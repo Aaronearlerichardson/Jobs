@@ -1,0 +1,25 @@
+# Secrets — never commit
+credentials.json
+.env
+*.env
+
+# Playwright session state — contains auth cookies. NEVER commit.
+sessions/
+
+# Runtime data
+seen_jobs.db
+seen_jobs.db-journal
+job_reports/
+
+# Python cruft
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
