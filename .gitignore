@@ -7,7 +7,7 @@ credentials.json
 sessions/
 
 # Runtime data
-seen_jobs.db
+seen_jobs_remote.db
 seen_jobs.db-journal
 job_reports/
 
@@ -19,7 +19,7 @@ __pycache__/
 venv/
 
 # Editor
-.idea/
+.idea/*
 .vscode/
 *.swp
 .DS_Store
