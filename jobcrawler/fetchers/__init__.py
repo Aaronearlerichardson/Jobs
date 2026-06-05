@@ -8,6 +8,7 @@ from .ats_api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .discourse import fetch_discourse
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
+from .jazzhr import fetch_jazzhr
 from .jsonld import fetch_jsonld_careers, fetch_jsonld_page
 from .peopleadmin import fetch_peopleadmin
 from .remoteok import fetch_remoteok
@@ -23,6 +24,7 @@ __all__ = [
     "fetch_discourse",
     "fetch_greenhouse",
     "fetch_hnhiring",
+    "fetch_jazzhr",
     "fetch_jsonld_careers",
     "fetch_jsonld_page",
     "fetch_kula",
