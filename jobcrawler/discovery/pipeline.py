@@ -1,13 +1,23 @@
 """Company discovery pipeline — Claude → candidates → ATS probe → report."""
 
+import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 from config import REPORT_DIR
 from ..claude import DISCOVER_SYSTEM, call_claude_json
-from .probes import PROBES
+from .probes import PROBES, WorkdayJsProbe, probe_workday
+from .seeds import seed_candidates_for
+
+# Parallel worker count for validate_candidate. Each worker does network
+# I/O against a different ATS host (greenhouse/lever/ashby/kula + a
+# company careers page), so same-host piling-up is rare even at 8 up.
+# Tune down if you see 429s from any probe provider.
+_DISCOVERY_WORKERS = 8
 
 
 @dataclass
@@ -32,60 +42,233 @@ def candidate_from_dict(d):
     )
 
 
-def slug_variants(name, first_guess):
+# Corporate suffixes to strip before generating slug variants. Stored
+# lowercased; match is word-boundary so "biosciences" doesn't eat "bio".
+_CORP_SUFFIXES = (
+    "incorporated", "technologies", "biosciences", "pharmaceuticals",
+    "therapeutics", "corporation", "systems", "holdings", "sciences",
+    "pharma", "health", "bio", "labs", "group", "inc", "corp", "ltd",
+    "llc", "co", "company",
+)
+_SUFFIX_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(s) for s in _CORP_SUFFIXES) + r")\b\.?",
+    re.IGNORECASE,
+)
+_PAREN_RE = re.compile(r"\s*\([^)]*\)")
+
+
+def _normalize_name(name: str) -> str:
+    """Strip parentheticals and trailing corporate suffixes."""
+    s = _PAREN_RE.sub("", name or "")
+    s = _SUFFIX_RE.sub("", s)
+    # Clean up punctuation left behind by suffix stripping.
+    s = re.sub(r"[,\.]+", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _variants_for(name: str) -> list[str]:
+    """Generate plausible ATS slug strings for a single cleaned name."""
     base = (name or "").lower().strip()
-    variants = []
-    if first_guess:
-        variants.append(first_guess.lower())
-    variants += [
-        base.replace(" ", "-"),
-        base.replace(" ", ""),
-        base.replace(",", "").replace(".", "").replace(" ", "-"),
-        base.split()[0] if base else "",
+    if not base:
+        return []
+    # Strip slug-hostile punctuation upfront — ATS slugs are [a-z0-9-].
+    cleaned = re.sub(r"[^a-z0-9\s-]", "", base)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return []
+    words = cleaned.split()
+    out = [
+        cleaned.replace(" ", "-"),
+        cleaned.replace(" ", ""),
+        words[0],
     ]
+    # Hyphenated first two words ("united-therapeutics") for short heads.
+    if len(words) >= 2:
+        out.append(f"{words[0]}-{words[1]}")
+        out.append(f"{words[0]}{words[1]}")
+    return out
+
+
+def slug_variants(name, first_guess):
+    """
+    Produce a deduped list of slug candidates from a company name.
+
+    Handles:
+      * parenthetical annotations ("Corcept Therapeutics (NC office)")
+      * slash-aliased names ("Cree / Wolfspeed")
+      * corporate suffixes (Inc, Corp, Ltd, LLC, Therapeutics, Biosciences)
+      * first-word truncation
+      * a Claude-supplied first_guess (tried first)
+    """
+    variants: list[str] = []
+    if first_guess:
+        variants.append(first_guess.lower().strip())
+
+    raw = (name or "").strip()
+    # Slash-aliases: try each half as an independent name.
+    halves = [h.strip() for h in re.split(r"\s*/\s*", raw) if h.strip()] or [raw]
+
+    for half in halves:
+        # Full form first (keeps Inc/Corp suffix in play if ATS expects it).
+        cleaned_full = _PAREN_RE.sub("", half).strip()
+        variants.extend(_variants_for(cleaned_full))
+        # Then the suffix-stripped form.
+        cleaned_short = _normalize_name(half)
+        if cleaned_short and cleaned_short.lower() != cleaned_full.lower():
+            variants.extend(_variants_for(cleaned_short))
+
     seen, out = set(), []
     for v in variants:
-        v = v.strip("-")
+        v = (v or "").strip("- ").lower()
         if v and v not in seen:
             seen.add(v)
             out.append(v)
-    return out[:4]
+    return out[:8]
 
 
-def validate_candidate(c, delay=0.3):
+def validate_candidate(c, delay=0.3, js_probe=None, log=print):
+    """
+    Try each slug variant against the claimed ATS. If `c.ats` isn't one
+    we know how to probe (e.g. "unknown", "workday"), sweep ALL probes —
+    many Claude responses mislabel the ATS or leave it blank. On a hit,
+    update c.ats so downstream apply_to_config() routes it correctly.
+
+    Workday gets two fallbacks when all slug probes miss:
+      1. static probe_workday — requests.get on candidate careers URLs
+      2. js_probe (optional)  — headless Playwright for SPA careers pages
+
+    `log` receives each progress line as a single string. Defaults to
+    print; parallel callers pass a buffer-append callable so per-worker
+    output can be flushed atomically under an stdout lock.
+    """
+    variants = slug_variants(c.name, c.slug_guess)
     probe = PROBES.get(c.ats)
-    if not probe:
-        return c
-    for slug in slug_variants(c.name, c.slug_guess):
+
+    if probe:
+        candidates = [(c.ats, probe)]
+    else:
+        # Unknown/unsupported ATS — try all known probes.
+        candidates = list(PROBES.items())
+
+    for slug in variants:
         c.tried_slugs.append(slug)
-        ok, count = probe(slug)
+        for ats_name, probe_fn in candidates:
+            ok, count = probe_fn(slug)
+            time.sleep(delay)
+            if ok:
+                c.confirmed  = True
+                c.slug_guess = slug
+                c.job_count  = count
+                c.ats        = ats_name
+                return c
+
+    # Workday fallback. Workday can't be probed by slug — we have to
+    # scrape the company's careers page to learn tenant/pod/site. Only
+    # try if Claude tagged the candidate workday or unknown; spare the
+    # scrape for ats values that definitely aren't workday (e.g. we
+    # know it's "lever" but that slug missed — unlikely to be on wd).
+    if c.ats in ("unknown", "workday"):
+        meta = probe_workday(c.name, c.careers_url)
         time.sleep(delay)
-        if ok:
-            c.confirmed = True
-            c.slug_guess = slug
-            c.job_count = count
-            return c
+        # Static scrape missed? Try the JS-rendered version for SPAs.
+        # Noisy hint to the user — browser launches are slow, and
+        # they'll otherwise wonder why discover() is suddenly pausing.
+        if not meta and js_probe is not None:
+            marker = "[js]" if js_probe.launched else "[js init]"
+            meta = js_probe.probe(c.name, c.careers_url)
+            log(f"    {marker} {c.name}: headless scrape... "
+                f"{'hit' if meta else 'miss'}")
+        if meta:
+            c.confirmed  = True
+            c.ats        = "workday"
+            # Encode the triple in slug_guess so apply_to_config and
+            # the report can parse it back out. wd_pod stays numeric.
+            c.slug_guess = f"{meta['tenant']}|{meta['wd_pod']}|{meta['site']}"
+            c.job_count  = meta["count"]
+            c.tried_slugs.append(
+                f"[workday:{meta['tenant']}.wd{meta['wd_pod']}/{meta['site']}"
+                + ("" if meta["validated"] else " ~unvalidated")
+                + "]"
+            )
     return c
+
+
+def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
+    """
+    Append seed candidates to Claude's output, deduping by normalized
+    name. Claude's entry wins when both sources have the same company
+    (its ats/slug_guess may be more accurate than the seed's 'unknown').
+    """
+    seen = {_normalize_name(c.get("name") or "").lower() for c in claude_raw}
+    return list(claude_raw) + [
+        s for s in seeds
+        if _normalize_name(s["name"]).lower() not in seen
+    ]
 
 
 def discover(term):
     print(f"  > Asking Claude for companies in: {term!r}")
     payload = call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000)
-    if not payload:
+    raw_companies = (payload or {}).get("companies", [])
+    seeds = seed_candidates_for(term)
+
+    if not payload and not seeds:
         return {"term": term, "companies": [], "gated_sites": []}
 
-    raw_companies = payload.get("companies", [])
-    print(f"  > Claude returned {len(raw_companies)} company suggestion(s)")
-    validated = []
-    for i, rc in enumerate(raw_companies, 1):
+    merged = _merge_seeds(raw_companies, seeds)
+    added = len(merged) - len(raw_companies)
+
+    if not payload:
+        print(f"  > Claude returned no response; probing {added} seed(s)")
+    elif added:
+        print(f"  > Claude returned {len(raw_companies)} suggestion(s) "
+              f"+ {added} seed(s) merged")
+    else:
+        print(f"  > Claude returned {len(raw_companies)} company suggestion(s)")
+
+    # Each worker drops log lines into its own list and flushes them
+    # as a single atomic block when the candidate finishes — so the
+    # [N/total] progress line + any "[js] headless scrape..." messages
+    # for one candidate always appear contiguously, even with 8
+    # workers logging concurrently.
+    total     = len(merged)
+    validated = [None] * total
+    out_lock  = threading.Lock()
+    done      = [0]                           # list-as-box for closure mutation
+
+    def _worker(idx, rc):
         cand = candidate_from_dict(rc)
-        print(f"  [{i}/{len(raw_companies)}] {cand.name} ({cand.ats})")
-        validated.append(validate_candidate(cand))
+        buf: list[str] = []
+        validate_candidate(
+            cand, delay=0.15, js_probe=js_probe, log=buf.append,
+        )
+        # Flush under lock so concurrent candidates never interleave.
+        with out_lock:
+            done[0] += 1
+            status = "OK  " if cand.confirmed else "miss"
+            detail = (f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
+                      if cand.confirmed else "")
+            print(f"  [{done[0]:>3}/{total}] {status}  {cand.name} "
+                  f"({cand.ats}){detail}")
+            for line in buf:
+                print(line)
+        return idx, cand
+
+    # One browser reused across all workday JS scrapes; lazy-launched
+    # the first time a candidate actually needs it (non-RTP runs never
+    # pay the startup cost).
+    with WorkdayJsProbe() as js_probe:
+        with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
+            futures = [pool.submit(_worker, i, rc)
+                       for i, rc in enumerate(merged)]
+            for fut in as_completed(futures):
+                idx, cand = fut.result()
+                validated[idx] = cand
 
     return {
         "term":        term,
         "companies":   validated,
-        "gated_sites": payload.get("gated_sites", []),
+        "gated_sites": (payload or {}).get("gated_sites", []),
     }
 
 
@@ -118,11 +301,21 @@ def write_discovery_report(result):
                     "lever":      "LEVER_COMPANIES",
                     "ashby":      "ASHBY_COMPANIES",
                     "kula":       "KULA_COMPANIES",
+                    "workday":    "WORKDAY_COMPANIES",
                 }.get(ats_name, f"{ats_name.upper()}_COMPANIES")
                 f.write(f"### `{dict_name}`\n\n```python\n")
                 for c in cands:
                     if ats_name == "kula":
                         f.write(f'    ("{c.name}", "{c.slug_guess}"),\n')
+                    elif ats_name == "workday":
+                        parts = (c.slug_guess or "").split("|")
+                        if len(parts) == 3 and parts[1].isdigit():
+                            t, p, s = parts
+                            f.write(f'    ("{t}", {int(p)}, "{s}", "{c.name}"),  '
+                                    f'# {c.job_count} job(s) live\n')
+                        else:
+                            f.write(f'    # malformed workday slug for {c.name}: '
+                                    f'{c.slug_guess!r}\n')
                     else:
                         f.write(f'    "{c.slug_guess}": "{c.name}",  '
                                 f'# {c.job_count} job(s) live\n')

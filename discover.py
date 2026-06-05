@@ -27,7 +27,12 @@ import argparse
 import sys
 
 from config import INCLUDE_KEYWORDS, SITE_CONFIGS
-from jobcrawler.discovery import discover, print_summary, write_discovery_report
+from jobcrawler.discovery import (
+    apply_to_config,
+    discover,
+    print_summary,
+    write_discovery_report,
+)
 from jobcrawler.sessions import (
     capture_session,
     check_credentials,
@@ -46,6 +51,11 @@ def main():
                     help="Run discovery for each entry in INCLUDE_KEYWORDS")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
+    ap.add_argument("--apply", action="store_true",
+                    help="Insert confirmed candidates into config.py in place "
+                         "(deduped by slug, tagged with date/term for audit)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="With --apply, preview changes without writing the file")
 
     g = ap.add_argument_group("credentials (legacy cookie-paste flow)")
     g.add_argument("--credentials-init", action="store_true",
@@ -113,6 +123,9 @@ def main():
             print_summary(result)
             if not args.no_report:
                 write_discovery_report(result)
+            if args.apply:
+                for line in apply_to_config(result, dry_run=args.dry_run):
+                    print(line)
         return
 
     if not args.term:
@@ -123,6 +136,9 @@ def main():
     print_summary(result)
     if not args.no_report:
         write_discovery_report(result)
+    if args.apply:
+        for line in apply_to_config(result, dry_run=args.dry_run):
+            print(line)
 
 
 if __name__ == "__main__":

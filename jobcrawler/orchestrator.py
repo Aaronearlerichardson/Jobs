@@ -4,6 +4,7 @@ import time
 from datetime import datetime
 
 from config import (
+    ACCEPT_REMOTE,
     ASHBY_COMPANIES,
     CUSTOM_COMPANIES,
     DISCOURSE_BOARDS,
@@ -136,7 +137,16 @@ def crawl(dry_run=False):
         process(fetch_sitemap(name, sitemap_url, url_filter=url_filter))
         time.sleep(1.0)
 
-    for label, query, max_results in WEBSEARCH_QUERIES:
+    for entry in WEBSEARCH_QUERIES:
+        # Optional 4th element flags remote-only boards; skip those when
+        # ACCEPT_REMOTE is off so a pure-local crawl doesn't waste DDG
+        # quota on WeWorkRemotely/Himalayas/Remote.co etc.
+        label, query, max_results, *rest = entry
+        remote_only = bool(rest[0]) if rest else False
+        if remote_only and not ACCEPT_REMOTE:
+            print(f"  . {label} (DuckDuckGo) — skipped, remote-only "
+                  f"and ACCEPT_REMOTE=False")
+            continue
         print(f"  > {label} (DuckDuckGo)")
         process(fetch_websearch(label, query, max_results=max_results))
         time.sleep(2.0)
