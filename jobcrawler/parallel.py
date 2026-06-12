@@ -13,7 +13,11 @@ order.
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-DEFAULT_WORKERS = 8
+from .util import worker_count
+
+# Network-I/O-bound, so this is a concurrency knob, not a CPU one: defaults
+# to n_cpus-1, raise CRAWLER_WORKERS to push more concurrent source fetches.
+DEFAULT_WORKERS = worker_count("CRAWLER_WORKERS")
 
 
 def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):

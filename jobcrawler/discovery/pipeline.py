@@ -10,14 +10,16 @@ from pathlib import Path
 
 from config import REPORT_DIR
 from ..claude import DISCOVER_SYSTEM, call_claude_json
+from ..util import worker_count
 from .probes import PROBES, WorkdayJsProbe, probe_workday, sniff_careers_ats
 from .seeds import seed_candidates_for
 
-# Parallel worker count for validate_candidate. Each worker does network
-# I/O against a different ATS host (greenhouse/lever/ashby/kula + a
-# company careers page), so same-host piling-up is rare even at 8 up.
-# Tune down if you see 429s from any probe provider.
-_DISCOVERY_WORKERS = 8
+# Parallel worker count for validate_candidate. Each worker is almost
+# entirely blocked on network I/O (slug probes + careers-page fetches
+# against different hosts), so this is a network-concurrency knob, not a
+# CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
+# more concurrent requests. Tune down if you see 429s from a probe provider.
+_DISCOVERY_WORKERS = worker_count("DISCOVERY_WORKERS")
 
 
 @dataclass
@@ -316,10 +318,16 @@ def discover(term):
     }
 
 
-def _validate_all(candidate_dicts):
+def _validate_all(candidate_dicts, use_js=True):
     """Validate candidate dicts in parallel; return Candidate objects in
     input order. Shared by Claude-driven discover() and name-list-driven
-    discover_companies()."""
+    discover_companies().
+
+    use_js gates the headless-browser Workday fallback. That browser is
+    serialized onto a single thread (Playwright greenlet affinity), so when
+    many candidates need it they queue — profiling a 677-company run showed
+    it dominating wall time. Off for bulk sweeps; the static probe_workday
+    still confirms non-SPA Workday boards in parallel."""
     # Each worker drops log lines into its own list and flushes them
     # as a single atomic block when the candidate finishes — so the
     # [N/total] progress line + any "[js] headless scrape..." messages
@@ -333,8 +341,11 @@ def _validate_all(candidate_dicts):
     def _worker(idx, rc, js_probe):
         cand = candidate_from_dict(rc)
         buf: list[str] = []
+        # Small inter-probe delay: each probe hits a different ATS host, and
+        # workers already run concurrently, so politeness sleeps add up to
+        # dead time per candidate. 0.05 keeps a light touch without the tax.
         validate_candidate(
-            cand, delay=0.15, js_probe=js_probe, log=buf.append,
+            cand, delay=0.05, js_probe=js_probe, log=buf.append,
         )
         # Flush under lock so concurrent candidates never interleave.
         with out_lock:
@@ -351,27 +362,36 @@ def _validate_all(candidate_dicts):
                 print(line)
         return idx, cand
 
-    # One browser reused across all workday JS scrapes; lazy-launched
-    # the first time a candidate actually needs it (non-RTP runs never
-    # pay the startup cost).
-    with WorkdayJsProbe() as js_probe:
+    # One browser reused across all workday JS scrapes; lazy-launched the
+    # first time a candidate needs it. Skipped entirely when use_js is off,
+    # so bulk sweeps never pay the (serialized) browser cost.
+    js_probe = WorkdayJsProbe() if use_js else None
+    try:
         with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
             futures = [pool.submit(_worker, i, rc, js_probe)
                        for i, rc in enumerate(candidate_dicts)]
             for fut in as_completed(futures):
                 idx, cand = fut.result()
                 validated[idx] = cand
+    finally:
+        if js_probe is not None:
+            js_probe.close()
     return validated
 
 
-def discover_companies(candidate_dicts, term):
+def discover_companies(candidate_dicts, term, use_js=False):
     """Resolve an explicit list of candidate dicts (e.g. harvested from the
     BCIWiki directory) to crawlable boards — no Claude call. Returns the
-    same result shape as discover()."""
-    print(f"  > Resolving {len(candidate_dicts)} candidate(s) for {term!r}")
+    same result shape as discover().
+
+    use_js defaults False: bulk directory sweeps are dominated by the
+    single-threaded browser fallback, and few entries are Workday SPAs.
+    Pass use_js=True for a smaller, thorough pass."""
+    print(f"  > Resolving {len(candidate_dicts)} candidate(s) for {term!r} "
+          f"(workers={_DISCOVERY_WORKERS}, js={'on' if use_js else 'off'})")
     if not candidate_dicts:
         return {"term": term, "companies": [], "gated_sites": []}
-    validated = _validate_all(candidate_dicts)
+    validated = _validate_all(candidate_dicts, use_js=use_js)
     return {"term": term, "companies": validated, "gated_sites": []}
 
 

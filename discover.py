@@ -59,6 +59,10 @@ def main():
                          "(companies,labs,organizations). Default: companies")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap the number of candidates resolved (for testing)")
+    ap.add_argument("--js", action="store_true",
+                    help="Enable the headless-browser Workday fallback for "
+                         "--from-bciwiki (off by default for bulk: it's "
+                         "single-threaded and dominates a large run)")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
@@ -145,7 +149,8 @@ def main():
         if args.limit:
             seeds = seeds[: args.limit]
         print(f"  > {len(seeds)} candidate(s) to resolve")
-        result = discover_companies(seeds, term=f"bciwiki:{','.join(cats)}")
+        result = discover_companies(seeds, term=f"bciwiki:{','.join(cats)}",
+                                    use_js=args.js)
         print_summary(result)
         if not args.no_report:
             write_discovery_report(result)

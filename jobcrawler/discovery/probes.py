@@ -3,6 +3,7 @@
 import html
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -263,7 +264,7 @@ def probe_workday(name: str, careers_url: str = ""):
     for url in _workday_candidate_urls(name, careers_url):
         try:
             r = requests.get(
-                url, timeout=12, headers=HEADERS, allow_redirects=True,
+                url, timeout=6, headers=HEADERS, allow_redirects=True,
             )
         except Exception:
             continue
@@ -336,7 +337,14 @@ _ATS_LEAD_PATTERNS = [
     ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
     ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
     ("paylocity",       re.compile(r"(recruiting\.paylocity\.com/[A-Za-z0-9/_-]+)", re.I)),
-    ("workday",         re.compile(r"([a-z0-9-]+\.wd\d+\.myworkdayjobs\.com)", re.I)),
+    ("paycom",          re.compile(r"(paycomonline\.net/[A-Za-z0-9/_-]+)", re.I)),
+    ("breezy",          re.compile(r"([a-z0-9-]+\.breezy\.hr)", re.I)),
+    ("gohire",          re.compile(r"([a-z0-9-]+\.gohire\.io)", re.I)),
+    # NOTE: Workday is intentionally NOT here — it's fetchable via the CXS
+    # API (probe_workday confirms with a live count), so it must stay a
+    # confirmable path, not a detection-only lead. Leaving it here would
+    # make validate_candidate's "skip workday fallback when a lead exists"
+    # guard suppress the very probe that confirms it.
 ]
 
 # Fetchable-ATS host detector — used to skip Claude's careers_url when it's
@@ -446,20 +454,38 @@ def _confirm_coords(ats, slug):
     return count if ok else None
 
 
+def _fetch_careers_page(url):
+    """GET one careers-page candidate. Short timeout: most are speculative
+    domain/path guesses that 404 or don't resolve; a real careers page
+    answers fast. Returns the Response on 200, else None."""
+    try:
+        r = requests.get(url, timeout=6, headers=HEADERS, allow_redirects=True)
+        return r if r.status_code == 200 else None
+    except Exception:
+        return None
+
+
 def sniff_careers_ats(name, careers_url=""):
     """
     Fetch the company's careers page(s) and read the ATS off the embedded
     board link. Prefers a fetchable confirmation; falls back to a
     detection-only lead. See module section header for the return shape.
+
+    The candidate URLs are fetched concurrently (a miss otherwise pays ~16
+    sequential GETs — the dominant per-candidate latency in a bulk run),
+    then evaluated in priority order so the highest-priority confirm/lead
+    still wins regardless of which response landed first.
     """
-    lead = None  # first detection-only platform seen, kept as a fallback
-    for url in _careers_urls(name, careers_url):
-        try:
-            r = requests.get(url, timeout=12, headers=HEADERS,
-                             allow_redirects=True)
-        except Exception:
-            continue
-        if r.status_code != 200:
+    urls = _careers_urls(name, careers_url)
+    if not urls:
+        return None
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        responses = dict(zip(urls, pool.map(_fetch_careers_page, urls)))
+
+    lead = None  # first (highest-priority) detection-only platform seen
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
             continue
         blob = r.url + " " + r.text
         coords = _coords_from_text(r.url) or _coords_from_text(r.text)
