@@ -281,8 +281,12 @@ def build_sources(cfg, include_websearch=True):
         sources.append(("HN Who-is-hiring", "hn",
                         lambda: fetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS)))
     for label, url, default_loc in cfg.RSS_FEEDS:
+        # Config's RSS feeds are remote-only boards (WWR, Jobicy) — mark
+        # items with a structured remote hint so the runner trusts them.
+        is_remote_board = default_loc.strip().lower() == "remote"
         sources.append((label, "rss",
-                        lambda l=label, u=url, d=default_loc: fetch_rss(l, u, default_location=d)))
+                        lambda l=label, u=url, d=default_loc, rb=is_remote_board:
+                            fetch_rss(l, u, default_location=d, remote_board=rb)))
 
     # 4) Web searches (DDG -> JSON-LD).
     if include_websearch:

@@ -28,6 +28,7 @@ from bs4 import BeautifulSoup
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import stable_id
 
 
 _JOB_URL_HINTS = re.compile(
@@ -95,7 +96,7 @@ def _normalize_location(jp):
 
 def _normalize_description(jp):
     desc = jp.get("description", "") or ""
-    return BeautifulSoup(desc, "html.parser").get_text(" ")[:600]
+    return BeautifulSoup(desc, "html.parser").get_text(" ")
 
 
 def _job_from_posting(jp, company_name, source_url):
@@ -108,8 +109,8 @@ def _job_from_posting(jp, company_name, source_url):
     identifier = jp.get("identifier")
     if isinstance(identifier, dict):
         identifier = identifier.get("value", "")
-    jid = str(identifier or abs(hash(str(job_url))))
-    return {
+    jid = str(identifier or stable_id(str(job_url)))
+    job = {
         "id":          f"jsonld_{company_name.replace(' ', '_')}_{jid}",
         "company":     company_name,
         "title":       title,
@@ -117,6 +118,10 @@ def _job_from_posting(jp, company_name, source_url):
         "location":    location,
         "description": description,
     }
+    # Structured remote signal — schema.org marks remote roles explicitly.
+    if str(jp.get("jobLocationType", "")).upper() == "TELECOMMUTE":
+        job["remote_hint"] = "jsonld:telecommute"
+    return job
 
 
 def fetch_jsonld_page(company_name, page_url, timeout=20):

@@ -157,3 +157,61 @@ def remote_signal(location, description=""):
 def is_remote_eligible(location, description=""):
     """True iff the posting advertises remote-eligible work."""
     return remote_signal(location, description) is not None
+
+
+def remote_signal_for(job):
+    """Job-dict-aware remote signal.
+
+    Prefers a structured hint stamped by the fetcher (JSON-LD
+    jobLocationType=TELECOMMUTE, Lever workplaceType, Ashby isRemote,
+    remote-only boards) over phrase matching — the ATS knows better than
+    a regex. Falls back to remote_signal() on the location/body text.
+    """
+    hint = job.get("remote_hint")
+    if hint:
+        return f"hint:{hint}"
+    return remote_signal(job.get("location", ""), job.get("description", ""))
+
+
+# ─── US eligibility ──────────────────────────────────────────────────────
+#
+# "Remote" is not "remote for you": boards are full of "Philippines
+# Remote" / "Remote - EMEA" roles a US applicant can't take. Checked
+# against the LOCATION field only — it's short and curated, while body
+# text mentions regions for all kinds of reasons ("customers in Europe").
+# Unknown/ambiguous locations pass: better a stray non-US posting in the
+# digest than a real US-remote role silently dropped.
+
+_US_MARKERS = (
+    "us", "u.s", "usa", "united states", "america", "americas",
+    "north america", "worldwide", "global", "anywhere", "world",
+)
+
+_NON_US_REGIONS = (
+    "philippines", "india", "pakistan", "bangladesh", "nigeria", "kenya",
+    "south africa", "europe", "emea", "apac", "asia", "africa", "latam",
+    "latin america", "south america", "canada", "uk", "united kingdom",
+    "ireland", "australia", "new zealand", "germany", "france", "spain",
+    "poland", "portugal", "netherlands", "ukraine", "romania", "czech",
+    "brazil", "argentina", "mexico", "colombia", "vietnam", "indonesia",
+    "china", "japan", "singapore",
+)
+
+
+def _region_match(token, text):
+    # Short tokens ("us", "uk", "eu") need word boundaries.
+    if token.isalpha() and len(token) <= 3:
+        return re.search(rf"\b{re.escape(token)}\b", text) is not None
+    return token in text
+
+
+def us_eligible(location):
+    """True unless the location names a non-US region with no US marker."""
+    loc = (location or "").lower()
+    if not loc:
+        return True
+    if any(_region_match(t, loc) for t in _US_MARKERS):
+        return True
+    if any(_region_match(t, loc) for t in _NON_US_REGIONS):
+        return False
+    return True

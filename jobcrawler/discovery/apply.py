@@ -99,14 +99,20 @@ def _existing_slugs_workday(body: str) -> set[str]:
     return {f"{t}|{p}|{s}" for t, p, s in _TUPLE_WORKDAY_RE.findall(body)}
 
 
+def _verify_suffix(cand) -> str:
+    """Carry a VERIFY flag from discovery into the config comment."""
+    m = re.search(r"\[VERIFY: ([^\]]+)\]", getattr(cand, "notes", "") or "")
+    return f" — VERIFY: {m.group(1)}" if m else ""
+
+
 def _fmt_dict_entry(cand) -> str:
     return (f'    "{cand.slug_guess}": "{cand.name}",  '
-            f'# {cand.job_count} job(s), discovered')
+            f'# {cand.job_count} job(s), discovered{_verify_suffix(cand)}')
 
 
 def _fmt_list_entry(cand) -> str:
     return (f'    ("{cand.name}", "{cand.slug_guess}"),  '
-            f'# {cand.job_count} job(s), discovered')
+            f'# {cand.job_count} job(s), discovered{_verify_suffix(cand)}')
 
 
 def _fmt_workday_entry(cand):
@@ -122,7 +128,7 @@ def _fmt_workday_entry(cand):
     if not pod.isdigit():
         return None
     return (f'    ("{tenant}", {int(pod)}, "{site}", "{cand.name}"),  '
-            f'# {cand.job_count} job(s), discovered')
+            f'# {cand.job_count} job(s), discovered{_verify_suffix(cand)}')
 
 
 def apply_to_config(result, dry_run: bool = False) -> list[str]:

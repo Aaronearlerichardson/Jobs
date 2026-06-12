@@ -126,6 +126,31 @@ def slug_variants(name, first_guess):
     return out[:8]
 
 
+def _flag_for_verification(c, claimed_ats, slug):
+    """Tag a confirmed hit whose identity deserves a human look.
+
+    Slug probes confirm "a board with this slug exists", not "this is the
+    company Claude meant" — "seer" (proteomics) confirms for Seer Medical
+    (epilepsy), "nuro" (autonomous vehicles) for a BCI division. Flag the
+    two collision-prone patterns so reports/--apply carry a VERIFY note.
+    """
+    flags = []
+    if claimed_ats in PROBES and c.ats != claimed_ats:
+        flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
+    name_words = re.findall(r"[a-z0-9]+", c.name.lower())
+    if len(name_words) >= 2 and slug == name_words[0]:
+        flags.append("first-word slug - confirm it's the same company")
+    if flags:
+        note = "[VERIFY: " + "; ".join(flags) + "]"
+        c.notes = f"{c.notes} {note}".strip() if c.notes else note
+
+
+def verify_note(c) -> str:
+    """Extract the VERIFY text from a candidate's notes, or ''."""
+    m = re.search(r"\[VERIFY: ([^\]]+)\]", c.notes or "")
+    return m.group(1) if m else ""
+
+
 def validate_candidate(c, delay=0.3, js_probe=None, log=print):
     """
     Try each slug variant against the claimed ATS. If `c.ats` isn't one
@@ -142,6 +167,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
     output can be flushed atomically under an stdout lock.
     """
     variants = slug_variants(c.name, c.slug_guess)
+    claimed_ats = c.ats
     probe = PROBES.get(c.ats)
 
     if probe:
@@ -168,6 +194,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
                 c.slug_guess = slug
                 c.job_count  = count
                 c.ats        = ats_name
+                _flag_for_verification(c, claimed_ats, slug)
                 return c
 
     # Workday fallback. Workday can't be probed by slug — we have to
@@ -313,20 +340,22 @@ def write_discovery_report(result):
                 }.get(ats_name, f"{ats_name.upper()}_COMPANIES")
                 f.write(f"### `{dict_name}`\n\n```python\n")
                 for c in cands:
+                    note = verify_note(c)
+                    suffix = f"  # VERIFY: {note}" if note else ""
                     if ats_name == "kula":
-                        f.write(f'    ("{c.name}", "{c.slug_guess}"),\n')
+                        f.write(f'    ("{c.name}", "{c.slug_guess}"),{suffix}\n')
                     elif ats_name == "workday":
                         parts = (c.slug_guess or "").split("|")
                         if len(parts) == 3 and parts[1].isdigit():
                             t, p, s = parts
                             f.write(f'    ("{t}", {int(p)}, "{s}", "{c.name}"),  '
-                                    f'# {c.job_count} job(s) live\n')
+                                    f'# {c.job_count} job(s) live{suffix}\n')
                         else:
                             f.write(f'    # malformed workday slug for {c.name}: '
                                     f'{c.slug_guess!r}\n')
                     else:
                         f.write(f'    "{c.slug_guess}": "{c.name}",  '
-                                f'# {c.job_count} job(s) live\n')
+                                f'# {c.job_count} job(s) live{suffix}\n')
                 f.write("```\n\n")
 
         if unconfirmed:
@@ -363,8 +392,10 @@ def print_summary(result):
     print(f"{'='*w}")
     print(f"  Confirmed: {len(confirmed)} / Suggested: {len(companies)}\n")
     for c in confirmed:
+        note = verify_note(c)
+        tail = f"  [VERIFY: {note}]" if note else ""
         print(f"    + {c.name:<30} {c.ats:<10} slug='{c.slug_guess}'  "
-              f"({c.job_count} jobs)")
+              f"({c.job_count} jobs){tail}")
     unconfirmed = [c for c in companies if not c.confirmed]
     if unconfirmed:
         print(f"\n  Unconfirmed ({len(unconfirmed)}):")

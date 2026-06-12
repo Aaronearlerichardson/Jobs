@@ -1,6 +1,8 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
 import re
+import time
+
 import requests
 
 from ..http import HEADERS
@@ -40,13 +42,22 @@ def probe_ashby(slug):
         return (False, 0)
 
 
-def probe_kula(slug):
+def probe_kula(slug, retries=1):
+    # Kula serves a full HTML page (no JSON API) and throttles under
+    # probe bursts — a confirmed-live board can 4xx/timeout once during
+    # a parallel discovery run. One retry with a short backoff recovers
+    # those without slowing genuine misses much.
     url = f"https://careers.kula.ai/{slug}"
-    try:
-        r = requests.get(url, timeout=10, headers=HEADERS)
-        return (r.status_code == 200 and len(r.text) > 1000, 0)
-    except Exception:
-        return (False, 0)
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, timeout=10, headers=HEADERS)
+            if r.status_code == 200 and len(r.text) > 1000:
+                return (True, 0)
+        except Exception:
+            pass
+        if attempt < retries:
+            time.sleep(1.0)
+    return (False, 0)
 
 
 PROBES = {

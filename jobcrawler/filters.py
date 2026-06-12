@@ -25,6 +25,7 @@ from config import (
     CORE_KEYWORDS,
     DOMAIN_KEYWORDS,
     EXCLUDE_PHRASES,
+    EXCLUDE_TITLE_PHRASES,
     INCLUDE_KEYWORDS,
     LOCATION_EXCLUDE,
     LOCATION_INCLUDE,
@@ -38,17 +39,47 @@ from config import (
 #  Relevance                                                             #
 # --------------------------------------------------------------------- #
 
+def _kw_match(kw, text):
+    """
+    Case-insensitive keyword hit. Short single-token alphabetic keywords
+    (acronyms: eeg, bci, ecog, ieeg, meg, mri, dsp, ...) use word-boundary
+    matching — plain substring fires inside ordinary words ("ecog" in
+    "recognized", "meg" in "omega") and floods aggregator sources with
+    off-topic roles. Multi-word phrases and longer tokens stay substring
+    so "subcortical" still matches "cortical".
+    """
+    k = kw.lower()
+    if k.isalpha() and len(k) <= 5:
+        return re.search(rf"\b{re.escape(k)}\b", text) is not None
+    return k in text
+
+
 def _kw_in(text, keywords):
-    """Case-insensitive substring hit against any keyword."""
-    return any(k.lower() in text for k in keywords)
+    return any(_kw_match(k, text) for k in keywords)
+
+
+def _excluded(title, text):
+    """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only."""
+    if any(p.lower() in text for p in EXCLUDE_PHRASES):
+        return True
+    t = (title or "").lower()
+    return any(p.lower() in t for p in EXCLUDE_TITLE_PHRASES)
+
+
+# DOMAIN+SKILL pairing only reads the posting head. Specific CORE terms
+# (eeg, bci, neural decoding) are signal wherever they appear, but generic
+# domain words deep in a posting are usually benefits boilerplate —
+# "medical, dental, vision" + "data" would tier-match nearly every US job
+# ad if the pairing scanned full text.
+_PAIR_SCAN_CHARS = 1200
 
 
 def is_relevant(title, description=""):
     text = (title + " " + description).lower()
-    if any(p.lower() in text for p in EXCLUDE_PHRASES):
+    if _excluded(title, text):
         return False
 
-    # Tier 1: core neurotech / specific job titles.
+    # Tier 1: core neurotech / specific job titles. Full-text scan.
     if _kw_in(text, CORE_KEYWORDS):
         return True
 
@@ -59,7 +90,9 @@ def is_relevant(title, description=""):
         return True
 
     # Tier 2 x Tier 3: adjacent medical/bio domain + transferable skill.
-    return _kw_in(text, DOMAIN_KEYWORDS) and _kw_in(text, SKILL_KEYWORDS)
+    # Head-only scan — see _PAIR_SCAN_CHARS.
+    head = (title + " " + description[:_PAIR_SCAN_CHARS]).lower()
+    return _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS)
 
 
 def classify_relevance(title, description=""):
@@ -68,7 +101,7 @@ def classify_relevance(title, description=""):
     Not used by the crawler; handy for tuning the lists.
     """
     text = (title + " " + description).lower()
-    if any(p.lower() in text for p in EXCLUDE_PHRASES):
+    if _excluded(title, text):
         return None
     if _kw_in(text, CORE_KEYWORDS):
         return "CORE"
@@ -76,7 +109,8 @@ def classify_relevance(title, description=""):
     extras = [k for k in INCLUDE_KEYWORDS if k.lower() not in tiered]
     if extras and _kw_in(text, extras):
         return "EXTRA"
-    if _kw_in(text, DOMAIN_KEYWORDS) and _kw_in(text, SKILL_KEYWORDS):
+    head = (title + " " + description[:_PAIR_SCAN_CHARS]).lower()
+    if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
         return "DOMAIN+SKILL"
     return None
 

@@ -57,7 +57,7 @@ def fetch_remoteok(max_jobs=500):
         company  = entry.get("company")  or "RemoteOK"
         url      = entry.get("url") or entry.get("apply_url") or ""
         location = entry.get("location") or "Remote"
-        desc     = _strip_html(entry.get("description", ""))[:600]
+        desc     = _strip_html(entry.get("description", ""))
 
         # tags can enrich relevance matching (e.g. "ml", "python")
         tags = entry.get("tags") or []
@@ -73,5 +73,8 @@ def fetch_remoteok(max_jobs=500):
             "url":         url,
             "location":    location,
             "description": desc,
+            # RemoteOK is a remote-only board; `location` is the candidate
+            # region requirement, not an office.
+            "remote_hint": "board:remoteok",
         })
     return jobs

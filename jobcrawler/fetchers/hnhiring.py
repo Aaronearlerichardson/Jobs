@@ -22,8 +22,8 @@ Strategy:
   4. For each, fetch the top-level comment ids from `kids`, then fetch
      each comment and run is_relevant() on its text.
 
-Comments are free-form HTML. We strip tags, keep the first ~600 chars
-as description, and try to pull a company name and location heuristically
+Comments are free-form HTML. We strip tags, keep the text as the
+description, and try to pull a company name and location heuristically
 from the opening line. Format convention (widely followed) is:
     Company | Role | Location | Remote/Onsite | URL
 """
@@ -44,6 +44,22 @@ _HIRING_TITLE_RE = re.compile(r"^Ask HN:\s*Who is hiring\??", re.I)
 # Heuristic: "Company | Role | Location | ..." — split on | or •.
 _SPLIT_RE = re.compile(r"\s*[|•·]\s*")
 _URL_RE   = re.compile(r"https?://[^\s<>\"']+")
+
+# Posters don't agree on segment order ("Company | Remote (US) | Role" is
+# as common as "Company | Role | Remote"). Classify each segment instead
+# of trusting position: location-ish segments mention remote/onsite/region
+# words or look like "City, ST"; meta segments are employment type/comp.
+_LOC_SEG_RE = re.compile(
+    r"remote|on-?site|hybrid|wfh|work from|relocat|visa|"
+    r"\b(?:us|usa|uk|eu|emea|apac|nyc|sf|bay area|worldwide|global|anywhere)\b"
+    r"|[A-Za-z .]+,\s*[A-Z]{2}\b",
+    re.I,
+)
+_META_SEG_RE = re.compile(
+    r"full[- ]?time|part[- ]?time|contract|intern|equity|salary|\$\s*\d|"
+    r"\b\d{2,3}k\b",
+    re.I,
+)
 
 
 def _strip_html(s):
@@ -68,11 +84,20 @@ def _parse_post(text):
     comment. Returns whatever we can; callers fall back to the comment
     itself for id/url.
     """
-    first_line = text.split("\n", 1)[0].split(".", 1)[0]
+    # First sentence of the first line. Split on ". " (not bare ".") so
+    # ".NET Developer", "U.S.", and "Example Inc." don't chop the line.
+    first_line = text.split("\n", 1)[0].split(". ", 1)[0]
     parts = [p.strip() for p in _SPLIT_RE.split(first_line) if p.strip()]
-    company  = parts[0] if parts else ""
-    role     = parts[1] if len(parts) > 1 else ""
-    location = parts[2] if len(parts) > 2 else ""
+    company = parts[0] if parts else ""
+
+    # Classify the remaining segments rather than trusting their order.
+    role, loc_segs = "", []
+    for seg in parts[1:]:
+        if _LOC_SEG_RE.search(seg):
+            loc_segs.append(seg)
+        elif not role and not _META_SEG_RE.search(seg):
+            role = seg
+    location = " | ".join(loc_segs[:2])
 
     # If pipes weren't used, role is missing - just use first sentence
     # as title so the filter has something to match against.
@@ -146,6 +171,6 @@ def fetch_hnhiring(max_threads=2, max_comments_per_thread=400):
                 "title":       role or "(see post)",
                 "url":         post_url or hn_url,
                 "location":    location or "See post",
-                "description": text[:600],
+                "description": text,
             })
     return jobs

@@ -6,6 +6,7 @@ import requests
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import stable_id
 
 
 def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25):
@@ -56,7 +57,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
             jurl   = f"{link_base}{path}" if path else host
             loc    = p.get("locationsText", "") or "Unknown"
             posted = p.get("postedOn", "") or ""
-            jid    = path.rsplit("/", 1)[-1] if path else str(abs(hash(title + loc)))
+            jid    = path.rsplit("/", 1)[-1] if path else stable_id(title, loc)
             desc   = posted
             if is_relevant(title, desc):
                 jobs.append({

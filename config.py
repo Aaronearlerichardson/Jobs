@@ -111,7 +111,15 @@ EXCLUDE_PHRASES = [
     "Nurses", "nursing", "nurse practitioner",
     "md required", "medical doctor",
      # Exclude "clinical research" but not "clinical research engineer"
-    "clinical research coordinator", "manager"
+    "clinical research coordinator",
+]
+
+# Matched against the TITLE only. "manager" used to live in
+# EXCLUDE_PHRASES, where it also matched descriptions — killing any
+# engineer role whose posting said "reports to the Engineering Manager"
+# or "work closely with product managers".
+EXCLUDE_TITLE_PHRASES = [
+    "manager",
 ]
 
 # -----------------------------------------------------------------------
@@ -174,7 +182,11 @@ GREENHOUSE_COMPANIES = {
     "epicgames": "Epic Games",  # 69 job(s), discovered
     "pendo": "Pendo",  # 17 job(s), discovered
     # --- discovered 2026-04-23: neurotech RTP ---
-    "nuro": "Nuro (Nurokor / NuroMetrix)",  # 93 job(s), discovered
+    # NOTE: greenhouse slug "nuro" is Nuro the autonomous-delivery company,
+    # NOT Nurokor/NuroMetrix (slug collision from first-word probing).
+    # Kept because its postings are filtered by keywords anyway; remove if
+    # the fetch is wasted time.
+    "nuro": "Nuro (autonomous delivery)",  # 93 job(s), discovered
     "sas": "SAS Institute",  # 5 job(s), discovered
     # --- discovered 2026-04-23: medical tech companies in RTP ---
     "ceribell": "Ceribell",  # 46 job(s), discovered

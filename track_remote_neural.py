@@ -40,7 +40,8 @@ try:
 except Exception:
     pass
 from jobcrawler.db import init_db, is_new, mark_seen
-from jobcrawler.remote_filter import remote_signal
+from jobcrawler.parallel import fetch_all
+from jobcrawler.remote_filter import remote_signal_for, us_eligible
 from jobcrawler.tracks import remote_neural as track
 
 
@@ -102,17 +103,29 @@ def main():
     # Read-only DB connection for new/seen accounting; writes only on --commit.
     conn = init_db()
 
+    # ─── Phase 1: fetch every source in parallel ──────────────────────────
+    done_count = [0]
+
+    def _progress(name, platform, jobs, err):
+        done_count[0] += 1
+        status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
+        print(f"  [{done_count[0]:>2}/{len(sources)}] {name} ({platform}): "
+              f"{status}")
+
+    fetched = fetch_all(sources, on_done=_progress)
+
+    # ─── Phase 2: gate + dedupe + persist, in source order ───────────────
+    # Processing follows the configured source order (priority companies
+    # first) so cross-source duplicates resolve deterministically no
+    # matter which fetch finished first.
     matches = []                 # surfaced jobs, in source order
     seen_ids = set()             # de-dupe within this run
     rows = []                    # per-source summary rows
     total_relevant = total_neural = total_tech = total_surfaced = total_new = 0
 
-    for name, platform, thunk in sources:
+    for (name, platform, _), (jobs, err) in zip(sources, fetched):
         label = f"{name} ({platform})"
-        try:
-            jobs = thunk() or []
-        except Exception as e:
-            print(f"  ! {label}: fetch error: {e}")
+        if err is not None:
             rows.append((label, 0, 0, 0, 0, 0, "ERR"))
             continue
 
@@ -128,8 +141,10 @@ def main():
             if not track.is_technical_role(job.get("title", "")):
                 continue
             tech_here += 1
-            sig = remote_signal(job.get("location", ""), job.get("description", ""))
-            if not sig:
+            # Remote AND eligible for a US applicant ("Philippines Remote"
+            # is remote, just not for you).
+            sig = remote_signal_for(job)
+            if not sig or not us_eligible(job.get("location", "")):
                 continue
             surfaced_here += 1
             jid = job["id"]
@@ -152,12 +167,7 @@ def main():
         total_surfaced += surfaced_here
         total_new += new_here
         rows.append((label, relevant, neural_here, tech_here, surfaced_here,
-                     new_here, ""))
-        flag = " <-- priority" if platform.endswith("*") else ""
-        print(f"  {label:<46} relevant={relevant:>3}  neural={neural_here:>3}  "
-              f"tech={tech_here:>3}  remote={surfaced_here:>3}  "
-              f"new={new_here:>3}{flag}")
-        time.sleep(0.3)
+                     new_here, "priority" if platform.endswith("*") else ""))
 
     conn.close()
 
