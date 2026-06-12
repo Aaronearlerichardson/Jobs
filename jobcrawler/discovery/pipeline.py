@@ -123,10 +123,22 @@ def slug_variants(name, first_guess):
     seen, out = set(), []
     for v in variants:
         v = (v or "").strip("- ").lower()
-        if v and v not in seen:
+        # Drop 1-2 char junk slugs ("g" from "G.tec ...") — they match
+        # unrelated boards and never reach the intended employer.
+        if v and len(v) >= 3 and v not in seen:
             seen.add(v)
             out.append(v)
     return out[:8]
+
+
+# Generic single-word slugs that collide with unrelated boards when
+# probed from a multi-word company name ("Bio-Signal Technologies" -> the
+# bare slug "signal" hits some unrelated Lever board). Flagged for review.
+_GENERIC_SLUGS = {
+    "signal", "neuro", "neural", "brain", "medical", "health", "data",
+    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
+    "bci", "ai", "research", "digital", "care", "vision", "sense",
+}
 
 
 def _flag_for_verification(c, claimed_ats, slug):
@@ -141,8 +153,13 @@ def _flag_for_verification(c, claimed_ats, slug):
     if claimed_ats in PROBES and c.ats != claimed_ats:
         flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
     name_words = re.findall(r"[a-z0-9]+", c.name.lower())
+    single_token = "-" not in slug
     if len(name_words) >= 2 and slug == name_words[0]:
         flags.append("first-word slug - confirm it's the same company")
+    elif len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
+        # A generic word fragment ("signal", "neuro") that matched some
+        # unrelated board — high collision risk from a multi-word name.
+        flags.append(f"generic slug '{slug}' - likely a different company")
     if flags:
         note = "[VERIFY: " + "; ".join(flags) + "]"
         c.notes = f"{c.notes} {note}".strip() if c.notes else note
