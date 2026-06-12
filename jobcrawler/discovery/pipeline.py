@@ -145,7 +145,15 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
     probe = PROBES.get(c.ats)
 
     if probe:
-        candidates = [(c.ats, probe)]
+        # Probe the guessed ATS FIRST (fast path, preserves Claude's
+        # signal), then fall back to the other three. Claude's ATS guess
+        # is frequently wrong — it tags Neuralink "lever" when it's on
+        # greenhouse, Precision Neuroscience "greenhouse" when it's on
+        # kula — so a miss on the guessed ATS must not end the search,
+        # or real boards get reported as misses.
+        candidates = [(c.ats, probe)] + [
+            (name, fn) for name, fn in PROBES.items() if name != c.ats
+        ]
     else:
         # Unknown/unsupported ATS — try all known probes.
         candidates = list(PROBES.items())
