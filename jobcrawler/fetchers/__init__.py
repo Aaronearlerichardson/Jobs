@@ -4,7 +4,9 @@ Each fetcher returns a list of job dicts with the shape:
     {"id", "company", "title", "url", "location", "description"}
 """
 
+from .adp_wfn import fetch_adp
 from .ats_api import fetch_ashby, fetch_greenhouse, fetch_lever
+from .bamboohr import fetch_bamboohr
 from .discourse import fetch_discourse
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
@@ -19,7 +21,9 @@ from .websearch import fetch_websearch
 from .workday import fetch_workday
 
 __all__ = [
+    "fetch_adp",
     "fetch_ashby",
+    "fetch_bamboohr",
     "fetch_custom",
     "fetch_discourse",
     "fetch_greenhouse",

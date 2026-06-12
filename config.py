@@ -211,6 +211,22 @@ KULA_COMPANIES = [
     ("Precision Neuroscience", "precision-neuroscience"),
 ]
 
+# JazzHR boards: {subdomain: company}. Board at https://{sub}.applytojob.com
+JAZZHR_COMPANIES: dict[str, str] = {
+    "paradromicsinc": "Paradromics",
+}
+
+# BambooHR boards: {subdomain: company}. JSON at /careers/list.
+BAMBOOHR_COMPANIES: dict[str, str] = {
+    "cognixion": "Cognixion",  # 3 job(s), discovered 2026-06-12
+}
+
+# ADP Workforce Now career centers: (company, cid, ccid). The cid/ccid
+# pair comes from the careers-page embed URL (discovery sniffs it).
+ADP_COMPANIES: list[tuple[str, str, str]] = [
+    ("Synchron", "d290c04e-0230-4cd9-8bf0-f116bfab1405", "19000101_000003"),
+]
+
 DISCOURSE_BOARDS = [
     ("MNE Forum Jobs",           "https://mne.discourse.group", 9),
     ("Neurostars Announcements", "https://neurostars.org",      6),

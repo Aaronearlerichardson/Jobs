@@ -30,7 +30,9 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from ..fetchers import (
+    fetch_adp,
     fetch_ashby,
+    fetch_bamboohr,
     fetch_discourse,
     fetch_greenhouse,
     fetch_hnhiring,
@@ -242,7 +244,7 @@ def build_sources(cfg, include_websearch=True):
     counting, and error isolation.
     """
     sources = []
-    used_gh, used_kula = set(), set()
+    used_gh, used_kula, used_jazz = set(), set(), set()
 
     # 1) Priority company targets.
     for name, platform, fargs in PRIORITY_COMPANIES:
@@ -253,6 +255,7 @@ def build_sources(cfg, include_websearch=True):
             used_kula.add(fargs[0])
             sources.append((name, "kula*", _kula_thunk(fargs[0], name)))
         elif platform == "jazzhr":
+            used_jazz.add(fargs[0])
             sources.append((name, "jazzhr*", _jazzhr_thunk(fargs[0], name)))
 
     # 2) General neural-ML sweep across existing lightweight ATS sources.
@@ -268,6 +271,16 @@ def build_sources(cfg, include_websearch=True):
         if slug in used_kula:
             continue
         sources.append((name, "kula", _kula_thunk(slug, name)))
+    for sub, name in getattr(cfg, "JAZZHR_COMPANIES", {}).items():
+        if sub in used_jazz:
+            continue
+        sources.append((name, "jazzhr", _jazzhr_thunk(sub, name)))
+    for sub, name in getattr(cfg, "BAMBOOHR_COMPANIES", {}).items():
+        sources.append((name, "bamboohr",
+                        lambda s=sub, n=name: fetch_bamboohr(s, n)))
+    for name, cid, ccid in getattr(cfg, "ADP_COMPANIES", []):
+        sources.append((name, "adp",
+                        lambda c=cid, cc=ccid, n=name: fetch_adp(c, cc, n)))
     for name, base, cat in cfg.DISCOURSE_BOARDS:
         sources.append((name, "discourse", _discourse_thunk(name, base, cat)))
 

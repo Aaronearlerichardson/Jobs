@@ -10,7 +10,7 @@ from pathlib import Path
 
 from config import REPORT_DIR
 from ..claude import DISCOVER_SYSTEM, call_claude_json
-from .probes import PROBES, WorkdayJsProbe, probe_workday
+from .probes import PROBES, WorkdayJsProbe, probe_workday, sniff_careers_ats
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker does network
@@ -197,6 +197,23 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
                 _flag_for_verification(c, claimed_ats, slug)
                 return c
 
+    # Careers-page ATS sniff. Boards on platforms keyed by an opaque
+    # subdomain/GUID (ADP, JazzHR, BambooHR) can't be reached by guessing
+    # a slug — but the company's careers page links straight to them.
+    # Read the coordinates out of that link. This is cheaper than the
+    # Workday browser fallback, so try it first.
+    sniff = sniff_careers_ats(c.name, c.careers_url)
+    time.sleep(delay)
+    if sniff:
+        c.confirmed  = True
+        c.ats        = sniff["ats"]
+        c.slug_guess = sniff["slug"]
+        c.job_count  = sniff["count"]
+        c.tried_slugs.append(f"[sniff:{sniff['ats']} <- {sniff['source_url']}]")
+        note = f"sniffed from careers page ({sniff['ats']})"
+        c.notes = f"{c.notes} [VERIFY: {note}]".strip() if c.notes else f"[VERIFY: {note}]"
+        return c
+
     # Workday fallback. Workday can't be probed by slug — we have to
     # scrape the company's careers page to learn tenant/pod/site. Only
     # try if Claude tagged the candidate workday or unknown; spare the
@@ -336,13 +353,24 @@ def write_discovery_report(result):
                     "lever":      "LEVER_COMPANIES",
                     "ashby":      "ASHBY_COMPANIES",
                     "kula":       "KULA_COMPANIES",
+                    "jazzhr":     "JAZZHR_COMPANIES",
+                    "bamboohr":   "BAMBOOHR_COMPANIES",
+                    "adp":        "ADP_COMPANIES",
                     "workday":    "WORKDAY_COMPANIES",
                 }.get(ats_name, f"{ats_name.upper()}_COMPANIES")
                 f.write(f"### `{dict_name}`\n\n```python\n")
                 for c in cands:
                     note = verify_note(c)
                     suffix = f"  # VERIFY: {note}" if note else ""
-                    if ats_name == "kula":
+                    if ats_name in ("jazzhr", "bamboohr"):
+                        # {subdomain: "Company"} dicts.
+                        f.write(f'    "{c.slug_guess}": "{c.name}",  '
+                                f'# {c.job_count} job(s) live{suffix}\n')
+                    elif ats_name == "adp":
+                        cid, _, ccid = (c.slug_guess or "").partition("|")
+                        f.write(f'    ("{c.name}", "{cid}", "{ccid}"),  '
+                                f'# {c.job_count} job(s) live{suffix}\n')
+                    elif ats_name == "kula":
                         f.write(f'    ("{c.name}", "{c.slug_guess}"),{suffix}\n')
                     elif ats_name == "workday":
                         parts = (c.slug_guess or "").split("|")

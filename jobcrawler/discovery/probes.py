@@ -1,5 +1,6 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+import html
 import re
 import time
 
@@ -60,11 +61,37 @@ def probe_kula(slug, retries=1):
     return (False, 0)
 
 
+def probe_jazzhr(slug):
+    url = f"https://{slug}.applytojob.com/"
+    try:
+        r = requests.get(url, timeout=10, headers=HEADERS)
+        if r.status_code != 200:
+            return (False, 0)
+        n = len(re.findall(r"/apply/[A-Za-z0-9]+/", r.text))
+        return (n > 0, n)
+    except Exception:
+        return (False, 0)
+
+
+def probe_bamboohr(slug):
+    url = f"https://{slug}.bamboohr.com/careers/list"
+    try:
+        r = requests.get(url, timeout=10,
+                         headers={**HEADERS, "Accept": "application/json"})
+        if r.status_code != 200:
+            return (False, 0)
+        return (True, len(r.json().get("result", []) or []))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
     "ashby":      probe_ashby,
     "kula":       probe_kula,
+    "jazzhr":     probe_jazzhr,
+    "bamboohr":   probe_bamboohr,
 }
 
 
@@ -257,6 +284,125 @@ def probe_workday(name: str, careers_url: str = ""):
             "validated":  count is not None,
             "source_url": r.url,
         }
+    return None
+
+
+# ─── Careers-page ATS sniffer ────────────────────────────────────────────
+#
+# Many companies (Synchron on ADP, Cognixion on BambooHR, Paradromics on
+# JazzHR) aren't reachable by guessing a slug against the four JSON ATSes —
+# their boards live on platforms keyed by an opaque subdomain or GUID we
+# can't derive from the name. But the company's own careers page links to
+# the board. So when slug probing misses, fetch the careers page(s) and
+# read the ATS coordinates straight out of the embed URL.
+#
+# Returns a normalized dict the pipeline can confirm + persist:
+#   {"ats": "<name>", "slug": "<slug-or-pipe-encoded-coords>", "count": int,
+#    "source_url": "<careers page>"}
+
+# Each entry: (ats_name, compiled_regex). The regex's group(s) capture the
+# board coordinates. ADP needs two params (cid, ccId) and is handled
+# specially below.
+_ATS_LINK_PATTERNS = [
+    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([a-z0-9_-]+)", re.I)),
+    ("lever",      re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)", re.I)),
+    ("ashby",      re.compile(r"jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)", re.I)),
+    ("kula",       re.compile(r"careers\.kula\.ai/([a-z0-9_-]+)", re.I)),
+    ("jazzhr",     re.compile(r"([a-z0-9-]+)\.applytojob\.com", re.I)),
+    ("bamboohr",   re.compile(r"([a-z0-9-]+)\.bamboohr\.com", re.I)),
+]
+_ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
+_ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
+
+
+def _careers_urls(name, careers_url):
+    """Careers-page URLs to sniff, in priority order (caps at _URL_CAP)."""
+    urls = []
+    if careers_url:
+        urls.append(careers_url)
+    for token in _name_domain_tokens(name):
+        for path in ("/careers", "/careers/", "/company/careers", "/jobs"):
+            urls.append(f"https://www.{token}.com{path}")
+            urls.append(f"https://{token}.com{path}")
+        urls.append(f"https://{token}.io/careers")
+    seen, out = set(), []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+        if len(out) >= _URL_CAP:
+            break
+    return out
+
+
+def _coords_from_text(text):
+    """Return (ats, slug) from the first ATS embed found in `text`, or None."""
+    # ADP first: it needs two params and its host is generic. Unescape so
+    # entity-encoded query separators ("&amp;ccid=") still match.
+    if "workforcenow.adp.com" in text.lower():
+        unescaped = html.unescape(text)
+        cid = _ADP_CID_RE.search(unescaped)
+        ccid = _ADP_CCID_RE.search(unescaped)
+        if cid and ccid:
+            return "adp", f"{cid.group(1)}|{ccid.group(1)}"
+    for ats, pat in _ATS_LINK_PATTERNS:
+        m = pat.search(text)
+        if m:
+            slug = m.group(1)
+            # Skip obvious non-board subdomains.
+            if slug.lower() in ("www", "help", "support", "blog", "app"):
+                continue
+            return ats, slug
+    return None
+
+
+def _confirm_coords(ats, slug):
+    """Get a live job count for sniffed coordinates. Returns int or None."""
+    if ats == "adp":
+        cid, _, ccid = slug.partition("|")
+        try:
+            r = requests.get(
+                "https://workforcenow.adp.com/mascsr/default/careercenter"
+                "/public/events/staffing/v1/job-requisitions",
+                params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
+                timeout=12, headers={**HEADERS, "Accept": "application/json"},
+            )
+            if r.status_code != 200:
+                return None
+            return int(r.json().get("meta", {}).get("totalNumber", 0) or 0)
+        except Exception:
+            return None
+    probe = PROBES.get(ats)
+    if not probe:
+        return None
+    ok, count = probe(slug)
+    return count if ok else None
+
+
+def sniff_careers_ats(name, careers_url=""):
+    """
+    Fetch the company's careers page(s) and read ATS coordinates out of
+    the embedded board link. Returns
+        {"ats", "slug", "count", "source_url"}  or  None.
+    """
+    for url in _careers_urls(name, careers_url):
+        try:
+            r = requests.get(url, timeout=12, headers=HEADERS,
+                             allow_redirects=True)
+        except Exception:
+            continue
+        if r.status_code != 200:
+            continue
+        # The final URL itself can be the board (careers page redirects
+        # straight to applytojob.com etc.), then the HTML body.
+        coords = _coords_from_text(r.url) or _coords_from_text(r.text)
+        if not coords:
+            continue
+        ats, slug = coords
+        count = _confirm_coords(ats, slug)
+        if count is None:
+            continue
+        return {"ats": ats, "slug": slug, "count": count, "source_url": r.url}
     return None
 
 

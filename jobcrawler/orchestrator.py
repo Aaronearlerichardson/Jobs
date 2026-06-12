@@ -5,10 +5,13 @@ from datetime import datetime
 
 from config import (
     ACCEPT_REMOTE,
+    ADP_COMPANIES,
     ASHBY_COMPANIES,
+    BAMBOOHR_COMPANIES,
     CUSTOM_COMPANIES,
     DISCOURSE_BOARDS,
     GREENHOUSE_COMPANIES,
+    JAZZHR_COMPANIES,
     HNHIRING_ENABLED,
     HNHIRING_MAX_THREADS,
     JSONLD_COMPANIES,
@@ -27,11 +30,14 @@ from config import (
 )
 from .db import init_db, is_new, mark_seen
 from .fetchers import (
+    fetch_adp,
     fetch_ashby,
+    fetch_bamboohr,
     fetch_custom,
     fetch_discourse,
     fetch_greenhouse,
     fetch_hnhiring,
+    fetch_jazzhr,
     fetch_jsonld_careers,
     fetch_kula,
     fetch_lever,
@@ -97,6 +103,21 @@ def crawl(dry_run=False):
     for name, slug in KULA_COMPANIES:
         print(f"  > {name} (Kula)")
         process(fetch_kula(name, slug))
+        time.sleep(0.5)
+
+    for sub, name in JAZZHR_COMPANIES.items():
+        print(f"  > {name} (JazzHR)")
+        process(fetch_jazzhr(name, sub))
+        time.sleep(0.5)
+
+    for sub, name in BAMBOOHR_COMPANIES.items():
+        print(f"  > {name} (BambooHR)")
+        process(fetch_bamboohr(sub, name))
+        time.sleep(0.5)
+
+    for name, cid, ccid in ADP_COMPANIES:
+        print(f"  > {name} (ADP WFN)")
+        process(fetch_adp(cid, ccid, name))
         time.sleep(0.5)
 
     for name, base_url, cat_id in DISCOURSE_BOARDS:

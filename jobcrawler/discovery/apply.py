@@ -27,11 +27,15 @@ CONFIG_PATH: Path = SCRIPT_DIR / "config.py"
 #   "dict"            -> {slug: "Company"}
 #   "list_name_slug"  -> [("Company", slug), ...]
 #   "list_workday"    -> [(tenant, wd_pod_int, site, "Company"), ...]
+#   "list_adp"        -> [("Company", cid, ccid), ...]
 TARGETS: dict[str, tuple[str, str]] = {
     "greenhouse": ("GREENHOUSE_COMPANIES", "dict"),
     "lever":      ("LEVER_COMPANIES",      "dict"),
     "ashby":      ("ASHBY_COMPANIES",      "dict"),
     "kula":       ("KULA_COMPANIES",       "list_name_slug"),
+    "jazzhr":     ("JAZZHR_COMPANIES",     "dict"),
+    "bamboohr":   ("BAMBOOHR_COMPANIES",   "dict"),
+    "adp":        ("ADP_COMPANIES",        "list_adp"),
     "workday":    ("WORKDAY_COMPANIES",    "list_workday"),
 }
 
@@ -84,6 +88,10 @@ _TUPLE_SLUG_RE = re.compile(r'''\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']''')
 _TUPLE_WORKDAY_RE = re.compile(
     r'''\(\s*["']([^"']+)["']\s*,\s*(\d+)\s*,\s*["']([^"']+)["']\s*,\s*["'][^"']+["']\s*\)'''
 )
+# 3-tuple in ADP_COMPANIES:  ("Name", "cid", "ccid") — dedup on cid.
+_TUPLE_ADP_RE = re.compile(
+    r'''\(\s*["'][^"']+["']\s*,\s*["']([^"']+)["']\s*,\s*["'][^"']+["']\s*\)'''
+)
 
 
 def _existing_slugs_dict(body: str) -> set[str]:
@@ -92,6 +100,10 @@ def _existing_slugs_dict(body: str) -> set[str]:
 
 def _existing_slugs_list(body: str) -> set[str]:
     return set(_TUPLE_SLUG_RE.findall(body))
+
+
+def _existing_slugs_adp(body: str) -> set[str]:
+    return set(_TUPLE_ADP_RE.findall(body))
 
 
 def _existing_slugs_workday(body: str) -> set[str]:
@@ -112,6 +124,15 @@ def _fmt_dict_entry(cand) -> str:
 
 def _fmt_list_entry(cand) -> str:
     return (f'    ("{cand.name}", "{cand.slug_guess}"),  '
+            f'# {cand.job_count} job(s), discovered{_verify_suffix(cand)}')
+
+
+def _fmt_adp_entry(cand):
+    """ADP slug_guess is "cid|ccid". Emits ("Name", "cid", "ccid")."""
+    cid, sep, ccid = (cand.slug_guess or "").partition("|")
+    if not sep:
+        return None
+    return (f'    ("{cand.name}", "{cid}", "{ccid}"),  '
             f'# {cand.job_count} job(s), discovered{_verify_suffix(cand)}')
 
 
@@ -173,6 +194,9 @@ def apply_to_config(result, dry_run: bool = False) -> list[str]:
         elif kind == "list_workday":
             existing = _existing_slugs_workday(body)
             fmt      = _fmt_workday_entry
+        elif kind == "list_adp":
+            existing = _existing_slugs_adp(body)
+            fmt      = _fmt_adp_entry
         else:
             existing = _existing_slugs_list(body)
             fmt      = _fmt_list_entry
@@ -182,14 +206,16 @@ def apply_to_config(result, dry_run: bool = False) -> list[str]:
             slug = (c.slug_guess or "").strip()
             if not slug:
                 continue
-            if slug in existing:
+            # ADP dedups on the cid (slug is "cid|ccid").
+            dedup_key = slug.split("|", 1)[0] if kind == "list_adp" else slug
+            if dedup_key in existing:
                 skipped.append(c.name)
                 continue
             entry = fmt(c)
             if entry is None:     # fmt can reject malformed workday slugs
                 continue
             new_lines.append(entry)
-            existing.add(slug)
+            existing.add(dedup_key)
 
         if not new_lines:
             summary.append(f"    {var_name}: nothing to add "
