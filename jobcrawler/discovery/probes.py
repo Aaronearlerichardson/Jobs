@@ -296,13 +296,19 @@ def probe_workday(name: str, careers_url: str = ""):
 # the board. So when slug probing misses, fetch the careers page(s) and
 # read the ATS coordinates straight out of the embed URL.
 #
-# Returns a normalized dict the pipeline can confirm + persist:
-#   {"ats": "<name>", "slug": "<slug-or-pipe-encoded-coords>", "count": int,
-#    "source_url": "<careers page>"}
+# sniff_careers_ats returns one of:
+#   {"confirmed": True,  "ats", "slug", "count", "source_url"}
+#       — a fetchable board we validated and can add to config.
+#   {"confirmed": False, "ats", "slug", "source_url"}
+#       — a LEAD: the careers page links to a known-but-not-fetchable
+#         platform (Eightfold, Dayforce, iCIMS, SmartRecruiters, ...).
+#         Those are bot-protected/JS-only, so we can't auto-pull jobs, but
+#         surfacing the exact platform + URL turns a blind miss into an
+#         actionable "add this manually" note.
+#   None — nothing found.
 
-# Each entry: (ats_name, compiled_regex). The regex's group(s) capture the
-# board coordinates. ADP needs two params (cid, ccId) and is handled
-# specially below.
+# Fetchable platforms: regex captures the board slug; sniff confirms via a
+# live count. ADP needs two params (cid, ccId), handled specially below.
 _ATS_LINK_PATTERNS = [
     ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/([a-z0-9_-]+)", re.I)),
     ("lever",      re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)", re.I)),
@@ -314,29 +320,81 @@ _ATS_LINK_PATTERNS = [
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
 
+# Detection-only platforms: real ATSes we can recognize but not reliably
+# auto-fetch (bot-protected APIs or JS-only boards). Each regex captures a
+# short identifying host/path for the lead note.
+_ATS_LEAD_PATTERNS = [
+    ("eightfold",       re.compile(r"([a-z0-9-]+\.eightfold\.ai)", re.I)),
+    ("dayforce",        re.compile(r"(dayforcehcm\.com/[a-zA-Z-]+/[a-zA-Z0-9_-]+)", re.I)),
+    ("icims",           re.compile(r"([a-z0-9-]+\.icims\.com)", re.I)),
+    ("smartrecruiters", re.compile(r"(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)", re.I)),
+    ("workable",        re.compile(r"(apply\.workable\.com/[a-z0-9-]+)", re.I)),
+    ("recruitee",       re.compile(r"([a-z0-9-]+\.recruitee\.com)", re.I)),
+    ("teamtailor",      re.compile(r"([a-z0-9-]+\.teamtailor\.com)", re.I)),
+    ("jobvite",         re.compile(r"(jobs\.jobvite\.com/[a-z0-9-]+)", re.I)),
+    ("successfactors",  re.compile(r"([a-z0-9-]+\.(?:successfactors|sapsf)\.com)", re.I)),
+    ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
+    ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
+    ("paylocity",       re.compile(r"(recruiting\.paylocity\.com/[A-Za-z0-9/_-]+)", re.I)),
+    ("workday",         re.compile(r"([a-z0-9-]+\.wd\d+\.myworkdayjobs\.com)", re.I)),
+]
+
+# Fetchable-ATS host detector — used to skip Claude's careers_url when it's
+# itself a dead slug-guess against a JSON ATS (already covered by probing).
+_FETCHABLE_HOST_RE = re.compile(
+    r"(greenhouse\.io|lever\.co|ashbyhq\.com|kula\.ai|applytojob\.com|bamboohr\.com)",
+    re.I,
+)
+
+_SNIFF_URL_CAP = 16
+_CAREERS_TLDS  = (".com", ".co", ".io", ".ai")
+_CAREERS_PATHS = ("/careers", "/careers/", "/jobs", "/careers/open-positions",
+                  "/about/careers", "/company/careers", "/join", "/join-us",
+                  "/open-positions", "/employment")
+
 
 def _careers_urls(name, careers_url):
-    """Careers-page URLs to sniff, in priority order (caps at _URL_CAP)."""
+    """Careers-page URLs to sniff, in priority order (caps at _SNIFF_URL_CAP).
+
+    Ordered by likelihood: Claude's careers_url (unless it's a dead JSON-ATS
+    guess), then .com careers/jobs per name token, then alternate TLDs
+    (.co/.io/.ai — common for neurotech startups), then longer-tail paths
+    and careers/jobs subdomains.
+    """
     urls = []
-    if careers_url:
+    if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
         urls.append(careers_url)
-    for token in _name_domain_tokens(name):
-        for path in ("/careers", "/careers/", "/company/careers", "/jobs"):
+
+    tokens = _name_domain_tokens(name)
+    # Tier 1: most likely — .com /careers and /jobs.
+    for token in tokens:
+        urls.append(f"https://www.{token}.com/careers")
+        urls.append(f"https://{token}.com/careers")
+        urls.append(f"https://www.{token}.com/jobs")
+    # Tier 2: alternate TLDs, /careers.
+    for token in tokens:
+        for tld in _CAREERS_TLDS[1:]:
+            urls.append(f"https://www.{token}{tld}/careers")
+            urls.append(f"https://{token}{tld}/careers")
+    # Tier 3: longer-tail paths + careers/jobs subdomains.
+    for token in tokens:
+        for path in _CAREERS_PATHS[3:]:
             urls.append(f"https://www.{token}.com{path}")
-            urls.append(f"https://{token}.com{path}")
-        urls.append(f"https://{token}.io/careers")
+        urls.append(f"https://careers.{token}.com/")
+        urls.append(f"https://jobs.{token}.com/")
+
     seen, out = set(), []
     for u in urls:
         if u and u not in seen:
             seen.add(u)
             out.append(u)
-        if len(out) >= _URL_CAP:
+        if len(out) >= _SNIFF_URL_CAP:
             break
     return out
 
 
 def _coords_from_text(text):
-    """Return (ats, slug) from the first ATS embed found in `text`, or None."""
+    """Return (ats, slug) from the first fetchable ATS embed, or None."""
     # ADP first: it needs two params and its host is generic. Unescape so
     # entity-encoded query separators ("&amp;ccid=") still match.
     if "workforcenow.adp.com" in text.lower():
@@ -353,6 +411,15 @@ def _coords_from_text(text):
             if slug.lower() in ("www", "help", "support", "blog", "app"):
                 continue
             return ats, slug
+    return None
+
+
+def _lead_from_text(text):
+    """Return (platform, host) for a detection-only ATS, or None."""
+    for platform, pat in _ATS_LEAD_PATTERNS:
+        m = pat.search(text)
+        if m:
+            return platform, m.group(1)
     return None
 
 
@@ -381,10 +448,11 @@ def _confirm_coords(ats, slug):
 
 def sniff_careers_ats(name, careers_url=""):
     """
-    Fetch the company's careers page(s) and read ATS coordinates out of
-    the embedded board link. Returns
-        {"ats", "slug", "count", "source_url"}  or  None.
+    Fetch the company's careers page(s) and read the ATS off the embedded
+    board link. Prefers a fetchable confirmation; falls back to a
+    detection-only lead. See module section header for the return shape.
     """
+    lead = None  # first detection-only platform seen, kept as a fallback
     for url in _careers_urls(name, careers_url):
         try:
             r = requests.get(url, timeout=12, headers=HEADERS,
@@ -393,17 +461,20 @@ def sniff_careers_ats(name, careers_url=""):
             continue
         if r.status_code != 200:
             continue
-        # The final URL itself can be the board (careers page redirects
-        # straight to applytojob.com etc.), then the HTML body.
+        blob = r.url + " " + r.text
         coords = _coords_from_text(r.url) or _coords_from_text(r.text)
-        if not coords:
-            continue
-        ats, slug = coords
-        count = _confirm_coords(ats, slug)
-        if count is None:
-            continue
-        return {"ats": ats, "slug": slug, "count": count, "source_url": r.url}
-    return None
+        if coords:
+            ats, slug = coords
+            count = _confirm_coords(ats, slug)
+            if count is not None:
+                return {"confirmed": True, "ats": ats, "slug": slug,
+                        "count": count, "source_url": r.url}
+        if lead is None:
+            hit = _lead_from_text(blob)
+            if hit:
+                lead = {"confirmed": False, "ats": hit[0], "slug": hit[1],
+                        "source_url": r.url}
+    return lead
 
 
 # ─── JS-rendered Workday probe (fallback for SPA careers pages) ──────────

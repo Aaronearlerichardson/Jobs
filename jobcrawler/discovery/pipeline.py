@@ -30,6 +30,9 @@ class Candidate:
     confirmed: bool = False
     job_count: int = 0
     tried_slugs: list[str] = field(default_factory=list)
+    # Set when the candidate is unconfirmed but its careers page links to a
+    # known-but-not-auto-fetchable ATS (e.g. "eightfold @ acme.eightfold.ai").
+    ats_lead: str = ""
 
 
 def candidate_from_dict(d):
@@ -204,7 +207,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
     # Workday browser fallback, so try it first.
     sniff = sniff_careers_ats(c.name, c.careers_url)
     time.sleep(delay)
-    if sniff:
+    if sniff and sniff.get("confirmed"):
         c.confirmed  = True
         c.ats        = sniff["ats"]
         c.slug_guess = sniff["slug"]
@@ -213,13 +216,23 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
         note = f"sniffed from careers page ({sniff['ats']})"
         c.notes = f"{c.notes} [VERIFY: {note}]".strip() if c.notes else f"[VERIFY: {note}]"
         return c
+    if sniff:
+        # Detection-only lead: a real but not-auto-fetchable ATS
+        # (Eightfold/Dayforce/iCIMS/...). Record it so the unconfirmed
+        # report row points the user straight at the board to add by hand,
+        # rather than reading as a dead miss.
+        c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
+        c.tried_slugs.append(f"[lead:{sniff['ats']} <- {sniff['source_url']}]")
 
     # Workday fallback. Workday can't be probed by slug — we have to
     # scrape the company's careers page to learn tenant/pod/site. Only
     # try if Claude tagged the candidate workday or unknown; spare the
     # scrape for ats values that definitely aren't workday (e.g. we
     # know it's "lever" but that slug missed — unlikely to be on wd).
-    if c.ats in ("unknown", "workday"):
+    # Skip when we already have a (non-workday) lead: the careers page was
+    # reachable and showed a different platform, so the expensive JS
+    # browser launch won't help.
+    if c.ats in ("unknown", "workday") and not c.ats_lead:
         meta = probe_workday(c.name, c.careers_url)
         time.sleep(delay)
         # Static scrape missed? Try the JS-rendered version for SPAs.
@@ -387,12 +400,24 @@ def write_discovery_report(result):
                 f.write("```\n\n")
 
         if unconfirmed:
+            # Surface companies whose careers page links to a known but
+            # not-auto-fetchable ATS (bot-protected/JS-only) at the top —
+            # these are actionable: add the platform manually.
+            leads = [c for c in unconfirmed if c.ats_lead]
+            if leads:
+                f.write("### Detected ATS (manual add - not auto-fetchable)\n\n")
+                f.write("| Company | Platform | Found at |\n|---|---|---|\n")
+                for c in leads:
+                    plat, _, host = c.ats_lead.partition(" @ ")
+                    f.write(f"| {c.name} | {plat} | `{host}` |\n")
+                f.write("\n")
+
             f.write("## Unconfirmed - manual investigation needed\n\n")
-            f.write("| Company | ATS guess | Slugs tried | Careers URL | Notes |\n")
-            f.write("|---|---|---|---|---|\n")
+            f.write("| Company | ATS guess | ATS lead | Slugs tried | Careers URL | Notes |\n")
+            f.write("|---|---|---|---|---|---|\n")
             for c in unconfirmed:
                 tried = ", ".join(f"`{s}`" for s in c.tried_slugs) or "-"
-                f.write(f"| {c.name} | {c.ats} | {tried} | "
+                f.write(f"| {c.name} | {c.ats} | {c.ats_lead or '-'} | {tried} | "
                         f"{c.careers_url or '-'} | {c.notes} |\n")
             f.write("\n")
 
@@ -426,7 +451,13 @@ def print_summary(result):
               f"({c.job_count} jobs){tail}")
     unconfirmed = [c for c in companies if not c.confirmed]
     if unconfirmed:
+        leads = [c for c in unconfirmed if c.ats_lead]
+        if leads:
+            print(f"\n  Detected ATS (manual add, not auto-fetchable):")
+            for c in leads:
+                print(f"    > {c.name:<30} {c.ats_lead}")
         print(f"\n  Unconfirmed ({len(unconfirmed)}):")
         for c in unconfirmed:
-            print(f"    ? {c.name:<30} {c.ats:<10} tried={c.tried_slugs}")
+            lead = f"  lead={c.ats_lead}" if c.ats_lead else ""
+            print(f"    ? {c.name:<30} {c.ats:<10} tried={c.tried_slugs}{lead}")
     print(f"{'='*w}\n")
