@@ -8,10 +8,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import os
+
 from config import REPORT_DIR
 from ..claude import DISCOVER_SYSTEM, call_claude_json
 from ..util import worker_count
-from .probes import PROBES, WorkdayJsProbe, probe_workday, sniff_careers_ats
+from .probes import (
+    PROBES,
+    WorkdayJsProbePool,
+    probe_workday,
+    sniff_careers_ats,
+)
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost
@@ -20,6 +27,12 @@ from .seeds import seed_candidates_for
 # CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
 # more concurrent requests. Tune down if you see 429s from a probe provider.
 _DISCOVERY_WORKERS = worker_count("DISCOVERY_WORKERS")
+
+# Headless browsers for the parallel Workday JS fallback. Each is ~200-300MB
+# of RAM, so keep this modest; raise JS_BROWSERS to scrape more SPA careers
+# pages at once. Capped at the worker count (no point having idle browsers).
+_JS_BROWSERS = min(max(1, int(os.environ.get("JS_BROWSERS", "4"))),
+                   _DISCOVERY_WORKERS)
 
 
 @dataclass
@@ -323,11 +336,12 @@ def _validate_all(candidate_dicts, use_js=True):
     input order. Shared by Claude-driven discover() and name-list-driven
     discover_companies().
 
-    use_js gates the headless-browser Workday fallback. That browser is
-    serialized onto a single thread (Playwright greenlet affinity), so when
-    many candidates need it they queue — profiling a 677-company run showed
-    it dominating wall time. Off for bulk sweeps; the static probe_workday
-    still confirms non-SPA Workday boards in parallel."""
+    use_js gates the headless-browser Workday fallback. A single browser is
+    single-threaded (Playwright greenlet affinity), so the fallback runs as
+    a POOL of _JS_BROWSERS browsers — candidates that need it borrow a free
+    one and only block when all are busy, instead of all queuing on one.
+    Off for bulk sweeps by default; the static probe_workday still confirms
+    non-SPA Workday boards in parallel regardless."""
     # Each worker drops log lines into its own list and flushes them
     # as a single atomic block when the candidate finishes — so the
     # [N/total] progress line + any "[js] headless scrape..." messages
@@ -362,10 +376,11 @@ def _validate_all(candidate_dicts, use_js=True):
                 print(line)
         return idx, cand
 
-    # One browser reused across all workday JS scrapes; lazy-launched the
-    # first time a candidate needs it. Skipped entirely when use_js is off,
-    # so bulk sweeps never pay the (serialized) browser cost.
-    js_probe = WorkdayJsProbe() if use_js else None
+    # A pool of browsers for the JS scrapes, each lazy-launched on first
+    # use, so concurrent candidates scrape in parallel (up to _JS_BROWSERS)
+    # instead of serializing on one. Skipped entirely when use_js is off,
+    # so bulk sweeps never pay the browser cost.
+    js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
     try:
         with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
             futures = [pool.submit(_worker, i, rc, js_probe)

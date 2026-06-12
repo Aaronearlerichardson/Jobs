@@ -1,6 +1,7 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
 import html
+import queue
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -701,6 +702,54 @@ class WorkdayJsProbe:
     def launched(self) -> bool:
         """True once the browser has actually started (for logging)."""
         return self._launched
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        self.close()
+
+
+class WorkdayJsProbePool:
+    """K headless browsers running JS Workday scrapes in parallel.
+
+    A single WorkdayJsProbe is single-threaded by necessity — Playwright's
+    sync API pins its greenlet to one thread, so one instance serializes
+    every scrape onto one browser. But nothing stops running SEVERAL
+    instances at once: each owns its own Playwright + browser + thread, so
+    K of them give K-way parallel scraping. Discovery workers that need the
+    JS fallback borrow a free browser from the pool (blocking only when all
+    K are busy) instead of all queuing on one.
+
+    Browsers are heavy (~200-300MB each), so the pool is small by default
+    and each instance lazy-launches only when first handed out — a run that
+    needs the browser twice spins up two, not K.
+
+    Exposes the same probe()/launched/close() surface as WorkdayJsProbe, so
+    it is a drop-in for the single-probe path.
+    """
+
+    def __init__(self, size):
+        self.size = max(1, int(size))
+        self._probes = [WorkdayJsProbe() for _ in range(self.size)]
+        self._free = queue.Queue()
+        for p in self._probes:
+            self._free.put(p)
+
+    def probe(self, name, careers_url=""):
+        p = self._free.get()          # blocks until a browser is free
+        try:
+            return p.probe(name, careers_url)
+        finally:
+            self._free.put(p)
+
+    @property
+    def launched(self):
+        return any(p.launched for p in self._probes)
+
+    def close(self):
+        for p in self._probes:
+            p.close()
 
     def __enter__(self):
         return self
