@@ -291,17 +291,29 @@ def discover(term):
     else:
         print(f"  > Claude returned {len(raw_companies)} company suggestion(s)")
 
+    validated = _validate_all(merged)
+    return {
+        "term":        term,
+        "companies":   validated,
+        "gated_sites": (payload or {}).get("gated_sites", []),
+    }
+
+
+def _validate_all(candidate_dicts):
+    """Validate candidate dicts in parallel; return Candidate objects in
+    input order. Shared by Claude-driven discover() and name-list-driven
+    discover_companies()."""
     # Each worker drops log lines into its own list and flushes them
     # as a single atomic block when the candidate finishes — so the
     # [N/total] progress line + any "[js] headless scrape..." messages
     # for one candidate always appear contiguously, even with 8
     # workers logging concurrently.
-    total     = len(merged)
+    total     = len(candidate_dicts)
     validated = [None] * total
     out_lock  = threading.Lock()
     done      = [0]                           # list-as-box for closure mutation
 
-    def _worker(idx, rc):
+    def _worker(idx, rc, js_probe):
         cand = candidate_from_dict(rc)
         buf: list[str] = []
         validate_candidate(
@@ -310,9 +322,12 @@ def discover(term):
         # Flush under lock so concurrent candidates never interleave.
         with out_lock:
             done[0] += 1
-            status = "OK  " if cand.confirmed else "miss"
-            detail = (f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
-                      if cand.confirmed else "")
+            if cand.confirmed:
+                status, detail = "OK  ", f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
+            elif cand.ats_lead:
+                status, detail = "lead", f"  {cand.ats_lead}"
+            else:
+                status, detail = "miss", ""
             print(f"  [{done[0]:>3}/{total}] {status}  {cand.name} "
                   f"({cand.ats}){detail}")
             for line in buf:
@@ -324,17 +339,23 @@ def discover(term):
     # pay the startup cost).
     with WorkdayJsProbe() as js_probe:
         with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
-            futures = [pool.submit(_worker, i, rc)
-                       for i, rc in enumerate(merged)]
+            futures = [pool.submit(_worker, i, rc, js_probe)
+                       for i, rc in enumerate(candidate_dicts)]
             for fut in as_completed(futures):
                 idx, cand = fut.result()
                 validated[idx] = cand
+    return validated
 
-    return {
-        "term":        term,
-        "companies":   validated,
-        "gated_sites": (payload or {}).get("gated_sites", []),
-    }
+
+def discover_companies(candidate_dicts, term):
+    """Resolve an explicit list of candidate dicts (e.g. harvested from the
+    BCIWiki directory) to crawlable boards — no Claude call. Returns the
+    same result shape as discover()."""
+    print(f"  > Resolving {len(candidate_dicts)} candidate(s) for {term!r}")
+    if not candidate_dicts:
+        return {"term": term, "companies": [], "gated_sites": []}
+    validated = _validate_all(candidate_dicts)
+    return {"term": term, "companies": validated, "gated_sites": []}
 
 
 # ─── Report ──────────────────────────────────────────────────────────────

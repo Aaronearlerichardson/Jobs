@@ -29,7 +29,9 @@ import sys
 from config import INCLUDE_KEYWORDS, SITE_CONFIGS
 from jobcrawler.discovery import (
     apply_to_config,
+    bciwiki_seed_candidates,
     discover,
+    discover_companies,
     print_summary,
     write_discovery_report,
 )
@@ -49,6 +51,14 @@ def main():
                     help="Sector/industry/term to search for (e.g. 'neurotech startups')")
     ap.add_argument("--from-keywords", action="store_true",
                     help="Run discovery for each entry in INCLUDE_KEYWORDS")
+    ap.add_argument("--from-bciwiki", action="store_true",
+                    help="Resolve the BCIWiki company directory "
+                         "(bciwiki.org Category:Companies) to crawlable boards")
+    ap.add_argument("--bciwiki-categories", default="companies",
+                    help="Comma-separated BCIWiki categories to harvest "
+                         "(companies,labs,organizations). Default: companies")
+    ap.add_argument("--limit", type=int, default=None,
+                    help="Cap the number of candidates resolved (for testing)")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
@@ -126,6 +136,22 @@ def main():
             if args.apply:
                 for line in apply_to_config(result, dry_run=args.dry_run):
                     print(line)
+        return
+
+    if args.from_bciwiki:
+        cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
+        print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
+        seeds = bciwiki_seed_candidates(categories=cats)
+        if args.limit:
+            seeds = seeds[: args.limit]
+        print(f"  > {len(seeds)} candidate(s) to resolve")
+        result = discover_companies(seeds, term=f"bciwiki:{','.join(cats)}")
+        print_summary(result)
+        if not args.no_report:
+            write_discovery_report(result)
+        if args.apply:
+            for line in apply_to_config(result, dry_run=args.dry_run):
+                print(line)
         return
 
     if not args.term:
