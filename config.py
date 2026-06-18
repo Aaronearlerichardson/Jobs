@@ -191,6 +191,8 @@ GREENHOUSE_COMPANIES = {
     # --- discovered 2026-04-23: medical tech companies in RTP ---
     "ceribell": "Ceribell",  # 46 job(s), discovered
     "pairwise": "Pairwise",  # 0 job(s), discovered
+    # --- discovered 2026-06-12: bci ---
+    "motifneurotech": "Motif Neurotech",  # 1 job(s), discovered — VERIFY: found on greenhouse, not Claude's guess (ashby)
 }
 
 LEVER_COMPANIES = {
@@ -198,6 +200,16 @@ LEVER_COMPANIES = {
     # --- discovered 2026-04-23: pharma companies in rtp ---
     "pryon": "Pryon",  # 6 job(s), discovered
     "spreedly": "Spreedly",  # 11 job(s), discovered
+    # --- discovered 2026-06-12: ieeg ---
+    "ucsf": "UCSF Weill Institute for Neurosciences (clinical ops/eng roles)",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: lfp ---
+    "turing": "Turing Award (Applied Neuroscience / Dreem by Beacon Biosignals)",  # 17 job(s), discovered — VERIFY: found on greenhouse, not Claude's guess (ashby); first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: fnirs ---
+    "starfishneuroscience": "Starfish Neuroscience",  # 1 job(s), discovered — VERIFY: found on greenhouse, not Claude's guess (ashby)
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    "signal": "Bio-Signal Technologies",  # 0 job(s), discovered — VERIFY: generic slug 'signal' - likely a different company
+    "hint": "HiNT",  # 2 job(s), discovered
+    "mindful": "Mindful Scientific",  # 10 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 ASHBY_COMPANIES: dict[str, str] = {
@@ -205,26 +217,94 @@ ASHBY_COMPANIES: dict[str, str] = {
     "novo": "Novo Nordisk",  # 0 job(s), discovered
     # --- discovered 2026-04-23: neurotech RTP ---
     "brainco": "BrainCo",  # 0 job(s), discovered
+    # --- discovered 2026-06-12: bci ---
+    "kernel": "Kernel",  # 0 job(s), discovered — VERIFY: found on ashby, not Claude's guess (greenhouse)
+    # --- discovered 2026-06-12: neurostimulation ---
+    "calahealth": "Cala Health",  # 6 job(s), discovered
+    # --- discovered 2026-06-12: cortical ---
+    "independent": "BrainFlow (Mindplex / independent OSS backed roles)",  # 1 job(s), discovered
+    # --- discovered 2026-06-12: ecog ---
+    "turing": "Turing Medical",  # 17 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    "alljoined": "Alljoined",  # 0 job(s), discovered
+    "alpha": "Alpha MED Scientific",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "amo": "AMO Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "applied": "Applied Neuroscience",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "atlas": "ATLAS Neuroengineering",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "blink": "Blink Device Company",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "Pear-VC": "Blueberry",  # 0 job(s), discovered — VERIFY: sniffed from careers page (ashby)
+    "comind": "CoMind",  # 0 job(s), discovered
+    "dynamic": "Dynamic Neurotech",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "focus": "Foc.us",  # 0 job(s), discovered
+    "helius": "Helius Medical Technologies",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "human": "Human Waves",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "impulse": "Impulse Neiry",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "infinite": "Infinite Biomedical Technologies",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "mainstay": "Mainstay Medical",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "neural-earth": "Neural FLEX",  # 0 job(s), discovered — VERIFY: sniffed from careers page (ashby)
+    "neuralace": "NeuraLace Medical",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "omniscient": "Omniscient Neurotechnology",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "quantum": "Quantum Thinkers",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "symbiotic": "Symbiotic Devices",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 KULA_COMPANIES = [
     ("Precision Neuroscience", "precision-neuroscience"),
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    ("Flow Neuroscience", "flow-com"),  # 0 job(s), discovered — VERIFY: sniffed from careers page (kula)
 ]
 
 # JazzHR boards: {subdomain: company}. Board at https://{sub}.applytojob.com
 JAZZHR_COMPANIES: dict[str, str] = {
     "paradromicsinc": "Paradromics",
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    "chroma": "Chroma NV",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "halo": "Halo Neuroscience",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "npi": "NPI Electronic",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 # BambooHR boards: {subdomain: company}. JSON at /careers/list.
 BAMBOOHR_COMPANIES: dict[str, str] = {
     "cognixion": "Cognixion",  # 3 job(s), discovered 2026-06-12
+    # --- discovered 2026-06-12: bci ---
+    "blackrock": "Blackrock Neurotech",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: neurostimulation ---
+    "neuralace": "Neuralace Medical",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: cortical ---
+    "interaxon": "Muse (InteraXon)",  # 0 job(s), discovered
+    # --- discovered 2026-06-12: eeg ---
+    "g": "g.tec medical engineering",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    "aestudio": "AE Studio",  # 6 job(s), discovered
+    "attune": "Attune Neurosciences",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cadwell": "Cadwell Industries",  # 16 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cortex": "Cortex Brainwave Technologies",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "harvard": "Harvard Bioscience",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "highland": "Highland Instruments",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "inter": "Inter",  # 163 job(s), discovered
+    "iris": "Iris Biomedical",  # 12 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "london": "London Cognition",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "maxwell": "MaxWell Biosystems",  # 5 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "neu": "NeU",  # 6 job(s), discovered
+    "nordicnaturals": "Nordic Neurostim",  # 4 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
+    "omicron": "Omicron T",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "peak": "Peak Achievement Training",  # 48 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "reach": "Reach Neuro",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "ripple": "Ripple Neuro",  # 148 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "setpoint": "Setpoint Medical",  # 14 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sonic": "Sonic Concepts",  # 17 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "starlabs": "Star Labs Bioscience",  # 0 job(s), discovered
+    "upside": "Upside Down Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 # ADP Workforce Now career centers: (company, cid, ccid). The cid/ccid
 # pair comes from the careers-page embed URL (discovery sniffs it).
 ADP_COMPANIES: list[tuple[str, str, str]] = [
     ("Synchron", "d290c04e-0230-4cd9-8bf0-f116bfab1405", "19000101_000003"),
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    ("Aspect Imaging", "7120c628-221c-4769-b7e7-8ab11b78b67f", "9200879253113_2"),  # 1 job(s), discovered — VERIFY: sniffed from careers page (adp)
+    ("TMS Center of Colorado", "227380c2-b7ef-4c34-8220-db444305af06", "19000101_000001"),  # 6 job(s), discovered — VERIFY: sniffed from careers page (adp)
+    ("Zander Labs", "436434db-fa8e-46eb-9baa-f565ea20b2d9", "19000101_000001"),  # 9 job(s), discovered — VERIFY: sniffed from careers page (adp)
 ]
 
 DISCOURSE_BOARDS = [
@@ -259,6 +339,8 @@ WORKDAY_COMPANIES: list[tuple[str, int, str, str]] = [
     ("biibhr", 3, "external", "Biogen"),  # 258 job(s), discovered
     ("gsk", 5, "GSKCareers", "GSK (GlaxoSmithKline) RTP"),  # 793 job(s), discovered
     ("viatris", 5, "External", "Medicago (now acquired/dissolved) / Viatris RTP"),  # 255 job(s), discovered
+    # --- discovered 2026-06-12: bciwiki:companies ---
+    ("philips", 3, "jobs-and-careers", "Philips"),  # 1044 job(s), discovered
 ]
 
 # (host, company_name)
