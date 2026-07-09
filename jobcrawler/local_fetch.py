@@ -224,6 +224,41 @@ def fetch_peopleadmin_nc(host):
     return _adapt(fetch_peopleadmin(host, ""), "peopleadmin")
 
 
+def fetch_custom_careers_nc(careers_url):
+    """
+    Scrape a self-hosted / custom careers page (no standard ATS) for NC jobs.
+    Generic: finds job-detail links whose text is a title with a nearby
+    location. Covers Astro/Webflow-style boards like Science Corp
+    (science.xyz), which no ATS probe/sniffer can reach.
+    """
+    out, seen = [], set()
+    try:
+        r = requests.get(careers_url, timeout=20, headers=HEADERS)
+        soup = BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        print(f"    [!] custom {careers_url}: {e}")
+        return out
+    root = re.match(r"https?://[^/]+", careers_url).group(0)
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if not re.search(r"/(careers|positions|jobs|openings)/[a-z0-9]", href, re.I):
+            continue
+        te = a.select_one("h1,h2,h3,h4,h5,[class*='title']")
+        title = (te.get_text(" ").strip() if te else a.get_text(" ").strip())
+        le = a.select_one("[class*='description'],[class*='location'],[class*='meta']")
+        loc = le.get_text(" ").strip() if le else a.get_text(" ").strip()
+        if not title or not _is_nc(loc):
+            continue
+        url = href if href.startswith("http") else root + href
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append({"id": f"custom_{re.sub(r'[^a-z0-9]+', '-', url.lower())[-48:]}",
+                    "title": title[:90], "url": url, "location": loc[:70],
+                    "description": "", "ats": "custom", "_wd": None})
+    return out
+
+
 FETCHERS = {
     "greenhouse":      lambda c: fetch_greenhouse_nc(c["slug"]),
     "lever":           lambda c: fetch_lever_nc(c["slug"]),
@@ -233,6 +268,7 @@ FETCHERS = {
     "icims":           lambda c: fetch_icims_nc(c["slug"]),
     "successfactors":  lambda c: fetch_successfactors_nc(c["careers_url"]),
     "peopleadmin":     lambda c: fetch_peopleadmin_nc(c["careers_url"]),
+    "custom":          lambda c: fetch_custom_careers_nc(c["careers_url"]),
 }
 
 

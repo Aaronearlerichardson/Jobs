@@ -132,14 +132,21 @@ def expand_location(term):
 _MISSION_TIERS = ("healthcare-tech", "health-bio-science", "other")
 
 
-_COMPANY_MISSION_SYSTEM = """You classify an EMPLOYER's core mission for a candidate targeting health / bio / science roles. Given a company name and a sample of its job postings, judge the COMPANY (not one role).
+_COMPANY_MISSION_SYSTEM = """You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
+
+The candidate is a BME / neuroscience / ML data engineer. Their BULLSEYE is neurotechnology — brain-computer interfaces (BCI), neural implants/interfaces, electrophysiology, neural signal processing, and neuro-focused medical devices — broadening out to medical devices, clinical/health ML & AI, diagnostics, and digital health, then to biotech / pharma R&D / genomics / life-sciences.
 
 Return ONLY a JSON object with exactly:
 - "mission": one of
-    "healthcare-tech"    (core product/mission is healthcare, medical, clinical, digital health, medical devices, diagnostics, or health data/AI),
-    "health-bio-science" (biotech, pharma, life sciences, genomics/omics, scientific tools/instruments, or research science — health-adjacent but not a healthcare product),
+    "healthcare-tech"    (healthcare, medical, clinical, digital health, medical devices, diagnostics, neurotech/BCI, or health data/AI),
+    "health-bio-science" (biotech, pharma, life sciences, genomics/omics, scientific tools/instruments, research science),
     "other"              (generic SaaS, fintech, ecommerce, defense, staffing, etc.).
-- "score": 0.0-1.0 — how central health/bio/science is to the company (1.0 = pure healthcare/biotech; ~0.0 = unrelated).
+- "score": 0.0-1.0 alignment with the candidate's target:
+    * 1.00 EXACTLY = a brain-computer-interface / neural-implant / neural-interface / neurotechnology company. This is the single highest score, reserved ONLY for this category — award a full 1.00, never 0.9x.
+    * 0.85-0.98  = other neuro, medical-device, signal-processing, clinical or health ML/AI, diagnostics, or digital-health company.
+    * 0.60-0.85  = biotech / pharma R&D / genomics / science-heavy life-sciences company.
+    * 0.40-0.65  = pharma/biologics manufacturing, CRO clinical-operations, or health services with limited technical or neural overlap.
+    * 0.00-0.20  = not health/bio/science.
 - "reason": one short phrase (<= 12 words).
 Return ONLY valid JSON. No markdown, no preamble."""
 
@@ -167,7 +174,15 @@ def score_company_mission(name, context=""):
         score = max(0.0, min(1.0, float(result.get("score"))))
     except (TypeError, ValueError):
         score = None
-    return tier, score, str(result.get("reason", "")).strip()
+    reason = str(result.get("reason", "")).strip()
+    # Deterministic bullseye anchor: a genuine BCI / neural-interface company
+    # is the candidate's exact target and must score 1.0 (the defined top of
+    # the scale) — not a hedged 0.9x.
+    if re.search(r"brain[-\s]?computer|brain[-\s]?machine|\bbci\b|neural (?:implant|"
+                 r"interface|prosthe)|neurotech|neural[-\s]?signal",
+                 (reason + " " + name).lower()):
+        score, tier = 1.0, "healthcare-tech"
+    return tier, score, reason
 
 
 def score_resume_fit(resume, title, description=""):

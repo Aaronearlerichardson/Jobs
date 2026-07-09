@@ -12,9 +12,23 @@ Returns a dict: {"ats", "slug"|"triple", "careers_url"} or None.
 import re
 
 import requests
+from bs4 import BeautifulSoup
 
 from ..http import HEADERS
 from .probes import _extract_workday_triple, _name_domain_tokens
+
+_JOB_LINK_RE = re.compile(r"/(careers|positions|jobs|openings|roles)/[a-z0-9]", re.I)
+
+
+def _looks_like_custom_board(html):
+    """True if a page has several job-detail links but no known ATS — i.e. a
+    self-hosted careers board (like science.xyz) worth scraping directly."""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+    except Exception:
+        return False
+    n = sum(1 for a in soup.find_all("a", href=True) if _JOB_LINK_RE.search(a["href"]))
+    return n >= 3
 
 # ATS URL signatures. Each maps to a capture of the slug/tenant.
 _SIGS = [
@@ -29,25 +43,38 @@ _SIGS = [
     ("successfactors", re.compile(r"([a-z0-9\-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
 ]
 
-_CAREERS_PATHS = ("/careers", "/careers/", "/en/careers", "/company/careers",
-                  "/jobs", "/about/careers", "")
+_CAREERS_PATHS = ("/careers", "/careers/", "/careers/open-positions", "/en/careers",
+                  "/company/careers", "/jobs", "/about/careers", "")
+# Not just .com — startups (esp. neurotech/deep-tech) use .xyz/.ai/.io/.bio/.health.
+_TLDS = ("com", "xyz", "ai", "io", "bio", "health", "co")
+
+
+# (tld, path) combos in priority order — breadth-first so every name token's
+# high-value URLs (incl. non-.com TLDs like .xyz) are tried before the cap.
+_COMBOS = [
+    ("com", "/careers"), ("com", "/careers/open-positions"),
+    ("xyz", "/careers/open-positions"), ("xyz", "/careers"),
+    ("ai", "/careers"), ("io", "/careers"), ("bio", "/careers"),
+    ("com", "/jobs"), ("com", "/"), ("health", "/careers"), ("co", "/careers"),
+    ("com", "/careers/"), ("com", "/company/careers"),
+]
 
 
 def _candidate_urls(name, careers_url=""):
-    urls = []
-    if careers_url:
-        urls.append(careers_url)
-    for tok in _name_domain_tokens(name):
-        for path in _CAREERS_PATHS:
-            urls.append(f"https://www.{tok}.com{path}")
-        urls.append(f"https://careers.{tok}.com/")
-        urls.append(f"https://jobs.{tok}.com/")
+    urls = [careers_url] if careers_url else []
+    toks = _name_domain_tokens(name)
+    for tld, path in _COMBOS:
+        for tok in toks:
+            host = f"www.{tok}.com" if tld == "com" else f"{tok}.{tld}"
+            urls.append(f"https://{host}{path}")
+    for tok in toks:
+        urls += [f"https://careers.{tok}.com/", f"https://jobs.{tok}.com/"]
     seen, out = set(), []
     for u in urls:
         if u not in seen:
             seen.add(u)
             out.append(u)
-    return out[:12]
+    return out[:26]
 
 
 def _detect(text, final_url):
@@ -91,6 +118,8 @@ def sniff_ats(name, careers_url="", timeout=10):
         hit = _detect(r.text, r.url)
         if hit:
             return _pack(hit[0], hit[1], r.url)
+        if _looks_like_custom_board(r.text):
+            return {"ats": "custom", "careers_url": r.url}
     return None
 
 

@@ -29,7 +29,7 @@ import requests
 
 from ..http import HEADERS
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
-                     _DOMAIN_STOPWORDS)
+                     _DOMAIN_STOPWORDS, _name_domain_tokens)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,6 +354,45 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
 # --------------------------------------------------------------------------- #
 #  Config-ready output                                                         #
 # --------------------------------------------------------------------------- #
+
+# "<Triangle city>, NC" style address — a reliable "HQ/office is in NC" signal
+# that works even when a company currently has zero open postings.
+_NC_HQ_RE = re.compile(
+    r"\b(durham|raleigh|chapel hill|morrisville|cary|research triangle|\brtp\b|"
+    r"holly springs|clayton|apex|wake forest|pittsboro|winston-salem|greensboro)\b"
+    r"[\s,.\-]{0,4}(nc\b|north carolina)", re.I)
+
+
+def nc_hq_signal(name, careers_url="", board_jobs=None):
+    """
+    True if the company has a verifiable NC presence — used to TRACK local
+    companies that currently have no NC openings. Checks the board's job
+    locations first (cheap), then the company site/careers/contact pages.
+    """
+    if board_jobs:
+        for j in board_jobs:
+            if _NC_HQ_RE.search(j.get("location", "") or ""):
+                return True
+    urls = []
+    if careers_url:
+        urls.append(careers_url)
+    for tok in _name_domain_tokens(name):
+        urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
+                 f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
+                 f"https://www.{tok}.com/company"]
+    seen = set()
+    for u in urls[:8]:
+        if u in seen:
+            continue
+        seen.add(u)
+        try:
+            r = requests.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
+            if r.status_code == 200 and _NC_HQ_RE.search(r.text):
+                return True
+        except Exception:
+            continue
+    return False
+
 
 def _sample_titles(hit, n=6):
     """Fetch a few job titles from a confirmed board for mission context."""

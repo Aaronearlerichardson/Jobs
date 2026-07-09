@@ -20,7 +20,7 @@ from .sniffer import _SIGS
 from .probes import _extract_workday_triple
 from .. import local_fetch, store
 from ..claude import score_company_mission
-from .local_sourcing import _sample_titles
+from .local_sourcing import _sample_titles, nc_hq_signal
 
 # Standard dork set: each ATS host x the NC location terms, plus a Workday sweep.
 _NC_TERMS = '("North Carolina" OR Durham OR Raleigh OR "Research Triangle" OR Morrisville OR Cary)'
@@ -32,6 +32,11 @@ DORK_QUERIES = [
     f'site:jobs.smartrecruiters.com {_NC_TERMS}',
     f'"myworkdayjobs.com" ("Durham, NC" OR "Raleigh, NC" OR "Research Triangle") '
     f'(biotech OR pharma OR health OR clinical OR medical OR diagnostics)',
+    # Neurotech / BCI — the candidate's bullseye. These companies (e.g. Science
+    # Corp) are often on custom boards / non-.com domains, missed by name-guessing.
+    f'("neurotechnology" OR "brain-computer" OR "neural interface" OR "neural implant" '
+    f'OR "BCI" OR "electrophysiology" OR "neural signal") {_NC_TERMS} (careers OR jobs OR hiring)',
+    f'site:jobs.ashbyhq.com ("neuro" OR "neural" OR "brain") {_NC_TERMS}',
 ]
 
 
@@ -94,9 +99,12 @@ def harvest_urls(urls, verbose=True):
         except Exception:
             jobs = []
         nc = len(jobs)
-        if nc == 0:
-            continue
         name = (slug[0] if ats == "workday" else slug).replace("-", " ").title()
+        # Add even with 0 current NC openings IF we can confirm an NC HQ/office
+        # (so a daily run catches their next NC posting) — but not otherwise,
+        # else non-NC companies that merely mention NC would pollute the roster.
+        if nc == 0 and not nc_hq_signal(name):
+            continue
         titles = _sample_titles({"ats": ats, "slug": slug})
         tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
         active = 1 if tier in ("healthcare-tech", "health-bio-science") else 0
