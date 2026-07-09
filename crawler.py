@@ -48,6 +48,9 @@ def main():
                          "+ remote geo filter, clinical/health domain targeting, "
                          "ops/defense excludes, technical-bar scoring, ranked digest. "
                          "Writes dedup state but never emails.")
+    ap.add_argument("--local-tech", action="store_true",
+                    help="LOCAL-TECH crawl: read active companies from the SQL store, "
+                         "pull their NC jobs, résumé-fit-score them, rank. No email.")
     ap.add_argument("--score", metavar="TEXT",
                     help="Score one job title/description on technical bar (0..1) and exit")
     ap.add_argument("--db", metavar="PATH",
@@ -69,6 +72,11 @@ def main():
     if args.local_clinical:
         from jobcrawler.local_clinical import run as run_local_clinical
         run_local_clinical(db_path=config.DB_PATH if args.db else None)
+        raise SystemExit(0)
+
+    if args.local_tech:
+        from jobcrawler.local_tech import run as run_local_tech
+        run_local_tech()
         raise SystemExit(0)
 
     if args.expand:

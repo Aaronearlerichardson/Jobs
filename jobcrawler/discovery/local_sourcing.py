@@ -28,7 +28,8 @@ from datetime import datetime
 import requests
 
 from ..http import HEADERS
-from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday, _name_domain_tokens
+from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
+                     _DOMAIN_STOPWORDS)
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +79,7 @@ MAJORS_WORKDAY = [
 _MAJORS_KEYS = {re.sub(r"[^a-z0-9]", "", m.lower()) for m in MAJORS_WORKDAY}
 
 # Known bad name→board matches to drop from discovery (normalized names).
-NAME_BLOCKLIST = {"q2solutions"}  # slug q2ebanking is Q2 Holdings (fintech)
+NAME_BLOCKLIST = {"q2solutions", "q2labsolutions"}  # slug q2ebanking = Q2 Holdings (fintech)
 
 
 # From Built In "Biotech companies in RTP" (fetched 2026-07).
@@ -130,20 +131,25 @@ def gather_names(extra=None):
 # --------------------------------------------------------------------------- #
 
 def _slug_candidates(name):
-    """ATS-slug guesses for a company name, in priority order."""
+    """
+    ATS-slug guesses for a company name, in priority order. Uses joined,
+    hyphenated, and suffix-stripped-joined forms only — deliberately NOT the
+    bare first word ("eli", "novo", "charles"), which collides with unrelated
+    boards and shadows the real employer.
+    """
     clean = re.sub(r"\s*\([^)]*\)", "", name).lower()
     words = [w for w in re.split(r"[^a-z0-9]+", clean) if w]
     if not words:
         return []
-    joined = "".join(words)                 # unitedtherapeutics
-    hyphen = "-".join(words)                # united-therapeutics
-    tokens = _name_domain_tokens(name)      # suffix-stripped / first word
+    joined = "".join(words)                                  # unitedtherapeutics
+    hyphen = "-".join(words)                                 # united-therapeutics
+    stripped = "".join(w for w in words if w not in _DOMAIN_STOPWORDS) or joined
     out, seen = [], set()
-    for c in [joined, hyphen, *tokens]:
+    for c in (joined, hyphen, stripped):
         if c and c not in seen:
             seen.add(c)
             out.append(c)
-    return out[:4]
+    return out
 
 
 # NC-area tokens for the locality check (word-boundary for the 2-char "nc").
@@ -230,7 +236,7 @@ def probe_company(name, try_workday=True):
     return hit
 
 
-def discover_local(extra_names=None, max_workers=12, js_majors=True):
+def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True):
     """
     Gather names + probe each. Returns (confirmed, checked) where confirmed
     is a list of NC-local hit dicts. ``js_majors`` runs a headless-browser
@@ -254,7 +260,10 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True):
     # myworkdayjobs.com link only appears after JS runs, so the static probe
     # misses them. Re-probe MAJORS that got no board using one headless browser.
     if js_majors:
-        found = {re.sub(r"[^a-z0-9]", "", h["name"].lower()) for h in hits}
+        # Only an NC>0 board counts as "found" — a junk 0-NC slug collision
+        # must not block the JS fallback for the real employer.
+        found = {re.sub(r"[^a-z0-9]", "", h["name"].lower())
+                 for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
                   if re.sub(r"[^a-z0-9]", "", m.lower()) not in found]
         if missed:
@@ -270,6 +279,45 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True):
                                      "count": wd["count"], "nc": nc})
                         print(f"    [JS-OK] {m:30} {wd['tenant']}/{wd['wd_pod']}/"
                               f"{wd['site']}  nc={nc}/{wd['count']}")
+
+    # Sniffer pass: for names still without a real (NC>0) board, fetch their
+    # careers page and detect the embedded ATS + exact slug (covers Greenhouse/
+    # Lever/Ashby/Workday/SmartRecruiters/iCIMS/SuccessFactors and finds slugs
+    # the name-guesser can't). This is the main recall lever over the directory.
+    if sniff:
+        from .sniffer import sniff_ats
+        from .. import local_fetch
+        have = {re.sub(r"[^a-z0-9]", "", h["name"].lower()) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if re.sub(r"[^a-z0-9]", "", n.lower()) not in have]
+        print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
+
+        def _sniff_one(n):
+            s = sniff_ats(n)
+            if not s:
+                return None
+            ats = s["ats"]
+            if ats == "workday":
+                t, p, site = s["triple"]
+                comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
+                slug = (t, p, site)
+            else:
+                comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
+                slug = s.get("slug")
+            try:
+                jobs = local_fetch.fetch_company_nc(comp)
+            except Exception:
+                jobs = []
+            nc = len(jobs)
+            return {"name": n, "ats": ats, "slug": slug, "count": nc, "nc": nc,
+                    "careers_url": s.get("careers_url")}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for fut in as_completed({ex.submit(_sniff_one, n): n for n in todo}):
+                h = fut.result()
+                if h and h["nc"] > 0:
+                    hits.append(h)
+                    print(f"    [SNIFF] {h['name']:28} {h['ats']:14} "
+                          f"{h['slug']!s:26} nc={h['nc']}")
 
     # Drop known bad name→board matches.
     hits = [h for h in hits
@@ -361,6 +409,7 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
             "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
             "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
             "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
+            "careers_url": h.get("careers_url"),
             "nc_job_count": h["nc"], "total_job_count": h["count"],
             "mission_tier": tier, "mission_score": score, "mission_reason": reason,
             "source": "local_sourcing", "active": active,

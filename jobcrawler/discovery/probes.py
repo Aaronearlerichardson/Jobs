@@ -49,11 +49,23 @@ def probe_kula(slug):
         return (False, 0)
 
 
+def probe_smartrecruiters(slug):
+    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
+    try:
+        r = requests.get(url, timeout=10, headers=HEADERS)
+        if r.status_code != 200:
+            return (False, 0)
+        return (True, int(r.json().get("totalFound", 0) or 0))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
-    "greenhouse": probe_greenhouse,
-    "lever":      probe_lever,
-    "ashby":      probe_ashby,
-    "kula":       probe_kula,
+    "greenhouse":      probe_greenhouse,
+    "lever":           probe_lever,
+    "ashby":           probe_ashby,
+    "kula":            probe_kula,
+    "smartrecruiters": probe_smartrecruiters,
 }
 
 
