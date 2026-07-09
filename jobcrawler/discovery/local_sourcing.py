@@ -152,17 +152,7 @@ def _slug_candidates(name):
     return out
 
 
-# NC-area tokens for the locality check (word-boundary for the 2-char "nc").
-_NC_TOKENS = ["north carolina", "durham", "raleigh", "chapel hill", "morrisville",
-              "cary", "research triangle", "rtp", "holly springs", "clayton",
-              "franklinton", "burlington", "apex", "wake forest"]
-
-
-def _has_nc(text):
-    t = (text or "").lower()
-    if re.search(r"\bnc\b", t):
-        return True
-    return any(tok in t for tok in _NC_TOKENS)
+from ..nc import is_nc as _has_nc  # single source of truth
 
 
 def _nc_count_greenhouse(slug):
@@ -355,12 +345,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
 #  Config-ready output                                                         #
 # --------------------------------------------------------------------------- #
 
-# "<Triangle city>, NC" style address — a reliable "HQ/office is in NC" signal
-# that works even when a company currently has zero open postings.
-_NC_HQ_RE = re.compile(
-    r"\b(durham|raleigh|chapel hill|morrisville|cary|research triangle|\brtp\b|"
-    r"holly springs|clayton|apex|wake forest|pittsboro|winston-salem|greensboro)\b"
-    r"[\s,.\-]{0,4}(nc\b|north carolina)", re.I)
+from ..nc import NC_HQ_RE as _NC_HQ_RE  # "<Triangle city>, NC" HQ/office signal
 
 
 def nc_hq_signal(name, careers_url="", board_jobs=None):

@@ -9,6 +9,12 @@ sessions/
 # Runtime data
 *.db
 job_reports/
+*.log
+*.docx
+~$*
+# discovery run artifacts / harvested name lists
+cro_names.txt
+local_tech_companies.txt
 
 # Python cruft
 __pycache__/

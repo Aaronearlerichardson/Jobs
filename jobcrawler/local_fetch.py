@@ -15,14 +15,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .http import HEADERS
-
-_NC = re.compile(r"\bnc\b|north carolina|durham|raleigh|chapel hill|morrisville|"
-                 r"\bcary\b|research triangle|\brtp\b|holly springs|clayton|"
-                 r"franklinton|burlington|\bapex\b|wake forest", re.I)
-
-
-def _is_nc(text):
-    return bool(_NC.search(text or ""))
+from .nc import is_nc as _is_nc  # single source of truth for NC locality
 
 
 def fetch_greenhouse_nc(slug):
