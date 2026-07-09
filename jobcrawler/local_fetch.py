@@ -217,30 +217,139 @@ def fetch_peopleadmin_nc(host):
     return _adapt(fetch_peopleadmin(host, ""), "peopleadmin")
 
 
-def fetch_custom_careers_nc(careers_url):
-    """
-    Scrape a self-hosted / custom careers page (no standard ATS) for NC jobs.
-    Generic: finds job-detail links whose text is a title with a nearby
-    location. Covers Astro/Webflow-style boards like Science Corp
-    (science.xyz), which no ATS probe/sniffer can reach.
-    """
+# --- custom (self-hosted) careers-board scraping -------------------------- #
+# A job-detail URL is /careers|jobs|positions|openings|roles|job/<slug>. But
+# index/nav pages share that shape ("/careers/open-positions"), so we exclude
+# generic slugs and nav-ish link text, and require a *specific* slug.
+_JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
+                          r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
+_NAV_SLUGS = {
+    "open-positions", "open-roles", "career-opportunities", "current-openings",
+    "job-openings", "openings", "opportunities", "jobs", "job", "careers",
+    "career", "apply", "application", "search", "all", "browse", "students",
+    "internships", "benefits", "culture", "life", "teams", "team", "departments",
+    "locations", "faq", "contact", "index", "home", "overview",
+}
+_NAV_TEXT_RE = re.compile(
+    r"^(careers?|jobs?|view (all|current|open)|open (positions?|roles?)|"
+    r"see (all|open)|apply|search|browse|all (jobs|openings|roles)|"
+    r"current openings|open positions|view (job )?openings|join( us)?|"
+    r"work (with|at) us|learn more|explore|opportunities|all roles)\b", re.I)
+# City, ST  |  City, State  |  Remote  |  an NC token
+_LOC_RE = re.compile(r"[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+)*,\s*"
+                     r"(?:[A-Z]{2}|[A-Z][a-z]+)\b|\bremote\b", re.I)
+_OPENINGS_HREF_RE = re.compile(
+    r"/(open-positions|open-roles|career-opportunities|current-openings|"
+    r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
+
+
+def find_job_links(soup):
+    """Real job-posting links on a careers page (nav / index links filtered)."""
     out, seen = [], set()
-    try:
-        r = requests.get(careers_url, timeout=20, headers=HEADERS)
-        soup = BeautifulSoup(r.text, "html.parser")
-    except Exception as e:
-        print(f"    [!] custom {careers_url}: {e}")
-        return out
-    root = re.match(r"https?://[^/]+", careers_url).group(0)
-    for a in soup.select("a[href]"):
-        href = a.get("href", "")
-        if not re.search(r"/(careers|positions|jobs|openings)/[a-z0-9]", href, re.I):
+    for a in soup.find_all("a", href=True):
+        m = _JOB_HREF_RE.search(a["href"])
+        if not m:
             continue
-        te = a.select_one("h1,h2,h3,h4,h5,[class*='title']")
-        title = (te.get_text(" ").strip() if te else a.get_text(" ").strip())
-        le = a.select_one("[class*='description'],[class*='location'],[class*='meta']")
-        loc = le.get_text(" ").strip() if le else a.get_text(" ").strip()
-        if not title or not _is_nc(loc):
+        slug = m.group(2).rstrip("/").split("/")[-1].split("?")[0].lower()
+        if slug in _NAV_SLUGS or len(slug) < 4:
+            continue
+        text = a.get_text(" ", strip=True)
+        if not text or len(text) < 4 or _NAV_TEXT_RE.match(text):
+            continue
+        if a["href"] in seen:
+            continue
+        seen.add(a["href"])
+        # Prefer a heading/title element for a clean title (Science nests the
+        # title + location in one <a>); fall back to the full link text.
+        te = a.find(["h1", "h2", "h3", "h4", "h5"]) or a.select_one("[class*='title']")
+        title = te.get_text(" ", strip=True) if te else text
+        out.append((a, a["href"], title))
+    return out
+
+
+# Job aggregators / ATS hosts: never treat as a company's own custom board
+# (aggregators are handled by Indeed ingestion; ATS hosts by _detect).
+_OFFSITE_RE = re.compile(
+    r"indeed|linkedin|glassdoor|ziprecruiter|simplyhired|monster|dice|"
+    r"greenhouse|lever\.co|ashbyhq|myworkdayjobs|smartrecruiters|icims|"
+    r"paylocity|bamboohr|jobvite|google\.com|builtin", re.I)
+
+
+def _openings_link(soup, root):
+    """A SAME-HOST 'see current openings' link to follow one hop, or None.
+    Won't follow off to Indeed/LinkedIn/an ATS — those aren't a custom board."""
+    host = re.match(r"https?://([^/]+)", root).group(1)
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        if href.startswith("http"):
+            absu = href
+        elif href.startswith("/"):
+            absu = root + href
+        else:
+            absu = root + "/" + href
+        if not re.match(rf"https?://{re.escape(host)}(?:/|$)", absu):
+            continue  # off-domain — skip
+        if _OFFSITE_RE.search(absu):
+            continue
+        text = a.get_text(" ", strip=True).lower()
+        if _OPENINGS_HREF_RE.search(href) or re.search(
+                r"(current|open|view|see|all).{0,12}(opening|position|role|job)", text):
+            return absu
+    return None
+
+
+def _location_near(a):
+    """
+    Best-effort location for a job link: search the link then its container.
+    Prefers an NC location when the container is multi-location (so a role
+    listed "Alameda, CA | Durham, NC" is kept as a Durham job).
+    """
+    for el in (a, a.parent, a.parent.parent if a.parent else None):
+        if el is None:
+            continue
+        text = el.get_text(" ", strip=True)
+        if _is_nc(text):
+            m = re.search(r"(?:durham|raleigh|research triangle park|research triangle|"
+                          r"morrisville|chapel hill|\bcary\b|holly springs|clayton|apex)"
+                          r"(?:[,\s]+(?:nc|north carolina))?", text, re.I)
+            return m.group(0) if m else "NC"
+        m = _LOC_RE.search(text)
+        if m:
+            return m.group(0)
+    return ""
+
+
+def _get_soup(url):
+    try:
+        r = requests.get(url, timeout=20, headers=HEADERS)
+        if r.status_code != 200:
+            return None
+        return BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return None
+
+
+def fetch_custom_careers_nc(careers_url, _hop=True):
+    """
+    Scrape a self-hosted / custom careers board (no standard ATS) for NC jobs.
+    Structure-agnostic: identifies real job-detail links (not nav), reads the
+    title from the link and the location from its surrounding container, and
+    follows a 'careers -> openings' link one hop when the landing page has no
+    postings. Covers boards like Science Corp (science.xyz).
+    """
+    root = re.match(r"https?://[^/]+", careers_url).group(0)
+    soup = _get_soup(careers_url)
+    if soup is None:
+        return []
+    links = find_job_links(soup)
+    if len(links) < 3 and _hop:
+        op = _openings_link(soup, root)
+        if op and op.rstrip("/") != careers_url.rstrip("/"):
+            return fetch_custom_careers_nc(op, _hop=False)
+    out, seen = [], set()
+    for a, href, title in links:
+        loc = _location_near(a)
+        if not _is_nc(loc):
             continue
         url = href if href.startswith("http") else root + href
         if url in seen:
@@ -250,6 +359,28 @@ def fetch_custom_careers_nc(careers_url):
                     "title": title[:90], "url": url, "location": loc[:70],
                     "description": "", "ats": "custom", "_wd": None})
     return out
+
+
+def custom_board_listing_url(page_url, html=None):
+    """
+    If `page_url` (or the openings page it links to, one hop) is a real custom
+    job board (>=3 genuine job-detail links, not nav), return the URL that holds
+    the listings; else None. Used by the sniffer to detect + resolve the board.
+    """
+    if _OFFSITE_RE.search(page_url):
+        return None  # aggregator/ATS host is never a company's own custom board
+    root = re.match(r"https?://[^/]+", page_url).group(0)
+    soup = BeautifulSoup(html, "html.parser") if html is not None else _get_soup(page_url)
+    if soup is None:
+        return None
+    if len(find_job_links(soup)) >= 3:
+        return page_url
+    op = _openings_link(soup, root)
+    if op and op.rstrip("/") != page_url.rstrip("/"):
+        s2 = _get_soup(op)
+        if s2 and len(find_job_links(s2)) >= 3:
+            return op
+    return None
 
 
 FETCHERS = {

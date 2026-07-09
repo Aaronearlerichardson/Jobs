@@ -17,18 +17,15 @@ from bs4 import BeautifulSoup
 from ..http import HEADERS
 from .probes import _extract_workday_triple, _name_domain_tokens
 
-_JOB_LINK_RE = re.compile(r"/(careers|positions|jobs|openings|roles)/[a-z0-9]", re.I)
-
-
 def _looks_like_custom_board(html):
-    """True if a page has several job-detail links but no known ATS — i.e. a
-    self-hosted careers board (like science.xyz) worth scraping directly."""
+    """True if a page has several GENUINE job-detail links (nav/index links
+    filtered out) — i.e. a self-hosted careers board worth scraping."""
+    from ..local_fetch import find_job_links
     try:
         soup = BeautifulSoup(html, "html.parser")
     except Exception:
         return False
-    n = sum(1 for a in soup.find_all("a", href=True) if _JOB_LINK_RE.search(a["href"]))
-    return n >= 3
+    return len(find_job_links(soup)) >= 3
 
 # ATS URL signatures. Each maps to a capture of the slug/tenant.
 _SIGS = [
@@ -118,8 +115,12 @@ def sniff_ats(name, careers_url="", timeout=10):
         hit = _detect(r.text, r.url)
         if hit:
             return _pack(hit[0], hit[1], r.url)
-        if _looks_like_custom_board(r.text):
-            return {"ats": "custom", "careers_url": r.url}
+        # Custom board: resolve to the page that actually holds the listings
+        # (this page, or the openings page it links to one hop away).
+        from ..local_fetch import custom_board_listing_url
+        listing = custom_board_listing_url(r.url, r.text)
+        if listing:
+            return {"ats": "custom", "careers_url": listing}
     return None
 
 

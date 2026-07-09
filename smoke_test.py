@@ -56,6 +56,20 @@ def main():
     check("custom-board needs real job links",
           not sniffer._looks_like_custom_board("<a href='/careers/'>Careers</a>"))
 
+    # 5b. custom-board detection — real job links vs nav/index links
+    print("[custom board]")
+    from bs4 import BeautifulSoup
+    real = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
+            '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
+            '<a href="/careers/data-scientist-3">Data Scientist</a>')
+    nav = ('<a href="/careers/open-positions/">Careers</a>'
+           '<a href="/careers/career-opportunities/">View Current Job Openings</a>'
+           '<a href="/careers/career-opportunities/">Career Opportunities</a>')
+    check("3 real job links detected", len(lf.find_job_links(BeautifulSoup(real, "html.parser"))) == 3)
+    check("nav links rejected (0)", len(lf.find_job_links(BeautifulSoup(nav, "html.parser"))) == 0)
+    check("aggregator host never a custom board",
+          lf.custom_board_listing_url("https://www.indeed.com/jobs?q=x", "<html></html>") is None)
+
     # 6. store schema
     print("[store]")
     conn = store.connect(":memory:")
