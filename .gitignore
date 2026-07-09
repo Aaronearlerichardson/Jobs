@@ -7,8 +7,7 @@ credentials.json
 sessions/
 
 # Runtime data
-seen_jobs.db
-seen_jobs.db-journal
+*.db
 job_reports/
 
 # Python cruft

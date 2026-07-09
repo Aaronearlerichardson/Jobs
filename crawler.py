@@ -8,6 +8,9 @@ Usage:
     python crawler.py --expand "eeg engineer" # print expanded titles/keywords/sectors
     python crawler.py --expand-location "NC"  # expand a location term
     python crawler.py --keyword-report        # bulk-expand every INCLUDE_KEYWORDS entry
+    python crawler.py --local-clinical        # LOCAL-CLINICAL-ML track (live, ranked, no email)
+    python crawler.py --score "..."           # score one description on technical bar (0..1)
+    python crawler.py --db jobs_local.db ...   # use an isolated dedupe DB
 
 Edit config.py to tune keywords, locations, and target companies.
 """
@@ -15,7 +18,7 @@ Edit config.py to tune keywords, locations, and target companies.
 import argparse
 
 import config
-from jobcrawler.claude import expand_location, expand_search
+from jobcrawler.claude import expand_location, expand_search, score_technical_bar
 from jobcrawler.orchestrator import crawl
 from jobcrawler.report import (
     generate_keyword_report,
@@ -40,7 +43,41 @@ def main():
                     help="Expand a location term and fold results into this crawl run")
     ap.add_argument("--keyword-report", action="store_true",
                     help="Bulk-expand every INCLUDE_KEYWORDS entry and write a suggestions report")
+    ap.add_argument("--local-clinical", action="store_true",
+                    help="Run the LOCAL-CLINICAL-ML track: live crawl, Triangle/NC "
+                         "+ remote geo filter, clinical/health domain targeting, "
+                         "ops/defense excludes, technical-bar scoring, ranked digest. "
+                         "Writes dedup state but never emails.")
+    ap.add_argument("--local-tech", action="store_true",
+                    help="LOCAL-TECH crawl: read active companies from the SQL store, "
+                         "pull their NC jobs, résumé-fit-score them, rank. No email.")
+    ap.add_argument("--score", metavar="TEXT",
+                    help="Score one job title/description on technical bar (0..1) and exit")
+    ap.add_argument("--db", metavar="PATH",
+                    help="Override the dedupe DB path (isolates concurrent runs)")
     args = ap.parse_args()
+
+    if args.db:
+        from pathlib import Path
+        config.DB_PATH = Path(args.db)
+
+    if args.score:
+        score, reason, mission = score_technical_bar(args.score)
+        if score is None:
+            print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
+        else:
+            print(f"  technical-bar score: {score:.2f}  [{mission or 'mission?'}]  ({reason})")
+        raise SystemExit(0)
+
+    if args.local_clinical:
+        from jobcrawler.local_clinical import run as run_local_clinical
+        run_local_clinical(db_path=config.DB_PATH if args.db else None)
+        raise SystemExit(0)
+
+    if args.local_tech:
+        from jobcrawler.local_tech import run as run_local_tech
+        run_local_tech()
+        raise SystemExit(0)
 
     if args.expand:
         expanded = expand_search(args.expand)
