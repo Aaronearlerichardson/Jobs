@@ -482,9 +482,13 @@ def resolve_leads(max_workers=8):
                 "careers_url": s.get("careers_url")}
 
     resolved = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(_one, c["name"]): c for c in leads}
-        for fut in as_completed(futs):
+    # Hard cap on the whole pass: a lead whose domains blackhole (accept
+    # then stall) must become a reported miss, not a hung command. The
+    # command is idempotent — rerunning retries only unresolved leads.
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    futs = {ex.submit(_one, c["name"]): c for c in leads}
+    try:
+        for fut in as_completed(futs, timeout=240):
             c, hit = futs[fut], fut.result()
             if not hit:
                 print(f"    [miss] {c['name']:32} no board found "
@@ -512,6 +516,13 @@ def resolve_leads(max_workers=8):
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             print(f"    [{'OK  ' if active else 'off-mission'}] {c['name']:32} "
                   f"{hit['ats']:12} nc={hit['nc']:<3} {str(tier):20} {ss}")
+    except TimeoutError:
+        stuck = [c["name"] for f, c in futs.items() if not f.done()]
+        print(f"    [!] timed out waiting on {len(stuck)} lead(s): "
+              f"{', '.join(stuck[:6])}{'...' if len(stuck) > 6 else ''} "
+              f"(rerun --resolve-leads to retry)")
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
     conn.close()
     print(f"\n  {len(resolved)} board(s) resolved, "
           f"{sum(r['active'] for r in resolved)} activated, "

@@ -28,3 +28,4 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+*.bak
