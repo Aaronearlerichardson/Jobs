@@ -12,6 +12,11 @@ Two ways in, one pipeline:
   python capture.py page1.html [...]    # ingest pages saved with Ctrl+S
       Same pipeline for saved files (works even where the userscript can't).
 
+  python capture.py --watch [FOLDER]    # no userscript manager needed
+      Watches a folder (default: ./captures) and ingests every page you
+      save into it. Flow: browse, Ctrl+S ("Web Page, complete"), Enter —
+      the watcher picks it up within ~2s. Firefox remembers the folder.
+
 Companies seen on captured pages are recorded in the store (inactive, source
 'page_capture') so a later `python discover.py --local` pass can resolve
 their boards. No automated fetching of logged-in sites happens here — you
@@ -22,6 +27,7 @@ import argparse
 import json
 import re
 import sys
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -181,10 +187,52 @@ def serve(port):
         print("\n  stopped.")
 
 
+def _url_from_saved(html):
+    """Source URL of a saved page: Chrome's 'saved from url' comment,
+    SingleFile's banner, else the page's own canonical/og:url."""
+    m = re.search(r"<!--\s*saved from url=\(\d+\)(\S+)", html) or \
+        re.search(r"Page saved with SingleFile\s*\n\s*url:\s*(\S+)", html)
+    return m.group(1) if m else ""      # parse_page falls back to canonical
+
+
+def watch(folder, interval=2.0):
+    folder = Path(folder).expanduser()
+    folder.mkdir(parents=True, exist_ok=True)
+    print(f"\n  Watching {folder.resolve()}")
+    print("  Save pages there (Ctrl+S -> 'Web Page, complete'). Ctrl+C to stop.\n")
+    seen = {}
+    while True:
+        for p in sorted(folder.glob("*.htm*")):
+            try:
+                mtime = p.stat().st_mtime_ns
+            except OSError:
+                continue
+            if seen.get(p.name) == mtime:
+                continue
+            time.sleep(0.6)             # let the browser finish writing
+            try:
+                html = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            seen[p.name] = mtime
+            try:
+                ingest_html(_url_from_saved(html), html, label=p.name)
+            except Exception as e:
+                print(f"  [!] {p.name}: {e}")
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            print("\n  stopped.")
+            return
+
+
 def main():
     ap = argparse.ArgumentParser(description="Manual page capture for the job crawler")
     ap.add_argument("files", nargs="*", help="Saved .html pages to ingest (Ctrl+S fallback)")
     ap.add_argument("--serve", action="store_true", help="Run the capture server (default when no files)")
+    ap.add_argument("--watch", nargs="?", const="captures", metavar="FOLDER",
+                    help="Watch FOLDER (default ./captures) and ingest every "
+                         "page saved into it — no userscript manager needed")
     ap.add_argument("--port", type=int, default=PORT_DEFAULT)
     ap.add_argument("--url", default="", help="Original page URL for a single ingested file "
                                               "(improves site-specific parsing)")
@@ -194,13 +242,10 @@ def main():
         for f in args.files:
             p = Path(f)
             html = p.read_text(encoding="utf-8", errors="replace")
-            # Firefox/Chrome "save page" notes the source in a comment.
-            url = args.url
-            if not url:
-                m = re.search(r"<!--\s*saved from url=\(\d+\)(\S+)", html) or \
-                    re.search(r"Page saved with SingleFile\s*\n\s*url:\s*(\S+)", html)
-                url = m.group(1) if m else ""
-            ingest_html(url, html, label=p.name)
+            ingest_html(args.url or _url_from_saved(html), html, label=p.name)
+        return
+    if args.watch:
+        watch(args.watch)
         return
     serve(args.port)
 

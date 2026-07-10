@@ -337,7 +337,16 @@ exclude/technical-gated, resume-fit-scored, and written to the store; new
 company names are recorded as inactive `page_capture` leads for a later
 `python discover.py --local` pass to resolve.
 
-No userscript? Save pages with Ctrl+S and run:
+No userscript manager? Use watch mode — zero installs:
+
+```
+python capture.py --watch          # watches ./captures
+```
+
+Browse, then Ctrl+S -> "Web Page, complete" into the captures folder
+(Firefox remembers it, so each page is Ctrl+S, Enter). The watcher ingests
+every save within ~2s; the site is detected from the saved DOM even though
+Firefox strips the source URL. One-off files work too:
 
 ```
 python capture.py "Saved Page.html" [more.html ...]

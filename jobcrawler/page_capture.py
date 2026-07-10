@@ -161,11 +161,27 @@ def parse_generic(soup, page_url=""):
 
 # ─── Entry point ─────────────────────────────────────────────────────────
 
+def _canonical_url(soup):
+    el = soup.select_one("link[rel='canonical'][href]") \
+        or soup.select_one("meta[property='og:url'][content]")
+    return (el.get("href") or el.get("content") or "") if el else ""
+
+
 def parse_page(url, html):
     """Parse captured page HTML -> (jobs, source_label). Layered parsers;
-    de-duplicated by job id, site-specific hits first."""
+    de-duplicated by job id, site-specific hits first. When `url` is empty
+    (Ctrl+S saves carry none), the site is detected from the canonical URL
+    or distinctive DOM markers instead."""
     soup = BeautifulSoup(html, "html.parser")
+    if not url:
+        url = _canonical_url(soup)
     low = (url or "").lower()
+    if not low.startswith("http"):
+        if soup.select_one("[data-occludable-job-id], .job-card-container, "
+                           ".base-search-card__title"):
+            low = "linkedin."
+        elif soup.select_one("div.job_seen_beacon, a.jcs-JobTitle"):
+            low = "indeed."
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
         # the same postings under synthetic ids.

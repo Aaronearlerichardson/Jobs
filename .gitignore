@@ -11,6 +11,7 @@ sessions/
 job_reports/
 *.log
 ~$*
+captures/
 # discovery run artifacts / harvested name lists
 cro_names.txt
 local_tech_companies.txt
