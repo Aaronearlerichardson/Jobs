@@ -268,8 +268,6 @@ def probe_workday(name: str, careers_url: str = ""):
     or None if no workday URL was found.
 
     `validated=False` means the URL pattern was found but the CXS API
-    didn't confirm (DNS/auth/rate-limit) — still worth surfacing to
-    the user so they can wire it up manually.
     """
     for url in _workday_candidate_urls(name, careers_url):
         try:
@@ -325,8 +323,6 @@ class WorkdayJsProbe:
             meta = js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
-    object stays disabled — `probe()` returns None quietly so the
-    calling pipeline can proceed without the JS fallback.
     """
 
     def __init__(self):
@@ -513,14 +509,6 @@ class WorkdayJsProbePool:
     instances at once: each owns its own Playwright + browser + thread, so
     K of them give K-way parallel scraping. Discovery workers that need the
     JS fallback borrow a free browser from the pool (blocking only when all
-    K are busy) instead of all queuing on one.
-
-    Browsers are heavy (~200-300MB each), so the pool is small by default
-    and each instance lazy-launches only when first handed out — a run that
-    needs the browser twice spins up two, not K.
-
-    Exposes the same probe()/launched/close() surface as WorkdayJsProbe, so
-    it is a drop-in for the single-probe path.
     """
 
     def __init__(self, size):

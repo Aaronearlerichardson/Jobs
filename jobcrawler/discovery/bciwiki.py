@@ -8,11 +8,6 @@ and more relevant than Claude's 15-per-query discovery guesses.
 
 So we use it the way the rest of discovery works: harvest names here, then
 run them through validate_candidate (slug probe + careers-page ATS sniff)
-to resolve each to a crawlable board. The MediaWiki API gives clean,
-paginated category membership with no scraping.
-
-    https://bciwiki.org/api.php?action=query&list=categorymembers
-        &cmtitle=Category:Companies&cmlimit=500&format=json
 """
 
 import requests

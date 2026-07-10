@@ -8,10 +8,6 @@ in a single payload. No API key, no pagination, permissive CORS.
 Optional `category` parameter narrows by slug
 (e.g. "software-dev", "data"). We don't use it by default: our own
 is_relevant() filter is narrower than any single Remotive category.
-
-Schema (per job under data['jobs']):
-    id, url, title, company_name, category, tags, job_type,
-    publication_date, candidate_required_location, salary, description
 """
 
 import html

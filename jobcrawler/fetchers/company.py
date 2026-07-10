@@ -7,15 +7,6 @@ every posting through the keyword filter (filters.is_relevant), which is right
 for sweeping unvetted boards. Here the company was already vetted (mission
 scored at discovery time, stored in jobcrawler/store.py), so the whole board
 is pulled and the caller's own filter chain decides.
-
-Returned job dicts:
-    {id, title, url, location, description, ats, _wd}
-
-The location gate is a compiled regex (`loc_re`), so any track can scope the
-pull: the local track passes NC_RE (Triangle/NC), a future track could pass
-another region, and None pulls everything. Workday / SmartRecruiters
-descriptions need a per-job detail call, so those are hydrated lazily —
-only after the cheap technical pre-filter — via hydrate_description().
 """
 
 import re

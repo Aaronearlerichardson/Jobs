@@ -10,20 +10,6 @@ One project, two pivots of the same search (see jobcrawler/tracks/):
     python crawler.py                         # classic keyword crawl + email
 
 Track flags pass through, e.g.:
-    python crawler.py --track remote-neural --commit --send --fit
-    python crawler.py --track local-tech --top 20
-
-Utilities:
-    python crawler.py --import-seeds          # load config company lists into
-                                              #   the store (tags: neural/nc_local)
-    python crawler.py --dry-run               # classic crawl, no DB/email
-    python crawler.py --expand "eeg engineer" # expand titles/keywords/sectors
-    python crawler.py --expand-location "NC"  # expand a location term
-    python crawler.py --keyword-report        # bulk-expand INCLUDE_KEYWORDS
-    python crawler.py --score "..."           # technical-bar-score one posting
-    python crawler.py --db jobs_alt.db ...    # use an isolated store DB
-
-Edit config.py to tune keywords, locations, and seed companies.
 """
 
 import argparse

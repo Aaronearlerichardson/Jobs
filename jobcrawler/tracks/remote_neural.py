@@ -8,58 +8,33 @@ mission.
 How it stays modular:
   * Keyword focus is applied by *mutating config's tier lists in place*
     (``apply_to_config``), so the shared fetchers' ``is_relevant`` picks up
-    the neural-ML focus without any edit to ``config.py`` or ``filters.py``.
-  * Remote-eligibility is enforced by ``jobcrawler.remote_filter`` in the
-    track runner, not by the shared onsite ``is_location_allowed``.
-  * Sources are assembled here as (name, platform, thunk) specs and run by
-    ``track_remote_neural.py``; the default ``crawler.py`` / orchestrator
-    path is untouched.
-  * The digest is built here and tagged ``[REMOTE-NEURAL]``.
-
-Deliberately excluded: the heavy enterprise onsite ATSes in config
-(Workday/SuccessFactors/PeopleAdmin — Medtronic, IQVIA, Duke, UNC, ...).
-Those are locality-bound RTP employers and belong to the parallel
-local-clinical-ml track; sweeping their thousands of onsite reqs here would
-be slow and almost entirely culled by the remote filter.
 """
 
 import re
-import smtplib
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+
+from ..digest import send_gmail
 
 from .. import store as store_mod
 from ..fetchers import (
-    fetch_adp,
-    fetch_ashby,
-    fetch_bamboohr,
     fetch_discourse,
-    fetch_greenhouse,
     fetch_hnhiring,
-    fetch_jazzhr,
-    fetch_kula,
-    fetch_lever,
     fetch_remoteok,
     fetch_remotive,
     fetch_rss,
     fetch_websearch,
 )
+from ..sources import ATS_REGISTRY, LIGHTWEIGHT, iter_config_sources, iter_store_sources
 
 TAG = "[REMOTE-NEURAL]"
 TRACK = "remote-neural"
 
 
 # =========================================================================
-#  KEYWORD FOCUS (neural signal + high technical bar + clinical mission)
+#  KEYWORD FOCUS — tier model as in filters.is_relevant: CORE alone passes
+#  (a neural-signal term is a strong signal); DOMAIN+SKILL passes (clinical
+#  mission + technical skill, for roles that don't name a modality).
 # =========================================================================
-#
-# Tier model is the shared one in filters.is_relevant:
-#   CORE alone  -> relevant (a neural-signal term is itself a strong signal
-#                  and these roles are inherently high-bar + mission-driven).
-#   DOMAIN + SKILL -> relevant (clinical/health mission + technical skill,
-#                  catching neural-ML-adjacent roles that don't name a
-#                  modality in the title).
 
 # Tier 1 — neural signals. Standalone signal.
 TRACK_CORE = [
@@ -103,17 +78,10 @@ TRACK_SKILL = [
 
 
 # ─── Neural anchor gate ──────────────────────────────────────────────────
-#
-# The shared is_relevant() also passes DOMAIN+SKILL roles (e.g. "data" +
-# "health"), which is right for clinical-ML in general but drops the neural
-# axis this track exists to keep. So the runner additionally requires a
-# *neural signal* in every surfaced posting.
-#
-# Acronym anchors (eeg, bci, ecog, ieeg, lfp, meg, emg, fnirs) MUST use word
-# boundaries — a plain substring match for "ecog" fires inside "recognized"
-# and "meg" inside "omega", which silently injects fraud/identity/data-entry
-# roles. Multi-word and longer anchors ("neural decoding", "cortical") stay
-# substring so "subcortical" still matches "cortical".
+# is_relevant() alone passes DOMAIN+SKILL roles without any neural term, so
+# the runner also requires a neural signal. Short acronym anchors (eeg, bci,
+# ecog...) need word boundaries — "ecog" fires inside "recognized" — while
+# longer anchors stay substring so "subcortical" still matches "cortical".
 NEURAL_ANCHORS = TRACK_CORE
 
 
@@ -139,13 +107,9 @@ def is_neural_role(title, description=""):
 
 
 # ─── High-technical-bar gate ─────────────────────────────────────────────
-#
-# A neural-signal employer (Beacon et al.) carries its modality in every
-# posting's boilerplate, so "Corporate Controller" / "Clinical Study Ops"
-# would ride in on the EEG mission statement. This track wants the
-# *technical* roles, so the title must read as an engineering / research /
-# ML / data role. Inclusive by design — better to keep a borderline
-# engineer than to drop a real one.
+# Neural employers carry their modality in every posting's boilerplate, so
+# "Corporate Controller" would ride in on the EEG mission statement; the
+# title must read technical. Inclusive by design.
 _TECH_TITLE_RE = re.compile(
     r"\b("
     r"engineer|engineering|developer|scientist|neuroscientist|researcher|"
@@ -181,12 +145,11 @@ def apply_to_config(cfg):
 #  SOURCES
 # =========================================================================
 
-# Prioritized company targets. (display_name, platform, fetch-thunk-args)
-# Beacon Biosignals first, then Precision Neuroscience, then Paradromics.
+# Prioritized company targets, fetched (and deduped) first.
 PRIORITY_COMPANIES = [
-    ("Beacon Biosignals",     "greenhouse", ("beaconbiosignals",)),
-    ("Precision Neuroscience", "kula",       ("precision-neuroscience",)),
-    ("Paradromics",           "jazzhr",     ("paradromicsinc",)),
+    ("Beacon Biosignals",      "greenhouse", "beaconbiosignals"),
+    ("Precision Neuroscience", "kula",       "precision-neuroscience"),
+    ("Paradromics",            "jazzhr",     "paradromicsinc"),
 ]
 
 # Remote-leaning web searches for general neural-ML roles. (label, query,
@@ -209,135 +172,47 @@ WEBSEARCH_QUERIES = [
 ]
 
 
-def _greenhouse_thunk(slug, name):
-    return lambda: fetch_greenhouse(slug, name)
-
-
-def _lever_thunk(slug, name):
-    return lambda: fetch_lever(slug, name)
-
-
-def _ashby_thunk(slug, name):
-    return lambda: fetch_ashby(slug, name)
-
-
-def _kula_thunk(slug, name):
-    return lambda: fetch_kula(name, slug)
-
-
-def _jazzhr_thunk(sub, name):
-    return lambda: fetch_jazzhr(name, sub)
-
-
-def _discourse_thunk(name, base, cat):
-    return lambda: fetch_discourse(name, base, cat)
-
-
-def _websearch_thunk(label, query, n):
-    return lambda: fetch_websearch(label, query, max_results=n)
-
-
 def build_sources(cfg, include_websearch=True):
-    """Assemble the ordered list of (name, platform, thunk) source specs.
-
-    Priority companies first, then the lightweight existing ATS / forum /
-    aggregator sources from config, deduped against the priority targets.
-    Returns thunks (zero-arg callables) so the runner controls timing,
-    counting, and error isolation.
+    """Assemble the ordered list of (name, platform, thunk) source specs:
+    priority companies, then the company store (tag: neural), then the
+    config seed lists — deduped in that order so cross-source duplicates
+    resolve deterministically. Heavy onsite ATSes (Workday/SuccessFactors/
+    PeopleAdmin) are deliberately excluded: they're the local track's
+    locality-bound employers, and the remote filter would cull nearly all
+    of their thousands of onsite reqs anyway.
     """
-    sources = []
-    used_gh, used_lever, used_ashby = set(), set(), set()
-    used_kula, used_jazz, used_bamboo, used_adp = set(), set(), set(), set()
+    sources, used = [], set()
 
-    # 1) Priority company targets.
-    for name, platform, fargs in PRIORITY_COMPANIES:
-        if platform == "greenhouse":
-            used_gh.add(fargs[0])
-            sources.append((name, "greenhouse*", _greenhouse_thunk(fargs[0], name)))
-        elif platform == "kula":
-            used_kula.add(fargs[0])
-            sources.append((name, "kula*", _kula_thunk(fargs[0], name)))
-        elif platform == "jazzhr":
-            used_jazz.add(fargs[0])
-            sources.append((name, "jazzhr*", _jazzhr_thunk(fargs[0], name)))
+    def add(ats, name, slug, thunk, star=""):
+        key = (ats, str(slug))
+        if key not in used:
+            used.add(key)
+            sources.append((name, ats + star, thunk))
 
-    # 2) Company store sweep: companies tagged 'neural' (populated by
-    #    `crawler.py --import-seeds` and BCI discovery). The config lists
-    #    below remain as seeds / fallback, deduped against these, so a
-    #    fresh checkout with an empty store still crawls.
+    # 1) Priority targets.
+    for name, ats, slug in PRIORITY_COMPANIES:
+        _, _, mk, _, _ = ATS_REGISTRY[ats]
+        add(ats, name, slug, mk(name, slug), star="*")
+
+    # 2) Company store sweep (populated by --import-seeds + discovery).
     try:
         conn = store_mod.connect()
-        neural_cos = store_mod.get_companies(conn, active_only=True, tag="neural")
+        rows = store_mod.get_companies(conn, active_only=True, tag="neural")
         conn.close()
     except Exception as e:
         print(f"  [!] company store unavailable ({e}); using config lists only")
-        neural_cos = []
-    for c in neural_cos:
-        ats, slug, name = c.get("ats"), c.get("slug"), c["name"]
-        if not slug:
-            continue
-        if ats == "greenhouse" and slug not in used_gh:
-            used_gh.add(slug)
-            sources.append((name, "greenhouse", _greenhouse_thunk(slug, name)))
-        elif ats == "lever" and slug not in used_lever:
-            used_lever.add(slug)
-            sources.append((name, "lever", _lever_thunk(slug, name)))
-        elif ats == "ashby" and slug not in used_ashby:
-            used_ashby.add(slug)
-            sources.append((name, "ashby", _ashby_thunk(slug, name)))
-        elif ats == "kula" and slug not in used_kula:
-            used_kula.add(slug)
-            sources.append((name, "kula", _kula_thunk(slug, name)))
-        elif ats == "jazzhr" and slug not in used_jazz:
-            used_jazz.add(slug)
-            sources.append((name, "jazzhr", _jazzhr_thunk(slug, name)))
-        elif ats == "bamboohr" and slug not in used_bamboo:
-            used_bamboo.add(slug)
-            sources.append((name, "bamboohr",
-                            lambda s=slug, n=name: fetch_bamboohr(s, n)))
-        elif ats == "adp" and slug not in used_adp:
-            used_adp.add(slug)
-            cid, _, ccid = slug.partition("|")
-            if ccid:
-                sources.append((name, "adp",
-                                lambda c1=cid, c2=ccid, n=name: fetch_adp(c1, c2, n)))
+        rows = []
+    for ats, name, slug, thunk in iter_store_sources(rows):
+        add(ats, name, slug, thunk)
 
-    # 3) General neural-ML sweep across the config seed lists (anything the
-    #    store didn't already cover).
-    for slug, name in cfg.GREENHOUSE_COMPANIES.items():
-        if slug in used_gh:
-            continue
-        sources.append((name, "greenhouse", _greenhouse_thunk(slug, name)))
-    for slug, name in cfg.LEVER_COMPANIES.items():
-        if slug in used_lever:
-            continue
-        sources.append((name, "lever", _lever_thunk(slug, name)))
-    for slug, name in cfg.ASHBY_COMPANIES.items():
-        if slug in used_ashby:
-            continue
-        sources.append((name, "ashby", _ashby_thunk(slug, name)))
-    for name, slug in cfg.KULA_COMPANIES:
-        if slug in used_kula:
-            continue
-        sources.append((name, "kula", _kula_thunk(slug, name)))
-    for sub, name in getattr(cfg, "JAZZHR_COMPANIES", {}).items():
-        if sub in used_jazz:
-            continue
-        sources.append((name, "jazzhr", _jazzhr_thunk(sub, name)))
-    for sub, name in getattr(cfg, "BAMBOOHR_COMPANIES", {}).items():
-        if sub in used_bamboo:
-            continue
-        sources.append((name, "bamboohr",
-                        lambda s=sub, n=name: fetch_bamboohr(s, n)))
-    for name, cid, ccid in getattr(cfg, "ADP_COMPANIES", []):
-        if cid in {u.partition("|")[0] for u in used_adp}:
-            continue
-        sources.append((name, "adp",
-                        lambda c=cid, cc=ccid, n=name: fetch_adp(c, cc, n)))
+    # 3) Config seed lists (lightweight ATSes only), deduped against the store.
+    for ats, name, slug, thunk, _pause in iter_config_sources(cfg, only=LIGHTWEIGHT):
+        add(ats, name, slug, thunk)
+
+    # 4) Forums + aggregator feeds (remote-native boards).
     for name, base, cat in cfg.DISCOURSE_BOARDS:
-        sources.append((name, "discourse", _discourse_thunk(name, base, cat)))
-
-    # 4) Aggregator feeds (remote-native boards).
+        sources.append((name, "discourse",
+                        lambda n=name, b=base, c=cat: fetch_discourse(n, b, c)))
     if getattr(cfg, "REMOTEOK_ENABLED", True):
         sources.append(("RemoteOK", "remoteok", fetch_remoteok))
     if getattr(cfg, "REMOTIVE_ENABLED", True):
@@ -357,7 +232,9 @@ def build_sources(cfg, include_websearch=True):
     # 5) Web searches (DDG -> JSON-LD).
     if include_websearch:
         for label, query, n in WEBSEARCH_QUERIES:
-            sources.append((label, "websearch", _websearch_thunk(label, query, n)))
+            sources.append((label, "websearch",
+                            lambda l=label, q=query, m=n:
+                                fetch_websearch(l, q, max_results=m)))
 
     return sources
 
@@ -407,10 +284,6 @@ def send_digest(jobs, cfg):
     if not jobs:
         print("  No remote-eligible jobs - skipping email.")
         return
-    if cfg.GMAIL_APP_PASSWORD == "YOUR_APP_PASSWORD_HERE":
-        print("  [!] Set GMAIL_APP_PASSWORD before emailing.")
-        return
-
     date_str = datetime.now().strftime("%Y-%m-%d")
     subject = f"{TAG} {len(jobs)} remote neural-ML posting(s) - {date_str}"
     plain = "\n".join(
@@ -430,19 +303,5 @@ def send_digest(jobs, cfg):
   <tr><th>Tag</th><th>Title</th><th>Company</th><th>Location</th></tr>{rows}
 </table>
 </body></html>"""
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = cfg.GMAIL_ADDRESS
-    msg["To"] = cfg.GMAIL_ADDRESS
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(html, "html"))
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
-            srv.login(cfg.GMAIL_ADDRESS, cfg.GMAIL_APP_PASSWORD)
-            srv.sendmail(cfg.GMAIL_ADDRESS, cfg.GMAIL_ADDRESS, msg.as_string())
+    if send_gmail(subject, plain, html):
         print(f"  {TAG} digest emailed ({len(jobs)} posting(s)).")
-    except smtplib.SMTPAuthenticationError:
-        print("  [!] Gmail auth failed - check your App Password.")
-    except Exception as e:
-        print(f"  [!] Email error: {e}")

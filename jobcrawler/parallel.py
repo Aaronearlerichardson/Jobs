@@ -8,7 +8,6 @@ dead time *between* sources.
 
 Results are returned in input order so callers can process priority
 sources first and keep dedupe deterministic regardless of completion
-order.
 """
 
 from concurrent.futures import ThreadPoolExecutor, as_completed

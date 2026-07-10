@@ -9,13 +9,6 @@ hundreds of sites with zero per-vendor code.
 Use it two ways:
 
   fetch_jsonld_page(company, url)
-      - Parse JSON-LD from a single URL. Returns any JobPosting records
-        found on that page. Perfect for individual job-listing pages
-        surfaced by websearch / sitemap.
-
-  fetch_jsonld_careers(company, careers_url)
-      - Parse JSON-LD from a careers index page. If none found, follow
-        job-like links from that page and parse JSON-LD on each.
 """
 
 import json

@@ -8,12 +8,6 @@ and expose two unauthenticated JSON endpoints:
                                location{city,state}, isRemote,
                                locationType}, ...]}
     /careers/<id>/detail   -> {"result": {"jobOpening": {description,
-                               jobOpeningShareUrl, datePosted, ...}}}
-
-The list is cheap; descriptions cost one request per job, so they're
-fetched only for list entries that already look relevant from the title.
-locationType "1" / a truthy isRemote marks remote roles (structured
-signal, stamped as remote_hint).
 """
 
 import time

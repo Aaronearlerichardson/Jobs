@@ -116,7 +116,6 @@ def slug_variants(name, first_guess):
       * slash-aliased names ("Cree / Wolfspeed")
       * corporate suffixes (Inc, Corp, Ltd, LLC, Therapeutics, Biosciences)
       * first-word truncation
-      * a Claude-supplied first_guess (tried first)
     """
     variants: list[str] = []
     if first_guess:
@@ -195,11 +194,6 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
 
     Workday gets two fallbacks when all slug probes miss:
       1. static probe_workday — requests.get on candidate careers URLs
-      2. js_probe (optional)  — headless Playwright for SPA careers pages
-
-    `log` receives each progress line as a single string. Defaults to
-    print; parallel callers pass a buffer-append callable so per-worker
-    output can be flushed atomically under an stdout lock.
     """
     variants = slug_variants(c.name, c.slug_guess)
     claimed_ats = c.ats
@@ -256,14 +250,9 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
         c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
         c.tried_slugs.append(f"[lead:{sniff['ats']} <- {sniff['source_url']}]")
 
-    # Workday fallback. Workday can't be probed by slug — we have to
-    # scrape the company's careers page to learn tenant/pod/site. Only
-    # try if Claude tagged the candidate workday or unknown; spare the
-    # scrape for ats values that definitely aren't workday (e.g. we
-    # know it's "lever" but that slug missed — unlikely to be on wd).
-    # Skip when we already have a (non-workday) lead: the careers page was
-    # reachable and showed a different platform, so the expensive JS
-    # browser launch won't help.
+    # Workday fallback (page scrape for tenant/pod/site — no slug probe
+    # exists). Only for ats in (unknown, workday), and skipped when a
+    # non-workday lead already identified the platform.
     if c.ats in ("unknown", "workday") and not c.ats_lead:
         meta = probe_workday(c.name, c.careers_url)
         time.sleep(delay)
@@ -340,8 +329,7 @@ def _validate_all(candidate_dicts, use_js=True):
     single-threaded (Playwright greenlet affinity), so the fallback runs as
     a POOL of _JS_BROWSERS browsers — candidates that need it borrow a free
     one and only block when all are busy, instead of all queuing on one.
-    Off for bulk sweeps by default; the static probe_workday still confirms
-    non-SPA Workday boards in parallel regardless."""
+    """
     # Each worker drops log lines into its own list and flushes them
     # as a single atomic block when the candidate finishes — so the
     # [N/total] progress line + any "[js] headless scrape..." messages
@@ -498,8 +486,8 @@ def write_discovery_report(result):
         if gated:
             f.write("## Gated sites (require auth)\n\n")
             f.write("Login-only boards Claude thinks are worth searching. "
-                    "Use `python discover.py --capture-session <site>` to "
-                    "save an authenticated session for these.\n\n")
+                    "Browse them logged-in and capture result pages with "
+                    "`python capture.py --serve` (see setup.md).\n\n")
             f.write("| Site | Suggested query | Notes |\n|---|---|---|\n")
             for g in gated:
                 f.write(f"| {g.get('site','?')} | `{g.get('query','')}` | "

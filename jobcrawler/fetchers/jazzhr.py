@@ -8,7 +8,6 @@ parses. So this fetcher just discovers the per-job URLs and delegates
 parsing/relevance to ``fetch_jsonld_page``.
 
 Used for Paradromics (subdomain ``paradromicsinc``), whose careers site is
-a JS SPA with no ATS embed but whose apply links are JazzHR.
 """
 
 import re

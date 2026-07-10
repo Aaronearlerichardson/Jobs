@@ -8,12 +8,6 @@ supplies its own keyword focus (applied by mutating config's live lists via
     remote-neural  — REMOTE roles anchored on neural signals (BCI/EEG/...)
                      with a high technical bar and clinical mission.
     local-tech     — LOCAL (Triangle/NC) roles with a genuine technical bar
-                     and a health/bio/science mission; neural not required.
-
-Pivot between them from the single entry point:
-
-    python crawler.py --track remote-neural
-    python crawler.py --track local-tech
 """
 
 from . import local_tech, remote_neural

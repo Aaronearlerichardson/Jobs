@@ -7,16 +7,6 @@ Design (merged from both development tracks):
   * The company row carries the mission judgment once, so individual jobs
     inherit it instead of paying a per-job mission LLM call — "the company
     list simplifies the job list."  (local-clinical insight)
-  * Jobs carry track-specific columns (remote_eligible / remote_signal /
-    neural_signal from remote-neural; geo_mode / tech_bar_score /
-    resume_fit_score from local-clinical) side by side, all nullable, so
-    one schema serves every track and a posting surfaced by two tracks is
-    still one row.
-  * `tags` scopes a company to the tracks that should crawl it:
-    comma-separated tokens like "neural,remote_friendly" or "nc_local".
-    A track asks for its tag; a company can carry several.
-  * Additive, idempotent column migrations (remote-neural insight) keep
-    existing databases usable as fields are added — no destructive rebuild.
 """
 
 import sqlite3

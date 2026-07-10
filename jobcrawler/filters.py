@@ -8,14 +8,6 @@ Relevance model (tiered):
   1. CORE match  -> standalone signal, relevant.
   2. DOMAIN + SKILL match -> adjacent medical/bio domain where your
      transferable skills apply. Relevant.
-  3. Any legacy entry in INCLUDE_KEYWORDS that isn't in a tier is treated
-     as Tier 1 (standalone). This is how --expand-live additions and
-     manually-edited compat lists behave.
-
-Location model:
-  * Short tokens (<= 3 chars: "nc", "va", "rtp", "wfh") use word-boundary
-    matching so "clinical" doesn't match "nc" and "nevada" doesn't match
-    "va". Everything else uses plain substring.
 """
 
 import re
@@ -144,12 +136,6 @@ def is_location_allowed(location):
       2. LOCATION_EXCLUDE hit -> denied.
       3. LOCATION_ONSITE_INCLUDE hit -> allowed.
       4. ACCEPT_REMOTE and LOCATION_REMOTE_INCLUDE hit -> allowed.
-      5. Legacy/dynamic entries in LOCATION_INCLUDE not in either bucket
-         -> allowed (this is how --expand-location-live additions behave).
-      6. Otherwise denied.
-
-    ACCEPT_REMOTE is read off the live config module so mutating it at
-    runtime (tests, quick toggles) takes effect without re-importing.
     """
     if not location:
         return True

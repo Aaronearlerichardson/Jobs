@@ -7,24 +7,6 @@ the location-relaxed-to-NC / BCI-constraint-relaxed twin of the
 REMOTE-NEURAL track; the two share fetchers, discovery, the company store,
 the Claude scorers, and the parallel fetch pool, and differ only in their
 gates and ranking.
-
-Pipeline (company-store driven):
-    active companies from the store (populated by discovery/local_sourcing
-    + ats_dork + --import-seeds)
-      -> NC-scoped board pull            (fetchers/company.py, parallel)
-      -> exclude filter                  (CRA/coordinator/scribe + defense)
-      -> technical-title pre-filter      (cheap, so the LLM only scores
-                                          plausible roles)
-      -> resume-fit scoring              (claude.score_resume_fit, parallel)
-      -> store + digest ranked by fit    (company mission as tiebreak),
-         tagged [LOCAL-TECH]
-
-Consolidates the former jobcrawler/local_clinical.py (filter chain, domain
-keywords, excludes, heuristic scorer) and jobcrawler/local_tech.py (store-
-driven crawl + resume fit) into the tracks framework. Geography now uses
-the shared remote_filter for the "remote" side of the classification —
-higher precision than the old bare-token list ("distributed systems" no
-longer reads as a remote role).
 """
 
 import re

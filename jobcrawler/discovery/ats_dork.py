@@ -8,10 +8,6 @@ from each URL, NC-verify the board, mission-score it, and add it.
 
 Two entry points:
   * run_ddgs_dorks()  — fully automated via the ddgs package (DuckDuckGo).
-                        Note: DDG's index for boards.greenhouse.io is stale, so
-                        this under-delivers vs. a better search backend.
-  * harvest_urls(urls)— process a list of ATS URLs gathered elsewhere (e.g. the
-                        agent's WebSearch tool, which indexes these far better).
 """
 
 import re

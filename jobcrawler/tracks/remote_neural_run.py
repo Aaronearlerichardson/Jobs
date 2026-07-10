@@ -8,21 +8,6 @@ neural-ML roles. Only postings that pass remote-eligibility detection are
 surfaced, and every digest entry is tagged [REMOTE-NEURAL].
 
 Run it via the single entry point:
-    python crawler.py --track remote-neural [--commit] [--send] [--fit]
-                      [--no-websearch] [--samples N]
-(or the legacy shim `python track_remote_neural.py`, same flags).
-
-Flags:
-    --commit        persist matches to the unified store (default: preview)
-    --send          email the tagged digest (requires creds)
-    --fit           resume-fit-score the surfaced matches (Claude API) and
-                    rank the digest by fit — the local track's scorer,
-                    cross-pollinated here
-    --no-websearch  skip the (flaky) DDG web-search sources
-    --samples N     show N sample matches (default 5)
-
-Defaults to a read-only preview on purpose: inspect precision before it
-emails anything.
 """
 
 import argparse

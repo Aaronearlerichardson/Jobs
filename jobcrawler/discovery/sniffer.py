@@ -8,24 +8,6 @@ collisions), fetch the company's likely careers page(s) and detect which ATS
 is embedded, extracting the *exact* slug/tenant/GUID from the embed link.
 
 This merges the two sniffers built independently on the remote-neural and
-local-clinical branches:
-  * fetchable-platform coordinates + confirm-by-live-count + detection-only
-    "leads" for bot-protected platforms, with concurrent URL fetching
-    (remote-neural),
-  * SmartRecruiters/iCIMS/SuccessFactors signatures, non-.com TLD candidate
-    URLs (.xyz/.ai/.io/.bio/.health), custom-board detection, and the
-    headless-browser JsSniffer for JS-rendered pages (local-clinical).
-
-Two call styles:
-  sniff_ats(name)          -> {"ats", "slug"|"triple", "careers_url"} | None
-      Raw detection. Includes platforms that are only *sometimes* fetchable
-      (icims, successfactors, custom) — the local track has scrapers for
-      those; callers decide what to do with the coordinates.
-  sniff_careers_ats(name)  -> {"confirmed": True, ats, slug, count, source_url}
-                            | {"confirmed": False, ats, slug, source_url}   (lead)
-                            | None
-      Pipeline style: prefers a coordinate set it can CONFIRM with a live
-      job count via the slug probes; anything else is surfaced as a lead.
 """
 
 import html

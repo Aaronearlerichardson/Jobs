@@ -8,24 +8,6 @@ neurotech / research-adjacent roles surface that never hit an ATS.
 
 Firebase API:
   - https://hacker-news.firebaseio.com/v0/user/whoishiring.json
-    -> {"submitted": [ids...]}
-  - https://hacker-news.firebaseio.com/v0/item/<id>.json
-    -> {title, kids: [comment_ids], ...}
-
-Strategy:
-  1. Fetch whoishiring's submission list.
-  2. Filter to items whose title starts with "Ask HN: Who is hiring?"
-     (there are also "freelancer?" and "wants to be hired?" threads;
-     we stick to the main hiring one).
-  3. Take the N most recent hiring threads (default 2 = this month +
-     last month, to catch mid-month runs).
-  4. For each, fetch the top-level comment ids from `kids`, then fetch
-     each comment and run is_relevant() on its text.
-
-Comments are free-form HTML. We strip tags, keep the text as the
-description, and try to pull a company name and location heuristically
-from the opening line. Format convention (widely followed) is:
-    Company | Role | Location | Remote/Onsite | URL
 """
 
 import html

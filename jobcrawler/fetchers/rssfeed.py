@@ -8,12 +8,6 @@ URL, so config can add more (Jobicy, RemoteRocketship, most ATSs).
 WeWorkRemotely feeds:
     https://weworkremotely.com/categories/remote-programming-jobs.rss
     https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
-    https://weworkremotely.com/remote-jobs.rss           (all categories)
-    https://weworkremotely.com/categories/all-other-remote-jobs.rss
-
-Each <item> gives <title>, <link>, <description> (HTML-escaped), and
-<region> (WWR-specific) or <pubDate>. Location is often embedded inside
-the title as "Job Title at Company (Region)" - we parse that out.
 """
 
 import html

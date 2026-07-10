@@ -8,15 +8,6 @@ exactly like Claude candidates (validate_candidate sweeps all four
 ATSes when ats='unknown'), so you don't need to know the ATS upfront.
 
 Activation: seeds merge in only when the discovery term matches one of
-RTP_TRIGGERS below. Untriggered runs ('AI startups' with no geo term)
-skip seeds entirely so non-RTP discovery stays clean.
-
-Adding entries: append to RTP_SEED_COMPANIES with just a name and an
-optional short note. Don't bother guessing the ATS or slug — the
-universal probe will find it if it's on greenhouse/lever/ashby/kula.
-Employers on workday (Red Hat, BD, LabCorp, United Therapeutics, etc.)
-will land in the 'unconfirmed' bucket with their careers URL intact,
-which is still useful as a manual-investigate list.
 """
 
 import re

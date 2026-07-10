@@ -8,10 +8,6 @@ comment so you can audit or revert. Slug-level dedup means re-running
 is safe.
 
 Why regex and not ast? The AST parser strips comments, whitespace, and
-trailing commas, so writing back would require a full source-preserving
-unparser. This file is simple enough (one dict/list per target) that
-balance-matching brackets gets the job done with zero risk of
-clobbering the rest of config.py.
 """
 
 from datetime import datetime

@@ -8,16 +8,6 @@ health / bio / science / tech employers with a Triangle-NC presence:
        - a curated seed of established Triangle/NC health-bio-science + tech
          employers,
        - the static entries on the RTP.org directory,
-       - published "companies in RTP" article lists (folded into the seed),
-       - (optional) a DuckDuckGo/web-search sweep.
-  2. ATS-PROBE each name against Greenhouse / Lever / Ashby (fast JSON APIs),
-     with a static Workday fallback, to confirm a LIVE job board.
-  3. Emit confirmed companies as config-ready blocks for the LOCAL_TECH_*
-     lists that the local-tech crawler reads.
-
-The probe is the validator: a wrong/duplicate/misspelled seed name simply
-fails to confirm, so the seed can be generous. Per-job geography is still
-filtered downstream, so a nationally-HQ'd company with NC offices is fine.
 """
 
 import re

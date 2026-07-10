@@ -8,11 +8,6 @@ element is a legal/metadata stub (has no 'id') and must be skipped.
 Schema (per job):
     id, slug, epoch, date, company, company_logo, position, tags,
     description, location, salary, apply_url, url, original
-
-We don't do our own location filtering here - the orchestrator's
-is_location_allowed() handles that. We DO run is_relevant() to keep
-crawl volume reasonable, since the feed is several MB and mostly
-off-topic (marketing roles, etc.).
 """
 
 import html

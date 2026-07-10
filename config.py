@@ -44,10 +44,6 @@ LOCAL_TECH_DB_PATH = STORE_DB_PATH
 RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
 
 REPORT_DIR  = SCRIPT_DIR / "job_reports"
-SESSION_DIR = SCRIPT_DIR / "sessions"
-PROFILE_COPY_DIR = SESSION_DIR / "chrome-profile"
-CREDENTIALS_PATH          = SCRIPT_DIR / "credentials.json"
-CREDENTIALS_TEMPLATE_PATH = SCRIPT_DIR / "credentials.json.template"
 
 # =========================================================================
 #  KEYWORD FILTERS
@@ -500,27 +496,6 @@ RSS_FEEDS: list[tuple[str, str, str]] = [
 # =========================================================================
 #  GATED-SITE CAPTURE CONFIG (Playwright)
 # =========================================================================
-
-SITE_CONFIGS = {
-    "linkedin": {
-        "login_url":  "https://www.linkedin.com/login",
-        "verify_url": "https://www.linkedin.com/feed/",
-        "logged_in_url_markers":  ["/feed"],
-        "logged_out_url_markers": ["/login", "/uas/login", "/checkpoint", "/authwall"],
-    },
-    "indeed": {
-        "login_url":  "https://secure.indeed.com/auth",
-        "verify_url": "https://myjobs.indeed.com/",
-        "logged_in_url_markers":  ["myjobs.indeed.com"],
-        "logged_out_url_markers": ["/auth", "/account/login"],
-    },
-    "wellfound": {
-        "login_url":  "https://wellfound.com/login",
-        "verify_url": "https://wellfound.com/jobs",
-        "logged_in_url_markers":  ["/jobs", "/candidate", "/user"],
-        "logged_out_url_markers": ["/login", "/signup"],
-    },
-}
 
 # Keep roughly current — a stale UA is a red flag to fingerprinters.
 BROWSER_UA = (

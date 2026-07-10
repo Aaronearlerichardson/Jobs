@@ -9,12 +9,6 @@ same params drive an unauthenticated JSON API:
         job-requisitions?cid=<cid>&ccId=<ccid>&locale=en_US&$top=N&$skip=K
 
 Each requisition has itemID, requisitionTitle, postDate, and
-requisitionLocations[].nameCode.shortName. There's no per-job description
-in the list payload; a detail endpoint exists at
-``job-requisitions/<itemID>?cid=...`` and is fetched best-effort.
-
-cid/ccid can't be guessed from a company name — they come from the
-discovery sniffer reading the company's careers page (Synchron et al.).
 """
 
 import time
