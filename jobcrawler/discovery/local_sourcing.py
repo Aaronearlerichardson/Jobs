@@ -286,7 +286,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
     # the name-guesser can't). This is the main recall lever over the directory.
     if sniff:
         from .sniffer import sniff_ats
-        from .. import local_fetch
+        from ..fetchers import company as company_fetch
         have = {re.sub(r"[^a-z0-9]", "", h["name"].lower()) for h in hits if h["nc"] > 0}
         todo = [n for n in names if re.sub(r"[^a-z0-9]", "", n.lower()) not in have]
         print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
@@ -304,7 +304,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                 comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
                 slug = s.get("slug")
             try:
-                jobs = local_fetch.fetch_company_nc(comp)
+                jobs = company_fetch.fetch_company_nc(comp)
             except Exception:
                 jobs = []
             nc = len(jobs)
@@ -451,7 +451,7 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
             "careers_url": h.get("careers_url"),
             "nc_job_count": h["nc"], "total_job_count": h["count"],
             "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-            "source": "local_sourcing", "active": active,
+            "tags": "nc_local", "source": "local_sourcing", "active": active,
             "last_probed": datetime.now().isoformat(),
         }
         upsert_company(conn, row)

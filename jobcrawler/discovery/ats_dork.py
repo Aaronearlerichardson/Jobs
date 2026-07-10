@@ -18,7 +18,8 @@ import re
 
 from .sniffer import _SIGS
 from .probes import _extract_workday_triple
-from .. import local_fetch, store
+from .. import store
+from ..fetchers import company as company_fetch
 from ..claude import score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal
 
@@ -95,7 +96,7 @@ def harvest_urls(urls, verbose=True):
         comp = ({"ats": "workday", "wd_tenant": slug[0], "wd_pod": slug[1], "wd_site": slug[2]}
                 if ats == "workday" else {"ats": ats, "slug": slug})
         try:
-            jobs = local_fetch.fetch_company_nc(comp)
+            jobs = company_fetch.fetch_company_nc(comp)
         except Exception:
             jobs = []
         nc = len(jobs)
@@ -114,7 +115,8 @@ def harvest_urls(urls, verbose=True):
             wd_pod=slug[1] if ats == "workday" else None,
             wd_site=slug[2] if ats == "workday" else None,
             nc_job_count=nc, total_job_count=nc, mission_tier=tier,
-            mission_score=score, mission_reason=reason, source="ats_dork", active=active))
+            mission_score=score, mission_reason=reason, tags="nc_local",
+            source="ats_dork", active=active))
         added += 1
         if verbose:
             print(f"  {name[:26]:26} {ats:12} nc={nc:2} {str(tier):19} "

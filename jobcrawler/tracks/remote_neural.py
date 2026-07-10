@@ -29,6 +29,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+from .. import store as store_mod
 from ..fetchers import (
     fetch_adp,
     fetch_ashby,
@@ -46,6 +47,7 @@ from ..fetchers import (
 )
 
 TAG = "[REMOTE-NEURAL]"
+TRACK = "remote-neural"
 
 
 # =========================================================================
@@ -244,7 +246,8 @@ def build_sources(cfg, include_websearch=True):
     counting, and error isolation.
     """
     sources = []
-    used_gh, used_kula, used_jazz = set(), set(), set()
+    used_gh, used_lever, used_ashby = set(), set(), set()
+    used_kula, used_jazz, used_bamboo, used_adp = set(), set(), set(), set()
 
     # 1) Priority company targets.
     for name, platform, fargs in PRIORITY_COMPANIES:
@@ -258,14 +261,60 @@ def build_sources(cfg, include_websearch=True):
             used_jazz.add(fargs[0])
             sources.append((name, "jazzhr*", _jazzhr_thunk(fargs[0], name)))
 
-    # 2) General neural-ML sweep across existing lightweight ATS sources.
+    # 2) Company store sweep: companies tagged 'neural' (populated by
+    #    `crawler.py --import-seeds` and BCI discovery). The config lists
+    #    below remain as seeds / fallback, deduped against these, so a
+    #    fresh checkout with an empty store still crawls.
+    try:
+        conn = store_mod.connect()
+        neural_cos = store_mod.get_companies(conn, active_only=True, tag="neural")
+        conn.close()
+    except Exception as e:
+        print(f"  [!] company store unavailable ({e}); using config lists only")
+        neural_cos = []
+    for c in neural_cos:
+        ats, slug, name = c.get("ats"), c.get("slug"), c["name"]
+        if not slug:
+            continue
+        if ats == "greenhouse" and slug not in used_gh:
+            used_gh.add(slug)
+            sources.append((name, "greenhouse", _greenhouse_thunk(slug, name)))
+        elif ats == "lever" and slug not in used_lever:
+            used_lever.add(slug)
+            sources.append((name, "lever", _lever_thunk(slug, name)))
+        elif ats == "ashby" and slug not in used_ashby:
+            used_ashby.add(slug)
+            sources.append((name, "ashby", _ashby_thunk(slug, name)))
+        elif ats == "kula" and slug not in used_kula:
+            used_kula.add(slug)
+            sources.append((name, "kula", _kula_thunk(slug, name)))
+        elif ats == "jazzhr" and slug not in used_jazz:
+            used_jazz.add(slug)
+            sources.append((name, "jazzhr", _jazzhr_thunk(slug, name)))
+        elif ats == "bamboohr" and slug not in used_bamboo:
+            used_bamboo.add(slug)
+            sources.append((name, "bamboohr",
+                            lambda s=slug, n=name: fetch_bamboohr(s, n)))
+        elif ats == "adp" and slug not in used_adp:
+            used_adp.add(slug)
+            cid, _, ccid = slug.partition("|")
+            if ccid:
+                sources.append((name, "adp",
+                                lambda c1=cid, c2=ccid, n=name: fetch_adp(c1, c2, n)))
+
+    # 3) General neural-ML sweep across the config seed lists (anything the
+    #    store didn't already cover).
     for slug, name in cfg.GREENHOUSE_COMPANIES.items():
         if slug in used_gh:
             continue
         sources.append((name, "greenhouse", _greenhouse_thunk(slug, name)))
     for slug, name in cfg.LEVER_COMPANIES.items():
+        if slug in used_lever:
+            continue
         sources.append((name, "lever", _lever_thunk(slug, name)))
     for slug, name in cfg.ASHBY_COMPANIES.items():
+        if slug in used_ashby:
+            continue
         sources.append((name, "ashby", _ashby_thunk(slug, name)))
     for name, slug in cfg.KULA_COMPANIES:
         if slug in used_kula:
@@ -276,15 +325,19 @@ def build_sources(cfg, include_websearch=True):
             continue
         sources.append((name, "jazzhr", _jazzhr_thunk(sub, name)))
     for sub, name in getattr(cfg, "BAMBOOHR_COMPANIES", {}).items():
+        if sub in used_bamboo:
+            continue
         sources.append((name, "bamboohr",
                         lambda s=sub, n=name: fetch_bamboohr(s, n)))
     for name, cid, ccid in getattr(cfg, "ADP_COMPANIES", []):
+        if cid in {u.partition("|")[0] for u in used_adp}:
+            continue
         sources.append((name, "adp",
                         lambda c=cid, cc=ccid, n=name: fetch_adp(c, cc, n)))
     for name, base, cat in cfg.DISCOURSE_BOARDS:
         sources.append((name, "discourse", _discourse_thunk(name, base, cat)))
 
-    # 3) Aggregator feeds (remote-native boards).
+    # 4) Aggregator feeds (remote-native boards).
     if getattr(cfg, "REMOTEOK_ENABLED", True):
         sources.append(("RemoteOK", "remoteok", fetch_remoteok))
     if getattr(cfg, "REMOTIVE_ENABLED", True):
@@ -301,7 +354,7 @@ def build_sources(cfg, include_websearch=True):
                         lambda l=label, u=url, d=default_loc, rb=is_remote_board:
                             fetch_rss(l, u, default_location=d, remote_board=rb)))
 
-    # 4) Web searches (DDG -> JSON-LD).
+    # 5) Web searches (DDG -> JSON-LD).
     if include_websearch:
         for label, query, n in WEBSEARCH_QUERIES:
             sources.append((label, "websearch", _websearch_thunk(label, query, n)))
@@ -334,10 +387,14 @@ def write_digest(jobs, report_dir):
             f.write("_No remote-eligible neural-ML postings this run._\n")
         else:
             f.write(f"**{len(jobs)} remote-eligible posting(s)**\n\n")
-            f.write("| Tag | Company | Title | Location | Neural | Remote signal |\n")
-            f.write("|-----|---------|-------|----------|--------|---------------|\n")
+            with_fit = any(j.get("resume_fit_score") is not None for j in jobs)
+            fit_h = "Fit | " if with_fit else ""
+            f.write(f"| {fit_h}Tag | Company | Title | Location | Neural | Remote signal |\n")
+            f.write(f"|{'----:|' if with_fit else ''}-----|---------|-------|----------|--------|---------------|\n")
             for j in jobs:
-                f.write(f"| {TAG} | {j['company']} | "
+                fit = j.get("resume_fit_score")
+                fit_c = (f"{fit:.2f} | " if isinstance(fit, (int, float)) else "n/a | ") if with_fit else ""
+                f.write(f"| {fit_c}{TAG} | {j['company']} | "
                         f"[{j['title']}]({j['url']}) | {j['location']} | "
                         f"{j.get('neural_signal', '')} | "
                         f"{j.get('remote_signal', '')} |\n")

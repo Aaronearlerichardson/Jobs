@@ -1,25 +1,35 @@
 #!/usr/bin/env python3
 """
-BCI Job Crawler - CLI entry point.
+Job Crawler - CLI entry point.
 
-Usage:
-    python crawler.py                         # full run
-    python crawler.py --dry-run               # print only, no DB/email
-    python crawler.py --expand "eeg engineer" # print expanded titles/keywords/sectors
+One project, two pivots of the same search (see jobcrawler/tracks/):
+
+    python crawler.py --track remote-neural   # REMOTE roles, neural-anchored
+    python crawler.py --track local-tech      # LOCAL (Triangle/NC) roles,
+                                              # health/bio/science mission
+    python crawler.py                         # classic keyword crawl + email
+
+Track flags pass through, e.g.:
+    python crawler.py --track remote-neural --commit --send --fit
+    python crawler.py --track local-tech --top 20
+
+Utilities:
+    python crawler.py --import-seeds          # load config company lists into
+                                              #   the store (tags: neural/nc_local)
+    python crawler.py --dry-run               # classic crawl, no DB/email
+    python crawler.py --expand "eeg engineer" # expand titles/keywords/sectors
     python crawler.py --expand-location "NC"  # expand a location term
-    python crawler.py --keyword-report        # bulk-expand every INCLUDE_KEYWORDS entry
-    python crawler.py --local-clinical        # LOCAL-CLINICAL-ML track (live, ranked, no email)
-    python crawler.py --score "..."           # score one description on technical bar (0..1)
-    python crawler.py --db jobs_local.db ...   # use an isolated dedupe DB
+    python crawler.py --keyword-report        # bulk-expand INCLUDE_KEYWORDS
+    python crawler.py --score "..."           # technical-bar-score one posting
+    python crawler.py --db jobs_alt.db ...    # use an isolated store DB
 
-Edit config.py to tune keywords, locations, and target companies.
+Edit config.py to tune keywords, locations, and seed companies.
 """
 
 import argparse
 
 import config
 from jobcrawler.claude import expand_location, expand_search, score_technical_bar
-from jobcrawler.orchestrator import crawl
 from jobcrawler.report import (
     generate_keyword_report,
     print_expansion,
@@ -30,9 +40,18 @@ from jobcrawler.report import (
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BCI Job Crawler")
+    ap = argparse.ArgumentParser(description="Job Crawler")
+    ap.add_argument("--track", choices=("remote-neural", "local-tech"),
+                    help="Run one of the job-search tracks (see jobcrawler/tracks/). "
+                         "Remaining flags are forwarded to the track runner.")
+    # Legacy aliases for --track local-tech.
+    ap.add_argument("--local-clinical", "--local-tech", dest="local_tech",
+                    action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--import-seeds", action="store_true",
+                    help="Import the config.py company lists into the unified "
+                         "store (tagged neural / nc_local) and exit")
     ap.add_argument("--dry-run", action="store_true",
-                    help="Scan without DB writes or email")
+                    help="Classic crawl: scan without DB writes or email")
     ap.add_argument("--expand", metavar="TERM",
                     help="Expand a term into job titles/keywords/sectors and exit")
     ap.add_argument("--expand-live", metavar="TERM",
@@ -43,23 +62,21 @@ def main():
                     help="Expand a location term and fold results into this crawl run")
     ap.add_argument("--keyword-report", action="store_true",
                     help="Bulk-expand every INCLUDE_KEYWORDS entry and write a suggestions report")
-    ap.add_argument("--local-clinical", action="store_true",
-                    help="Run the LOCAL-CLINICAL-ML track: live crawl, Triangle/NC "
-                         "+ remote geo filter, clinical/health domain targeting, "
-                         "ops/defense excludes, technical-bar scoring, ranked digest. "
-                         "Writes dedup state but never emails.")
-    ap.add_argument("--local-tech", action="store_true",
-                    help="LOCAL-TECH crawl: read active companies from the SQL store, "
-                         "pull their NC jobs, résumé-fit-score them, rank. No email.")
     ap.add_argument("--score", metavar="TEXT",
                     help="Score one job title/description on technical bar (0..1) and exit")
     ap.add_argument("--db", metavar="PATH",
-                    help="Override the dedupe DB path (isolates concurrent runs)")
-    args = ap.parse_args()
+                    help="Override the unified store DB path (isolates concurrent runs)")
+    args, passthrough = ap.parse_known_args()
 
     if args.db:
         from pathlib import Path
-        config.DB_PATH = Path(args.db)
+        config.STORE_DB_PATH = Path(args.db)
+        config.DB_PATH = config.STORE_DB_PATH  # legacy readers
+
+    if args.import_seeds:
+        from jobcrawler.seed_import import import_config_seeds
+        import_config_seeds()
+        raise SystemExit(0)
 
     if args.score:
         score, reason, mission = score_technical_bar(args.score)
@@ -69,15 +86,26 @@ def main():
             print(f"  technical-bar score: {score:.2f}  [{mission or 'mission?'}]  ({reason})")
         raise SystemExit(0)
 
-    if args.local_clinical:
-        from jobcrawler.local_clinical import run as run_local_clinical
-        run_local_clinical(db_path=config.DB_PATH if args.db else None)
+    if args.local_tech and not args.track:
+        args.track = "local-tech"
+
+    if args.track == "remote-neural":
+        from jobcrawler.tracks.remote_neural_run import main as run_track
+        run_track(passthrough)
         raise SystemExit(0)
 
-    if args.local_tech:
-        from jobcrawler.local_tech import run as run_local_tech
-        run_local_tech()
+    if args.track == "local-tech":
+        from jobcrawler.tracks.local_tech import run as run_track
+        tp = argparse.ArgumentParser()
+        tp.add_argument("--top", type=int, default=15)
+        tp.add_argument("--workers", type=int, default=6)
+        targs = tp.parse_args(passthrough)
+        run_track(max_workers=targs.workers, top_n=targs.top)
         raise SystemExit(0)
+
+    if passthrough:
+        ap.error(f"unrecognized arguments: {' '.join(passthrough)} "
+                 f"(track flags require --track)")
 
     if args.expand:
         expanded = expand_search(args.expand)
@@ -127,6 +155,7 @@ def main():
                 print(f"  + {len(added_inc)} include / {len(added_exc)} "
                       f"exclude location filter(s).\n")
 
+    from jobcrawler.orchestrator import crawl
     new_jobs    = crawl(dry_run=args.dry_run)
     report_path = write_report(new_jobs)
     if not args.dry_run:

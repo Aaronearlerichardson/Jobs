@@ -26,7 +26,23 @@ CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
 # =========================================================================
 
 SCRIPT_DIR  = Path(__file__).parent
-DB_PATH     = SCRIPT_DIR / "seen_jobs_remote.db"
+
+# Unified store: companies (cached mission scores, scope tags) + jobs
+# (dedup state, per-track fields, resume-fit scores). Shared by every
+# track — see jobcrawler/store.py. Named local_tech.db for continuity with
+# the pre-merge local-track store; existing DBs migrate in place.
+STORE_DB_PATH = SCRIPT_DIR / "local_tech.db"
+
+# Back-compat aliases. DB_PATH used to be a standalone per-track seen-jobs
+# DB (seen_jobs_remote.db); jobcrawler/db.py now adapts old callers onto
+# the unified store.
+DB_PATH            = STORE_DB_PATH
+LOCAL_TECH_DB_PATH = STORE_DB_PATH
+
+# Resume used for per-job fit scoring (gitignored — personal). Extracted
+# lazily by jobcrawler/resume.py.
+RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
+
 REPORT_DIR  = SCRIPT_DIR / "job_reports"
 SESSION_DIR = SCRIPT_DIR / "sessions"
 PROFILE_COPY_DIR = SESSION_DIR / "chrome-profile"
@@ -72,30 +88,36 @@ CORE_KEYWORDS = [
 ]
 
 # Tier 2: adjacent medical/bio domains. Needs a SKILL_KEYWORDS pair to pass.
+# Precision notes (learned tuning the local track): bare "medical" and
+# "cancer" fire on benefits boilerplate ("medical, dental, vision"), and
+# catch-all "imaging" matched everything from satellites to cameras — use
+# the qualified forms instead.
 DOMAIN_KEYWORDS = [
-    "biomedical", "medical", "medical imaging",
+    "biomedical", "medical device", "medical imaging",
     "mri", "fmri", "ultrasound",
-    "wearable", "implantable", "cancer",
+    "wearable", "implantable",
     "physiological", "biosignal", "biosensor",
-    "clinical", "digital health", "healthtech",
+    "clinical", "clinical trial", "digital health", "healthtech",
     "radiology", "pathology", "cardiology", "sleep",
     "biostatistics", "bioinformatics",
     "ehr", "electronic health record",
-    "fnirs", "radiology", "imaging",
 ]
 
 # Tier 3: transferable technical skills. Only counts paired with DOMAIN.
 # Terms here should describe things YOU can do - the filter will pair them
 # with a DOMAIN term to confirm the role is in a relevant area.
+# Precision notes: bare "signal" leaked military RF/SDR roles into a
+# clinical search; bare "data"/"analysis"/"software" made the DOMAIN+SKILL
+# pair fire on nearly any posting. Qualified forms only.
 SKILL_KEYWORDS = [
     "pytorch", "tensorflow",
-    "signal", "time series", "dsp",
+    "signal processing", "time series", "dsp",
     "machine learning", "deep learning",
     "scientific software", "scientific computing",
-    "research engineer", "data", "analysis", "modeling", "simulation",
+    "research engineer", "data pipeline",
     "real-time", "embedded software", "firmware",
-    "numpy", "scipy", "visualization", "cloud computing",
-    "data manager", "backend", "software",
+    "numpy", "scipy",
+    "data manager", "backend",
 ]
 
 # Backward-compat view. Referenced by --expand-live, --from-keywords, and

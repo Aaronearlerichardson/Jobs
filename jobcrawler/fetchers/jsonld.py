@@ -100,7 +100,7 @@ def _normalize_description(jp):
 
 
 def _job_from_posting(jp, company_name, source_url):
-    title = jp.get("title", "") or ""
+    title = (jp.get("title") or jp.get("name") or "").strip()
     job_url = jp.get("url") or jp.get("mainEntityOfPage") or source_url
     if isinstance(job_url, dict):
         job_url = job_url.get("@id", source_url)

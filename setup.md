@@ -345,3 +345,72 @@ Add any Workday site the same way:
 Add a PeopleAdmin site by appending `(host, "Company Name")` to
 `PEOPLEADMIN_COMPANIES` in `crawler.py`. The scraper reads
 `/postings/search.atom`.
+
+---
+
+## Unified track architecture (post-merge)
+
+The two development branches — `track-remote-neural` (BCI constraint kept,
+location relaxed to remote) and `track-local-clinical-ml` (location kept to
+the Triangle, BCI relaxed to health/bio/science) — are merged into one
+project with pluggable *tracks* over shared machinery.
+
+### Running a track
+
+```
+python crawler.py --track remote-neural [--commit] [--send] [--fit] [--no-websearch]
+python crawler.py --track local-tech    [--top 20] [--workers 8]
+python crawler.py                       # classic keyword crawl + email
+```
+
+Both tracks default to a read-only preview (no email); `--commit` persists
+matches, `--send` emails the tagged digest (remote-neural only).
+
+### Shared machinery
+
+- **`jobcrawler/store.py`** — ONE SQLite store (`local_tech.db`):
+  `companies` (cached LLM mission score, scope tags `neural` / `nc_local`)
+  + `jobs` (dedup state, per-track fields, technical-bar and resume-fit
+  scores). Old DBs migrate in place; `jobcrawler/db.py` adapts legacy
+  callers. Pre-merge `seen_jobs_*.db` files are not imported — the first
+  run re-surfaces previously seen postings once.
+- **`jobcrawler/fetchers/`** — keyword-gated board fetchers (Greenhouse,
+  Lever, Ashby, Kula, JazzHR, BambooHR, ADP, Workday, SuccessFactors,
+  PeopleAdmin, RSS, HN, RemoteOK, Remotive, DDG/JSON-LD) plus
+  `fetchers/company.py`: company-vetted, location-scoped pulls (adds
+  SmartRecruiters + iCIMS + custom careers boards + lazy description
+  hydration) used by the local track.
+- **`jobcrawler/discovery/`** — Claude-driven discovery, BCIWiki sweeps
+  (`discover.py --from-bciwiki`), NC local sourcing (`discover.py --local`),
+  ATS dorking (`discover.py --dork`); all share `discovery/sniffer.py`
+  (single careers-page ATS sniffer: fetchable coordinates, confirm-by-live-
+  count, detection-only leads, headless-browser fallback) and the parallel
+  validation pipeline with VERIFY flags.
+- **Scorers** (`jobcrawler/claude.py`) — technical-bar, company-mission and
+  resume-fit scorers are available to every track; `--fit` ranks the
+  remote-neural digest by resume fit.
+- **Parallelism** (`jobcrawler/parallel.py`) — every track fetches sources
+  on a thread pool (n_cpus-1 default; `CRAWLER_WORKERS`/`DISCOVERY_WORKERS`
+  env to raise).
+
+### Company roster
+
+Companies live in the store, scoped by tags. `config.py`'s lists remain the
+human-reviewable seeds; load them with:
+
+```
+python crawler.py --import-seeds     # config lists -> store (neural / nc_local)
+python discover.py --local           # NC sourcing pass -> store (nc_local)
+python discover.py --from-bciwiki --apply   # BCIWiki -> config lists
+```
+
+The remote-neural track sweeps store companies tagged `neural` (config lists
+as fallback/seed); the local track crawls all active store companies with an
+NC-scoped pull.
+
+### Pivoting
+
+To pivot the search: run the other track. Both mutate the shared keyword
+filter *in-process only* (`tracks/*.apply_to_config`), so nothing on disk
+changes and tracks can run back to back or concurrently (same store; SQLite
+handles the locking on short transactions).

@@ -1,8 +1,26 @@
-"""Crawl "tracks" — self-contained crawl configurations.
+"""Job-search tracks.
 
-Each track bundles its own keyword focus, source list, eligibility filter,
-and digest tag, layered on top of the shared fetchers / db / config. Tracks
-live in their own modules so independent tracks (e.g. remote-neural vs
-local-clinical-ml) can be developed and merged without stepping on each
-other or on the default ``crawler.py`` path.
+A *track* is a self-contained search posture built on the shared machinery
+(fetchers, discovery, store, filters, scorers, parallel fetch). Each track
+supplies its own keyword focus (applied by mutating config's live lists via
+``apply_to_config``), its own gates, its own ranking, and a tagged digest.
+
+    remote-neural  — REMOTE roles anchored on neural signals (BCI/EEG/...)
+                     with a high technical bar and clinical mission.
+    local-tech     — LOCAL (Triangle/NC) roles with a genuine technical bar
+                     and a health/bio/science mission; neural not required.
+
+Pivot between them from the single entry point:
+
+    python crawler.py --track remote-neural
+    python crawler.py --track local-tech
 """
+
+from . import local_tech, remote_neural
+
+TRACKS = {
+    "remote-neural": remote_neural,
+    "local-tech":    local_tech,
+}
+
+__all__ = ["TRACKS", "local_tech", "remote_neural"]

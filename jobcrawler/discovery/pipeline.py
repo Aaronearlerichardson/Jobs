@@ -17,8 +17,8 @@ from .probes import (
     PROBES,
     WorkdayJsProbePool,
     probe_workday,
-    sniff_careers_ats,
 )
+from .sniffer import sniff_careers_ats
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost

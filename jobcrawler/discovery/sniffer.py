@@ -1,67 +1,136 @@
 """
-Careers-page ATS sniffer.
+Careers-page ATS sniffer — the single implementation shared by every
+discovery path (Claude-driven discovery, BCIWiki sweeps, NC local sourcing,
+ATS dorking).
 
 Instead of guessing an ATS board slug from a company name (low recall, false
-collisions), fetch the company's likely careers page(s) and detect which ATS is
-embedded, extracting the *exact* slug/tenant. Covers Greenhouse, Lever, Ashby,
-Workday, SmartRecruiters, iCIMS, and SuccessFactors.
+collisions), fetch the company's likely careers page(s) and detect which ATS
+is embedded, extracting the *exact* slug/tenant/GUID from the embed link.
 
-Returns a dict: {"ats", "slug"|"triple", "careers_url"} or None.
+This merges the two sniffers built independently on the remote-neural and
+local-clinical branches:
+  * fetchable-platform coordinates + confirm-by-live-count + detection-only
+    "leads" for bot-protected platforms, with concurrent URL fetching
+    (remote-neural),
+  * SmartRecruiters/iCIMS/SuccessFactors signatures, non-.com TLD candidate
+    URLs (.xyz/.ai/.io/.bio/.health), custom-board detection, and the
+    headless-browser JsSniffer for JS-rendered pages (local-clinical).
+
+Two call styles:
+  sniff_ats(name)          -> {"ats", "slug"|"triple", "careers_url"} | None
+      Raw detection. Includes platforms that are only *sometimes* fetchable
+      (icims, successfactors, custom) — the local track has scrapers for
+      those; callers decide what to do with the coordinates.
+  sniff_careers_ats(name)  -> {"confirmed": True, ats, slug, count, source_url}
+                            | {"confirmed": False, ats, slug, source_url}   (lead)
+                            | None
+      Pipeline style: prefers a coordinate set it can CONFIRM with a live
+      job count via the slug probes; anything else is surfaced as a lead.
 """
 
+import html
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from bs4 import BeautifulSoup
 
 from ..http import HEADERS
-from .probes import _extract_workday_triple, _name_domain_tokens
+from .probes import PROBES, _extract_workday_triple, _name_domain_tokens
+
+# ─── Platform signatures ─────────────────────────────────────────────────
+#
+# Fetchable platforms: regex captures the board slug; confirmable via a
+# live count (slug probes / ADP requisition API). ADP needs two params
+# (cid, ccId), handled specially. Workday (a triple) is detected first via
+# _extract_workday_triple — highest confidence.
+ATS_LINK_PATTERNS = [
+    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)", re.I)),
+    ("lever",      re.compile(r"jobs\.lever\.co/([a-z0-9_-]+)", re.I)),
+    ("ashby",      re.compile(r"jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)", re.I)),
+    ("kula",       re.compile(r"careers\.kula\.ai/([a-z0-9_-]+)", re.I)),
+    ("jazzhr",     re.compile(r"([a-z0-9-]+)\.applytojob\.com", re.I)),
+    ("bamboohr",   re.compile(r"([a-z0-9-]+)\.bamboohr\.com", re.I)),
+    ("smartrecruiters", re.compile(r"(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)", re.I)),
+    ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/", re.I)),
+]
+_ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
+_ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
+
+# Semi-fetchable: no probe/confirm path, but the local track has best-effort
+# scrapers (fetchers/company.py), so sniff_ats surfaces them as coordinates
+# while sniff_careers_ats treats them as leads.
+SEMI_FETCHABLE_PATTERNS = [
+    ("icims",           re.compile(r"([a-z0-9-]+)\.icims\.com", re.I)),
+    ("successfactors",  re.compile(r"([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
+]
+
+# Detection-only platforms: real ATSes we can recognize but not reliably
+# auto-fetch (bot-protected APIs or JS-only boards). Each regex captures a
+# short identifying host/path for the lead note.
+ATS_LEAD_PATTERNS = [
+    ("eightfold",       re.compile(r"([a-z0-9-]+\.eightfold\.ai)", re.I)),
+    ("dayforce",        re.compile(r"(dayforcehcm\.com/[a-zA-Z-]+/[a-zA-Z0-9_-]+)", re.I)),
+    ("workable",        re.compile(r"(apply\.workable\.com/[a-z0-9-]+)", re.I)),
+    ("recruitee",       re.compile(r"([a-z0-9-]+\.recruitee\.com)", re.I)),
+    ("teamtailor",      re.compile(r"([a-z0-9-]+\.teamtailor\.com)", re.I)),
+    ("jobvite",         re.compile(r"(jobs\.jobvite\.com/[a-z0-9-]+)", re.I)),
+    ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
+    ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
+    ("paylocity",       re.compile(r"(recruiting\.paylocity\.com/[A-Za-z0-9/_-]+)", re.I)),
+    ("paycom",          re.compile(r"(paycomonline\.net/[A-Za-z0-9/_-]+)", re.I)),
+    ("breezy",          re.compile(r"([a-z0-9-]+\.breezy\.hr)", re.I)),
+    ("gohire",          re.compile(r"([a-z0-9-]+\.gohire\.io)", re.I)),
+    # NOTE: Workday is intentionally NOT here — it's fetchable via the CXS
+    # API (probe_workday confirms with a live count), so it must stay a
+    # confirmable path, not a detection-only lead.
+]
+
+_BAD_SUBDOMAINS = ("www", "help", "support", "blog", "app", "careers", "jobs", "secure")
+
+# Fetchable-ATS host detector — used to skip a provided careers_url when
+# it's itself a dead slug-guess against a JSON ATS (already covered by
+# slug probing upstream).
+_FETCHABLE_HOST_RE = re.compile(
+    r"(greenhouse\.io|lever\.co|ashbyhq\.com|kula\.ai|applytojob\.com|bamboohr\.com)",
+    re.I,
+)
 
 _JOB_LINK_RE = re.compile(r"/(careers|positions|jobs|openings|roles)/[a-z0-9]", re.I)
 
 
-def _looks_like_custom_board(html):
+def _looks_like_custom_board(html_text):
     """True if a page has several job-detail links but no known ATS — i.e. a
     self-hosted careers board (like science.xyz) worth scraping directly."""
     try:
-        soup = BeautifulSoup(html, "html.parser")
+        soup = BeautifulSoup(html_text, "html.parser")
     except Exception:
         return False
     n = sum(1 for a in soup.find_all("a", href=True) if _JOB_LINK_RE.search(a["href"]))
     return n >= 3
 
-# ATS URL signatures. Each maps to a capture of the slug/tenant.
-_SIGS = [
-    ("greenhouse", re.compile(r"(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9]+)", re.I)),
-    ("greenhouse", re.compile(r"greenhouse\.io/embed/job_board\?for=([a-z0-9]+)", re.I)),
-    ("lever",      re.compile(r"jobs\.lever\.co/([a-z0-9\-]+)", re.I)),
-    ("ashby",      re.compile(r"jobs\.ashbyhq\.com/([a-z0-9\-]+)", re.I)),
-    ("smartrecruiters", re.compile(r"careers\.smartrecruiters\.com/([A-Za-z0-9]+)", re.I)),
-    ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/", re.I)),
-    ("smartrecruiters", re.compile(r"jobs\.smartrecruiters\.com/([A-Za-z0-9]+)", re.I)),
-    ("icims",      re.compile(r"([a-z0-9\-]+)\.icims\.com", re.I)),
-    ("successfactors", re.compile(r"([a-z0-9\-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
-]
 
-_CAREERS_PATHS = ("/careers", "/careers/", "/careers/open-positions", "/en/careers",
-                  "/company/careers", "/jobs", "/about/careers", "")
-# Not just .com — startups (esp. neurotech/deep-tech) use .xyz/.ai/.io/.bio/.health.
-_TLDS = ("com", "xyz", "ai", "io", "bio", "health", "co")
-
-
+# ─── Candidate careers-page URLs ─────────────────────────────────────────
+#
 # (tld, path) combos in priority order — breadth-first so every name token's
-# high-value URLs (incl. non-.com TLDs like .xyz) are tried before the cap.
+# high-value URLs (incl. non-.com TLDs like .xyz, common for neurotech /
+# deep-tech startups) are tried before the cap.
 _COMBOS = [
     ("com", "/careers"), ("com", "/careers/open-positions"),
     ("xyz", "/careers/open-positions"), ("xyz", "/careers"),
     ("ai", "/careers"), ("io", "/careers"), ("bio", "/careers"),
     ("com", "/jobs"), ("com", "/"), ("health", "/careers"), ("co", "/careers"),
     ("com", "/careers/"), ("com", "/company/careers"),
+    ("com", "/join"), ("com", "/open-positions"),
 ]
+
+_SNIFF_URL_CAP = 26
 
 
 def _candidate_urls(name, careers_url=""):
-    urls = [careers_url] if careers_url else []
+    urls = []
+    if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
+        urls.append(careers_url)
     toks = _name_domain_tokens(name)
     for tld, path in _COMBOS:
         for tok in toks:
@@ -71,30 +140,88 @@ def _candidate_urls(name, careers_url=""):
         urls += [f"https://careers.{tok}.com/", f"https://jobs.{tok}.com/"]
     seen, out = set(), []
     for u in urls:
-        if u not in seen:
+        if u and u not in seen:
             seen.add(u)
             out.append(u)
-    return out[:26]
+        if len(out) >= _SNIFF_URL_CAP:
+            break
+    return out
 
 
-def _detect(text, final_url):
-    """Scan text + final URL for an ATS signature; return (ats, slug) or None."""
+# ─── Detection ───────────────────────────────────────────────────────────
+
+def _detect(text, final_url=""):
+    """Scan text + final URL for an ATS signature.
+
+    Returns (kind, ats, slug) where kind is "fetchable" | "semi" | "lead",
+    or None. Workday first (triple, highest confidence), then ADP (two
+    params, generic host), then single-capture platforms.
+    """
     blob = f"{final_url}\n{text}"
-    # Workday first (triple, highest confidence).
     triple = _extract_workday_triple(blob)
     if triple:
-        return "workday", triple
-    for ats, rx in _SIGS:
-        m = rx.search(blob)
-        if not m:
-            continue
-        slug = m.group(1)
-        # Guard against generic/framework captures.
-        if ats == "icims" and slug.lower() in ("www", "careers", "jobs", "secure"):
-            continue
-        if slug and len(slug) >= 2:
-            return ats, slug
+        return "fetchable", "workday", triple
+    if "workforcenow.adp.com" in blob.lower():
+        unescaped = html.unescape(blob)
+        cid = _ADP_CID_RE.search(unescaped)
+        ccid = _ADP_CCID_RE.search(unescaped)
+        if cid and ccid:
+            return "fetchable", "adp", f"{cid.group(1)}|{ccid.group(1)}"
+    for kind, patterns in (("fetchable", ATS_LINK_PATTERNS),
+                           ("semi", SEMI_FETCHABLE_PATTERNS),
+                           ("lead", ATS_LEAD_PATTERNS)):
+        for ats, rx in patterns:
+            m = rx.search(blob)
+            if not m:
+                continue
+            slug = m.group(1)
+            if kind != "lead" and slug.lower() in _BAD_SUBDOMAINS:
+                continue
+            if slug and len(slug) >= 2:
+                return kind, ats, slug
     return None
+
+
+def _confirm_coords(ats, slug):
+    """Get a live job count for sniffed coordinates. Returns int or None."""
+    if ats == "adp":
+        cid, _, ccid = slug.partition("|")
+        try:
+            r = requests.get(
+                "https://workforcenow.adp.com/mascsr/default/careercenter"
+                "/public/events/staffing/v1/job-requisitions",
+                params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
+                timeout=12, headers={**HEADERS, "Accept": "application/json"},
+            )
+            if r.status_code != 200:
+                return None
+            return int(r.json().get("meta", {}).get("totalNumber", 0) or 0)
+        except Exception:
+            return None
+    probe = PROBES.get(ats)
+    if not probe:
+        return None
+    ok, count = probe(slug)
+    return count if ok else None
+
+
+def _fetch_page(url, timeout=6):
+    """GET one careers-page candidate. Short timeout: most are speculative
+    domain/path guesses that 404 or don't resolve; a real careers page
+    answers fast. Returns the Response on 200 with real content, else None."""
+    try:
+        r = requests.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
+        return r if r.status_code == 200 and len(r.text) >= 300 else None
+    except Exception:
+        return None
+
+
+def _fetch_all(urls):
+    """Fetch candidates concurrently (a miss otherwise pays ~26 sequential
+    GETs — the dominant per-candidate latency in a bulk run); results are
+    evaluated in priority order regardless of completion order."""
+    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+        return dict(zip(urls, pool.map(_fetch_page, urls)))
 
 
 def _pack(ats, slug, careers_url):
@@ -106,22 +233,58 @@ def _pack(ats, slug, careers_url):
     return out
 
 
-def sniff_ats(name, careers_url="", timeout=10):
-    """Fetch candidate careers pages (static) and detect the embedded ATS + slug."""
-    for url in _candidate_urls(name, careers_url):
-        try:
-            r = requests.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
-        except Exception:
-            continue
-        if r.status_code != 200 or len(r.text) < 300:
+# ─── Public API ──────────────────────────────────────────────────────────
+
+def sniff_ats(name, careers_url="", timeout=6):
+    """Raw detection: first fetchable/semi-fetchable ATS found, else a
+    custom self-hosted board, else None. Shape:
+    {"ats", "slug"|"triple", "careers_url"}."""
+    urls = _candidate_urls(name, careers_url)
+    if not urls:
+        return None
+    responses = _fetch_all(urls)
+    custom = None
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
             continue
         hit = _detect(r.text, r.url)
-        if hit:
-            return _pack(hit[0], hit[1], r.url)
-        if _looks_like_custom_board(r.text):
-            return {"ats": "custom", "careers_url": r.url}
-    return None
+        if hit and hit[0] in ("fetchable", "semi"):
+            return _pack(hit[1], hit[2], r.url)
+        if custom is None and _looks_like_custom_board(r.text):
+            custom = {"ats": "custom", "careers_url": r.url}
+    return custom
 
+
+def sniff_careers_ats(name, careers_url=""):
+    """Pipeline style: prefer coordinates we can CONFIRM with a live count;
+    otherwise surface the highest-priority detection as a lead."""
+    urls = _candidate_urls(name, careers_url)
+    if not urls:
+        return None
+    responses = _fetch_all(urls)
+    lead = None  # first (highest-priority) unconfirmable detection seen
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
+            continue
+        hit = _detect(r.text, r.url)
+        if not hit:
+            continue
+        kind, ats, slug = hit
+        if kind == "fetchable" and ats != "workday":
+            count = _confirm_coords(ats, slug)
+            if count is not None:
+                return {"confirmed": True, "ats": ats, "slug": slug,
+                        "count": count, "source_url": r.url}
+        if lead is None:
+            lead_slug = "|".join(map(str, slug)) if isinstance(slug, tuple) else slug
+            lead = {"confirmed": False, "ats": ats, "slug": lead_slug,
+                    "source_url": r.url}
+    return lead
+
+
+# ─── Headless-browser sniffer (JS-rendered careers pages) ────────────────
 
 class JsSniffer:
     """
@@ -165,8 +328,8 @@ class JsSniffer:
                     hit = _detect(page.content(), page.url)
                 except Exception:
                     hit = None
-                if hit:
-                    return _pack(hit[0], hit[1], page.url)
+                if hit and hit[0] in ("fetchable", "semi"):
+                    return _pack(hit[1], hit[2], page.url)
                 try:
                     page.wait_for_load_state("networkidle", timeout=6000)
                 except Exception:
@@ -185,3 +348,7 @@ class JsSniffer:
 
     def __exit__(self, *a):
         self.close()
+
+
+# Back-compat: modules that imported the signature table from here.
+_SIGS = ATS_LINK_PATTERNS + SEMI_FETCHABLE_PATTERNS
