@@ -96,18 +96,15 @@ _FETCHABLE_HOST_RE = re.compile(
     re.I,
 )
 
-_JOB_LINK_RE = re.compile(r"/(careers|positions|jobs|openings|roles)/[a-z0-9]", re.I)
-
-
 def _looks_like_custom_board(html_text):
-    """True if a page has several job-detail links but no known ATS — i.e. a
-    self-hosted careers board (like science.xyz) worth scraping directly."""
+    """True if a page has several GENUINE job-detail links (nav/index links
+    filtered out) — i.e. a self-hosted careers board worth scraping."""
+    from ..fetchers.company import find_job_links
     try:
         soup = BeautifulSoup(html_text, "html.parser")
     except Exception:
         return False
-    n = sum(1 for a in soup.find_all("a", href=True) if _JOB_LINK_RE.search(a["href"]))
-    return n >= 3
+    return len(find_job_links(soup)) >= 3
 
 
 # ─── Candidate careers-page URLs ─────────────────────────────────────────
@@ -251,8 +248,13 @@ def sniff_ats(name, careers_url="", timeout=6):
         hit = _detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
             return _pack(hit[1], hit[2], r.url)
-        if custom is None and _looks_like_custom_board(r.text):
-            custom = {"ats": "custom", "careers_url": r.url}
+        if custom is None:
+            # Custom board: resolve to the page that actually holds the
+            # listings (this page, or the openings page one hop away).
+            from ..fetchers.company import custom_board_listing_url
+            listing = custom_board_listing_url(r.url, r.text)
+            if listing:
+                custom = {"ats": "custom", "careers_url": listing}
     return custom
 
 
