@@ -47,49 +47,99 @@ def _job(jid, title, company, url, location, description=""):
 
 
 # ─── LinkedIn ────────────────────────────────────────────────────────────
+#
+# Three markup generations, all seen in the wild (live DOM and Ctrl+S saves):
+#   1. current obfuscated classes: job anchors carry no stable class names,
+#      but their visible strings are [Title, "Company · Location", "Posted…"];
+#   2. classic authed cards (.job-card-container / artdeco lockups);
+#   3. guest/logged-out cards (.base-card).
+# Detail pages are parsed from the <title> tag ("Job | Company | LinkedIn"),
+# the "(Remote/Hybrid/On-site)" location string, and the "About the job"
+# section. NOTE: "Top job picks" collection pages are virtualized — a Ctrl+S
+# save contains almost no job data; save Job tracker / search / detail pages.
+
+_MODE_RE = re.compile(r"\((Remote|Hybrid|On-site)\)")
+_NONTITLE_RE = re.compile(r"^(apply|easy apply|save|saved|dismiss|x)$", re.I)
+
+
+def _split_company_loc(text):
+    company, _, location = text.partition("\u00b7")
+    return company.strip(), location.strip()
+
 
 def parse_linkedin(soup, page_url=""):
     jobs = []
-    # Card lists (authenticated + guest markup).
-    cards = soup.select("li[data-occludable-job-id], div.job-card-container, "
-                        "div.base-card, li.jobs-search-results__list-item")
-    for c in cards:
+    # Job anchors (generations 1 + 2). Visible strings first; classic-card
+    # selectors as fallback for the older markup.
+    for a in soup.select("a[href*='/jobs/view/']"):
+        m = _LI_VIEW_RE.search(a.get("href", ""))
+        if not m:
+            continue
+        parts = list(a.stripped_strings)
+        if not parts or _NONTITLE_RE.match(parts[0]):
+            continue
+        title = re.sub(r"(.+?)\1$", r"\1", parts[0])   # LinkedIn doubles titles
+        company = location = ""
+        for p in parts[1:4]:
+            if "\u00b7" in p:
+                company, location = _split_company_loc(p)
+                break
+        card = a.find_parent("li") or a.parent
+        if not company and card is not None:
+            company = _sel(card, ".artdeco-entity-lockup__subtitle",
+                           ".job-card-container__primary-description",
+                           "h4.base-search-card__subtitle")
+            location = location or _sel(card, ".job-card-container__metadata-wrapper li",
+                                        ".artdeco-entity-lockup__caption",
+                                        "span.job-search-card__location")
+        j = _job(f"linkedin_{m.group(1)}", title, company,
+                 f"https://www.linkedin.com/jobs/view/{m.group(1)}/", location)
+        if j:
+            jobs.append(j)
+
+    # Guest cards (generation 3): title/company live outside the anchor.
+    for c in soup.select("div.base-card"):
         a = c.select_one("a[href*='/jobs/view/']")
         if not a:
             continue
         m = _LI_VIEW_RE.search(a.get("href", ""))
-        jid = m.group(1) if m else c.get("data-occludable-job-id", "")
-        title = _sel(c, ".job-card-list__title--link", ".job-card-container__link",
-                     "h3.base-search-card__title") or _txt(a)
-        title = re.sub(r"(.+?)\1$", r"\1", title)  # LinkedIn doubles the title
-        company = _sel(c, ".artdeco-entity-lockup__subtitle",
-                       ".job-card-container__primary-description",
-                       "h4.base-search-card__subtitle")
-        location = _sel(c, ".job-card-container__metadata-wrapper li",
-                        ".artdeco-entity-lockup__caption",
-                        "span.job-search-card__location")
-        j = _job(f"linkedin_{jid}" if jid else f"linkedin_{stable_id(title, company)}",
-                 title, company, f"https://www.linkedin.com/jobs/view/{jid}/" if jid else page_url,
-                 location)
+        title = _sel(c, "h3.base-search-card__title")
+        j = _job(f"linkedin_{m.group(1)}" if m else f"linkedin_{stable_id(title)}",
+                 title, _sel(c, "h4.base-search-card__subtitle"),
+                 a.get("href", "").split("?")[0], _sel(c, "span.job-search-card__location"))
         if j:
             jobs.append(j)
 
-    # Detail pane (the job open on the right; carries the description).
-    m = _LI_CURRENT_RE.search(page_url) or _LI_VIEW_RE.search(page_url)
-    title = _sel(soup, ".job-details-jobs-unified-top-card__job-title",
-                 "h1.top-card-layout__title")
-    if m and title:
-        desc = _sel(soup, "#job-details", ".jobs-description__content",
-                    ".description__text")
-        j = _job(f"linkedin_{m.group(1)}", title,
-                 _sel(soup, ".job-details-jobs-unified-top-card__company-name",
-                      "a.topcard__org-name-link"),
-                 f"https://www.linkedin.com/jobs/view/{m.group(1)}/",
-                 _sel(soup, ".job-details-jobs-unified-top-card__primary-description-container",
-                      "span.topcard__flavor--bullet"),
-                 desc)
+    # Detail page: <title> is "Job Title | Company | LinkedIn" (with an
+    # unread-count "(9) " prefix on live DOM). No stable numeric id is
+    # recoverable, so the id hashes title+company.
+    t = soup.title.get_text(" ", strip=True) if soup.title else ""
+    tm = re.match(r"^(?:\(\d+\)\s*)?(.+?)\s*\|\s*(.+?)\s*\|\s*LinkedIn$", t)
+    if tm:
+        title, company = tm.group(1), tm.group(2)
+        loc_el = soup.find(string=_MODE_RE)
+        location = re.sub(r"\s+", " ", str(loc_el)).strip() if loc_el else ""
+        desc, marker = "", soup.find(string=re.compile(r"^\s*About the job\s*$"))
+        sec = marker.find_parent() if marker else None
+        for _ in range(5):
+            if sec is None or len(sec.get_text(" ", strip=True)) > 400:
+                break
+            sec = sec.parent
+        if sec is not None:
+            desc = sec.get_text(" ", strip=True)
+        j = _job(f"linkedin_{stable_id(title, company)}", title, company,
+                 page_url or "", location, desc)
         if j:
-            jobs.append(j)
+            twin = next((x for x in jobs
+                         if x["title"].lower() == j["title"].lower()
+                         and not x["company"]), None)
+            if twin is not None:
+                # Same job seen as a bare anchor: keep its numeric id/url,
+                # take the rich fields from the title-tag parse.
+                twin.update(company=j["company"], location=j["location"],
+                            description=j["description"])
+            else:
+                jobs.append(j)
     return jobs
 
 
@@ -177,8 +227,11 @@ def parse_page(url, html):
         url = _canonical_url(soup)
     low = (url or "").lower()
     if not low.startswith("http"):
-        if soup.select_one("[data-occludable-job-id], .job-card-container, "
-                           ".base-search-card__title"):
+        t = soup.title.get_text(strip=True) if soup.title else ""
+        if t.endswith("LinkedIn") or soup.select_one(
+                "a[href*='linkedin.com/jobs/view/'], [data-occludable-job-id], "
+                ".job-card-container, .base-search-card__title") or \
+                soup.select_one("link[href*='licdn.com'], img[src*='licdn.com']"):
             low = "linkedin."
         elif soup.select_one("div.job_seen_beacon, a.jcs-JobTitle"):
             low = "indeed."

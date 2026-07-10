@@ -438,6 +438,87 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
     return written
 
 
+def resolve_leads(max_workers=8):
+    """Resolve company leads recorded by page capture (inactive rows with
+    no ats) into crawlable boards: slug-probe + careers-page sniff each
+    name, NC-verify, mission-score, activate the hits. The page-capture ->
+    resolve-leads -> crawl loop is how manually browsed postings grow the
+    company roster."""
+    from ..claude import score_company_mission
+    from ..fetchers import company as company_fetch
+    from ..store import connect, get_companies as _store_companies, upsert_company
+    from .sniffer import sniff_ats
+
+    conn = connect()
+    leads = [c for c in _store_companies(conn, active_only=False)
+             if c.get("source") == "page_capture" and not c.get("ats")]
+    if not leads:
+        print("  No unresolved page-capture leads in the store.")
+        conn.close()
+        return []
+    print(f"  resolving {len(leads)} page-capture lead(s) "
+          f"(slug probe -> careers-page sniff -> NC-verify)...")
+
+    def _one(name):
+        hit = probe_company(name, try_workday=False)
+        if hit:
+            return hit
+        s = sniff_ats(name)
+        if not s:
+            return None
+        ats = s["ats"]
+        if ats == "workday":
+            t, p, site = s["triple"]
+            comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
+            slug = (t, p, site)
+        else:
+            comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
+            slug = s.get("slug") or s.get("careers_url")
+        try:
+            nc = len(company_fetch.fetch_company_nc(comp))
+        except Exception:
+            nc = 0
+        return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
+                "careers_url": s.get("careers_url")}
+
+    resolved = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(_one, c["name"]): c for c in leads}
+        for fut in as_completed(futs):
+            c, hit = futs[fut], fut.result()
+            if not hit:
+                print(f"    [miss] {c['name']:32} no board found "
+                      f"(gated/aggregator-only employer?)")
+                continue
+            titles = _sample_titles(hit)
+            tier, score, reason = score_company_mission(
+                hit["name"], " | ".join(t for t in titles if t))
+            active = 1 if (tier in ("healthcare-tech", "health-bio-science")
+                           or tier is None) else 0
+            is_wd = hit["ats"] == "workday"
+            row = {"name": c["name"], "ats": hit["ats"],
+                   "slug": None if is_wd else hit["slug"],
+                   "wd_tenant": hit["slug"][0] if is_wd else None,
+                   "wd_pod":    hit["slug"][1] if is_wd else None,
+                   "wd_site":   hit["slug"][2] if is_wd else None,
+                   "careers_url": hit.get("careers_url"),
+                   "nc_job_count": hit["nc"], "total_job_count": hit["count"],
+                   "mission_tier": tier, "mission_score": score,
+                   "mission_reason": reason,
+                   "tags": "nc_local" if hit["nc"] else None,
+                   "source": "page_capture", "active": active}
+            upsert_company(conn, row)
+            resolved.append(row)
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            print(f"    [{'OK  ' if active else 'off-mission'}] {c['name']:32} "
+                  f"{hit['ats']:12} nc={hit['nc']:<3} {str(tier):20} {ss}")
+    conn.close()
+    print(f"\n  {len(resolved)} board(s) resolved, "
+          f"{sum(r['active'] for r in resolved)} activated, "
+          f"{len(leads) - len(resolved)} miss(es).")
+    return resolved
+
+
 def format_config_block(confirmed):
     by = {"greenhouse": [], "lever": [], "ashby": [], "workday": []}
     for h in confirmed:

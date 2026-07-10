@@ -47,6 +47,9 @@ def main():
                     help="NC local-sourcing pass: curated seeds + RTP directory "
                          "+ careers-page sniffing -> NC-verified boards, "
                          "mission-scored into the company store")
+    ap.add_argument("--resolve-leads", action="store_true",
+                    help="Resolve page-capture company leads (from capture.py) "
+                         "into crawlable boards and activate the hits")
     ap.add_argument("--dork", action="store_true",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
                          "board URLs for NC companies into the company store")
@@ -91,6 +94,11 @@ def main():
     if args.local:
         from jobcrawler.discovery.local_sourcing import populate_companies
         populate_companies()
+        return
+
+    if args.resolve_leads:
+        from jobcrawler.discovery.local_sourcing import resolve_leads
+        resolve_leads()
         return
 
     if args.dork:
