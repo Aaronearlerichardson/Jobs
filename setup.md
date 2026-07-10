@@ -167,108 +167,11 @@ For each suggestion, it asks an ATS (Greenhouse / Lever / Ashby / Kula) if
 the slug exists. Confirmed slugs get written into a markdown report as
 ready-to-paste dict entries for `crawler.py`.
 
-### Credentials for gated sites — two options
+### Gated sites (LinkedIn / Indeed / Wellfound)
 
-**Option A — session capture (preferred).**
-Opens a real browser, you log in normally (2FA, captchas, device
-challenges — all handled by you, not the script). When you're done,
-the script saves the browser's cookies + localStorage to
-`sessions/<site>.json`. Your password never touches disk.
-
-```
-pip install playwright playwright-stealth
-playwright install chrome       # recommended — real Chrome bypasses Cloudflare
-playwright install chromium     # fallback (test build — often blocked)
-playwright install firefox      # alternative engine
-
-python discover.py --capture-session linkedin
-python discover.py --capture-session indeed
-python discover.py --capture-session wellfound
-
-python discover.py --list-sessions          # show captured sessions + age
-python discover.py --test-session linkedin  # verify session is still valid
-```
-
-Supported sites: `linkedin`, `indeed`, `wellfound`. `sessions/` is
-gitignored by default.
-
-**Cloudflare error 300031 / Turnstile failing?** Playwright's bundled
-Chromium has a "HeadlessChrome" build signature that Cloudflare flags on
-sites like LinkedIn. Use `--browser chrome` (the default) to launch your
-real installed Chrome instead — that's what gets past most Turnstile
-challenges. If Chrome still fails, try Firefox:
-
-```
-python discover.py --capture-session linkedin --browser chrome    # default
-python discover.py --capture-session linkedin --browser firefox   # alt
-python discover.py --capture-session linkedin --browser chromium  # test build
-```
-
-**Still failing? Use a COPY of your REAL Chrome profile (`--use-profile`).**
-
-This makes a copy of your live Chrome profile (cookies, history,
-extensions, signed-in state) at `sessions/chrome-profile/` and launches
-Chrome against the copy. Why a copy? Chrome refuses to enable its remote
-debugging interface on the default user-data dir — Playwright can't
-control a Chrome instance running on your live profile directly.
-
-Cloudflare still sees the cookies / history / trust signal from your real
-profile, just routed through the copy. This is the strongest bypass
-short of a residential proxy.
-
-```
-# Quit Chrome FULLY first (check the system tray). Then:
-python discover.py --capture-session linkedin --use-profile
-```
-
-The copy is created on first run (10-60s, depending on profile size) and
-reused on subsequent runs. To re-copy from your live Chrome (e.g. after
-logging into a new site in regular Chrome):
-
-```
-python discover.py --capture-session linkedin --use-profile --refresh-profile
-```
-
-If you use multiple Chrome profiles, pick the one already signed into the
-target site:
-
-```
-python discover.py --capture-session linkedin --use-profile --profile-directory "Profile 1"
-```
-
-Override the user-data dir if yours isn't at the standard Windows location
-(`%LOCALAPPDATA%\Google\Chrome\User Data`):
-
-```
-python discover.py --capture-session linkedin --use-profile --user-data-dir "D:\chrome-data"
-```
-
-**Gotchas:**
-- Chrome must be fully quit. If you see "ProcessSingleton" or "user data
-  directory is already in use", Chrome is still running somewhere. Kill it.
-- Once you've captured a session JSON, you don't need `--use-profile` for
-  `--test-session` or automated fetches. The saved cookies work with plain
-  ephemeral Chrome.
-- `--use-profile` forces `--browser chrome` (persistent context only works
-  with the chromium-based engine).
-
-**Option B — paste raw cookies (legacy).**
-If you already have cookie values from DevTools:
-
-```
-python discover.py --credentials-init
-python discover.py --credentials-check
-```
-
-`credentials.json` is gitignored by default.
-
-**Fair warning (applies to both options):** automated access to
-LinkedIn / Indeed / Glassdoor / Wellfound violates their ToS and can get
-your account suspended or banned. Session capture protects your password
-but does NOT reduce the ToS risk. Run sparingly and space requests out
-(1 req / 5–15 s with jitter is a reasonable starting point).
-
----
+Automated login-session scraping was removed — see **Manual page capture**
+at the bottom of this file: you browse logged in as yourself and send pages
+to `capture.py` with one click (or Ctrl+S).
 
 ## Files created at runtime
 
@@ -414,3 +317,28 @@ To pivot the search: run the other track. Both mutate the shared keyword
 filter *in-process only* (`tracks/*.apply_to_config`), so nothing on disk
 changes and tracks can run back to back or concurrently (same store; SQLite
 handles the locking on short transactions).
+
+
+## Manual page capture (gated sites: LinkedIn / Indeed / anything)
+
+Automated login-session scraping was removed (account-ban risk, bot
+detection). Instead, you browse logged in as yourself and hand pages to the
+crawler:
+
+```
+python capture.py                    # start the local capture server
+```
+
+Open `http://127.0.0.1:8877/` once to install the userscript (needs
+Violentmonkey or Tampermonkey). Then on any LinkedIn/Indeed results or job
+page, click the floating **-> Jobs** button: the page's live DOM is parsed
+(site-specific selectors -> JSON-LD -> generic job links), postings are
+exclude/technical-gated, resume-fit-scored, and written to the store; new
+company names are recorded as inactive `page_capture` leads for a later
+`python discover.py --local` pass to resolve.
+
+No userscript? Save pages with Ctrl+S and run:
+
+```
+python capture.py "Saved Page.html" [more.html ...]
+```
