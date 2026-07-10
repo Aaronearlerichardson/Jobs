@@ -47,6 +47,10 @@ def main():
                     help="NC local-sourcing pass: curated seeds + RTP directory "
                          "+ careers-page sniffing -> NC-verified boards, "
                          "mission-scored into the company store")
+    ap.add_argument("--add-board", nargs=2, metavar=("NAME", "URL"),
+                    help="Register a known board directly: company name + its ATS "
+                         "board URL (or careers page). No guessing; NC-verifies, "
+                         "mission-scores, activates.")
     ap.add_argument("--resolve-leads", action="store_true",
                     help="Resolve page-capture company leads (from capture.py) "
                          "into crawlable boards and activate the hits")
@@ -94,6 +98,11 @@ def main():
     if args.local:
         from jobcrawler.discovery.local_sourcing import populate_companies
         populate_companies()
+        return
+
+    if args.add_board:
+        from jobcrawler.discovery.local_sourcing import add_board
+        add_board(*args.add_board)
         return
 
     if args.resolve_leads:

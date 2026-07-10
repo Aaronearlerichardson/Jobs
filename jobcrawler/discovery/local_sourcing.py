@@ -438,6 +438,110 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
     return written
 
 
+def add_board(name, url):
+    """Register a board the user already knows — no guessing. `url` may be
+    the ATS board itself (myworkdayjobs / greenhouse / lever / ...) or the
+    company's careers page; coordinates are detected, the board NC-counted,
+    mission-scored, and activated.
+
+        python discover.py --add-board "NC DHHS" https://nc.wd108.myworkdayjobs.com/NC_Careers
+    """
+    from ..claude import score_company_mission
+    from ..fetchers import company as company_fetch
+    from ..store import connect, upsert_company
+    from .sniffer import _detect, _pack
+
+    hit = _detect("", url)
+    if hit and hit[0] in ("fetchable", "semi"):
+        found = _pack(hit[1], hit[2], url)
+    else:
+        found = sniff_ats(name, careers_url=url)
+    if not found:
+        print(f"  [!] No ATS coordinates found at/near {url}")
+        return None
+
+    ats = found["ats"]
+    if ats == "workday":
+        t, pd, site = found["triple"]
+        comp = {"ats": "workday", "wd_tenant": t, "wd_pod": pd, "wd_site": site}
+        slug = (t, pd, site)
+    else:
+        comp = {"ats": ats, "slug": found.get("slug"),
+                "careers_url": found.get("careers_url") or url}
+        slug = found.get("slug") or url
+    try:
+        nc = len(company_fetch.fetch_company(comp, company_fetch.NC_RE))
+    except Exception:
+        nc = 0
+
+    sample_hit = {"ats": ats, "slug": slug}
+    titles = _sample_titles(sample_hit)
+    tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
+
+    conn = connect()
+    is_wd = ats == "workday"
+    upsert_company(conn, {
+        "name": name, "ats": ats,
+        "slug": None if is_wd else (found.get("slug") or None),
+        "wd_tenant": slug[0] if is_wd else None,
+        "wd_pod":    slug[1] if is_wd else None,
+        "wd_site":   slug[2] if is_wd else None,
+        "careers_url": found.get("careers_url") or url,
+        "nc_job_count": nc, "mission_tier": tier, "mission_score": score,
+        "mission_reason": reason, "tags": "nc_local" if nc else None,
+        "source": "manual", "active": 1,
+    })
+    conn.close()
+    ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+    print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  ACTIVE")
+    return found
+
+
+def _websearch_board(name, max_results=6):
+    """Find a company's board via web search when domain-guessing fails
+    (gov/org domains, acronyms: 'NC DHHS' -> ncdhhs.gov -> nc.wd108).
+    Returns the sniff_ats result shape, or None."""
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+    except ImportError:
+        return None
+    import requests as _rq
+
+    from ..http import HEADERS as _H
+    from .sniffer import _detect, _pack
+
+    urls = []
+    try:
+        with DDGS() as ddg:
+            for r in ddg.text(f'"{name}" careers jobs', max_results=max_results):
+                u = r.get("href") or r.get("url")
+                if u:
+                    urls.append(u)
+    except Exception:
+        return None
+    # Pass 1: coordinates visible in the result URL itself (myworkdayjobs,
+    # boards.greenhouse.io, ... links surface directly in search results).
+    for u in urls:
+        hit = _detect("", u)
+        if hit and hit[0] in ("fetchable", "semi"):
+            return _pack(hit[1], hit[2], u)
+    # Pass 2: fetch the top results and sniff their content.
+    for u in urls[:4]:
+        try:
+            r = _rq.get(u, timeout=8, headers=_H, allow_redirects=True)
+            if r.status_code != 200:
+                continue
+        except Exception:
+            continue
+        hit = _detect(r.text, r.url)
+        if hit and hit[0] in ("fetchable", "semi"):
+            return _pack(hit[1], hit[2], r.url)
+    return None
+
+
 def resolve_leads(max_workers=8):
     """Resolve company leads recorded by page capture (inactive rows with
     no ats) into crawlable boards: slug-probe + careers-page sniff each
@@ -460,10 +564,15 @@ def resolve_leads(max_workers=8):
           f"(slug probe -> careers-page sniff -> NC-verify)...")
 
     def _one(name):
-        hit = probe_company(name, try_workday=False)
+        # Workday fallback ON: enterprise leads (Analog Devices, Cadence,
+        # Teledyne, ...) overwhelmingly live on Workday, and a lead list is
+        # small enough to afford the careers-page scrape.
+        hit = probe_company(name, try_workday=True)
         if hit:
             return hit
         s = sniff_ats(name)
+        if not s:
+            s = _websearch_board(name)
         if not s:
             return None
         ats = s["ats"]
