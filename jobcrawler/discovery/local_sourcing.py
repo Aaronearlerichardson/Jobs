@@ -542,6 +542,52 @@ def _websearch_board(name, max_results=6):
     return None
 
 
+def score_missions(max_workers=6, rescore_all=False):
+    """Backfill company mission scores: every active company with a board
+    and no mission_tier (or all of them, with rescore_all) gets sampled
+    titles + one score_company_mission call. Heals stores populated by
+    --import-seeds (which deliberately imports without scoring) or by
+    keyless/failed scoring passes."""
+    from ..claude import score_company_mission
+    from ..store import connect, get_companies, upsert_company
+    from ..sources import store_slug
+
+    conn = connect()
+    cos = [c for c in get_companies(conn, active_only=True)
+           if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
+    if not cos:
+        print("  Nothing to score - every active company has a mission tier.")
+        conn.close()
+        return 0
+    print(f"  mission-scoring {len(cos)} compan(ies)...")
+
+    def _one(c):
+        hit = {"ats": c["ats"],
+               "slug": ((c.get("wd_tenant"), c.get("wd_pod"), c.get("wd_site"))
+                        if c["ats"] == "workday" else c.get("slug"))}
+        titles = _sample_titles(hit)
+        return c, score_company_mission(c["name"], " | ".join(t for t in titles if t))
+
+    n = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for fut in as_completed({ex.submit(_one, c): c for c in cos}):
+            try:
+                c, (tier, score, reason) = fut.result()
+            except Exception as e:
+                print(f"    [!] {e}")
+                continue
+            if tier is None and score is None:
+                continue          # scoring unavailable - leave the row alone
+            upsert_company(conn, {"name": c["name"], "mission_tier": tier,
+                                  "mission_score": score, "mission_reason": reason})
+            n += 1
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason})")
+    conn.close()
+    print(f"\n  {n} compan(ies) scored.")
+    return n
+
+
 def resolve_leads(max_workers=8):
     """Resolve company leads recorded by page capture (inactive rows with
     no ats) into crawlable boards: slug-probe + careers-page sniff each

@@ -51,6 +51,12 @@ def main():
                     help="Register a known board directly: company name + its ATS "
                          "board URL (or careers page). No guessing; NC-verifies, "
                          "mission-scores, activates.")
+    ap.add_argument("--score-missions", action="store_true",
+                    help="Backfill mission scores for active companies that "
+                         "have a board but no mission tier (seeds import "
+                         "deliberately skips scoring)")
+    ap.add_argument("--rescore-missions", action="store_true",
+                    help="Re-score mission for ALL active companies")
     ap.add_argument("--resolve-leads", action="store_true",
                     help="Resolve page-capture company leads (from capture.py) "
                          "into crawlable boards and activate the hits")
@@ -103,6 +109,11 @@ def main():
     if args.add_board:
         from jobcrawler.discovery.local_sourcing import add_board
         add_board(*args.add_board)
+        return
+
+    if args.score_missions or args.rescore_missions:
+        from jobcrawler.discovery.local_sourcing import score_missions
+        score_missions(rescore_all=args.rescore_missions)
         return
 
     if args.resolve_leads:

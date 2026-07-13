@@ -129,6 +129,10 @@ def upsert_company(conn, c):
     both scopes.
     """
     c = {**c, "last_probed": c.get("last_probed") or datetime.now().isoformat()}
+    # Drop None-valued keys: an upsert must never erase an existing value
+    # (e.g. a failed/keyless mission-scoring pass writing mission_score=None
+    # over a previously scored company). Inserts still get NULL defaults.
+    c = {k: v for k, v in c.items() if v is not None}
     old = conn.execute("SELECT tags FROM companies WHERE name=?",
                        (c["name"],)).fetchone()
     if old and old["tags"]:
