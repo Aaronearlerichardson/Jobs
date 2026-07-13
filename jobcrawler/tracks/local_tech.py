@@ -17,6 +17,7 @@ import config
 
 from .. import store
 from ..claude import score_resume_fit
+from ..filters import is_relevant
 from ..fetchers import company as company_fetch
 from ..parallel import fetch_all
 from ..remote_filter import remote_signal
@@ -270,6 +271,22 @@ def heuristic_score(title, description=""):
 #  Runner.                                                                      #
 # --------------------------------------------------------------------------- #
 
+def _keep_job(company, job):
+    """Local-track posting filter, shared by the full crawl and single-company
+    crawls: exclude gate, technical-title gate, plus the health-keyword gate
+    for multi-division conglomerates (keep only their aligned-subdivision
+    roles — focused companies were already mission-vetted and skip it)."""
+    title = job.get("title", "")
+    desc = job.get("description", "")
+    if exclude_reason(title, desc):
+        return False
+    if not is_technical_role(title):
+        return False
+    if config.is_multi_division(company["name"]) and not is_relevant(title, desc):
+        return False
+    return True
+
+
 def _score_job(resume, company, job):
     company_fetch.hydrate_description(job)
     fit, reason = score_resume_fit(resume, job["title"], job.get("description", ""))
@@ -279,8 +296,32 @@ def _score_job(resume, company, job):
         "track": TRACK,
         "geo_mode": geo_mode(job["location"], job.get("description", "")) or "onsite",
         "description": (job.get("description", "") or "")[:2000],
-        "tech_bar_score": None, "resume_fit_score": fit, "fit_reason": reason,
+        "resume_fit_score": fit, "fit_reason": reason,
     }
+
+
+def crawl_company(conn, resume, company, max_workers=6):
+    """Fetch ONE store company's NC-scoped board, apply the local-track
+    filters, resume-fit-score the new postings, and store them. Returns
+    (n_nc_fetched, n_kept, n_new). Used by the single-job --add flow to pull
+    a company's other jobs once it's in the roster."""
+    try:
+        jobs = company_fetch.fetch_company(company, company_fetch.NC_RE)
+    except Exception as e:
+        print(f"    [!] fetch error for {company['name']}: {e}")
+        return (0, 0, 0)
+    kept = [j for j in jobs if _keep_job(company, j)]
+    fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
+    n_new = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = [ex.submit(_score_job, resume, company, j) for j in fresh]
+        for fut in as_completed(futs):
+            try:
+                store.upsert_job(conn, fut.result())
+                n_new += 1
+            except Exception as e:
+                print(f"    [!] scoring error: {e}")
+    return (len(jobs), len(kept), n_new)
 
 
 def run(max_workers=6, top_n=15):
@@ -317,13 +358,7 @@ def run(max_workers=6, top_n=15):
             print(f"  {c['name']:26} [!] fetch error: {err}")
             continue
         n_fetched += len(jobs)
-        kept = []
-        for j in jobs:
-            if exclude_reason(j["title"], j.get("description", "")):
-                continue
-            if not is_technical_role(j["title"]):
-                continue
-            kept.append(j)
+        kept = [j for j in jobs if _keep_job(c, j)]
         n_tech += len(kept)
         fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
         n_skip += len(kept) - len(fresh)
@@ -344,15 +379,19 @@ def run(max_workers=6, top_n=15):
             except Exception as e:
                 print(f"    [!] scoring error: {e}")
 
-    ranked = store.ranked_jobs(conn, track=TRACK)
+    # Geography enforced at the query layer (not the `track` label): only
+    # NC-locatable postings appear in the local search, whatever ingested them.
+    ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE)
     write_digest(ranked)
 
-    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
+    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY COMBINED FIT×MISSION\n  {bar}")
     for j in ranked[:top_n]:
         fit = j["resume_fit_score"]
         fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
+        comb = j.get("combined_score")
+        cs = f"{comb:.2f}" if isinstance(comb, float) else "n/a"
         tier = j.get("mission_tier") or "?"
-        print(f"  {TAG} fit={fs} [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}")
+        print(f"  {TAG} score={cs} (fit={fs}) [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}")
         print(f"        {j['company_name']} ({tier})  -  {j.get('fit_reason','')}")
         print(f"        {j['url']}")
     print(f"\n  {len(ranked)} job(s) in store; {scored} newly scored this run.")
@@ -400,37 +439,56 @@ def rescore_all(max_workers=6, track=None):
     return n
 
 
-def ingest_external_jobs(jobs, source="indeed", max_workers=6):
+def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
     """
     Ingest external job dicts into the jobs table with resume-fit scores.
     Each dict: {id?, title, company, url, location, description?}. Applies the
     same exclude + technical-title gate as the crawl. For agent-mediated
     sources (e.g. the Indeed MCP) that the standalone crawler can't poll —
     the caller supplies the fetched jobs.
+
+    `curated=True` (manual --add): the caller hand-picked these jobs, so the
+    exclude + technical-title guesswork is skipped — but the NC location gate
+    still applies (the local track is Triangle-scoped by definition).
     """
     import hashlib
     resume = resume_text()
     conn = store.connect()
-    kept = []
+    kept, n_nonlocal = [], 0
     for j in jobs:
         if not j.get("id"):
             key = (j.get("url") or "") + (j.get("title") or "") + (j.get("company") or "")
             j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
-        if exclude_reason(j.get("title", ""), j.get("description", "")):
+        # Local-tech is a Triangle/NC track: gate ingested jobs on the same
+        # NC location filter the live crawl applies inside its fetchers.
+        # Without this, agent-sourced boards (LinkedIn/Indeed) inject CA/TX
+        # postings that then rank in the local top-10. Enforced even for
+        # curated adds — the track is NC by definition.
+        if not company_fetch.NC_RE.search(j.get("location", "") or ""):
+            n_nonlocal += 1
             continue
-        if not is_technical_role(j.get("title", "")):
-            continue
+        if not curated:
+            if exclude_reason(j.get("title", ""), j.get("description", "")):
+                continue
+            if not is_technical_role(j.get("title", "")):
+                continue
         if not store.job_exists(conn, j["id"]):
+            # Resolve the company link on the MAIN thread — SQLite connections
+            # can't cross into the scoring pool below. Link to a vetted company
+            # row when the name matches, so the job inherits its mission score
+            # (else it stays an orphan and sinks under the combined ranking).
+            j["_company_id"] = store.company_id_by_name(conn, j.get("company"))
             kept.append(j)
 
     def _score(j):
         fit, reason = score_resume_fit(resume, j["title"], j.get("description", ""))
-        return {"job_id": j["id"], "company_id": None, "company_name": j.get("company"),
+        return {"job_id": j["id"], "company_id": j.get("_company_id"),
+                "company_name": j.get("company"),
                 "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),
                 "track": TRACK,
                 "geo_mode": geo_mode(j.get("location", ""), j.get("description", "")) or "onsite",
                 "description": (j.get("description", "") or "")[:2000],
-                "tech_bar_score": None, "resume_fit_score": fit, "fit_reason": reason,
+                "resume_fit_score": fit, "fit_reason": reason,
                 "status": "open"}
 
     scored = 0
@@ -441,9 +499,92 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6):
                 scored += 1
             except Exception as e:
                 print(f"    [!] ingest error: {e}")
-    print(f"  ingested {scored} new {source} job(s) ({len(kept)} technical, "
-          f"{len(jobs)} raw)")
+    print(f"  ingested {scored} new {source} job(s) ({len(kept)} kept, "
+          f"{n_nonlocal} non-NC dropped, {len(jobs)} raw)")
     return scored
+
+
+def add_manual_job(url, title, company, location, description="",
+                   pull_board=True, max_workers=6):
+    """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
+    company's board resolves — pull its OTHER NC jobs too.
+
+    The single job is curated (exclude/technical gates skipped, you chose it)
+    but still NC-gated: a non-NC posting is dropped, because the local track
+    is Triangle-scoped by definition. For bot-gated giants (Meta, Google) the
+    board won't resolve, so only the one job lands and the company is recorded
+    for a later retry. Returns a summary dict.
+    """
+    from ..discovery.local_sourcing import resolve_company_board, _sample_titles
+    from ..claude import score_company_mission, ACTIVE_MISSION_TIERS
+
+    name = (company or "").strip()
+    if not name or not (url or title):
+        print("  [!] --add needs --company plus at least --url or --title.")
+        return {}
+
+    # 1) Company: resolve a board if we don't already have one for it, so the
+    #    job links to a real company row (and its board can be pulled below).
+    conn = store.connect()
+    existing = next((c for c in store.get_companies(conn, active_only=False)
+                     if (c["name"] or "").lower() == name.lower()), None)
+    board = None
+    if not existing or not existing.get("ats"):
+        print(f"  resolving board for {name!r}...")
+        board = resolve_company_board(name)
+    if board:
+        is_wd = board["ats"] == "workday"
+        slug = board["slug"]
+        titles = _sample_titles(board)
+        tier, score, reason = score_company_mission(
+            name, " | ".join(t for t in titles if t))
+        active = 1 if (tier in ACTIVE_MISSION_TIERS
+                       or config.is_multi_division(name) or tier is None) else 0
+        store.upsert_company(conn, {
+            "name": name, "ats": board["ats"],
+            "slug": None if is_wd else slug,
+            "wd_tenant": slug[0] if is_wd else None,
+            "wd_pod": slug[1] if is_wd else None,
+            "wd_site": slug[2] if is_wd else None,
+            "careers_url": board.get("careers_url"),
+            "nc_job_count": board["nc"], "total_job_count": board["count"],
+            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
+            "tags": "nc_local" if board["nc"] else None,
+            "source": "manual_add", "active": active,
+        })
+        print(f"    board resolved: {board['ats']} nc={board['nc']} "
+              f"mission={tier} ({score if score is not None else 'n/a'})")
+    elif not existing:
+        store.upsert_company(conn, {"name": name, "active": 0, "source": "manual_add",
+                                    "notes": f"manual add from {url}"})
+        print("    company recorded (board unresolved — gated / unknown ATS)")
+    else:
+        print(f"    company already in roster (ats={existing.get('ats')})")
+    conn.close()
+
+    # 2) The single job — curated (skip exclude/technical), NC gate still on.
+    print(f"  adding job: {title!r} @ {name} [{location}]")
+    n_job = ingest_external_jobs(
+        [{"title": title, "company": name, "url": url,
+          "location": location or "", "description": description or ""}],
+        source="manual", curated=True)
+
+    # 3) The company's OTHER jobs — crawl its board whenever it has one
+    #    (freshly resolved OR already in the roster), unless --no-board.
+    n_other = 0
+    conn = store.connect()
+    row = next((c for c in store.get_companies(conn, active_only=False)
+                if (c["name"] or "").lower() == name.lower()), None)
+    has_board = bool(row and row.get("ats"))
+    if pull_board and has_board:
+        _, _, n_other = crawl_company(conn, resume_text(), row, max_workers)
+        print(f"    pulled {n_other} other NC job(s) from {name}'s board")
+    conn.close()
+
+    status = "active board" if has_board else "recorded (board unresolved)"
+    print(f"\n  DONE: +{n_job} job, +{n_other} from board; company '{name}' - {status}.")
+    return {"job_added": n_job, "other_jobs": n_other,
+            "board": has_board, "company": name}
 
 
 def write_digest(ranked):
@@ -451,13 +592,16 @@ def write_digest(ranked):
     path = config.REPORT_DIR / f"local_tech_{datetime.now():%Y-%m-%d}.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {TAG} Job Digest — {datetime.now():%Y-%m-%d}\n\n")
-        f.write(f"**{len(ranked)} job(s)**, ranked by resume-fit (company mission as tiebreak).\n\n")
-        f.write("| Fit | Company | Mission | Title | Location | Why |\n")
-        f.write("|----:|---------|---------|-------|----------|-----|\n")
+        f.write(f"**{len(ranked)} job(s)**, ranked by combined score "
+                f"= √(resume-fit × company-mission).\n\n")
+        f.write("| Score | Fit | Company | Mission | Title | Location | Why |\n")
+        f.write("|------:|----:|---------|---------|-------|----------|-----|\n")
         for j in ranked:
             fit = j["resume_fit_score"]
             fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-            f.write(f"| {fs} | {j['company_name']} | {j.get('mission_tier') or '?'} "
+            comb = j.get("combined_score")
+            cs = f"{comb:.2f}" if isinstance(comb, float) else "n/a"
+            f.write(f"| {cs} | {fs} | {j['company_name']} | {j.get('mission_tier') or '?'} "
                     f"| [{j['title']}]({j['url']}) | {j['location']} | {j.get('fit_reason','')} |\n")
     print(f"  digest -> {path}")
     return path

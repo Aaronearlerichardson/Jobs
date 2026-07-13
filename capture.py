@@ -51,6 +51,7 @@ USERSCRIPT = r"""// ==UserScript==
 // @match        https://www.indeed.com/*
 // @match        https://wellfound.com/*
 // @match        https://*.builtin.com/*
+// @match        https://www.metacareers.com/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
 // @connect      127.0.0.1
@@ -236,7 +237,26 @@ def main():
     ap.add_argument("--port", type=int, default=PORT_DEFAULT)
     ap.add_argument("--url", default="", help="Original page URL for a single ingested file "
                                               "(improves site-specific parsing)")
+    # --add: hand-pick one job from a gated/JS site (Meta, Google, any custom
+    # board) the auto-parsers can't reach. Bypasses the exclude/technical
+    # gates (you chose it) but keeps the NC location gate; also registers the
+    # company and pulls its other NC jobs when its board resolves.
+    ap.add_argument("--add", action="store_true",
+                    help="Add one curated job by fields (see --title/--company/--location)")
+    ap.add_argument("--title", default="", help="With --add: the job title")
+    ap.add_argument("--company", default="", help="With --add: the employer name")
+    ap.add_argument("--location", default="", help="With --add: the job location (must be NC to pass the gate)")
+    ap.add_argument("--desc", default="", help="With --add: optional job description")
+    ap.add_argument("--no-board", action="store_true",
+                    help="With --add: don't also pull the company's other jobs")
     args = ap.parse_args()
+
+    if args.add:
+        from jobcrawler.tracks.local_tech import add_manual_job
+        add_manual_job(url=args.url, title=args.title, company=args.company,
+                       location=args.location, description=args.desc,
+                       pull_board=not args.no_board)
+        return
 
     if args.files:
         for f in args.files:

@@ -9,10 +9,24 @@ Design (merged from both development tracks):
     list simplifies the job list."  (local-clinical insight)
 """
 
+import math
 import sqlite3
 from datetime import datetime
 
 import config
+
+
+def combined_score(fit, mission):
+    """Geometric mean sqrt(fit * mission) of the resume-fit and company
+    mission scores (both 0..1). Returns None if either is missing, so a job
+    is only ranked once both factors are known. The geometric mean punishes
+    imbalance: a strong fit at a weak-mission company scores far below a job
+    that is solid on both axes (0.9*0.2 -> 0.42 < balanced 0.5*0.5 -> 0.50)."""
+    if fit is None or mission is None:
+        return None
+    if fit < 0 or mission < 0:
+        return None
+    return math.sqrt(fit * mission)
 
 
 # --------------------------------------------------------------------------- #
@@ -29,10 +43,9 @@ CREATE TABLE IF NOT EXISTS companies (
     wd_pod         INTEGER,
     wd_site        TEXT,
     careers_url    TEXT,
-    hq_location    TEXT,
     nc_job_count   INTEGER DEFAULT 0,
     total_job_count INTEGER DEFAULT 0,
-    mission_tier   TEXT,              -- healthcare-tech|health-bio-science|other
+    mission_tier   TEXT,              -- healthcare-tech|health-bio-science|community-driven-tech|other
     mission_score  REAL,              -- 0..1 (health/tech relevance)
     mission_reason TEXT,
     tags           TEXT,              -- comma tokens: neural,nc_local,remote_friendly
@@ -55,9 +68,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     remote_eligible INTEGER,              -- 1 when the remote filter passed
     remote_signal  TEXT,                  -- phrase/hint that marked it remote
     neural_signal  TEXT,                  -- neural anchor term that matched
-    mission        TEXT,                  -- job-level mission tier (if scored)
     description    TEXT,
-    tech_bar_score REAL,
     resume_fit_score REAL,
     fit_reason     TEXT,
     first_seen     TEXT,
@@ -84,8 +95,16 @@ _MIGRATIONS = {
         "remote_eligible": "INTEGER",
         "remote_signal":   "TEXT",
         "neural_signal":   "TEXT",
-        "mission":         "TEXT",
     },
+}
+
+# Columns retired after the unified refactor. Dropped idempotently on connect
+# so existing DBs (which keep old columns under CREATE TABLE IF NOT EXISTS)
+# shed them too. All three were 100% NULL — mission/tech_bar_score became
+# company-level after unification; hq_location was never populated.
+_DROPPED_COLUMNS = {
+    "jobs": ("mission", "tech_bar_score"),
+    "companies": ("hq_location",),
 }
 
 
@@ -95,6 +114,11 @@ def _ensure_columns(conn):
         for col, decl in cols.items():
             if col not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+    for table, cols in _DROPPED_COLUMNS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for col in cols:
+            if col in existing:
+                conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
     conn.commit()
 
 
@@ -115,7 +139,7 @@ def connect(path=None):
 
 _COMPANY_COLS = (
     "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url",
-    "hq_location", "nc_job_count", "total_job_count", "mission_tier",
+    "nc_job_count", "total_job_count", "mission_tier",
     "mission_score", "mission_reason", "tags", "source", "active",
     "last_probed", "notes",
 )
@@ -149,6 +173,18 @@ def upsert_company(conn, c):
     )
     conn.commit()
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
+    return row["id"] if row else None
+
+
+def company_id_by_name(conn, name):
+    """Resolve a company name to its id (case-insensitive exact match), or
+    None if the store has no such company. Used to link externally-ingested
+    jobs to their vetted company row so they inherit its mission score."""
+    if not name:
+        return None
+    row = conn.execute(
+        "SELECT id FROM companies WHERE lower(name) = lower(?) LIMIT 1",
+        (name,)).fetchone()
     return row["id"] if row else None
 
 
@@ -193,10 +229,10 @@ def upsert_job(conn, j):
     conn.execute(
         """INSERT INTO jobs
             (job_id, company_id, company_name, title, url, location, track,
-             geo_mode, remote_eligible, remote_signal, neural_signal, mission,
-             description, tech_bar_score, resume_fit_score, fit_reason,
+             geo_mode, remote_eligible, remote_signal, neural_signal,
+             description, resume_fit_score, fit_reason,
              first_seen, last_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url, location=excluded.location,
              track=COALESCE(excluded.track, track),
@@ -204,9 +240,7 @@ def upsert_job(conn, j):
              remote_eligible=COALESCE(excluded.remote_eligible, remote_eligible),
              remote_signal=COALESCE(excluded.remote_signal, remote_signal),
              neural_signal=COALESCE(excluded.neural_signal, neural_signal),
-             mission=COALESCE(excluded.mission, mission),
              description=excluded.description,
-             tech_bar_score=COALESCE(excluded.tech_bar_score, tech_bar_score),
              resume_fit_score=COALESCE(excluded.resume_fit_score, resume_fit_score),
              fit_reason=COALESCE(NULLIF(excluded.fit_reason,''), fit_reason),
              last_seen=excluded.last_seen,
@@ -214,7 +248,7 @@ def upsert_job(conn, j):
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
          j.get("url"), j.get("location"), j.get("track"), j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("neural_signal"),
-         j.get("mission"), j.get("description"), j.get("tech_bar_score"),
+         j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
          now, now, j.get("status", "open")),
     )
@@ -222,20 +256,46 @@ def upsert_job(conn, j):
     return new
 
 
-def ranked_jobs(conn, track=None, limit=None):
-    """Jobs joined to company mission, ranked by resume fit then mission."""
+def ranked_jobs(conn, track=None, limit=None, location_re=None):
+    """Jobs joined to company mission, ranked by the combined score
+    sqrt(resume_fit * company_mission). Jobs missing either factor fall to
+    the bottom (combined is None), ordered among themselves by whatever
+    score they do have.
+
+    `location_re` (a compiled regex) enforces geography at query time,
+    independent of the `track` label: a job whose stored location doesn't
+    match is excluded from this search but stays in the shared table. This
+    is how the local track keeps out-of-area postings out of its results no
+    matter which ingest path stamped them `local-tech`."""
     q = """
-      SELECT j.*, c.mission_tier, c.mission_score, c.hq_location AS company_location
+      SELECT j.*, c.mission_tier, c.mission_score
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
     """
     args = []
     if track:
         q += " WHERE j.track = ?"
         args.append(track)
-    q += " ORDER BY j.resume_fit_score DESC NULLS LAST, c.mission_score DESC NULLS LAST"
+    rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+    if location_re is not None:
+        rows = [r for r in rows if location_re.search(r.get("location") or "")]
+    for r in rows:
+        # A conglomerate's own mission score is ~0.05 (off-mission overall),
+        # but a job here already passed the health keyword filter at crawl
+        # time — so rank it at the keyword-vetted floor, not the company's
+        # score, or its combined rank would be sunk unfairly.
+        mission = r.get("mission_score")
+        if config.is_multi_division(r.get("company_name")):
+            mission = max(mission or 0.0, config.MULTI_DIVISION_MISSION_FLOOR)
+        r["combined_score"] = combined_score(r.get("resume_fit_score"), mission)
+    # Sort by combined desc, then the individual factors as tiebreaks; None
+    # sorts last via the -1 sentinel (all real scores are >= 0).
+    rows.sort(key=lambda r: (r["combined_score"] if r["combined_score"] is not None else -1.0,
+                             r["resume_fit_score"] if r["resume_fit_score"] is not None else -1.0,
+                             r["mission_score"] if r["mission_score"] is not None else -1.0),
+              reverse=True)
     if limit:
-        q += f" LIMIT {int(limit)}"
-    return [dict(r) for r in conn.execute(q, args).fetchall()]
+        rows = rows[:int(limit)]
+    return rows
 
 
 # --------------------------------------------------------------------------- #

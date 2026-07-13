@@ -174,6 +174,13 @@ def _flag_for_verification(c, claimed_ats, slug):
         # A generic word fragment ("signal", "neuro") that matched some
         # unrelated board — high collision risk from a multi-word name.
         flags.append(f"generic slug '{slug}' - likely a different company")
+    elif len(name_words) == 1 and single_token and (slug in _GENERIC_SLUGS
+                                                    or len(slug) <= 5):
+        # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
+        # short common token that collides with a large unrelated board
+        # ("inter" -> 158 jobs at a fintech). These slip past the checks
+        # above, which require a multi-word name.
+        flags.append(f"single-word name slug '{slug}' - confirm identity")
     if flags:
         note = "[VERIFY: " + "; ".join(flags) + "]"
         c.notes = f"{c.notes} {note}".strip() if c.notes else note

@@ -29,11 +29,12 @@ Key distinctions: "data management" / "data engineering" / "quality engineering"
 Also classify the employer's MISSION into exactly one tier:
 - "healthcare-tech": the company's core product/mission is healthcare, medical, clinical, digital health, medical devices, diagnostics, or health-data/health-AI. (The candidate's top preference.)
 - "health-bio-science": a broader health-adjacent, biotech, life-sciences, genomics/omics, pharma, scientific-software/instruments, or research-science mission that isn't primarily a healthcare product.
-- "other": none of the above (generic SaaS, fintech, e-commerce, defense, etc.).
+- "community-driven-tech": an open-source, developer-tools/platform, or community-driven technology company (e.g. Red Hat, GitHub, GitLab, Mozilla, Hugging Face).
+- "other": none of the above (generic SaaS, fintech, e-commerce, defense, etc. that isn't community-driven/open-source).
 
 Return ONLY a JSON object with exactly these keys:
 - "score": a number from 0.0 to 1.0 (two decimals) — the TECHNICAL BAR.
-- "mission": one of "healthcare-tech", "health-bio-science", or "other".
+- "mission": one of "healthcare-tech", "health-bio-science", "community-driven-tech", or "other".
 - "reason": one short phrase (<= 12 words) naming the deciding factor.
 Return ONLY valid JSON. No markdown, no preamble."""
 
@@ -129,7 +130,18 @@ def expand_location(term):
 #  involves (high) vs. SOP-execution / study-coordination / data-entry (low).  #
 # --------------------------------------------------------------------------- #
 
-_MISSION_TIERS = ("healthcare-tech", "health-bio-science", "other")
+# Mission tiers, highest alignment → lowest. "community-driven-tech" ranks
+# just above the catch-all "other": open-source / developer-tooling employers
+# (Red Hat, GitHub, …) aren't health/bio, but are a better cultural fit than
+# generic SaaS/fintech, so they sit one notch up.
+_MISSION_TIERS = ("healthcare-tech", "health-bio-science",
+                  "community-driven-tech", "other")
+
+# Tiers whose companies are crawled. Only "other" is dropped — everything
+# above it (including community-driven-tech) is kept active. Single source of
+# truth for the active/inactive decision across the sourcing + scoring passes.
+ACTIVE_MISSION_TIERS = ("healthcare-tech", "health-bio-science",
+                        "community-driven-tech")
 
 
 _COMPANY_MISSION_SYSTEM = """You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
@@ -138,15 +150,17 @@ The candidate is a BME / neuroscience / ML data engineer. Their BULLSEYE is neur
 
 Return ONLY a JSON object with exactly:
 - "mission": one of
-    "healthcare-tech"    (healthcare, medical, clinical, digital health, medical devices, diagnostics, neurotech/BCI, or health data/AI),
-    "health-bio-science" (biotech, pharma, life sciences, genomics/omics, scientific tools/instruments, research science),
-    "other"              (generic SaaS, fintech, ecommerce, defense, staffing, etc.).
+    "healthcare-tech"       (healthcare, medical, clinical, digital health, medical devices, diagnostics, neurotech/BCI, or health data/AI),
+    "health-bio-science"    (biotech, pharma, life sciences, genomics/omics, scientific tools/instruments, research science),
+    "community-driven-tech" (open-source, developer tools/platforms, or community-driven technology — e.g. Red Hat, GitHub, GitLab, Mozilla, Hugging Face, the Linux Foundation),
+    "other"                 (generic SaaS, fintech, ecommerce, defense, staffing, etc. — not community-driven/open-source).
 - "score": 0.0-1.0 alignment with the candidate's target:
     * 1.00 EXACTLY = a brain-computer-interface / neural-implant / neural-interface / neurotechnology company. This is the single highest score, reserved ONLY for this category — award a full 1.00, never 0.9x.
     * 0.85-0.98  = other neuro, medical-device, signal-processing, clinical or health ML/AI, diagnostics, or digital-health company.
     * 0.60-0.85  = biotech / pharma R&D / genomics / science-heavy life-sciences company.
     * 0.40-0.65  = pharma/biologics manufacturing, CRO clinical-operations, or health services with limited technical or neural overlap.
-    * 0.00-0.20  = not health/bio/science.
+    * 0.22-0.38  = community-driven / open-source / developer-tooling company (Red Hat, GitHub, …) — not health/bio, but a better fit than generic tech.
+    * 0.00-0.20  = anything else (generic SaaS, fintech, ecommerce, defense, staffing).
 - "reason": one short phrase (<= 12 words).
 Return ONLY valid JSON. No markdown, no preamble."""
 
@@ -188,10 +202,13 @@ def score_company_mission(name, context=""):
     reason = str(result.get("reason", "")).strip()
     # Deterministic bullseye anchor: a genuine BCI / neural-interface company
     # is the candidate's exact target and must score 1.0 (the defined top of
-    # the scale) — not a hedged 0.9x.
+    # the scale) — not a hedged 0.9x. Match the NAME only: the reason text is
+    # where the model's *negations* live ("no neurotech focus", "not a BCI
+    # company"), and a substring match there would flip a rejection into a
+    # perfect score.
     if re.search(r"brain[-\s]?computer|brain[-\s]?machine|\bbci\b|neural (?:implant|"
                  r"interface|prosthe)|neurotech|neural[-\s]?signal",
-                 (reason + " " + name).lower()):
+                 name.lower()):
         score, tier = 1.0, "healthcare-tech"
     return tier, score, reason
 

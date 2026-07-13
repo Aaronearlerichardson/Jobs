@@ -90,7 +90,12 @@ def probe_smartrecruiters(slug):
         r = requests.get(url, timeout=10, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
-        return (True, int(r.json().get("totalFound", 0) or 0))
+        # SmartRecruiters returns 200 / totalFound:0 for ANY slug, even
+        # nonexistent ones — so a 200 alone is not proof of a real board.
+        # Require live postings (like jazzhr), else every guessed slug
+        # "confirms" with zero jobs and floods discovery with false hits.
+        n = int(r.json().get("totalFound", 0) or 0)
+        return (n > 0, n)
     except Exception:
         return (False, 0)
 

@@ -22,12 +22,32 @@ def _loc_ok(loc_re, text):
     return loc_re is None or bool(loc_re.search(text or ""))
 
 
+def _get_json(url, label, **kw):
+    """GET + parse JSON, treating any HTTP error, empty body, or non-JSON
+    response as a clean miss (returns None) rather than an exception that
+    surfaces as a cryptic ``Expecting value`` further up the stack."""
+    r = requests.get(url, timeout=25, headers=HEADERS, **kw)
+    if r.status_code != 200:
+        print(f"    [!] {label}: HTTP {r.status_code}")
+        return None
+    if not r.content.strip():
+        print(f"    [!] {label}: empty response")
+        return None
+    try:
+        return r.json()
+    except ValueError:
+        print(f"    [!] {label}: non-JSON response")
+        return None
+
+
 def fetch_greenhouse_all(slug, loc_re=None):
     out = []
     try:
-        r = requests.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
-                         timeout=25, headers=HEADERS)
-        for j in r.json().get("jobs", []):
+        data = _get_json(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+                         f"greenhouse {slug}")
+        if not isinstance(data, dict):
+            return out
+        for j in data.get("jobs", []):
             loc = j.get("location", {}).get("name", "")
             if not _loc_ok(loc_re, loc):
                 continue
@@ -43,9 +63,11 @@ def fetch_greenhouse_all(slug, loc_re=None):
 def fetch_lever_all(slug, loc_re=None):
     out = []
     try:
-        r = requests.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                         timeout=25, headers=HEADERS)
-        for j in r.json():
+        data = _get_json(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+                         f"lever {slug}")
+        if not isinstance(data, list):
+            return out
+        for j in data:
             loc = j.get("categories", {}).get("location", "")
             if not _loc_ok(loc_re, loc):
                 continue
@@ -61,9 +83,11 @@ def fetch_lever_all(slug, loc_re=None):
 def fetch_ashby_all(slug, loc_re=None):
     out = []
     try:
-        r = requests.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                         timeout=25, headers=HEADERS)
-        for j in r.json().get("jobPostings", []):
+        data = _get_json(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+                         f"ashby {slug}")
+        if not isinstance(data, dict):
+            return out
+        for j in data.get("jobPostings", []):
             loc = j.get("location", "") or ""
             if not _loc_ok(loc_re, loc):
                 continue

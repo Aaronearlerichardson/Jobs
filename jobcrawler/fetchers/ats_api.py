@@ -12,11 +12,14 @@ def fetch_greenhouse(slug, company_name):
     try:
         r = requests.get(url, timeout=20, headers=HEADERS)
         r.raise_for_status()
+        data = r.json()
     except Exception as e:
         print(f"    [!] Greenhouse {company_name}: {e}")
         return []
+    if not isinstance(data, dict):
+        return []
     jobs = []
-    for job in r.json().get("jobs", []):
+    for job in data.get("jobs", []):
         title = job.get("title", "")
         jid   = str(job.get("id", ""))
         jurl  = job.get("absolute_url", "")
@@ -40,11 +43,14 @@ def fetch_lever(slug, company_name):
     try:
         r = requests.get(url, timeout=20, headers=HEADERS)
         r.raise_for_status()
+        data = r.json()
     except Exception as e:
         print(f"    [!] Lever {company_name}: {e}")
         return []
+    if not isinstance(data, list):
+        return []
     jobs = []
-    for job in r.json():
+    for job in data:
         title = job.get("text", "")
         jid   = job.get("id", "")
         jurl  = job.get("hostedUrl", "")
@@ -66,11 +72,14 @@ def fetch_ashby(slug, company_name):
     try:
         r = requests.get(url, timeout=20, headers=HEADERS)
         r.raise_for_status()
+        data = r.json()
     except Exception as e:
         print(f"    [!] Ashby {company_name}: {e}")
         return []
+    if not isinstance(data, dict):
+        return []
     jobs = []
-    for job in r.json().get("jobPostings", []):
+    for job in data.get("jobPostings", []):
         title = job.get("title", "")
         jid   = job.get("id", "")
         jurl  = job.get("jobUrl", "") or f"https://jobs.ashbyhq.com/{slug}/{jid}"

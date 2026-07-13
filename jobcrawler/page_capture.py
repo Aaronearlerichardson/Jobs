@@ -163,6 +163,77 @@ def parse_indeed(soup, page_url=""):
     return jobs
 
 
+# ─── Meta Careers (metacareers.com) ──────────────────────────────────────
+#
+# Meta's careers site is custom-built (not a standard ATS) and blocks
+# server-side fetches, so the ONLY way in is a live browser capture
+# (userscript button or Ctrl+S). Job links are stable —
+#   /profile/job_details/<numeric id>/
+# — but Meta's CSS classes are obfuscated, so titles come from the link text
+# and locations from a "City, ST" / "Remote" heuristic rather than selectors.
+# (The local-tech NC gate still applies downstream, so out-of-NC Meta roles
+# are dropped at ingest — as intended.)
+
+_META_JOB_RE = re.compile(r"/profile/job_details/(\d+)")
+_META_LOC_RE = re.compile(
+    r"([A-Z][A-Za-z.\-]+(?:\s[A-Z][A-Za-z.\-]+)*,\s*[A-Z]{2}\b"
+    r"|Remote(?:,\s*[A-Za-z .]+)?|Multiple Locations)")
+
+
+def parse_metacareers(soup, page_url=""):
+    jobs, seen = [], set()
+    # Listing/search page: one card per job, each linking to a job_details URL.
+    for a in soup.select("a[href*='/profile/job_details/']"):
+        m = _META_JOB_RE.search(a.get("href", ""))
+        if not m or m.group(1) in seen:
+            continue
+        jid = m.group(1)
+        seen.add(jid)
+        card = a.find_parent(["div", "li"]) or a
+        strings = [s for s in a.stripped_strings if not _NONTITLE_RE.match(s)]
+        title = strings[0] if strings else ""
+        if not title:
+            te = card.find(["h1", "h2", "h3", "h4"])
+            title = _txt(te) if te else ""
+        # Search for the location in the card text with the TITLE removed —
+        # titles like "Engineer, Reality Labs" carry their own comma and would
+        # otherwise bleed into the greedy "City, ST" match.
+        rest = card.get_text(" ", strip=True).replace(title, " ", 1) if title else \
+            card.get_text(" ", strip=True)
+        lm = _META_LOC_RE.search(rest)
+        j = _job(f"meta_{jid}", title, "Meta",
+                 f"https://www.metacareers.com/profile/job_details/{jid}/",
+                 lm.group(1) if lm else "")
+        if j:
+            jobs.append(j)
+
+    # Single job-detail page: emit/enrich from the title tag + og:description.
+    dm = _META_JOB_RE.search(page_url or "")
+    if dm:
+        jid = dm.group(1)
+        og = soup.select_one("meta[property='og:title'][content]")
+        raw = (og.get("content") if og else "") or \
+            (soup.title.get_text(" ", strip=True) if soup.title else "")
+        title = re.sub(r"\s*[|\-–—]\s*Meta\b.*$", "", raw).strip() or raw
+        ogd = soup.select_one("meta[property='og:description'][content]")
+        desc = ogd.get("content", "") if ogd else ""
+        body = soup.get_text(" ", strip=True).replace(title, " ", 1) if title else \
+            soup.get_text(" ", strip=True)
+        lm = _META_LOC_RE.search(body)
+        j = _job(f"meta_{jid}", title, "Meta",
+                 f"https://www.metacareers.com/profile/job_details/{jid}/",
+                 lm.group(1) if lm else "", desc)
+        if j:
+            twin = next((x for x in jobs if x["id"] == j["id"]), None)
+            if twin:  # listing card + open detail: keep the richer fields
+                for k, v in j.items():
+                    if v and len(str(v)) > len(str(twin.get(k) or "")):
+                        twin[k] = v
+            else:
+                jobs.append(j)
+    return jobs
+
+
 # ─── Generic (JSON-LD + job-link sweep) ──────────────────────────────────
 
 def parse_jsonld(soup, page_url=""):
@@ -235,12 +306,16 @@ def parse_page(url, html):
             low = "linkedin."
         elif soup.select_one("div.job_seen_beacon, a.jcs-JobTitle"):
             low = "indeed."
+        elif soup.select_one("a[href*='/profile/job_details/']"):
+            low = "metacareers."
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
         # the same postings under synthetic ids.
         layers, source = [parse_linkedin, parse_jsonld], "linkedin"
     elif "indeed." in low:
         layers, source = [parse_indeed, parse_jsonld], "indeed"
+    elif "metacareers." in low:
+        layers, source = [parse_metacareers], "metacareers"
     else:
         layers, source = [parse_jsonld, parse_generic], "page"
 

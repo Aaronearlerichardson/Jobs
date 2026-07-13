@@ -17,6 +17,8 @@ from datetime import datetime
 
 import requests
 
+import config
+
 from ..http import HEADERS
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
                      _DOMAIN_STOPWORDS, _name_domain_tokens)
@@ -397,7 +399,7 @@ def _sample_titles(hit, n=6):
     return []
 
 
-def populate_companies(extra_names=None, include_missions=("healthcare-tech", "health-bio-science")):
+def populate_companies(extra_names=None, include_missions=None):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
@@ -407,8 +409,10 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
     Returns the list of company dicts written (active ones first).
     """
     from ..store import connect, upsert_company
-    from ..claude import score_company_mission
+    from ..claude import score_company_mission, ACTIVE_MISSION_TIERS
 
+    if include_missions is None:
+        include_missions = ACTIVE_MISSION_TIERS
     confirmed, _ = discover_local(extra_names)
     conn = connect()
     written = []
@@ -416,7 +420,10 @@ def populate_companies(extra_names=None, include_missions=("healthcare-tech", "h
     for h in confirmed:
         titles = _sample_titles(h)
         tier, score, reason = score_company_mission(h["name"], " | ".join(t for t in titles if t))
-        active = 1 if (tier in include_missions or tier is None) else 0
+        # Multi-division conglomerates stay active despite an "other" tier —
+        # their healthcare subdivisions are filtered in at crawl time.
+        active = 1 if (tier in include_missions or tier is None
+                       or config.is_multi_division(h["name"])) else 0
         row = {
             "name": h["name"], "ats": h["ats"],
             "slug": h["slug"] if h["ats"] != "workday" else None,
@@ -449,7 +456,7 @@ def add_board(name, url):
     from ..claude import score_company_mission
     from ..fetchers import company as company_fetch
     from ..store import connect, upsert_company
-    from .sniffer import _detect, _pack
+    from .sniffer import _detect, _pack, sniff_ats
 
     hit = _detect("", url)
     if hit and hit[0] in ("fetchable", "semi"):
@@ -497,10 +504,75 @@ def add_board(name, url):
     return found
 
 
-def _websearch_board(name, max_results=6):
+# Job aggregators / company-directory sites: they rank highly for
+# '"<name>" careers' but are never the employer's own ATS board, so sniffing
+# them wastes fetch slots. Skipped when picking result URLs to resolve.
+_AGGREGATOR_HOSTS = (
+    "linkedin.com", "indeed.", "glassdoor.", "ziprecruiter.com", "simplyhired.com",
+    "builtin.com", "rocketreach.co", "careerjet.", "monster.com", "dice.com",
+    "lensa.com", "jobcase.com", "themuse.com", "wellfound.com", "levels.fyi",
+    "trueup.io", "salary.com", "comparably.com", "talent.com", "unifygtm.com",
+    "getro.com", "jooble.org", "adzuna.", "snagajob.com", "careers.tufts.edu",
+    "google.com/search", "bing.com", "facebook.com", "twitter.com", "x.com",
+    "youtube.com", "crunchbase.com", "pitchbook.com", "zippia.com",
+)
+
+
+def _is_aggregator(url):
+    return any(h in url.lower() for h in _AGGREGATOR_HOSTS)
+
+
+# Generic words that don't distinguish a company's domain — excluded when
+# matching a result host to a name, so "medicaljobs.com" doesn't match
+# "Sampson Regional Medical Center" on the word "medical".
+_GENERIC_NAME_WORDS = {
+    "medical", "center", "centre", "health", "healthcare", "regional",
+    "group", "services", "systems", "system", "technology", "technologies",
+    "imaging", "solutions", "associates", "partners", "care", "clinic",
+    "hospital", "labs", "laboratories", "company", "corporation", "global",
+    "national", "american", "international", "the", "and", "inc", "llc",
+}
+
+
+def _host_matches_name(url, name):
+    """True if the result's host plausibly belongs to the company itself
+    (a distinctive name token appears in the host) — the guard that keeps a
+    self-hosted 'custom' board from resolving to a third-party jobs site."""
+    host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0].replace("www.", "")
+    hostslug = re.sub(r"[^a-z0-9]", "", host)
+    joined = re.sub(r"[^a-z0-9]", "", name.lower())
+    tokens = {joined} | {w for w in re.findall(r"[a-z0-9]+", name.lower())
+                         if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
+    return any(len(t) >= 4 and t in hostslug for t in tokens)
+
+
+def _slug_matches_name(slug, name):
+    """True if a web-searched ATS slug/tenant plausibly belongs to the
+    company — guards against the dork surfacing an unrelated board (e.g.
+    'Novamed' -> the 'nc' NC-government Workday tenant)."""
+    s = slug[0] if isinstance(slug, tuple) else slug   # workday tenant, else slug
+    s = re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+    if len(s) < 3:
+        return False
+    tokens = {re.sub(r"[^a-z0-9]", "", name.lower())}
+    tokens |= {w for w in re.findall(r"[a-z0-9]+", name.lower())
+               if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
+    return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
+
+
+def _websearch_board(name, max_results=8):
     """Find a company's board via web search when domain-guessing fails
-    (gov/org domains, acronyms: 'NC DHHS' -> ncdhhs.gov -> nc.wd108).
-    Returns the sniff_ats result shape, or None."""
+    (gov/org domains, acronyms, or product-named domains — e.g. 'Core Sound
+    Imaging' -> corestudycast.com). Returns the sniff_ats result shape, or
+    None.
+
+    Two improvements over a plain '"<name>" careers' search, which is
+    dominated by LinkedIn/Indeed and rarely surfaces the real board:
+      1. an ATS-dork query first, so a direct Workday/Greenhouse/iCIMS board
+         link surfaces in the results;
+      2. aggregators are skipped and self-hosted *custom* boards accepted,
+         not just JSON-API ATSes.
+    """
     try:
         try:
             from ddgs import DDGS
@@ -511,34 +583,66 @@ def _websearch_board(name, max_results=6):
     import requests as _rq
 
     from ..http import HEADERS as _H
+    from ..fetchers.company import custom_board_listing_url
     from .sniffer import _detect, _pack
 
-    urls = []
-    try:
-        with DDGS() as ddg:
-            for r in ddg.text(f'"{name}" careers jobs', max_results=max_results):
-                u = r.get("href") or r.get("url")
-                if u:
-                    urls.append(u)
-    except Exception:
-        return None
-    # Pass 1: coordinates visible in the result URL itself (myworkdayjobs,
-    # boards.greenhouse.io, ... links surface directly in search results).
-    for u in urls:
-        hit = _detect("", u)
-        if hit and hit[0] in ("fetchable", "semi"):
-            return _pack(hit[1], hit[2], u)
-    # Pass 2: fetch the top results and sniff their content.
-    for u in urls[:4]:
+    def _search(query):
+        out = []
         try:
-            r = _rq.get(u, timeout=8, headers=_H, allow_redirects=True)
-            if r.status_code != 200:
-                continue
+            with DDGS() as ddg:
+                for r in ddg.text(query, max_results=max_results):
+                    u = r.get("href") or r.get("url")
+                    if u and not _is_aggregator(u):
+                        out.append(u)
         except Exception:
-            continue
-        hit = _detect(r.text, r.url)
-        if hit and hit[0] in ("fetchable", "semi"):
-            return _pack(hit[1], hit[2], r.url)
+            pass
+        return out
+
+    def _resolve(urls):
+        # Pass 1: ATS coordinates already visible in a result URL
+        # (myworkdayjobs.com / boards.greenhouse.io / *.icims.com links).
+        # The slug must match the name — a bare board link from search has no
+        # page context, so an unrelated board (nc.wd108 for "Novamed") is
+        # otherwise indistinguishable from a real hit.
+        for u in urls:
+            hit = _detect("", u)
+            if hit and hit[0] in ("fetchable", "semi") and _slug_matches_name(hit[2], name):
+                return _pack(hit[1], hit[2], u)
+        # Pass 2: fetch the top real (non-aggregator) results and sniff for
+        # an embedded ATS or a self-hosted board with genuine job links.
+        for u in urls[:5]:
+            try:
+                r = _rq.get(u, timeout=8, headers=_H, allow_redirects=True)
+                if r.status_code != 200 or len(r.text) < 300:
+                    continue
+            except Exception:
+                continue
+            own = _host_matches_name(r.url, name)
+            hit = _detect(r.text, r.url)
+            # Trust an embedded ATS when its slug matches the name OR it was
+            # embedded on the company's own careers page (own-domain link).
+            if hit and hit[0] in ("fetchable", "semi") and (own or _slug_matches_name(hit[2], name)):
+                return _pack(hit[1], hit[2], r.url)
+            # Custom self-hosted board: only on the company's OWN domain —
+            # otherwise a third-party jobs site with ≥3 listings
+            # (healthecareers, dotmed, expertini, …) resolves as the board.
+            if own:
+                listing = custom_board_listing_url(r.url, r.text)
+                if listing:
+                    return {"ats": "custom", "careers_url": listing}
+        return None
+
+    # Dork for a direct ATS board first (cheap win, avoids the second query
+    # when it lands); fall back to a general careers search only if it misses.
+    ats_hint = ("myworkdayjobs OR greenhouse OR lever OR ashbyhq OR icims "
+                "OR smartrecruiters OR bamboohr OR workday")
+    seen = set()
+    for query in (f'"{name}" jobs ({ats_hint})', f'"{name}" careers'):
+        fresh = [u for u in _search(query) if u not in seen]
+        seen.update(fresh)
+        hit = _resolve(fresh)
+        if hit:
+            return hit
     return None
 
 
@@ -578,14 +682,52 @@ def score_missions(max_workers=6, rescore_all=False):
                 continue
             if tier is None and score is None:
                 continue          # scoring unavailable - leave the row alone
-            upsert_company(conn, {"name": c["name"], "mission_tier": tier,
-                                  "mission_score": score, "mission_reason": reason})
+            # Off-mission companies are deactivated so the crawl skips them,
+            # matching the new-company sourcing path (an `other` tier means
+            # "not health/bio/science" — no reason to keep crawling it).
+            update = {"name": c["name"], "mission_tier": tier,
+                      "mission_score": score, "mission_reason": reason}
+            if tier == "other" and not config.is_multi_division(c["name"]):
+                update["active"] = 0
+            upsert_company(conn, update)
             n += 1
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason})")
+            flag = "  -> deactivated (off-mission)" if tier == "other" else ""
+            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
     conn.close()
     print(f"\n  {n} compan(ies) scored.")
     return n
+
+
+def resolve_company_board(name):
+    """Resolve a company NAME to a crawlable board: slug-probe (Greenhouse/
+    Lever/Ashby/Workday) -> careers-page sniff -> web search. Returns a hit
+    dict {name, ats, slug, count, nc, careers_url} with an NC job count, or
+    None. Shared by --resolve-leads and the manual --add flow."""
+    from ..fetchers import company as company_fetch
+    from .sniffer import sniff_ats
+    # Workday fallback ON: enterprise employers (Analog Devices, Cadence, ...)
+    # overwhelmingly live on Workday, worth the careers-page scrape.
+    hit = probe_company(name, try_workday=True)
+    if hit:
+        return hit
+    s = sniff_ats(name) or _websearch_board(name)
+    if not s:
+        return None
+    ats = s["ats"]
+    if ats == "workday":
+        t, p, site = s["triple"]
+        comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
+        slug = (t, p, site)
+    else:
+        comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
+        slug = s.get("slug") or s.get("careers_url")
+    try:
+        nc = len(company_fetch.fetch_company_nc(comp))
+    except Exception:
+        nc = 0
+    return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
+            "careers_url": s.get("careers_url")}
 
 
 def resolve_leads(max_workers=8):
@@ -594,10 +736,8 @@ def resolve_leads(max_workers=8):
     name, NC-verify, mission-score, activate the hits. The page-capture ->
     resolve-leads -> crawl loop is how manually browsed postings grow the
     company roster."""
-    from ..claude import score_company_mission
-    from ..fetchers import company as company_fetch
+    from ..claude import score_company_mission, ACTIVE_MISSION_TIERS
     from ..store import connect, get_companies as _store_companies, upsert_company
-    from .sniffer import sniff_ats
 
     conn = connect()
     leads = [c for c in _store_companies(conn, active_only=False)
@@ -609,39 +749,12 @@ def resolve_leads(max_workers=8):
     print(f"  resolving {len(leads)} page-capture lead(s) "
           f"(slug probe -> careers-page sniff -> NC-verify)...")
 
-    def _one(name):
-        # Workday fallback ON: enterprise leads (Analog Devices, Cadence,
-        # Teledyne, ...) overwhelmingly live on Workday, and a lead list is
-        # small enough to afford the careers-page scrape.
-        hit = probe_company(name, try_workday=True)
-        if hit:
-            return hit
-        s = sniff_ats(name)
-        if not s:
-            s = _websearch_board(name)
-        if not s:
-            return None
-        ats = s["ats"]
-        if ats == "workday":
-            t, p, site = s["triple"]
-            comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
-            slug = (t, p, site)
-        else:
-            comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
-            slug = s.get("slug") or s.get("careers_url")
-        try:
-            nc = len(company_fetch.fetch_company_nc(comp))
-        except Exception:
-            nc = 0
-        return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-                "careers_url": s.get("careers_url")}
-
     resolved = []
     # Hard cap on the whole pass: a lead whose domains blackhole (accept
     # then stall) must become a reported miss, not a hung command. The
     # command is idempotent — rerunning retries only unresolved leads.
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(_one, c["name"]): c for c in leads}
+    futs = {ex.submit(resolve_company_board, c["name"]): c for c in leads}
     try:
         for fut in as_completed(futs, timeout=240):
             c, hit = futs[fut], fut.result()
@@ -652,7 +765,8 @@ def resolve_leads(max_workers=8):
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
                 hit["name"], " | ".join(t for t in titles if t))
-            active = 1 if (tier in ("healthcare-tech", "health-bio-science")
+            active = 1 if (tier in ACTIVE_MISSION_TIERS
+                           or config.is_multi_division(c["name"])
                            or tier is None) else 0
             is_wd = hit["ats"] == "workday"
             row = {"name": c["name"], "ats": hit["ats"],

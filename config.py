@@ -228,6 +228,55 @@ LEVER_COMPANIES = {
     "signal": "Bio-Signal Technologies",  # 0 job(s), discovered — VERIFY: generic slug 'signal' - likely a different company
     "hint": "HiNT",  # 2 job(s), discovered
     "mindful": "Mindful Scientific",  # 10 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    "aestudio": "AE Studio",  # 6 job(s), discovered
+    "attune": "Attune Neurosciences",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cadwell": "Cadwell Industries",  # 18 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "calahealth": "Cala Health",  # 4 job(s), discovered
+    "cortex": "Cortex Brainwave Technologies",  # 6 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "harvard": "Harvard Bioscience",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "highland": "Highland Instruments",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "inter": "Inter",  # 159 job(s), discovered — VERIFY: single-word name slug 'inter' - confirm identity
+    "iris": "Iris Biomedical",  # 7 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "london": "London Cognition",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "maxwell": "MaxWell Biosystems",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "neu": "NeU",  # 5 job(s), discovered — VERIFY: single-word name slug 'neu' - confirm identity
+    "omicron": "Omicron T",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "peak": "Peak Achievement Training",  # 47 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "reach": "Reach Neuro",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "ripple": "Ripple Neuro",  # 151 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "setpoint": "Setpoint Medical",  # 15 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sonic": "Sonic Concepts",  # 16 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "spiro": "Spiro Medical",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "starlabs": "Star Labs Bioscience",  # 0 job(s), discovered
+    "xai": "X-trodes",  # 212 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
+    "action": "Action and Attention Lab",  # 11 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "fox": "Fox Lab",  # 6 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "immersive": "Immersive Neuromodulation and Neuroimaging Lab",  # 14 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "integrated": "Integrated Circuit Neuroscience Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "mcgill": "McGill Laboratory of Affiliation and Prosociality",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "mit": "MIT Media Lab Fluid Interfaces Group",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "rehabilitation": "Rehabilitation and Neural Engineering Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "systems": "Systems Neural Engineering Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "thealleninstitute": "Allen Institute for Brain Science",  # 23 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
+    "alta": "Alta Life Sciences",  # 11 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "athena": "ATHENA Research team",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "axial": "Axial",  # 3 job(s), discovered — VERIFY: single-word name slug 'axial' - confirm identity
+    "bearing": "Bearing Capital",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "branch": "Branch Out Neurological Foundation",  # 11 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "enigmaio": "ENIGMA: Enhancing Neuro Imaging Genetics through Meta-Analysis",  # 9 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
+    "focused": "Focused Ultrasound Foundation",  # 14 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "future": "Future Gadget Laboratory",  # 5 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "international": "International Network of tES-fMRI",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "israel": "Israel Brain Technologies",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "metropolis": "Metropolis Ventures",  # 110 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "national": "National Center for Adaptive Neurotechnologies",  # 8 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "netherlands": "Netherlands Enterprise Agency",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "new": "New York Venture Partners",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "qualia": "Qualia Research Institute",  # 17 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "redwoodsoftware": "Redwood Center for Thoeretical Neuroscience",  # 45 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
+    "sterling": "Sterling Capital Management",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "technology": "Technology Partners",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 ASHBY_COMPANIES: dict[str, str] = {
@@ -270,6 +319,8 @@ KULA_COMPANIES = [
     ("Precision Neuroscience", "precision-neuroscience"),
     # --- discovered 2026-06-12: bciwiki:companies ---
     ("Flow Neuroscience", "flow-com"),  # 0 job(s), discovered — VERIFY: sniffed from careers page (kula)
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    ("Motion Simulator Lab", "motion"),  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 ]
 
 # JazzHR boards: {subdomain: company}. Board at https://{sub}.applytojob.com
@@ -279,6 +330,35 @@ JAZZHR_COMPANIES: dict[str, str] = {
     "chroma": "Chroma NV",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "halo": "Halo Neuroscience",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "npi": "NPI Electronic",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    "character": "C&P International",  # 0 job(s), discovered — VERIFY: sniffed from careers page (ashby)
+    "nudge": "Nudge",  # 0 job(s), discovered — VERIFY: single-word name slug 'nudge' - confirm identity
+    "upside": "Upside Down Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "adaptive": "Adaptive Neurorehabilitation Systems Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "attention": "Attention and Action Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cognition": "Cognition and Action Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "litmus": "Machine Learning and Neuroimaging Lab (MLNL)",  # 0 job(s), discovered — VERIFY: sniffed from careers page (ashby)
+    "perk": "Perk Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sapien": "Sapien Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sequence": "Sequence Production Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "arthur": "Arthur Prochazka's Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "bernard": "Bernard Balleine",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "braintrust": "Brain Trust Accelerator Fund",  # 0 job(s), discovered
+    "curie": "Curie Capital",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "foresight": "Foresight Institute",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "frontier": "Frontier Capital",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "novel": "Novel Growth Partners",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "real": "Real Tech Fund",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sierra": "Sierra Angels",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "synthetic": "Synthetic Neurobiology Group",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "union": "Union Neurotech",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    "bridge": "Bridge Builders Collaborative",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "phillips": "Phillips Lab",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "bright": "Bright Minds Institute",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cyclotroninc": "Cyclotron Research Centre",  # 18 job(s), discovered — VERIFY: sniffed from careers page (jazzhr)
+    "hci": "HCI Games Group",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "templeuniversity": "Temple University EEG Corpus",  # 5 job(s), discovered
 }
 
 # BambooHR boards: {subdomain: company}. JSON at /careers/list.
@@ -299,11 +379,9 @@ BAMBOOHR_COMPANIES: dict[str, str] = {
     "cortex": "Cortex Brainwave Technologies",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "harvard": "Harvard Bioscience",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "highland": "Highland Instruments",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
-    "inter": "Inter",  # 163 job(s), discovered
     "iris": "Iris Biomedical",  # 12 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "london": "London Cognition",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "maxwell": "MaxWell Biosystems",  # 5 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
-    "neu": "NeU",  # 6 job(s), discovered
     "nordicnaturals": "Nordic Neurostim",  # 4 job(s), discovered — VERIFY: sniffed from careers page (greenhouse)
     "omicron": "Omicron T",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "peak": "Peak Achievement Training",  # 48 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
@@ -313,6 +391,56 @@ BAMBOOHR_COMPANIES: dict[str, str] = {
     "sonic": "Sonic Concepts",  # 17 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
     "starlabs": "Star Labs Bioscience",  # 0 job(s), discovered
     "upside": "Upside Down Labs",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    "brainscope": "BrainScope",  # 0 job(s), discovered
+    "imec": "Imec",  # 6 job(s), discovered
+    "imotions": "IMotions",  # 4 job(s), discovered
+    "neurocare": "Neurocare",  # 8 job(s), discovered
+    "nirsense": "NIRSense",  # 2 job(s), discovered
+    "nirx": "NIRx",  # 0 job(s), discovered
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    "adept": "Adept Neuro",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "area": "Area 10 Labs",  # 3 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "avalon": "Avalon AI",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "betterfly": "BetterFly",  # 0 job(s), discovered
+    "brainbox": "Brainbox",  # 0 job(s), discovered
+    "cadence": "Cadence Neuroscience",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "dsp": "DSP Wireless",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "ems": "EMS Biomedical",  # 95 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "integral": "Integral",  # 10 job(s), discovered
+    "kyma": "Kyma",  # 0 job(s), discovered — VERIFY: single-word name slug 'kyma' - confirm identity
+    "zengar": "NeurOptimal",  # 2 job(s), discovered — VERIFY: sniffed from careers page (bamboohr)
+    "saludamedical": "Saluda Medical",  # 26 job(s), discovered
+    "sens": "Sens.ai",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "spark": "Spark",  # 4 job(s), discovered — VERIFY: single-word name slug 'spark' - confirm identity
+    "stroke": "Stroke Rehab",  # 3 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "tct": "TCT",  # 6 job(s), discovered — VERIFY: single-word name slug 'tct' - confirm identity
+    "the": "The Brain Driver",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "true": "True Impact",  # 11 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "world": "World Precision Instruments",  # 5 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "active": "Active Perception Laboratory",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "berg": "Berg Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "cap": "CAP Lab (The Computation and Psycholinguistics Laboratory at UTSC)",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "decisionresources": "Decision Lab",  # 8 job(s), discovered — VERIFY: sniffed from careers page (bamboohr)
+    "mackmolding": "Mack Lab",  # 34 job(s), discovered — VERIFY: sniffed from careers page (bamboohr)
+    "moises": "Music and Cognition Lab",  # 2 job(s), discovered — VERIFY: sniffed from careers page (bamboohr)
+    "opti": "Opti Lab",  # 2 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "peter": "Peter Carlen Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "scope": "SCOPE Neuroscience Lab",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "smith": "Smith Lab",  # 3 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "universityof": "University of Cambridge Bioelectronics Laboratory",  # 5 job(s), discovered
+    "cen": "CEN",  # 0 job(s), discovered — VERIFY: single-word name slug 'cen' - confirm identity
+    "dsc": "DSC Investment",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "ibs": "IBS Capital",  # 8 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "jazz": "JAZZ Venture Partners",  # 4 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "lawson": "Lawson Health Research Institute",  # 3 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "nxt": "NXT",  # 0 job(s), discovered — VERIFY: single-word name slug 'nxt' - confirm identity
+    "paris": "Paris Brain Institute",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "randstad": "Randstad Innovation Fund",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "sig": "SIG China (SIG Asia Investments)",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "synergy": "Synergy Ventures",  # 0 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "usc": "USC Biomedical Imaging Group",  # 8 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
+    "wellcome": "Wellcome Centre for Human Neuroimaging",  # 1 job(s), discovered — VERIFY: first-word slug - confirm it's the same company
 }
 
 # ADP Workforce Now career centers: (company, cid, ccid). The cid/ccid
@@ -323,6 +451,9 @@ ADP_COMPANIES: list[tuple[str, str, str]] = [
     ("Aspect Imaging", "7120c628-221c-4769-b7e7-8ab11b78b67f", "9200879253113_2"),  # 1 job(s), discovered — VERIFY: sniffed from careers page (adp)
     ("TMS Center of Colorado", "227380c2-b7ef-4c34-8220-db444305af06", "19000101_000001"),  # 6 job(s), discovered — VERIFY: sniffed from careers page (adp)
     ("Zander Labs", "436434db-fa8e-46eb-9baa-f565ea20b2d9", "19000101_000001"),  # 9 job(s), discovered — VERIFY: sniffed from careers page (adp)
+    # --- discovered 2026-07-13: bciwiki:companies,labs,organizations ---
+    ("NeuroCatch", "3a148327-9258-4419-bdb8-ae8236e63d64", "9200179358193_2"),  # 0 job(s), discovered — VERIFY: sniffed from careers page (adp)
+    ("Sleep Shepherd", "4e867c6c-1221-430a-94e1-2048cd1def6b", "19000101_000001"),  # 2 job(s), discovered — VERIFY: sniffed from careers page (adp)
 ]
 
 DISCOURSE_BOARDS = [
@@ -332,6 +463,25 @@ DISCOURSE_BOARDS = [
 
 # (company_name, page_url, css_selector_or_None)
 CUSTOM_COMPANIES: list[tuple[str, str, str | None]] = []
+
+# Conglomerates whose OVERALL mission scores "other", but which run
+# healthcare/neuro-aligned subdivisions worth surfacing — Google (Verily,
+# DeepMind Health, Fitbit), Microsoft (Nuance, Health Futures), Meta (Reality
+# Labs / CTRL-labs neural interfaces), Amazon (One Medical, Health). The
+# company-level mission score is the wrong granularity for these: they are
+# kept ACTIVE despite an "other" tier, crawled through the health keyword
+# filter (only aligned roles survive), and their surviving jobs are ranked at
+# MULTI_DIVISION_MISSION_FLOOR rather than the company's own low score.
+MULTI_DIVISION_COMPANIES = {
+    "microsoft", "google", "alphabet", "meta", "facebook",
+    "amazon", "apple", "ibm", "oracle", "intel", "nvidia", "samsung",
+}
+MULTI_DIVISION_MISSION_FLOOR = 0.6
+
+
+def is_multi_division(name):
+    """True if `name` is a known multi-division conglomerate (see above)."""
+    return (name or "").strip().lower() in MULTI_DIVISION_COMPANIES
 
 # (company_name, base_url).  Scraper appends /search/ + paging.
 SUCCESSFACTORS_COMPANIES = [
