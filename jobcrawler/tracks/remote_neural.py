@@ -24,7 +24,7 @@ from ..fetchers import (
     fetch_rss,
     fetch_websearch,
 )
-from ..sources import ATS_REGISTRY, LIGHTWEIGHT, iter_config_sources, iter_store_sources
+from ..sources import ATS_REGISTRY, iter_store_sources
 
 TAG = "[REMOTE-NEURAL]"
 TRACK = "remote-neural"
@@ -174,12 +174,12 @@ WEBSEARCH_QUERIES = [
 
 def build_sources(cfg, include_websearch=True):
     """Assemble the ordered list of (name, platform, thunk) source specs:
-    priority companies, then the company store (tag: neural), then the
-    config seed lists — deduped in that order so cross-source duplicates
-    resolve deterministically. Heavy onsite ATSes (Workday/SuccessFactors/
-    PeopleAdmin) are deliberately excluded: they're the local track's
-    locality-bound employers, and the remote filter would cull nearly all
-    of their thousands of onsite reqs anyway.
+    priority companies, then the company store (tag: neural) — deduped in
+    that order so cross-source duplicates resolve deterministically. Heavy
+    onsite ATSes (Workday/SuccessFactors/PeopleAdmin) are deliberately
+    excluded: they're the local track's locality-bound employers, and the
+    remote filter would cull nearly all of their thousands of onsite reqs
+    anyway.
     """
     sources, used = [], set()
 
@@ -191,22 +191,18 @@ def build_sources(cfg, include_websearch=True):
 
     # 1) Priority targets.
     for name, ats, slug in PRIORITY_COMPANIES:
-        _, _, mk, _, _ = ATS_REGISTRY[ats]
+        mk, _tag, _pause = ATS_REGISTRY[ats]
         add(ats, name, slug, mk(name, slug), star="*")
 
-    # 2) Company store sweep (populated by --import-seeds + discovery).
+    # 2) Company store sweep (populated by discovery / --import-companies).
     try:
         conn = store_mod.connect()
         rows = store_mod.get_companies(conn, active_only=True, tag="neural")
         conn.close()
     except Exception as e:
-        print(f"  [!] company store unavailable ({e}); using config lists only")
+        print(f"  [!] company store unavailable ({e}); priority list only")
         rows = []
     for ats, name, slug, thunk in iter_store_sources(rows):
-        add(ats, name, slug, thunk)
-
-    # 3) Config seed lists (lightweight ATSes only), deduped against the store.
-    for ats, name, slug, thunk, _pause in iter_config_sources(cfg, only=LIGHTWEIGHT):
         add(ats, name, slug, thunk)
 
     # 4) Forums + aggregator feeds (remote-native boards).

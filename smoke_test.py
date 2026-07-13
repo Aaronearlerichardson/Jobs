@@ -21,7 +21,6 @@ def main():
     import jobcrawler.db as db
     import jobcrawler.nc as nc
     import jobcrawler.resume as resume
-    import jobcrawler.seed_import as seed_import
     import jobcrawler.fetchers.company as cf
     import jobcrawler.tracks.local_tech as lt
     import jobcrawler.tracks.remote_neural as rn

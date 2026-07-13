@@ -347,8 +347,8 @@ def run(max_workers=6, top_n=15):
           f"\n  {len(companies)} active compan(ies)\n{bar}\n")
     if not companies:
         print("  [!] Company store is empty. Populate it first:\n"
-              "        python crawler.py --import-seeds      (config lists)\n"
-              "        python discover.py --local             (NC sourcing pass)\n")
+              "        python discover.py --local                   (NC sourcing pass)\n"
+              "        python crawler.py --import-companies FILE    (shared roster)\n")
 
     # Fetch every company's NC-scoped board in parallel (remote-neural's
     # thread pool; per-company politeness lives inside each fetcher).

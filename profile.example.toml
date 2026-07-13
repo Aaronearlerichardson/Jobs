@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------------------
+# Search profile TEMPLATE. Copy to `profile.toml` (gitignored) and edit for
+# your own search. config.py loads profile.toml if present, else this file.
+#
+# Relevance model: a job is relevant if it matches ANY `core` term, OR matches
+# a `domain` term AND a `skill` term. Keep `core` narrow (high-signal); let
+# `domain` + `skill` pull in adjacent roles without opening the floodgates.
+# ---------------------------------------------------------------------------
+
+[keywords]
+# Tier 1 — any single hit => relevant. Your field's unambiguous signals.
+core = [
+    "machine learning engineer", "data engineer", "backend engineer",
+    "site reliability", "platform engineer",
+]
+# Tier 2 — adjacent domains. Needs a `skill` pair to pass.
+domain = [
+    "fintech", "healthtech", "climate", "robotics", "logistics",
+]
+# Tier 3 — transferable skills. Only count paired with a `domain` term.
+skill = [
+    "python", "golang", "kubernetes", "distributed systems",
+    "data pipeline", "machine learning",
+]
+
+[exclude]
+phrases = ["phd required", "must have a phd", "clearance required"]
+title_phrases = ["manager", "director", "intern"]
+
+[locations]
+onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]
+remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "anywhere"]
+accept_remote = true
+exclude = []
+
+[policy]
+# Large companies to keep active despite an "other" mission score, crawling
+# only their aligned roles. Leave empty if you don't want special-casing.
+multi_division = []
+multi_division_mission_floor = 0.6

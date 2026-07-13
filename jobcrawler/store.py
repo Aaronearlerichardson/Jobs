@@ -176,6 +176,35 @@ def upsert_company(conn, c):
     return row["id"] if row else None
 
 
+def export_companies(conn, path):
+    """Dump the company roster to JSON — the shareable/bootstrap artifact
+    that replaced config.py's seed lists. Secrets-free by construction."""
+    import json
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM companies ORDER BY name").fetchall()]
+    for r in rows:
+        r.pop("id", None)          # ids are per-database
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, indent=1, ensure_ascii=False)
+    return len(rows)
+
+
+def import_companies(conn, path):
+    """Upsert companies from an export_companies JSON file (idempotent;
+    tags merge, existing mission scores survive None fields)."""
+    import json
+    with open(path, encoding="utf-8") as f:
+        rows = json.load(f)
+    n = 0
+    for r in rows:
+        if not isinstance(r, dict) or not r.get("name"):
+            continue
+        r.pop("id", None)
+        upsert_company(conn, r)
+        n += 1
+    return n
+
+
 def company_id_by_name(conn, name):
     """Resolve a company name to its id (case-insensitive exact match), or
     None if the store has no such company. Used to link externally-ingested

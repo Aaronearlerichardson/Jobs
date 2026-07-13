@@ -16,7 +16,7 @@ import sys
 
 from config import INCLUDE_KEYWORDS
 from jobcrawler.discovery import (
-    apply_to_config,
+    apply_to_store,
     bciwiki_seed_candidates,
     discover,
     discover_companies,
@@ -80,7 +80,7 @@ def main():
             if not args.no_report:
                 write_discovery_report(result)
             if args.apply:
-                for line in apply_to_config(result, dry_run=args.dry_run):
+                for line in apply_to_store(result, dry_run=args.dry_run):
                     print(line)
         return
 
@@ -97,7 +97,7 @@ def main():
         if not args.no_report:
             write_discovery_report(result)
         if args.apply:
-            for line in apply_to_config(result, dry_run=args.dry_run):
+            for line in apply_to_store(result, dry_run=args.dry_run):
                 print(line)
         return
 
@@ -137,7 +137,7 @@ def main():
     if not args.no_report:
         write_discovery_report(result)
     if args.apply:
-        for line in apply_to_config(result, dry_run=args.dry_run):
+        for line in apply_to_store(result, dry_run=args.dry_run):
             print(line)
 
 

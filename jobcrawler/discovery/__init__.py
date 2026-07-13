@@ -1,6 +1,6 @@
 """Discovery pipeline — ask Claude for employers, probe each ATS slug."""
 
-from .apply import apply_to_config
+from .apply import apply_to_store
 from .bciwiki import bciwiki_seed_candidates
 from .pipeline import (
     discover,
@@ -10,7 +10,7 @@ from .pipeline import (
 )
 
 __all__ = [
-    "apply_to_config",
+    "apply_to_store",
     "bciwiki_seed_candidates",
     "discover",
     "discover_companies",

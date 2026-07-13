@@ -427,45 +427,14 @@ def write_discovery_report(result):
         f.write(f"**{len(confirmed)}** confirmed / {len(companies)} suggested\n\n")
 
         if confirmed:
-            f.write("## Confirmed - ready to add to config.py\n\n")
+            f.write("## Confirmed - written to the company store with `--apply`\n\n")
+            f.write("| Company | ATS | Slug / coordinates | Jobs live | Verify |\n")
+            f.write("|---|---|---|---:|---|\n")
             for ats_name, cands in by_ats.items():
-                dict_name = {
-                    "greenhouse": "GREENHOUSE_COMPANIES",
-                    "lever":      "LEVER_COMPANIES",
-                    "ashby":      "ASHBY_COMPANIES",
-                    "kula":       "KULA_COMPANIES",
-                    "jazzhr":     "JAZZHR_COMPANIES",
-                    "bamboohr":   "BAMBOOHR_COMPANIES",
-                    "adp":        "ADP_COMPANIES",
-                    "workday":    "WORKDAY_COMPANIES",
-                }.get(ats_name, f"{ats_name.upper()}_COMPANIES")
-                f.write(f"### `{dict_name}`\n\n```python\n")
                 for c in cands:
-                    note = verify_note(c)
-                    suffix = f"  # VERIFY: {note}" if note else ""
-                    if ats_name in ("jazzhr", "bamboohr"):
-                        # {subdomain: "Company"} dicts.
-                        f.write(f'    "{c.slug_guess}": "{c.name}",  '
-                                f'# {c.job_count} job(s) live{suffix}\n')
-                    elif ats_name == "adp":
-                        cid, _, ccid = (c.slug_guess or "").partition("|")
-                        f.write(f'    ("{c.name}", "{cid}", "{ccid}"),  '
-                                f'# {c.job_count} job(s) live{suffix}\n')
-                    elif ats_name == "kula":
-                        f.write(f'    ("{c.name}", "{c.slug_guess}"),{suffix}\n')
-                    elif ats_name == "workday":
-                        parts = (c.slug_guess or "").split("|")
-                        if len(parts) == 3 and parts[1].isdigit():
-                            t, p, s = parts
-                            f.write(f'    ("{t}", {int(p)}, "{s}", "{c.name}"),  '
-                                    f'# {c.job_count} job(s) live{suffix}\n')
-                        else:
-                            f.write(f'    # malformed workday slug for {c.name}: '
-                                    f'{c.slug_guess!r}\n')
-                    else:
-                        f.write(f'    "{c.slug_guess}": "{c.name}",  '
-                                f'# {c.job_count} job(s) live{suffix}\n')
-                f.write("```\n\n")
+                    f.write(f"| {c.name} | {ats_name} | `{c.slug_guess}` "
+                            f"| {c.job_count} | {verify_note(c)} |\n")
+            f.write("\n")
 
         if unconfirmed:
             # Surface companies whose careers page links to a known but

@@ -650,7 +650,7 @@ def score_missions(max_workers=6, rescore_all=False):
     """Backfill company mission scores: every active company with a board
     and no mission_tier (or all of them, with rescore_all) gets sampled
     titles + one score_company_mission call. Heals stores populated by
-    --import-seeds (which deliberately imports without scoring) or by
+    --import-companies / older seed imports (no scoring) or by
     keyless/failed scoring passes."""
     from ..claude import score_company_mission
     from ..store import connect, get_companies, upsert_company

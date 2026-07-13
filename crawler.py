@@ -33,9 +33,12 @@ def main():
     # Legacy aliases for --track local-tech.
     ap.add_argument("--local-clinical", "--local-tech", dest="local_tech",
                     action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--export-companies", metavar="PATH",
+                    help="Dump the company roster to JSON (share/backup)")
+    ap.add_argument("--import-companies", metavar="PATH",
+                    help="Upsert companies from an exported JSON roster")
     ap.add_argument("--import-seeds", action="store_true",
-                    help="Import the config.py company lists into the unified "
-                         "store (tagged neural / nc_local) and exit")
+                    help=argparse.SUPPRESS)   # retired: roster lives in the DB
     ap.add_argument("--dry-run", action="store_true",
                     help="Classic crawl: scan without DB writes or email")
     ap.add_argument("--expand", metavar="TERM",
@@ -65,8 +68,21 @@ def main():
         config.DB_PATH = config.STORE_DB_PATH  # legacy readers
 
     if args.import_seeds:
-        from jobcrawler.seed_import import import_config_seeds
-        import_config_seeds()
+        print("  --import-seeds is retired: the company roster lives in the DB.\n"
+              "  Manage it with discover.py (--local / --add-board / --apply) or\n"
+              "  crawler.py --import-companies roster.json / --export-companies roster.json")
+        raise SystemExit(0)
+
+    if args.export_companies or args.import_companies:
+        from jobcrawler import store
+        conn = store.connect()
+        if args.export_companies:
+            n = store.export_companies(conn, args.export_companies)
+            print(f"  exported {n} compan(ies) -> {args.export_companies}")
+        if args.import_companies:
+            n = store.import_companies(conn, args.import_companies)
+            print(f"  imported/refreshed {n} compan(ies) from {args.import_companies}")
+        conn.close()
         raise SystemExit(0)
 
     if args.score:

@@ -29,3 +29,6 @@ venv/
 *.swp
 .DS_Store
 *.bak
+
+# Personal search profile (keywords/locations) — profile.example.toml is the template
+profile.toml

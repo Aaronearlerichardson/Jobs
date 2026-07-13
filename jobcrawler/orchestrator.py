@@ -31,7 +31,8 @@ from .fetchers import (
     fetch_sitemap,
     fetch_websearch,
 )
-from .sources import iter_config_sources
+from . import store
+from .sources import iter_store_sources, pause_for
 from .filters import is_location_allowed
 
 
@@ -65,13 +66,16 @@ def crawl(dry_run=False):
                     mark_seen(conn, job)
                 print(f"    {'[DRY]' if dry_run else '[NEW]'} {job['title']}")
 
-    # ─── Per-ATS sources (declarative registry — see sources.py) ─────────
+    # ─── Per-ATS sources: every active store company (see sources.py) ─────
     _LABEL = {"adp": "ADP WFN", "jazzhr": "JazzHR", "bamboohr": "BambooHR",
               "successfactors": "SuccessFactors", "peopleadmin": "PeopleAdmin"}
-    for ats, name, _slug, thunk, pause in iter_config_sources(config):
+    sconn = store.connect()
+    companies = store.get_companies(sconn, active_only=True)
+    sconn.close()
+    for ats, name, _slug, thunk in iter_store_sources(companies, only=None):
         print(f"  > {name} ({_LABEL.get(ats, ats.title())})")
         process(thunk())
-        time.sleep(pause)
+        time.sleep(pause_for(ats))
 
     for name, base_url, cat_id in DISCOURSE_BOARDS:
         print(f"  > {name} (Discourse)")
