@@ -487,7 +487,7 @@ def write_discovery_report(result):
             f.write("## Gated sites (require auth)\n\n")
             f.write("Login-only boards Claude thinks are worth searching. "
                     "Browse them logged-in and capture result pages with "
-                    "`python capture.py --serve` (see setup.md).\n\n")
+                    "`python capture.py` (see README.md).\n\n")
             f.write("| Site | Suggested query | Notes |\n|---|---|---|\n")
             for g in gated:
                 f.write(f"| {g.get('site','?')} | `{g.get('query','')}` | "
