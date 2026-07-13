@@ -81,12 +81,19 @@ def main():
         raise SystemExit(0)
 
     if args.track == "local-tech":
-        from jobcrawler.tracks.local_tech import run as run_track
         tp = argparse.ArgumentParser()
         tp.add_argument("--top", type=int, default=15)
         tp.add_argument("--workers", type=int, default=6)
+        tp.add_argument("--rescore", action="store_true",
+                        help="Re-score ALL stored jobs against the current "
+                             "resume/prompt instead of crawling")
         targs = tp.parse_args(passthrough)
-        run_track(max_workers=targs.workers, top_n=targs.top)
+        if targs.rescore:
+            from jobcrawler.tracks.local_tech import rescore_all
+            rescore_all(max_workers=targs.workers)
+        else:
+            from jobcrawler.tracks.local_tech import run as run_track
+            run_track(max_workers=targs.workers, top_n=targs.top)
         raise SystemExit(0)
 
     if passthrough:

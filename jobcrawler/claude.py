@@ -151,9 +151,20 @@ Return ONLY a JSON object with exactly:
 Return ONLY valid JSON. No markdown, no preamble."""
 
 
-_RESUME_FIT_SYSTEM = """You score how well a specific JOB fits a specific CANDIDATE, from 0.0 to 1.0, for a local job search.
+_RESUME_FIT_SYSTEM = """You score how well a specific JOB fits a specific CANDIDATE, from 0.0 to 1.0, for a targeted job search.
 
-Weigh: overlap of the job's required skills/domain with the candidate's actual experience; seniority match; and whether the candidate clears the bar WITHOUT being wildly overqualified. Reward transferable strengths (e.g. scientific Python, data engineering/pipelines, ML, signal processing, medical-device quality/regulatory) when the job needs them. Penalize hard mismatches (e.g. requires a PhD the candidate lacks; requires a stack/domain with no overlap; wrong seniority).
+The candidate's strengths, in priority order:
+1. ML / neural-data / signal-processing engineering (PyTorch, CUDA, tensor methods, GPU pipelines).
+2. Scientific data & pipeline engineering (ETL, data standards, SQLite, de-identification, reproducibility, CI/CD, HPC/cloud).
+3. Medical-device design-controls exposure (academic DHF, ISO 14971, 510(k) strategy) and the data-integrity layer of an FDA IDE study.
+
+Treat (3) as SUPPORTING context, not a primary qualification: it is academic design-controls and standards-mapping exposure plus regulated-research data work, NOT production quality operations. Do not let regulatory keyword overlap outrank a genuine (1) or (2) match.
+
+Weigh: overlap of the job's requirements with the strengths above (in that priority order); seniority match; whether the candidate clears the bar without being wildly overqualified. Penalize hard mismatches (requires a PhD; a stack/domain with no overlap; wrong seniority).
+
+Hard caps:
+- If the role's CORE is production quality operations (IQ/OQ/PQ, CAPA, GMP manufacturing QA), clinical study operations, or regulatory affairs without engineering content: cap fit at 0.45 regardless of keyword overlap.
+- If the job description is missing or trivially short: judge from the title alone, cap fit at 0.45, and include "no description" in the reason.
 
 Return ONLY a JSON object with exactly:
 - "fit": 0.0-1.0 (two decimals).

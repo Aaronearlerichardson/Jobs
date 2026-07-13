@@ -360,6 +360,46 @@ def run(max_workers=6, top_n=15):
     return ranked
 
 
+def rescore_all(max_workers=6, track=None):
+    """Re-run resume-fit scoring over every stored job (all tracks unless
+    one is named). Use after changing the resume or the scoring prompt —
+    the normal crawl only scores jobs it hasn't seen."""
+    resume = resume_text()
+    if not resume:
+        print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
+        return 0
+    conn = store.connect()
+    q = "SELECT job_id, title, description FROM jobs"
+    args = []
+    if track:
+        q += " WHERE track = ?"
+        args.append(track)
+    rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+    print(f"  rescoring {len(rows)} job(s) against the current resume...")
+
+    def _one(r):
+        fit, reason = score_resume_fit(resume, r["title"], r.get("description", ""))
+        return r["job_id"], fit, reason
+
+    n = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for fut in as_completed({ex.submit(_one, r): r for r in rows}):
+            try:
+                jid, fit, reason = fut.result()
+            except Exception as e:
+                print(f"    [!] rescore error: {e}")
+                continue
+            if fit is None:
+                continue
+            conn.execute("UPDATE jobs SET resume_fit_score=?, fit_reason=? "
+                         "WHERE job_id=?", (fit, reason, jid))
+            conn.commit()
+            n += 1
+    conn.close()
+    print(f"  {n} job(s) rescored.")
+    return n
+
+
 def ingest_external_jobs(jobs, source="indeed", max_workers=6):
     """
     Ingest external job dicts into the jobs table with resume-fit scores.
