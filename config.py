@@ -74,10 +74,13 @@ def _load_profile():
 
 
 _PROFILE, PROFILE_SOURCE = _load_profile()
-_kw  = _PROFILE.get("keywords", {})
-_exc = _PROFILE.get("exclude", {})
-_loc = _PROFILE.get("locations", {})
-_pol = _PROFILE.get("policy", {})
+_kw   = _PROFILE.get("keywords", {})
+_exc  = _PROFILE.get("exclude", {})
+_loc  = _PROFILE.get("locations", {})
+_pol  = _PROFILE.get("policy", {})
+_cand = _PROFILE.get("candidate", {})
+_mis  = _PROFILE.get("mission", {})
+_lcl  = _PROFILE.get("locality", {})
 
 # Tiered relevance: a job is relevant if it hits any CORE term, or a DOMAIN
 # term AND a SKILL term (see profile.example.toml).
@@ -95,6 +98,28 @@ LOCATION_REMOTE_INCLUDE = list(_loc.get("remote", []))
 ACCEPT_REMOTE           = bool(_loc.get("accept_remote", False))
 LOCATION_EXCLUDE        = list(_loc.get("exclude", []))
 LOCATION_INCLUDE        = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
+
+# --- Candidate identity (injected into Claude prompts; jobcrawler/claude.py) --
+CANDIDATE_SUMMARY   = (_cand.get("summary") or "").strip()
+CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
+CANDIDATE_FIT_CAPS  = list(_cand.get("fit_caps", []))
+CANDIDATE_AVOID     = (_cand.get("avoid") or "").strip()
+
+# --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
+# Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
+MISSION_TIERS = [
+    {"name": t["name"], "desc": t.get("desc", ""),
+     "band": list(t.get("band", [0.0, 1.0])), "active": bool(t.get("active", True))}
+    for t in _mis.get("tiers", [])
+]
+MISSION_BULLSEYE_REGEX = (_mis.get("bullseye_regex") or "").strip()
+MISSION_BULLSEYE_TIER  = (_mis.get("bullseye_tier") or "").strip()
+
+# --- Locality (what counts as "local"; jobcrawler/nc.py) ----------------------
+LOCALITY_NAME         = (_lcl.get("name") or "local").strip()
+LOCALITY_WORD_TOKENS  = list(_lcl.get("word_tokens", []))
+LOCALITY_SUBSTRINGS   = list(_lcl.get("substrings", []))
+LOCALITY_STATE_SUFFIX = list(_lcl.get("state_suffix", []))
 
 # =========================================================================
 #  HTTP

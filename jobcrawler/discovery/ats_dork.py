@@ -12,6 +12,8 @@ Two entry points:
 
 import re
 
+import config
+
 from .sniffer import _SIGS
 from .probes import _extract_workday_triple
 from .. import store
@@ -19,22 +21,36 @@ from ..fetchers import company as company_fetch
 from ..claude import score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal
 
-# Standard dork set: each ATS host x the NC location terms, plus a Workday sweep.
-_NC_TERMS = '("North Carolina" OR Durham OR Raleigh OR "Research Triangle" OR Morrisville OR Cary)'
+
+def _or_group(terms, n=8):
+    """A `("a" OR b OR "c d")` search clause from profile terms (multi-word
+    terms quoted). Empty string when there are no terms."""
+    picked = [t for t in terms[:n] if t]
+    if not picked:
+        return ""
+    return "(" + " OR ".join(f'"{t}"' if " " in t else t for t in picked) + ")"
+
+
+# Dork set derived from the loaded profile: each ATS host x the locality terms
+# ([locality]), a Workday sweep narrowed by domain keywords, and a bullseye
+# sweep over the core keywords — so this generalizes to any profile.
+_LOC = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS)
+_DOMAIN = _or_group(config.DOMAIN_KEYWORDS)
+_CORE = _or_group(config.CORE_KEYWORDS)
+
 DORK_QUERIES = [
-    f'site:boards.greenhouse.io {_NC_TERMS}',
-    f'site:job-boards.greenhouse.io {_NC_TERMS}',
-    f'site:jobs.lever.co {_NC_TERMS}',
-    f'site:jobs.ashbyhq.com {_NC_TERMS}',
-    f'site:jobs.smartrecruiters.com {_NC_TERMS}',
-    f'"myworkdayjobs.com" ("Durham, NC" OR "Raleigh, NC" OR "Research Triangle") '
-    f'(biotech OR pharma OR health OR clinical OR medical OR diagnostics)',
-    # Neurotech / BCI — the candidate's bullseye. These companies (e.g. Science
-    # Corp) are often on custom boards / non-.com domains, missed by name-guessing.
-    f'("neurotechnology" OR "brain-computer" OR "neural interface" OR "neural implant" '
-    f'OR "BCI" OR "electrophysiology" OR "neural signal") {_NC_TERMS} (careers OR jobs OR hiring)',
-    f'site:jobs.ashbyhq.com ("neuro" OR "neural" OR "brain") {_NC_TERMS}',
+    f'site:boards.greenhouse.io {_LOC}',
+    f'site:job-boards.greenhouse.io {_LOC}',
+    f'site:jobs.lever.co {_LOC}',
+    f'site:jobs.ashbyhq.com {_LOC}',
+    f'site:jobs.smartrecruiters.com {_LOC}',
+    f'"myworkdayjobs.com" {_LOC}' + (f" {_DOMAIN}" if _DOMAIN else ""),
 ]
+if _CORE:
+    # Bullseye sweep — target companies are often on custom boards / non-.com
+    # domains that name-guessing misses.
+    DORK_QUERIES.append(f'{_CORE} {_LOC} (careers OR jobs OR hiring)')
+DORK_QUERIES = [q for q in DORK_QUERIES if _LOC and _LOC in q]
 
 
 def extract_boards_from_urls(urls):
