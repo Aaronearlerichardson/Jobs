@@ -7,6 +7,7 @@ Each fetcher returns a list of job dicts with the shape:
 from .adp_wfn import fetch_adp
 from .ats_api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
+from .careeronestop import fetch_nlx_company
 from .discourse import fetch_discourse
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
@@ -33,6 +34,7 @@ __all__ = [
     "fetch_jsonld_page",
     "fetch_kula",
     "fetch_lever",
+    "fetch_nlx_company",
     "fetch_peopleadmin",
     "fetch_remoteok",
     "fetch_remotive",

@@ -21,6 +21,13 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HER
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
 
+# CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
+# (NLx) feed, where federal contractors must list openings (VEVRAA). Register
+# at https://www.careeronestop.org/Developers/WebAPI/registration.aspx; DOL
+# emails a UserId + token. Used by `python crawler.py --nlx "Meta,Google"`.
+CAREERONESTOP_USER_ID = os.environ.get("CAREERONESTOP_USER_ID", "")
+CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
+
 # =========================================================================
 #  PATHS
 # =========================================================================
@@ -509,6 +516,8 @@ WORKDAY_COMPANIES: list[tuple[str, int, str, str]] = [
     ("viatris", 5, "External", "Medicago (now acquired/dissolved) / Viatris RTP"),  # 255 job(s), discovered
     # --- discovered 2026-06-12: bciwiki:companies ---
     ("philips", 3, "jobs-and-careers", "Philips"),  # 1044 job(s), discovered
+    # --- verified 2026-07-13: multi-division conglomerates on Workday ---
+    ("nvidia", 5, "NVIDIAExternalCareerSite", "NVIDIA"),  # 86 NC job(s), mostly Durham
 ]
 
 # (host, company_name)

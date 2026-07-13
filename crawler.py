@@ -50,6 +50,11 @@ def main():
                     help="Bulk-expand every INCLUDE_KEYWORDS entry and write a suggestions report")
     ap.add_argument("--score", metavar="TEXT",
                     help="Score one job title/description on technical bar (0..1) and exit")
+    ap.add_argument("--nlx", metavar="COMPANIES",
+                    help="Pull NC postings for comma-separated employers from the "
+                         "NLx public feed (CareerOneStop API; covers bot-gated "
+                         "federal contractors like Meta/Google/Qualcomm) and "
+                         "ingest through the local-tech pipeline")
     ap.add_argument("--db", metavar="PATH",
                     help="Override the unified store DB path (isolates concurrent runs)")
     args, passthrough = ap.parse_known_args()
@@ -70,6 +75,18 @@ def main():
             print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
         else:
             print(f"  technical-bar score: {score:.2f}  [{mission or 'mission?'}]  ({reason})")
+        raise SystemExit(0)
+
+    if args.nlx:
+        from jobcrawler.fetchers.careeronestop import fetch_nlx_company
+        from jobcrawler.tracks.local_tech import ingest_external_jobs
+        total = 0
+        for name in [n.strip() for n in args.nlx.split(",") if n.strip()]:
+            jobs = fetch_nlx_company(name)
+            print(f"  {name}: {len(jobs)} NLx posting(s) in NC")
+            if jobs:
+                total += ingest_external_jobs(jobs, source="nlx")
+        print(f"\n  {total} new job(s) ingested from the NLx feed.")
         raise SystemExit(0)
 
     if args.local_tech and not args.track:

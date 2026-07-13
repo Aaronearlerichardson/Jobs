@@ -277,12 +277,17 @@ def _keep_job(company, job):
     for multi-division conglomerates (keep only their aligned-subdivision
     roles — focused companies were already mission-vetted and skip it)."""
     title = job.get("title", "")
-    desc = job.get("description", "")
-    if exclude_reason(title, desc):
-        return False
     if not is_technical_role(title):
         return False
-    if config.is_multi_division(company["name"]) and not is_relevant(title, desc):
+    if config.is_multi_division(company["name"]):
+        # Workday/SmartRecruiters listings carry no description until the
+        # detail call — but the relevance gate NEEDS the description (titles
+        # like "Research Scientist" say nothing about the division). Hydrate
+        # first; only NC-filtered jobs at conglomerates pay this extra GET.
+        company_fetch.hydrate_description(job)
+        if not is_relevant(title, job.get("description", "")):
+            return False
+    if exclude_reason(title, job.get("description", "")):
         return False
     return True
 
