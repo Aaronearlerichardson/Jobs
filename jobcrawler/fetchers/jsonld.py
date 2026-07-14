@@ -9,13 +9,6 @@ hundreds of sites with zero per-vendor code.
 Use it two ways:
 
   fetch_jsonld_page(company, url)
-      - Parse JSON-LD from a single URL. Returns any JobPosting records
-        found on that page. Perfect for individual job-listing pages
-        surfaced by websearch / sitemap.
-
-  fetch_jsonld_careers(company, careers_url)
-      - Parse JSON-LD from a careers index page. If none found, follow
-        job-like links from that page and parse JSON-LD on each.
 """
 
 import json
@@ -28,6 +21,7 @@ from bs4 import BeautifulSoup
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import stable_id
 
 
 _JOB_URL_HINTS = re.compile(
@@ -95,11 +89,11 @@ def _normalize_location(jp):
 
 def _normalize_description(jp):
     desc = jp.get("description", "") or ""
-    return BeautifulSoup(desc, "html.parser").get_text(" ")[:600]
+    return BeautifulSoup(desc, "html.parser").get_text(" ")
 
 
 def _job_from_posting(jp, company_name, source_url):
-    title = jp.get("title", "") or ""
+    title = (jp.get("title") or jp.get("name") or "").strip()
     job_url = jp.get("url") or jp.get("mainEntityOfPage") or source_url
     if isinstance(job_url, dict):
         job_url = job_url.get("@id", source_url)
@@ -108,8 +102,8 @@ def _job_from_posting(jp, company_name, source_url):
     identifier = jp.get("identifier")
     if isinstance(identifier, dict):
         identifier = identifier.get("value", "")
-    jid = str(identifier or abs(hash(str(job_url))))
-    return {
+    jid = str(identifier or stable_id(str(job_url)))
+    job = {
         "id":          f"jsonld_{company_name.replace(' ', '_')}_{jid}",
         "company":     company_name,
         "title":       title,
@@ -117,6 +111,10 @@ def _job_from_posting(jp, company_name, source_url):
         "location":    location,
         "description": description,
     }
+    # Structured remote signal — schema.org marks remote roles explicitly.
+    if str(jp.get("jobLocationType", "")).upper() == "TELECOMMUTE":
+        job["remote_hint"] = "jsonld:telecommute"
+    return job
 
 
 def fetch_jsonld_page(company_name, page_url, timeout=20):

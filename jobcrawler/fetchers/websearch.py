@@ -8,13 +8,6 @@ meaningfully broadens the crawler's reach over just hitting hard-coded
 ATS tenants.
 
 Pipeline per query:
-  1. Run DDG text search with your `site:` / operator-flavored query.
-  2. For each result URL, fetch the page and extract JSON-LD JobPosting
-     records (via fetchers/jsonld.py).
-  3. Filters + dedupe happen in the orchestrator like any other source.
-
-Rate limiting: DDG tolerates a few queries per minute comfortably. We
-sleep between queries and between per-result page fetches.
 """
 
 import time

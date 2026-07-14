@@ -8,11 +8,6 @@ element is a legal/metadata stub (has no 'id') and must be skipped.
 Schema (per job):
     id, slug, epoch, date, company, company_logo, position, tags,
     description, location, salary, apply_url, url, original
-
-We don't do our own location filtering here - the orchestrator's
-is_location_allowed() handles that. We DO run is_relevant() to keep
-crawl volume reasonable, since the feed is several MB and mostly
-off-topic (marketing roles, etc.).
 """
 
 import html
@@ -57,7 +52,7 @@ def fetch_remoteok(max_jobs=500):
         company  = entry.get("company")  or "RemoteOK"
         url      = entry.get("url") or entry.get("apply_url") or ""
         location = entry.get("location") or "Remote"
-        desc     = _strip_html(entry.get("description", ""))[:600]
+        desc     = _strip_html(entry.get("description", ""))
 
         # tags can enrich relevance matching (e.g. "ml", "python")
         tags = entry.get("tags") or []
@@ -73,5 +68,8 @@ def fetch_remoteok(max_jobs=500):
             "url":         url,
             "location":    location,
             "description": desc,
+            # RemoteOK is a remote-only board; `location` is the candidate
+            # region requirement, not an office.
+            "remote_hint": "board:remoteok",
         })
     return jobs

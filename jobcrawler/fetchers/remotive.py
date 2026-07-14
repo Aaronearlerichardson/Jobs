@@ -8,10 +8,6 @@ in a single payload. No API key, no pagination, permissive CORS.
 Optional `category` parameter narrows by slug
 (e.g. "software-dev", "data"). We don't use it by default: our own
 is_relevant() filter is narrower than any single Remotive category.
-
-Schema (per job under data['jobs']):
-    id, url, title, company_name, category, tags, job_type,
-    publication_date, candidate_required_location, salary, description
 """
 
 import html
@@ -61,7 +57,7 @@ def fetch_remotive(category=None, max_jobs=None):
         company  = entry.get("company_name") or "Remotive"
         jurl     = entry.get("url") or ""
         location = entry.get("candidate_required_location") or "Remote"
-        desc     = _strip_html(entry.get("description", ""))[:600]
+        desc     = _strip_html(entry.get("description", ""))
 
         tags     = entry.get("tags") or []
         tag_text = " ".join(str(t) for t in tags if t)
@@ -77,5 +73,8 @@ def fetch_remotive(category=None, max_jobs=None):
             "url":         jurl,
             "location":    location,
             "description": desc,
+            # Remotive is a remote-only board; `location` is the candidate
+            # region requirement (e.g. "USA Only", "Worldwide").
+            "remote_hint": "board:remotive",
         })
     return jobs

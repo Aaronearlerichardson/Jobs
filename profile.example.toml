@@ -1,0 +1,98 @@
+# ---------------------------------------------------------------------------
+# Search profile TEMPLATE. Copy to `profile.toml` (gitignored) and edit for
+# your own search. config.py loads profile.toml if present, else this file.
+#
+# Relevance model: a job is relevant if it matches ANY `core` term, OR matches
+# a `domain` term AND a `skill` term. Keep `core` narrow (high-signal); let
+# `domain` + `skill` pull in adjacent roles without opening the floodgates.
+# ---------------------------------------------------------------------------
+
+[keywords]
+# Tier 1 — any single hit => relevant. Your field's unambiguous signals.
+core = [
+    "machine learning engineer", "data engineer", "backend engineer",
+    "site reliability", "platform engineer",
+]
+# Tier 2 — adjacent domains. Needs a `skill` pair to pass.
+domain = [
+    "fintech", "healthtech", "climate", "robotics", "logistics",
+]
+# Tier 3 — transferable skills. Only count paired with a `domain` term.
+skill = [
+    "python", "golang", "kubernetes", "distributed systems",
+    "data pipeline", "machine learning",
+]
+
+[exclude]
+phrases = ["phd required", "must have a phd", "clearance required"]
+title_phrases = ["manager", "director", "intern"]
+
+[locations]
+onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]
+remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "anywhere"]
+accept_remote = true
+exclude = []
+
+[policy]
+# Large companies to keep active despite an "other" mission score, crawling
+# only their aligned roles. Leave empty if you don't want special-casing.
+multi_division = []
+multi_division_mission_floor = 0.6
+
+# ---------------------------------------------------------------------------
+# Candidate identity — injected into the Claude scoring/expansion prompts.
+# ---------------------------------------------------------------------------
+[candidate]
+summary = "A senior software/data engineer targeting backend, ML, and platform roles at mission-driven companies."
+strengths = [
+    "Backend & distributed systems engineering (Go, Python, Kubernetes, event-driven architectures).",
+    "Data pipeline & analytics engineering (SQL, dbt, Spark, warehouse modeling).",
+    "Cloud infrastructure & reliability (Terraform, CI/CD, observability).",
+]
+fit_caps = [
+    "If the role is pure people-management with no hands-on engineering: cap fit at 0.45.",
+    "If the job description is missing or trivially short: judge from the title alone and cap fit at 0.45.",
+]
+avoid = "Avoid roles requiring an active security clearance or a PhD."
+
+# ---------------------------------------------------------------------------
+# Mission taxonomy — employer-alignment ladder, highest first. Rename/reorder
+# tiers to match what you care about. The LAST tier is typically the inactive
+# catch-all. `band` = score range; `active` = whether to crawl that tier.
+# ---------------------------------------------------------------------------
+[mission]
+tiers = [
+    { name = "core-mission",   desc = "companies whose core product is exactly what you want to work on", band = [0.75, 1.00], active = true },
+    { name = "adjacent",       desc = "companies in an adjacent domain where your skills transfer well", band = [0.45, 0.75], active = true },
+    { name = "other",          desc = "everything else", band = [0.00, 0.30], active = false },
+]
+# Optional: pin companies whose NAME matches this regex to (bullseye_tier, 1.0).
+# Leave empty to disable. Use a TOML literal string (single quotes) for regexes.
+bullseye_regex = ''
+bullseye_tier  = "core-mission"
+
+# ---------------------------------------------------------------------------
+# Locality — what counts as "local" for the local track.
+# ---------------------------------------------------------------------------
+[locality]
+name = "San Francisco Bay Area"
+word_tokens = ["sf", "ca"]
+substrings = ["san francisco", "bay area", "oakland", "berkeley", "palo alto", "mountain view", "san jose"]
+state_suffix = ["ca", "california"]
+
+# ---------------------------------------------------------------------------
+# Discovery — company NAMES for `discover.py --local` to probe for public ATS
+# boards, plus recall levers. All a starting pool; the probe + locality check
+# filter it. Leave lists empty to rely purely on web-search harvesting.
+# ---------------------------------------------------------------------------
+[discovery]
+seed_companies = []          # curated employer names to probe
+workday_majors = []          # big employers to also try via the Workday fallback
+directory_urls = []          # e.g. a local chamber/association "/company/<slug>/" directory
+# The main recall lever — searches whose results are harvested for names, then
+# probed. Tailor to your region/domain.
+name_search_queries = [
+    "tech companies in <your city>",
+    "<your industry> startups <your region>",
+]
+name_blocklist = []          # normalized names to drop (bad slug collisions)

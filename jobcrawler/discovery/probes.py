@@ -1,6 +1,8 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+import queue
 import re
+import time
 import requests
 
 from ..http import HEADERS
@@ -40,11 +42,60 @@ def probe_ashby(slug):
         return (False, 0)
 
 
-def probe_kula(slug):
+def probe_kula(slug, retries=1):
+    # Kula serves a full HTML page (no JSON API) and throttles under
+    # probe bursts — a confirmed-live board can 4xx/timeout once during
+    # a parallel discovery run. One retry with a short backoff recovers
+    # those without slowing genuine misses much.
     url = f"https://careers.kula.ai/{slug}"
+    for attempt in range(retries + 1):
+        try:
+            r = requests.get(url, timeout=10, headers=HEADERS)
+            if r.status_code == 200 and len(r.text) > 1000:
+                return (True, 0)
+        except Exception:
+            pass
+        if attempt < retries:
+            time.sleep(1.0)
+    return (False, 0)
+
+
+def probe_jazzhr(slug):
+    url = f"https://{slug}.applytojob.com/"
     try:
         r = requests.get(url, timeout=10, headers=HEADERS)
-        return (r.status_code == 200 and len(r.text) > 1000, 0)
+        if r.status_code != 200:
+            return (False, 0)
+        n = len(re.findall(r"/apply/[A-Za-z0-9]+/", r.text))
+        return (n > 0, n)
+    except Exception:
+        return (False, 0)
+
+
+def probe_bamboohr(slug):
+    url = f"https://{slug}.bamboohr.com/careers/list"
+    try:
+        r = requests.get(url, timeout=10,
+                         headers={**HEADERS, "Accept": "application/json"})
+        if r.status_code != 200:
+            return (False, 0)
+        return (True, len(r.json().get("result", []) or []))
+    except Exception:
+        return (False, 0)
+
+
+def probe_smartrecruiters(slug):
+    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
+    try:
+        r = requests.get(url, timeout=10, headers=HEADERS)
+        if r.status_code != 200:
+            return (False, 0)
+        # SmartRecruiters returns 200 / totalFound:0 for ANY slug, even
+        # nonexistent ones — so a 200 alone is not proof of a real board.
+        # Require live postings (like jazzhr), else every guessed slug
+        # "confirms" with zero jobs and floods discovery with false hits.
+        n = int(r.json().get("totalFound", 0) or 0)
+        return (n > 0, n)
     except Exception:
         return (False, 0)
 
@@ -54,6 +105,9 @@ PROBES = {
     "lever":      probe_lever,
     "ashby":      probe_ashby,
     "kula":       probe_kula,
+    "jazzhr":     probe_jazzhr,
+    "bamboohr":   probe_bamboohr,
+    "smartrecruiters": probe_smartrecruiters,
 }
 
 
@@ -219,13 +273,11 @@ def probe_workday(name: str, careers_url: str = ""):
     or None if no workday URL was found.
 
     `validated=False` means the URL pattern was found but the CXS API
-    didn't confirm (DNS/auth/rate-limit) — still worth surfacing to
-    the user so they can wire it up manually.
     """
     for url in _workday_candidate_urls(name, careers_url):
         try:
             r = requests.get(
-                url, timeout=12, headers=HEADERS, allow_redirects=True,
+                url, timeout=6, headers=HEADERS, allow_redirects=True,
             )
         except Exception:
             continue
@@ -276,8 +328,6 @@ class WorkdayJsProbe:
             meta = js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
-    object stays disabled — `probe()` returns None quietly so the
-    calling pipeline can proceed without the JS fallback.
     """
 
     def __init__(self):
@@ -447,6 +497,46 @@ class WorkdayJsProbe:
     def launched(self) -> bool:
         """True once the browser has actually started (for logging)."""
         return self._launched
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        self.close()
+
+
+class WorkdayJsProbePool:
+    """K headless browsers running JS Workday scrapes in parallel.
+
+    A single WorkdayJsProbe is single-threaded by necessity — Playwright's
+    sync API pins its greenlet to one thread, so one instance serializes
+    every scrape onto one browser. But nothing stops running SEVERAL
+    instances at once: each owns its own Playwright + browser + thread, so
+    K of them give K-way parallel scraping. Discovery workers that need the
+    JS fallback borrow a free browser from the pool (blocking only when all
+    """
+
+    def __init__(self, size):
+        self.size = max(1, int(size))
+        self._probes = [WorkdayJsProbe() for _ in range(self.size)]
+        self._free = queue.Queue()
+        for p in self._probes:
+            self._free.put(p)
+
+    def probe(self, name, careers_url=""):
+        p = self._free.get()          # blocks until a browser is free
+        try:
+            return p.probe(name, careers_url)
+        finally:
+            self._free.put(p)
+
+    @property
+    def launched(self):
+        return any(p.launched for p in self._probes)
+
+    def close(self):
+        for p in self._probes:
+            p.close()
 
     def __enter__(self):
         return self

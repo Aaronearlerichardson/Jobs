@@ -5,16 +5,75 @@ import re
 
 import requests
 
+import config
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
 
-_BCI_EXPAND_SYSTEM = """You are a job search strategist specializing in neurotechnology and BCI (brain-computer interface) careers. The user does NOT have a PhD - avoid suggesting roles that require one (Research Scientist at most companies requires a PhD). The user has: extensive PyTorch experience, 7+ years of EEG/ECoG/iEEG signal processing pipeline development, authored the sliceTCA tensor decomposition library for neural data, contributed to MNE-Python, BME background with medical device hardware experience, and a BCI paper in preparation.
+# --------------------------------------------------------------------------- #
+#  Prompt building blocks — the candidate identity + mission taxonomy come    #
+#  from profile.toml (via config), so scoring/discovery is about whoever's    #
+#  profile is loaded, not a hard-coded person.                                #
+# --------------------------------------------------------------------------- #
 
-Given a job title, skill, or BCI concept, return ONLY a JSON object with exactly three keys:
-- "titles": array of up to 12 alternative job title strings to search for. Prioritize non-PhD tracks: Research Engineer, ML Engineer, Software Engineer (Neuro/BCI), Applied Scientist, Signal Processing Engineer, Neurotech Engineer, Systems Engineer, Data Scientist. Avoid "Research Scientist" unless it is documented that the role does not require a PhD.
-- "keywords": array of up to 12 technical keywords, skills, or domain terms to include in job searches that will surface more relevant listings.
-- "sectors": array of up to 12 specific company types, industry verticals, or named employers/labs where these roles exist without PhD requirements.
+_CANDIDATE = config.CANDIDATE_SUMMARY or "A technical candidate seeking a targeted job search."
+_AVOID = config.CANDIDATE_AVOID or ""
+
+# Mission tiers as loaded (highest alignment → lowest, last is the catch-all).
+_MISSION_TIERS = tuple(t["name"] for t in config.MISSION_TIERS) or ("other",)
+ACTIVE_MISSION_TIERS = tuple(t["name"] for t in config.MISSION_TIERS if t["active"])
+
+# Compiled bullseye pin (profile [mission].bullseye_regex); None when disabled.
+_BULLSEYE_RE = re.compile(config.MISSION_BULLSEYE_REGEX, re.I) \
+    if config.MISSION_BULLSEYE_REGEX else None
+
+
+def _tier_enum():
+    """`"name" (desc)` lines for the mission-tier list in prompts."""
+    return "\n".join(f'    "{t["name"]}" — {t["desc"]}' for t in config.MISSION_TIERS)
+
+
+def _tier_bands():
+    """`lo-hi = name: desc` score-band lines for the mission prompt."""
+    out = []
+    for t in config.MISSION_TIERS:
+        lo, hi = t["band"]
+        out.append(f"    * {lo:.2f}-{hi:.2f} = {t['name']}: {t['desc']}")
+    return "\n".join(out)
+
+
+_EXPAND_SYSTEM = f"""You are a job-search strategist for this candidate:
+
+{_CANDIDATE}
+{_AVOID}
+
+Given a job title, skill, or concept, return ONLY a JSON object with exactly three keys:
+- "titles": array of up to 12 alternative job-title strings to search for, matched to the candidate's reachable level.
+- "keywords": array of up to 12 technical keywords/skills/domain terms that surface more relevant listings.
+- "sectors": array of up to 12 company types, industry verticals, or named employers/labs where these roles exist.
 Return ONLY valid JSON. No markdown, no explanation, no preamble."""
+
+
+_TECH_BAR_SCORE_SYSTEM = f"""You are a technical-hiring screener for this candidate:
+
+{_CANDIDATE}
+
+The candidate wants ANY role with a genuine TECHNICAL or QUANTITATIVE component — NOT only machine learning. Given a job posting (title + description), rate the role's TECHNICAL BAR on a 0.0-to-1.0 scale.
+
+Scoring rubric:
+- HIGH (0.75-1.0): the core work is hands-on technical — writing software; building or maintaining data pipelines, databases, ETL, or infrastructure; quantitative/statistical analysis; modeling, algorithms, or research; quality, test, validation, or systems engineering; data management or data engineering; bioinformatics/computational work. The person builds, engineers, analyzes, or rigorously tests.
+- MEDIUM (0.4-0.7): partially technical — an analyst/specialist who runs existing tools or queries rather than building them, or a role mixing technical tasks with coordination/admin.
+- LOW (0.0-0.35): little or no technical component — executing SOPs, coordination/monitoring, paperwork, manual data ENTRY, scheduling, patient care, recruiting, sales, marketing, or general people/project management without technical depth.
+
+Key distinctions: "data management" / "data engineering" / "quality engineering" / "test engineering" / "validation" / "analysis" are TECHNICAL (high-ish). "data ENTRY" / "coordination" / "monitoring" are NOT (low). Judge by the ACTUAL responsibilities, not the title or seniority.
+
+Also classify the employer's MISSION into exactly one tier:
+{_tier_enum()}
+
+Return ONLY a JSON object with exactly these keys:
+- "score": a number from 0.0 to 1.0 (two decimals) — the TECHNICAL BAR.
+- "mission": one of {", ".join(f'"{t}"' for t in _MISSION_TIERS)}.
+- "reason": one short phrase (<= 12 words) naming the deciding factor.
+Return ONLY valid JSON. No markdown, no preamble."""
 
 
 _LOCATION_EXPAND_SYSTEM = """You are a geographic search strategist. Given a location term (a city, region, country, or qualifier like "remote"), return ONLY a JSON object with exactly two keys:
@@ -23,9 +82,12 @@ _LOCATION_EXPAND_SYSTEM = """You are a geographic search strategist. Given a loc
 Use lowercase unless the token is normally capitalized (country codes etc). Return ONLY valid JSON, no markdown, no explanation."""
 
 
-DISCOVER_SYSTEM = """You are a technical recruiter who maps employers to ATS platforms. Given a sector, industry, or job concept, list companies that (a) plausibly hire for roles in that space and (b) are likely to post jobs publicly. The user is targeting neurotechnology / BCI / ML / signal-processing roles and does NOT have a PhD.
+DISCOVER_SYSTEM = f"""You are a technical recruiter who maps employers to ATS platforms. Given a sector, industry, or job concept, list companies that (a) plausibly hire for roles in that space and (b) are likely to post jobs publicly. The candidate you're sourcing for:
 
-Return ONLY a JSON object with this exact shape:
+{_CANDIDATE}
+{_AVOID}
+
+Return ONLY a JSON object with this exact shape:""" + r"""
 {
   "companies": [
     {
@@ -46,7 +108,7 @@ Return ONLY a JSON object with this exact shape:
 }
 
 Rules:
-- Up to 15 companies. Prefer ones where a Research Engineer / ML Engineer / Software Engineer role is achievable without a PhD.
+- Up to 15 companies. Prefer ones with roles the candidate above could realistically land.
 - slug_guess: best educated guess (typically the company name lowercased with hyphens). Use null if you really can't guess.
 - ats: "unknown" is fine if you're not sure.
 - Return ONLY valid JSON. No markdown, no commentary."""
@@ -93,8 +155,115 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000):
 
 
 def expand_search(term):
-    return call_claude_json(_BCI_EXPAND_SYSTEM, term)
+    return call_claude_json(_EXPAND_SYSTEM, term)
 
 
 def expand_location(term):
     return call_claude_json(_LOCATION_EXPAND_SYSTEM, term)
+
+
+# --------------------------------------------------------------------------- #
+#  Technical-bar scorer (repurposes the --expand Claude call).                 #
+#                                                                              #
+#  Instead of expanding a term into more keywords, this asks Claude to score   #
+#  a single posting 0.0-1.0 on how much real model/algorithm/research work it  #
+#  involves (high) vs. SOP-execution / study-coordination / data-entry (low).  #
+# --------------------------------------------------------------------------- #
+
+_COMPANY_MISSION_SYSTEM = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
+
+{_CANDIDATE}
+
+Return ONLY a JSON object with exactly:
+- "mission": one of
+{_tier_enum()}
+- "score": 0.0-1.0 alignment with the candidate's target — pick within the band for the tier you chose:
+{_tier_bands()}
+- "reason": one short phrase (<= 12 words).
+Return ONLY valid JSON. No markdown, no preamble."""
+
+
+_STRENGTHS = "\n".join(f"{i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1)) \
+    or "1. (no strengths configured — judge on general technical merit)"
+_FIT_CAPS = "\n".join(f"- {c}" for c in config.CANDIDATE_FIT_CAPS) \
+    or "- If the job description is missing or trivially short: judge from the title alone and cap fit at 0.45."
+
+_RESUME_FIT_SYSTEM = f"""You score how well a specific JOB fits a specific CANDIDATE, from 0.0 to 1.0, for a targeted job search.
+
+The candidate's strengths, in priority order:
+{_STRENGTHS}
+
+Weigh: overlap of the job's requirements with the strengths above (in that priority order); seniority match; whether the candidate clears the bar without being wildly overqualified. Penalize hard mismatches (a stack/domain with no overlap; wrong seniority; a hard requirement the candidate lacks).
+
+Hard caps:
+{_FIT_CAPS}
+
+Return ONLY a JSON object with exactly:
+- "fit": 0.0-1.0 (two decimals).
+- "reason": one short phrase (<= 14 words) naming the deciding factor.
+Return ONLY valid JSON. No markdown, no preamble."""
+
+
+def score_company_mission(name, context=""):
+    """Return (mission_tier|None, score|None, reason) for an employer."""
+    user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
+    result = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120)
+    if not result or "mission" not in result:
+        return None, None, ""
+    tier = str(result.get("mission", "")).strip().lower()
+    if tier not in _MISSION_TIERS:
+        tier = None
+    try:
+        score = max(0.0, min(1.0, float(result.get("score"))))
+    except (TypeError, ValueError):
+        score = None
+    reason = str(result.get("reason", "")).strip()
+    # Deterministic bullseye anchor (profile [mission].bullseye_regex): a
+    # company whose NAME is the candidate's exact target is pinned to 1.0 in
+    # the bullseye tier — not a hedged 0.9x. Match the NAME only: the reason
+    # text is where the model's *negations* live ("no neurotech focus"), and a
+    # substring match there would flip a rejection into a perfect score.
+    if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
+        score, tier = 1.0, config.MISSION_BULLSEYE_TIER or tier
+    return tier, score, reason
+
+
+def score_resume_fit(resume, title, description=""):
+    """Return (fit: float in [0,1]|None, reason: str) for one job vs a résumé."""
+    if not resume:
+        return None, ""
+    desc = (description or "")[:2200]
+    user = (f"CANDIDATE RÉSUMÉ:\n{resume[:6000]}\n\n"
+            f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc or '(no description)'}")
+    result = call_claude_json(_RESUME_FIT_SYSTEM, user, max_tokens=120)
+    if not result or "fit" not in result:
+        return None, ""
+    try:
+        fit = max(0.0, min(1.0, float(result["fit"])))
+    except (TypeError, ValueError):
+        return None, ""
+    return fit, str(result.get("reason", "")).strip()
+
+
+def score_technical_bar(title, description=""):
+    """
+    Return (score: float in [0,1], reason: str, mission: str|None) for one
+    posting, where mission is one of _MISSION_TIERS (None when unknown).
+
+    Falls back to ``(None, "", None)`` when the API key is unset or the call
+    fails, so callers can degrade to a heuristic without crashing.
+    """
+    desc = (description or "")[:2500]
+    user = f"TITLE: {title}\n\nDESCRIPTION:\n{desc or '(no description provided)'}"
+    result = call_claude_json(_TECH_BAR_SCORE_SYSTEM, user, max_tokens=120)
+    if not result or "score" not in result:
+        return None, "", None
+    try:
+        score = float(result["score"])
+    except (TypeError, ValueError):
+        return None, "", None
+    score = max(0.0, min(1.0, score))
+    mission = str(result.get("mission", "")).strip().lower()
+    if mission not in _MISSION_TIERS:
+        mission = None
+    return score, str(result.get("reason", "")).strip(), mission

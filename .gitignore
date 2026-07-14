@@ -7,9 +7,14 @@ credentials.json
 sessions/
 
 # Runtime data
-seen_jobs.db
-seen_jobs.db-journal
+*.db
 job_reports/
+*.log
+~$*
+captures/
+# discovery run artifacts / harvested name lists
+cro_names.txt
+local_tech_companies.txt
 
 # Python cruft
 __pycache__/
@@ -23,3 +28,7 @@ venv/
 .vscode/
 *.swp
 .DS_Store
+*.bak
+
+# Personal search profile (keywords/locations) — profile.example.toml is the template
+profile.toml

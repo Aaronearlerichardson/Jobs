@@ -1,37 +1,28 @@
-"""SQLite dedupe store for seen jobs."""
+"""Legacy dedupe API — thin adapter over the unified store.
 
-import sqlite3
-from datetime import datetime
+Earlier revisions kept a standalone `seen_jobs` SQLite table per track
+(seen_jobs_remote.db / jobs_local_clinical.db). Both tracks now share one
+store (jobcrawler/store.py) whose `jobs` table carries the dedupe state,
+so this module just forwards. Kept so the classic orchestrator path and
+older scripts keep working unchanged.
 
-from config import DB_PATH
+NOTE: pre-merge seen_jobs_*.db files are not auto-imported; the first run
+after upgrading will re-surface previously seen postings once.
+"""
+
+import config
+
+from . import store
 
 
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS seen_jobs (
-            job_id     TEXT PRIMARY KEY,
-            company    TEXT,
-            title      TEXT,
-            url        TEXT,
-            location   TEXT,
-            first_seen TEXT
-        )
-    """)
-    conn.commit()
-    return conn
+def init_db(path=None):
+    """Open the unified store. Honours a --db override on config."""
+    return store.connect(path or getattr(config, "STORE_DB_PATH", None))
 
 
 def is_new(conn, job_id):
-    return conn.execute(
-        "SELECT 1 FROM seen_jobs WHERE job_id = ?", (job_id,)
-    ).fetchone() is None
+    return store.is_new(conn, job_id)
 
 
-def mark_seen(conn, job):
-    conn.execute(
-        "INSERT OR IGNORE INTO seen_jobs VALUES (?,?,?,?,?,?)",
-        (job["id"], job["company"], job["title"],
-         job["url"], job["location"], datetime.now().isoformat()),
-    )
-    conn.commit()
+def mark_seen(conn, job, track=None):
+    store.mark_seen(conn, job, track=track)

@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import stable_id
 
 
 def fetch_kula(company_name, kula_slug):
@@ -78,7 +79,7 @@ def fetch_custom(company_name, page_url, css_selector=None):
             continue
         seen.add(href)
         jobs.append({
-            "id": f"custom_{company_name.replace(' ','_')}_{abs(hash(href))}",
+            "id": f"custom_{company_name.replace(' ','_')}_{stable_id(href)}",
             "company": company_name, "title": title,
             "url": href, "location": "See posting", "description": "",
         })
@@ -137,7 +138,7 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
                     loc = m.group(0).strip(" ,-")
 
             jid_m = re.search(r"/job/([^/?#]+)", href)
-            jid = jid_m.group(1) if jid_m else str(abs(hash(href)))
+            jid = jid_m.group(1) if jid_m else stable_id(href)
             new_on_page += 1
             if is_relevant(title):
                 jobs.append({

@@ -1,20 +1,16 @@
 """Reports, keyword expansion report, Gmail digest."""
 
-import smtplib
 import time
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from config import (
-    GMAIL_ADDRESS,
-    GMAIL_APP_PASSWORD,
     INCLUDE_KEYWORDS,
     LOCATION_EXCLUDE,
     LOCATION_INCLUDE,
     REPORT_DIR,
 )
 from .claude import expand_search
+from .digest import send_gmail
 
 
 # ─── Job report ───────────────────────────────────────────────────────────
@@ -54,10 +50,6 @@ def send_email(new_jobs, report_path):
     if not new_jobs:
         print("  No new jobs - skipping email.")
         return
-    if GMAIL_APP_PASSWORD == "YOUR_APP_PASSWORD_HERE":
-        print("  [!] Set GMAIL_APP_PASSWORD before emailing.")
-        return
-
     subject = f"[BCI Jobs] {len(new_jobs)} new posting(s) - {datetime.now().strftime('%Y-%m-%d')}"
     plain = "\n".join(
         [subject, ""]
@@ -77,22 +69,8 @@ def send_email(new_jobs, report_path):
 </table>
 <p>Full report: {report_path}</p>
 </body></html>"""
-
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"]    = GMAIL_ADDRESS
-    msg["To"]      = GMAIL_ADDRESS
-    msg.attach(MIMEText(plain, "plain"))
-    msg.attach(MIMEText(html, "html"))
-    try:
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as srv:
-            srv.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
-            srv.sendmail(GMAIL_ADDRESS, GMAIL_ADDRESS, msg.as_string())
+    if send_gmail(subject, plain, html):
         print("  Email sent.")
-    except smtplib.SMTPAuthenticationError:
-        print("  [!] Gmail auth failed - check your App Password.")
-    except Exception as e:
-        print(f"  [!] Email error: {e}")
 
 
 # ─── Expansion pretty-printers ────────────────────────────────────────────

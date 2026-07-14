@@ -3,47 +3,36 @@
 import time
 from datetime import datetime
 
+import config
 from config import (
     ACCEPT_REMOTE,
-    ASHBY_COMPANIES,
     CUSTOM_COMPANIES,
     DISCOURSE_BOARDS,
-    GREENHOUSE_COMPANIES,
     HNHIRING_ENABLED,
     HNHIRING_MAX_THREADS,
     JSONLD_COMPANIES,
-    KULA_COMPANIES,
-    LEVER_COMPANIES,
-    PEOPLEADMIN_COMPANIES,
     REMOTEOK_ENABLED,
     REMOTIVE_CATEGORY,
     REMOTIVE_ENABLED,
     REPORT_DIR,
     RSS_FEEDS,
     SITEMAP_COMPANIES,
-    SUCCESSFACTORS_COMPANIES,
     WEBSEARCH_QUERIES,
-    WORKDAY_COMPANIES,
 )
 from .db import init_db, is_new, mark_seen
 from .fetchers import (
-    fetch_ashby,
     fetch_custom,
     fetch_discourse,
-    fetch_greenhouse,
     fetch_hnhiring,
     fetch_jsonld_careers,
-    fetch_kula,
-    fetch_lever,
-    fetch_peopleadmin,
     fetch_remoteok,
     fetch_remotive,
     fetch_rss,
     fetch_sitemap,
-    fetch_successfactors,
     fetch_websearch,
-    fetch_workday,
 )
+from . import store
+from .sources import iter_store_sources, pause_for
 from .filters import is_location_allowed
 
 
@@ -77,27 +66,16 @@ def crawl(dry_run=False):
                     mark_seen(conn, job)
                 print(f"    {'[DRY]' if dry_run else '[NEW]'} {job['title']}")
 
-    # ─── Per-ATS sources ──────────────────────────────────────────────────
-
-    for slug, name in GREENHOUSE_COMPANIES.items():
-        print(f"  > {name} (Greenhouse)")
-        process(fetch_greenhouse(slug, name))
-        time.sleep(0.5)
-
-    for slug, name in LEVER_COMPANIES.items():
-        print(f"  > {name} (Lever)")
-        process(fetch_lever(slug, name))
-        time.sleep(0.5)
-
-    for slug, name in ASHBY_COMPANIES.items():
-        print(f"  > {name} (Ashby)")
-        process(fetch_ashby(slug, name))
-        time.sleep(0.5)
-
-    for name, slug in KULA_COMPANIES:
-        print(f"  > {name} (Kula)")
-        process(fetch_kula(name, slug))
-        time.sleep(0.5)
+    # ─── Per-ATS sources: every active store company (see sources.py) ─────
+    _LABEL = {"adp": "ADP WFN", "jazzhr": "JazzHR", "bamboohr": "BambooHR",
+              "successfactors": "SuccessFactors", "peopleadmin": "PeopleAdmin"}
+    sconn = store.connect()
+    companies = store.get_companies(sconn, active_only=True)
+    sconn.close()
+    for ats, name, _slug, thunk in iter_store_sources(companies, only=None):
+        print(f"  > {name} ({_LABEL.get(ats, ats.title())})")
+        process(thunk())
+        time.sleep(pause_for(ats))
 
     for name, base_url, cat_id in DISCOURSE_BOARDS:
         print(f"  > {name} (Discourse)")
@@ -107,21 +85,6 @@ def crawl(dry_run=False):
     for name, url, sel in CUSTOM_COMPANIES:
         print(f"  > {name} (HTML scrape)")
         process(fetch_custom(name, url, sel))
-        time.sleep(1.0)
-
-    for name, base_url in SUCCESSFACTORS_COMPANIES:
-        print(f"  > {name} (SuccessFactors)")
-        process(fetch_successfactors(name, base_url))
-        time.sleep(1.0)
-
-    for tenant, wd_pod, site, name in WORKDAY_COMPANIES:
-        print(f"  > {name} (Workday)")
-        process(fetch_workday(tenant, wd_pod, site, name))
-        time.sleep(1.0)
-
-    for host, name in PEOPLEADMIN_COMPANIES:
-        print(f"  > {name} (PeopleAdmin)")
-        process(fetch_peopleadmin(host, name))
         time.sleep(1.0)
 
     # ─── Generic sources (JSON-LD / sitemap / web search) ─────────────────

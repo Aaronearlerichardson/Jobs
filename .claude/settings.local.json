@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python -m py_compile config.py crawler.py discover.py jobcrawler/__init__.py jobcrawler/db.py jobcrawler/filters.py jobcrawler/http.py jobcrawler/claude.py jobcrawler/report.py jobcrawler/orchestrator.py jobcrawler/fetchers/__init__.py jobcrawler/fetchers/ats_api.py jobcrawler/fetchers/html_scrape.py jobcrawler/fetchers/workday.py jobcrawler/fetchers/peopleadmin.py jobcrawler/fetchers/discourse.py jobcrawler/fetchers/jsonld.py jobcrawler/fetchers/sitemap.py jobcrawler/fetchers/websearch.py jobcrawler/discovery/__init__.py jobcrawler/discovery/pipeline.py jobcrawler/discovery/probes.py jobcrawler/sessions/__init__.py jobcrawler/sessions/browser.py jobcrawler/sessions/profile.py jobcrawler/sessions/capture.py jobcrawler/sessions/credentials.py)",
+      "Bash(python -c ' *)",
+      "Bash(python crawler.py --help)",
+      "Bash(python discover.py --help)",
+      "Bash(timeout 300 python crawler.py --dry-run)",
+      "Bash(python -c \"from jobcrawler.fetchers import fetch_remoteok, fetch_remotive, fetch_hnhiring, fetch_rss; print\\('imports OK'\\)\")",
+      "Bash(python -c \"from jobcrawler.orchestrator import crawl; print\\('orchestrator OK'\\)\")",
+      "Bash(python -X utf8 crawler.py --dry-run)",
+      "Bash(python -c \"from jobcrawler.orchestrator import crawl; print\\('orchestrator import OK'\\)\")"
+    ]
+  }
+}

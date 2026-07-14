@@ -8,16 +8,32 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+import os
+
 from config import REPORT_DIR
 from ..claude import DISCOVER_SYSTEM, call_claude_json
-from .probes import PROBES, WorkdayJsProbe, probe_workday
+from ..util import worker_count
+from .probes import (
+    PROBES,
+    WorkdayJsProbePool,
+    _count_workday_jobs,
+    probe_workday,
+)
+from .sniffer import sniff_careers_ats
 from .seeds import seed_candidates_for
 
-# Parallel worker count for validate_candidate. Each worker does network
-# I/O against a different ATS host (greenhouse/lever/ashby/kula + a
-# company careers page), so same-host piling-up is rare even at 8 up.
-# Tune down if you see 429s from any probe provider.
-_DISCOVERY_WORKERS = 8
+# Parallel worker count for validate_candidate. Each worker is almost
+# entirely blocked on network I/O (slug probes + careers-page fetches
+# against different hosts), so this is a network-concurrency knob, not a
+# CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
+# more concurrent requests. Tune down if you see 429s from a probe provider.
+_DISCOVERY_WORKERS = worker_count("DISCOVERY_WORKERS")
+
+# Headless browsers for the parallel Workday JS fallback. Each is ~200-300MB
+# of RAM, so keep this modest; raise JS_BROWSERS to scrape more SPA careers
+# pages at once. Capped at the worker count (no point having idle browsers).
+_JS_BROWSERS = min(max(1, int(os.environ.get("JS_BROWSERS", "4"))),
+                   _DISCOVERY_WORKERS)
 
 
 @dataclass
@@ -30,6 +46,9 @@ class Candidate:
     confirmed: bool = False
     job_count: int = 0
     tried_slugs: list[str] = field(default_factory=list)
+    # Set when the candidate is unconfirmed but its careers page links to a
+    # known-but-not-auto-fetchable ATS (e.g. "eightfold @ acme.eightfold.ai").
+    ats_lead: str = ""
 
 
 def candidate_from_dict(d):
@@ -98,7 +117,6 @@ def slug_variants(name, first_guess):
       * slash-aliased names ("Cree / Wolfspeed")
       * corporate suffixes (Inc, Corp, Ltd, LLC, Therapeutics, Biosciences)
       * first-word truncation
-      * a Claude-supplied first_guess (tried first)
     """
     variants: list[str] = []
     if first_guess:
@@ -120,10 +138,59 @@ def slug_variants(name, first_guess):
     seen, out = set(), []
     for v in variants:
         v = (v or "").strip("- ").lower()
-        if v and v not in seen:
+        # Drop 1-2 char junk slugs ("g" from "G.tec ...") — they match
+        # unrelated boards and never reach the intended employer.
+        if v and len(v) >= 3 and v not in seen:
             seen.add(v)
             out.append(v)
     return out[:8]
+
+
+# Generic single-word slugs that collide with unrelated boards when
+# probed from a multi-word company name ("Bio-Signal Technologies" -> the
+# bare slug "signal" hits some unrelated Lever board). Flagged for review.
+_GENERIC_SLUGS = {
+    "signal", "neuro", "neural", "brain", "medical", "health", "data",
+    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
+    "bci", "ai", "research", "digital", "care", "vision", "sense",
+}
+
+
+def _flag_for_verification(c, claimed_ats, slug):
+    """Tag a confirmed hit whose identity deserves a human look.
+
+    Slug probes confirm "a board with this slug exists", not "this is the
+    company Claude meant" — "seer" (proteomics) confirms for Seer Medical
+    (epilepsy), "nuro" (autonomous vehicles) for a BCI division. Flag the
+    two collision-prone patterns so reports/--apply carry a VERIFY note.
+    """
+    flags = []
+    if claimed_ats in PROBES and c.ats != claimed_ats:
+        flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
+    name_words = re.findall(r"[a-z0-9]+", c.name.lower())
+    single_token = "-" not in slug
+    if len(name_words) >= 2 and slug == name_words[0]:
+        flags.append("first-word slug - confirm it's the same company")
+    elif len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
+        # A generic word fragment ("signal", "neuro") that matched some
+        # unrelated board — high collision risk from a multi-word name.
+        flags.append(f"generic slug '{slug}' - likely a different company")
+    elif len(name_words) == 1 and single_token and (slug in _GENERIC_SLUGS
+                                                    or len(slug) <= 5):
+        # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
+        # short common token that collides with a large unrelated board
+        # ("inter" -> 158 jobs at a fintech). These slip past the checks
+        # above, which require a multi-word name.
+        flags.append(f"single-word name slug '{slug}' - confirm identity")
+    if flags:
+        note = "[VERIFY: " + "; ".join(flags) + "]"
+        c.notes = f"{c.notes} {note}".strip() if c.notes else note
+
+
+def verify_note(c) -> str:
+    """Extract the VERIFY text from a candidate's notes, or ''."""
+    m = re.search(r"\[VERIFY: ([^\]]+)\]", c.notes or "")
+    return m.group(1) if m else ""
 
 
 def validate_candidate(c, delay=0.3, js_probe=None, log=print):
@@ -135,17 +202,21 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
 
     Workday gets two fallbacks when all slug probes miss:
       1. static probe_workday — requests.get on candidate careers URLs
-      2. js_probe (optional)  — headless Playwright for SPA careers pages
-
-    `log` receives each progress line as a single string. Defaults to
-    print; parallel callers pass a buffer-append callable so per-worker
-    output can be flushed atomically under an stdout lock.
     """
     variants = slug_variants(c.name, c.slug_guess)
+    claimed_ats = c.ats
     probe = PROBES.get(c.ats)
 
     if probe:
-        candidates = [(c.ats, probe)]
+        # Probe the guessed ATS FIRST (fast path, preserves Claude's
+        # signal), then fall back to the other three. Claude's ATS guess
+        # is frequently wrong — it tags Neuralink "lever" when it's on
+        # greenhouse, Precision Neuroscience "greenhouse" when it's on
+        # kula — so a miss on the guessed ATS must not end the search,
+        # or real boards get reported as misses.
+        candidates = [(c.ats, probe)] + [
+            (name, fn) for name, fn in PROBES.items() if name != c.ats
+        ]
     else:
         # Unknown/unsupported ATS — try all known probes.
         candidates = list(PROBES.items())
@@ -160,14 +231,53 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
                 c.slug_guess = slug
                 c.job_count  = count
                 c.ats        = ats_name
+                _flag_for_verification(c, claimed_ats, slug)
                 return c
 
-    # Workday fallback. Workday can't be probed by slug — we have to
-    # scrape the company's careers page to learn tenant/pod/site. Only
-    # try if Claude tagged the candidate workday or unknown; spare the
-    # scrape for ats values that definitely aren't workday (e.g. we
-    # know it's "lever" but that slug missed — unlikely to be on wd).
-    if c.ats in ("unknown", "workday"):
+    # Careers-page ATS sniff. Boards on platforms keyed by an opaque
+    # subdomain/GUID (ADP, JazzHR, BambooHR) can't be reached by guessing
+    # a slug — but the company's careers page links straight to them.
+    # Read the coordinates out of that link. This is cheaper than the
+    # Workday browser fallback, so try it first.
+    sniff = sniff_careers_ats(c.name, c.careers_url)
+    time.sleep(delay)
+    if sniff and sniff.get("confirmed"):
+        c.confirmed  = True
+        c.ats        = sniff["ats"]
+        c.slug_guess = sniff["slug"]
+        c.job_count  = sniff["count"]
+        c.tried_slugs.append(f"[sniff:{sniff['ats']} <- {sniff['source_url']}]")
+        note = f"sniffed from careers page ({sniff['ats']})"
+        c.notes = f"{c.notes} [VERIFY: {note}]".strip() if c.notes else f"[VERIFY: {note}]"
+        return c
+    if sniff:
+        # A sniffed WORKDAY triple IS fetchable (the CXS API), so validate the
+        # coordinates and CONFIRM it here — don't demote a real board (BD,
+        # Stryker, ...) to a manual "lead" just because it wasn't slug-guessable.
+        wd = str(sniff.get("slug") or "")
+        if sniff["ats"] == "workday" and wd.count("|") == 2 and wd.split("|")[1].isdigit():
+            t, p, s = wd.split("|")
+            count = _count_workday_jobs(t, int(p), s)
+            if count is not None:
+                c.confirmed  = True
+                c.ats        = "workday"
+                c.slug_guess = f"{t}|{int(p)}|{s}"
+                c.job_count  = count
+                c.tried_slugs.append(f"[sniff:workday <- {sniff['source_url']}]")
+                c.notes = (f"{c.notes} [VERIFY: sniffed Workday from careers page]".strip()
+                           if c.notes else "[VERIFY: sniffed Workday from careers page]")
+                return c
+        # Detection-only lead: a real but not-auto-fetchable ATS
+        # (Eightfold/Dayforce/iCIMS/...). Record it so the unconfirmed
+        # report row points the user straight at the board to add by hand,
+        # rather than reading as a dead miss.
+        c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
+        c.tried_slugs.append(f"[lead:{sniff['ats']} <- {sniff['source_url']}]")
+
+    # Workday fallback (page scrape for tenant/pod/site — no slug probe
+    # exists). Only for ats in (unknown, workday), and skipped when a
+    # non-workday lead already identified the platform.
+    if c.ats in ("unknown", "workday") and not c.ats_lead:
         meta = probe_workday(c.name, c.careers_url)
         time.sleep(delay)
         # Static scrape missed? Try the JS-rendered version for SPAs.
@@ -226,50 +336,90 @@ def discover(term):
     else:
         print(f"  > Claude returned {len(raw_companies)} company suggestion(s)")
 
+    validated = _validate_all(merged)
+    return {
+        "term":        term,
+        "companies":   validated,
+        "gated_sites": (payload or {}).get("gated_sites", []),
+    }
+
+
+def _validate_all(candidate_dicts, use_js=True):
+    """Validate candidate dicts in parallel; return Candidate objects in
+    input order. Shared by Claude-driven discover() and name-list-driven
+    discover_companies().
+
+    use_js gates the headless-browser Workday fallback. A single browser is
+    single-threaded (Playwright greenlet affinity), so the fallback runs as
+    a POOL of _JS_BROWSERS browsers — candidates that need it borrow a free
+    one and only block when all are busy, instead of all queuing on one.
+    """
     # Each worker drops log lines into its own list and flushes them
     # as a single atomic block when the candidate finishes — so the
     # [N/total] progress line + any "[js] headless scrape..." messages
     # for one candidate always appear contiguously, even with 8
     # workers logging concurrently.
-    total     = len(merged)
+    total     = len(candidate_dicts)
     validated = [None] * total
     out_lock  = threading.Lock()
     done      = [0]                           # list-as-box for closure mutation
 
-    def _worker(idx, rc):
+    def _worker(idx, rc, js_probe):
         cand = candidate_from_dict(rc)
         buf: list[str] = []
+        # Small inter-probe delay: each probe hits a different ATS host, and
+        # workers already run concurrently, so politeness sleeps add up to
+        # dead time per candidate. 0.05 keeps a light touch without the tax.
         validate_candidate(
-            cand, delay=0.15, js_probe=js_probe, log=buf.append,
+            cand, delay=0.05, js_probe=js_probe, log=buf.append,
         )
         # Flush under lock so concurrent candidates never interleave.
         with out_lock:
             done[0] += 1
-            status = "OK  " if cand.confirmed else "miss"
-            detail = (f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
-                      if cand.confirmed else "")
+            if cand.confirmed:
+                status, detail = "OK  ", f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
+            elif cand.ats_lead:
+                status, detail = "lead", f"  {cand.ats_lead}"
+            else:
+                status, detail = "miss", ""
             print(f"  [{done[0]:>3}/{total}] {status}  {cand.name} "
                   f"({cand.ats}){detail}")
             for line in buf:
                 print(line)
         return idx, cand
 
-    # One browser reused across all workday JS scrapes; lazy-launched
-    # the first time a candidate actually needs it (non-RTP runs never
-    # pay the startup cost).
-    with WorkdayJsProbe() as js_probe:
+    # A pool of browsers for the JS scrapes, each lazy-launched on first
+    # use, so concurrent candidates scrape in parallel (up to _JS_BROWSERS)
+    # instead of serializing on one. Skipped entirely when use_js is off,
+    # so bulk sweeps never pay the browser cost.
+    js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
+    try:
         with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
-            futures = [pool.submit(_worker, i, rc)
-                       for i, rc in enumerate(merged)]
+            futures = [pool.submit(_worker, i, rc, js_probe)
+                       for i, rc in enumerate(candidate_dicts)]
             for fut in as_completed(futures):
                 idx, cand = fut.result()
                 validated[idx] = cand
+    finally:
+        if js_probe is not None:
+            js_probe.close()
+    return validated
 
-    return {
-        "term":        term,
-        "companies":   validated,
-        "gated_sites": (payload or {}).get("gated_sites", []),
-    }
+
+def discover_companies(candidate_dicts, term, use_js=False):
+    """Resolve an explicit list of candidate dicts (e.g. harvested from the
+    BCIWiki directory) to crawlable boards — no Claude call. Returns the
+    same result shape as discover().
+
+    use_js defaults False: bulk directory sweeps are dominated by the
+    single-threaded browser fallback, and few entries are Workday SPAs.
+    Pass use_js=True for a smaller, thorough pass."""
+    print(f"  > Resolving {len(candidate_dicts)} candidate(s) for {term!r} "
+          f"(workers={_DISCOVERY_WORKERS}, js={'on' if use_js else 'off'})")
+    if not candidate_dicts:
+        return {"term": term, "companies": [], "gated_sites": []}
+    validated = _validate_all(candidate_dicts, use_js=use_js)
+    return {"term": term, "companies": validated, "gated_sites": []}
 
 
 # ─── Report ──────────────────────────────────────────────────────────────
@@ -294,40 +444,34 @@ def write_discovery_report(result):
         f.write(f"**{len(confirmed)}** confirmed / {len(companies)} suggested\n\n")
 
         if confirmed:
-            f.write("## Confirmed - ready to add to config.py\n\n")
+            f.write("## Confirmed - written to the company store with `--apply`\n\n")
+            f.write("| Company | ATS | Slug / coordinates | Jobs live | Verify |\n")
+            f.write("|---|---|---|---:|---|\n")
             for ats_name, cands in by_ats.items():
-                dict_name = {
-                    "greenhouse": "GREENHOUSE_COMPANIES",
-                    "lever":      "LEVER_COMPANIES",
-                    "ashby":      "ASHBY_COMPANIES",
-                    "kula":       "KULA_COMPANIES",
-                    "workday":    "WORKDAY_COMPANIES",
-                }.get(ats_name, f"{ats_name.upper()}_COMPANIES")
-                f.write(f"### `{dict_name}`\n\n```python\n")
                 for c in cands:
-                    if ats_name == "kula":
-                        f.write(f'    ("{c.name}", "{c.slug_guess}"),\n')
-                    elif ats_name == "workday":
-                        parts = (c.slug_guess or "").split("|")
-                        if len(parts) == 3 and parts[1].isdigit():
-                            t, p, s = parts
-                            f.write(f'    ("{t}", {int(p)}, "{s}", "{c.name}"),  '
-                                    f'# {c.job_count} job(s) live\n')
-                        else:
-                            f.write(f'    # malformed workday slug for {c.name}: '
-                                    f'{c.slug_guess!r}\n')
-                    else:
-                        f.write(f'    "{c.slug_guess}": "{c.name}",  '
-                                f'# {c.job_count} job(s) live\n')
-                f.write("```\n\n")
+                    f.write(f"| {c.name} | {ats_name} | `{c.slug_guess}` "
+                            f"| {c.job_count} | {verify_note(c)} |\n")
+            f.write("\n")
 
         if unconfirmed:
+            # Surface companies whose careers page links to a known but
+            # not-auto-fetchable ATS (bot-protected/JS-only) at the top —
+            # these are actionable: add the platform manually.
+            leads = [c for c in unconfirmed if c.ats_lead]
+            if leads:
+                f.write("### Detected ATS (manual add - not auto-fetchable)\n\n")
+                f.write("| Company | Platform | Found at |\n|---|---|---|\n")
+                for c in leads:
+                    plat, _, host = c.ats_lead.partition(" @ ")
+                    f.write(f"| {c.name} | {plat} | `{host}` |\n")
+                f.write("\n")
+
             f.write("## Unconfirmed - manual investigation needed\n\n")
-            f.write("| Company | ATS guess | Slugs tried | Careers URL | Notes |\n")
-            f.write("|---|---|---|---|---|\n")
+            f.write("| Company | ATS guess | ATS lead | Slugs tried | Careers URL | Notes |\n")
+            f.write("|---|---|---|---|---|---|\n")
             for c in unconfirmed:
                 tried = ", ".join(f"`{s}`" for s in c.tried_slugs) or "-"
-                f.write(f"| {c.name} | {c.ats} | {tried} | "
+                f.write(f"| {c.name} | {c.ats} | {c.ats_lead or '-'} | {tried} | "
                         f"{c.careers_url or '-'} | {c.notes} |\n")
             f.write("\n")
 
@@ -335,8 +479,8 @@ def write_discovery_report(result):
         if gated:
             f.write("## Gated sites (require auth)\n\n")
             f.write("Login-only boards Claude thinks are worth searching. "
-                    "Use `python discover.py --capture-session <site>` to "
-                    "save an authenticated session for these.\n\n")
+                    "Browse them logged-in and capture result pages with "
+                    "`python capture.py` (see README.md).\n\n")
             f.write("| Site | Suggested query | Notes |\n|---|---|---|\n")
             for g in gated:
                 f.write(f"| {g.get('site','?')} | `{g.get('query','')}` | "
@@ -355,11 +499,19 @@ def print_summary(result):
     print(f"{'='*w}")
     print(f"  Confirmed: {len(confirmed)} / Suggested: {len(companies)}\n")
     for c in confirmed:
+        note = verify_note(c)
+        tail = f"  [VERIFY: {note}]" if note else ""
         print(f"    + {c.name:<30} {c.ats:<10} slug='{c.slug_guess}'  "
-              f"({c.job_count} jobs)")
+              f"({c.job_count} jobs){tail}")
     unconfirmed = [c for c in companies if not c.confirmed]
     if unconfirmed:
+        leads = [c for c in unconfirmed if c.ats_lead]
+        if leads:
+            print(f"\n  Detected ATS (manual add, not auto-fetchable):")
+            for c in leads:
+                print(f"    > {c.name:<30} {c.ats_lead}")
         print(f"\n  Unconfirmed ({len(unconfirmed)}):")
         for c in unconfirmed:
-            print(f"    ? {c.name:<30} {c.ats:<10} tried={c.tried_slugs}")
+            lead = f"  lead={c.ats_lead}" if c.ats_lead else ""
+            print(f"    ? {c.name:<30} {c.ats:<10} tried={c.tried_slugs}{lead}")
     print(f"{'='*w}\n")

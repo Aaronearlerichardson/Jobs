@@ -8,12 +8,6 @@ URL, so config can add more (Jobicy, RemoteRocketship, most ATSs).
 WeWorkRemotely feeds:
     https://weworkremotely.com/categories/remote-programming-jobs.rss
     https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
-    https://weworkremotely.com/remote-jobs.rss           (all categories)
-    https://weworkremotely.com/categories/all-other-remote-jobs.rss
-
-Each <item> gives <title>, <link>, <description> (HTML-escaped), and
-<region> (WWR-specific) or <pubDate>. Location is often embedded inside
-the title as "Job Title at Company (Region)" - we parse that out.
 """
 
 import html
@@ -24,6 +18,7 @@ from bs4 import BeautifulSoup
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import stable_id
 
 
 # WWR titles take either shape:
@@ -74,12 +69,16 @@ def _parse_title(title):
     return t, "", ""
 
 
-def fetch_rss(source_label, url, default_location="Remote", max_items=200):
+def fetch_rss(source_label, url, default_location="Remote", max_items=200,
+              remote_board=False):
     """
     Pull an RSS/Atom feed, yield relevant jobs.
 
     `source_label` is used as a fallback company name. If the feed is
     WWR-shaped we extract the real company from each item's title.
+    `remote_board=True` marks every item with a structured remote hint —
+    use for feeds from remote-only boards (WeWorkRemotely, Jobicy) where
+    the parsed region is an eligibility constraint, not an office.
     """
     try:
         r = requests.get(url, timeout=25, headers=HEADERS)
@@ -118,12 +117,15 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200):
         if not is_relevant(role, desc):
             continue
 
-        jobs.append({
-            "id":          f"rss_{source_label.replace(' ', '_')}_{abs(hash(guid))}",
+        job = {
+            "id":          f"rss_{source_label.replace(' ', '_')}_{stable_id(guid)}",
             "company":     company or source_label,
             "title":       role,
             "url":         link,
             "location":    location,
-            "description": desc[:600],
-        })
+            "description": desc,
+        }
+        if remote_board:
+            job["remote_hint"] = "board:rss"
+        jobs.append(job)
     return jobs

@@ -10,6 +10,7 @@ Secrets come from environment variables (see top of file).
 """
 
 import os
+import re
 from pathlib import Path
 
 # =========================================================================
@@ -21,133 +22,114 @@ GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HER
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
 
+# CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
+# (NLx) feed, where federal contractors must list openings (VEVRAA). Register
+# at https://www.careeronestop.org/Developers/WebAPI/registration.aspx; DOL
+# emails a UserId + token. Used by `python crawler.py --nlx "Meta,Google"`.
+CAREERONESTOP_USER_ID = os.environ.get("CAREERONESTOP_USER_ID", "")
+CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
+
 # =========================================================================
 #  PATHS
 # =========================================================================
 
 SCRIPT_DIR  = Path(__file__).parent
-DB_PATH     = SCRIPT_DIR / "seen_jobs_remote.db"
+
+# Unified store: companies (cached mission scores, scope tags) + jobs
+# (dedup state, per-track fields, resume-fit scores). Shared by every
+# track — see jobcrawler/store.py. Named local_tech.db for continuity with
+# the pre-merge local-track store; existing DBs migrate in place.
+STORE_DB_PATH = SCRIPT_DIR / "local_tech.db"
+
+# Back-compat aliases. DB_PATH used to be a standalone per-track seen-jobs
+# DB (seen_jobs_remote.db); jobcrawler/db.py now adapts old callers onto
+# the unified store.
+DB_PATH            = STORE_DB_PATH
+LOCAL_TECH_DB_PATH = STORE_DB_PATH
+
+# Resume used for per-job fit scoring (gitignored — personal). Extracted
+# lazily by jobcrawler/resume.py.
+RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
+
 REPORT_DIR  = SCRIPT_DIR / "job_reports"
-SESSION_DIR = SCRIPT_DIR / "sessions"
-PROFILE_COPY_DIR = SESSION_DIR / "chrome-profile"
-CREDENTIALS_PATH          = SCRIPT_DIR / "credentials.json"
-CREDENTIALS_TEMPLATE_PATH = SCRIPT_DIR / "credentials.json.template"
 
 # =========================================================================
-#  KEYWORD FILTERS
+#  SEARCH PROFILE (keywords / locations / policy) — loaded from TOML
 # =========================================================================
-
-# -----------------------------------------------------------------------
-# Tiered relevance matching.
 #
-#   A job is relevant if ANY of:
-#     1. it matches a CORE_KEYWORDS term (standalone signal), OR
-#     2. it matches both a DOMAIN_KEYWORDS term AND a SKILL_KEYWORDS term,
-#        i.e. an adjacent medical/bio domain where your transferable skills
-#        apply.
-#
-#   This lets CORE stay narrow ("only neurotech" signal) while DOMAIN+SKILL
-#   pulls in adjacent medical/ML roles where your resume is still strong,
-#   without opening the floodgates to generic SaaS roles that happen to use
-#   PyTorch or have a "backend" in the title.
-# -----------------------------------------------------------------------
+# Your search criteria live in profile.toml (gitignored), NOT in this file —
+# so the crawler stays generic and your terms are easy to edit, share, or
+# reset. Falls back to the checked-in profile.example.toml when profile.toml
+# is absent. See profile.example.toml for the schema + the relevance model.
 
-# Tier 1: explicit neurotech / specific job titles. Any hit => relevant.
-CORE_KEYWORDS = [
-    # BCI / neural interfaces
-    "bci", "brain-computer", "brain computer",
-    "neural interface", "neural decoding", "neuroprosthetic",
-    "neurotech", "neurostimulation", "closed-loop", "cortical",
-    # Electrophysiology modalities
-    "eeg", "ecog", "ieeg", "lfp", "fnirs", "meg", "emg",
-    "spike sorting", "electrophysiology",
-    # Neuroscience (specific enough to stand alone)
-    "neuroscience", "neuroscientist", "neuroimaging",
-    "computational neuroscience",
-    # Tooling you specifically know
-    "mne-python",
-    # Specific job titles where the title alone = clear signal
-    "biomedical engineer", "signal processing engineer",
-    "neural engineer",
-]
+import tomllib
 
-# Tier 2: adjacent medical/bio domains. Needs a SKILL_KEYWORDS pair to pass.
-DOMAIN_KEYWORDS = [
-    "biomedical", "medical", "medical imaging",
-    "mri", "fmri", "ultrasound",
-    "wearable", "implantable", "cancer",
-    "physiological", "biosignal", "biosensor",
-    "clinical", "digital health", "healthtech",
-    "radiology", "pathology", "cardiology", "sleep",
-    "biostatistics", "bioinformatics",
-    "ehr", "electronic health record",
-    "fnirs", "radiology", "imaging",
-]
 
-# Tier 3: transferable technical skills. Only counts paired with DOMAIN.
-# Terms here should describe things YOU can do - the filter will pair them
-# with a DOMAIN term to confirm the role is in a relevant area.
-SKILL_KEYWORDS = [
-    "pytorch", "tensorflow",
-    "signal", "time series", "dsp",
-    "machine learning", "deep learning",
-    "scientific software", "scientific computing",
-    "research engineer", "data", "analysis", "modeling", "simulation",
-    "real-time", "embedded software", "firmware",
-    "numpy", "scipy", "visualization", "cloud computing",
-    "data manager", "backend", "software",
-]
+def _load_profile():
+    for fname in ("profile.toml", "profile.example.toml"):
+        p = SCRIPT_DIR / fname
+        if p.exists():
+            with open(p, "rb") as fh:
+                return tomllib.load(fh), fname
+    return {}, None
 
-# Backward-compat view. Referenced by --expand-live, --from-keywords, and
-# the keyword-report. Mutations here (e.g. --expand-live appending) are
-# treated as Tier 1 (standalone) by is_relevant().
+
+_PROFILE, PROFILE_SOURCE = _load_profile()
+_kw   = _PROFILE.get("keywords", {})
+_exc  = _PROFILE.get("exclude", {})
+_loc  = _PROFILE.get("locations", {})
+_pol  = _PROFILE.get("policy", {})
+_cand = _PROFILE.get("candidate", {})
+_mis  = _PROFILE.get("mission", {})
+_lcl  = _PROFILE.get("locality", {})
+_dsc  = _PROFILE.get("discovery", {})
+
+# Tiered relevance: a job is relevant if it hits any CORE term, or a DOMAIN
+# term AND a SKILL term (see profile.example.toml).
+CORE_KEYWORDS   = list(_kw.get("core", []))
+DOMAIN_KEYWORDS = list(_kw.get("domain", []))
+SKILL_KEYWORDS  = list(_kw.get("skill", []))
+# Flat back-compat view; --expand-live appends here (treated as Tier 1).
 INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
-EXCLUDE_PHRASES = [
-    "phd required", "ph.d. required", "doctoral degree required",
-    "must have a phd", "requires a phd", "ph.d is required",
-    "postdoc", "post-doc", "post-doctoral",
-    "postdoc position", "postdoctoral position",
-    "Nurses", "nursing", "nurse practitioner",
-    "md required", "medical doctor",
-     # Exclude "clinical research" but not "clinical research engineer"
-    "clinical research coordinator", "manager"
+EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
+EXCLUDE_TITLE_PHRASES = list(_exc.get("title_phrases", []))
+
+LOCATION_ONSITE_INCLUDE = list(_loc.get("onsite", []))
+LOCATION_REMOTE_INCLUDE = list(_loc.get("remote", []))
+ACCEPT_REMOTE           = bool(_loc.get("accept_remote", False))
+LOCATION_EXCLUDE        = list(_loc.get("exclude", []))
+LOCATION_INCLUDE        = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
+
+# --- Candidate identity (injected into Claude prompts; jobcrawler/claude.py) --
+CANDIDATE_SUMMARY   = (_cand.get("summary") or "").strip()
+CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
+CANDIDATE_FIT_CAPS  = list(_cand.get("fit_caps", []))
+CANDIDATE_AVOID     = (_cand.get("avoid") or "").strip()
+
+# --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
+# Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
+MISSION_TIERS = [
+    {"name": t["name"], "desc": t.get("desc", ""),
+     "band": list(t.get("band", [0.0, 1.0])), "active": bool(t.get("active", True))}
+    for t in _mis.get("tiers", [])
 ]
+MISSION_BULLSEYE_REGEX = (_mis.get("bullseye_regex") or "").strip()
+MISSION_BULLSEYE_TIER  = (_mis.get("bullseye_tier") or "").strip()
 
-# -----------------------------------------------------------------------
-# Two buckets: physical locations you're willing to commute to, and
-# remote-work markers. A job passes the location gate iff:
-#   * EXCLUDE doesn't match, AND
-#   * at least one of:
-#       - an ONSITE term matches,
-#       - ACCEPT_REMOTE is True and a REMOTE term matches,
-#       - a legacy/dynamic LOCATION_INCLUDE term matches (not in a bucket).
-#
-# Short tokens ("nc", "va", "rtp") use word-boundary matching so that
-# "Clinical Research, MA" doesn't spuriously pass the "nc" filter.
-# -----------------------------------------------------------------------
+# --- Locality (what counts as "local"; jobcrawler/nc.py) ----------------------
+LOCALITY_NAME         = (_lcl.get("name") or "local").strip()
+LOCALITY_WORD_TOKENS  = list(_lcl.get("word_tokens", []))
+LOCALITY_SUBSTRINGS   = list(_lcl.get("substrings", []))
+LOCALITY_STATE_SUFFIX = list(_lcl.get("state_suffix", []))
 
-LOCATION_ONSITE_INCLUDE = [
-    "research triangle", "durham", "raleigh", "chapel hill", "rtp",
-    "carrboro", "nc", "cary", "apex", "north carolina",
-    "charlotte", "greensboro", "winston-salem", "asheville",
-    "richmond", "virginia", "va", "mid atlantic",
-]
-
-LOCATION_REMOTE_INCLUDE = [
-    "remote", "work from home", "wfh", "fully remote",
-    "distributed", "anywhere",
-]
-
-# Master switch for remote listings. Flip to False for a pure-local crawl.
-ACCEPT_REMOTE = False
-
-LOCATION_EXCLUDE: list[str] = []
-
-# Back-compat union view. Referenced by --expand-location-live (which
-# appends here) and by the report's dup-check. Additions go here first
-# and are treated as "allowed" by the filter until you classify them.
-LOCATION_INCLUDE = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
+# --- Discovery sourcing (discover.py --local; jobcrawler/discovery/local_sourcing) -
+DISCOVERY_SEED_COMPANIES     = list(_dsc.get("seed_companies", []))
+DISCOVERY_WORKDAY_MAJORS     = list(_dsc.get("workday_majors", []))
+DISCOVERY_DIRECTORY_URLS     = list(_dsc.get("directory_urls", []))
+DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
+DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
+                                for n in _dsc.get("name_blocklist", [])}
 
 # =========================================================================
 #  HTTP
@@ -160,44 +142,13 @@ USER_AGENT = (
 )
 
 # =========================================================================
-#  TARGET COMPANIES (per-ATS dispatch)
+#  NON-ATS SOURCES + POLICY
 # =========================================================================
-
-GREENHOUSE_COMPANIES = {
-    "neuralink":        "Neuralink",
-    "beaconbiosignals": "Beacon Biosignals",
-    "neuropace":        "NeuroPace",
-    # --- discovered 2026-04-23: pharma companies in rtp ---
-    "corcepttherapeutics": "Corcept Therapeutics",  # 44 job(s), discovered
-    "rti": "RTI International",  # 15 job(s), discovered
-    "bandwidth": "Bandwidth Inc.",  # 47 job(s), discovered
-    "epicgames": "Epic Games",  # 69 job(s), discovered
-    "pendo": "Pendo",  # 17 job(s), discovered
-    # --- discovered 2026-04-23: neurotech RTP ---
-    "nuro": "Nuro (Nurokor / NuroMetrix)",  # 93 job(s), discovered
-    "sas": "SAS Institute",  # 5 job(s), discovered
-    # --- discovered 2026-04-23: medical tech companies in RTP ---
-    "ceribell": "Ceribell",  # 46 job(s), discovered
-    "pairwise": "Pairwise",  # 0 job(s), discovered
-}
-
-LEVER_COMPANIES = {
-    "kitware": "Kitware",
-    # --- discovered 2026-04-23: pharma companies in rtp ---
-    "pryon": "Pryon",  # 6 job(s), discovered
-    "spreedly": "Spreedly",  # 11 job(s), discovered
-}
-
-ASHBY_COMPANIES: dict[str, str] = {
-    # --- discovered 2026-04-23: pharma companies in rtp ---
-    "novo": "Novo Nordisk",  # 0 job(s), discovered
-    # --- discovered 2026-04-23: neurotech RTP ---
-    "brainco": "BrainCo",  # 0 job(s), discovered
-}
-
-KULA_COMPANIES = [
-    ("Precision Neuroscience", "precision-neuroscience"),
-]
+#
+# The per-ATS company ROSTER now lives in the SQLite store (companies
+# table), not here. Manage it with:  discover.py --local / --add-board /
+# --apply,  or  crawler.py --import-companies roster.json.  What remains
+# below is non-ATS sources (forums / custom scrapes) and crawl policy.
 
 DISCOURSE_BOARDS = [
     ("MNE Forum Jobs",           "https://mne.discourse.group", 9),
@@ -207,37 +158,18 @@ DISCOURSE_BOARDS = [
 # (company_name, page_url, css_selector_or_None)
 CUSTOM_COMPANIES: list[tuple[str, str, str | None]] = []
 
-# (company_name, base_url).  Scraper appends /search/ + paging.
-SUCCESSFACTORS_COMPANIES = [
-    ("Duke University", "https://careers.duke.edu"),
-    ("Duke Health",     "https://careers.dukehealth.org"),
-]
+# Conglomerates (from profile.toml [policy]) whose OVERALL mission scores
+# "other" but which run aligned subdivisions worth surfacing. Kept ACTIVE,
+# crawled through the keyword filter (only aligned roles survive), and ranked
+# at MULTI_DIVISION_MISSION_FLOOR rather than their own low company score.
+MULTI_DIVISION_COMPANIES = {s.strip().lower()
+                            for s in _pol.get("multi_division", [])}
+MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.6))
 
-# (tenant, wd_pod, site, company_name)
-WORKDAY_COMPANIES: list[tuple[str, int, str, str]] = [
-    # --- discovered 2026-04-23: biotech companies in RTP ---
-    ("osv-bioventus", 501, "External", "Bioventus"),  # 0 job(s), discovered
-    ("redhat", 5, "jobs", "Red Hat (IBM subsidiary, RTP HQ)"),  # 365 job(s), discovered
-    ("vhr-unither", 5, "External", "United Therapeutics"),  # 0 job(s), discovered
-    ("askbio", 12, "AskBio", "AskBio"),  # 12 job(s), discovered
-    ("bdx", 1, "EXTERNAL_CAREER_SITE_USA", "BD"),  # 512 job(s), discovered
-    # --- discovered 2026-04-23: medical tech companies in RTP ---
-    ("medtronic", 1, "MedtronicCareers", "Medtronic"),  # 1206 job(s), discovered
-    ("iqvia", 1, "IQVIA", "Quintiles IMS (IQVIA)"),  # 1854 job(s), discovered
-    # --- discovered 2026-04-23: medical tech companies in RTP ---
-    ("cree", 108, "EXT", "Cree / Wolfspeed"),  # 108 job(s), discovered
-    ("labcorp", 1, "External", "LabCorp"),  # 1438 job(s), discovered
-    # --- discovered 2026-04-23: pharma companies in RTP ---
-    ("biibhr", 3, "external", "Biogen"),  # 258 job(s), discovered
-    ("gsk", 5, "GSKCareers", "GSK (GlaxoSmithKline) RTP"),  # 793 job(s), discovered
-    ("viatris", 5, "External", "Medicago (now acquired/dissolved) / Viatris RTP"),  # 255 job(s), discovered
-]
 
-# (host, company_name)
-PEOPLEADMIN_COMPANIES = [
-    ("unc.peopleadmin.com", "UNC Chapel Hill"),
-]
-
+def is_multi_division(name):
+    """True if `name` is a known multi-division conglomerate (profile policy)."""
+    return (name or "").strip().lower() in MULTI_DIVISION_COMPANIES
 # =========================================================================
 #  NEW GENERIC SOURCES (JSON-LD + sitemap + web search)
 # =========================================================================
@@ -368,27 +300,6 @@ RSS_FEEDS: list[tuple[str, str, str]] = [
 # =========================================================================
 #  GATED-SITE CAPTURE CONFIG (Playwright)
 # =========================================================================
-
-SITE_CONFIGS = {
-    "linkedin": {
-        "login_url":  "https://www.linkedin.com/login",
-        "verify_url": "https://www.linkedin.com/feed/",
-        "logged_in_url_markers":  ["/feed"],
-        "logged_out_url_markers": ["/login", "/uas/login", "/checkpoint", "/authwall"],
-    },
-    "indeed": {
-        "login_url":  "https://secure.indeed.com/auth",
-        "verify_url": "https://myjobs.indeed.com/",
-        "logged_in_url_markers":  ["myjobs.indeed.com"],
-        "logged_out_url_markers": ["/auth", "/account/login"],
-    },
-    "wellfound": {
-        "login_url":  "https://wellfound.com/login",
-        "verify_url": "https://wellfound.com/jobs",
-        "logged_in_url_markers":  ["/jobs", "/candidate", "/user"],
-        "logged_out_url_markers": ["/login", "/signup"],
-    },
-}
 
 # Keep roughly current — a stale UA is a red flag to fingerprinters.
 BROWSER_UA = (
