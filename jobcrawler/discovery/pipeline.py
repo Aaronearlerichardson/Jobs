@@ -16,6 +16,7 @@ from ..util import worker_count
 from .probes import (
     PROBES,
     WorkdayJsProbePool,
+    _count_workday_jobs,
     probe_workday,
 )
 from .sniffer import sniff_careers_ats
@@ -250,6 +251,22 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
         c.notes = f"{c.notes} [VERIFY: {note}]".strip() if c.notes else f"[VERIFY: {note}]"
         return c
     if sniff:
+        # A sniffed WORKDAY triple IS fetchable (the CXS API), so validate the
+        # coordinates and CONFIRM it here — don't demote a real board (BD,
+        # Stryker, ...) to a manual "lead" just because it wasn't slug-guessable.
+        wd = str(sniff.get("slug") or "")
+        if sniff["ats"] == "workday" and wd.count("|") == 2 and wd.split("|")[1].isdigit():
+            t, p, s = wd.split("|")
+            count = _count_workday_jobs(t, int(p), s)
+            if count is not None:
+                c.confirmed  = True
+                c.ats        = "workday"
+                c.slug_guess = f"{t}|{int(p)}|{s}"
+                c.job_count  = count
+                c.tried_slugs.append(f"[sniff:workday <- {sniff['source_url']}]")
+                c.notes = (f"{c.notes} [VERIFY: sniffed Workday from careers page]".strip()
+                           if c.notes else "[VERIFY: sniffed Workday from careers page]")
+                return c
         # Detection-only lead: a real but not-auto-fetchable ATS
         # (Eightfold/Dayforce/iCIMS/...). Record it so the unconfirmed
         # report row points the user straight at the board to add by hand,

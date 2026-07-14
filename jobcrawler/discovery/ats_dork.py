@@ -11,6 +11,7 @@ Two entry points:
 """
 
 import re
+import time
 
 import config
 
@@ -31,26 +32,32 @@ def _or_group(terms, n=8):
     return "(" + " OR ".join(f'"{t}"' if " " in t else t for t in picked) + ")"
 
 
-# Dork set derived from the loaded profile: each ATS host x the locality terms
-# ([locality]), a Workday sweep narrowed by domain keywords, and a bullseye
-# sweep over the core keywords — so this generalizes to any profile.
-_LOC = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS)
-_DOMAIN = _or_group(config.DOMAIN_KEYWORDS)
-_CORE = _or_group(config.CORE_KEYWORDS)
+# Dork set derived from the loaded profile. DDG chokes on long `site:` + big
+# OR-group queries (returns nothing), so the site-scoped dorks use a SHORT
+# locality clause (top few terms); the free-text sweeps can afford more.
+_LOC = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS, n=8)
+_LOC_SITE = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS, n=4)
+_DOMAIN = _or_group(config.DOMAIN_KEYWORDS, n=6)
+_CORE = _or_group(config.CORE_KEYWORDS, n=6)
 
 DORK_QUERIES = [
-    f'site:boards.greenhouse.io {_LOC}',
-    f'site:job-boards.greenhouse.io {_LOC}',
-    f'site:jobs.lever.co {_LOC}',
-    f'site:jobs.ashbyhq.com {_LOC}',
-    f'site:jobs.smartrecruiters.com {_LOC}',
-    f'"myworkdayjobs.com" {_LOC}' + (f" {_DOMAIN}" if _DOMAIN else ""),
+    f'site:boards.greenhouse.io {_LOC_SITE}',
+    f'site:job-boards.greenhouse.io {_LOC_SITE}',
+    f'site:jobs.lever.co {_LOC_SITE}',
+    f'site:jobs.ashbyhq.com {_LOC_SITE}',
+    f'site:jobs.smartrecruiters.com {_LOC_SITE}',
+    f'"myworkdayjobs.com" {_LOC_SITE}' + (f" {_DOMAIN}" if _DOMAIN else ""),
 ]
 if _CORE:
     # Bullseye sweep — target companies are often on custom boards / non-.com
     # domains that name-guessing misses.
     DORK_QUERIES.append(f'{_CORE} {_LOC} (careers OR jobs OR hiring)')
-DORK_QUERIES = [q for q in DORK_QUERIES if _LOC and _LOC in q]
+DORK_QUERIES = [q for q in DORK_QUERIES if _LOC_SITE and _LOC_SITE in q or _CORE and _CORE in q]
+
+# Non-slug path fragments the greenhouse/embed URL forms expose — never a real
+# board (boards.greenhouse.io/embed/job_board?for=<realslug>).
+_SLUG_STOP = {"embed", "job_board", "jobs", "js", "boards", "job-boards",
+              "www", "careers", "search", "api"}
 
 
 def extract_boards_from_urls(urls):
@@ -69,7 +76,7 @@ def extract_boards_from_urls(urls):
             if not m:
                 continue
             slug = m.group(1)
-            if ats == "icims" and slug.lower() in ("www", "careers", "jobs"):
+            if slug.lower() in _SLUG_STOP:   # embed/job_board/js/... not a board
                 continue
             key = (ats, slug)
             if key not in seen and len(slug) >= 2:
@@ -136,20 +143,40 @@ def harvest_urls(urls, verbose=True):
     return added, len(boards)
 
 
-def run_ddgs_dorks(max_results=25):
-    """Automated dorking via ddgs (best-effort; DDG's ATS index is patchy)."""
+def _ddg_text(query, max_results, retries=2, pause=2.5):
+    """One DDG query with retry/backoff. DDG rate-limits aggressively and
+    surfaces it as an exception ("No results found."/"Ratelimit"), so a fresh
+    session + a pause between attempts recovers far more than a single try.
+    Returns a list of result URLs (possibly empty)."""
     try:
-        from ddgs import DDGS
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
     except ImportError:
-        from duckduckgo_search import DDGS
+        return []
+    for attempt in range(retries + 1):
+        try:
+            with DDGS() as ddg:
+                return [u for r in ddg.text(query, max_results=max_results)
+                        if (u := (r.get("href") or r.get("url")))]
+        except Exception as e:
+            if attempt < retries:
+                time.sleep(pause * (attempt + 1))
+                continue
+            print(f"  [!] dork {query[:48]}...: {e}")
+    return []
+
+
+def run_ddgs_dorks(max_results=25, pause=2.5):
+    """Automated dorking via ddgs (best-effort; DDG's ATS index is patchy).
+    Queries are spaced out — hammering DDG back-to-back is what makes it start
+    returning 'No results found' mid-run."""
     urls = []
-    with DDGS() as ddg:
-        for q in DORK_QUERIES:
-            try:
-                for r in ddg.text(q, max_results=max_results):
-                    u = r.get("href") or r.get("url")
-                    if u:
-                        urls.append(u)
-            except Exception as e:
-                print(f"  [!] dork {q[:40]}...: {e}")
+    for i, q in enumerate(DORK_QUERIES):
+        if i:
+            time.sleep(pause)          # be gentle between queries
+        found = _ddg_text(q, max_results)
+        print(f"  [dork] {len(found):2} result(s)  {q[:60]}")
+        urls += found
     return harvest_urls(urls)
