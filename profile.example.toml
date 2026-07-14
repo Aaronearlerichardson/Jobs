@@ -79,3 +79,20 @@ name = "San Francisco Bay Area"
 word_tokens = ["sf", "ca"]
 substrings = ["san francisco", "bay area", "oakland", "berkeley", "palo alto", "mountain view", "san jose"]
 state_suffix = ["ca", "california"]
+
+# ---------------------------------------------------------------------------
+# Discovery — company NAMES for `discover.py --local` to probe for public ATS
+# boards, plus recall levers. All a starting pool; the probe + locality check
+# filter it. Leave lists empty to rely purely on web-search harvesting.
+# ---------------------------------------------------------------------------
+[discovery]
+seed_companies = []          # curated employer names to probe
+workday_majors = []          # big employers to also try via the Workday fallback
+directory_urls = []          # e.g. a local chamber/association "/company/<slug>/" directory
+# The main recall lever — searches whose results are harvested for names, then
+# probed. Tailor to your region/domain.
+name_search_queries = [
+    "tech companies in <your city>",
+    "<your industry> startups <your region>",
+]
+name_blocklist = []          # normalized names to drop (bad slug collisions)

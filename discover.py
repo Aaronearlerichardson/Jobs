@@ -60,9 +60,9 @@ def main():
     ap.add_argument("--resolve-leads", action="store_true",
                     help="Resolve page-capture company leads (from capture.py) "
                          "into crawlable boards and activate the hits")
-    ap.add_argument("--dork", action="store_true",
+    ap.add_argument("--dork", "--ats-dork", action="store_true", dest="dork",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
-                         "board URLs for NC companies into the company store")
+                         "board URLs for local companies into the company store")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",

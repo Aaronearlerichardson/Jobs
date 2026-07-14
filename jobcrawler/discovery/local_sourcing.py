@@ -28,90 +28,119 @@ from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
 #  Candidate NAMES                                                             #
 # --------------------------------------------------------------------------- #
 
-# Curated seed: established Triangle/NC health-bio-science + science/health-tech
-# employers likely to run a public ATS. Generous by design — the probe filters.
-SEED_COMPANIES = [
-    # CROs / clinical data / health analytics
-    "IQVIA", "Labcorp", "Syneos Health", "Advarra", "Q2 Solutions",
-    "Clinipace", "Caidya", "Emmes", "PRA Health Sciences", "Parexel",
-    # pharma / biopharma / cell & gene
-    "United Therapeutics", "Biogen", "Grifols", "Seqirus", "CSL",
-    "Fujifilm Diosynth Biotechnologies", "KBI Biopharma", "Precision BioSciences",
-    "Humacyte", "Chimerix", "G1 Therapeutics", "Fennec Pharmaceuticals",
-    "Asklepios BioPharmaceutical", "AskBio", "StrideBio", "Locus Biosciences",
-    "Bioventus", "Novartis Gene Therapies", "Amgen", "Pfizer",
-    # diagnostics / genomics / tools
-    "GRAIL", "Metabolon", "BioAgilytix", "Galaxy Diagnostics", "BioMedomics",
-    "Genedata", "Sequenom", "QIAGEN", "bioMerieux", "Avazyme",
-    # medical devices / health hardware
-    "410 Medical", "ABK Biomedical", "Bioptimus", "Teleflex", "Nuvectra",
-    # health-tech / science software / analytics
-    "SAS", "Relias", "nCino", "Pendo", "Red Hat", "Willow Tree",
-    "Definitive Healthcare", "Clarify Health", "Vidant", "First Health",
-    # industrial bio / materials / agtech science
-    "Novonesis", "Novozymes", "BASF", "Bayer Crop Science", "Syngenta",
-    "Boragen", "AgBiome", "Precision BioSciences",
-]
-
-# Big NC health-bio employers known to run Workday. Only these get the slow
-# Workday careers-page fallback; everyone else is probed via the fast
-# Greenhouse/Lever/Ashby JSON APIs, so a 200+ name pool stays quick.
-MAJORS_WORKDAY = [
-    "IQVIA", "Amgen", "Biogen", "Novartis Gene Therapies", "Merck",
-    "Eli Lilly", "Novo Nordisk", "Catalent", "Charles River Laboratories",
-    "Certara", "Fortrea", "Labcorp", "Syneos Health", "United Therapeutics",
-    "Grifols", "CSL Seqirus", "Fujifilm Diosynth Biotechnologies", "Metabolon",
-    "Precision BioSciences", "Humacyte", "Chimerix", "Bioventus",
-    "Thermo Fisher Scientific", "PPD", "Parexel", "ICON", "RTI International",
-    "Novonesis", "Novozymes", "Bayer", "BASF", "Syngenta", "Corteva",
-    "Alltech", "Almac", "Asymchem", "bioMerieux", "Antech Diagnostics",
-    "Sanofi", "AskBio", "KBI Biopharma", "Pfizer", "AstraZeneca", "GSK",
-]
-
+# Seed employers + Workday-fallback majors + drop-list all come from the
+# active profile ([discovery]) so sourcing generalizes to any region/domain.
+SEED_COMPANIES = config.DISCOVERY_SEED_COMPANIES
+MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
 _MAJORS_KEYS = {re.sub(r"[^a-z0-9]", "", m.lower()) for m in MAJORS_WORKDAY}
-
-# Known bad name→board matches to drop from discovery (normalized names).
-NAME_BLOCKLIST = {"q2solutions", "q2labsolutions"}  # slug q2ebanking = Q2 Holdings (fintech)
+NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
-# From Built In "Biotech companies in RTP" (fetched 2026-07).
-BUILTIN_RTP = [
-    "Fennec Pharmaceuticals", "G1 Therapeutics", "Galaxy Diagnostics",
-    "MAA Laboratories", "BioMedomics", "Avazyme", "Merakris Therapeutics",
-    "GRAIL", "Asklepios Biopharmaceutical", "NALA Membranes", "Inanovate",
-    "Verinetics", "Click Therapeutics", "Dignify Therapeutics",
-    "Lindy Biosciences", "Ascent Bio-Nano Technologies",
-]
+# Non-company noise seen in `/company/<slug>/` harvesting: image placeholders,
+# nav/facet labels, listicle fragments — dropped before probing.
+_NAME_NOISE_RE = re.compile(
+    r"^(fallback[\s-]?image|compan(y|ies)|directory|home|built in|search|menu|"
+    r"about|contact|careers?|jobs?|privacy|terms|cookie|login|register|"
+    r"company[\s_-]?types?|facility[\s_-]?types?|availability|operator|opt)\b",
+    re.I)
 
 
-def scrape_rtp_static(timeout=20):
-    """
-    Best-effort: pull company names from the server-rendered part of the
-    RTP.org directory. (The full list loads via FacetWP AJAX which needs
-    template config we don't replicate; the static slugs are a free bonus.)
-    """
+def _looks_like_company(name):
+    n = (name or "").strip()
+    if not (2 < len(n) < 45) or not re.search(r"[A-Za-z]", n):
+        return False
+    if _NAME_NOISE_RE.match(n) or re.fullmatch(r"[a-z0-9_]+", n):
+        return False   # snake_case slug / facet name, never a display name
+    if re.search(r"\b(jobs|startups?|startup week|ecosystem|degrees?)\b", n, re.I):
+        return False   # listicle/region phrases, not employers
+    return True
+
+
+# On a directory/listicle page, an employer is a `/company/<slug>/` link.
+_COMPANY_SLUG_RE = re.compile(r"/company/([a-z0-9][a-z0-9\-]{2,58})/?", re.I)
+_STOP_SLUGS = {"research-triangle-park"}
+
+
+def _names_from_html(html):
+    out = set()
+    for slug in _COMPANY_SLUG_RE.findall(html or ""):
+        s = slug.lower()
+        if s in _STOP_SLUGS or "fallback-image" in s:
+            continue
+        out.add(slug.replace("-", " ").title())
+    return {n for n in out if _looks_like_company(n)}
+
+
+def scrape_directory_names(url, timeout=20):
+    """Employer names from a directory page's `/company/<slug>/` links — works
+    for any site with that shape (RTP.org, Built In, chamber directories).
+    Server-rendered only; JS-loaded facets are out of scope."""
     try:
-        r = requests.get("https://www.rtp.org/directory-map/",
-                         timeout=timeout, headers=HEADERS)
+        r = requests.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] RTP directory scrape failed: {e}")
+        print(f"    [!] directory scrape failed ({url}): {e}")
         return []
-    slugs = sorted(set(re.findall(r'/company/([a-z0-9\-]+)/', r.text)))
-    names = []
-    for s in slugs:
-        if s in ("research-triangle-park",):
+    return sorted(_names_from_html(r.text))
+
+
+def harvest_search_names(queries, per_query=12, fetch_dirs=10):
+    """The main recall lever: web-search each query, then scrape the directory/
+    listicle results (Built In, Growjo, Crunchbase, ...) for `/company/<slug>/`
+    employer links. Every name is probed downstream, so residual noise just
+    fails to resolve. Returns a de-duped list."""
+    if not queries:
+        return []
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+    except ImportError:
+        print("    [!] name harvesting needs the 'ddgs' package (pip install ddgs)")
+        return []
+
+    _DIR_HOSTS = ("builtin.com", "growjo.com", "rtp.org", "ncbiotech",
+                  "crunchbase", "themuse", "vault.com", "clutch.co", "wellfound",
+                  "getlatka", "tracxn", "f6s.com")
+    dir_urls = []
+    try:
+        with DDGS() as ddg:
+            for q in queries:
+                for r in ddg.text(q, max_results=per_query):
+                    u = r.get("href") or r.get("url") or ""
+                    if u and any(h in u.lower() for h in _DIR_HOSTS):
+                        dir_urls.append(u)
+    except Exception as e:
+        print(f"    [!] name search failed: {e}")
+
+    names = set()
+    for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
+        try:
+            html = requests.get(u, timeout=12, headers=HEADERS).text
+        except Exception:
             continue
-        names.append(s.replace("-", " ").title())
-    return names
+        names |= _names_from_html(html)
+    return sorted(names)
 
 
 def gather_names(extra=None):
-    """Union of all name sources, de-duplicated case-insensitively."""
+    """Union of all name sources, de-duplicated case-insensitively:
+    profile seeds + Workday majors + configured directory scrapes + web-search
+    harvesting + any explicit `extra`."""
+    sources = [SEED_COMPANIES, MAJORS_WORKDAY]
+    for url in config.DISCOVERY_DIRECTORY_URLS:
+        sources.append(scrape_directory_names(url))
+    harvested = harvest_search_names(config.DISCOVERY_NAME_SEARCH_QUERIES)
+    if harvested:
+        print(f"    web-search harvested {len(harvested)} candidate name(s)")
+    sources.append(harvested)
+    sources.append(extra or [])
+
     names, seen = [], set()
-    for src in (SEED_COMPANIES, MAJORS_WORKDAY, BUILTIN_RTP, scrape_rtp_static(), extra or []):
+    for src in sources:
         for n in src:
-            k = re.sub(r"[^a-z0-9]", "", n.lower())
+            k = re.sub(r"[^a-z0-9]", "", (n or "").lower())
             if k and k not in seen:
                 seen.add(k)
                 names.append(n.strip())

@@ -10,6 +10,7 @@ Secrets come from environment variables (see top of file).
 """
 
 import os
+import re
 from pathlib import Path
 
 # =========================================================================
@@ -81,6 +82,7 @@ _pol  = _PROFILE.get("policy", {})
 _cand = _PROFILE.get("candidate", {})
 _mis  = _PROFILE.get("mission", {})
 _lcl  = _PROFILE.get("locality", {})
+_dsc  = _PROFILE.get("discovery", {})
 
 # Tiered relevance: a job is relevant if it hits any CORE term, or a DOMAIN
 # term AND a SKILL term (see profile.example.toml).
@@ -120,6 +122,14 @@ LOCALITY_NAME         = (_lcl.get("name") or "local").strip()
 LOCALITY_WORD_TOKENS  = list(_lcl.get("word_tokens", []))
 LOCALITY_SUBSTRINGS   = list(_lcl.get("substrings", []))
 LOCALITY_STATE_SUFFIX = list(_lcl.get("state_suffix", []))
+
+# --- Discovery sourcing (discover.py --local; jobcrawler/discovery/local_sourcing) -
+DISCOVERY_SEED_COMPANIES     = list(_dsc.get("seed_companies", []))
+DISCOVERY_WORKDAY_MAJORS     = list(_dsc.get("workday_majors", []))
+DISCOVERY_DIRECTORY_URLS     = list(_dsc.get("directory_urls", []))
+DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
+DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
+                                for n in _dsc.get("name_blocklist", [])}
 
 # =========================================================================
 #  HTTP
