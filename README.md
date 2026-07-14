@@ -1,29 +1,31 @@
 # Jobs Crawler
 
-A job-search crawler built around one hard problem: **there aren't many BCI
-jobs in North Carolina.** So it runs the same machinery in two postures —
-relax the location, or relax the BCI constraint — and lets you pivot between
-them:
+A configurable job-search crawler. **Your entire search — what you want, where,
+and who you are — lives in one `profile.toml`; the code stays generic.** It
+ships with an example profile for a genuinely hard case: *there aren't many BCI
+jobs in North Carolina.* So it runs the same machinery in two postures — relax
+the location, or relax the BCI constraint — and lets you pivot between them:
 
 | Track | Keeps | Relaxes | Command |
 |---|---|---|---|
 | **remote-neural** | neural signals (BCI/EEG/iEEG/ECoG/...), high technical bar, clinical mission | location → remote (US-eligible) | `python crawler.py --track remote-neural` |
 | **local-tech** | Triangle/NC location (~2.5 h ring), technical bar, health/bio/science mission | neural requirement | `python crawler.py --track local-tech` |
 
-Both tracks share the fetchers, discovery pipeline, company store, Claude
-scorers, and parallel fetch pool; they differ only in gates and ranking.
-A third, older mode (`python crawler.py` with no flags) runs the classic
-keyword crawl and emails a digest.
+Those specifics are just the shipped profile — swap `profile.toml` and the
+tracks retarget any field/region. Both tracks share the fetchers, discovery
+pipeline, company store, Claude scorers, and parallel fetch pool; they differ
+only in gates and ranking. A third, older mode (`python crawler.py` with no
+flags) runs the classic keyword crawl and emails a digest.
 
 ```
 DISCOVERY                    STORE (local_tech.db)            CRAWL
 discover.py ..............>  companies                        crawler.py --track ...
   Claude suggestions           (ats, slug, mission score,       fetch boards (parallel)
-  BCIWiki directory             tags: neural | nc_local)        -> gates (per track)
-  NC sourcing / dorking                                         -> score (resume fit /
+  BCIWiki directory             tags: neural | nc_local,        -> gates (per track)
+  local sourcing / dorking      active flag)                    -> score (resume fit /
   page-capture leads          jobs                                 tech bar / remote)
 capture.py ...............>    (dedup, per-track fields,       -> ranked digest
-  browse LinkedIn yourself      fit scores)                        job_reports/*.md
+  browse gated sites yourself   fit scores)                        job_reports/*.md
 ```
 
 ---
@@ -34,29 +36,47 @@ capture.py ...............>    (dedup, per-track fields,       -> ranked digest
 pip install -r requirements.txt
 ```
 
-API keys as env vars (PowerShell, persistent):
+**1. Your search profile.** Copy the template and edit it — this is the only
+file that holds your criteria:
+
+```
+cp profile.example.toml profile.toml
+```
+
+`profile.toml` (gitignored) holds your keywords, locations, candidate identity,
+mission tiers, locality, and discovery seeds. `config.py` is now just plumbing
+(paths, HTTP headers, source toggles, secrets). See **[Customizing](#customizing--profiletoml)**.
+
+**2. API keys** as env vars (PowerShell, persistent):
 
 ```powershell
 [Environment]::SetEnvironmentVariable("ANTHROPIC_API_KEY", "sk-ant-...", "User")
 [Environment]::SetEnvironmentVariable("GMAIL_APP_PASSWORD", "abcdefghijklmnop", "User")
-# optional: $env:CLAUDE_MODEL = "claude-sonnet-4-6"
+# optional feeds/models:
+# [Environment]::SetEnvironmentVariable("CAREERONESTOP_USER_ID", "...", "User")
+# [Environment]::SetEnvironmentVariable("CAREERONESTOP_TOKEN",   "...", "User")
 ```
 
-- **ANTHROPIC_API_KEY** powers the scorers (resume fit, technical bar,
-  company mission) and Claude-driven discovery. Everything degrades
-  gracefully without it (heuristic fallbacks, unscored missions).
-- **GMAIL_APP_PASSWORD** is only needed for emailed digests: Google Account
-  → Security → 2-Step Verification ON → "App passwords" → Mail/Windows →
-  copy the 16-char password.
-- `config.RESUME_PATH` points at your resume (.docx); it drives per-job
-  fit scoring.
+- **ANTHROPIC_API_KEY** powers the scorers (resume fit, technical bar, company
+  mission) and Claude-driven discovery. Everything degrades gracefully without
+  it (heuristic fallbacks, unscored missions).
+- **GMAIL_APP_PASSWORD** is only needed for emailed digests (Google Account →
+  Security → 2-Step Verification → "App passwords" → Mail).
+- **CAREERONESTOP_*** (optional) unlock the NLx feed for gated federal
+  contractors — see [Gated employers](#gated--big-company-employers).
+- `config.RESUME_PATH` points at your resume (.docx); it drives per-job fit
+  scoring.
 
-First run:
+**3. First run:**
 
 ```
-python crawler.py --import-seeds          # load config company lists -> store
+python discover.py --local                # source local companies into the store
+python discover.py --score-missions       # tier the new companies
 python crawler.py --track local-tech      # or --track remote-neural
 ```
+
+(There is no more `--import-seeds` — the company roster is stored in the DB, not
+in `config.py`. Bootstrap it with discovery, or `--import-companies`.)
 
 ---
 
@@ -67,10 +87,9 @@ python crawler.py --track local-tech      # or --track remote-neural
 Surfaces REMOTE, US-eligible roles that keep all three of: a neural-signal
 anchor (word-boundary matched — "ecog" never fires inside "recognized"), a
 technical title, and remote eligibility (structured ATS hints like Lever
-`workplaceType` beat regex; hard negations like "on-site only" veto).
-Sweeps priority companies (Beacon, Precision, Paradromics), then store
-companies tagged `neural`, then config seed lists, forums, remote boards
-(RemoteOK/Remotive/HN/RSS), and optional DDG web searches.
+`workplaceType` beat regex; hard negations like "on-site only" veto). Sweeps
+priority companies, then store companies tagged `neural`, then forums and
+remote boards (RemoteOK/Remotive/HN/RSS), and optional DDG web searches.
 
 ```
 python crawler.py --track remote-neural                  # read-only preview
@@ -80,78 +99,118 @@ python crawler.py --track remote-neural --fit            # resume-fit-rank match
 python crawler.py --track remote-neural --no-websearch   # skip flaky DDG
 ```
 
-Preview prints a per-source funnel (RELV → NEUR → TECH → REMOTE → NEW) and
-sample matches so you can sanity-check precision before anything emails.
-
 ### local-tech
 
-Crawls every **active company in the store**, pulls their Triangle/NC
-postings (company-vetted, so no keyword gate), drops clinical-ops and
-defense roles, keeps technical titles, resume-fit-scores each new job in
-parallel, and writes a digest ranked by fit (company mission as tiebreak).
-Never emails.
+Crawls every **active company in the store**, pulls their local (profile
+`[locality]`) postings, drops clinical-ops and defense roles, keeps technical
+titles, resume-fit-scores each new job in parallel, and writes a digest ranked
+by a combined **√(resume-fit × company-mission)** score. Never emails.
 
 ```
 python crawler.py --track local-tech [--top 20] [--workers 8]
 ```
 
-Companies carry a cached mission score (BCI/neurotech = 1.0 bullseye →
-healthcare-tech → health-bio-science → other), judged once per company
-instead of once per job.
+Companies carry a cached mission score (bullseye = 1.0 → down the profile's
+mission tiers), judged once per company instead of once per job. **Multi-division
+conglomerates** (profile `[policy].multi_division`) are the exception — they're
+crawled through the keyword filter so only their aligned-subdivision roles
+survive, and ranked at a floor rather than their low company score.
 
 ---
 
 ## Growing the company roster — `discover.py`
 
-The store is the operational roster; `config.py`'s lists are reviewable
-seeds. Ways to add companies:
+The store's `companies` table **is** the roster — there are no company lists in
+`config.py` anymore. Ways to add companies:
 
 | Command | What it does |
 |---|---|
-| `python discover.py "neurotech startups"` | Claude suggests employers; slugs probed against Greenhouse/Lever/Ashby/Kula/JazzHR/BambooHR/SmartRecruiters; careers pages sniffed; Workday resolved via headless-browser pool. Confirmed boards → report with VERIFY flags; `--apply` writes them into config.py. |
-| `python discover.py --from-keywords` | Same, for every `INCLUDE_KEYWORDS` entry. |
-| `python discover.py --from-bciwiki [--js]` | Resolve the BCIWiki company directory (~700 BCI companies) to crawlable boards. |
-| `python discover.py --local` | NC sourcing pass: curated Triangle seeds + RTP directory + careers-page sniffing → NC-verified boards, mission-scored into the store (tag `nc_local`). |
-| `python discover.py --dork` | ATS "dorking": mine search-indexed board URLs (`site:jobs.lever.co "Durham"`) into the store. |
-| `python discover.py --resolve-leads` | Resolve page-capture company leads: slug probe → careers sniff → Workday probe → web-search fallback. Idempotent; reruns retry only unresolved leads. |
-| `python discover.py --add-board "NC DHHS" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted (Workday triples parse straight from job URLs), NC-verified, activated. |
-| `python crawler.py --import-seeds` | Config lists → store (`neural` for the BCI set, `nc_local` for the big RTP employers). |
+| `python discover.py "neurotech startups"` | Claude suggests employers; slugs probed against Greenhouse/Lever/Ashby/Kula/JazzHR/BambooHR/SmartRecruiters; careers pages sniffed; Workday resolved via headless browser. `--apply` upserts confirmed boards **into the store** (mission left NULL). |
+| `python discover.py --from-keywords` | Same, for every profile keyword. |
+| `python discover.py --from-bciwiki [--js]` | Resolve the BCIWiki company directory (~700 companies) to crawlable boards. |
+| `python discover.py --local` | Local sourcing: profile seeds + directory scrapes + **web-search name harvesting** → probe → locality-verify → mission-score into the store (tag `nc_local`). |
+| `python discover.py --dork` (`--ats-dork`) | Mine search-indexed board URLs (`site:jobs.lever.co "Durham"`) built from your profile locality + keywords. |
+| `python discover.py --resolve-leads` | Resolve page-capture company leads: slug probe → careers sniff → Workday probe → web-search fallback. Idempotent. |
+| `python discover.py --add-board "NVIDIA" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted, locality-verified, activated. |
+| `python discover.py --score-missions` | Tier any active company that has a board but no mission yet (run after `--apply`/`--local`). `--rescore-missions` re-scores everything. |
 
-Slug probing can confirm the wrong company ("seer" the proteomics shop vs
-Seer Medical) — such hits carry `VERIFY:` notes through reports and config
-comments. Eyeball them.
+After `--apply` or `--local`, run `--score-missions` — the apply step
+deliberately leaves mission NULL so scoring happens in one pass.
+
+Slug probing can confirm the wrong company ("seer" the proteomics shop vs Seer
+Medical) — such hits carry `VERIFY:` notes through reports. Eyeball them.
+
+### Sharing / backing up the roster
+
+```
+python crawler.py --export-companies roster.json    # dump the roster (secrets-free)
+python crawler.py --import-companies roster.json    # upsert a shared roster
+```
+
+`roster.json` is the diffable, shareable "starter set" that replaced the old
+config seed lists — hand it to someone and they bootstrap instantly.
+
+---
+
+## Gated & big-company employers
+
+Some employers can't be crawled directly. Route by type:
+
+- **Secretly on a standard ATS** (e.g. NVIDIA on Workday) — just add the board:
+  `python discover.py --add-board "NVIDIA" https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite`.
+- **Bot-gated custom sites** (Meta, Google, Qualcomm — no public feed):
+  - **NLx feed** — `python crawler.py --nlx "Meta,Google,Qualcomm"`. Federal
+    contractors must list US openings via the National Labor Exchange; this
+    reads them through the free **CareerOneStop** API (register at
+    careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`). No
+    scraping, no bot walls. Results carry a description snippet.
+  - **Manual** — browse the site yourself and add postings with `capture.py`
+    (metacareers.com is parsed; any single job via `capture.py --add`).
+- **Multi-division conglomerates** — list them in profile `[policy].multi_division`
+  so their healthcare-aligned subdivisions surface even though the company's
+  overall mission is "other".
 
 ---
 
 ## Manual page capture — `capture.py`
 
-For gated boards (LinkedIn, Indeed): **you** browse logged in as yourself;
-the crawler just keeps what you saw. No automation touches your account.
+For gated boards (LinkedIn, Indeed, metacareers): **you** browse logged in as
+yourself; the crawler just keeps what you saw. No automation touches your account.
 
 ```
 python capture.py                 # capture server on http://127.0.0.1:8877/
 python capture.py --watch         # or: watch ./captures for Ctrl+S saves
 python capture.py page.html ...   # or: ingest saved files one-off
+python capture.py --add --url URL --title "..." --company "Meta" --location "Durham, NC"
 ```
 
 - **Userscript button** (needs Violentmonkey/Tampermonkey): open
   `http://127.0.0.1:8877/` once to install; a **➤ Jobs** button appears on
-  LinkedIn/Indeed pages and sends the live DOM on click. (A plain
-  bookmarklet can't work — LinkedIn's CSP blocks page-context calls to
-  localhost.)
-- **Watch mode** (zero installs): run `--watch`, then Ctrl+S → "Web Page,
-  complete" into `captures/`. Ingested within ~2 s.
+  LinkedIn / Indeed / metacareers pages and sends the live DOM on click.
+- **Watch mode** (zero installs): run `--watch`, Ctrl+S → "Web Page, complete"
+  into `captures/`. Ingested within ~2 s.
+- **`--add`** hand-adds one curated posting from a gated/JS site: it skips the
+  exclude/technical guesswork (you chose it) but **keeps the locality gate**,
+  registers the company, and pulls its other local jobs if the board resolves.
 
-Captured pages are parsed in layers (LinkedIn's current obfuscated markup,
-classic cards, guest cards, detail pages via the `<title>` tag + "About the
-job" section; Indeed cards; JSON-LD; generic job links), gated, fit-scored,
-and stored. Company names seen on captured pages become **leads** —
-`python discover.py --resolve-leads` turns them into crawlable boards.
+Captured pages are parsed in layers (LinkedIn markup generations, Indeed cards,
+metacareers job cards, JSON-LD, generic job links), gated, fit-scored, stored.
+Company names seen become **leads** → `discover.py --resolve-leads`.
 
-Notes: LinkedIn "Top job picks" collection pages are virtualized and save
-almost empty — capture **Job tracker / search / detail** pages instead.
-LinkedIn reshuffles markup periodically; expect to touch
-`jobcrawler/page_capture.py` occasionally.
+---
+
+## Maintenance
+
+```
+python crawler.py --prune                     # deactivate dead (404) ATS boards
+python crawler.py --prune --prune-offmission  # also drop off-mission "other" companies
+```
+
+`--prune` probes every active Greenhouse/Lever/Ashby/BambooHR board and
+deactivates the dead ones — run it whenever the crawl starts spamming `HTTP 404`
+(usually after a big discovery import leaves stale slugs). It never touches a
+live board; `--prune-offmission` additionally retires `other`-tier companies
+(keeping multi-division giants).
 
 ---
 
@@ -161,32 +220,40 @@ LinkedIn reshuffles markup periodically; expect to touch
 python crawler.py --expand "eeg engineer"        # Claude: alt titles/keywords/sectors
 python crawler.py --expand-live TERM             # ...folded into this run
 python crawler.py --expand-location "NC"         # location synonym expansion
-python crawler.py --keyword-report               # bulk-expand INCLUDE_KEYWORDS
+python crawler.py --keyword-report               # bulk-expand profile keywords
 python crawler.py --score "job description..."   # technical-bar score one posting
 python crawler.py --db alt.db ...                # isolated store (concurrent runs)
 python smoke_test.py                             # offline regression guard
 ```
 
-Keyword filter design (learned the hard way, see `jobcrawler/filters.py` /
-`config.py`): CORE terms pass alone; DOMAIN+SKILL must pair, and only in
-the posting head (benefits boilerplate says "medical, dental, vision");
-short acronyms are word-boundary matched; bare generic terms ("signal",
-"data", "medical") are qualified — they leaked military RF and fintech
-roles into a clinical search.
-
 ---
 
-## Customizing
+## Customizing — `profile.toml`
 
-- **Keywords / excludes / locations:** `CORE_KEYWORDS`, `DOMAIN_KEYWORDS`,
-  `SKILL_KEYWORDS`, `EXCLUDE_PHRASES` (+ title-only `EXCLUDE_TITLE_PHRASES`),
-  `LOCATION_INCLUDE`/`LOCATION_EXCLUDE` in `config.py`.
-- **Companies by hand:** add to the config lists (`"slug": "Name"` for
-  Greenhouse/Lever/Ashby; tuples for Kula/ADP/Workday) and re-run
-  `--import-seeds`, or skip config entirely with `--add-board`.
-- **Track keyword focus** lives in `jobcrawler/tracks/*.py`
-  (`apply_to_config` mutates the live lists in-process only — nothing on
-  disk changes, so tracks can run back to back).
+Everything personal lives in `profile.toml` (gitignored; `profile.example.toml`
+is the checked-in template). Sections:
+
+| Section | Controls |
+|---|---|
+| `[keywords]` | `core` / `domain` / `skill` relevance tiers |
+| `[exclude]` | `phrases` (title+body) and `title_phrases` (title only) |
+| `[locations]` | `onsite` / `remote` terms, `accept_remote` |
+| `[policy]` | `multi_division` conglomerates + ranking floor |
+| `[candidate]` | who you are — injected verbatim into every Claude scoring/discovery prompt |
+| `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
+| `[locality]` | what counts as "local" for the local track (`jobcrawler/nc.py`) |
+| `[discovery]` | seed company names, Workday majors, directory URLs, web-search name queries |
+
+**Relevance model:** a job passes if it hits any `core` term, OR a `domain` +
+`skill` pair. Keep `core` narrow (high-signal); let `domain`+`skill` pull in
+adjacent roles without opening the floodgates. Precision notes are preserved as
+comments in the file — short acronyms are word-boundary matched, and bare
+generic terms ("signal", "medical") are qualified because they leaked military
+RF and benefits-boilerplate roles into a clinical search.
+
+**It's fully swappable.** Drop in a different `profile.toml` and the whole system
+retargets — mission tiers, locality regex, the LLM prompts, and discovery
+sourcing all follow. `config.py` needs no edits.
 
 ---
 
@@ -210,33 +277,35 @@ Register-ScheduledTask -TaskName "Jobs Crawler" -Action $action -Trigger $trigge
 
 One SQLite store, `local_tech.db` (`jobcrawler/store.py`):
 
-- **companies** — name, ats, slug / Workday triple / careers_url, NC job
-  count, cached mission tier + score, `tags` (`neural`, `nc_local` — which
-  tracks crawl it), source (config_seed / local_sourcing / ats_dork /
-  page_capture / manual), active flag.
+- **companies** — name, ats, slug / Workday triple / careers_url, NC job count,
+  cached mission tier + score, `tags` (`neural`, `nc_local`, `multi_division` —
+  which tracks crawl it), `source` (`discovery:<term>` / `local_sourcing` /
+  `ats_dork` / `page_capture` / `manual` / `nlx`), `active` flag.
 - **jobs** — stable job_id (dedup), track, geo_mode, remote/neural signals,
-  description, technical-bar + resume-fit scores, first/last seen.
+  description, resume-fit score + reason, first/last seen. The combined
+  ranking score is computed at read time, not stored.
 
-Schema migrations are additive and automatic; old DBs upgrade in place.
-Runtime artifacts (all gitignored): `local_tech.db`, `job_reports/*.md`,
-`captures/`, `*.log`.
+Schema migrations are additive/automatic; old DBs upgrade in place (and shed
+retired columns). Runtime artifacts (all gitignored): `local_tech.db`,
+`profile.toml`, `job_reports/*.md`, `captures/`, `*.log`.
 
-**One writer at a time:** SQLite locking does not span the boundary between
-your shell and an agent sandbox mounting the same folder — running two
-writers concurrently corrupts the DB (ask us how we know).
+**One writer at a time:** SQLite locking does not span the boundary between your
+shell and an agent sandbox mounting the same folder — two concurrent writers
+corrupt the DB.
 
 ## Module map
 
 | Module | Role |
 |---|---|
-| `crawler.py` / `discover.py` / `capture.py` | entry points: crawl, roster growth, manual capture |
+| `crawler.py` / `discover.py` / `capture.py` | entry points: crawl/maintain, roster growth, manual capture |
+| `config.py` / `profile.toml` | plumbing (config.py) vs. all search criteria (profile.toml) |
 | `jobcrawler/tracks/` | the two tracks (gates, ranking, digests) |
-| `jobcrawler/sources.py` | declarative ATS registry: config lists ↔ fetch thunks ↔ store seeds |
-| `jobcrawler/fetchers/` | keyword-gated board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap) |
+| `jobcrawler/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
+| `jobcrawler/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap + CareerOneStop/NLx) |
 | `jobcrawler/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
-| `jobcrawler/discovery/` | pipeline, slug probes, shared careers-page sniffer, BCIWiki, NC sourcing, dorking |
-| `jobcrawler/page_capture.py` | parse captured LinkedIn/Indeed/any-board HTML |
-| `jobcrawler/store.py` | unified companies + jobs store |
-| `jobcrawler/claude.py` | scorers + discovery/expansion prompts |
-| `jobcrawler/filters.py` / `remote_filter.py` / `nc.py` | keyword tiers, remote eligibility, NC locality (single sources of truth) |
+| `jobcrawler/discovery/` | pipeline, slug probes, careers-page sniffer, BCIWiki, local sourcing (+ web-search name harvest), dorking; `apply.py` upserts into the store |
+| `jobcrawler/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
+| `jobcrawler/store.py` | unified companies + jobs store (+ export/import, prune) |
+| `jobcrawler/claude.py` | scorers + discovery/expansion prompts, templated from profile `[candidate]`/`[mission]` |
+| `jobcrawler/filters.py` / `remote_filter.py` / `nc.py` | keyword tiers, remote eligibility, locality — all driven by `profile.toml` |
 | `jobcrawler/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
