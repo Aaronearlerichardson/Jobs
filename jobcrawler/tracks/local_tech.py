@@ -294,14 +294,14 @@ def _keep_job(company, job):
 
 def _score_job(resume, company, job):
     company_fetch.hydrate_description(job)
-    fit, reason = score_resume_fit(resume, job["title"], job.get("description", ""))
+    res = score_resume_fit(resume, job["title"], job.get("description", ""))
     return {
         "job_id": job["id"], "company_id": company["id"], "company_name": company["name"],
         "title": job["title"], "url": job["url"], "location": job["location"],
         "track": TRACK,
         "geo_mode": geo_mode(job["location"], job.get("description", "")) or "onsite",
         "description": (job.get("description", "") or "")[:2000],
-        "resume_fit_score": fit, "fit_reason": reason,
+        **res.as_columns(),
     }
 
 
@@ -434,31 +434,27 @@ def rescore_all(max_workers=6, track=None, described_only=False):
     print(f"  rescoring {len(rows)} job(s) against the current resume...")
 
     def _one(r):
-        fit, reason = score_resume_fit(resume, r["title"], r.get("description", ""))
-        return r["job_id"], fit, reason, r.get("description", "")
+        res = score_resume_fit(resume, r["title"], r.get("description", ""))
+        return r["job_id"], res, r.get("description", "")
 
     n = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for fut in as_completed({ex.submit(_one, r): r for r in rows}):
             try:
-                jid, fit, reason, desc = fut.result()
+                jid, res, desc = fut.result()
             except Exception as e:
                 print(f"    [!] rescore error: {e}")
                 continue
-            if fit is None:
-                # Unscorable (no real body): clear any stale score so it drops
-                # from ranking. A described row that just failed to parse (has a
-                # body) is left alone to keep its previous score.
+            if res.score is None:
+                # Unscorable (no real body): clear the stale score AND axis
+                # columns so it drops from ranking. A described row that merely
+                # failed to parse (has a body) is left alone to keep its score.
                 if len((desc or "").strip()) < MIN_DESC_CHARS:
-                    conn.execute("UPDATE jobs SET resume_fit_score=NULL, "
-                                 "fit_reason=? WHERE job_id=?",
-                                 ("no description; unscored", jid))
-                    conn.commit()
+                    store.update_job_scores(
+                        conn, jid, {"fit_reason": "no description; unscored"})
                     n += 1
                 continue
-            conn.execute("UPDATE jobs SET resume_fit_score=?, fit_reason=? "
-                         "WHERE job_id=?", (fit, reason, jid))
-            conn.commit()
+            store.update_job_scores(conn, jid, res.as_columns())
             n += 1
     conn.close()
     print(f"  {n} job(s) rescored.")
@@ -507,15 +503,15 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
             kept.append(j)
 
     def _score(j):
-        fit, reason = score_resume_fit(resume, j["title"], j.get("description", ""))
+        res = score_resume_fit(resume, j["title"], j.get("description", ""))
         return {"job_id": j["id"], "company_id": j.get("_company_id"),
                 "company_name": j.get("company"),
                 "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),
                 "track": TRACK,
                 "geo_mode": geo_mode(j.get("location", ""), j.get("description", "")) or "onsite",
                 "description": (j.get("description", "") or "")[:2000],
-                "resume_fit_score": fit, "fit_reason": reason,
-                "status": "open"}
+                "status": "open",
+                **res.as_columns()}
 
     scored = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:

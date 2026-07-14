@@ -17,19 +17,20 @@ at); Python does the arithmetic (transparent, tunable, calibratable). The
 combiner is a weighted geometric mean -- the same imbalance-punishing shape
 store.combined_score() already uses -- times the worst gate multiplier.
 
-Wiring (three small edits, all backward-compatible):
-  1. claude.py:  `from jobcrawler import fit` and make `score_resume_fit`
-     delegate:  `return fit.score_resume_fit(title, description).as_legacy()`
-  2. config.py:  load an optional `[fit]` profile block (weights / gate
-     penalties / taxonomy overrides); omit it and the defaults below apply.
-  3. store.py :  add `"fit_axes": "TEXT"` to _MIGRATIONS["jobs"] and persist
-     FitResult.axes_json to it. The scalar still lands in resume_fit_score, so
-     ranked_jobs() and combined_score() keep working untouched.
+Wired into:
+  - claude.py:  `score_resume_fit(resume, title, desc)` delegates here and
+    returns the FitResult (resume is ignored; the rubric scores the profile).
+  - config.py:  loads the optional `[fit]` profile block (weights / gate
+    penalties / domain ladder / stack / region); omit it and the defaults
+    below apply.
+  - store.py :  jobs table carries one column per axis (fit_domain/function/
+    stack/seniority) plus fit_gates; FitResult.as_columns() produces them and
+    store.update_job_scores() writes them. resume_fit_score stays the combined
+    scalar, so ranked_jobs()/combined_score() keep working untouched.
 """
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass, field
 
@@ -106,19 +107,29 @@ class FitResult:
     gates: list = field(default_factory=list)   # names of FAILED gates
     reason: str = ""
 
-    @property
-    def axes_json(self) -> str:
-        return json.dumps({"axes": self.axes, "gates": self.gates})
-
     def summary(self) -> str:
-        """Compact one-liner that carries the vector into fit_reason/reports."""
+        """Compact one-liner that carries the vector into fit_reason/reports.
+        For an unscored result (no axes) it is just the plain reason, so a
+        None-scored row doesn't get a misleading [dom0.00 ...] tag."""
+        if not self.axes:
+            return self.reason
         a = " ".join(f"{k[:3]}{self.axes.get(k, 0):.2f}" for k in AXES)
         g = f" gate:{'+'.join(self.gates)}" if self.gates else ""
         return f"[{a}{g}] {self.reason}".strip()
 
     def as_legacy(self):
-        """`(fit, reason)` tuple so existing callers don't change."""
+        """`(fit, reason)` tuple for any caller that only wants the scalar."""
         return self.score, self.summary()
+
+    def as_columns(self) -> dict:
+        """DB-ready fields: the scalar, the reason tag, the tripped gates, and
+        one column per axis. Keys match the jobs-table columns added in
+        store.py. Axes are None on an unscored result, so those columns clear."""
+        cols = {"resume_fit_score": self.score,
+                "fit_reason": self.summary(),
+                "fit_gates": ",".join(self.gates) or None}
+        cols.update({f"fit_{a}": self.axes.get(a) for a in AXES})
+        return cols
 
 
 # --------------------------------------------------------------------------- #

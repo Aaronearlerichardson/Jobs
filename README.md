@@ -228,6 +228,70 @@ python smoke_test.py                             # offline regression guard
 
 ---
 
+## Résumé-fit scoring
+
+Each job gets a résumé-fit score in [0, 1] from a **multi-axis rubric**
+(`jobcrawler/fit.py`), not a single opaque number. The LLM scores four
+orthogonal axes and flags disqualifying gates; Python combines them (a weighted
+geometric mean times the worst gate penalty), so the math is transparent and
+tunable:
+
+- **domain** — how close the role's subject matter is to yours, on a graded
+  ladder (e.g. iEEG/EEG ~1.0 down to non-health ~0.15).
+- **function** — whether the role's *discipline* matches (research / ML /
+  scientific-pipeline high; analytics-warehouse, embedded, generic backend low),
+  judged from the JD body, not the title.
+- **stack** — overlap of the tools the JD actually requires with your stack; a
+  role centred on tools you lack (Snowflake/dbt, Kubernetes, RTOS) scores low
+  even when the title matches.
+- **seniority** — do you clear the level without being wildly over/under.
+
+Gates are disqualifiers (they multiply the score down, worst gate wins), not
+deductions: **geo** (not remote and not in your region), **embedded**
+(firmware/PCB/RTOS), **level** (below your technical bar), **phd** (hard PhD
+requirement). Together the axes keep two different non-domain roles distinct, and
+the gates — not more axes — create the spread, so a warehouse "Data Engineer"
+stops scoring like your pipeline work.
+
+Everything is profile-driven: weights, gate penalties, the domain ladder, your
+stack vocabulary, and region terms live in `profile.toml [fit]` (omit it for the
+built-in neural/biosignal defaults). The rubric is calibrated against a small
+anchor set — run `python -m jobcrawler.fit` to print the predicted-vs-hand table
+after retuning weights.
+
+**Stored columns.** `resume_fit_score` is the combined scalar; the breakdown is
+also stored per axis (`fit_domain`, `fit_function`, `fit_stack`,
+`fit_seniority`), plus `fit_gates` (comma-joined) and a compact `fit_reason` tag,
+so you can query and sort on any axis:
+
+```
+sqlite3 local_tech.db "SELECT resume_fit_score, fit_domain, fit_stack, fit_gates, title \
+  FROM jobs WHERE fit_gates IS NULL ORDER BY resume_fit_score DESC LIMIT 20"
+```
+
+**No description, no score.** A posting with no real JD body (under ~200 chars)
+scores `None` and is left unranked, rather than floated at a fabricated mid
+value — so fetch the bodies first.
+
+### Re-scoring & description backfill
+
+```
+python crawler.py --local-tech --backfill-descriptions            # fetch full JD text for stored Workday jobs (CXS)
+python crawler.py --local-tech --backfill-descriptions --limit 20 # try a small batch first
+python crawler.py --local-tech --rescore                          # re-score every stored job with the current rubric/profile
+python crawler.py --local-tech --rescore --described-only         # ...only jobs that already have a JD body
+```
+
+Workday serves each job's full description as plain JSON from
+`/wday/cxs/{tenant}/{site}{externalPath}` — the live fetcher now pulls it, and
+`--backfill-descriptions` fills it in for rows stored before that (idempotent;
+only touches `myworkdayjobs.com` URLs missing a body). Run the backfill, then
+`--rescore`: real text goes in, and the no-description rows that used to clog the
+top are cleared out. Use `--rescore` after changing your resume, the `[fit]`
+block, or the prompt — a normal crawl only scores jobs it hasn't seen.
+
+---
+
 ## Customizing — `profile.toml`
 
 Everything personal lives in `profile.toml` (gitignored; `profile.example.toml`
@@ -240,6 +304,7 @@ is the checked-in template). Sections:
 | `[locations]` | `onsite` / `remote` terms, `accept_remote` |
 | `[policy]` | `multi_division` conglomerates + ranking floor |
 | `[candidate]` | who you are — injected verbatim into every Claude scoring/discovery prompt |
+| `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, the `domain_ladder`, your `stack_core`/`stack_anti`, and `region_terms` (all optional; sensible defaults) |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
 | `[locality]` | what counts as "local" for the local track (`jobcrawler/nc.py`) |
 | `[discovery]` | seed company names, Workday majors, directory URLs, web-search name queries |
@@ -282,8 +347,10 @@ One SQLite store, `local_tech.db` (`jobcrawler/store.py`):
   which tracks crawl it), `source` (`discovery:<term>` / `local_sourcing` /
   `ats_dork` / `page_capture` / `manual` / `nlx`), `active` flag.
 - **jobs** — stable job_id (dedup), track, geo_mode, remote/neural signals,
-  description, resume-fit score + reason, first/last seen. The combined
-  ranking score is computed at read time, not stored.
+  description, résumé-fit score + reason, the per-axis breakdown (`fit_domain`,
+  `fit_function`, `fit_stack`, `fit_seniority`, `fit_gates`), first/last seen.
+  The combined résumé-fit×mission ranking score is computed at read time, not
+  stored.
 
 Schema migrations are additive/automatic; old DBs upgrade in place (and shed
 retired columns). Runtime artifacts (all gitignored): `local_tech.db`,
@@ -301,11 +368,12 @@ corrupt the DB.
 | `config.py` / `profile.toml` | plumbing (config.py) vs. all search criteria (profile.toml) |
 | `jobcrawler/tracks/` | the two tracks (gates, ranking, digests) |
 | `jobcrawler/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `jobcrawler/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap + CareerOneStop/NLx) |
+| `jobcrawler/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap + CareerOneStop/NLx); `workday.py` also pulls full JD text via the CXS per-job endpoint and exposes `backfill_workday_descriptions` |
 | `jobcrawler/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
 | `jobcrawler/discovery/` | pipeline, slug probes, careers-page sniffer, BCIWiki, local sourcing (+ web-search name harvest), dorking; `apply.py` upserts into the store |
 | `jobcrawler/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
-| `jobcrawler/store.py` | unified companies + jobs store (+ export/import, prune) |
-| `jobcrawler/claude.py` | scorers + discovery/expansion prompts, templated from profile `[candidate]`/`[mission]` |
+| `jobcrawler/store.py` | unified companies + jobs store (+ export/import, prune, `update_job_scores`) |
+| `jobcrawler/fit.py` | multi-axis résumé-fit rubric (axes + gates + deterministic combiner), templated from profile `[fit]`; calibration harness via `python -m jobcrawler.fit` |
+| `jobcrawler/claude.py` | Claude API wrapper + discovery/expansion/mission/tech-bar prompts; `score_resume_fit` delegates to `fit.py` |
 | `jobcrawler/filters.py` / `remote_filter.py` / `nc.py` | keyword tiers, remote eligibility, locality — all driven by `profile.toml` |
 | `jobcrawler/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |

@@ -95,6 +95,13 @@ _MIGRATIONS = {
         "remote_eligible": "INTEGER",
         "remote_signal":   "TEXT",
         "neural_signal":   "TEXT",
+        # Per-axis fit sub-scores (jobcrawler/fit.py). resume_fit_score stays
+        # the combined scalar; these expose the breakdown for querying/sorting.
+        "fit_domain":      "REAL",
+        "fit_function":    "REAL",
+        "fit_stack":       "REAL",
+        "fit_seniority":   "REAL",
+        "fit_gates":       "TEXT",   # comma-joined tripped gate names, or NULL
     },
 }
 
@@ -306,8 +313,9 @@ def upsert_job(conn, j):
             (job_id, company_id, company_name, title, url, location, track,
              geo_mode, remote_eligible, remote_signal, neural_signal,
              description, resume_fit_score, fit_reason,
+             fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
              first_seen, last_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url, location=excluded.location,
              track=COALESCE(excluded.track, track),
@@ -318,6 +326,11 @@ def upsert_job(conn, j):
              description=excluded.description,
              resume_fit_score=COALESCE(excluded.resume_fit_score, resume_fit_score),
              fit_reason=COALESCE(NULLIF(excluded.fit_reason,''), fit_reason),
+             fit_domain=COALESCE(excluded.fit_domain, fit_domain),
+             fit_function=COALESCE(excluded.fit_function, fit_function),
+             fit_stack=COALESCE(excluded.fit_stack, fit_stack),
+             fit_seniority=COALESCE(excluded.fit_seniority, fit_seniority),
+             fit_gates=COALESCE(excluded.fit_gates, fit_gates),
              last_seen=excluded.last_seen,
              status=excluded.status""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
@@ -325,10 +338,28 @@ def upsert_job(conn, j):
          remote, j.get("remote_signal"), j.get("neural_signal"),
          j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
+         j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
+         j.get("fit_seniority"), j.get("fit_gates"),
          now, now, j.get("status", "open")),
     )
     conn.commit()
     return new
+
+
+# Fit columns written together by the rescore path (see update_job_scores).
+_SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates",
+               "fit_domain", "fit_function", "fit_stack", "fit_seniority")
+
+
+def update_job_scores(conn, job_id, cols):
+    """Overwrite only the fit columns for one job (used by rescore). `cols` is a
+    FitResult.as_columns() dict; any missing key is written NULL, so passing an
+    empty/partial dict clears a stale score (an unscorable row drops out of
+    ranking)."""
+    sets = ", ".join(f"{c}=?" for c in _SCORE_COLS)
+    conn.execute(f"UPDATE jobs SET {sets} WHERE job_id=?",
+                 [cols.get(c) for c in _SCORE_COLS] + [job_id])
+    conn.commit()
 
 
 def ranked_jobs(conn, track=None, limit=None, location_re=None):

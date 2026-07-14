@@ -68,8 +68,8 @@ def _score_fits(matches, max_workers=6):
     print(f"  scoring {len(matches)} match(es) against resume...")
 
     def _one(j):
-        fit, reason = score_resume_fit(resume, j["title"], j.get("description", ""))
-        j["resume_fit_score"], j["fit_reason"] = fit, reason
+        res = score_resume_fit(resume, j["title"], j.get("description", ""))
+        j.update(res.as_columns())
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         list(ex.map(_one, matches))

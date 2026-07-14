@@ -213,13 +213,13 @@ def score_company_mission(name, context=""):
 
 
 def score_resume_fit(resume, title, description=""):
-    """Delegate to the multi-axis rubric in jobcrawler/fit.py; returns the same
-    (fit, reason) tuple callers expect. `resume` is accepted for backward
-    compatibility but the rubric scores against the config profile (strengths,
-    domain ladder, stack), not raw résumé text. Imported lazily to avoid a
-    claude<->fit import cycle."""
+    """Delegate to the multi-axis rubric in jobcrawler/fit.py; returns a
+    FitResult (`.score`, `.axes`, `.gates`, `.reason`, and `.as_columns()` /
+    `.as_legacy()`). `resume` is accepted for backward compatibility but the
+    rubric scores against the config profile (strengths, domain ladder, stack),
+    not raw résumé text. Imported lazily to avoid a claude<->fit import cycle."""
     from jobcrawler import fit
-    return fit.score_resume_fit(title, description).as_legacy()
+    return fit.score_resume_fit(title, description)
 
 
 def score_technical_bar(title, description=""):
