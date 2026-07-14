@@ -183,25 +183,9 @@ Return ONLY a JSON object with exactly:
 Return ONLY valid JSON. No markdown, no preamble."""
 
 
-_STRENGTHS = "\n".join(f"{i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1)) \
-    or "1. (no strengths configured — judge on general technical merit)"
-_FIT_CAPS = "\n".join(f"- {c}" for c in config.CANDIDATE_FIT_CAPS) \
-    or "- If the job description is missing or trivially short: judge from the title alone and cap fit at 0.45."
-
-_RESUME_FIT_SYSTEM = f"""You score how well a specific JOB fits a specific CANDIDATE, from 0.0 to 1.0, for a targeted job search.
-
-The candidate's strengths, in priority order:
-{_STRENGTHS}
-
-Weigh: overlap of the job's requirements with the strengths above (in that priority order); seniority match; whether the candidate clears the bar without being wildly overqualified. Penalize hard mismatches (a stack/domain with no overlap; wrong seniority; a hard requirement the candidate lacks).
-
-Hard caps:
-{_FIT_CAPS}
-
-Return ONLY a JSON object with exactly:
-- "fit": 0.0-1.0 (two decimals).
-- "reason": one short phrase (<= 14 words) naming the deciding factor.
-Return ONLY valid JSON. No markdown, no preamble."""
+# Résumé-fit scoring moved to jobcrawler/fit.py (multi-axis rubric + gates).
+# score_resume_fit() below is a thin delegator; the old single-scalar prompt
+# and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
 def score_company_mission(name, context=""):
@@ -229,20 +213,13 @@ def score_company_mission(name, context=""):
 
 
 def score_resume_fit(resume, title, description=""):
-    """Return (fit: float in [0,1]|None, reason: str) for one job vs a résumé."""
-    if not resume:
-        return None, ""
-    desc = (description or "")[:2200]
-    user = (f"CANDIDATE RÉSUMÉ:\n{resume[:6000]}\n\n"
-            f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc or '(no description)'}")
-    result = call_claude_json(_RESUME_FIT_SYSTEM, user, max_tokens=120)
-    if not result or "fit" not in result:
-        return None, ""
-    try:
-        fit = max(0.0, min(1.0, float(result["fit"])))
-    except (TypeError, ValueError):
-        return None, ""
-    return fit, str(result.get("reason", "")).strip()
+    """Delegate to the multi-axis rubric in jobcrawler/fit.py; returns the same
+    (fit, reason) tuple callers expect. `resume` is accepted for backward
+    compatibility but the rubric scores against the config profile (strengths,
+    domain ladder, stack), not raw résumé text. Imported lazily to avoid a
+    claude<->fit import cycle."""
+    from jobcrawler import fit
+    return fit.score_resume_fit(title, description).as_legacy()
 
 
 def score_technical_bar(title, description=""):

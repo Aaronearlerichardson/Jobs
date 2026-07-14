@@ -107,6 +107,17 @@ CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
 CANDIDATE_FIT_CAPS  = list(_cand.get("fit_caps", []))
 CANDIDATE_AVOID     = (_cand.get("avoid") or "").strip()
 
+# --- Fit rubric (jobcrawler/fit.py) — optional [fit] block; defaults apply if
+#     absent. weights/gate_penalty are dicts; domain_ladder is a list of
+#     {score, terms=[...]}; stack_* / region_terms are lists joined to text. ---
+_fitp = _PROFILE.get("fit", {})
+FIT_WEIGHTS       = _fitp.get("weights") or None
+FIT_GATE_PENALTY  = _fitp.get("gate_penalty") or None
+FIT_DOMAIN_LADDER = _fitp.get("domain_ladder") or None
+FIT_STACK_CORE    = ", ".join(_fitp.get("stack_core", [])) or None
+FIT_STACK_ANTI    = ", ".join(_fitp.get("stack_anti", [])) or None
+FIT_REGION        = ", ".join(_fitp.get("region_terms", [])) or None
+
 # --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
 MISSION_TIERS = [
