@@ -176,6 +176,52 @@ def upsert_company(conn, c):
     return row["id"] if row else None
 
 
+def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
+    """Deactivate active companies whose JSON-API ATS board no longer resolves
+    (a hard 404/error — the source of the crawl's `HTTP 404` spam), and
+    optionally off-mission `other`-tier companies (excluding multi-division).
+    Only greenhouse/lever/ashby/bamboohr are probed — their board endpoint
+    cleanly distinguishes "exists" (200) from "dead" (404). Returns
+    (n_dead, n_offmission)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    import config
+    from .discovery.probes import (probe_greenhouse, probe_lever,
+                                   probe_ashby, probe_bamboohr)
+    PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
+             "ashby": probe_ashby, "bamboohr": probe_bamboohr}
+
+    rows = [c for c in get_companies(conn, active_only=True)
+            if c.get("ats") in PROBE and c.get("slug")]
+
+    def _check(c):
+        ok, _ = PROBE[c["ats"]](c["slug"])
+        return c, ok
+
+    dead = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for fut in as_completed({ex.submit(_check, c): c for c in rows}):
+            c, ok = fut.result()
+            if not ok:
+                dead.append(c)
+    for c in dead:
+        conn.execute("UPDATE companies SET active=0, notes=? WHERE id=?",
+                     (f"deactivated: dead {c['ats']} board '{c['slug']}'", c["id"]))
+        print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} {c['slug']}")
+
+    n_off = 0
+    if deactivate_offmission:
+        off = [c for c in get_companies(conn, active_only=True)
+               if c.get("mission_tier") == "other"
+               and not config.is_multi_division(c.get("name"))]
+        for c in off:
+            conn.execute("UPDATE companies SET active=0 WHERE id=?", (c["id"],))
+            print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
+                  f"mission_score={c.get('mission_score')}")
+        n_off = len(off)
+    conn.commit()
+    return len(dead), n_off
+
+
 def export_companies(conn, path):
     """Dump the company roster to JSON — the shareable/bootstrap artifact
     that replaced config.py's seed lists. Secrets-free by construction."""

@@ -33,6 +33,12 @@ def main():
     # Legacy aliases for --track local-tech.
     ap.add_argument("--local-clinical", "--local-tech", dest="local_tech",
                     action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--prune", action="store_true",
+                    help="Deactivate companies whose ATS board is dead (404) — "
+                         "clears the crawl's HTTP-404 spam")
+    ap.add_argument("--prune-offmission", action="store_true",
+                    help="With --prune, also deactivate active 'other'-tier "
+                         "companies (keeps multi-division)")
     ap.add_argument("--export-companies", metavar="PATH",
                     help="Dump the company roster to JSON (share/backup)")
     ap.add_argument("--import-companies", metavar="PATH",
@@ -71,6 +77,17 @@ def main():
         print("  --import-seeds is retired: the company roster lives in the DB.\n"
               "  Manage it with discover.py (--local / --add-board / --apply) or\n"
               "  crawler.py --import-companies roster.json / --export-companies roster.json")
+        raise SystemExit(0)
+
+    if args.prune:
+        from jobcrawler import store
+        conn = store.connect()
+        n_dead, n_off = store.prune_dead_boards(
+            conn, deactivate_offmission=args.prune_offmission)
+        conn.close()
+        print(f"\n  deactivated {n_dead} dead-board compan(ies)"
+              + (f" + {n_off} off-mission" if args.prune_offmission else "")
+              + ". Re-run --track local-tech to see the cleaner crawl.")
         raise SystemExit(0)
 
     if args.export_companies or args.import_companies:
