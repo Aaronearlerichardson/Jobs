@@ -404,36 +404,57 @@ def run(max_workers=6, top_n=15):
     return ranked
 
 
-def rescore_all(max_workers=6, track=None):
+def rescore_all(max_workers=6, track=None, described_only=False):
     """Re-run resume-fit scoring over every stored job (all tracks unless
     one is named). Use after changing the resume or the scoring prompt —
-    the normal crawl only scores jobs it hasn't seen."""
+    the normal crawl only scores jobs it hasn't seen.
+
+    described_only: only touch rows that have a real JD body (skip the rest
+    entirely, leaving their scores untouched). Without it, a row with no body
+    is unscorable, so its stale score is cleared to NULL so it drops out of
+    ranking; a *described* row that merely fails to parse keeps its old score.
+    """
+    from ..fit import MIN_DESC_CHARS
     resume = resume_text()
     if not resume:
         print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
         return 0
     conn = store.connect()
-    q = "SELECT job_id, title, description FROM jobs"
-    args = []
+    conds, args = [], []
     if track:
-        q += " WHERE track = ?"
+        conds.append("track = ?")
         args.append(track)
+    if described_only:
+        conds.append("length(COALESCE(description,'')) >= ?")
+        args.append(MIN_DESC_CHARS)
+    q = "SELECT job_id, title, description FROM jobs"
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
     print(f"  rescoring {len(rows)} job(s) against the current resume...")
 
     def _one(r):
         fit, reason = score_resume_fit(resume, r["title"], r.get("description", ""))
-        return r["job_id"], fit, reason
+        return r["job_id"], fit, reason, r.get("description", "")
 
     n = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for fut in as_completed({ex.submit(_one, r): r for r in rows}):
             try:
-                jid, fit, reason = fut.result()
+                jid, fit, reason, desc = fut.result()
             except Exception as e:
                 print(f"    [!] rescore error: {e}")
                 continue
             if fit is None:
+                # Unscorable (no real body): clear any stale score so it drops
+                # from ranking. A described row that just failed to parse (has a
+                # body) is left alone to keep its previous score.
+                if len((desc or "").strip()) < MIN_DESC_CHARS:
+                    conn.execute("UPDATE jobs SET resume_fit_score=NULL, "
+                                 "fit_reason=? WHERE job_id=?",
+                                 ("no description; unscored", jid))
+                    conn.commit()
+                    n += 1
                 continue
             conn.execute("UPDATE jobs SET resume_fit_score=?, fit_reason=? "
                          "WHERE job_id=?", (fit, reason, jid))

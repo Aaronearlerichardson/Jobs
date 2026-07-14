@@ -134,13 +134,24 @@ def main():
         tp = argparse.ArgumentParser()
         tp.add_argument("--top", type=int, default=15)
         tp.add_argument("--workers", type=int, default=6)
+        tp.add_argument("--limit", type=int, default=None,
+                        help="Cap rows processed (backfill); default all")
         tp.add_argument("--rescore", action="store_true",
                         help="Re-score ALL stored jobs against the current "
                              "resume/prompt instead of crawling")
+        tp.add_argument("--backfill-descriptions", action="store_true",
+                        help="Fetch full JD text for stored Workday jobs that "
+                             "are missing it (via the CXS endpoint), then stop")
+        tp.add_argument("--described-only", action="store_true",
+                        help="With --rescore: only score jobs that have a real "
+                             "JD body, and leave the rest untouched")
         targs = tp.parse_args(passthrough)
-        if targs.rescore:
+        if targs.backfill_descriptions:
+            from jobcrawler.fetchers.workday import backfill_workday_descriptions
+            backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
+        elif targs.rescore:
             from jobcrawler.tracks.local_tech import rescore_all
-            rescore_all(max_workers=targs.workers)
+            rescore_all(max_workers=targs.workers, described_only=targs.described_only)
         else:
             from jobcrawler.tracks.local_tech import run as run_track
             run_track(max_workers=targs.workers, top_n=targs.top)

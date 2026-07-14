@@ -190,13 +190,25 @@ Return ONLY a JSON object with exactly:
 Return ONLY valid JSON. No markdown, no preamble."""
 
 
+# A body shorter than this is a stub (a stored "Posted N days ago" string, a
+# dead link), not a JD. We can't score it honestly, so we return None rather
+# than a title-only guess that floats to the top on a fake 0.45. Matches the
+# Workday backfill's notion of "missing" so the two stay consistent.
+MIN_DESC_CHARS = 200
+
+
 def score_resume_fit(title: str, description: str = "", *, max_tokens=220) -> FitResult:
-    """Score one posting. Falls back to a neutral empty result if the API is
-    unavailable, so callers degrade instead of crashing (matches the old fn)."""
+    """Score one posting. Returns a None-scored result when the API is
+    unavailable OR when there is no real description to assess (callers treat a
+    None score as 'don't rank this'), so unscorable rows drop out instead of
+    floating at a fabricated cap."""
     if call_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
-    desc = (description or "")[:2500]
-    user = f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc or '(no description)'}"
+    desc = (description or "").strip()
+    if len(desc) < MIN_DESC_CHARS:
+        return FitResult(score=None, reason="no description; unscored")
+    desc = desc[:2500]
+    user = f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc}"
     r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens)
     if not r or "function" not in r:
         return FitResult(score=None, reason="unscored")
@@ -205,9 +217,6 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=220) -> Fi
     weights = getattr(config, "FIT_WEIGHTS", None)
     penalties = getattr(config, "FIT_GATE_PENALTY", None)
     score = combine(axes, gates, weights, penalties)
-    # Missing-JD guard, mirroring the old fit_caps: no body -> cap at 0.45.
-    if not desc:
-        score = min(score, 0.45)
     return FitResult(score=score, axes=axes, gates=gates,
                      reason=str(r.get("reason", "")).strip())
 
