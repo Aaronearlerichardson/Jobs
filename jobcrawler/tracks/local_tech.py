@@ -386,17 +386,21 @@ def run(max_workers=6, top_n=15):
 
     # Geography enforced at the query layer (not the `track` label): only
     # NC-locatable postings appear in the local search, whatever ingested them.
-    ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE)
+    # Rank by résumé fit, not fit×mission: every local company is the same
+    # health-tech mission tier, so the near-constant mission factor only
+    # inflates and compresses the ranking. combined is still shown per row.
+    ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE,
+                               rank_by="fit")
     write_digest(ranked)
 
-    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY COMBINED FIT×MISSION\n  {bar}")
+    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
     for j in ranked[:top_n]:
         fit = j["resume_fit_score"]
         fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
         comb = j.get("combined_score")
         cs = f"{comb:.2f}" if isinstance(comb, float) else "n/a"
         tier = j.get("mission_tier") or "?"
-        print(f"  {TAG} score={cs} (fit={fs}) [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}")
+        print(f"  {TAG} fit={fs} (combined={cs}) [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}")
         print(f"        {j['company_name']} ({tier})  -  {j.get('fit_reason','')}")
         print(f"        {j['url']}")
     print(f"\n  {len(ranked)} job(s) in store; {scored} newly scored this run.")
@@ -614,16 +618,16 @@ def write_digest(ranked):
     path = config.REPORT_DIR / f"local_tech_{datetime.now():%Y-%m-%d}.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {TAG} Job Digest — {datetime.now():%Y-%m-%d}\n\n")
-        f.write(f"**{len(ranked)} job(s)**, ranked by combined score "
-                f"= √(resume-fit × company-mission).\n\n")
-        f.write("| Score | Fit | Company | Mission | Title | Location | Why |\n")
-        f.write("|------:|----:|---------|---------|-------|----------|-----|\n")
+        f.write(f"**{len(ranked)} job(s)**, ranked by resume fit "
+                f"(combined = sqrt(resume-fit x company-mission), shown for reference).\n\n")
+        f.write("| Fit | Combined | Company | Mission | Title | Location | Why |\n")
+        f.write("|----:|---------:|---------|---------|-------|----------|-----|\n")
         for j in ranked:
             fit = j["resume_fit_score"]
             fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
             comb = j.get("combined_score")
             cs = f"{comb:.2f}" if isinstance(comb, float) else "n/a"
-            f.write(f"| {cs} | {fs} | {j['company_name']} | {j.get('mission_tier') or '?'} "
+            f.write(f"| {fs} | {cs} | {j['company_name']} | {j.get('mission_tier') or '?'} "
                     f"| [{j['title']}]({j['url']}) | {j['location']} | {j.get('fit_reason','')} |\n")
     print(f"  digest -> {path}")
     return path

@@ -190,6 +190,15 @@ Return ONLY valid JSON. No markdown, no preamble."""
 
 def score_company_mission(name, context=""):
     """Return (mission_tier|None, score|None, reason) for an employer."""
+    # Deterministic bullseye anchor (profile [mission].bullseye_regex), checked
+    # BEFORE the LLM: a company whose NAME is the candidate's exact target is
+    # pinned to 1.0 in the bullseye tier with no API call. The name is the whole
+    # signal here, and the mission model often can't see a client-rendered
+    # careers page anyway (this is how Science.xyz got mis-scored to 0.10).
+    # Match the NAME only, never the reason text, where the model's negations
+    # live ("no neurotech focus") and a substring match would invert the result.
+    if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
+        return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
     user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
     result = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120)
     if not result or "mission" not in result:
@@ -202,13 +211,6 @@ def score_company_mission(name, context=""):
     except (TypeError, ValueError):
         score = None
     reason = str(result.get("reason", "")).strip()
-    # Deterministic bullseye anchor (profile [mission].bullseye_regex): a
-    # company whose NAME is the candidate's exact target is pinned to 1.0 in
-    # the bullseye tier — not a hedged 0.9x. Match the NAME only: the reason
-    # text is where the model's *negations* live ("no neurotech focus"), and a
-    # substring match there would flip a rejection into a perfect score.
-    if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
-        score, tier = 1.0, config.MISSION_BULLSEYE_TIER or tier
     return tier, score, reason
 
 

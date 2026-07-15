@@ -10,6 +10,7 @@ Design (merged from both development tracks):
 """
 
 import math
+import re
 import sqlite3
 from datetime import datetime
 
@@ -229,6 +230,58 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     return len(dead), n_off
 
 
+def dedup_companies(conn):
+    """Merge company rows that point at the SAME board (same ats+slug, or the
+    same Workday triple) but were created under different name spellings
+    ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
+    those, so the crawl fetches one board several times. Jobs are re-pointed to
+    the kept row and tags merge, so the merge is lossless. Returns rows merged."""
+    from collections import defaultdict
+
+    def board_key(r):
+        if r["ats"] == "workday" and r["wd_tenant"]:
+            return ("workday", r["wd_tenant"], r["wd_pod"], r["wd_site"])
+        if r["ats"] and r["slug"]:
+            return (r["ats"], r["slug"])
+        return None
+
+    rows = [dict(r) for r in conn.execute("SELECT * FROM companies")]
+    jobcount = {cid: n for cid, n in conn.execute(
+        "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
+    groups = defaultdict(list)
+    for r in rows:
+        k = board_key(r)
+        if k:
+            groups[k].append(r)
+
+    def keep_rank(r):
+        # Prefer a scored row, then active, then most-referenced, then the
+        # shortest (most canonical) name.
+        return (r.get("mission_tier") is not None, r.get("active") or 0,
+                jobcount.get(r["id"], 0), -len(r.get("name") or ""))
+
+    merged = 0
+    for k, members in groups.items():
+        if len(members) < 2:
+            continue
+        members.sort(key=keep_rank, reverse=True)
+        keep, losers = members[0], members[1:]
+        tags = set(t for t in (keep.get("tags") or "").split(",") if t)
+        for l in losers:
+            tags |= set(t for t in (l.get("tags") or "").split(",") if t)
+            conn.execute("UPDATE jobs SET company_id=? WHERE company_id=?",
+                         (keep["id"], l["id"]))
+            conn.execute("DELETE FROM companies WHERE id=?", (l["id"],))
+        active = 1 if any(m.get("active") for m in members) else (keep.get("active") or 0)
+        conn.execute("UPDATE companies SET tags=?, active=? WHERE id=?",
+                     (",".join(sorted(tags)) or None, active, keep["id"]))
+        merged += len(losers)
+        print(f"    {keep['name'][:30]:30} <- merged {len(losers)}: "
+              + ", ".join(l["name"][:20] for l in losers))
+    conn.commit()
+    return merged
+
+
 def export_companies(conn, path):
     """Dump the company roster to JSON — the shareable/bootstrap artifact
     that replaced config.py's seed lists. Secrets-free by construction."""
@@ -362,11 +415,48 @@ def update_job_scores(conn, job_id, cols):
     conn.commit()
 
 
-def ranked_jobs(conn, track=None, limit=None, location_re=None):
-    """Jobs joined to company mission, ranked by the combined score
-    sqrt(resume_fit * company_mission). Jobs missing either factor fall to
-    the bottom (combined is None), ordered among themselves by whatever
-    score they do have.
+# Matches the fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
+# sen0.80 gate:geo+embedded] reason". Gates are '+'-joined in the tag.
+_AXIS_TAG = re.compile(
+    r"\[dom([\d.]+) fun([\d.]+) sta([\d.]+) sen([\d.]+)(?: gate:([^\]]+))?\]")
+
+
+def backfill_axis_columns(conn):
+    """Populate the per-axis columns (fit_domain/function/stack/seniority,
+    fit_gates) from the tag already embedded in fit_reason. Offline, no API.
+    Only touches rows that have the tag and a NULL fit_domain, and leaves
+    resume_fit_score / fit_reason untouched. Rows with no tag ('no
+    description; unscored', or old single-scalar reasons) are skipped."""
+    rows = conn.execute(
+        "SELECT job_id, fit_reason FROM jobs "
+        "WHERE fit_domain IS NULL AND fit_reason LIKE '[dom%'"
+    ).fetchall()
+    n = 0
+    for r in rows:
+        m = _AXIS_TAG.match(r["fit_reason"] or "")
+        if not m:
+            continue
+        dom, fun, sta, sen, gates = m.groups()
+        conn.execute(
+            "UPDATE jobs SET fit_domain=?, fit_function=?, fit_stack=?, "
+            "fit_seniority=?, fit_gates=? WHERE job_id=?",
+            (float(dom), float(fun), float(sta), float(sen),
+             (gates.replace("+", ",") if gates else None), r["job_id"]),
+        )
+        n += 1
+    conn.commit()
+    print(f"  {n} of {len(rows)} row(s) backfilled from fit_reason tags.")
+    return n
+
+
+def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined"):
+    """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
+    sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
+    score alone. Use "fit" for a market where every company shares one mission
+    tier (e.g. the local health-tech track), so the near-constant mission
+    factor doesn't inflate and compress the ranking. `combined_score` is still
+    computed either way, so callers can display it. Jobs missing the ranking
+    factor fall to the bottom, ordered among themselves by whatever they have.
 
     `location_re` (a compiled regex) enforces geography at query time,
     independent of the `track` label: a job whose stored location doesn't
@@ -393,12 +483,14 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None):
         if config.is_multi_division(r.get("company_name")):
             mission = max(mission or 0.0, config.MULTI_DIVISION_MISSION_FLOOR)
         r["combined_score"] = combined_score(r.get("resume_fit_score"), mission)
-    # Sort by combined desc, then the individual factors as tiebreaks; None
+    # Primary sort key per rank_by, then the other factors as tiebreaks; None
     # sorts last via the -1 sentinel (all real scores are >= 0).
-    rows.sort(key=lambda r: (r["combined_score"] if r["combined_score"] is not None else -1.0,
-                             r["resume_fit_score"] if r["resume_fit_score"] is not None else -1.0,
-                             r["mission_score"] if r["mission_score"] is not None else -1.0),
-              reverse=True)
+    primary = "resume_fit_score" if rank_by == "fit" else "combined_score"
+    def _k(r):
+        vals = (r.get(primary), r.get("combined_score"),
+                r.get("resume_fit_score"), r.get("mission_score"))
+        return tuple(v if v is not None else -1.0 for v in vals)
+    rows.sort(key=_k, reverse=True)
     if limit:
         rows = rows[:int(limit)]
     return rows

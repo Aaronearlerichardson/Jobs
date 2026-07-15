@@ -33,6 +33,9 @@ def main():
     # Legacy aliases for --track local-tech.
     ap.add_argument("--local-clinical", "--local-tech", dest="local_tech",
                     action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--dedup", action="store_true",
+                    help="Merge company rows that point at the same board under "
+                         "different name spellings (re-points jobs; lossless)")
     ap.add_argument("--prune", action="store_true",
                     help="Deactivate companies whose ATS board is dead (404) — "
                          "clears the crawl's HTTP-404 spam")
@@ -77,6 +80,14 @@ def main():
         print("  --import-seeds is retired: the company roster lives in the DB.\n"
               "  Manage it with discover.py (--local / --add-board / --apply) or\n"
               "  crawler.py --import-companies roster.json / --export-companies roster.json")
+        raise SystemExit(0)
+
+    if args.dedup:
+        from jobcrawler import store
+        conn = store.connect()
+        n = store.dedup_companies(conn)
+        conn.close()
+        print(f"\n  merged {n} duplicate company row(s) into their canonical board.")
         raise SystemExit(0)
 
     if args.prune:
@@ -145,10 +156,18 @@ def main():
         tp.add_argument("--described-only", action="store_true",
                         help="With --rescore: only score jobs that have a real "
                              "JD body, and leave the rest untouched")
+        tp.add_argument("--backfill-axes", action="store_true",
+                        help="Populate the per-axis fit columns from the tag "
+                             "already in fit_reason (offline, no API), then stop")
         targs = tp.parse_args(passthrough)
         if targs.backfill_descriptions:
             from jobcrawler.fetchers.workday import backfill_workday_descriptions
             backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
+        elif targs.backfill_axes:
+            from jobcrawler import store
+            conn = store.connect()
+            store.backfill_axis_columns(conn)
+            conn.close()
         elif targs.rescore:
             from jobcrawler.tracks.local_tech import rescore_all
             rescore_all(max_workers=targs.workers, described_only=targs.described_only)
