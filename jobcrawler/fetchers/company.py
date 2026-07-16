@@ -455,11 +455,74 @@ def _adapt(jobs, ats, loc_re):
     return out
 
 
-def fetch_successfactors_all(base_url, loc_re=None):
-    # Duke's board is huge; reuse the existing fetcher (keyword-gated by the
-    # live CORE_KEYWORDS the track sets) rather than pulling everything.
-    from . import fetch_successfactors
-    return _adapt(fetch_successfactors("", base_url), "successfactors", loc_re)
+def fetch_successfactors_all(base_url, loc_re=None, step=25, max_pages=80):
+    """Full SuccessFactors board, ungated. Mirrors html_scrape.fetch_successfactors
+    but (a) drops its is_relevant() keyword gate — company-vetted callers pull
+    the whole board and their own filter chain decides; multi-division orgs
+    (Duke) are re-gated in the local track's _keep_job — and (b) recovers the
+    location from the SF job-detail slug (``/job/Durham,-NC-<title>-NC-27701/``)
+    when the listing row hides it, so loc_re filtering works on boards like
+    OXB's where the row carries no location text."""
+    from urllib.parse import unquote, urljoin
+
+    out, seen = [], set()
+    sf_headers = {**HEADERS, "Accept": "text/html"}
+    # SF slug head is "<City>,-<ST>-<Title>..." with spaces encoded as hyphens
+    # (e.g. "/job/Holly-Springs,-NC-<title>-NC-27540/"). Non-greedy up to the
+    # first ",-<2 caps>-" so a comma inside the title can't steal the match.
+    loc_slug_re = re.compile(r"/job/(.+?),-([A-Z]{2})-")
+    for page in range(max_pages):
+        url = f"{base_url.rstrip('/')}/search/?startrow={page * step}"
+        try:
+            r = requests.get(url, timeout=25, headers=sf_headers)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"    [!] SuccessFactors {base_url} p{page}: {e}")
+            break
+        soup = BeautifulSoup(r.text, "html.parser")
+        anchors = soup.select("a.jobTitle-link") or [
+            a for a in soup.find_all("a", href=True) if "/job/" in a["href"]]
+        if not anchors:
+            break
+        new_on_page = 0
+        for a in anchors:
+            href = a.get("href", "")
+            if not href:
+                continue
+            if not href.startswith("http"):
+                href = urljoin(base_url, href)
+            if href in seen:
+                continue
+            seen.add(href)
+            new_on_page += 1
+            # Location: SF encodes "City,-ST" at the head of the /job/ slug.
+            # Fall back to the surrounding row text, then "See posting".
+            loc = ""
+            m = loc_slug_re.search(unquote(href))
+            if m:
+                loc = f"{m.group(1).replace('-', ' ').strip()}, {m.group(2)}"
+            else:
+                row = a.find_parent("tr") or a.find_parent("li") or a.find_parent("div")
+                if row is not None:
+                    rm = re.search(
+                        r"(Durham|Chapel Hill|Raleigh|Research Triangle|RTP|Cary|"
+                        r"Morrisville|Charlotte|Greensboro|Winston[- ]Salem|Holly Springs|"
+                        r"North Carolina|\bNC\b|Remote)[^|\n]{0,40}",
+                        row.get_text(" ", strip=True), flags=re.I)
+                    loc = rm.group(0).strip(" ,-") if rm else "See posting"
+                else:
+                    loc = "See posting"
+            if not _loc_ok(loc_re, loc):
+                continue
+            jid_m = re.search(r"/job/[^/]+/(\d+)", href) or re.search(r"/job/([^/?#]+)", href)
+            jid = jid_m.group(1) if jid_m else str(abs(hash(href)))
+            out.append({"id": f"sf_{re.sub(r'[^a-z0-9]+','',base_url.lower())[-16:]}_{jid}",
+                        "title": a.get_text(strip=True), "url": href,
+                        "location": loc, "description": "", "ats": "successfactors",
+                        "_wd": None})
+        if new_on_page == 0:
+            break
+    return out
 
 
 def fetch_peopleadmin_all(host, loc_re=None):
