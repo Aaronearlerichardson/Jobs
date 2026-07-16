@@ -826,6 +826,23 @@ def resolve_board_sniff_first(name, careers_url=""):
         hit = _mk(p["ats"], p["slug"], p.get("careers_url"), "probe")
         if hit:
             return hit
+
+    # 3) Web-search fallback: find the careers page for names whose domain the
+    #    sniffer can't guess (acronyms, hyphenated or product-named domains --
+    #    'OXB' -> oxb.com, 'United Imaging - North America' -> united-imaging.com,
+    #    'Core Sound Imaging' -> studycast). _websearch_board already validates
+    #    slug/own-domain against the name, so it's not collision-flagged.
+    #    Best-effort: degrades to a miss when the search backend is rate-limited.
+    w = _websearch_board(name)
+    if w:
+        if w["ats"] == "workday":
+            hit = _mk("workday", w["triple"], w.get("careers_url"), "websearch")
+        elif w["ats"] == "custom":
+            hit = _mk("custom", None, w.get("careers_url"), "websearch")
+        else:
+            hit = _mk(w["ats"], w.get("slug"), w.get("careers_url"), "websearch")
+        if hit:
+            return hit
     return None
 
 
