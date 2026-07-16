@@ -19,6 +19,7 @@ from .fetchers import (
     fetch_jazzhr,
     fetch_kula,
     fetch_lever,
+    fetch_paylocity,
     fetch_peopleadmin,
     fetch_successfactors,
     fetch_workday,
@@ -33,6 +34,7 @@ ATS_REGISTRY = {
     "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s), "neural", 0.5),
     "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n), "neural", 0.5),
     "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n), "neural", 0.5),
+    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n), "nc_local", 0.5),
     "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
                                         st=s.split("|")[2]:
                                  fetch_workday(t, p, st, n)), "nc_local", 1.0),
@@ -42,7 +44,7 @@ ATS_REGISTRY = {
 
 # ATSes whose store rows the remote-neural track sweeps (lightweight JSON
 # APIs; the heavyweight onsite boards stay with the local track).
-LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr", "adp")
+LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr", "adp", "paylocity")
 
 
 def seed_tag_for(ats):

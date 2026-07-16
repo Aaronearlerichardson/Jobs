@@ -13,6 +13,7 @@ from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
 from .jazzhr import fetch_jazzhr
 from .jsonld import fetch_jsonld_careers, fetch_jsonld_page
+from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
 from .remoteok import fetch_remoteok
 from .remotive import fetch_remotive
@@ -35,6 +36,7 @@ __all__ = [
     "fetch_kula",
     "fetch_lever",
     "fetch_nlx_company",
+    "fetch_paylocity",
     "fetch_peopleadmin",
     "fetch_remoteok",
     "fetch_remotive",

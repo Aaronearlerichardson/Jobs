@@ -338,6 +338,42 @@ def fetch_adp_all(slug, loc_re=None, page_size=50, max_pages=10,
     return out
 
 
+def fetch_paylocity_all(guid, loc_re=None, max_details=200, detail_delay=0.15):
+    """Full Paylocity board, ungated (mirrors fetchers.paylocity.fetch_paylocity
+    without its is_relevant() gate). Location-filters from the embedded
+    listing before paying for any detail-page description fetch."""
+    import time as _time
+
+    from .paylocity import _DETAIL, fetch_description, location_str, parse_board
+
+    try:
+        raw = parse_board(guid)
+    except Exception as e:
+        print(f"    [!] Paylocity {guid[:8]}: {e}")
+        return []
+    out, fetched = [], 0
+    for j in raw:
+        jid = str(j.get("JobId") or "")
+        title = j.get("JobTitle") or ""
+        if not jid or not title:
+            continue
+        loc = location_str(j)
+        if not _loc_ok(loc_re, loc):
+            continue
+        desc = ""
+        if fetched < max_details:
+            desc = fetch_description(jid)
+            fetched += 1
+            _time.sleep(detail_delay)
+        job = {"id": f"paylocity_{guid[:8]}_{jid}", "title": title,
+               "url": _DETAIL.format(jid=jid), "location": loc,
+               "description": desc, "ats": "paylocity", "_wd": None}
+        if j.get("IsRemote"):
+            job["remote_hint"] = "paylocity:isRemote"
+        out.append(job)
+    return out
+
+
 def fetch_kula_all(slug, loc_re=None):
     """Full Kula board, ungated (mirrors fetchers.html_scrape.fetch_kula but
     skips its is_relevant() pre-filter). Kula never exposes a listing-page
@@ -408,6 +444,11 @@ def hydrate_description(job):
             job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:4000]
         except Exception:
             pass
+    elif job.get("ats") == "paylocity":
+        m = re.search(r"/Details/(\d+)", job.get("url", "") or "")
+        if m:
+            from .paylocity import fetch_description
+            job["description"] = fetch_description(m.group(1))[:4000]
     return job
 
 
@@ -703,6 +744,7 @@ FETCHERS = {
     "bamboohr":        lambda c, lr: fetch_bamboohr_all(c["slug"], lr),
     "adp":             lambda c, lr: fetch_adp_all(c["slug"], lr),
     "kula":            lambda c, lr: fetch_kula_all(c["slug"], lr),
+    "paylocity":       lambda c, lr: fetch_paylocity_all(c["slug"], lr),
     "workday":         lambda c, lr: fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: fetch_icims_all(c["slug"], lr),
