@@ -759,41 +759,123 @@ def resolve_company_board(name):
             "careers_url": s.get("careers_url")}
 
 
-def resolve_leads(max_workers=8):
-    """Resolve company leads recorded by page capture (inactive rows with
-    no ats) into crawlable boards: slug-probe + careers-page sniff each
-    name, NC-verify, mission-score, activate the hits. The page-capture ->
-    resolve-leads -> crawl loop is how manually browsed postings grow the
-    company roster."""
+def _validate_board(comp):
+    """Fetch a resolved board and return (total, nc) live job counts. A board
+    that returns zero jobs is treated as dead/wrong by the caller — this is
+    what rejects a slug-guess that resolves to an empty or nonexistent board."""
+    from ..fetchers import company as company_fetch
+    try:
+        allj = company_fetch.fetch_company(comp, None)
+    except Exception:
+        return 0, 0
+    if not allj:
+        return 0, 0
+    try:
+        nc = sum(1 for j in allj
+                 if company_fetch.NC_RE.search(j.get("location", "") or ""))
+    except Exception:
+        nc = 0
+    return len(allj), nc
+
+
+def resolve_board_sniff_first(name, careers_url=""):
+    """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
+    slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
+
+    The collision-hardened counterpart to resolve_company_board(): that one
+    probes name-guessed slugs first, which false-positives onto same-named but
+    unrelated boards ('Oxford Biomedica' -> a different Oxford Workday tenant;
+    'Raya Health' -> the Raya dating app on Lever). Sniffing the company's OWN
+    careers page can't collide that way, so it goes first; a probe-only hit is
+    tagged ``via='probe'`` so the caller can flag it for a human sanity-check.
+
+    Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
+    a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
+    a custom self-hosted board."""
+    from .sniffer import sniff_ats
+
+    def _mk(ats, slug, curl, via):
+        if ats == "workday":
+            comp = {"ats": "workday", "wd_tenant": slug[0],
+                    "wd_pod": slug[1], "wd_site": slug[2]}
+        elif ats == "custom":
+            comp = {"ats": "custom", "careers_url": curl}
+        else:
+            comp = {"ats": ats, "slug": slug, "careers_url": curl}
+        total, nc = _validate_board(comp)
+        if total <= 0:
+            return None
+        return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
+                "count": total, "nc": nc, "via": via}
+
+    # 1) Authoritative: detect the ATS embedded on the company's own careers page.
+    s = sniff_ats(name, careers_url or "")
+    if s:
+        if s["ats"] == "workday":
+            hit = _mk("workday", s["triple"], s.get("careers_url"), "sniff")
+        elif s["ats"] == "custom":
+            hit = _mk("custom", None, s.get("careers_url"), "sniff")
+        else:
+            hit = _mk(s["ats"], s.get("slug"), s.get("careers_url"), "sniff")
+        if hit:
+            return hit
+
+    # 2) Fallback: name-guessed slug/Workday probe (collision risk -> validated).
+    p = probe_company(name, try_workday=True)
+    if p:
+        hit = _mk(p["ats"], p["slug"], p.get("careers_url"), "probe")
+        if hit:
+            return hit
+    return None
+
+
+def resolve_leads(max_workers=8, sources=("page_capture",), all_leads=False,
+                  limit=None):
+    """Resolve boardless company leads (banked by capture.py from browsed
+    LinkedIn/Indeed pages, or by manual adds) into crawlable boards and
+    activate the hits. Careers-page SNIFF first (collision-safe), slug-probe
+    fallback, every board VALIDATED by a live fetch, then mission-scored.
+    The capture -> resolve-leads -> crawl loop is how manually browsed postings
+    grow the roster.
+
+    sources: resolve only leads carrying one of these ``source`` values
+    (default: capture.py's 'page_capture'). all_leads=True ignores the source
+    filter and takes every inactive boardless lead. Idempotent — rerunning
+    retries only the still-unresolved leads."""
     from ..claude import score_company_mission, ACTIVE_MISSION_TIERS
     from ..store import connect, get_companies as _store_companies, upsert_company
 
     conn = connect()
     leads = [c for c in _store_companies(conn, active_only=False)
-             if c.get("source") == "page_capture" and not c.get("ats")]
+             if not c.get("ats") and not c.get("active")]
+    if not all_leads:
+        leads = [c for c in leads if c.get("source") in sources]
+    if limit:
+        leads = leads[:int(limit)]
     if not leads:
-        print("  No unresolved page-capture leads in the store.")
+        print("  No unresolved leads to resolve"
+              + ("." if all_leads else f" (source in {sources}; --all-leads to widen)."))
         conn.close()
         return []
-    print(f"  resolving {len(leads)} page-capture lead(s) "
-          f"(slug probe -> careers-page sniff -> NC-verify)...")
+    print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
+          f"fallback; every board validated by a live fetch)...")
 
-    resolved = []
-    # Hard cap on the whole pass: a lead whose domains blackhole (accept
-    # then stall) must become a reported miss, not a hung command. The
-    # command is idempotent — rerunning retries only unresolved leads.
+    resolved, probe_only = [], []
+    # Hard cap on the pass: a lead whose domains blackhole must become a
+    # reported miss, not a hung command.
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(resolve_company_board, c["name"]): c for c in leads}
+    futs = {ex.submit(resolve_board_sniff_first, c["name"], c.get("careers_url") or ""): c
+            for c in leads}
     try:
-        for fut in as_completed(futs, timeout=240):
+        for fut in as_completed(futs, timeout=300):
             c, hit = futs[fut], fut.result()
             if not hit:
-                print(f"    [miss] {c['name']:32} no board found "
-                      f"(gated/aggregator-only employer?)")
+                print(f"    [miss] {c['name'][:34]:34} no live board found "
+                      f"(LinkedIn/Indeed-only or JS-gated employer?)")
                 continue
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
-                hit["name"], " | ".join(t for t in titles if t))
+                c["name"], " | ".join(t for t in titles if t))
             active = 1 if (tier in ACTIVE_MISSION_TIERS
                            or config.is_multi_division(c["name"])
                            or tier is None) else 0
@@ -808,23 +890,31 @@ def resolve_leads(max_workers=8):
                    "mission_tier": tier, "mission_score": score,
                    "mission_reason": reason,
                    "tags": "nc_local" if hit["nc"] else None,
-                   "source": "page_capture", "active": active}
+                   "source": c.get("source") or "resolve_leads", "active": active}
             upsert_company(conn, row)
             resolved.append(row)
+            if hit.get("via") == "probe":
+                probe_only.append(c["name"])
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    [{'OK  ' if active else 'off-mission'}] {c['name']:32} "
-                  f"{hit['ats']:12} nc={hit['nc']:<3} {str(tier):20} {ss}")
+            flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
+            print(f"    [{'OK  ' if active else 'off '}] {c['name'][:30]:30} "
+                  f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
+                  f"{str(tier):18} {ss}{flag}")
     except TimeoutError:
         stuck = [c["name"] for f, c in futs.items() if not f.done()]
-        print(f"    [!] timed out waiting on {len(stuck)} lead(s): "
+        print(f"    [!] timed out on {len(stuck)} lead(s): "
               f"{', '.join(stuck[:6])}{'...' if len(stuck) > 6 else ''} "
-              f"(rerun --resolve-leads to retry)")
+              f"(rerun --resolve-leads to retry — idempotent)")
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     conn.close()
     print(f"\n  {len(resolved)} board(s) resolved, "
           f"{sum(r['active'] for r in resolved)} activated, "
           f"{len(leads) - len(resolved)} miss(es).")
+    if probe_only:
+        print(f"  [verify] {len(probe_only)} resolved by name-guess, not the "
+              f"company's own site — sanity-check for collisions: "
+              f"{', '.join(probe_only[:6])}{'...' if len(probe_only) > 6 else ''}")
     return resolved
 
 

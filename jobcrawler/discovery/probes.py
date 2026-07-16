@@ -100,6 +100,17 @@ def probe_smartrecruiters(slug):
         return (False, 0)
 
 
+def probe_paylocity(guid):
+    """Confirm a Paylocity board by its company GUID (live job count from the
+    embedded pageData). Reuses the fetcher's parser."""
+    from ..fetchers.paylocity import parse_board
+    try:
+        jobs = parse_board(guid)
+        return (len(jobs) > 0, len(jobs))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
@@ -108,6 +119,7 @@ PROBES = {
     "jazzhr":     probe_jazzhr,
     "bamboohr":   probe_bamboohr,
     "smartrecruiters": probe_smartrecruiters,
+    "paylocity":  probe_paylocity,
 }
 
 

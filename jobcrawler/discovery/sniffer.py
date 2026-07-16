@@ -35,6 +35,10 @@ ATS_LINK_PATTERNS = [
     ("bamboohr",   re.compile(r"([a-z0-9-]+)\.bamboohr\.com", re.I)),
     ("smartrecruiters", re.compile(r"(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)", re.I)),
     ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/", re.I)),
+    # Paylocity: the board slug is the 36-char company GUID in the board URL
+    # (recruiting.paylocity.com/recruiting/jobs/All/<guid>/<name>). Fetchable
+    # via jobcrawler/fetchers/paylocity.py; the URL's name segment is cosmetic.
+    ("paylocity", re.compile(r"recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})", re.I)),
 ]
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
@@ -59,7 +63,8 @@ ATS_LEAD_PATTERNS = [
     ("jobvite",         re.compile(r"(jobs\.jobvite\.com/[a-z0-9-]+)", re.I)),
     ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
     ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
-    ("paylocity",       re.compile(r"(recruiting\.paylocity\.com/[A-Za-z0-9/_-]+)", re.I)),
+    # NOTE: Paylocity moved up to ATS_LINK_PATTERNS (now fetchable via the
+    # paylocity fetcher) — it must stay a confirmable path, not a lead.
     ("paycom",          re.compile(r"(paycomonline\.net/[A-Za-z0-9/_-]+)", re.I)),
     ("breezy",          re.compile(r"([a-z0-9-]+\.breezy\.hr)", re.I)),
     ("gohire",          re.compile(r"([a-z0-9-]+\.gohire\.io)", re.I)),

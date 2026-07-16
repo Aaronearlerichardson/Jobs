@@ -58,8 +58,13 @@ def main():
     ap.add_argument("--rescore-missions", action="store_true",
                     help="Re-score mission for ALL active companies")
     ap.add_argument("--resolve-leads", action="store_true",
-                    help="Resolve page-capture company leads (from capture.py) "
-                         "into crawlable boards and activate the hits")
+                    help="Resolve boardless company leads (from capture.py) into "
+                         "crawlable boards and activate the hits: careers-page "
+                         "sniff first (collision-safe), slug-probe fallback, every "
+                         "board validated by a live fetch")
+    ap.add_argument("--all-leads", action="store_true",
+                    help="With --resolve-leads: resolve EVERY inactive boardless "
+                         "lead, not just capture.py's page_capture ones")
     ap.add_argument("--dork", "--ats-dork", action="store_true", dest="dork",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
                          "board URLs for local companies into the company store")
@@ -118,7 +123,7 @@ def main():
 
     if args.resolve_leads:
         from jobcrawler.discovery.local_sourcing import resolve_leads
-        resolve_leads()
+        resolve_leads(all_leads=args.all_leads, limit=args.limit)
         return
 
     if args.dork:
