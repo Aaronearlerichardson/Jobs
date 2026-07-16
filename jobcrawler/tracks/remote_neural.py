@@ -283,11 +283,13 @@ def write_digest(jobs, report_dir):
     date_str = datetime.now().strftime("%Y-%m-%d")
     path = report_dir / f"remote_neural_{date_str}.md"
     with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# {TAG} Remote-Neural Job Alert - {date_str}\n\n")
+        f.write(f"# {TAG} Neural-ML Job Alert - {date_str}\n\n")
         if not jobs:
-            f.write("_No remote-eligible neural-ML postings this run._\n")
+            f.write("_No neural-ML postings this run._\n")
         else:
-            f.write(f"**{len(jobs)} remote-eligible posting(s)**\n\n")
+            n_remote = sum(1 for j in jobs if j.get("remote_eligible"))
+            f.write(f"**{len(jobs)} neural/BCI posting(s)** "
+                    f"({n_remote} remote-eligible; the track is location-agnostic).\n\n")
             with_fit = any(j.get("resume_fit_score") is not None for j in jobs)
             fit_h = "Fit | " if with_fit else ""
             f.write(f"| {fit_h}Tag | Company | Title | Location | Neural | Remote signal |\n")

@@ -524,7 +524,16 @@ def is_new(conn, job_id):
 def mark_seen(conn, job, track=None):
     """Record a fetched job dict ({id, company, title, url, location, ...})
     in the unified jobs table. Adapter for callers that only need
-    seen/unseen dedupe semantics."""
+    seen/unseen dedupe semantics.
+
+    Fit columns are passed through when the caller has already scored the
+    job in place (e.g. remote_neural_run's ``--fit --commit`` path, which
+    ``j.update(FitResult.as_columns())``s before committing). Dedupe-only
+    callers simply omit those keys, so ``.get`` yields None and upsert_job's
+    COALESCE preserves any existing score — this adapter never clobbers a
+    stored score with a null. Without this pass-through, a ``--fit --commit``
+    run computed scores, wrote them to the digest, and then dropped every
+    one on the DB write."""
     upsert_job(conn, {
         "job_id":          job["id"],
         "company_name":    job.get("company"),
@@ -536,4 +545,11 @@ def mark_seen(conn, job, track=None):
         "remote_signal":   job.get("remote_signal"),
         "neural_signal":   job.get("neural_signal"),
         "description":     (job.get("description") or "")[:2000],
+        "resume_fit_score": job.get("resume_fit_score"),
+        "fit_reason":      job.get("fit_reason"),
+        "fit_gates":       job.get("fit_gates"),
+        "fit_domain":      job.get("fit_domain"),
+        "fit_function":    job.get("fit_function"),
+        "fit_stack":       job.get("fit_stack"),
+        "fit_seniority":   job.get("fit_seniority"),
     })
