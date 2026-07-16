@@ -111,6 +111,17 @@ def probe_paylocity(guid):
         return (False, 0)
 
 
+def probe_rippling(slug):
+    """Confirm a Rippling board by its slug (live job count from the public
+    ATS API). Reuses the fetcher's parser."""
+    from ..fetchers.rippling import parse_board
+    try:
+        jobs = parse_board(slug)
+        return (len(jobs) > 0, len(jobs))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
@@ -120,6 +131,7 @@ PROBES = {
     "bamboohr":   probe_bamboohr,
     "smartrecruiters": probe_smartrecruiters,
     "paylocity":  probe_paylocity,
+    "rippling":   probe_rippling,
 }
 
 

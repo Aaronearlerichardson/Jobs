@@ -17,6 +17,7 @@ from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
 from .remoteok import fetch_remoteok
 from .remotive import fetch_remotive
+from .rippling import fetch_rippling
 from .rssfeed import fetch_rss
 from .sitemap import fetch_sitemap
 from .websearch import fetch_websearch
@@ -40,6 +41,7 @@ __all__ = [
     "fetch_peopleadmin",
     "fetch_remoteok",
     "fetch_remotive",
+    "fetch_rippling",
     "fetch_rss",
     "fetch_sitemap",
     "fetch_successfactors",

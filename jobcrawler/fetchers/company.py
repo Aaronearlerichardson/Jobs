@@ -374,6 +374,39 @@ def fetch_paylocity_all(guid, loc_re=None, max_details=200, detail_delay=0.15):
     return out
 
 
+def fetch_rippling_all(slug, loc_re=None, max_details=200, detail_delay=0.15):
+    """Full Rippling board, ungated (mirrors fetchers.rippling.fetch_rippling
+    without its is_relevant() gate). Location-filters from the listing before
+    paying for a detail-page description fetch."""
+    import time as _time
+
+    from .rippling import fetch_description, location_str, parse_board
+
+    try:
+        raw = parse_board(slug)
+    except Exception as e:
+        print(f"    [!] Rippling {slug}: {e}")
+        return []
+    out, fetched = [], 0
+    for j in raw:
+        uuid = j.get("uuid") or ""
+        title = (j.get("name") or "").strip()
+        if not uuid or not title:
+            continue
+        loc = location_str(j)
+        if not _loc_ok(loc_re, loc):
+            continue
+        desc = ""
+        if fetched < max_details:
+            desc = fetch_description(slug, uuid)
+            fetched += 1
+            _time.sleep(detail_delay)
+        out.append({"id": f"rippling_{slug}_{uuid[:12]}", "title": title,
+                    "url": j.get("url") or f"https://ats.rippling.com/{slug}/jobs/{uuid}",
+                    "location": loc, "description": desc, "ats": "rippling", "_wd": None})
+    return out
+
+
 def fetch_kula_all(slug, loc_re=None):
     """Full Kula board, ungated (mirrors fetchers.html_scrape.fetch_kula but
     skips its is_relevant() pre-filter). Kula never exposes a listing-page
@@ -449,6 +482,11 @@ def hydrate_description(job):
         if m:
             from .paylocity import fetch_description
             job["description"] = fetch_description(m.group(1))[:4000]
+    elif job.get("ats") == "rippling":
+        m = re.search(r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", job.get("url", "") or "")
+        if m:
+            from .rippling import fetch_description
+            job["description"] = fetch_description(m.group(1), m.group(2))[:4000]
     return job
 
 
@@ -745,6 +783,7 @@ FETCHERS = {
     "adp":             lambda c, lr: fetch_adp_all(c["slug"], lr),
     "kula":            lambda c, lr: fetch_kula_all(c["slug"], lr),
     "paylocity":       lambda c, lr: fetch_paylocity_all(c["slug"], lr),
+    "rippling":        lambda c, lr: fetch_rippling_all(c["slug"], lr),
     "workday":         lambda c, lr: fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: fetch_icims_all(c["slug"], lr),

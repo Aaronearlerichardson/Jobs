@@ -39,6 +39,8 @@ ATS_LINK_PATTERNS = [
     # (recruiting.paylocity.com/recruiting/jobs/All/<guid>/<name>). Fetchable
     # via jobcrawler/fetchers/paylocity.py; the URL's name segment is cosmetic.
     ("paylocity", re.compile(r"recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})", re.I)),
+    # Rippling: board slug in ats.rippling.com/<slug>/jobs (public JSON API).
+    ("rippling", re.compile(r"ats\.rippling\.com/([a-z0-9][a-z0-9-]+)/jobs", re.I)),
 ]
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
