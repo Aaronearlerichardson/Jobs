@@ -829,8 +829,9 @@ def resolve_board_sniff_first(name, careers_url=""):
     return None
 
 
-def resolve_leads(max_workers=8, sources=("page_capture",), all_leads=False,
-                  limit=None):
+def resolve_leads(max_workers=8,
+                  sources=("page_capture", "linkedin_search", "linkedin_company_search"),
+                  all_leads=False, limit=None):
     """Resolve boardless company leads (banked by capture.py from browsed
     LinkedIn/Indeed pages, or by manual adds) into crawlable boards and
     activate the hits. Careers-page SNIFF first (collision-safe), slug-probe
