@@ -37,13 +37,43 @@ def _sel(scope, *selectors):
     return ""
 
 
-def _job(jid, title, company, url, location, description=""):
+# Aggregator / ATS / social hosts — a URL on one of these is NOT the
+# company's own website, so it can't seed a careers-page guess for the lead
+# resolver. Only a company-owned domain is worth recording.
+_AGG_HOST_RE = re.compile(
+    r"linkedin\.|indeed\.|glassdoor\.|ziprecruiter\.|simplyhired|monster\.|"
+    r"dice\.|greenhouse\.|lever\.co|ashbyhq|myworkdayjobs|smartrecruiters|"
+    r"icims|bamboohr|jazzhr|applytojob|paylocity|paycom|workable|breezy|"
+    r"google\.com|facebook\.|twitter\.|x\.com|youtube\.|instagram\.|"
+    r"crunchbase|builtin|wellfound|schema\.org", re.I)
+
+
+def _company_site(*urls):
+    """First real company-owned website (scheme+host) among the given URLs,
+    skipping aggregator/ATS/social hosts. Recorded on a lead as careers_url so
+    the resolver can probe {domain}/careers instead of guessing the domain from
+    the name (which misses acronym/hyphenated domains: OXB->oxb.com,
+    'United Imaging'->united-imaging.com). '' if none qualifies."""
+    for u in urls:
+        if not u or not isinstance(u, str):
+            continue
+        m = re.match(r"https?://([^/]+)", u.strip())
+        if not m or _AGG_HOST_RE.search(m.group(1)):
+            continue
+        return f"https://{m.group(1)}"
+    return ""
+
+
+def _job(jid, title, company, url, location, description="", company_url=""):
     title = (title or "").strip()
     if not title or not jid:
         return None
-    return {"id": jid, "title": title[:120], "company": (company or "").strip()[:80],
-            "url": url or "", "location": (location or "").strip()[:80],
-            "description": (description or "")[:4000]}
+    j = {"id": jid, "title": title[:120], "company": (company or "").strip()[:80],
+         "url": url or "", "location": (location or "").strip()[:80],
+         "description": (description or "")[:4000]}
+    if company_url:
+        j["company_url"] = company_url
+    return j
 
 
 # ─── LinkedIn ────────────────────────────────────────────────────────────
@@ -257,11 +287,19 @@ def parse_jsonld(soup, page_url=""):
             location = ", ".join(x for x in (addr.get("addressLocality"),
                                              addr.get("addressRegion")) if x)
             url = jp.get("url") or page_url
+            # schema.org marks the employer's own site in hiringOrganization
+            # (sameAs / url) — capture it as the lead's careers_url hint.
+            org_site = ""
+            if isinstance(org, dict):
+                same = org.get("sameAs")
+                same = same if isinstance(same, list) else [same]
+                org_site = _company_site(*same, org.get("url"))
             j = _job(f"cap_{stable_id(url, jp.get('title'))}",
                      (jp.get("title") or jp.get("name") or ""),
                      org.get("name", "") if isinstance(org, dict) else str(org),
                      url, location,
-                     re.sub(r"<[^>]+>", " ", jp.get("description") or ""))
+                     re.sub(r"<[^>]+>", " ", jp.get("description") or ""),
+                     company_url=org_site)
             if j:
                 jobs.append(j)
     return jobs

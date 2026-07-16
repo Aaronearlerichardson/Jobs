@@ -109,18 +109,24 @@ INDEX_HTML = """<!doctype html><meta charset="utf-8">
 </body>"""
 
 
-def _record_companies(names, source_site):
-    """Record captured company names as inactive store leads."""
+def _record_companies(names, source_site, sites=None):
+    """Record captured company names as inactive store leads. `sites` maps a
+    company name -> its own website (from JSON-LD hiringOrganization); stored as
+    careers_url so `discover.py --resolve-leads` can probe {domain}/careers
+    instead of guessing the domain from the name."""
+    sites = sites or {}
     fresh = []
     conn = store.connect()
     have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
     for n in sorted({n.strip() for n in names if n and n.strip()}):
         if n.lower() in have:
             continue
-        store.upsert_company(conn, {
-            "name": n, "active": 0, "source": "page_capture",
-            "notes": f"seen on {source_site}; resolve board via discover.py --local",
-        })
+        row = {"name": n, "active": 0, "source": "page_capture",
+               "notes": f"seen on {source_site}; resolve board via "
+                        f"discover.py --resolve-leads"}
+        if sites.get(n):
+            row["careers_url"] = sites[n]
+        store.upsert_company(conn, row)
         fresh.append(n)
     conn.close()
     return fresh
@@ -131,7 +137,10 @@ def ingest_html(url, html, label=""):
     summary dict."""
     jobs, source = parse_page(url, html)
     ingested = ingest_external_jobs(jobs, source=source) if jobs else 0
-    new_cos = _record_companies((j.get("company") for j in jobs), source)
+    # Company name -> its own website, when the page exposed it (JSON-LD).
+    sites = {j["company"]: j["company_url"] for j in jobs
+             if j.get("company") and j.get("company_url")}
+    new_cos = _record_companies((j.get("company") for j in jobs), source, sites)
     tag = label or url or source
     print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
           + (f", {len(new_cos)} new compan(ies): {', '.join(new_cos[:6])}"

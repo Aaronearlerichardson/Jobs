@@ -115,6 +115,16 @@ def _candidate_urls(name, careers_url=""):
     urls = []
     if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
         urls.append(careers_url)
+        # A recorded company domain (e.g. capture.py's JSON-LD hint) is a far
+        # better base than a name-guess — derive its careers subpages first, so
+        # oxb.com / united-imaging.com resolve even though the name never would.
+        base_m = re.match(r"(https?://[^/]+)", careers_url)
+        if base_m:
+            base = base_m.group(1)
+            for _tld, path in _COMBOS:
+                u = f"{base}{path}"
+                if u not in urls:
+                    urls.append(u)
     toks = _name_domain_tokens(name)
     for tld, path in _COMBOS:
         for tok in toks:
