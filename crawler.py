@@ -153,6 +153,12 @@ def main():
         tp.add_argument("--backfill-descriptions", action="store_true",
                         help="Fetch full JD text for stored Workday jobs that "
                              "are missing it (via the CXS endpoint), then stop")
+        tp.add_argument("--backfill-board-descriptions", action="store_true",
+                        help="Fetch full JD text for stored jobs (any ATS) "
+                             "missing it, by title-matching against their "
+                             "company's own board — fixes rows ingested with "
+                             "a title only (e.g. captured LinkedIn cards), "
+                             "then stop")
         tp.add_argument("--described-only", action="store_true",
                         help="With --rescore: only score jobs that have a real "
                              "JD body, and leave the rest untouched")
@@ -163,6 +169,9 @@ def main():
         if targs.backfill_descriptions:
             from jobcrawler.fetchers.workday import backfill_workday_descriptions
             backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
+        elif targs.backfill_board_descriptions:
+            from jobcrawler.tracks.local_tech import backfill_board_descriptions
+            backfill_board_descriptions(max_workers=targs.workers, limit=targs.limit)
         elif targs.backfill_axes:
             from jobcrawler import store
             conn = store.connect()

@@ -199,6 +199,190 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
     return out
 
 
+def fetch_jazzhr_all(slug, loc_re=None, max_jobs=60, per_job_delay=0.3):
+    """Full JazzHR board, ungated. Mirrors fetchers.jazzhr.fetch_jazzhr but
+    skips its is_relevant() filter — the caller's own filter chain decides,
+    same contract as the other *_all fetchers in this module. Needed because
+    fetch_jazzhr's per-job JSON-LD parse (fetchers/jsonld.py) drops any
+    posting that doesn't match whatever keyword tier is live in config at
+    call time, which silently starves company-vetted callers (board hydrate,
+    the local-tech NC crawl) of postings with generic engineering titles."""
+    import re
+    import time as _time
+
+    from .jsonld import _job_from_posting, extract_jsonld, is_jobposting
+
+    base = f"https://{slug}.applytojob.com"
+    try:
+        r = requests.get(base + "/", timeout=20, headers=HEADERS)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"    [!] JazzHR {slug}: {e}")
+        return []
+
+    apply_re = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
+    seen, urls = set(), []
+    for path in apply_re.findall(r.text):
+        url = base + path
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+        if len(urls) >= max_jobs:
+            break
+
+    out = []
+    for url in urls:
+        try:
+            jr = requests.get(url, timeout=20, headers=HEADERS)
+            jr.raise_for_status()
+        except Exception as e:
+            print(f"    [!] JazzHR {slug} {url}: {e}")
+            continue
+        for obj in extract_jsonld(jr.text):
+            if not is_jobposting(obj):
+                continue
+            job = _job_from_posting(obj, slug, url)
+            if not _loc_ok(loc_re, job.get("location", "")):
+                continue
+            out.append({"id": job["id"], "title": job.get("title", ""),
+                        "url": job.get("url", ""), "location": job.get("location", ""),
+                        "description": job.get("description", ""),
+                        "ats": "jazzhr", "_wd": None})
+        _time.sleep(per_job_delay)
+    return out
+
+
+def fetch_bamboohr_all(slug, loc_re=None, max_details=200, detail_delay=0.15):
+    """Full BambooHR board, ungated (mirrors fetchers.bamboohr.fetch_bamboohr
+    but skips its is_relevant() title/dept pre-filter)."""
+    import time as _time
+
+    from .bamboohr import _fetch_description, _is_remote, _location_str
+
+    base = f"https://{slug}.bamboohr.com"
+    try:
+        r = requests.get(f"{base}/careers/list", timeout=20,
+                         headers={**HEADERS, "Accept": "application/json"})
+        r.raise_for_status()
+        entries = r.json().get("result") or []
+    except Exception as e:
+        print(f"    [!] BambooHR {slug}: {e}")
+        return []
+
+    out = []
+    for i, entry in enumerate(entries):
+        jid = str(entry.get("id") or "")
+        title = entry.get("jobOpeningName") or ""
+        if not jid or not title:
+            continue
+        loc = _location_str(entry)
+        if not _loc_ok(loc_re, loc):
+            continue
+        desc = _fetch_description(base, jid) if i < max_details else ""
+        if i < max_details:
+            _time.sleep(detail_delay)
+        job = {"id": f"bamboo_{slug}_{jid}", "title": title,
+               "url": f"{base}/careers/{jid}", "location": loc,
+               "description": desc, "ats": "bamboohr", "_wd": None}
+        if _is_remote(entry):
+            job["remote_hint"] = "bamboohr:locationType"
+        out.append(job)
+    return out
+
+
+def fetch_adp_all(slug, loc_re=None, page_size=50, max_pages=10,
+                  max_details=200, detail_delay=0.15):
+    """Full ADP Workforce Now board, ungated (mirrors fetchers.adp_wfn but
+    skips its is_relevant() title pre-filter). `slug` is "cid|ccid"."""
+    import time as _time
+
+    from .adp_wfn import _API, _PORTAL, _fetch_description, _location_str
+
+    cid, ccid = slug.split("|", 1)
+    out, details_fetched = [], 0
+    for page in range(max_pages):
+        try:
+            r = requests.get(
+                _API, params={"cid": cid, "ccId": ccid, "locale": "en_US",
+                              "$top": page_size, "$skip": page * page_size},
+                timeout=25, headers={**HEADERS, "Accept": "application/json"})
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"    [!] ADP {cid[:8]} p{page}: {e}")
+            break
+        reqs = data.get("jobRequisitions") or []
+        if not reqs:
+            break
+        for req in reqs:
+            item_id = str(req.get("itemID") or "")
+            title = req.get("requisitionTitle") or ""
+            if not item_id or not title:
+                continue
+            loc = _location_str(req)
+            if not _loc_ok(loc_re, loc):
+                continue
+            desc = ""
+            if details_fetched < max_details:
+                desc = _fetch_description(item_id, cid, ccid)
+                details_fetched += 1
+                _time.sleep(detail_delay)
+            out.append({"id": f"adp_{cid[:8]}_{item_id}", "title": title,
+                        "url": f"{_PORTAL}?cid={cid}&ccId={ccid}&jobId={item_id}&lang=en_US",
+                        "location": loc, "description": desc,
+                        "ats": "adp", "_wd": None})
+        if len(reqs) < page_size:
+            break
+        _time.sleep(0.3)
+    return out
+
+
+def fetch_kula_all(slug, loc_re=None):
+    """Full Kula board, ungated (mirrors fetchers.html_scrape.fetch_kula but
+    skips its is_relevant() pre-filter). Kula never exposes a listing-page
+    description; callers needing the body must hit the per-job URL themselves."""
+    import re
+
+    from urllib.parse import urljoin
+
+    base_url = f"https://careers.kula.ai/{slug}"
+    try:
+        r = requests.get(base_url, timeout=20, headers=HEADERS)
+        r.raise_for_status()
+    except Exception as e:
+        print(f"    [!] Kula {slug}: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    apply_links = soup.find_all("a", href=re.compile(rf"/{re.escape(slug)}/\d+"))
+    out = []
+    for a in apply_links:
+        href = a["href"]
+        if not href.startswith("http"):
+            href = urljoin("https://careers.kula.ai", href)
+        jid = re.search(r"/(\d+)/?$", href)
+        if not jid:
+            continue
+        parent = a.parent
+        lines = []
+        for _ in range(8):
+            raw = parent.get_text("\n").strip()
+            lines = [l.strip() for l in raw.split("\n") if len(l.strip()) > 3]
+            if len(lines) >= 2:
+                break
+            parent = parent.parent
+        title = lines[1] if len(lines) > 1 else lines[0] if lines else "Unknown"
+        loc = lines[2] if len(lines) > 2 else "See posting"
+        loc = loc.split(";")[0].strip()
+        if not _loc_ok(loc_re, loc):
+            continue
+        out.append({"id": f"kula_{slug}_{jid.group(1)}", "title": title,
+                    "url": href, "location": loc, "description": "",
+                    "ats": "kula", "_wd": None})
+    return out
+
+
 def hydrate_description(job):
     """Fetch a job's real description (in place) for ATSes with a detail call."""
     if job.get("description"):
@@ -224,6 +408,38 @@ def hydrate_description(job):
             job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:4000]
         except Exception:
             pass
+    return job
+
+
+def hydrate_from_company_board(job, company):
+    """Backfill an empty description by title-matching this job against its
+    company's own ATS board (a full, ungated FETCHERS pull).
+
+    For jobs that arrived with only a title — manually captured LinkedIn
+    search-card rows (jobcrawler/page_capture.py), or any other curated
+    ingest — `description` is never populated, so they permanently fail
+    fit.py's MIN_DESC_CHARS gate. When the job is linked to a company with a
+    resolvable board, we can recover the real description by pulling that
+    board and matching on title. No-op if the job already has a description
+    or the company has no fetchable board.
+    """
+    if (job.get("description") or "").strip() or not company or not company.get("ats"):
+        return job
+    title_l = (job.get("title") or "").strip().lower()
+    if not title_l:
+        return job
+    try:
+        board = fetch_company(company, loc_re=None)
+    except Exception as e:
+        print(f"    [!] board-hydrate fetch failed for {company.get('name')}: {e}")
+        return job
+    match = next((b for b in board if (b.get("title") or "").strip().lower() == title_l), None)
+    if match is None:
+        return job
+    hydrate_description(match)
+    if match.get("description"):
+        job["description"] = match["description"]
+        job["url"] = job.get("url") or match.get("url")
     return job
 
 
@@ -420,6 +636,10 @@ FETCHERS = {
     "greenhouse":      lambda c, lr: fetch_greenhouse_all(c["slug"], lr),
     "lever":           lambda c, lr: fetch_lever_all(c["slug"], lr),
     "ashby":           lambda c, lr: fetch_ashby_all(c["slug"], lr),
+    "jazzhr":          lambda c, lr: fetch_jazzhr_all(c["slug"], lr),
+    "bamboohr":        lambda c, lr: fetch_bamboohr_all(c["slug"], lr),
+    "adp":             lambda c, lr: fetch_adp_all(c["slug"], lr),
+    "kula":            lambda c, lr: fetch_kula_all(c["slug"], lr),
     "workday":         lambda c, lr: fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: fetch_icims_all(c["slug"], lr),

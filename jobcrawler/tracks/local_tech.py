@@ -91,6 +91,17 @@ def _tok_in(token, text):
     return t in text
 
 
+def _is_neural_tagged(company):
+    """True if a company store row carries the 'neural' scope tag (the
+    BCI/neural-signal target list shared with the neural track). Used to
+    relax local-tech's NC-only geo gate for these companies specifically —
+    an explicitly REMOTE posting from one still counts as local-tech
+    material; an onsite one outside NC does not."""
+    if not company:
+        return False
+    return "neural" in {t for t in (company.get("tags") or "").split(",") if t}
+
+
 def geo_mode(location, description=""):
     """
     Classify a posting's geography: "onsite" (Triangle/NC), "remote", or
@@ -289,6 +300,14 @@ def _keep_job(company, job):
             return False
     if exclude_reason(title, job.get("description", "")):
         return False
+    if _is_neural_tagged(company):
+        # Neural/BCI-tagged companies are now fetched with no location
+        # restriction (see run()/crawl_company()) so their remote postings
+        # can surface here — but that also lets their onsite-elsewhere reqs
+        # through the fetch. Gate those out here instead: onsite-in-NC or
+        # explicitly-remote passes, onsite-anywhere-else does not.
+        if geo_mode(job.get("location", ""), job.get("description", "")) is None:
+            return False
     return True
 
 
@@ -306,12 +325,14 @@ def _score_job(resume, company, job):
 
 
 def crawl_company(conn, resume, company, max_workers=6):
-    """Fetch ONE store company's NC-scoped board, apply the local-track
-    filters, resume-fit-score the new postings, and store them. Returns
+    """Fetch ONE store company's NC-scoped board (or, for a neural/BCI-tagged
+    company, its WHOLE board — see run()), apply the local-track filters,
+    resume-fit-score the new postings, and store them. Returns
     (n_nc_fetched, n_kept, n_new). Used by the single-job --add flow to pull
     a company's other jobs once it's in the roster."""
+    loc_re = None if _is_neural_tagged(company) else company_fetch.NC_RE
     try:
-        jobs = company_fetch.fetch_company(company, company_fetch.NC_RE)
+        jobs = company_fetch.fetch_company(company, loc_re)
     except Exception as e:
         print(f"    [!] fetch error for {company['name']}: {e}")
         return (0, 0, 0)
@@ -350,10 +371,14 @@ def run(max_workers=6, top_n=15):
               "        python discover.py --local                   (NC sourcing pass)\n"
               "        python crawler.py --import-companies FILE    (shared roster)\n")
 
-    # Fetch every company's NC-scoped board in parallel (remote-neural's
-    # thread pool; per-company politeness lives inside each fetcher).
+    # Fetch every company's board in parallel (remote-neural's thread pool;
+    # per-company politeness lives inside each fetcher). NC-scoped for most
+    # companies; neural/BCI-tagged companies get their WHOLE board pulled
+    # (no location restriction) so an explicitly-remote posting can surface
+    # here too — _keep_job() applies the geo gate afterward.
     sources = [(c["name"], c["ats"] or "?",
-                (lambda cc=c: company_fetch.fetch_company(cc, company_fetch.NC_RE)))
+                (lambda cc=c: company_fetch.fetch_company(
+                    cc, None if _is_neural_tagged(cc) else company_fetch.NC_RE)))
                for c in companies]
     fetched = fetch_all(sources)
 
@@ -369,7 +394,8 @@ def run(max_workers=6, top_n=15):
         n_skip += len(kept) - len(fresh)
         for j in fresh:
             to_score.append((c, j))
-        print(f"  {c['name']:26} {len(jobs):3} NC -> {len(kept):2} technical "
+        scope = "brd" if _is_neural_tagged(c) else "NC "
+        print(f"  {c['name']:26} {len(jobs):3} {scope} -> {len(kept):2} technical "
               f"-> {len(fresh):2} new")
 
     print(f"\n  scoring {len(to_score)} new job(s) against resume "
@@ -385,12 +411,14 @@ def run(max_workers=6, top_n=15):
                 print(f"    [!] scoring error: {e}")
 
     # Geography enforced at the query layer (not the `track` label): only
-    # NC-locatable postings appear in the local search, whatever ingested them.
-    # Rank by résumé fit, not fit×mission: every local company is the same
-    # health-tech mission tier, so the near-constant mission factor only
-    # inflates and compresses the ranking. combined is still shown per row.
+    # NC-locatable postings appear in the local search, whatever ingested them
+    # -- plus explicitly-remote postings (neural/BCI companies only; see
+    # geo_mode()/_is_neural_tagged()). Rank by résumé fit, not fit×mission:
+    # every local company is the same health-tech mission tier, so the
+    # near-constant mission factor only inflates and compresses the ranking.
+    # combined is still shown per row.
     ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE,
-                               rank_by="fit")
+                               rank_by="fit", allow_geo_modes={"remote"})
     write_digest(ranked)
 
     print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
@@ -406,6 +434,59 @@ def run(max_workers=6, top_n=15):
     print(f"\n  {len(ranked)} job(s) in store; {scored} newly scored this run.")
     print(f"  *** NO EMAIL SENT (preview) ***\n")
     return ranked
+
+
+def backfill_board_descriptions(max_workers=8, limit=None, min_len=200):
+    """One-shot: fill in full JD text for stored jobs missing it (any
+    company-linked row whose description is shorter than min_len chars —
+    the default matches jobcrawler.fit.MIN_DESC_CHARS), via each company's
+    own ATS board — the non-Workday counterpart to fetchers/workday.py's
+    backfill_workday_descriptions. Covers rows created with a title only
+    (manually captured LinkedIn cards via capture.py) that were never
+    scored because they never had a real JD body. Batched per company so a
+    board with several stale rows is fetched once. Safe to re-run."""
+    conn = store.connect()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT job_id, title, company_id FROM jobs "
+        "WHERE company_id IS NOT NULL "
+        "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
+    if limit:
+        rows = rows[:int(limit)]
+    print(f"  backfilling {len(rows)} description(s) via company board(s)...")
+
+    by_company = {}
+    for r in rows:
+        by_company.setdefault(r["company_id"], []).append(r)
+
+    n = 0
+    for cid, rs in by_company.items():
+        company = store.get_company(conn, cid)
+        if not company or not company.get("ats"):
+            continue
+        try:
+            board = company_fetch.fetch_company(company, loc_re=None)
+        except Exception as e:
+            print(f"    [!] {company['name']}: {e}")
+            continue
+        by_title = {(b.get("title") or "").strip().lower(): b for b in board}
+        n_matched = 0
+        for r in rs:
+            match = by_title.get((r["title"] or "").strip().lower())
+            if match is None:
+                continue
+            company_fetch.hydrate_description(match)
+            desc = match.get("description")
+            if not desc:
+                continue
+            conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
+                         (desc[:8000], r["job_id"]))
+            conn.commit()
+            n += 1
+            n_matched += 1
+        print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
+    conn.close()
+    print(f"  {n} of {len(rows)} description(s) backfilled.")
+    return n
 
 
 def rescore_all(max_workers=6, track=None, described_only=False):
@@ -465,6 +546,42 @@ def rescore_all(max_workers=6, track=None, described_only=False):
     return n
 
 
+def _hydrate_missing_descriptions(conn, jobs):
+    """Backfill empty descriptions on jobs linked to a company with a
+    resolvable board, batched so each board is fetched once no matter how
+    many of its jobs need hydrating (e.g. several LinkedIn-captured
+    postings from the same employer in one ingest run)."""
+    need = [j for j in jobs if j.get("_company_id") and not (j.get("description") or "").strip()]
+    if not need:
+        return
+    by_company = {}
+    for j in need:
+        by_company.setdefault(j["_company_id"], []).append(j)
+    for cid, js in by_company.items():
+        company = store.get_company(conn, cid)
+        if not company or not company.get("ats"):
+            continue
+        try:
+            board = company_fetch.fetch_company(company, loc_re=None)
+        except Exception as e:
+            print(f"    [!] board hydrate fetch failed for {company['name']}: {e}")
+            continue
+        by_title = {(b.get("title") or "").strip().lower(): b for b in board}
+        n_hydrated = 0
+        for j in js:
+            match = by_title.get((j.get("title") or "").strip().lower())
+            if match is None:
+                continue
+            company_fetch.hydrate_description(match)
+            if match.get("description"):
+                j["description"] = match["description"]
+                j["url"] = j.get("url") or match.get("url")
+                n_hydrated += 1
+        if n_hydrated:
+            print(f"    hydrated {n_hydrated}/{len(js)} description(s) from "
+                  f"{company['name']}'s {company['ats']} board")
+
+
 def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
     """
     Ingest external job dicts into the jobs table with resume-fit scores.
@@ -486,11 +603,19 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
             key = (j.get("url") or "") + (j.get("title") or "") + (j.get("company") or "")
             j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
         # Local-tech is a Triangle/NC track: gate ingested jobs on the same
-        # NC location filter the live crawl applies inside its fetchers.
-        # Without this, agent-sourced boards (LinkedIn/Indeed) inject CA/TX
-        # postings that then rank in the local top-10. Enforced even for
-        # curated adds — the track is NC by definition.
-        if not company_fetch.NC_RE.search(j.get("location", "") or ""):
+        # NC location filter the live crawl applies inside its fetchers, with
+        # one relaxation — a posting from a neural/BCI-tagged company still
+        # passes when it's explicitly remote (the local-tech <-> neural-track
+        # geo overlap; see geo_mode()). Without the NC/remote gate at all,
+        # agent-sourced boards (LinkedIn/Indeed) would inject any CA/TX
+        # posting into the local top-10. Enforced even for curated adds.
+        loc = j.get("location", "") or ""
+        company_id = store.company_id_by_name(conn, j.get("company"))
+        company_row = store.get_company(conn, company_id) if company_id else None
+        is_local = bool(company_fetch.NC_RE.search(loc))
+        is_remote_neural = (_is_neural_tagged(company_row)
+                            and geo_mode(loc, j.get("description", "")) == "remote")
+        if not (is_local or is_remote_neural):
             n_nonlocal += 1
             continue
         if not curated:
@@ -503,8 +628,10 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
             # can't cross into the scoring pool below. Link to a vetted company
             # row when the name matches, so the job inherits its mission score
             # (else it stays an orphan and sinks under the combined ranking).
-            j["_company_id"] = store.company_id_by_name(conn, j.get("company"))
+            j["_company_id"] = company_id
             kept.append(j)
+
+    _hydrate_missing_descriptions(conn, kept)
 
     def _score(j):
         res = score_resume_fit(resume, j["title"], j.get("description", ""))

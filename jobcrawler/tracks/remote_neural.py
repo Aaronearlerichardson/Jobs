@@ -1,9 +1,17 @@
 """REMOTE-NEURAL track.
 
-Surfaces REMOTE-eligible roles that keep all three of: neural signals
-(EEG/iEEG/ECoG/MEG/BCI/neural decoding/neural signal processing), a high
-technical bar (ML / PyTorch / signal processing), and a clinical/health
-mission.
+LOCATION-AGNOSTIC (the "remote" in the module/track name is now vestigial;
+kept as-is rather than renamed mid-flight — see remote_neural_run.py's
+docstring). Surfaces neural/BCI-company roles ANYWHERE that keep both:
+neural signals (EEG/iEEG/ECoG/MEG/BCI/neural decoding/neural signal
+processing) and a high technical bar (ML / PyTorch / signal processing).
+remote_eligible is still computed and stored per job (tag_job) — queryable,
+not a gate.
+
+Own store: jobcrawler.store rows here live in config.NEURAL_DB_PATH, not
+local_tech.db — see remote_neural_run.main's connect() call. The company
+roster was seeded from a one-time copy of local-tech's `companies` table;
+new neural-company discovery should target this DB going forward.
 
 How it stays modular:
   * Keyword focus is applied by *mutating config's tier lists in place*
@@ -145,11 +153,21 @@ def apply_to_config(cfg):
 #  SOURCES
 # =========================================================================
 
-# Prioritized company targets, fetched (and deduped) first.
+# Prioritized company targets, fetched (and deduped) first. Location-agnostic
+# now (see remote_neural_run.main / config.NEURAL_DB_PATH) — these are the
+# named BCI-company targets, not a remote-only shortlist; onsite postings
+# surface too, with remote_eligible stamped per-job rather than gated.
 PRIORITY_COMPANIES = [
     ("Beacon Biosignals",      "greenhouse", "beaconbiosignals"),
+    ("Neuralink",              "greenhouse", "neuralink"),
     ("Precision Neuroscience", "kula",       "precision-neuroscience"),
     ("Paradromics",            "jazzhr",     "paradromicsinc"),
+    ("Synchron",               "adp",        "d290c04e-0230-4cd9-8bf0-f116bfab1405|19000101_000003"),
+    ("Merge Labs",             "greenhouse", "merge"),
+    # Blackrock Neurotech deliberately omitted: the company store's stored
+    # slug (bamboohr/blackrock) resolves to an unrelated company (BlackRock
+    # Asphalt, Tampa FL). The correct board is unresolved as of this pass
+    # (see the migration notes) — add it here once a real slug is found.
 ]
 
 # Remote-leaning web searches for general neural-ML roles. (label, query,
@@ -172,7 +190,7 @@ WEBSEARCH_QUERIES = [
 ]
 
 
-def build_sources(cfg, include_websearch=True):
+def build_sources(cfg, include_websearch=True, db_path=None):
     """Assemble the ordered list of (name, platform, thunk) source specs:
     priority companies, then the company store (tag: neural) — deduped in
     that order so cross-source duplicates resolve deterministically. Heavy
@@ -180,6 +198,11 @@ def build_sources(cfg, include_websearch=True):
     excluded: they're the local track's locality-bound employers, and the
     remote filter would cull nearly all of their thousands of onsite reqs
     anyway.
+
+    `db_path` selects which store's company roster to sweep — pass
+    config.NEURAL_DB_PATH (this track's own, isolated store); omitting it
+    falls back to store.connect()'s default (config.STORE_DB_PATH /
+    local_tech.db), which is almost never what this track wants.
     """
     sources, used = [], set()
 
@@ -196,7 +219,7 @@ def build_sources(cfg, include_websearch=True):
 
     # 2) Company store sweep (populated by discovery / --import-companies).
     try:
-        conn = store_mod.connect()
+        conn = store_mod.connect(db_path)
         rows = store_mod.get_companies(conn, active_only=True, tag="neural")
         conn.close()
     except Exception as e:
@@ -241,9 +264,14 @@ def build_sources(cfg, include_websearch=True):
 
 def tag_job(job, signal=None):
     """Stamp the track tag, the remote_eligible flag, and (optionally) the
-    matched remote signal onto a job dict in place."""
+    matched remote signal onto a job dict in place.
+
+    The track is now LOCATION-AGNOSTIC (it surfaces neural/BCI-company
+    postings anywhere, not just remote ones — see remote_neural_run.main),
+    so remote_eligible reflects the real signal instead of being hard-coded
+    True: it's a queryable fact about the posting, not a gate."""
     job["track_tag"] = TAG
-    job["remote_eligible"] = True
+    job["remote_eligible"] = bool(signal)
     if signal is not None:
         job["remote_signal"] = signal
     return job

@@ -1,11 +1,24 @@
 """REMOTE-NEURAL track runner.
 
-Surfaces REMOTE-eligible roles that keep all three of: neural signals, a
-high technical bar, and a clinical/health mission. Prioritizes Beacon
-Biosignals, Precision Neuroscience, and Paradromics, then sweeps the
-company store (tag: neural) + lightweight config sources for general
-neural-ML roles. Only postings that pass remote-eligibility detection are
-surfaced, and every digest entry is tagged [REMOTE-NEURAL].
+LOCATION-AGNOSTIC (the "remote" in the name is now vestigial — kept so the
+branch/module name doesn't shift mid-flight; see jobcrawler/tracks/
+remote_neural.py's module docstring). Surfaces neural/BCI-company roles
+ANYWHERE that keep both: neural signals and a high technical bar.
+Prioritizes Beacon Biosignals, Neuralink, Precision Neuroscience,
+Paradromics, Synchron, and Merge Labs, then sweeps the company store
+(tag: neural, own DB — see config.NEURAL_DB_PATH) + lightweight config
+sources for general neural-ML roles. remote_eligible is computed and stored
+per posting but no longer gates it — an onsite BCI-company posting surfaces
+too. Every digest entry is tagged [REMOTE-NEURAL].
+
+A keyword relevance pre-filter runs before any of this: each source's own
+fetcher (jobcrawler/fetchers/ats_api.py, bamboohr.py, adp_wfn.py, ...)
+already applies is_relevant() against the neural-ML keyword tiers this
+track sets via apply_to_config(), so `jobs` arriving here is already the
+keyword-relevant set, not a raw board dump — cost control for the "same
+companies, anywhere" volume this track can now see. --fit additionally
+gates on jobcrawler.tracks.remote_neural_run.COST_GUARD_THRESHOLD before
+spending any Claude API calls; see --confirm-cost.
 
 Run it via the single entry point:
 """
@@ -25,10 +38,24 @@ try:
 except Exception:
     pass
 
-from ..db import init_db, is_new, mark_seen
+from .. import store
 from ..parallel import fetch_all
 from ..remote_filter import remote_signal_for, us_eligible
 from . import remote_neural as track
+
+
+# Aaron's hard budget guard: never send more than this many postings to the
+# Claude API in one --fit run without an explicit --confirm-cost. The track
+# went location-agnostic (remove the remote-only gate below) specifically to
+# admit "same BCI companies, anywhere" volume, which is exactly the scenario
+# this exists to catch before it becomes an API bill.
+COST_GUARD_THRESHOLD = 300
+# Rough per-posting cost: ~700 input tokens (system prompt + JD, cached
+# system prompt after the first call) + ~120 output tokens, at Claude
+# Sonnet's blended per-token rate. Order-of-magnitude only — for deciding
+# whether to stop and ask, not for a real invoice.
+_EST_TOKENS_PER_POSTING = 820
+_EST_USD_PER_MTOK = 4.0
 
 
 def _short(text, n):
@@ -89,12 +116,17 @@ def main(argv=None):
                     help="Skip the DuckDuckGo web-search sources")
     ap.add_argument("--samples", type=int, default=5,
                     help="Number of sample matches to print (default 5)")
+    ap.add_argument("--confirm-cost", action="store_true",
+                    help="With --fit: allow scoring more than the "
+                         f"{COST_GUARD_THRESHOLD}-posting safety threshold "
+                         "via the Claude API")
     args = ap.parse_args(argv)
 
     # Point the shared keyword filter at the neural-ML focus + allow remote.
     track.apply_to_config(config)
 
-    sources = track.build_sources(config, include_websearch=not args.no_websearch)
+    sources = track.build_sources(config, include_websearch=not args.no_websearch,
+                                  db_path=config.NEURAL_DB_PATH)
 
     bar = "=" * 70
     print(f"\n{bar}")
@@ -107,11 +139,15 @@ def main(argv=None):
     elif args.send:
         mode = "EMAIL (no DB writes)"
     print(f"  Mode: {mode}")
-    print(f"  Sources: {len(sources)}  |  remote filter: ON  |  "
-          f"keyword focus: neural-ML\n")
+    print(f"  Sources: {len(sources)}  |  location-agnostic (remote_eligible "
+          f"stored, not gated)  |  keyword focus: neural-ML\n")
 
-    # Read-only DB connection for new/seen accounting; writes only on --commit.
-    conn = init_db()
+    # Own store, isolated from local-tech's local_tech.db (see
+    # config.NEURAL_DB_PATH) — read-only for new/seen accounting unless
+    # --commit. Companies are seeded from a one-time copy of the local-tech
+    # roster (see the migration note in config.py); this track's own
+    # discovery/--add-board work should target this DB going forward.
+    conn = store.connect(config.NEURAL_DB_PATH)
 
     # ─── Phase 1: fetch every source in parallel ──────────────────────────
     done_count = [0]
@@ -142,7 +178,12 @@ def main(argv=None):
         relevant = len(jobs)
         neural_here = tech_here = surfaced_here = new_here = 0
         for job in jobs:
-            # Funnel: neural-anchored AND high-technical-bar AND remote.
+            # Funnel: neural-anchored AND high-technical-bar. Cheap, title-
+            # level checks first (each source's own fetcher already applied
+            # a title/description keyword gate before this — see
+            # jobcrawler/fetchers/ats_api.py etc — so `jobs` here is already
+            # the keyword-relevant set; this re-applies the track's tighter
+            # neural-anchor + technical-title tiers on top of it).
             nsig = track.neural_signal(job.get("title", ""),
                                        job.get("description", ""))
             if not nsig:
@@ -151,14 +192,14 @@ def main(argv=None):
             if not track.is_technical_role(job.get("title", "")):
                 continue
             tech_here += 1
-            # Remote AND eligible for a US applicant ("Philippines Remote"
-            # is remote, just not for you).
+            # Location-agnostic (task 2b): remote eligibility is recorded,
+            # not a gate — an onsite BCI-company posting surfaces here too.
+            # "Philippines Remote" is remote, just not for a US applicant,
+            # so that distinction still lives in the stored signal/flag.
             sig = remote_signal_for(job)
-            if not sig or not us_eligible(job.get("location", "")):
-                continue
             surfaced_here += 1
             jid = job["id"]
-            new = is_new(conn, jid)
+            new = store.is_new(conn, jid)
             if new:
                 new_here += 1
             if jid in seen_ids:
@@ -167,6 +208,7 @@ def main(argv=None):
             track.tag_job(job, signal=sig)
             job["neural_signal"] = nsig
             job["_new"] = new
+            job["_us_eligible"] = us_eligible(job.get("location", ""))
             matches.append(job)
 
         total_relevant += relevant
@@ -177,23 +219,40 @@ def main(argv=None):
         rows.append((label, relevant, neural_here, tech_here, surfaced_here,
                      new_here, "priority" if platform.endswith("*") else ""))
 
-    # Optional cross-pollinated scorer: resume fit, ranked.
+    # Optional cross-pollinated scorer: resume fit, ranked. Hard budget
+    # guard first — the location-agnostic sweep can surface far more
+    # postings than the old remote-only gate did, and each one is a Claude
+    # API call.
     if args.fit and matches:
-        _score_fits(matches)
+        if len(matches) > COST_GUARD_THRESHOLD and not args.confirm_cost:
+            est_tokens = len(matches) * _EST_TOKENS_PER_POSTING
+            est_usd = est_tokens / 1_000_000 * _EST_USD_PER_MTOK
+            print(f"\n{bar}")
+            print(f"  [!] BUDGET GUARD: {len(matches)} posting(s) would be scored "
+                  f"via the Claude API (> {COST_GUARD_THRESHOLD}).")
+            print(f"      Rough estimate: ~{est_tokens:,} tokens, ~${est_usd:.2f} "
+                  f"(order-of-magnitude, not a quote).")
+            print(f"      Re-run with --fit --confirm-cost to proceed. Scoring skipped this run.")
+            print(f"{bar}")
+        else:
+            _score_fits(matches)
 
     if args.commit:
         for job in matches:
-            mark_seen(conn, job, track=track.TRACK)
+            store.mark_seen(conn, job, track=track.TRACK)
     conn.close()
 
     # ─── Per-source table + totals ────────────────────────────────────────
+    # Location-agnostic (task 2b): SURF (surfaced) is everything that cleared
+    # the neural+technical gates, onsite or remote alike -- would-be-scored
+    # count for --fit. REMOTE is informational (remote_eligible), not a gate.
     print(f"\n{bar}")
     print("  PER-SOURCE FUNNEL  (RELV=keyword-relevant -> NEUR=neural-anchored")
-    print("   -> TECH=+technical role -> REMOTE=+remote-eligible = surfaced;")
+    print("   -> TECH=+technical role = SURFaced (onsite+remote, would-be-scored);")
     print("   NEW=unseen vs DB)")
     print(f"{bar}")
     print(f"  {'SOURCE':<46} {'RELV':>4} {'NEUR':>4} {'TECH':>4} "
-          f"{'REMOTE':>6} {'NEW':>4}")
+          f"{'SURF':>6} {'NEW':>4}")
     print(f"  {'-'*46} {'-'*4} {'-'*4} {'-'*4} {'-'*6} {'-'*4}")
     for label, relevant, neural_here, tech_here, surfaced_here, new_here, note in rows:
         tail = f"  [{note}]" if note else ""
@@ -202,8 +261,12 @@ def main(argv=None):
     print(f"  {'-'*46} {'-'*4} {'-'*4} {'-'*4} {'-'*6} {'-'*4}")
     print(f"  {'TOTAL':<46} {total_relevant:>4} {total_neural:>4} "
           f"{total_tech:>4} {total_surfaced:>6} {total_new:>4}")
-    print(f"\n  Surfaced (neural & technical & remote) this run: {len(matches)} "
-          f"(unique)  |  new vs DB: {total_new}")
+    n_remote = sum(1 for j in matches if j.get("remote_eligible"))
+    print(f"\n  Surfaced (neural & technical, any location) this run: {len(matches)} "
+          f"(unique)  |  remote-eligible: {n_remote}  |  new vs DB: {total_new}")
+    print(f"  Would be sent to the Claude API with --fit: {len(matches)} posting(s)"
+          + (f"  [!] over the {COST_GUARD_THRESHOLD}-posting budget guard"
+             if len(matches) > COST_GUARD_THRESHOLD else ""))
 
     # ─── Sample matches for precision sanity-check ────────────────────────
     n = max(0, args.samples)
@@ -211,7 +274,7 @@ def main(argv=None):
     print(f"  {n} SAMPLE MATCHES (sanity-check precision before emailing)")
     print(f"{bar}")
     if not matches:
-        print("  (no remote-eligible matches)")
+        print("  (no matches)")
     for i, j in enumerate(_diversify(matches, n), 1):
         print(f"\n  {i}. {track.TAG} {j['title']}")
         print(f"     company : {j['company']}")

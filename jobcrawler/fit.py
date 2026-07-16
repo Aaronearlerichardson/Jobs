@@ -217,6 +217,12 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=220) -> Fi
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
+        # Visible, not silent: a job that passed discovery but arrives here
+        # with an empty/stub body would otherwise sit at a NULL score with
+        # no trace of why — exactly what hid the Neuralink/Paradromics
+        # description-hydration bug for weeks.
+        print(f"    [!] SKIP-SCORE: {len(desc)}/{MIN_DESC_CHARS} char description "
+              f"for {title!r} - unscored (check the fetcher/hydration path)")
         return FitResult(score=None, reason="no description; unscored")
     desc = desc[:2500]
     user = f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc}"

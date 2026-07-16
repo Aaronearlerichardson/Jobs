@@ -311,6 +311,14 @@ def import_companies(conn, path):
     return n
 
 
+def get_company(conn, company_id):
+    """One company row by id, or None."""
+    if not company_id:
+        return None
+    row = conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def company_id_by_name(conn, name):
     """Resolve a company name to its id (case-insensitive exact match), or
     None if the store has no such company. Used to link externally-ingested
@@ -449,7 +457,8 @@ def backfill_axis_columns(conn):
     return n
 
 
-def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined"):
+def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
+                allow_geo_modes=None):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -462,7 +471,12 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     independent of the `track` label: a job whose stored location doesn't
     match is excluded from this search but stays in the shared table. This
     is how the local track keeps out-of-area postings out of its results no
-    matter which ingest path stamped them `local-tech`."""
+    matter which ingest path stamped them `local-tech`.
+
+    `allow_geo_modes` (an iterable of stored `geo_mode` values, e.g.
+    {"remote"}) admits rows that fail `location_re` but whose own geo_mode
+    already qualifies them — e.g. a remote neural/BCI posting whose location
+    string reads "Remote", not a Triangle/NC place name."""
     q = """
       SELECT j.*, c.mission_tier, c.mission_score
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
@@ -473,7 +487,9 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
         args.append(track)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
     if location_re is not None:
-        rows = [r for r in rows if location_re.search(r.get("location") or "")]
+        rows = [r for r in rows
+                if location_re.search(r.get("location") or "")
+                or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes)]
     for r in rows:
         # A conglomerate's own mission score is ~0.05 (off-mission overall),
         # but a job here already passed the health keyword filter at crawl

@@ -47,6 +47,13 @@ STORE_DB_PATH = SCRIPT_DIR / "local_tech.db"
 DB_PATH            = STORE_DB_PATH
 LOCAL_TECH_DB_PATH = STORE_DB_PATH
 
+# The REMOTE-NEURAL track's own store — kept separate from STORE_DB_PATH so
+# its (now location-agnostic; see jobcrawler/tracks/remote_neural_run.py)
+# sweep of neural/BCI companies never commingles with local-tech's jobs
+# table again. Same schema (jobcrawler/store.py); seeded from a one-time
+# copy of the companies table.
+NEURAL_DB_PATH = SCRIPT_DIR / "neural.db"
+
 # Resume used for per-job fit scoring (gitignored — personal). Extracted
 # lazily by jobcrawler/resume.py.
 RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
