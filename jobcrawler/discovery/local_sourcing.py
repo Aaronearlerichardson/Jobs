@@ -10,7 +10,10 @@ health / bio / science / tech employers with a Triangle-NC presence:
        - the static entries on the RTP.org directory,
 """
 
+import hashlib
+import json
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -20,6 +23,81 @@ import config
 from ..http import HEADERS, SESSION
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
                      _DOMAIN_STOPWORDS, _name_domain_tokens)
+
+
+# --------------------------------------------------------------------------- #
+#  Bounded + cached DuckDuckGo text search                                     #
+# --------------------------------------------------------------------------- #
+#
+# DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
+# wall-clock bound, so when DDG rate-limits (frequent), the library's internal
+# retry/backoff blocks for many minutes yielding nothing — profiled at ~1271s
+# of a 1726s --local run. Two guards, capability preserved:
+#   * a disk cache (7-day TTL) so repeat runs — and repeat queries within a
+#     run — return instantly instead of re-hitting DDG;
+#   * a hard per-query wall-clock budget via a worker thread + join(timeout),
+#     so one throttled query abandons after ~budget seconds instead of stalling
+#     the whole crawl. A timed-out/empty result is NOT cached, so it retries
+#     next run (we only cache genuine non-empty hits).
+_DDG_CACHE_DIR = config.SCRIPT_DIR / ".cache" / "ddg"
+_DDG_CACHE_TTL = 7 * 24 * 3600      # seconds
+_DDG_WALL_BUDGET = 25.0             # hard per-query wall-clock cap (seconds)
+
+
+def _ddg_cache_path(key):
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return _DDG_CACHE_DIR / f"{h}.json"
+
+
+def _ddg_cache_get(key):
+    p = _ddg_cache_path(key)
+    try:
+        if time.time() - p.stat().st_mtime > _DDG_CACHE_TTL:
+            return None
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _ddg_cache_put(key, value):
+    try:
+        _DDG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _ddg_cache_path(key).write_text(json.dumps(value), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
+    """Bounded, disk-cached DDG text search. Returns a list of result dicts
+    (each with 'href'/'title'/...), or [] on miss/timeout/missing-package —
+    every caller already tolerates an empty list."""
+    key = f"{query}||{max_results}"
+    cached = _ddg_cache_get(key)
+    if cached is not None:
+        return cached
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            return []
+    box = {"v": None}
+
+    def _run():
+        try:
+            with DDGS(timeout=min(10, int(budget))) as ddg:
+                box["v"] = list(ddg.text(query, max_results=max_results))
+        except Exception:
+            box["v"] = None
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(budget)
+    out = box["v"] or []
+    if out:                              # cache only genuine hits
+        _ddg_cache_put(key, out)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -89,28 +167,16 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     fails to resolve. Returns a de-duped list."""
     if not queries:
         return []
-    try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
-    except ImportError:
-        print("    [!] name harvesting needs the 'ddgs' package (pip install ddgs)")
-        return []
 
     _DIR_HOSTS = ("builtin.com", "growjo.com", "rtp.org", "ncbiotech",
                   "crunchbase", "themuse", "vault.com", "clutch.co", "wellfound",
                   "getlatka", "tracxn", "f6s.com")
     dir_urls = []
-    try:
-        with DDGS() as ddg:
-            for q in queries:
-                for r in ddg.text(q, max_results=per_query):
-                    u = r.get("href") or r.get("url") or ""
-                    if u and any(h in u.lower() for h in _DIR_HOSTS):
-                        dir_urls.append(u)
-    except Exception as e:
-        print(f"    [!] name search failed: {e}")
+    for q in queries:
+        for r in ddg_text(q, max_results=per_query):
+            u = r.get("href") or r.get("url") or ""
+            if u and any(h in u.lower() for h in _DIR_HOSTS):
+                dir_urls.append(u)
 
     names = set()
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
@@ -600,27 +666,16 @@ def _websearch_board(name, max_results=8):
       2. aggregators are skipped and self-hosted *custom* boards accepted,
          not just JSON-API ATSes.
     """
-    try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
-    except ImportError:
-        return None
     from ..http import HEADERS as _H
     from ..fetchers.company import custom_board_listing_url
     from .sniffer import _detect, _pack
 
     def _search(query):
         out = []
-        try:
-            with DDGS() as ddg:
-                for r in ddg.text(query, max_results=max_results):
-                    u = r.get("href") or r.get("url")
-                    if u and not _is_aggregator(u):
-                        out.append(u)
-        except Exception:
-            pass
+        for r in ddg_text(query, max_results=max_results):
+            u = r.get("href") or r.get("url")
+            if u and not _is_aggregator(u):
+                out.append(u)
         return out
 
     def _resolve(urls):
