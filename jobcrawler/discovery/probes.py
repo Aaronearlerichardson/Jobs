@@ -122,6 +122,16 @@ def probe_rippling(slug):
         return (False, 0)
 
 
+def probe_ultipro(slug):
+    """Confirm a UKG Pro (UltiPro) board by its slug ('CODE|GUID')."""
+    from ..fetchers.ultipro import parse_board
+    try:
+        jobs = parse_board(slug)
+        return (len(jobs) > 0, len(jobs))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
@@ -132,6 +142,7 @@ PROBES = {
     "smartrecruiters": probe_smartrecruiters,
     "paylocity":  probe_paylocity,
     "rippling":   probe_rippling,
+    "ultipro":    probe_ultipro,
 }
 
 

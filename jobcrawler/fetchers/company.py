@@ -407,6 +407,31 @@ def fetch_rippling_all(slug, loc_re=None, max_details=200, detail_delay=0.15):
     return out
 
 
+def fetch_ultipro_all(slug, loc_re=None):
+    """Full UKG Pro (UltiPro) board, ungated (mirrors fetchers.ultipro.fetch_ultipro
+    without its is_relevant() gate). BriefDescription is inline, so no detail call."""
+    from .ultipro import _desc, _detail_url, location_str, parse_board
+    try:
+        opps = parse_board(slug)
+    except Exception as e:
+        print(f"    [!] UltiPro {slug.split('|')[0]}: {e}")
+        return []
+    code = slug.split("|")[0]
+    out = []
+    for o in opps:
+        title = (o.get("Title") or "").strip()
+        oid = o.get("Id") or ""
+        if not title or not oid:
+            continue
+        loc = location_str(o)
+        if not _loc_ok(loc_re, loc):
+            continue
+        out.append({"id": f"ultipro_{code}_{oid[:12]}", "title": title,
+                    "url": _detail_url(slug, oid), "location": loc,
+                    "description": _desc(o), "ats": "ultipro", "_wd": None})
+    return out
+
+
 def fetch_kula_all(slug, loc_re=None):
     """Full Kula board, ungated (mirrors fetchers.html_scrape.fetch_kula but
     skips its is_relevant() pre-filter). Kula never exposes a listing-page
@@ -784,6 +809,7 @@ FETCHERS = {
     "kula":            lambda c, lr: fetch_kula_all(c["slug"], lr),
     "paylocity":       lambda c, lr: fetch_paylocity_all(c["slug"], lr),
     "rippling":        lambda c, lr: fetch_rippling_all(c["slug"], lr),
+    "ultipro":         lambda c, lr: fetch_ultipro_all(c["slug"], lr),
     "workday":         lambda c, lr: fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: fetch_icims_all(c["slug"], lr),

@@ -20,6 +20,7 @@ from .remotive import fetch_remotive
 from .rippling import fetch_rippling
 from .rssfeed import fetch_rss
 from .sitemap import fetch_sitemap
+from .ultipro import fetch_ultipro
 from .websearch import fetch_websearch
 from .workday import fetch_workday
 
@@ -42,6 +43,7 @@ __all__ = [
     "fetch_remoteok",
     "fetch_remotive",
     "fetch_rippling",
+    "fetch_ultipro",
     "fetch_rss",
     "fetch_sitemap",
     "fetch_successfactors",

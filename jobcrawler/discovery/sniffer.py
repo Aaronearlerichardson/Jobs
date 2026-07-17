@@ -163,6 +163,10 @@ def _detect(text, final_url=""):
         ccid = _ADP_CCID_RE.search(unescaped)
         if cid and ccid:
             return "fetchable", "adp", f"{cid.group(1)}|{ccid.group(1)}"
+    # UKG Pro (UltiPro): slug is CODE|GUID from the board URL.
+    ukg = re.search(r"recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a-fA-F\-]{36})", blob, re.I)
+    if ukg:
+        return "fetchable", "ultipro", f"{ukg.group(1)}|{ukg.group(2)}"
     for kind, patterns in (("fetchable", ATS_LINK_PATTERNS),
                            ("semi", SEMI_FETCHABLE_PATTERNS),
                            ("lead", ATS_LEAD_PATTERNS)):
