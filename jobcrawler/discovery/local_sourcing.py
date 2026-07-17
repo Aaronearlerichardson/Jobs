@@ -15,11 +15,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
-import requests
-
 import config
 
-from ..http import HEADERS
+from ..http import HEADERS, SESSION
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
                      _DOMAIN_STOPWORDS, _name_domain_tokens)
 
@@ -76,7 +74,7 @@ def scrape_directory_names(url, timeout=20):
     for any site with that shape (RTP.org, Built In, chamber directories).
     Server-rendered only; JS-loaded facets are out of scope."""
     try:
-        r = requests.get(url, timeout=timeout, headers=HEADERS)
+        r = SESSION.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] directory scrape failed ({url}): {e}")
@@ -117,7 +115,7 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     names = set()
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
-            html = requests.get(u, timeout=12, headers=HEADERS).text
+            html = SESSION.get(u, timeout=12, headers=HEADERS).text
         except Exception:
             continue
         names |= _names_from_html(html)
@@ -178,7 +176,7 @@ from ..nc import is_nc as _has_nc  # single source of truth for NC locality
 
 def _nc_count_greenhouse(slug):
     try:
-        r = requests.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
+        r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
                          timeout=15, headers=HEADERS)
         return sum(1 for j in r.json().get("jobs", [])
                    if _has_nc(j.get("location", {}).get("name", "")))
@@ -188,7 +186,7 @@ def _nc_count_greenhouse(slug):
 
 def _nc_count_lever(slug):
     try:
-        r = requests.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+        r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
                          timeout=15, headers=HEADERS)
         return sum(1 for j in r.json()
                    if _has_nc(j.get("categories", {}).get("location", "")))
@@ -198,7 +196,7 @@ def _nc_count_lever(slug):
 
 def _nc_count_ashby(slug):
     try:
-        r = requests.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+        r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
                          timeout=15, headers=HEADERS)
         return sum(1 for j in r.json().get("jobPostings", [])
                    if _has_nc(j.get("location", "")))
@@ -210,7 +208,7 @@ def _nc_count_workday(tenant, pod, site):
     """Query the Workday CXS search for NC postings (searchText hits location)."""
     api = f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
     try:
-        r = requests.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
+        r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
                                      "searchText": "North Carolina"},
                           timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
         return int(r.json().get("total", 0) or 0)
@@ -392,7 +390,7 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
             continue
         seen.add(u)
         try:
-            r = requests.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
+            r = SESSION.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
             if r.status_code == 200 and _NC_HQ_RE.search(r.text):
                 return True
         except Exception:
@@ -405,21 +403,21 @@ def _sample_titles(hit, n=6):
     ats, slug = hit["ats"], hit["slug"]
     try:
         if ats == "greenhouse":
-            r = requests.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
+            r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
                              timeout=15, headers=HEADERS)
             return [j.get("title", "") for j in r.json().get("jobs", [])[:n]]
         if ats == "lever":
-            r = requests.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+            r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
                              timeout=15, headers=HEADERS)
             return [j.get("text", "") for j in r.json()[:n]]
         if ats == "ashby":
-            r = requests.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+            r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
                              timeout=15, headers=HEADERS)
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
         if ats == "workday":
             t, p, s = slug
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
-            r = requests.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
+            r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
                                          "searchText": "North Carolina"},
                               timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
@@ -609,8 +607,6 @@ def _websearch_board(name, max_results=8):
             from duckduckgo_search import DDGS
     except ImportError:
         return None
-    import requests as _rq
-
     from ..http import HEADERS as _H
     from ..fetchers.company import custom_board_listing_url
     from .sniffer import _detect, _pack
@@ -641,7 +637,7 @@ def _websearch_board(name, max_results=8):
         # an embedded ATS or a self-hosted board with genuine job links.
         for u in urls[:5]:
             try:
-                r = _rq.get(u, timeout=8, headers=_H, allow_redirects=True)
+                r = SESSION.get(u, timeout=8, headers=_H, allow_redirects=True)
                 if r.status_code != 200 or len(r.text) < 300:
                     continue
             except Exception:

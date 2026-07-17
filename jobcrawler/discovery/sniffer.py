@@ -14,10 +14,9 @@ import html
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-import requests
 from bs4 import BeautifulSoup
 
-from ..http import HEADERS
+from ..http import HEADERS, SESSION
 from .probes import PROBES, _extract_workday_triple, _name_domain_tokens
 
 # ─── Platform signatures ─────────────────────────────────────────────────
@@ -187,7 +186,7 @@ def _confirm_coords(ats, slug):
     if ats == "adp":
         cid, _, ccid = slug.partition("|")
         try:
-            r = requests.get(
+            r = SESSION.get(
                 "https://workforcenow.adp.com/mascsr/default/careercenter"
                 "/public/events/staffing/v1/job-requisitions",
                 params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
@@ -210,7 +209,7 @@ def _fetch_page(url, timeout=6):
     domain/path guesses that 404 or don't resolve; a real careers page
     answers fast. Returns the Response on 200 with real content, else None."""
     try:
-        r = requests.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
+        r = SESSION.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
         return r if r.status_code == 200 and len(r.text) >= 300 else None
     except Exception:
         return None

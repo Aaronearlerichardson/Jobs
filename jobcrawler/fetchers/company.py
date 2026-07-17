@@ -11,10 +11,9 @@ is pulled and the caller's own filter chain decides.
 
 import re
 
-import requests
 from bs4 import BeautifulSoup
 
-from ..http import HEADERS
+from ..http import HEADERS, SESSION
 from ..nc import NC_RE  # Triangle/NC locality — the local track's location gate
 
 
@@ -26,7 +25,7 @@ def _get_json(url, label, **kw):
     """GET + parse JSON, treating any HTTP error, empty body, or non-JSON
     response as a clean miss (returns None) rather than an exception that
     surfaces as a cryptic ``Expecting value`` further up the stack."""
-    r = requests.get(url, timeout=25, headers=HEADERS, **kw)
+    r = SESSION.get(url, timeout=25, headers=HEADERS, **kw)
     if r.status_code != 200:
         print(f"    [!] {label}: HTTP {r.status_code}")
         return None
@@ -114,7 +113,7 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolin
     out = []
     for page in range(max_pages):
         try:
-            r = requests.post(api, json={"appliedFacets": {}, "limit": page_size,
+            r = SESSION.post(api, json={"appliedFacets": {}, "limit": page_size,
                                          "offset": page * page_size,
                                          "searchText": search_text},
                               timeout=25, headers=hdr)
@@ -144,7 +143,7 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
     out = []
     for page in range(max_pages):
         try:
-            r = requests.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+            r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
                              f"?limit=100&offset={page*100}", timeout=25, headers=HEADERS)
             data = r.json()
         except Exception as e:
@@ -178,7 +177,7 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
     url = (f"https://{tenant}.icims.com/jobs/search?ss=1&in_iframe=1"
            f"&searchLocation={search_location}")
     try:
-        r = requests.get(url, timeout=20, headers=HEADERS)
+        r = SESSION.get(url, timeout=20, headers=HEADERS)
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a.iCIMS_Anchor, a[href*='/jobs/']"):
             title = a.get_text(" ").strip()
@@ -214,7 +213,7 @@ def fetch_jazzhr_all(slug, loc_re=None, max_jobs=60, per_job_delay=0.3):
 
     base = f"https://{slug}.applytojob.com"
     try:
-        r = requests.get(base + "/", timeout=20, headers=HEADERS)
+        r = SESSION.get(base + "/", timeout=20, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] JazzHR {slug}: {e}")
@@ -234,7 +233,7 @@ def fetch_jazzhr_all(slug, loc_re=None, max_jobs=60, per_job_delay=0.3):
     out = []
     for url in urls:
         try:
-            jr = requests.get(url, timeout=20, headers=HEADERS)
+            jr = SESSION.get(url, timeout=20, headers=HEADERS)
             jr.raise_for_status()
         except Exception as e:
             print(f"    [!] JazzHR {slug} {url}: {e}")
@@ -262,7 +261,7 @@ def fetch_bamboohr_all(slug, loc_re=None, max_details=200, detail_delay=0.15):
 
     base = f"https://{slug}.bamboohr.com"
     try:
-        r = requests.get(f"{base}/careers/list", timeout=20,
+        r = SESSION.get(f"{base}/careers/list", timeout=20,
                          headers={**HEADERS, "Accept": "application/json"})
         r.raise_for_status()
         entries = r.json().get("result") or []
@@ -303,7 +302,7 @@ def fetch_adp_all(slug, loc_re=None, page_size=50, max_pages=10,
     out, details_fetched = [], 0
     for page in range(max_pages):
         try:
-            r = requests.get(
+            r = SESSION.get(
                 _API, params={"cid": cid, "ccId": ccid, "locale": "en_US",
                               "$top": page_size, "$skip": page * page_size},
                 timeout=25, headers={**HEADERS, "Accept": "application/json"})
@@ -442,7 +441,7 @@ def fetch_kula_all(slug, loc_re=None):
 
     base_url = f"https://careers.kula.ai/{slug}"
     try:
-        r = requests.get(base_url, timeout=20, headers=HEADERS)
+        r = SESSION.get(base_url, timeout=20, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Kula {slug}: {e}")
@@ -485,7 +484,7 @@ def hydrate_description(job):
         tenant, pod, site, path = job["_wd"]
         api = f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/job{path}"
         try:
-            r = requests.get(api, timeout=20, headers={**HEADERS, "Accept": "application/json"})
+            r = SESSION.get(api, timeout=20, headers={**HEADERS, "Accept": "application/json"})
             html = r.json().get("jobPostingInfo", {}).get("jobDescription", "") or ""
             job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:4000]
         except Exception:
@@ -493,7 +492,7 @@ def hydrate_description(job):
     elif job.get("ats") == "smartrecruiters" and job.get("_sr"):
         slug, pid = job["_sr"]
         try:
-            r = requests.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}",
+            r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}",
                              timeout=20, headers=HEADERS)
             secs = r.json().get("jobAd", {}).get("sections", {}) or {}
             parts = [secs.get(k, {}).get("text", "") for k in
@@ -578,7 +577,7 @@ def fetch_successfactors_all(base_url, loc_re=None, step=25, max_pages=80):
     for page in range(max_pages):
         url = f"{base_url.rstrip('/')}/search/?startrow={page * step}"
         try:
-            r = requests.get(url, timeout=25, headers=sf_headers)
+            r = SESSION.get(url, timeout=25, headers=sf_headers)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] SuccessFactors {base_url} p{page}: {e}")
@@ -737,7 +736,7 @@ def _location_near(a, loc_re=None):
 
 def _get_soup(url):
     try:
-        r = requests.get(url, timeout=20, headers=HEADERS)
+        r = SESSION.get(url, timeout=20, headers=HEADERS)
         if r.status_code != 200:
             return None
         return BeautifulSoup(r.text, "html.parser")
