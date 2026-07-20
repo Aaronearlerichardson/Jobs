@@ -666,6 +666,12 @@ _LOC_TEXT_RE = re.compile(r"[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+)*,\s*"
 _OPENINGS_HREF_RE = re.compile(
     r"/(open-positions|open-roles|career-opportunities|current-openings|"
     r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
+# scheme+host extractor and the openings link-text cue — precompiled once
+# rather than rebuilt per anchor (the host check was an rf-string with
+# re.escape(host), a fresh pattern per distinct host that thrashed re's cache).
+_SCHEME_HOST_RE = re.compile(r"https?://([^/]+)")
+_OPENINGS_TEXT_RE = re.compile(
+    r"(current|open|view|see|all).{0,12}(opening|position|role|job)", re.I)
 
 
 def find_job_links(soup):
@@ -712,13 +718,13 @@ def _openings_link(soup, root):
             absu = root + href
         else:
             absu = root + "/" + href
-        if not re.match(rf"https?://{re.escape(host)}(?:/|$)", absu):
+        hm = _SCHEME_HOST_RE.match(absu)
+        if not hm or hm.group(1) != host:
             continue  # off-domain — skip
         if _OFFSITE_RE.search(absu):
             continue
         text = a.get_text(" ", strip=True).lower()
-        if _OPENINGS_HREF_RE.search(href) or re.search(
-                r"(current|open|view|see|all).{0,12}(opening|position|role|job)", text):
+        if _OPENINGS_HREF_RE.search(href) or _OPENINGS_TEXT_RE.search(text):
             return absu
     return None
 

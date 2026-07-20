@@ -106,9 +106,13 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
 
 # Seed employers + Workday-fallback majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
+# Name -> comparison key: strip everything but [a-z0-9]. Called on every
+# candidate name in several dedup/lookup loops, so compile it once.
+_NONALNUM_RE = re.compile(r"[^a-z0-9]")
+
 SEED_COMPANIES = config.DISCOVERY_SEED_COMPANIES
 MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
-_MAJORS_KEYS = {re.sub(r"[^a-z0-9]", "", m.lower()) for m in MAJORS_WORKDAY}
+_MAJORS_KEYS = {_NONALNUM_RE.sub("", m.lower()) for m in MAJORS_WORKDAY}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
@@ -204,7 +208,7 @@ def gather_names(extra=None):
     names, seen = [], set()
     for src in sources:
         for n in src:
-            k = re.sub(r"[^a-z0-9]", "", (n or "").lower())
+            k = _NONALNUM_RE.sub("", (n or "").lower())
             if k and k not in seen:
                 seen.add(k)
                 names.append(n.strip())
@@ -318,13 +322,13 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
     Workday probe for big employers the static probe missed.
     """
     names = gather_names(extra_names)
-    n_wd = sum(1 for n in names if re.sub(r"[^a-z0-9]", "", n.lower()) in _MAJORS_KEYS)
+    n_wd = sum(1 for n in names if _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
           f"({n_wd} with Workday fallback)...")
     hits = []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(probe_company, n,
-                          re.sub(r"[^a-z0-9]", "", n.lower()) in _MAJORS_KEYS): n
+                          _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS): n
                 for n in names}
         for fut in as_completed(futs):
             hit = fut.result()
@@ -337,10 +341,10 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
     if js_majors:
         # Only an NC>0 board counts as "found" — a junk 0-NC slug collision
         # must not block the JS fallback for the real employer.
-        found = {re.sub(r"[^a-z0-9]", "", h["name"].lower())
+        found = {_NONALNUM_RE.sub("", h["name"].lower())
                  for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
-                  if re.sub(r"[^a-z0-9]", "", m.lower()) not in found]
+                  if _NONALNUM_RE.sub("", m.lower()) not in found]
         if missed:
             from .probes import WorkdayJsProbe
             print(f"  JS-probing {len(missed)} major(s) with no static board...")
@@ -362,8 +366,8 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
     if sniff:
         from .sniffer import sniff_ats
         from ..fetchers import company as company_fetch
-        have = {re.sub(r"[^a-z0-9]", "", h["name"].lower()) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if re.sub(r"[^a-z0-9]", "", n.lower()) not in have]
+        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
         print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
         def _sniff_one(n):
@@ -396,7 +400,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
 
     # Drop known bad name→board matches.
     hits = [h for h in hits
-            if re.sub(r"[^a-z0-9]", "", h["name"].lower()) not in NAME_BLOCKLIST]
+            if _NONALNUM_RE.sub("", h["name"].lower()) not in NAME_BLOCKLIST]
 
     # De-dup by resolved board (same slug/triple reached via different names,
     # e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter name.
@@ -632,8 +636,8 @@ def _host_matches_name(url, name):
     (a distinctive name token appears in the host) — the guard that keeps a
     self-hosted 'custom' board from resolving to a third-party jobs site."""
     host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0].replace("www.", "")
-    hostslug = re.sub(r"[^a-z0-9]", "", host)
-    joined = re.sub(r"[^a-z0-9]", "", name.lower())
+    hostslug = _NONALNUM_RE.sub("", host)
+    joined = _NONALNUM_RE.sub("", name.lower())
     tokens = {joined} | {w for w in re.findall(r"[a-z0-9]+", name.lower())
                          if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 4 and t in hostslug for t in tokens)
@@ -644,10 +648,10 @@ def _slug_matches_name(slug, name):
     company — guards against the dork surfacing an unrelated board (e.g.
     'Novamed' -> the 'nc' NC-government Workday tenant)."""
     s = slug[0] if isinstance(slug, tuple) else slug   # workday tenant, else slug
-    s = re.sub(r"[^a-z0-9]", "", str(s or "").lower())
+    s = _NONALNUM_RE.sub("", str(s or "").lower())
     if len(s) < 3:
         return False
-    tokens = {re.sub(r"[^a-z0-9]", "", name.lower())}
+    tokens = {_NONALNUM_RE.sub("", name.lower())}
     tokens |= {w for w in re.findall(r"[a-z0-9]+", name.lower())
                if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
