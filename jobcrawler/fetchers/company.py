@@ -9,8 +9,12 @@ scored at discovery time, stored in jobcrawler/store.py), so the whole board
 is pulled and the caller's own filter chain decides.
 """
 
+import hashlib
+import json
 import re
+import time
 
+import config
 from bs4 import BeautifulSoup, SoupStrainer
 
 # Parse pages with lxml (2-3x faster than html.parser, and the gap widens with
@@ -803,6 +807,39 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
     return out
 
 
+# Short-TTL cache for board-detection results (the hottest app path). The same
+# careers URLs are re-checked within a run (sniffer + web-search fallback) and
+# across daily runs, each re-check costing a parse + an openings-hop GET. Cache
+# the outcome (listing URL, or None for "not a custom board") keyed by page URL.
+# TTL is deliberately SHORT so a board that later goes live — or one that goes
+# dead — is re-checked within the window rather than pinned by a stale negative.
+# Transient fetch failures are NOT cached (only decided outcomes), so a network
+# blip never suppresses a real board.
+_BOARD_CACHE_DIR = config.SCRIPT_DIR / ".cache" / "board"
+_BOARD_CACHE_TTL = 6 * 3600      # seconds
+
+
+def _board_cache_get(url):
+    """(listing_or_None,) on a live entry, or None on miss/expired/error.
+    The 1-tuple lets callers distinguish a cached negative from a miss."""
+    p = _BOARD_CACHE_DIR / f"{hashlib.sha1(url.encode('utf-8')).hexdigest()}.json"
+    try:
+        if time.time() - p.stat().st_mtime > _BOARD_CACHE_TTL:
+            return None
+        return (json.loads(p.read_text("utf-8")).get("listing"),)
+    except Exception:
+        return None
+
+
+def _board_cache_put(url, listing):
+    try:
+        _BOARD_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _BOARD_CACHE_DIR / f"{hashlib.sha1(url.encode('utf-8')).hexdigest()}.json"
+        p.write_text(json.dumps({"listing": listing}), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def custom_board_listing_url(page_url, html=None):
     """
     If `page_url` (or the openings page it links to, one hop) is a real custom
@@ -811,20 +848,26 @@ def custom_board_listing_url(page_url, html=None):
     """
     if _OFFSITE_RE.search(page_url):
         return None  # aggregator/ATS host is never a company's own custom board
+    cached = _board_cache_get(page_url)
+    if cached is not None:
+        return cached[0]
     root = re.match(r"https?://[^/]+", page_url).group(0)
     # Only job/openings anchors are inspected here, so parse <a> tags only.
     soup = (BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY)
             if html is not None else _get_anchor_soup(page_url))
     if soup is None:
-        return None
+        return None  # transient fetch failure — do NOT cache
+    result = None
     if len(find_job_links(soup)) >= 3:
-        return page_url
-    op = _openings_link(soup, root)
-    if op and op.rstrip("/") != page_url.rstrip("/"):
-        s2 = _get_anchor_soup(op)
-        if s2 and len(find_job_links(s2)) >= 3:
-            return op
-    return None
+        result = page_url
+    else:
+        op = _openings_link(soup, root)
+        if op and op.rstrip("/") != page_url.rstrip("/"):
+            s2 = _get_anchor_soup(op)
+            if s2 and len(find_job_links(s2)) >= 3:
+                result = op
+    _board_cache_put(page_url, result)
+    return result
 
 
 FETCHERS = {
