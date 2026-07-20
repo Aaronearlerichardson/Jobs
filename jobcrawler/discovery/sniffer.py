@@ -14,7 +14,9 @@ import html
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
+
+_ANCHORS_ONLY = SoupStrainer("a")
 
 from ..http import HEADERS, SESSION
 from .probes import PROBES, _extract_workday_triple, _name_domain_tokens
@@ -89,7 +91,7 @@ def _looks_like_custom_board(html_text):
     filtered out) — i.e. a self-hosted careers board worth scraping."""
     from ..fetchers.company import find_job_links
     try:
-        soup = BeautifulSoup(html_text, "html.parser")
+        soup = BeautifulSoup(html_text, "lxml", parse_only=_ANCHORS_ONLY)
     except Exception:
         return False
     return len(find_job_links(soup)) >= 3

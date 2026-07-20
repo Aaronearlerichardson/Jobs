@@ -11,7 +11,16 @@ is pulled and the caller's own filter chain decides.
 
 import re
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
+
+# Parse pages with lxml (2-3x faster than html.parser, and the gap widens with
+# page size). For paths that only need job/nav anchors — link counting and the
+# openings-hop — restrict parsing to <a> tags via SoupStrainer; anchors and
+# their descendants are preserved (find_job_links reads a title element inside
+# each <a>), which is all those callers touch. Paths that read an anchor's
+# surrounding container (location extraction in fetch_custom_careers) keep the
+# full tree via _get_soup.
+_ANCHORS_ONLY = SoupStrainer("a")
 
 from ..http import HEADERS, SESSION
 from ..nc import NC_RE  # Triangle/NC locality — the local track's location gate
@@ -739,7 +748,19 @@ def _get_soup(url):
         r = SESSION.get(url, timeout=20, headers=HEADERS)
         if r.status_code != 200:
             return None
-        return BeautifulSoup(r.text, "html.parser")
+        return BeautifulSoup(r.text, "lxml")
+    except Exception:
+        return None
+
+
+def _get_anchor_soup(url):
+    """Like _get_soup but parses only <a> tags — for callers that just count
+    or scan job/openings links (no surrounding-container reads)."""
+    try:
+        r = SESSION.get(url, timeout=20, headers=HEADERS)
+        if r.status_code != 200:
+            return None
+        return BeautifulSoup(r.text, "lxml", parse_only=_ANCHORS_ONLY)
     except Exception:
         return None
 
@@ -785,14 +806,16 @@ def custom_board_listing_url(page_url, html=None):
     if _OFFSITE_RE.search(page_url):
         return None  # aggregator/ATS host is never a company's own custom board
     root = re.match(r"https?://[^/]+", page_url).group(0)
-    soup = BeautifulSoup(html, "html.parser") if html is not None else _get_soup(page_url)
+    # Only job/openings anchors are inspected here, so parse <a> tags only.
+    soup = (BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY)
+            if html is not None else _get_anchor_soup(page_url))
     if soup is None:
         return None
     if len(find_job_links(soup)) >= 3:
         return page_url
     op = _openings_link(soup, root)
     if op and op.rstrip("/") != page_url.rstrip("/"):
-        s2 = _get_soup(op)
+        s2 = _get_anchor_soup(op)
         if s2 and len(find_job_links(s2)) >= 3:
             return op
     return None
