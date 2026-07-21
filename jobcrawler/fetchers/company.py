@@ -557,7 +557,12 @@ def _description_from_job_url(url):
     try:
         soup = BeautifulSoup(html, "lxml")
         el = (soup.select_one('[data-careersite-propertyid="description"]')
-              or soup.select_one('[data-careersite-propertyid="jobdescription"]'))
+              or soup.select_one('[data-careersite-propertyid="jobdescription"]')
+              # Custom boards that name the JD container (science.xyz: "_flow
+              # job-description"). Kept specific — 'job-description'/'jobDescription',
+              # not a bare 'description' — so a short company tagline can't match.
+              or soup.select_one('[class*="job-description"]')
+              or soup.select_one('[class*="jobDescription"]'))
         if el:
             d = el.get_text(" ", strip=True)
             if len(d) >= 120:

@@ -13,7 +13,13 @@ from requests.adapters import HTTPAdapter
 
 from config import USER_AGENT
 
-HEADERS = {"User-Agent": USER_AGENT}
+# Advertise only gzip/deflate — NOT brotli. requests would otherwise offer `br`
+# (brotlicffi is installed), and some servers' chunked brotli responses crash
+# that decoder ("can_accept_more_data() is False"), raising ContentDecodingError
+# on .text/.content. That failure is silent in fetchers that try/except a fetch:
+# the board just looks empty/unreachable (e.g. science.xyz careers pages). gzip
+# and deflate are universally supported, so dropping br loses nothing.
+HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
 
 def _build_session():
