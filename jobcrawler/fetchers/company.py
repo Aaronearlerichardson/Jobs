@@ -524,7 +524,47 @@ def hydrate_description(job):
         if m:
             from .rippling import fetch_description
             job["description"] = fetch_description(m.group(1), m.group(2))[:4000]
+    # Generic fallback: any job with a detail URL whose ATS-specific branch
+    # didn't yield a body (SuccessFactors career sites like Duke/Teleflex whose
+    # slug is unknown, custom boards, Workday rows that arrived without _wd).
+    # Covers the empty-description rows that were silently unscorable.
+    if not job.get("description") and job.get("url"):
+        d = _description_from_job_url(job["url"])
+        if d:
+            job["description"] = d
     return job
+
+
+def _description_from_job_url(url):
+    """Best-effort JD text from a job's own detail page, vendor-agnostically:
+    schema.org JSON-LD JobPosting first (hundreds of sites), then SuccessFactors
+    Career-Site-Builder markup (data-careersite-propertyid='description' — Duke,
+    Teleflex, and other SAP SF frontends). Returns '' on miss."""
+    try:
+        html = SESSION.get(url, timeout=20, headers=HEADERS,
+                           allow_redirects=True).text
+    except Exception:
+        return ""
+    try:
+        from .jsonld import extract_jsonld, is_jobposting, _normalize_description
+        for obj in extract_jsonld(html):
+            if is_jobposting(obj):
+                d = _normalize_description(obj).strip()
+                if len(d) >= 120:
+                    return d[:8000]
+    except Exception:
+        pass
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        el = (soup.select_one('[data-careersite-propertyid="description"]')
+              or soup.select_one('[data-careersite-propertyid="jobdescription"]'))
+        if el:
+            d = el.get_text(" ", strip=True)
+            if len(d) >= 120:
+                return d[:8000]
+    except Exception:
+        pass
+    return ""
 
 
 def hydrate_from_company_board(job, company):

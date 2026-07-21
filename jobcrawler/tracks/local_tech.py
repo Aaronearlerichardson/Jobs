@@ -410,6 +410,35 @@ def run(max_workers=6, top_n=15):
             except Exception as e:
                 print(f"    [!] scoring error: {e}")
 
+    # Self-heal: the fresh-only loop above never revisits an already-stored
+    # job, so a row that was ingested bodyless (unscorable -> NULL score) would
+    # stay out of the ranking forever even once its description is recovered.
+    # Score any NULL-score row that now carries a real body (hydrated by
+    # backfill_board_descriptions, or by an earlier run before this pass).
+    if resume:
+        from ..fit import MIN_DESC_CHARS
+        pending = [dict(r) for r in conn.execute(
+            "SELECT job_id, title, description FROM jobs "
+            "WHERE track = ? AND resume_fit_score IS NULL "
+            "AND length(COALESCE(description,'')) >= ?",
+            (TRACK, MIN_DESC_CHARS)).fetchall()]
+        if pending:
+            print(f"  self-heal: scoring {len(pending)} newly-described "
+                  f"job(s) that were previously unscorable...")
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futs = {ex.submit(score_resume_fit, resume, r["title"],
+                                  r.get("description", "")): r for r in pending}
+                for fut in as_completed(futs):
+                    r = futs[fut]
+                    try:
+                        res = fut.result()
+                    except Exception as e:
+                        print(f"    [!] self-heal scoring error: {e}")
+                        continue
+                    if res.score is not None:
+                        store.update_job_scores(conn, r["job_id"], res.as_columns())
+                        scored += 1
+
     # Geography enforced at the query layer (not the `track` label): only
     # NC-locatable postings appear in the local search, whatever ingested them
     # -- plus explicitly-remote postings (neural/BCI companies only; see
@@ -447,7 +476,7 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200):
     board with several stale rows is fetched once. Safe to re-run."""
     conn = store.connect()
     rows = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, company_id FROM jobs "
+        "SELECT job_id, title, url, company_id FROM jobs "
         "WHERE company_id IS NOT NULL "
         "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
     if limit:
@@ -463,19 +492,30 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200):
         company = store.get_company(conn, cid)
         if not company or not company.get("ats"):
             continue
+        # Batched board pull for the common case (one fetch per company);
+        # boards we can't pull (e.g. SuccessFactors career sites with an
+        # unknown slug — Duke) simply yield no title matches, and each row
+        # falls through to per-job-URL hydration below.
         try:
             board = company_fetch.fetch_company(company, loc_re=None)
         except Exception as e:
             print(f"    [!] {company['name']}: {e}")
-            continue
+            board = []
         by_title = {(b.get("title") or "").strip().lower(): b for b in board}
         n_matched = 0
         for r in rs:
+            desc = None
             match = by_title.get((r["title"] or "").strip().lower())
-            if match is None:
-                continue
-            company_fetch.hydrate_description(match)
-            desc = match.get("description")
+            if match is not None:
+                company_fetch.hydrate_description(match)
+                desc = match.get("description")
+            if not desc and r.get("url"):
+                # Board didn't cover this row — hydrate from the job's own
+                # detail page (JSON-LD / SuccessFactors career-site markup).
+                stub = {"title": r["title"], "url": r["url"],
+                        "ats": company.get("ats"), "description": ""}
+                company_fetch.hydrate_description(stub)
+                desc = stub.get("description")
             if not desc:
                 continue
             conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
