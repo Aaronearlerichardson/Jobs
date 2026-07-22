@@ -458,7 +458,7 @@ def backfill_axis_columns(conn):
 
 
 def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
-                allow_geo_modes=None):
+                allow_geo_modes=None, min_mission=None):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -476,7 +476,17 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     `allow_geo_modes` (an iterable of stored `geo_mode` values, e.g.
     {"remote"}) admits rows that fail `location_re` but whose own geo_mode
     already qualifies them — e.g. a remote neural/BCI posting whose location
-    string reads "Remote", not a Triangle/NC place name."""
+    string reads "Remote", not a Triangle/NC place name.
+
+    `min_mission` drops jobs at companies we positively know are off-mission
+    (effective mission below the floor). Needed when ranking by "fit", which
+    ignores the mission factor entirely: an off-mission employer's senior ML
+    role can otherwise out-rank on-mission work on function/seniority alone
+    (a games studio's rec-sys job at fit 0.40 / mission 0.03). Rows with NO
+    mission score — unlinked or unscored companies — are KEPT, so the floor
+    only removes what has been judged, never what is merely unknown. The
+    multi-division floor is applied first, so a conglomerate's keyword-vetted
+    job isn't dropped for its parent's low corporate score."""
     q = """
       SELECT j.*, c.mission_tier, c.mission_score
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
@@ -490,7 +500,7 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
         rows = [r for r in rows
                 if location_re.search(r.get("location") or "")
                 or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes)]
-    for r in rows:
+    def _effective_mission(r):
         # A conglomerate's own mission score is ~0.05 (off-mission overall),
         # but a job here already passed the health keyword filter at crawl
         # time — so rank it at the keyword-vetted floor, not the company's
@@ -498,7 +508,14 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
         mission = r.get("mission_score")
         if config.is_multi_division(r.get("company_name")):
             mission = max(mission or 0.0, config.MULTI_DIVISION_MISSION_FLOOR)
-        r["combined_score"] = combined_score(r.get("resume_fit_score"), mission)
+        return mission
+
+    for r in rows:
+        r["combined_score"] = combined_score(r.get("resume_fit_score"),
+                                             _effective_mission(r))
+    if min_mission is not None:
+        rows = [r for r in rows
+                if (m := _effective_mission(r)) is None or m >= min_mission]
     # Primary sort key per rank_by, then the other factors as tiebreaks; None
     # sorts last via the -1 sentinel (all real scores are >= 0).
     primary = "resume_fit_score" if rank_by == "fit" else "combined_score"

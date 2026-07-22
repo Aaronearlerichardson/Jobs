@@ -26,6 +26,11 @@ from ..resume import resume_text
 TAG = "[LOCAL-TECH]"
 TRACK = "local-tech"
 
+# Ranking floor on company mission (see the ranked_jobs call in run()). Tier
+# "other" companies score ~0.0-0.15, health/bio/med-tech ones ~0.4-0.97, so 0.2
+# cleanly separates them. Only applied to companies that HAVE been scored.
+MIN_MISSION_FOR_RANKING = 0.2
+
 # --------------------------------------------------------------------------- #
 #  Domain targets — health / bio / science (NOT requiring neural signals).      #
 # --------------------------------------------------------------------------- #
@@ -443,11 +448,18 @@ def run(max_workers=6, top_n=15):
     # NC-locatable postings appear in the local search, whatever ingested them
     # -- plus explicitly-remote postings (neural/BCI companies only; see
     # geo_mode()/_is_neural_tagged()). Rank by résumé fit, not fit×mission:
-    # every local company is the same health-tech mission tier, so the
+    # most local companies sit in the same health-tech mission tier, so the
     # near-constant mission factor only inflates and compresses the ranking.
     # combined is still shown per row.
+    #
+    # But the roster is NOT uniformly on-mission (~70 active companies score
+    # "other"), and ranking on fit alone lets an off-mission employer's senior
+    # ML role win on function/seniority: a games studio rec-sys job ranked top-20
+    # at fit 0.40 against a mission of 0.03. MIN_MISSION_FOR_RANKING drops what
+    # has been *judged* off-mission; jobs with no mission score at all are kept.
     ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE,
-                               rank_by="fit", allow_geo_modes={"remote"})
+                               rank_by="fit", allow_geo_modes={"remote"},
+                               min_mission=MIN_MISSION_FOR_RANKING)
     write_digest(ranked)
 
     print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
