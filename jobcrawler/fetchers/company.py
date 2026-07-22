@@ -562,7 +562,11 @@ def _description_from_job_url(url):
               # job-description"). Kept specific — 'job-description'/'jobDescription',
               # not a bare 'description' — so a short company tagline can't match.
               or soup.select_one('[class*="job-description"]')
-              or soup.select_one('[class*="jobDescription"]'))
+              or soup.select_one('[class*="jobDescription"]')
+              # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template
+              # wraps the posting in .jobDisplay (Teleflex). Last in the chain:
+              # it carries a little page chrome, so the precise containers win.
+              or soup.select_one('[class*="jobDisplay"]'))
         if el:
             d = el.get_text(" ", strip=True)
             if len(d) >= 120:
