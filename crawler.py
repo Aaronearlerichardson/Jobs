@@ -165,8 +165,16 @@ def main():
         tp.add_argument("--backfill-axes", action="store_true",
                         help="Populate the per-axis fit columns from the tag "
                              "already in fit_reason (offline, no API), then stop")
+        tp.add_argument("--check-closed", action="store_true",
+                        help="Probe the job URLs of open rows the crawl's "
+                             "board-diff can't reach (orphans / inactive or "
+                             "board-less companies) and mark dead ones "
+                             "closed, then stop")
         targs = tp.parse_args(passthrough)
-        if targs.backfill_descriptions:
+        if targs.check_closed:
+            from jobcrawler.tracks.local_tech import check_closed_jobs
+            check_closed_jobs(max_workers=targs.workers, limit=targs.limit)
+        elif targs.backfill_descriptions:
             from jobcrawler.fetchers.workday import backfill_workday_descriptions
             backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
         elif targs.backfill_board_descriptions:

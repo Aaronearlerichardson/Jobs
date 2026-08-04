@@ -121,6 +121,71 @@ def main():
     check("seen-jobs dedupe", not store.is_new(conn, "j1") and store.is_new(conn, "j2"))
     conn.close()
 
+    # 9. closed-job lifecycle: board-diff closes / reopens; ranking excludes
+    print("[closed jobs]")
+    conn = store.connect(":memory:")
+    cid = store.upsert_company(conn, {"name": "Y", "ats": "greenhouse", "slug": "y"})
+    for jid, title, url, fit in (("gh_y_1", "Data Engineer", "https://y.io/1", 0.9),
+                                 ("gh_y_2", "ML Engineer", "https://y.io/2", 0.8),
+                                 ("linkedin_aaa", "Platform Engineer",
+                                  "https://linkedin.com/jobs/3", 0.7)):
+        store.upsert_job(conn, {"job_id": jid, "company_id": cid,
+                                "company_name": "Y", "title": title, "url": url,
+                                "location": "Durham, NC", "track": "local-tech",
+                                "resume_fit_score": fit})
+    snap = [{"id": "gh_y_2", "title": "ML Engineer", "url": "https://y.io/2"}]
+    st = lambda j: conn.execute("SELECT status, closed_at FROM jobs WHERE job_id=?",
+                                (j,)).fetchone()
+    store.sync_job_statuses(conn, cid, snap, track="local-tech")
+    check("vanished board-native job closed", st("gh_y_1")["status"] == "closed"
+          and st("gh_y_1")["closed_at"] is not None)
+    check("still-listed job stays open", st("gh_y_2")["status"] == "open")
+    check("fresh external row grace-protected", st("linkedin_aaa")["status"] == "open")
+    ids = [r["job_id"] for r in store.ranked_jobs(conn, track="local-tech")]
+    check("closed excluded from ranking", "gh_y_1" not in ids and "gh_y_2" in ids)
+    check("include_closed readmits", "gh_y_1" in
+          [r["job_id"] for r in store.ranked_jobs(conn, track="local-tech",
+                                                  include_closed=True)])
+    # URL match (not id) keeps an external row open; reappearance reopens
+    snap2 = snap + [{"id": "gh_y_1", "title": "Data Engineer", "url": "https://y.io/1"},
+                    {"id": "gh_y_9", "title": "Staff Something",
+                     "url": "http://linkedin.com/jobs/3/"}]
+    store.sync_job_statuses(conn, cid, snap2, track="local-tech")
+    check("reappeared job reopened", st("gh_y_1")["status"] == "open"
+          and st("gh_y_1")["closed_at"] is None)
+    # external row past grace with no match on a later sync -> closed
+    conn.execute("UPDATE jobs SET first_seen='2020-01-01T00:00:00', "
+                 "last_seen='2020-01-01T00:00:00' WHERE job_id='linkedin_aaa'")
+    conn.commit()
+    store.sync_job_statuses(conn, cid, snap, track="local-tech")
+    check("stale unmatched external row closed",
+          st("linkedin_aaa")["status"] == "closed")
+    # re-upsert (re-ingest/re-capture) reopens and clears closed_at
+    store.upsert_job(conn, {"job_id": "linkedin_aaa", "company_id": cid,
+                            "company_name": "Y", "title": "Platform Engineer",
+                            "url": "https://linkedin.com/jobs/3",
+                            "location": "Durham, NC", "track": "local-tech"})
+    check("re-ingest reopens", st("linkedin_aaa")["status"] == "open"
+          and st("linkedin_aaa")["closed_at"] is None)
+    store.set_job_status(conn, "linkedin_aaa", "closed")
+    store.touch_job(conn, "linkedin_aaa")   # dedupe-path re-sighting
+    check("touch_job reopens + refreshes last_seen",
+          st("linkedin_aaa")["status"] == "open" and conn.execute(
+              "SELECT last_seen FROM jobs WHERE job_id='linkedin_aaa'"
+          ).fetchone()[0] > "2020-01-02")
+    check("empty snapshot never closes",
+          store.sync_job_statuses(conn, cid, [], track="local-tech") == (0, 0))
+    conn.close()
+
+    # 10. probe guards (offline: no network hit for gated hosts / marker regex)
+    print("[closed probe]")
+    check("linkedin probe indeterminate",
+          cf.probe_job_open("https://www.linkedin.com/jobs/view/123")[0] is None)
+    check("closed marker matches",
+          bool(cf._CLOSED_TEXT_RE.search("This position is no longer available")))
+    check("closed-loop JD does not trip marker",
+          not cf._CLOSED_TEXT_RE.search("develop closed-loop neurostimulation"))
+
     print(f"\n{'ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
     sys.exit(1 if FAILS else 0)
 

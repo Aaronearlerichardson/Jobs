@@ -145,6 +145,7 @@ def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200):
     rows = conn.execute(
         "SELECT job_id, url FROM jobs "
         "WHERE url LIKE '%myworkdayjobs.com%' "
+        "AND COALESCE(status,'open') != 'closed' "
         "AND length(COALESCE(description,'')) < ?",
         (min_len,),
     ).fetchall()

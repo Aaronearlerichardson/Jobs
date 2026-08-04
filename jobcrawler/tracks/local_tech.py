@@ -341,6 +341,10 @@ def crawl_company(conn, resume, company, max_workers=6):
     except Exception as e:
         print(f"    [!] fetch error for {company['name']}: {e}")
         return (0, 0, 0)
+    # A successful non-empty snapshot is the authority on what this company
+    # currently lists: close stored rows that vanished, revive returners.
+    if jobs and company.get("id"):
+        store.sync_job_statuses(conn, company["id"], jobs, track=TRACK)
     kept = [j for j in jobs if _keep_job(company, j)]
     fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
     n_new = 0
@@ -388,10 +392,22 @@ def run(max_workers=6, top_n=15):
     fetched = fetch_all(sources)
 
     to_score, n_fetched, n_tech, n_skip = [], 0, 0, 0
+    n_closed = n_reopened = 0
     for c, (jobs, err) in zip(companies, fetched):
         if err is not None:
             print(f"  {c['name']:26} [!] fetch error: {err}")
             continue
+        # Open/closed sync against this fetch. Guarded to non-empty
+        # snapshots: fetchers soft-fail to [] (dead board, HTTP 404), which
+        # must never read as "every job here closed".
+        status_note = ""
+        if jobs and c.get("id"):
+            n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs, track=TRACK)
+            n_reopened += n_re
+            n_closed += n_cl
+            if n_cl or n_re:
+                status_note = (f"  [{n_cl} closed"
+                               + (f", {n_re} reopened" if n_re else "") + "]")
         n_fetched += len(jobs)
         kept = [j for j in jobs if _keep_job(c, j)]
         n_tech += len(kept)
@@ -401,7 +417,7 @@ def run(max_workers=6, top_n=15):
             to_score.append((c, j))
         scope = "brd" if _is_neural_tagged(c) else "NC "
         print(f"  {c['name']:26} {len(jobs):3} {scope} -> {len(kept):2} technical "
-              f"-> {len(fresh):2} new")
+              f"-> {len(fresh):2} new{status_note}")
 
     print(f"\n  scoring {len(to_score)} new job(s) against resume "
           f"({n_skip} already scored)...")
@@ -425,6 +441,7 @@ def run(max_workers=6, top_n=15):
         pending = [dict(r) for r in conn.execute(
             "SELECT job_id, title, description FROM jobs "
             "WHERE track = ? AND resume_fit_score IS NULL "
+            "AND COALESCE(status,'open') != 'closed' "
             "AND length(COALESCE(description,'')) >= ?",
             (TRACK, MIN_DESC_CHARS)).fetchall()]
         if pending:
@@ -472,7 +489,8 @@ def run(max_workers=6, top_n=15):
         print(f"  {TAG} fit={fs} (combined={cs}) [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}")
         print(f"        {j['company_name']} ({tier})  -  {j.get('fit_reason','')}")
         print(f"        {j['url']}")
-    print(f"\n  {len(ranked)} job(s) in store; {scored} newly scored this run.")
+    print(f"\n  {len(ranked)} open job(s) in ranking; {scored} newly scored, "
+          f"{n_closed} marked closed, {n_reopened} reopened this run.")
     print(f"  *** NO EMAIL SENT (preview) ***\n")
     return ranked
 
@@ -490,6 +508,7 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200):
     rows = [dict(r) for r in conn.execute(
         "SELECT job_id, title, url, company_id FROM jobs "
         "WHERE company_id IS NOT NULL "
+        "AND COALESCE(status,'open') != 'closed' "
         "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
     if limit:
         rows = rows[:int(limit)]
@@ -550,6 +569,9 @@ def rescore_all(max_workers=6, track=None, described_only=False):
     entirely, leaving their scores untouched). Without it, a row with no body
     is unscorable, so its stale score is cleared to NULL so it drops out of
     ranking; a *described* row that merely fails to parse keeps its old score.
+
+    Closed jobs are always skipped — no Claude API spend on postings that
+    are already gone (they're excluded from ranking anyway).
     """
     from ..fit import MIN_DESC_CHARS
     resume = resume_text()
@@ -557,7 +579,7 @@ def rescore_all(max_workers=6, track=None, described_only=False):
         print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
         return 0
     conn = store.connect()
-    conds, args = [], []
+    conds, args = ["COALESCE(status,'open') != 'closed'"], []
     if track:
         conds.append("track = ?")
         args.append(track)
@@ -596,6 +618,53 @@ def rescore_all(max_workers=6, track=None, described_only=False):
     conn.close()
     print(f"  {n} job(s) rescored.")
     return n
+
+
+def check_closed_jobs(max_workers=8, limit=None):
+    """Probe the detail URLs of OPEN rows the crawl's board-diff can never
+    reach — rows with no company link, or whose company is inactive or has
+    no fetchable board — and close the ones that are positively dead
+    (HTTP 404/410, an ATS "no longer accepting" notice, a past JSON-LD
+    validThrough, a Workday CXS miss). Indeterminate probes (bot-gated
+    aggregator hosts like LinkedIn, JS-only pages) leave the row untouched.
+
+    Rows at active board companies are NOT probed: the live crawl's
+    sync_job_statuses already settles those authoritatively on every run.
+    """
+    conn = store.connect()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT j.job_id, j.title, j.company_name, j.url "
+        "FROM jobs j LEFT JOIN companies c ON j.company_id = c.id "
+        "WHERE COALESCE(j.status,'open') != 'closed' "
+        "AND (c.id IS NULL OR c.active != 1 OR c.ats IS NULL) "
+        "ORDER BY j.company_name").fetchall()]
+    if limit:
+        rows = rows[:int(limit)]
+    print(f"  probing {len(rows)} open job(s) outside board coverage...")
+
+    n_closed = n_live = n_unknown = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(company_fetch.probe_job_open, r["url"]): r
+                for r in rows}
+        for fut in as_completed(futs):
+            r = futs[fut]
+            try:
+                is_open, reason = fut.result()
+            except Exception as e:
+                is_open, reason = None, f"probe error: {e}"
+            label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
+            if is_open is False:
+                store.set_job_status(conn, r["job_id"], "closed")
+                n_closed += 1
+                print(f"    [closed] {label} {reason}")
+            elif is_open:
+                n_live += 1
+            else:
+                n_unknown += 1
+    conn.close()
+    print(f"  {n_closed} closed, {n_live} confirmed live, "
+          f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
+    return n_closed
 
 
 def _hydrate_missing_descriptions(conn, jobs):
@@ -675,7 +744,11 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
                 continue
             if not is_technical_role(j.get("title", "")):
                 continue
-        if not store.job_exists(conn, j["id"]):
+        if store.job_exists(conn, j["id"]):
+            # Already stored — but the source just showed it live, so reopen
+            # a closed row and reset its grace clock (no re-score).
+            store.touch_job(conn, j["id"])
+        else:
             # Resolve the company link on the MAIN thread — SQLite connections
             # can't cross into the scoring pool below. Link to a vetted company
             # row when the name matches, so the job inherits its mission score
@@ -797,7 +870,8 @@ def write_digest(ranked):
     path = config.REPORT_DIR / f"local_tech_{datetime.now():%Y-%m-%d}.md"
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {TAG} Job Digest — {datetime.now():%Y-%m-%d}\n\n")
-        f.write(f"**{len(ranked)} job(s)**, ranked by resume fit "
+        f.write(f"**{len(ranked)} open job(s)** (closed postings excluded), "
+                f"ranked by resume fit "
                 f"(combined = sqrt(resume-fit x company-mission), shown for reference).\n\n")
         f.write("| Fit | Combined | Company | Mission | Title | Location | Why |\n")
         f.write("|----:|---------:|---------|---------|-------|----------|-----|\n")

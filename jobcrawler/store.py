@@ -12,7 +12,7 @@ Design (merged from both development tracks):
 import math
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     fit_reason     TEXT,
     first_seen     TEXT,
     last_seen      TEXT,
-    status         TEXT DEFAULT 'open'
+    status         TEXT DEFAULT 'open'   -- open|closed (see sync_job_statuses)
 );
 """
 
@@ -103,6 +103,9 @@ _MIGRATIONS = {
         "fit_stack":       "REAL",
         "fit_seniority":   "REAL",
         "fit_gates":       "TEXT",   # comma-joined tripped gate names, or NULL
+        # When status flipped to 'closed' (NULL while open). Set by
+        # sync_job_statuses / set_job_status, cleared on reopen.
+        "closed_at":       "TEXT",
     },
 }
 
@@ -393,7 +396,9 @@ def upsert_job(conn, j):
              fit_seniority=COALESCE(excluded.fit_seniority, fit_seniority),
              fit_gates=COALESCE(excluded.fit_gates, fit_gates),
              last_seen=excluded.last_seen,
-             status=excluded.status""",
+             status=excluded.status,
+             closed_at=CASE WHEN excluded.status='closed'
+                            THEN closed_at ELSE NULL END""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
          j.get("url"), j.get("location"), j.get("track"), j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("neural_signal"),
@@ -405,6 +410,118 @@ def upsert_job(conn, j):
     )
     conn.commit()
     return new
+
+
+# --------------------------------------------------------------------------- #
+#  Open/closed status                                                           #
+# --------------------------------------------------------------------------- #
+
+def _norm_title(t):
+    return re.sub(r"\s+", " ", (t or "")).strip().lower()
+
+
+def _norm_url(u):
+    """Scheme/query/fragment/trailing-slash-insensitive URL key."""
+    u = (u or "").strip().lower()
+    u = re.sub(r"^https?://", "", u)
+    return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+def set_job_status(conn, job_id, status):
+    """Mark one job 'open' or 'closed' directly (closed_at maintained)."""
+    conn.execute(
+        "UPDATE jobs SET status=?, closed_at=? WHERE job_id=?",
+        (status, datetime.now().isoformat() if status == "closed" else None,
+         job_id))
+    conn.commit()
+
+
+def touch_job(conn, job_id):
+    """Record that a job was just observed live at its source — reopen it and
+    refresh last_seen, touching nothing else. For dedupe paths that skip the
+    full upsert (e.g. a re-captured LinkedIn card already in the store): the
+    sighting must still reset the closed flag and the external-row grace
+    clock (see sync_job_statuses), or the next board sync could re-close a
+    posting the user just saw live."""
+    conn.execute(
+        "UPDATE jobs SET status='open', closed_at=NULL, last_seen=? "
+        "WHERE job_id=?", (datetime.now().isoformat(), job_id))
+    conn.commit()
+
+
+def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
+                      external_grace_days=3):
+    """Reconcile ONE company's stored jobs against a live board snapshot
+    (`fetched_jobs`: dicts with id/title/url, as returned by
+    fetchers.company.fetch_company). Rows matched by job_id, URL, or
+    normalized title are (re)marked open and their last_seen touched; rows
+    that have vanished from the snapshot are marked closed. Returns
+    (n_reopened, n_closed).
+
+    Caller contract: only pass a snapshot from a SUCCESSFUL, non-empty fetch
+    — fetchers soft-fail to [] (HTTP 404, non-JSON), which is
+    indistinguishable from a genuinely emptied board, so an empty snapshot
+    must never close anything (this function no-ops on one).
+
+    Matching is deliberately three-keyed: externally-ingested rows
+    (LinkedIn captures, NLx, manual --add) carry job_ids a board fetch will
+    never mint, but usually share the posting's title/URL.
+
+    Close rules:
+      * A row whose job_id lives in the snapshot's OWN id namespace (same
+        "<ats>_<key>_" prefix as some snapshot id) is closed immediately —
+        the board is authoritative for its own ids. A partial fetch (e.g.
+        Workday pagination dying mid-board) can close rows spuriously, but
+        the next full fetch reopens them (matched rows always flip back).
+      * Any other row (external namespace) is closed only after
+        `external_grace_days` without being seen, so a manual --add or a
+        fresh LinkedIn capture isn't insta-closed just because its title
+        doesn't exactly match a board row.
+      * When `track` is given, only rows of that track are ever CLOSED
+        (matched rows are reopened regardless — they're live on the board).
+    """
+    if not company_id or not fetched_jobs:
+        return (0, 0)
+    ids = {j.get("id") for j in fetched_jobs if j.get("id")}
+    urls = {u for u in (_norm_url(j.get("url")) for j in fetched_jobs) if u}
+    titles = {t for t in (_norm_title(j.get("title")) for j in fetched_jobs) if t}
+    # "gh_<slug>_123" -> "gh_<slug>_": the id namespace(s) this snapshot
+    # covers. First TWO tokens, not rsplit — the per-job tail may itself
+    # carry underscores ("wd_amgen_<Title-Slug>_R-250290"). Single-token-tail
+    # ids ("custom_<blob>") degrade to a full-id prefix, i.e. those rows only
+    # ever close via the grace path — right for the flakiest scraped boards.
+    prefixes = {"_".join(i.split("_", 2)[:2]) + "_" for i in ids if "_" in i}
+    now = datetime.now().isoformat()
+    grace_cutoff = (datetime.now()
+                    - timedelta(days=external_grace_days)).isoformat()
+    n_reopened = n_closed = 0
+    rows = conn.execute(
+        "SELECT job_id, url, title, track, status, first_seen, last_seen "
+        "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
+    for r in rows:
+        present = (r["job_id"] in ids
+                   or _norm_url(r["url"]) in urls
+                   or _norm_title(r["title"]) in titles)
+        if present:
+            if (r["status"] or "open") != "open":
+                n_reopened += 1
+            conn.execute(
+                "UPDATE jobs SET status='open', closed_at=NULL, last_seen=? "
+                "WHERE job_id=?", (now, r["job_id"]))
+            continue
+        if track is not None and r["track"] != track:
+            continue
+        if (r["status"] or "open") == "closed":
+            continue
+        board_native = any(r["job_id"].startswith(p) for p in prefixes)
+        seen = r["last_seen"] or r["first_seen"] or ""
+        if board_native or seen < grace_cutoff:   # ISO strings sort by time
+            conn.execute(
+                "UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?",
+                (now, r["job_id"]))
+            n_closed += 1
+    conn.commit()
+    return (n_reopened, n_closed)
 
 
 # Fit columns written together by the rescore path (see update_job_scores).
@@ -458,7 +575,7 @@ def backfill_axis_columns(conn):
 
 
 def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
-                allow_geo_modes=None, min_mission=None):
+                allow_geo_modes=None, min_mission=None, include_closed=False):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -486,15 +603,23 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     mission score — unlinked or unscored companies — are KEPT, so the floor
     only removes what has been judged, never what is merely unknown. The
     multi-division floor is applied first, so a conglomerate's keyword-vetted
-    job isn't dropped for its parent's low corporate score."""
+    job isn't dropped for its parent's low corporate score.
+
+    Jobs marked closed (status='closed' — vanished from their company's
+    board, or probed dead; see sync_job_statuses) are excluded unless
+    `include_closed=True`."""
     q = """
       SELECT j.*, c.mission_tier, c.mission_score
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
     """
-    args = []
+    conds, args = [], []
     if track:
-        q += " WHERE j.track = ?"
+        conds.append("j.track = ?")
         args.append(track)
+    if not include_closed:
+        conds.append("COALESCE(j.status,'open') != 'closed'")
+    if conds:
+        q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
     if location_re is not None:
         rows = [r for r in rows

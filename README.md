@@ -290,6 +290,32 @@ only touches `myworkdayjobs.com` URLs missing a body). Run the backfill, then
 top are cleared out. Use `--rescore` after changing your resume, the `[fit]`
 block, or the prompt — a normal crawl only scores jobs it hasn't seen.
 
+### Closed-job tracking
+
+```
+python crawler.py --track local-tech                        # crawl also syncs open/closed per board
+python crawler.py --track local-tech --check-closed         # probe rows the crawl can't reach
+python crawler.py --track local-tech --check-closed --limit 20
+```
+
+Every job row carries `status` (`open`/`closed`) and `closed_at`. The crawl
+marks them itself: each successful, non-empty board fetch is treated as the
+authoritative list of what that company currently posts — stored rows that
+vanished from it are closed (matched by job id, URL, or title, so
+LinkedIn-captured rows with foreign ids are matched too; external-id rows get
+a few days' grace before closing so a fresh manual `--add` isn't insta-closed
+on a title mismatch), and rows that reappear are reopened. Empty or failed
+fetches never close anything, so a dead board can't nuke its history.
+`--check-closed` covers the rest — rows at inactive/board-less companies —
+by probing each job URL for definite death signals (404/410, "no longer
+accepting applications" notices, past JSON-LD `validThrough`, a Workday CXS
+miss); indeterminate probes (e.g. bot-gated LinkedIn URLs) leave rows open.
+
+Closed jobs drop out of `ranked_jobs()` (the top-N digest) automatically and
+are skipped by `--rescore` and both description backfills, so no Claude API
+or hydration spend goes to dead postings. Re-seeing a job anywhere — a crawl,
+a re-capture, an ingest — reopens it.
+
 ---
 
 ## Customizing — `profile.toml`

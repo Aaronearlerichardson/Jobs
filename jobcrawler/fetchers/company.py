@@ -576,6 +576,93 @@ def _description_from_job_url(url):
     return ""
 
 
+# --- open/closed probing --------------------------------------------------- #
+# Standard "this posting is gone" notices across ATS templates. Curated and
+# phrase-anchored (never a bare "closed"/"expired") so an open JD that merely
+# mentions e.g. "closed-loop systems" can't trip it.
+_CLOSED_TEXT_RE = re.compile("|".join((
+    r"no longer (open|available|active|posted|accepting applications)",
+    r"(position|role|job|posting|vacancy|requisition) (has been|is|was) "
+    r"(filled|closed|cancell?ed|removed)",
+    r"(job|position|posting|vacancy) (has |is )?expired",
+    r"not currently accepting applications",
+    r"this (job|position|posting) is (closed|inactive|unavailable)",
+    r"job (posting )?not found",
+)), re.I)
+
+# Hosts that bot-gate anonymous GETs (authwalls/999s): a probe there says
+# nothing about the posting, so report "unverifiable", never "closed".
+_GATED_HOST_RE = re.compile(
+    r"linkedin\.com|indeed\.com|glassdoor\.|ziprecruiter\.com|"
+    r"simplyhired\.com|monster\.com", re.I)
+
+
+def probe_job_open(url):
+    """Best-effort liveness check of one job's own detail URL.
+
+    Returns (is_open, reason): True = positively live, False = positively
+    closed, None = indeterminate (bot-gated host, fetch error, or a 200 with
+    no recognizable signal) — callers must leave stored status alone on None.
+    Only used for rows the crawl's board-diff can't cover (see
+    tracks.local_tech.check_closed_jobs); board snapshots are authoritative
+    where available.
+    """
+    if not url:
+        return None, "no url"
+    if _GATED_HOST_RE.search(url):
+        return None, "bot-gated aggregator host"
+
+    # Workday: the CXS JSON detail endpoint is authoritative and JS-free.
+    from .workday import _cxs_detail_url
+    cxs = _cxs_detail_url(url)
+    if cxs:
+        try:
+            r = SESSION.get(cxs, timeout=20,
+                            headers={**HEADERS, "Accept": "application/json"})
+        except Exception as e:
+            return None, f"workday cxs fetch error: {e}"
+        if r.status_code in (404, 410):
+            return False, f"workday cxs HTTP {r.status_code}"
+        if r.status_code != 200:
+            return None, f"workday cxs HTTP {r.status_code}"
+        try:
+            info = r.json().get("jobPostingInfo") or {}
+        except ValueError:
+            return None, "workday cxs non-JSON"
+        if info.get("jobDescription") or info.get("title"):
+            return True, "workday cxs: posting live"
+        return False, "workday cxs: no jobPostingInfo"
+
+    try:
+        r = SESSION.get(url, timeout=20, headers=HEADERS, allow_redirects=True)
+    except Exception as e:
+        return None, f"fetch error: {e}"
+    if r.status_code in (404, 410):
+        return False, f"HTTP {r.status_code}"
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}"
+    html = r.text[:200_000]
+    m = _CLOSED_TEXT_RE.search(html)
+    if m:
+        return False, f"page says {m.group(0)[:50]!r}"
+    # Greenhouse silently redirects a closed job's URL back to the board root.
+    if "greenhouse.io" in url:
+        tail = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
+        if tail and tail not in (r.url or ""):
+            return False, "greenhouse redirect off job page"
+    try:
+        from .jsonld import extract_jsonld, is_jobposting
+        for obj in extract_jsonld(html):
+            if is_jobposting(obj):
+                vt = str(obj.get("validThrough") or "")[:10]
+                if vt and vt < time.strftime("%Y-%m-%d"):
+                    return False, f"validThrough {vt} past"
+                return True, "JSON-LD JobPosting live"
+    except Exception:
+        pass
+    return None, "no closed signal"
+
+
 def hydrate_from_company_board(job, company):
     """Backfill an empty description by title-matching this job against its
     company's own ATS board (a full, ungated FETCHERS pull).
