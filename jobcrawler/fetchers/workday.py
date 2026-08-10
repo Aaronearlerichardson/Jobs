@@ -18,9 +18,11 @@ from urllib.parse import urlparse
 
 import requests
 
+import config
+
 from ..filters import is_relevant
 from ..http import HEADERS
-from ..util import stable_id
+from ..util import norm_posted_date, stable_id
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 
@@ -127,6 +129,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
                 "url":         f"{link_base}{path}" if path else host,
                 "location":    loc,
                 "description": desc or posted,
+                "posted_at":   norm_posted_date(posted),
             })
 
         if len(postings) < page_size:
@@ -167,7 +170,7 @@ def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200):
             if not text:
                 continue
             conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                         (text[:8000], jid))
+                         (text[:config.MAX_DESC_CHARS], jid))
             conn.commit()
             n += 1
     conn.close()

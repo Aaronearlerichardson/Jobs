@@ -114,11 +114,35 @@ Rules:
 - Return ONLY valid JSON. No markdown, no commentary."""
 
 
-def call_claude_json(system_prompt, user_content, max_tokens=1000):
-    """POST to /v1/messages, return the JSON block from the text response."""
+# 5-family models run ADAPTIVE THINKING when the `thinking` param is omitted,
+# and max_tokens caps thinking + response text TOGETHER — an unguarded upgrade
+# would let thinking eat a 300-token scoring budget and truncate the JSON.
+# For these models we explicitly disable thinking unless the caller opts in.
+_THINKING_DEFAULT_MODELS = ("claude-sonnet-5", "claude-opus-5",
+                            "claude-fable-5", "claude-mythos-5")
+
+
+def call_claude_json(system_prompt, user_content, max_tokens=1000,
+                     model=None, thinking=False):
+    """POST to /v1/messages, return the JSON block from the text response.
+
+    `model` overrides config.CLAUDE_MODEL for this call (the deep-verify
+    pass runs a stronger model than the screen). `thinking=True` leaves the
+    model's default adaptive thinking on (5-family models) — pair it with a
+    max_tokens large enough for thinking + the JSON; the default False
+    pins thinking off so small structured calls can't be truncated by it."""
     if ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
         print("  [!] Set ANTHROPIC_API_KEY env var (or edit config.py).")
         return {}
+    use_model = model or CLAUDE_MODEL
+    payload = {
+        "model":      use_model,
+        "max_tokens": max_tokens,
+        "system":     system_prompt,
+        "messages":   [{"role": "user", "content": user_content}],
+    }
+    if not thinking and use_model.startswith(_THINKING_DEFAULT_MODELS):
+        payload["thinking"] = {"type": "disabled"}
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -127,20 +151,24 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000):
                 "anthropic-version": "2023-06-01",
                 "content-type":      "application/json",
             },
-            json={
-                "model":      CLAUDE_MODEL,
-                "max_tokens": max_tokens,
-                "system":     system_prompt,
-                "messages":   [{"role": "user", "content": user_content}],
-            },
-            timeout=60,
+            json=payload,
+            timeout=120,
         )
         r.raise_for_status()
+        data = r.json()
         text = next(
-            (b["text"] for b in r.json().get("content", []) if b.get("type") == "text"),
-            "{}",
+            (b["text"] for b in data.get("content", []) if b.get("type") == "text"),
+            "",
         )
         cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
+        if not cleaned:
+            # Two "no answer" shapes that aren't parse errors: adaptive
+            # thinking exhausting max_tokens before any text lands
+            # (stop_reason max_tokens — raise the caller's budget), and a
+            # safety refusal (stop_reason refusal — no text block at all).
+            print(f"  [!] Claude returned no text "
+                  f"(stop_reason={data.get('stop_reason')})")
+            return {}
         return json.loads(cleaned)
     except requests.HTTPError as e:
         body = getattr(e.response, "text", "")[:300]
@@ -232,7 +260,8 @@ def score_technical_bar(title, description=""):
     Falls back to ``(None, "", None)`` when the API key is unset or the call
     fails, so callers can degrade to a heuristic without crashing.
     """
-    desc = (description or "")[:2500]
+    from jobcrawler.fit import clip_desc
+    desc = clip_desc(description or "")
     user = f"TITLE: {title}\n\nDESCRIPTION:\n{desc or '(no description provided)'}"
     result = call_claude_json(_TECH_BAR_SCORE_SYSTEM, user, max_tokens=120)
     if not result or "score" not in result:

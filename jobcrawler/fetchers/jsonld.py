@@ -21,6 +21,7 @@ from bs4 import BeautifulSoup
 
 from ..filters import is_relevant
 from ..http import HEADERS
+from ..util import norm_posted_date as _norm_posted
 from ..util import stable_id
 
 
@@ -110,6 +111,7 @@ def _job_from_posting(jp, company_name, source_url):
         "url":         str(job_url) if job_url else source_url,
         "location":    location,
         "description": description,
+        "posted_at":   _norm_posted(jp.get("datePosted")),
     }
     # Structured remote signal — schema.org marks remote roles explicitly.
     if str(jp.get("jobLocationType", "")).upper() == "TELECOMMUTE":

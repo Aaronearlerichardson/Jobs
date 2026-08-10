@@ -28,6 +28,11 @@ _ANCHORS_ONLY = SoupStrainer("a")
 
 from ..http import HEADERS, SESSION
 from ..nc import NC_RE  # Triangle/NC locality — the local track's location gate
+from ..util import norm_posted_date
+
+# JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
+# scoring prompt, so a long posting's requirements block survives end to end.
+_DESC_MAX = config.MAX_DESC_CHARS
 
 
 def _loc_ok(loc_re, text):
@@ -66,7 +71,9 @@ def fetch_greenhouse_all(slug, loc_re=None):
             desc = BeautifulSoup(j.get("content", "") or "", "html.parser").get_text(" ")
             out.append({"id": f"gh_{slug}_{j.get('id')}", "title": j.get("title", ""),
                         "url": j.get("absolute_url", ""), "location": loc,
-                        "description": desc[:4000], "ats": "greenhouse", "_wd": None})
+                        "description": desc[:_DESC_MAX], "ats": "greenhouse", "_wd": None,
+                        "posted_at": norm_posted_date(j.get("first_published")
+                                                      or j.get("updated_at"))})
     except Exception as e:
         print(f"    [!] greenhouse {slug}: {e}")
     return out
@@ -85,8 +92,9 @@ def fetch_lever_all(slug, loc_re=None):
                 continue
             out.append({"id": f"lv_{slug}_{j.get('id')}", "title": j.get("text", ""),
                         "url": j.get("hostedUrl", ""), "location": loc,
-                        "description": (j.get("descriptionPlain") or "")[:4000],
-                        "ats": "lever", "_wd": None})
+                        "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
+                        "ats": "lever", "_wd": None,
+                        "posted_at": norm_posted_date(j.get("createdAt"))})
     except Exception as e:
         print(f"    [!] lever {slug}: {e}")
     return out
@@ -105,8 +113,10 @@ def fetch_ashby_all(slug, loc_re=None):
                 continue
             out.append({"id": f"ashby_{slug}_{j.get('id')}", "title": j.get("title", ""),
                         "url": j.get("jobUrl", "") or f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
-                        "location": loc, "description": (j.get("descriptionPlain") or "")[:4000],
-                        "ats": "ashby", "_wd": None})
+                        "location": loc, "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
+                        "ats": "ashby", "_wd": None,
+                        "posted_at": norm_posted_date(j.get("publishedDate")
+                                                      or j.get("publishedAt"))})
     except Exception as e:
         print(f"    [!] ashby {slug}: {e}")
     return out
@@ -145,7 +155,10 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolin
             out.append({"id": f"wd_{tenant}_{jid}", "title": p.get("title", ""),
                         "url": f"{link}{path}" if path else host, "location": loc,
                         "description": "", "ats": "workday",
-                        "_wd": (tenant, pod, site, path)})
+                        "_wd": (tenant, pod, site, path),
+                        # relative text ("Posted 30+ Days Ago") — approximate
+                        "posted_at": norm_posted_date(p.get("postedOnDate")
+                                                      or p.get("postedOn"))})
         if len(posts) < page_size:
             break
     return out
@@ -175,7 +188,8 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
             out.append({"id": f"sr_{slug}_{pid}", "title": p.get("name", ""),
                         "url": f"https://jobs.smartrecruiters.com/{slug}/{pid}",
                         "location": loc_s, "description": "", "ats": "smartrecruiters",
-                        "_wd": None, "_sr": (slug, pid)})
+                        "_wd": None, "_sr": (slug, pid),
+                        "posted_at": norm_posted_date(p.get("releasedDate"))})
         if len(content) < 100:
             break
     return out
@@ -499,7 +513,7 @@ def hydrate_description(job):
         try:
             r = SESSION.get(api, timeout=20, headers={**HEADERS, "Accept": "application/json"})
             html = r.json().get("jobPostingInfo", {}).get("jobDescription", "") or ""
-            job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:4000]
+            job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:_DESC_MAX]
         except Exception:
             pass
     elif job.get("ats") == "smartrecruiters" and job.get("_sr"):
@@ -511,19 +525,19 @@ def hydrate_description(job):
             parts = [secs.get(k, {}).get("text", "") for k in
                      ("jobDescription", "qualifications", "additionalInformation")]
             html = " ".join(p for p in parts if p)
-            job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:4000]
+            job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:_DESC_MAX]
         except Exception:
             pass
     elif job.get("ats") == "paylocity":
         m = re.search(r"/Details/(\d+)", job.get("url", "") or "")
         if m:
             from .paylocity import fetch_description
-            job["description"] = fetch_description(m.group(1))[:4000]
+            job["description"] = fetch_description(m.group(1))[:_DESC_MAX]
     elif job.get("ats") == "rippling":
         m = re.search(r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", job.get("url", "") or "")
         if m:
             from .rippling import fetch_description
-            job["description"] = fetch_description(m.group(1), m.group(2))[:4000]
+            job["description"] = fetch_description(m.group(1), m.group(2))[:_DESC_MAX]
     # Generic fallback: any job with a detail URL whose ATS-specific branch
     # didn't yield a body (SuccessFactors career sites like Duke/Teleflex whose
     # slug is unknown, custom boards, Workday rows that arrived without _wd).
@@ -551,7 +565,7 @@ def _description_from_job_url(url):
             if is_jobposting(obj):
                 d = _normalize_description(obj).strip()
                 if len(d) >= 120:
-                    return d[:8000]
+                    return d[:_DESC_MAX]
     except Exception:
         pass
     try:
@@ -570,7 +584,7 @@ def _description_from_job_url(url):
         if el:
             d = el.get_text(" ", strip=True)
             if len(d) >= 120:
-                return d[:8000]
+                return d[:_DESC_MAX]
     except Exception:
         pass
     return ""

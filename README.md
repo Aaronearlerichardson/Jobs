@@ -290,26 +290,96 @@ only touches `myworkdayjobs.com` URLs missing a body). Run the backfill, then
 top are cleared out. Use `--rescore` after changing your resume, the `[fit]`
 block, or the prompt — a normal crawl only scores jobs it hasn't seen.
 
+### Deep verification & the watchlist
+
+```
+python crawler.py --track local-tech                     # crawl deep-verifies the top N before writing the digest
+python crawler.py --track local-tech --no-verify         # skip the second pass
+python crawler.py --track local-tech --verify-top 15     # re-verify the current top 15 (no crawl), rewrite digest
+python crawler.py --watch "Ceribell"                     # never miss a new technical posting there
+python crawler.py --unwatch "Ceribell"
+```
+
+Scoring is two-pass. The **screen** scores every new job once on up to
+`config.MAX_DESC_CHARS` of text (one budget shared by fetchers, storage, and
+the prompt; clipping keeps head + tail so a requirements block at the end of a
+long JD survives). The **deep verify** pass then re-reads the finalists' full
+postings (live detail fetch — Workday CXS / Greenhouse API / JSON-LD — over
+stored text), first extracting hard requirements (years, seat type,
+must-haves, candidate gaps) and only then re-scoring all axes and gates;
+demotions re-rank and newly-promoted rows get verified too. Born of a real
+failure: a 20k-char Ceribell "Sr Manager, Applied AI" JD scored 0.69 off its
+EEG preamble while "8+ years program management + end-to-end GCP" sat past
+every truncation cap — the fixed pipeline gates it as the management seat it
+is (`management` gate, and the domain axis now scores the role's own work,
+not the employer's halo).
+
+**Watched companies** (`--watch`) get their whole board fetched every crawl,
+and every new technical posting there is flagged in a dedicated digest
+section regardless of fit rank or geography — the "wait for the right role
+at this employer" list.
+
+### Dispositions — record your decisions, teach the scorer
+
+```
+python crawler.py --mark applied gh_beaconbiosignals_4361153009
+python crawler.py --mark dismissed 6113860004 --why "TPM seat, wrong archetype"
+python crawler.py --mark saved <url>          # shortlist; stays in the ranking
+python crawler.py --mark clear <job>          # undo
+python crawler.py --pipeline                  # everything you've dispositioned
+```
+
+`JOB` is a job_id, any unique fragment of one, or the posting URL.
+Dispositions: `saved` (shortlisted — stays ranked), `applied` / `interviewing`
+(move to the digest's **pipeline** section, which also flags when a posting
+closes after you applied), `rejected` / `dismissed` (leave the ranking).
+Rows out of the ranking are also skipped by `--rescore`, self-heal, and
+verification — no API spend on decided jobs.
+
+The feedback loop: your most recent applied/dismissed decisions are injected
+into the fit-scoring prompt as few-shot calibration, with `--why` notes
+verbatim — so "dismissed: TPM seat, wrong archetype" teaches the screen to
+score the next such posting down. Tune the count via profile.toml `[fit]
+disposition_examples` (0 disables).
+
+### Posting dates & freshness
+
+Every board fetch now captures the posting's real publish date
+(`posted_at`: Greenhouse `first_published`, Lever `createdAt`, Ashby,
+SmartRecruiters `releasedDate`, JSON-LD `datePosted`, Workday's relative
+"Posted N Days Ago" — approximate, "30+" is a floor). The status sync
+backfills dates for already-stored rows on every crawl, so coverage grows
+with zero extra requests. SuccessFactors/custom boards publish no dates and
+show `?`. The console top-N and the digest carry an **Age** tag: `NEW` =
+first seen today, `Nd` = days since posted, `!` = 45+ days (often a ghost
+req), `?` = unknown. `first_seen` (when the crawler noticed it) is
+deliberately kept separate from `posted_at` (when it actually went up).
+
 ### Closed-job tracking
 
 ```
 python crawler.py --track local-tech                        # crawl also syncs open/closed per board
-python crawler.py --track local-tech --check-closed         # probe rows the crawl can't reach
-python crawler.py --track local-tech --check-closed --limit 20
+python crawler.py --track local-tech --sync-status          # reconcile statuses only (no scoring/API) + rewrite digest
+python crawler.py --track local-tech --check-closed         # probe rows no board has vouched for lately
+python crawler.py --track local-tech --check-closed --stale-days 5 --limit 20
 ```
 
 Every job row carries `status` (`open`/`closed`) and `closed_at`. The crawl
 marks them itself: each successful, non-empty board fetch is treated as the
 authoritative list of what that company currently posts — stored rows that
-vanished from it are closed (matched by job id, URL, or title, so
-LinkedIn-captured rows with foreign ids are matched too; external-id rows get
-a few days' grace before closing so a fresh manual `--add` isn't insta-closed
-on a title mismatch), and rows that reappear are reopened. Empty or failed
-fetches never close anything, so a dead board can't nuke its history.
-`--check-closed` covers the rest — rows at inactive/board-less companies —
-by probing each job URL for definite death signals (404/410, "no longer
-accepting applications" notices, past JSON-LD `validThrough`, a Workday CXS
-miss); indeterminate probes (e.g. bot-gated LinkedIn URLs) leave rows open.
+vanished from it are closed and rows that reappear are reopened. Rows whose
+id came from the board itself match by **exact id only** (boards recycle
+titles across requisitions, so one live "Algorithm Engineer" must not shield
+five dead ones); externally-ingested rows (LinkedIn captures, `--add`) can
+never id-match, so they match by URL/title and get a few days' grace before
+closing. Empty or failed fetches never close anything, so a dead board can't
+nuke its history. `--check-closed` covers what board fetches can't vouch for
+— orphans, inactive companies, and boards that died or moved (a renamed
+Greenhouse slug) — by probing each job URL for definite death signals
+(404/410, "no longer accepting" notices, past JSON-LD `validThrough`, a
+Workday CXS miss); indeterminate probes (e.g. bot-gated LinkedIn URLs) leave
+rows open. `--sync-status` re-fetches every active board and reconciles
+statuses without scoring anything — the cheap recovery pass.
 
 Closed jobs drop out of `ranked_jobs()` (the top-N digest) automatically and
 are skipped by `--rescore` and both description backfills, so no Claude API

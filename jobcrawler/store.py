@@ -106,8 +106,24 @@ _MIGRATIONS = {
         # When status flipped to 'closed' (NULL while open). Set by
         # sync_job_statuses / set_job_status, cleared on reopen.
         "closed_at":       "TEXT",
+        # Real posting date from the board (YYYY-MM-DD; first-known wins).
+        # first_seen is when WE noticed it; posted_at is when it went up.
+        "posted_at":       "TEXT",
+        # The user's decision on this job (see DISPOSITIONS): drives ranking
+        # exclusion, the digest pipeline section, and few-shot calibration.
+        "disposition":      "TEXT",
+        "disposition_note": "TEXT",
+        "disposition_at":   "TEXT",
     },
 }
+
+# The user's recorded decision on a job. `saved` = shortlisted, still shown
+# in ranking; the rest leave the ranking: applied/interviewing move to the
+# digest's pipeline section, rejected/dismissed disappear (and dismissed
+# rows become negative few-shot examples for the fit scorer — jobcrawler/
+# fit.py reads them, so a --note saying WHY is worth writing).
+DISPOSITIONS = ("saved", "applied", "interviewing", "rejected", "dismissed")
+RANKING_EXCLUDED_DISPOSITIONS = ("applied", "interviewing", "rejected", "dismissed")
 
 # Columns retired after the unified refactor. Dropped idempotently on connect
 # so existing DBs (which keep old columns under CREATE TABLE IF NOT EXISTS)
@@ -314,6 +330,23 @@ def import_companies(conn, path):
     return n
 
 
+def set_company_tag(conn, name, tag, add=True):
+    """Add or remove one scope tag on a company (case-insensitive name
+    match). Returns the company's new comma-joined tag string ('' when the
+    last tag was removed), or None if no such company exists."""
+    row = conn.execute(
+        "SELECT id, tags FROM companies WHERE lower(name)=lower(?)",
+        (name,)).fetchone()
+    if not row:
+        return None
+    tags = {t for t in (row["tags"] or "").split(",") if t}
+    (tags.add if add else tags.discard)(tag)
+    val = ",".join(sorted(tags)) or None
+    conn.execute("UPDATE companies SET tags=? WHERE id=?", (val, row["id"]))
+    conn.commit()
+    return val or ""
+
+
 def get_company(conn, company_id):
     """One company row by id, or None."""
     if not company_id:
@@ -378,8 +411,8 @@ def upsert_job(conn, j):
              geo_mode, remote_eligible, remote_signal, neural_signal,
              description, resume_fit_score, fit_reason,
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
-             first_seen, last_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             posted_at, first_seen, last_seen, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url, location=excluded.location,
              track=COALESCE(excluded.track, track),
@@ -395,6 +428,7 @@ def upsert_job(conn, j):
              fit_stack=COALESCE(excluded.fit_stack, fit_stack),
              fit_seniority=COALESCE(excluded.fit_seniority, fit_seniority),
              fit_gates=COALESCE(excluded.fit_gates, fit_gates),
+             posted_at=COALESCE(posted_at, excluded.posted_at),
              last_seen=excluded.last_seen,
              status=excluded.status,
              closed_at=CASE WHEN excluded.status='closed'
@@ -406,7 +440,7 @@ def upsert_job(conn, j):
          j.get("resume_fit_score"), j.get("fit_reason"),
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
          j.get("fit_seniority"), j.get("fit_gates"),
-         now, now, j.get("status", "open")),
+         j.get("posted_at"), now, now, j.get("status", "open")),
     )
     conn.commit()
     return new
@@ -436,6 +470,61 @@ def set_job_status(conn, job_id, status):
     conn.commit()
 
 
+def resolve_job(conn, ref):
+    """Resolve a user-supplied job reference to rows: exact job_id first,
+    then unique job_id substring, then normalized URL. Returns a list of
+    matching rows (ideally one; several = ambiguous; empty = no match) so
+    callers can report ambiguity instead of guessing."""
+    row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (ref,)).fetchone()
+    if row:
+        return [dict(row)]
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM jobs WHERE job_id LIKE ?", (f"%{ref}%",)).fetchall()]
+    if rows:
+        return rows
+    want = _norm_url(ref)
+    if want:
+        return [dict(r) for r in conn.execute("SELECT * FROM jobs").fetchall()
+                if _norm_url(r["url"]) == want]
+    return []
+
+
+def set_disposition(conn, ref, disposition, note=None):
+    """Record the user's decision on one job. `ref` is a job_id, a unique
+    job_id fragment, or the posting URL; `disposition` is one of
+    DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
+    the matched job on success, error a printable message otherwise."""
+    d = (disposition or "").strip().lower()
+    clearing = d in ("none", "clear")
+    if not clearing and d not in DISPOSITIONS:
+        return None, (f"unknown disposition {disposition!r} — use one of "
+                      f"{', '.join(DISPOSITIONS)} (or 'clear')")
+    matches = resolve_job(conn, ref)
+    if not matches:
+        return None, f"no job matches {ref!r} (job_id, id fragment, or URL)"
+    if len(matches) > 1:
+        opts = "\n".join(f"    {m['job_id']}  {(m['title'] or '')[:50]}"
+                         for m in matches[:8])
+        return None, f"{ref!r} is ambiguous ({len(matches)} matches):\n{opts}"
+    row = matches[0]
+    conn.execute(
+        "UPDATE jobs SET disposition=?, disposition_note=?, disposition_at=? "
+        "WHERE job_id=?",
+        (None if clearing else d, None if clearing else note,
+         None if clearing else datetime.now().isoformat(), row["job_id"]))
+    conn.commit()
+    return row, None
+
+
+def get_pipeline(conn):
+    """Every job the user has dispositioned, newest decision first — the
+    digest's pipeline section and the --pipeline CLI. Includes closed rows
+    on purpose: 'posting closed after you applied' is a signal."""
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM jobs WHERE disposition IS NOT NULL "
+        "ORDER BY disposition_at DESC").fetchall()]
+
+
 def touch_job(conn, job_id):
     """Record that a job was just observed live at its source — reopen it and
     refresh last_seen, touching nothing else. For dedupe paths that skip the
@@ -463,20 +552,23 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     indistinguishable from a genuinely emptied board, so an empty snapshot
     must never close anything (this function no-ops on one).
 
-    Matching is deliberately three-keyed: externally-ingested rows
-    (LinkedIn captures, NLx, manual --add) carry job_ids a board fetch will
-    never mint, but usually share the posting's title/URL.
-
-    Close rules:
-      * A row whose job_id lives in the snapshot's OWN id namespace (same
-        "<ats>_<key>_" prefix as some snapshot id) is closed immediately —
-        the board is authoritative for its own ids. A partial fetch (e.g.
-        Workday pagination dying mid-board) can close rows spuriously, but
-        the next full fetch reopens them (matched rows always flip back).
-      * Any other row (external namespace) is closed only after
-        `external_grace_days` without being seen, so a manual --add or a
-        fresh LinkedIn capture isn't insta-closed just because its title
-        doesn't exactly match a board row.
+    Matching depends on where the row's job_id came from:
+      * BOARD-NATIVE rows — job_id in the snapshot's own id namespace (same
+        "<ats>_<key>_" prefix as some snapshot id) — match by EXACT id only.
+        The board is authoritative for its own ids, and boards recycle
+        titles across requisitions (Beacon reposts "Algorithm Engineer"
+        under a fresh Greenhouse id every cycle), so a title/URL fallback
+        would let one live posting shield every dead same-titled req from
+        ever closing. Absent id -> closed immediately. A partial fetch
+        (e.g. Workday pagination dying mid-board) can close rows
+        spuriously, but the next full fetch reopens them (matched rows
+        always flip back).
+      * EXTERNAL rows (LinkedIn captures, NLx, manual --add, legacy ids
+        from a retired fetcher) can never id-match, so they match by
+        normalized URL or title instead, and are closed only after
+        `external_grace_days` without being seen — a manual --add isn't
+        insta-closed just because its title doesn't exactly match a board
+        row.
       * When `track` is given, only rows of that track are ever CLOSED
         (matched rows are reopened regardless — they're live on the board).
     """
@@ -485,6 +577,17 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     ids = {j.get("id") for j in fetched_jobs if j.get("id")}
     urls = {u for u in (_norm_url(j.get("url")) for j in fetched_jobs) if u}
     titles = {t for t in (_norm_title(j.get("title")) for j in fetched_jobs) if t}
+    # Posting dates piggyback on the sync: every matched row gets its NULL
+    # posted_at backfilled from the live snapshot, so the whole store gains
+    # real posting dates over normal crawls with zero extra HTTP.
+    posted = {}
+    for j in fetched_jobs:
+        p = j.get("posted_at")
+        if not p:
+            continue
+        for key in (j.get("id"), _norm_url(j.get("url")), _norm_title(j.get("title"))):
+            if key:
+                posted.setdefault(key, p)
     # "gh_<slug>_123" -> "gh_<slug>_": the id namespace(s) this snapshot
     # covers. First TWO tokens, not rsplit — the per-job tail may itself
     # carry underscores ("wd_amgen_<Title-Slug>_R-250290"). Single-token-tail
@@ -499,21 +602,25 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
         "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
     for r in rows:
+        board_native = any(r["job_id"].startswith(p) for p in prefixes)
         present = (r["job_id"] in ids
-                   or _norm_url(r["url"]) in urls
-                   or _norm_title(r["title"]) in titles)
+                   or (not board_native
+                       and (_norm_url(r["url"]) in urls
+                            or _norm_title(r["title"]) in titles)))
         if present:
             if (r["status"] or "open") != "open":
                 n_reopened += 1
+            p = (posted.get(r["job_id"]) or posted.get(_norm_url(r["url"]))
+                 or posted.get(_norm_title(r["title"])))
             conn.execute(
-                "UPDATE jobs SET status='open', closed_at=NULL, last_seen=? "
-                "WHERE job_id=?", (now, r["job_id"]))
+                "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
+                "posted_at=COALESCE(posted_at, ?) WHERE job_id=?",
+                (now, p, r["job_id"]))
             continue
         if track is not None and r["track"] != track:
             continue
         if (r["status"] or "open") == "closed":
             continue
-        board_native = any(r["job_id"].startswith(p) for p in prefixes)
         seen = r["last_seen"] or r["first_seen"] or ""
         if board_native or seen < grace_cutoff:   # ISO strings sort by time
             conn.execute(
@@ -607,7 +714,10 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
 
     Jobs marked closed (status='closed' — vanished from their company's
     board, or probed dead; see sync_job_statuses) are excluded unless
-    `include_closed=True`."""
+    `include_closed=True`. Jobs the user has dispositioned also leave the
+    ranking — applied/interviewing live in the digest's pipeline section,
+    rejected/dismissed disappear — except 'saved' (shortlisted), which
+    stays visible."""
     q = """
       SELECT j.*, c.mission_tier, c.mission_score
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
@@ -618,6 +728,9 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
         args.append(track)
     if not include_closed:
         conds.append("COALESCE(j.status,'open') != 'closed'")
+    ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
+    conds.append(f"(j.disposition IS NULL OR j.disposition NOT IN ({ph}))")
+    args += list(RANKING_EXCLUDED_DISPOSITIONS)
     if conds:
         q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
@@ -686,7 +799,8 @@ def mark_seen(conn, job, track=None):
         "remote_eligible": job.get("remote_eligible"),
         "remote_signal":   job.get("remote_signal"),
         "neural_signal":   job.get("neural_signal"),
-        "description":     (job.get("description") or "")[:2000],
+        "description":     (job.get("description") or "")[:config.MAX_DESC_CHARS],
+        "posted_at":       job.get("posted_at"),
         "resume_fit_score": job.get("resume_fit_score"),
         "fit_reason":      job.get("fit_reason"),
         "fit_gates":       job.get("fit_gates"),

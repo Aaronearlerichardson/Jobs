@@ -20,7 +20,15 @@ from pathlib import Path
 GMAIL_ADDRESS      = os.environ.get("GMAIL_ADDRESS",      "jakdaxter31@gmail.com")
 GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HERE")
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
-CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-4-6")
+# Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
+# pricing ($3/$15 per MTok; intro $2/$10 through 2026-08-31, cheaper than the
+# Sonnet 4.6 it replaces). NOTE for 5-family models: thinking is ON by
+# default and max_tokens caps thinking+text together — jobcrawler/claude.py
+# disables thinking for these small structured-JSON calls.
+CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-5")
+# Deep-verify pass over ranking finalists only (~15-30 calls/run, judgment-
+# heavy): Opus 5 with adaptive thinking. $5/$25 per MTok, but bounded volume.
+CLAUDE_VERIFY_MODEL = os.environ.get("CLAUDE_VERIFY_MODEL", "claude-opus-5")
 
 # CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
 # (NLx) feed, where federal contractors must list openings (VEVRAA). Register
@@ -59,6 +67,16 @@ NEURAL_DB_PATH = SCRIPT_DIR / "neural.db"
 RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
 
 REPORT_DIR  = SCRIPT_DIR / "job_reports"
+
+# One cap for JD text everywhere — fetchers, hydration, DB storage, and the
+# scoring prompt (see jobcrawler/fit.py clip_desc, which keeps head + tail so
+# a requirements block at the END of a long posting survives). The old
+# per-site caps (2000/2500/4000) silently fed the scorer only the opening
+# company boilerplate of long JDs: Ceribell's Sr Manager posting was 20k
+# chars with the disqualifying "8+ years TPM/GCP" block at char 7000, and it
+# scored 0.69 on the first 2500 chars. ~12k chars ≈ ~3k tokens per scoring
+# call — the honesty is worth the marginal cost.
+MAX_DESC_CHARS = 12000
 
 # =========================================================================
 #  SEARCH PROFILE (keywords / locations / policy) — loaded from TOML
@@ -124,6 +142,9 @@ FIT_DOMAIN_LADDER = _fitp.get("domain_ladder") or None
 FIT_STACK_CORE    = ", ".join(_fitp.get("stack_core", [])) or None
 FIT_STACK_ANTI    = ", ".join(_fitp.get("stack_anti", [])) or None
 FIT_REGION        = ", ".join(_fitp.get("region_terms", [])) or None
+# How many of your own --mark decisions (applied/dismissed, each) are fed to
+# the fit scorer as few-shot calibration. None -> default 3; 0 disables.
+FIT_DISPOSITION_EXAMPLES = _fitp.get("disposition_examples")
 
 # --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.

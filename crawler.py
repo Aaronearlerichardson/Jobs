@@ -36,6 +36,25 @@ def main():
     ap.add_argument("--dedup", action="store_true",
                     help="Merge company rows that point at the same board under "
                          "different name spellings (re-points jobs; lossless)")
+    ap.add_argument("--watch", metavar="COMPANY",
+                    help="Tag a company as watched: its whole board is fetched "
+                         "and every new technical posting there is flagged in "
+                         "the local-tech digest regardless of rank/geography")
+    ap.add_argument("--unwatch", metavar="COMPANY",
+                    help="Remove a company's watch tag")
+    ap.add_argument("--mark", nargs=2, metavar=("DISPOSITION", "JOB"),
+                    help="Record your decision on a job: saved|applied|"
+                         "interviewing|rejected|dismissed, or 'clear'. JOB is "
+                         "a job_id, a unique id fragment, or the posting URL. "
+                         "applied/interviewing move to the digest's pipeline "
+                         "section; rejected/dismissed leave the ranking; "
+                         "saved stays ranked. Pair with --why.")
+    ap.add_argument("--why", metavar="TEXT",
+                    help="With --mark: one-line reason, fed back to the fit "
+                         "scorer as calibration (e.g. \"TPM seat, wrong "
+                         "archetype\") — most useful on dismissals")
+    ap.add_argument("--pipeline", action="store_true",
+                    help="Print every job you've dispositioned, then exit")
     ap.add_argument("--prune", action="store_true",
                     help="Deactivate companies whose ATS board is dead (404) — "
                          "clears the crawl's HTTP-404 spam")
@@ -88,6 +107,53 @@ def main():
         n = store.dedup_companies(conn)
         conn.close()
         print(f"\n  merged {n} duplicate company row(s) into their canonical board.")
+        raise SystemExit(0)
+
+    if args.watch or args.unwatch:
+        from jobcrawler import store
+        name = args.watch or args.unwatch
+        conn = store.connect()
+        tags = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
+        conn.close()
+        if tags is None:
+            print(f"  [!] no company named {name!r} in the store "
+                  f"(names are matched case-insensitively but exactly).")
+        else:
+            verb = "watching" if args.watch else "unwatched"
+            print(f"  {verb} {name}  (tags: {tags or 'none'})")
+        raise SystemExit(0)
+
+    if args.mark:
+        from jobcrawler import store
+        disp, ref = args.mark
+        conn = store.connect()
+        row, err = store.set_disposition(conn, ref, disp, note=args.why)
+        conn.close()
+        if err:
+            print(f"  [!] {err}")
+            raise SystemExit(1)
+        act = ("cleared" if disp.strip().lower() in ("none", "clear")
+               else f"marked {disp.strip().lower()}")
+        print(f"  {act}: {row['title']} @ {row['company_name']}")
+        print(f"    {row['job_id']}")
+        if args.why:
+            print(f"    why: {args.why}")
+        raise SystemExit(0)
+
+    if args.pipeline:
+        from jobcrawler import store
+        conn = store.connect()
+        rows = store.get_pipeline(conn)
+        conn.close()
+        if not rows:
+            print("  pipeline empty - record decisions with: "
+                  "python crawler.py --mark applied <job_id|url>")
+        for p in rows:
+            state = "CLOSED" if p.get("status") == "closed" else "open"
+            note = f"  - {p['disposition_note']}" if p.get("disposition_note") else ""
+            print(f"  {p['disposition']:<12} {(p.get('disposition_at') or '')[:10]}"
+                  f"  [{state:<6}] {(p['title'] or '')[:44]} @ "
+                  f"{p['company_name']}{note}")
         raise SystemExit(0)
 
     if args.prune:
@@ -166,14 +232,36 @@ def main():
                         help="Populate the per-axis fit columns from the tag "
                              "already in fit_reason (offline, no API), then stop")
         tp.add_argument("--check-closed", action="store_true",
-                        help="Probe the job URLs of open rows the crawl's "
-                             "board-diff can't reach (orphans / inactive or "
-                             "board-less companies) and mark dead ones "
-                             "closed, then stop")
+                        help="Probe the job URLs of open rows no board fetch "
+                             "has recently vouched for (orphans, inactive / "
+                             "board-less companies, dead or moved boards) and "
+                             "mark dead ones closed, then stop")
+        tp.add_argument("--stale-days", type=int, default=2,
+                        help="With --check-closed: only probe rows not "
+                             "board-verified in this many days (default 2)")
+        tp.add_argument("--sync-status", action="store_true",
+                        help="Re-fetch every active board and reconcile "
+                             "open/closed statuses only (no scoring, no API), "
+                             "rewrite the digest, then stop")
+        tp.add_argument("--no-verify", action="store_true",
+                        help="Crawl only: skip the deep second-pass "
+                             "verification of the top N")
+        tp.add_argument("--verify-top", type=int, nargs="?", const=15,
+                        default=None, metavar="N",
+                        help="Deep-verify the current top N stored jobs "
+                             "(full-JD requirements read; default 15), "
+                             "rewrite the digest, then stop — no crawl")
         targs = tp.parse_args(passthrough)
-        if targs.check_closed:
+        if targs.verify_top is not None:
+            from jobcrawler.tracks.local_tech import verify_top_cli
+            verify_top_cli(top_n=targs.verify_top, max_workers=targs.workers)
+        elif targs.sync_status:
+            from jobcrawler.tracks.local_tech import sync_status_all
+            sync_status_all(top_n=targs.top)
+        elif targs.check_closed:
             from jobcrawler.tracks.local_tech import check_closed_jobs
-            check_closed_jobs(max_workers=targs.workers, limit=targs.limit)
+            check_closed_jobs(max_workers=targs.workers, limit=targs.limit,
+                              stale_days=targs.stale_days)
         elif targs.backfill_descriptions:
             from jobcrawler.fetchers.workday import backfill_workday_descriptions
             backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
@@ -190,7 +278,8 @@ def main():
             rescore_all(max_workers=targs.workers, described_only=targs.described_only)
         else:
             from jobcrawler.tracks.local_tech import run as run_track
-            run_track(max_workers=targs.workers, top_n=targs.top)
+            run_track(max_workers=targs.workers, top_n=targs.top,
+                      verify=not targs.no_verify)
         raise SystemExit(0)
 
     if passthrough:

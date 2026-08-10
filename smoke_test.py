@@ -175,7 +175,146 @@ def main():
           ).fetchone()[0] > "2020-01-02")
     check("empty snapshot never closes",
           store.sync_job_statuses(conn, cid, [], track="local-tech") == (0, 0))
+    # Recycled titles: a live posting must NOT shield a dead same-titled
+    # board-native req (the Beacon "Algorithm Engineer" repost pattern) —
+    # board-native rows match by exact id only. External rows (foreign id
+    # namespace) still get the title match.
+    for jid in ("gh_y_old", "gh_y_new"):
+        store.upsert_job(conn, {"job_id": jid, "company_id": cid,
+                                "company_name": "Y", "title": "Algorithm Engineer",
+                                "url": f"https://y.io/{jid}", "location": "Durham, NC",
+                                "track": "local-tech"})
+    store.upsert_job(conn, {"job_id": "linkedin_bbb", "company_id": cid,
+                            "company_name": "Y", "title": "Algorithm Engineer",
+                            "url": "https://linkedin.com/jobs/9",
+                            "location": "Durham, NC", "track": "local-tech"})
+    store.sync_job_statuses(conn, cid, [
+        {"id": "gh_y_new", "title": "Algorithm Engineer",
+         "url": "https://y.io/gh_y_new"}], track="local-tech")
+    check("dead req closes despite shared live title",
+          st("gh_y_old")["status"] == "closed")
+    check("live same-titled req stays open", st("gh_y_new")["status"] == "open")
+    check("external row still title-matches", st("linkedin_bbb")["status"] == "open")
     conn.close()
+
+    # 9b. fit rubric: clip keeps the tail, management gate exists and bites,
+    # profile gate_penalty merges over defaults instead of replacing them
+    print("[fit rubric]")
+    import config as _config
+    import jobcrawler.fit as fit
+    long_jd = "INTRO " + ("boilerplate " * 2000) + "REQUIREMENTS: 8+ years TPM"
+    clipped = fit.clip_desc(long_jd, max_chars=5000)
+    check("clip keeps the requirements tail",
+          clipped.endswith("REQUIREMENTS: 8+ years TPM") and "elided" in clipped)
+    check("short text passes through unclipped",
+          fit.clip_desc("short jd", max_chars=5000) == "short jd")
+    check("management gate registered", "management" in fit.GATES)
+    axes = dict(domain=.35, function=.30, stack=.35, seniority=.45)
+    check("management gate bites",
+          fit.combine(axes, ["management"]) < fit.combine(axes, []) * 0.5)
+    _saved = getattr(_config, "FIT_GATE_PENALTY", None)
+    _config.FIT_GATE_PENALTY = {"geo": 0.10}          # pre-management profile
+    merged = fit._effective_penalties()
+    _config.FIT_GATE_PENALTY = _saved
+    check("profile penalties merge, not replace",
+          merged["geo"] == 0.10 and merged["management"] == 0.35)
+    check("verify prompt extracts requirements",
+          all(k in fit.build_verify_prompt()
+              for k in ("years_required", "seat_type", "candidate_gaps")))
+    check("verify_fit refuses stub descriptions",
+          fit.verify_fit("T", "too short").score is None)
+
+    # 9c. watchlist plumbing
+    print("[watchlist]")
+    conn = store.connect(":memory:")
+    store.upsert_company(conn, {"name": "W", "ats": "greenhouse", "slug": "w"})
+    check("watch tag set", store.set_company_tag(conn, "w", "watch") == "watch")
+    row = store.get_companies(conn, active_only=False)[0]
+    check("watched company gets whole board",
+          lt._is_watched(row) and lt._whole_board(row))
+    check("watch tag removed", store.set_company_tag(conn, "W", "watch", add=False) == "")
+    check("unknown company -> None", store.set_company_tag(conn, "Nope", "watch") is None)
+    conn.close()
+
+    # 9d. dispositions: mark/resolve/exclude/pipeline + few-shot calibration
+    print("[dispositions]")
+    conn = store.connect(":memory:")
+    cid = store.upsert_company(conn, {"name": "D", "ats": "greenhouse", "slug": "d"})
+    for jid, title, fit in (("gh_d_100", "Algorithm Engineer", 0.9),
+                            ("gh_d_200", "TPM Seat", 0.8),
+                            ("gh_d_300", "Data Engineer", 0.7)):
+        store.upsert_job(conn, {"job_id": jid, "company_id": cid, "company_name": "D",
+                                "title": title, "url": f"https://d.io/{jid}",
+                                "location": "Durham, NC", "track": "local-tech",
+                                "resume_fit_score": fit})
+    row, err = store.set_disposition(conn, "gh_d_200", "dismissed", note="wrong archetype")
+    check("mark by exact id", err is None and row["job_id"] == "gh_d_200")
+    row, err = store.set_disposition(conn, "300", "applied")
+    check("mark by unique id fragment", err is None and row["job_id"] == "gh_d_300")
+    row, err = store.set_disposition(conn, "https://d.io/gh_d_100/", "saved")
+    check("mark by URL", err is None and row["job_id"] == "gh_d_100")
+    _, err = store.set_disposition(conn, "gh_d", "applied")
+    check("ambiguous fragment errors", err is not None and "ambiguous" in err)
+    _, err = store.set_disposition(conn, "gh_d_100", "bogus")
+    check("unknown disposition errors", err is not None)
+    ids = [r["job_id"] for r in store.ranked_jobs(conn, track="local-tech")]
+    check("dismissed+applied leave ranking, saved stays", ids == ["gh_d_100"])
+    check("pipeline lists all three", len(store.get_pipeline(conn)) == 3)
+    from jobcrawler.fit import disposition_examples_block
+    block = disposition_examples_block(conn, 3)
+    check("few-shot block carries decisions + why-note",
+          'PURSUED: "Data Engineer"' in block and "wrong archetype" in block)
+    row, err = store.set_disposition(conn, "gh_d_100", "clear")
+    check("clear removes from pipeline",
+          err is None and len(store.get_pipeline(conn)) == 2)
+    conn.close()
+
+    # 9e. posting dates: normalizer, first-known-wins, sync backfill, age tags
+    print("[posted dates]")
+    from datetime import datetime, timedelta
+
+    from jobcrawler.util import norm_posted_date
+    today = datetime.now().strftime("%Y-%m-%d")
+    check("ISO datetime w/ tz", norm_posted_date("2026-08-04T09:42:41-04:00") == "2026-08-04")
+    check("epoch-ms string (Lever)",
+          norm_posted_date("1784035164618")
+          == datetime.fromtimestamp(1784035164.618).strftime("%Y-%m-%d"))
+    check("workday relative days", norm_posted_date("Posted 3 Days Ago")
+          == (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d"))
+    check("workday 30+ floor", norm_posted_date("Posted 30+ Days Ago")
+          == (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d"))
+    check("posted today", norm_posted_date("Posted Today") == today)
+    check("garbage -> None", norm_posted_date("See posting") is None)
+
+    conn = store.connect(":memory:")
+    cid = store.upsert_company(conn, {"name": "P", "ats": "greenhouse", "slug": "p"})
+    for jid, posted in (("gh_p_1", "2026-08-01"), ("gh_p_2", None)):
+        store.upsert_job(conn, {"job_id": jid, "company_id": cid, "company_name": "P",
+                                "title": jid, "url": f"https://p.io/{jid}",
+                                "location": "Durham, NC", "track": "local-tech",
+                                "posted_at": posted})
+    store.upsert_job(conn, {"job_id": "gh_p_1", "company_id": cid, "company_name": "P",
+                            "title": "gh_p_1", "url": "https://p.io/gh_p_1",
+                            "location": "Durham, NC", "track": "local-tech",
+                            "posted_at": "2026-08-09"})
+    got = conn.execute("SELECT posted_at FROM jobs WHERE job_id='gh_p_1'").fetchone()[0]
+    check("posted_at first-known wins", got == "2026-08-01")
+    store.sync_job_statuses(conn, cid, [
+        {"id": "gh_p_1", "title": "gh_p_1", "url": "https://p.io/gh_p_1"},
+        {"id": "gh_p_2", "title": "gh_p_2", "url": "https://p.io/gh_p_2",
+         "posted_at": "2026-07-15"}], track="local-tech")
+    got = conn.execute("SELECT posted_at FROM jobs WHERE job_id='gh_p_2'").fetchone()[0]
+    check("status sync backfills posted_at", got == "2026-07-15")
+    conn.close()
+    check("age NEW on first-seen-today",
+          lt._age_tag({"first_seen": datetime.now().isoformat()}) == "NEW")
+    check("age in days", lt._age_tag(
+        {"first_seen": "2026-01-01T00:00:00",
+         "posted_at": (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")}) == "6d")
+    check("age stale flag", lt._age_tag(
+        {"first_seen": "2026-01-01T00:00:00",
+         "posted_at": (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")}) == "60d!")
+    check("age unknown", lt._age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?")
 
     # 10. probe guards (offline: no network hit for gated hosts / marker regex)
     print("[closed probe]")

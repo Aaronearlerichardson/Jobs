@@ -16,6 +16,7 @@ layers hit, results are merged and de-duplicated by job id.
 import json
 import re
 
+import config
 from bs4 import BeautifulSoup
 
 from .util import stable_id
@@ -70,7 +71,7 @@ def _job(jid, title, company, url, location, description="", company_url=""):
         return None
     j = {"id": jid, "title": title[:120], "company": (company or "").strip()[:80],
          "url": url or "", "location": (location or "").strip()[:80],
-         "description": (description or "")[:4000]}
+         "description": (description or "")[:config.MAX_DESC_CHARS]}
     if company_url:
         j["company_url"] = company_url
     return j
