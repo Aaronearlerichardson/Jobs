@@ -237,9 +237,12 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
 
     n_off = 0
     if deactivate_offmission:
+        # Watched companies are exempt: a watch tag is the user deliberately
+        # keeping an off-mission employer (e.g. a defense DSP shop) crawled.
         off = [c for c in get_companies(conn, active_only=True)
                if c.get("mission_tier") == "other"
-               and not config.is_multi_division(c.get("name"))]
+               and not config.is_multi_division(c.get("name"))
+               and "watch" not in (c.get("tags") or "").split(",")]
         for c in off:
             conn.execute("UPDATE companies SET active=0 WHERE id=?", (c["id"],))
             print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
@@ -260,6 +263,13 @@ def dedup_companies(conn):
     def board_key(r):
         if r["ats"] == "workday" and r["wd_tenant"]:
             return ("workday", r["wd_tenant"], r["wd_pod"], r["wd_site"])
+        # careers_url-keyed ATSes: their slug is a shared datacenter host
+        # (SuccessFactors "performancemanagerN" serves many tenants) or
+        # absent, and the careers_url IS the board identity. Keying these on
+        # slug merged Bayer into Sonova (both performancemanager5).
+        if r["ats"] in ("successfactors", "peopleadmin", "custom", "wpjson"):
+            u = (r.get("careers_url") or "").rstrip("/").lower()
+            return (r["ats"], u) if u else None
         if r["ats"] and r["slug"]:
             return (r["ats"], r["slug"])
         return None

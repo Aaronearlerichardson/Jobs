@@ -199,27 +199,79 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
     """
     Best-effort iCIMS scrape via the public job-search page. iCIMS is often
     JS-gated; this catches the server-rendered rows and returns [] otherwise.
+
+    searchLocation is a free-text query some tenants don't parse ("NC" gets
+    'No Results Found' on careers-sas / incareers-acentra) — so a located
+    search that comes back empty is retried WITHOUT the location param, with
+    loc_re (or, failing that, the whole-board pull) doing the filtering.
+    Paginated: server-rendered tenants expose ?pr=N result pages.
     """
     out = []
-    url = (f"https://{tenant}.icims.com/jobs/search?ss=1&in_iframe=1"
-           f"&searchLocation={search_location}")
-    try:
-        r = SESSION.get(url, timeout=20, headers=HEADERS)
+    # iCIMS's WAF 405s Chrome-like UAs that arrive without Chrome's
+    # client-hint headers (sec-ch-ua etc.) — i.e. exactly what a requests
+    # session claiming Chrome looks like. A plain Mozilla platform UA
+    # passes. Scoped here so other boards keep the shared session UA.
+    icims_headers = {**HEADERS,
+                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+
+    def _one_page(params):
+        found = []
+        r = SESSION.get(f"https://{tenant}.icims.com/jobs/search?ss=1&in_iframe=1"
+                        + params, timeout=20, headers=icims_headers)
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a.iCIMS_Anchor, a[href*='/jobs/']"):
-            title = a.get_text(" ").strip()
+            # Row anchors carry a screen-reader label ("Requisition Title")
+            # ahead of the actual title text.
+            title = re.sub(r"^\s*Requisition Title\s*", "",
+                           a.get_text(" ").strip())
             href = a.get("href", "")
-            if not title or "/jobs/" not in href:
+            jid = re.search(r"/jobs/(\d+)/", href)
+            # A numbered detail URL is what distinguishes a posting row from
+            # the search shell's own chrome (/jobs/intro, /jobs/search links)
+            # — junk rows here would mask the sitemap fallback below.
+            if not title or not jid:
                 continue
             row = a.find_parent()
             loc = row.get_text(" ") if row else ""
             if not _loc_ok(loc_re, loc) and not _loc_ok(loc_re, title):
                 continue
-            jid = re.search(r"/jobs/(\d+)/", href)
-            out.append({"id": f"icims_{tenant}_{jid.group(1) if jid else abs(hash(href))}",
-                        "title": title, "url": href if href.startswith("http")
-                        else f"https://{tenant}.icims.com{href}", "location": loc_label,
-                        "description": "", "ats": "icims", "_wd": None})
+            found.append({"id": f"icims_{tenant}_{jid.group(1)}",
+                          "title": title, "url": href if href.startswith("http")
+                          else f"https://{tenant}.icims.com{href}", "location": loc_label,
+                          "description": "", "ats": "icims", "_wd": None})
+        return found
+
+    try:
+        out = _one_page(f"&searchLocation={search_location}")
+        if not out:
+            for page in range(1, 9):   # locationless, paged; loc_re filters
+                batch = _one_page(f"&pr={page - 1}" if page > 1 else "")
+                if not batch:
+                    break
+                out.extend(batch)
+        if not out:
+            # Fully JS-rendered tenant (careers-sas): the search page serves a
+            # shell, but /sitemap.xml lists every live posting. Titles come
+            # from the URL slug; location is unknown here, so rows carry
+            # loc_label and the caller's hydration/geo chain refines them.
+            from urllib.parse import unquote
+            r = SESSION.get(f"https://{tenant}.icims.com/sitemap.xml",
+                            timeout=20, headers=icims_headers)
+            for u in re.findall(r"<loc>([^<]+)</loc>", r.text):
+                m = re.search(r"/jobs/(\d+)/([^/]+)/job", u)
+                if not m:
+                    continue
+                title = unquote(m.group(2)).replace("---", " - ").replace("-", " ").strip()
+                out.append({"id": f"icims_{tenant}_{m.group(1)}", "title": title,
+                            "url": u, "location": loc_label,
+                            "description": "", "ats": "icims", "_wd": None})
+        # De-dup across pages (last page repeats on some tenants).
+        seen, uniq = set(), []
+        for j in out:
+            if j["id"] not in seen:
+                seen.add(j["id"])
+                uniq.append(j)
+        out = uniq
     except Exception as e:
         print(f"    [!] icims {tenant}: {e}")
     return out
@@ -538,6 +590,19 @@ def hydrate_description(job):
         if m:
             from .rippling import fetch_description
             job["description"] = fetch_description(m.group(1), m.group(2))[:_DESC_MAX]
+    elif job.get("ats") == "wpjson" and job.get("url"):
+        # Outbound apply page (restor3d: Arcoro/BirdDog portal). Server-
+        # rendered; the JD sits in #portalViewRequirement. The generic
+        # fallback below still runs on a miss (e.g. a WP permalink URL).
+        try:
+            html = SESSION.get(job["url"], timeout=25, headers=HEADERS).text
+            soup = BeautifulSoup(html, "lxml")
+            el = (soup.select_one("#portalViewRequirement")
+                  or soup.select_one('[class*="bmportalrequirementdetails"]'))
+            if el:
+                job["description"] = el.get_text(" ", strip=True)[:_DESC_MAX]
+        except Exception:
+            pass
     # Generic fallback: any job with a detail URL whose ATS-specific branch
     # didn't yield a body (SuccessFactors career sites like Duke/Teleflex whose
     # slug is unknown, custom boards, Workday rows that arrived without _wd).
@@ -555,8 +620,16 @@ def _description_from_job_url(url):
     Career-Site-Builder markup (data-careersite-propertyid='description' — Duke,
     Teleflex, and other SAP SF frontends). Returns '' on miss."""
     try:
-        html = SESSION.get(url, timeout=20, headers=HEADERS,
-                           allow_redirects=True).text
+        r = SESSION.get(url, timeout=20, headers=HEADERS,
+                        allow_redirects=True)
+        if r.status_code in (403, 405):
+            # WAFs (iCIMS) that reject a Chrome UA without Chrome's
+            # client-hint headers accept a plain platform UA — same quirk
+            # fetch_icims_all works around.
+            r = SESSION.get(url, timeout=20, allow_redirects=True,
+                            headers={**HEADERS, "User-Agent":
+                                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        html = r.text
     except Exception:
         return ""
     try:
@@ -1020,6 +1093,46 @@ def custom_board_listing_url(page_url, html=None):
     return result
 
 
+def fetch_wpjson_careers_all(base_url, loc_re=None):
+    """WordPress "post-filters-archive" careers endpoint (restor3d-class
+    themes): {root}/wp-json/post-filters-archive/get-posts?post_type=career.
+
+    For sites whose careers grid AND per-job pages are all JS-rendered, so
+    neither fetch_custom_careers (no server-side anchors) nor the JSON-LD
+    path sees anything — but the theme's own REST route serves clean JSON.
+    The stored URL is the posting's outbound apply link (restor3d: an
+    Arcoro/BirdDog portal page, server-rendered); hydrate_description's
+    "wpjson" branch pulls the JD text from it."""
+    m = re.match(r"https?://[^/]+", base_url or "")
+    if not m:
+        return []
+    root = m.group(0)
+    host = re.sub(r"^https?://(www\.)?", "", root)
+    out, page = [], 1
+    while True:
+        d = _get_json(f"{root}/wp-json/post-filters-archive/get-posts"
+                      f"?post_type=career&posts_per_page=100&paged={page}",
+                      f"wpjson {host}")
+        if not d:
+            break
+        for p in d.get("posts", []) or []:
+            loc_d = p.get("location") or {}
+            loc = ", ".join(x for x in (loc_d.get("city"), loc_d.get("state"))
+                            if x) or "See posting"
+            if not _loc_ok(loc_re, loc):
+                continue
+            url = ((p.get("link") or {}).get("url")) or p.get("permalink") or ""
+            out.append({"id": f"wpjson_{host}_{p.get('ID')}",
+                        "title": p.get("post_title") or "Unknown",
+                        "url": url, "location": loc, "description": "",
+                        "posted_at": norm_posted_date((p.get("post_date") or "")[:10]),
+                        "ats": "wpjson", "_wd": None})
+        if page >= int(d.get("max_num_pages") or 1):
+            break
+        page += 1
+    return out
+
+
 FETCHERS = {
     "greenhouse":      lambda c, lr: fetch_greenhouse_all(c["slug"], lr),
     "lever":           lambda c, lr: fetch_lever_all(c["slug"], lr),
@@ -1037,6 +1150,7 @@ FETCHERS = {
     "successfactors":  lambda c, lr: fetch_successfactors_all(c["careers_url"], lr),
     "peopleadmin":     lambda c, lr: fetch_peopleadmin_all(c["careers_url"], lr),
     "custom":          lambda c, lr: fetch_custom_careers(c["careers_url"], lr),
+    "wpjson":          lambda c, lr: fetch_wpjson_careers_all(c["careers_url"], lr),
 }
 
 

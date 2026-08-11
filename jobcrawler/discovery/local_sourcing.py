@@ -882,9 +882,12 @@ def score_missions(max_workers=6, rescore_all=False):
             # Off-mission companies are deactivated so the crawl skips them,
             # matching the new-company sourcing path (an `other` tier means
             # "not health/bio/science" — no reason to keep crawling it).
+            # Watched companies are exempt: the watch tag is the user
+            # deliberately keeping an off-mission employer crawled (Covar).
             update = {"name": c["name"], "mission_tier": tier,
                       "mission_score": score, "mission_reason": reason}
-            if tier == "other" and not config.is_multi_division(c["name"]):
+            if (tier == "other" and not config.is_multi_division(c["name"])
+                    and "watch" not in (c.get("tags") or "").split(",")):
                 update["active"] = 0
             upsert_company(conn, update)
             n += 1

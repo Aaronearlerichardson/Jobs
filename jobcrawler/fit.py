@@ -32,6 +32,7 @@ Wired into:
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 
 try:
@@ -71,6 +72,13 @@ DEFAULT_GATE_PENALTY = {
     # and the candidate is an IC. Harsher than phd — equivalent experience can
     # argue past a PhD line; it cannot conjure a management track record.
     "management": 0.35,
+    # Role demands an ACTIVE/current security clearance the candidate doesn't
+    # hold (Vadum-class). Same weight as phd: sometimes arguable past (an
+    # employer can sponsor a clearable citizen), unlike a management track
+    # record. Citizenship-only or "able to obtain" requirements do NOT trip
+    # this — the candidate is a US citizen. Detected by the LLM AND a
+    # deterministic regex backstop (_CLEARANCE_RE) on the posting text.
+    "clearance": 0.45,
 }
 
 GATES = tuple(DEFAULT_GATE_PENALTY)
@@ -174,7 +182,16 @@ def _profile_block():
         strengths = "\n".join(f"  {i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1))
         summary = getattr(config, "CANDIDATE_SUMMARY", "") or ""
         avoid = getattr(config, "CANDIDATE_AVOID", "") or ""
-        return f"{summary}\nStrengths (priority order):\n{strengths}\n{avoid}".strip()
+        # profile.toml [candidate] fit_caps. The model never returns the final
+        # scalar (Python owns the combine), so a cap is enforced by bounding
+        # the axis it targets: when one applies, function must sit at or below
+        # the cap value. Went unread from the old scorer's retirement until
+        # 2026-08 — the production-quality-ops cap is the census's #1 screen.
+        caps = (getattr(config, "CANDIDATE_FIT_CAPS", None) or [])
+        caps_block = ("\nHard caps — when one applies, score the FUNCTION axis "
+                      "at or below the cap value:\n"
+                      + "\n".join(f"  - {c}" for c in caps)) if caps else ""
+        return f"{summary}\nStrengths (priority order):\n{strengths}\n{avoid}{caps_block}".strip()
     return "A technical candidate. (No profile loaded; judge on general merit.)"
 
 
@@ -253,7 +270,8 @@ def _axes_and_gates_block() -> str:
   stack ({_cfg("FIT_STACK_CORE", DEFAULT_STACK_CORE)}). Weight load-bearing
   requirements heavily. If the JD centres on tools OUTSIDE that stack
   ({_cfg("FIT_STACK_ANTI", DEFAULT_STACK_ANTI)}), score low no matter what the
-  title says.
+  title says; if any of those anti-stack tools is a stated REQUIREMENT
+  (required/must-have, not merely preferred), stack is at most 0.20.
 - "seniority": does the candidate clear the level without being wildly over- or
   under-qualified. Principal/Staff for a mid-level candidate scores low, as do
   people-management titles (Manager/Senior Manager/Director) and roles whose
@@ -269,7 +287,12 @@ Then set any GATES that apply (these are disqualifiers, not deductions):
 - "management": true if the role's CORE is people/program/product management —
   directing engineers or contractors, owning PRDs/roadmaps/governance,
   running programs — rather than hands-on IC engineering or science. An IC
-  role with some cross-team coordination is NOT management."""
+  role with some cross-team coordination is NOT management.
+- "clearance": true only if the posting TEXT states an ACTIVE or current
+  security clearance (Secret/TS/SCI) is required. US citizenship,
+  export-control (ITAR) eligibility, or "ability to obtain a clearance" do
+  NOT trip this — the candidate is a US citizen and clearable — and a
+  defense/DoD employer context alone is NEVER grounds to infer it."""
 
 
 def build_system_prompt() -> str:
@@ -327,6 +350,20 @@ Return ONLY valid JSON. No markdown, no preamble."""
 # Workday backfill's notion of "missing" so the two stay consistent.
 MIN_DESC_CHARS = 200
 
+# Deterministic backstop for the "clearance" gate: ACTIVE/current-clearance
+# demands are formulaic enough to regex, and a missed gate means a wasted
+# application at a role the candidate cannot hold. Deliberately does NOT
+# match "eligible for" / "ability to obtain" a clearance — the candidate is
+# a clearable US citizen, so only holding-one-today requirements gate.
+_CLEARANCE_RE = re.compile(
+    r"\b(?:active|current)\s+"
+    r"(?:(?:us|u\.s\.|government|dod|top[-\s]?secret|ts/?\s?sci|secret)\s+)*"
+    r"(?:security\s+)?clearance", re.I)
+
+
+def _clearance_required(text):
+    return bool(_CLEARANCE_RE.search(text or ""))
+
 # How much of the tail survives clipping. Corporate JDs put the
 # requirements/qualifications block LAST, after pages of mission boilerplate
 # — a plain head-truncation is what let a TPM posting score 0.69 on its EEG
@@ -370,6 +407,9 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=300) -> Fi
         return FitResult(score=None, reason="unscored")
     axes = {a: _clamp(r.get(a)) for a in AXES}
     gates = _parse_gates(r.get("gates"))
+    # Regex backstop on the FULL pre-clip text (clipping could elide it).
+    if _clearance_required(description) and "clearance" not in gates:
+        gates.append("clearance")
     weights = getattr(config, "FIT_WEIGHTS", None)
     score = combine(axes, gates, weights, _effective_penalties())
     return FitResult(score=score, axes=axes, gates=gates,
@@ -410,6 +450,8 @@ def verify_fit(title: str, description: str = "", *, max_tokens=8000) -> FitResu
     seat = str(r.get("seat_type") or "").strip().lower()
     if seat in ("management", "program-product") and "management" not in gates:
         gates.append("management")
+    if _clearance_required(description) and "clearance" not in gates:
+        gates.append("clearance")
     score = combine(axes, gates, getattr(config, "FIT_WEIGHTS", None),
                     _effective_penalties())
     bits = []

@@ -182,8 +182,15 @@ NONCLINICAL_TERMS = [
 ]
 
 
-def exclude_reason(title, description=""):
-    """Return a short reason string if the posting must be dropped, else None."""
+def exclude_reason(title, description="", allow_defense=False):
+    """Return a short reason string if the posting must be dropped, else None.
+
+    `allow_defense` skips the DEFENSE_TERMS/military-radar exclusion ONLY —
+    role-quality excludes (coordinator/scribe/data-entry) always apply. Set
+    for WATCHED companies: `--watch Covar` means "I know this employer is
+    defense-adjacent and want its technical roles anyway". The mission score
+    stays abysmal by design, so these roles surface (watch section, scored
+    rows) without out-ranking on-mission work."""
     title_l = (title or "").lower()
     text = f"{title} {description}".lower()
 
@@ -196,14 +203,15 @@ def exclude_reason(title, description=""):
         if re.search(rf"\b{re.escape(tok)}\b", title_l):
             return f"role-title: {tok.upper()}"
 
-    hit = next((d for d in DEFENSE_TERMS if _tok_in(d, text)), None)
-    if hit:
-        return f"defense: {hit}"
-    # Military RF-radar: only exclude "radar" in a defense/military context.
-    if "radar" in text and any(_tok_in(d, text) for d in
-                               ("military", "defense", "defence", "weapon",
-                                "warfare", "missile", "rf ")):
-        return "defense: military radar"
+    if not allow_defense:
+        hit = next((d for d in DEFENSE_TERMS if _tok_in(d, text)), None)
+        if hit:
+            return f"defense: {hit}"
+        # Military RF-radar: only exclude "radar" in a defense/military context.
+        if "radar" in text and any(_tok_in(d, text) for d in
+                                   ("military", "defense", "defence", "weapon",
+                                    "warfare", "missile", "rf ")):
+            return "defense: military radar"
 
     nc = next((d for d in NONCLINICAL_TERMS
                if re.search(rf"\b{re.escape(d)}\b", text)), None)
@@ -322,7 +330,8 @@ def _keep_job(company, job):
         company_fetch.hydrate_description(job)
         if not is_relevant(title, job.get("description", "")):
             return False
-    if exclude_reason(title, job.get("description", "")):
+    if exclude_reason(title, job.get("description", ""),
+                      allow_defense=_is_watched(company)):
         return False
     if _whole_board(company):
         # Neural/BCI-tagged and watched companies are fetched with no
@@ -468,7 +477,9 @@ def run(max_workers=6, top_n=15, verify=True):
             for j in jobs:
                 if (store.job_exists(conn, j["id"]) and j["id"] not in fresh_ids) \
                         or not is_technical_role(j.get("title", "")) \
-                        or exclude_reason(j.get("title", ""), j.get("description", "")):
+                        or exclude_reason(j.get("title", ""),
+                                          j.get("description", ""),
+                                          allow_defense=True):
                     continue
                 in_pipeline = j["id"] in fresh_ids
                 watch_hits.append((c, j, in_pipeline))
