@@ -16,6 +16,11 @@ captures/
 cro_names.txt
 local_tech_companies.txt
 
+# Nuitka build outputs (build_exe.bat)
+webapp.build/
+webapp.dist/
+webapp.onefile-build/
+
 # Python cruft
 __pycache__/
 *.pyc

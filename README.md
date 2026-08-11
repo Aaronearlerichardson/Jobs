@@ -319,6 +319,52 @@ and every new technical posting there is flagged in a dedicated digest
 section regardless of fit rank or geography — the "wait for the right role
 at this employer" list.
 
+### Web UI
+
+```
+python webapp.py        ->  http://127.0.0.1:5533
+```
+
+Everything above in one local page (Flask + a single self-contained
+[webui/index.html](webui/index.html), light/dark, no build step):
+
+* **Jobs** — the exact digest ranking (fit, combined, verified badge, axis
+  meters, gates, age/NEW/stale chips), filters (search, min fit, geo, age,
+  verified-only, watched-companies, include closed/decided), row expand for
+  the full deep-verify reason + description, and one-click dispositions
+  (dismiss/reject prompt for the --why note that teaches the scorer).
+* **Pipeline** — applied/interviewing/saved/rejected/dismissed groups, with
+  the closed-after-you-applied flag and change/clear actions.
+* **Companies** — roster with mission tier/score, open-job counts,
+  active toggles, and the ★ watchlist; roster JSON export.
+* **Operations** — crawl, status sync, deep-verify, stale-URL probe,
+  rescore, description backfill, prune, dedup, and manual job add — run as
+  background tasks with the console streamed live into the page (one at a
+  time; buttons lock while something runs).
+
+The UI talks to the same SQLite store and modules as the CLI, so the two are
+interchangeable; start it from a shell where `ANTHROPIC_API_KEY` is set or
+scoring operations will no-op (the header shows a warning).
+
+**Launchers.** Double-click `run_webui.bat` to start from source (opens your
+browser once the server is up). To ship the UI to a machine **without Python
+or any pip installs**, run `build_exe.bat`: it compiles the whole app with
+[Nuitka](https://nuitka.net) into a self-contained folder,
+`webapp.dist\`, whose `JobCrawlerUI.exe` bundles CPython, Flask, the crawler
+package, and lxml. The exe finds its data (`local_tech.db`, `profile.toml`,
+résumé, `job_reports\`) in this order: a `JOBS_DATA_DIR` env var if set; its
+own folder when data already sits there; the folder **above** it when that
+holds `local_tech.db` (so a dist folder still inside this project uses the
+project's real data rather than spawning a second empty DB); otherwise its
+own folder, creating a fresh DB there — the copied-to-a-new-machine case.
+The header of the UI always shows which DB file is live.
+`ANTHROPIC_API_KEY` still comes from the environment. The only feature
+missing from the compiled build is the optional Playwright headless-browser
+probing for JS-only boards (it requires its own browser download and can't
+ship inside an exe; those code paths degrade gracefully). First build
+downloads a C compiler if none is present and takes 10–30 minutes; rebuilds
+are fast.
+
 ### Dispositions — record your decisions, teach the scorer
 
 ```

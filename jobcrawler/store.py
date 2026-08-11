@@ -682,7 +682,8 @@ def backfill_axis_columns(conn):
 
 
 def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
-                allow_geo_modes=None, min_mission=None, include_closed=False):
+                allow_geo_modes=None, min_mission=None, include_closed=False,
+                include_dispositioned=False):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -728,9 +729,10 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
         args.append(track)
     if not include_closed:
         conds.append("COALESCE(j.status,'open') != 'closed'")
-    ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
-    conds.append(f"(j.disposition IS NULL OR j.disposition NOT IN ({ph}))")
-    args += list(RANKING_EXCLUDED_DISPOSITIONS)
+    if not include_dispositioned:
+        ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
+        conds.append(f"(j.disposition IS NULL OR j.disposition NOT IN ({ph}))")
+        args += list(RANKING_EXCLUDED_DISPOSITIONS)
     if conds:
         q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]

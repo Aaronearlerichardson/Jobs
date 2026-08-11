@@ -11,6 +11,7 @@ Secrets come from environment variables (see top of file).
 
 import os
 import re
+import sys
 from pathlib import Path
 
 # =========================================================================
@@ -41,7 +42,29 @@ CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
 #  PATHS
 # =========================================================================
 
-SCRIPT_DIR  = Path(__file__).parent
+# Where the app's data lives (DB, profile.toml, résumé, job_reports/).
+# Running from source: this file's directory. In a compiled build (Nuitka
+# defines "__compiled__" in every compiled module), resolved in order:
+#   1. JOBS_DATA_DIR env var — explicit override.
+#   2. The exe's own folder, when it already holds data (local_tech.db or
+#      profile.toml) — the copied-to-another-machine case.
+#   3. The exe folder's PARENT, when THAT holds local_tech.db — i.e. the
+#      dist folder still lives inside the project checkout; use the real
+#      project data instead of spawning a second empty DB beside the exe.
+#   4. Otherwise the exe's folder (fresh install: a new DB is created there).
+if "__compiled__" in globals():
+    _exe_dir = Path(sys.argv[0]).resolve().parent
+    _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
+    if _env_home:
+        SCRIPT_DIR = Path(_env_home)
+    elif (_exe_dir / "local_tech.db").exists() or (_exe_dir / "profile.toml").exists():
+        SCRIPT_DIR = _exe_dir
+    elif (_exe_dir.parent / "local_tech.db").exists():
+        SCRIPT_DIR = _exe_dir.parent
+    else:
+        SCRIPT_DIR = _exe_dir
+else:
+    SCRIPT_DIR = Path(__file__).parent
 
 # Unified store: companies (cached mission scores, scope tags) + jobs
 # (dedup state, per-track fields, resume-fit scores). Shared by every
