@@ -325,6 +325,15 @@ def main():
     from jobcrawler.discovery.ats_dork import DORK_QUERIES
     check("dork queries built from profile locality",
           len(DORK_QUERIES) >= 4 and any("greenhouse" in q for q in DORK_QUERIES))
+    # Parallel JS pass safety property: several probe instances can coexist
+    # and tear down cleanly without ever launching a browser (lazy launch).
+    from contextlib import ExitStack
+    from jobcrawler.discovery.probes import WorkdayJsProbe
+    with ExitStack() as _stack:
+        _probes = [_stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
+        check("K probe instances coexist unlaunched",
+              len(_probes) == 3 and not any(p._launched for p in _probes))
+    check("probe teardown clean", True)
 
     # 10. probe guards (offline: no network hit for gated hosts / marker regex)
     print("[closed probe]")

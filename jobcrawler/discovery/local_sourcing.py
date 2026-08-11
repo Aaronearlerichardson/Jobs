@@ -16,6 +16,7 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack
 from datetime import datetime
 
 import config
@@ -391,19 +392,53 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                  for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
                   if _NONALNUM_RE.sub("", m.lower()) not in found]
+        try:
+            import playwright.sync_api  # noqa: F401 — availability check only
+        except ImportError:
+            if missed:
+                print(f"    [js] playwright not installed; skipping JS probe "
+                      f"of {len(missed)} major(s)")
+            missed = []
         if missed:
             from .probes import WorkdayJsProbe
-            print(f"  JS-probing {len(missed)} major(s) with no static board...")
-            with WorkdayJsProbe() as js:
-                for m in missed:
-                    wd = js.probe(m)
-                    if wd and wd.get("validated"):
-                        nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
-                        hits.append({"name": m, "ats": "workday",
-                                     "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                                     "count": wd["count"], "nc": nc})
-                        print(f"    [JS-OK] {m:30} {wd['tenant']}/{wd['wd_pod']}/"
-                              f"{wd['site']}  nc={nc}/{wd['count']}")
+            # Parallel across DIFFERENT sites is safe: each target still sees
+            # exactly one page load; the serial design existed for sync-
+            # Playwright's thread affinity, not politeness. Each probe
+            # instance already pins its browser to its own dedicated thread,
+            # so K instances + K caller threads = K-way parallelism with the
+            # thread-safety model untouched. K is memory-bound (one headless
+            # Chromium each), so it's capped low and separate from the HTTP
+            # worker count.
+            k = min(4, len(missed))
+            print(f"  JS-probing {len(missed)} major(s) with no static board "
+                  f"({k} parallel browser(s))...")
+            with ExitStack() as stack:
+                probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(k)]
+
+                def _js_one(i, name):
+                    wd = probes[i % k].probe(name)
+                    if not (wd and wd.get("validated")):
+                        return None
+                    nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
+                    return {"name": name, "ats": "workday",
+                            "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
+                            "count": wd["count"], "nc": nc}
+
+                with ThreadPoolExecutor(max_workers=k) as ex:
+                    futs = {ex.submit(_js_one, i, m): m
+                            for i, m in enumerate(missed)}
+                    for fut in as_completed(futs):
+                        try:
+                            h = fut.result()
+                        except Exception as e:
+                            print(f"    [!] JS probe failed for "
+                                  f"{futs[fut]!r}: {e}")
+                            continue
+                        if h:
+                            hits.append(h)
+                            t, p, s = h["slug"]
+                            print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
+                                  f"nc={h['nc']}/{h['count']}")
 
     # Sniffer pass: for names still without a real (NC>0) board, fetch their
     # careers page and detect the embedded ATS + exact slug (covers Greenhouse/
@@ -566,30 +601,46 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     conn = connect()
     written = []
     print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
-    for h in confirmed:
+
+    # The title fetch (1 GET) + mission call (1 LLM request) per company are
+    # pure network I/O — the historical serial tail of the pass. Run them in
+    # a pool; SQLite upserts stay on this thread (connections don't cross
+    # threads). Output is completion-ordered.
+    def _score_one(h):
         titles = _sample_titles(h)
-        tier, score, reason = score_company_mission(h["name"], " | ".join(t for t in titles if t))
-        # Multi-division conglomerates stay active despite an "other" tier —
-        # their healthcare subdivisions are filtered in at crawl time.
-        active = 1 if (tier in include_missions or tier is None
-                       or config.is_multi_division(h["name"])) else 0
-        row = {
-            "name": h["name"], "ats": h["ats"],
-            "slug": h["slug"] if h["ats"] != "workday" else None,
-            "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
-            "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
-            "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
-            "careers_url": h.get("careers_url"),
-            "nc_job_count": h["nc"], "total_job_count": h["count"],
-            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-            "tags": "nc_local", "source": "local_sourcing", "active": active,
-            "last_probed": datetime.now().isoformat(),
-        }
-        upsert_company(conn, row)
-        written.append({**row, "active": active})
-        flag = "active" if active else "INACTIVE(other)"
-        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-        print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+        return h, score_company_mission(h["name"],
+                                        " | ".join(t for t in titles if t))
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed)))) as ex:
+        futs = {ex.submit(_score_one, h): h for h in confirmed}
+        for fut in as_completed(futs):
+            try:
+                h, (tier, score, reason) = fut.result()
+            except Exception as e:
+                print(f"    [!] mission scoring failed for "
+                      f"{futs[fut]['name']!r}: {e}")
+                continue
+            # Multi-division conglomerates stay active despite an "other"
+            # tier — their healthcare subdivisions are filtered at crawl time.
+            active = 1 if (tier in include_missions or tier is None
+                           or config.is_multi_division(h["name"])) else 0
+            row = {
+                "name": h["name"], "ats": h["ats"],
+                "slug": h["slug"] if h["ats"] != "workday" else None,
+                "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
+                "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
+                "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
+                "careers_url": h.get("careers_url"),
+                "nc_job_count": h["nc"], "total_job_count": h["count"],
+                "mission_tier": tier, "mission_score": score, "mission_reason": reason,
+                "tags": "nc_local", "source": "local_sourcing", "active": active,
+                "last_probed": datetime.now().isoformat(),
+            }
+            upsert_company(conn, row)
+            written.append({**row, "active": active})
+            flag = "active" if active else "INACTIVE(other)"
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
     conn.close()
 
     if dork:
