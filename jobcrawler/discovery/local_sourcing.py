@@ -192,10 +192,52 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     return sorted(names)
 
 
+def brainstorm_company_names(n=None):
+    """One LLM call listing REAL employers matching the profile's region +
+    domain — a stage-1 name source reaching companies that directory sites
+    never list (private CROs, hospital-system tech arms, spinouts).
+
+    Hallucination-safe by construction: every name still has to survive the
+    probe -> NC-count -> sniffer verification chain downstream, so an
+    invented company simply fails to resolve — same contract as web-harvest
+    noise. Disk-cached on the DDG cache's 7-day TTL so repeat runs are free;
+    profile.toml [discovery] brainstorm_names tunes the count (0 disables).
+    Without an API key it quietly contributes nothing."""
+    if n is None:
+        cfg = getattr(config, "DISCOVERY_BRAINSTORM_NAMES", None)
+        n = 50 if cfg is None else int(cfg)   # explicit 0 means "off"
+    if n <= 0:
+        return []
+    region = ", ".join((config.LOCALITY_SUBSTRINGS or [])[:6]) or "the target region"
+    domain = ", ".join((config.DOMAIN_KEYWORDS or [])[:10]) or "the target domain"
+    key = f"brainstorm||{n}||{region}||{domain}"
+    cached = _ddg_cache_get(key)
+    if cached is not None:
+        return cached
+    from ..claude import call_claude_json
+    system = ("You help maintain a job-search company roster. "
+              "Return ONLY valid JSON. No markdown, no commentary.")
+    user = (
+        f"List up to {n} REAL employers likely to have offices, labs, or "
+        f"significant operations in or near: {region}.\n"
+        f"Focus on organizations whose work involves: {domain}.\n"
+        "Mix sizes and kinds: large employers, mid-size companies, startups, "
+        "CROs, diagnostics and device makers, health-system technology arms, "
+        "university spinouts. Use official company names only — no "
+        "descriptions, no locations, no commentary.\n"
+        'Return ONLY: {"companies": ["Name", "Name", ...]}')
+    r = call_claude_json(system, user, max_tokens=1600)
+    names = [str(x).strip() for x in (r.get("companies") or []) if str(x).strip()]
+    names = [x for x in names if 2 < len(x) < 60][:n]
+    if names:
+        _ddg_cache_put(key, names)
+    return names
+
+
 def gather_names(extra=None):
     """Union of all name sources, de-duplicated case-insensitively:
     profile seeds + Workday majors + configured directory scrapes + web-search
-    harvesting + any explicit `extra`."""
+    harvesting + an LLM region/domain brainstorm + any explicit `extra`."""
     sources = [SEED_COMPANIES, MAJORS_WORKDAY]
     for url in config.DISCOVERY_DIRECTORY_URLS:
         sources.append(scrape_directory_names(url))
@@ -203,6 +245,10 @@ def gather_names(extra=None):
     if harvested:
         print(f"    web-search harvested {len(harvested)} candidate name(s)")
     sources.append(harvested)
+    brainstormed = brainstorm_company_names()
+    if brainstormed:
+        print(f"    LLM brainstorm contributed {len(brainstormed)} candidate name(s)")
+    sources.append(brainstormed)
     sources.append(extra or [])
 
     names, seen = [], set()
@@ -496,14 +542,20 @@ def _sample_titles(hit, n=6):
     return []
 
 
-def populate_companies(extra_names=None, include_missions=None):
+def populate_companies(extra_names=None, include_missions=None, dork=True):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
     Companies whose mission is `other` are stored but marked inactive (so
     they aren't crawled) unless include_missions says otherwise.
 
-    Returns the list of company dicts written (active ones first).
+    Finishes with the ATS-dork sweep (search-indexed board URLs) unless
+    `dork=False` — run LAST on purpose: it consults the store and skips
+    boards the name-based pass just added, so the two passes don't create
+    duplicate rows for the same board. Dork adds are upserted directly and
+    are NOT included in the returned list.
+
+    Returns the list of company dicts written by the name-based pass.
     """
     from ..store import connect, upsert_company
     from ..claude import score_company_mission, ACTIVE_MISSION_TIERS
@@ -539,6 +591,16 @@ def populate_companies(extra_names=None, include_missions=None):
         ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
         print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
     conn.close()
+
+    if dork:
+        print("\n  ATS-dork sweep (search-indexed board URLs)...")
+        try:
+            from .ats_dork import run_ddgs_dorks
+            added, checked = run_ddgs_dorks()
+            print(f"  dork: {added} new board(s) added "
+                  f"({checked} extracted from search results)")
+        except Exception as e:
+            print(f"  [!] dork sweep failed (name-based results unaffected): {e}")
     return written
 
 

@@ -316,6 +316,16 @@ def main():
          "posted_at": (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")}) == "60d!")
     check("age unknown", lt._age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?")
 
+    # 9f. discovery expansion: brainstorm knob + dork wiring (offline)
+    print("[discovery expansion]")
+    check("brainstorm disabled returns empty (no API touched)",
+          ls.brainstorm_company_names(n=0) == [])
+    check("populate_companies grew a dork switch",
+          "dork" in ls.populate_companies.__code__.co_varnames)
+    from jobcrawler.discovery.ats_dork import DORK_QUERIES
+    check("dork queries built from profile locality",
+          len(DORK_QUERIES) >= 4 and any("greenhouse" in q for q in DORK_QUERIES))
+
     # 10. probe guards (offline: no network hit for gated hosts / marker regex)
     print("[closed probe]")
     check("linkedin probe indeterminate",

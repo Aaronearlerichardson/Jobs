@@ -338,7 +338,11 @@ Everything above in one local page (Flask + a single self-contained
 * **Companies** — roster with mission tier/score, open-job counts,
   active toggles, and the ★ watchlist; roster JSON export.
 * **Operations** — crawl, status sync, deep-verify, stale-URL probe,
-  rescore, description backfill, prune, dedup, and manual job add — run as
+  rescore, description backfills (board + Workday CXS), NLx ingest,
+  **company discovery** (directories + web search + a cached LLM
+  name-brainstorm + the ATS-dork sweep; `[discovery] brainstorm_names`
+  tunes the brainstorm, 0 disables), a standalone ATS dork sweep, mission
+  scoring, prune, dedup, manual job add, and add-company-board — run as
   background tasks with the console streamed live into the page (one at a
   time; buttons lock while something runs).
 

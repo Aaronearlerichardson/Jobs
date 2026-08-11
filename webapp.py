@@ -158,7 +158,14 @@ OPS = {
         "label": "Discover local companies",
         "fn": lambda p: __import__(
             "jobcrawler.discovery.local_sourcing",
-            fromlist=["populate_companies"]).populate_companies(),
+            fromlist=["populate_companies"]
+        ).populate_companies(dork=not p.get("no_dork")),
+    },
+    "dork": {
+        "label": "ATS dork sweep",
+        "fn": lambda p: __import__(
+            "jobcrawler.discovery.ats_dork", fromlist=["run_ddgs_dorks"]
+        ).run_ddgs_dorks(),
     },
     "score-missions": {
         "label": "Score missions",

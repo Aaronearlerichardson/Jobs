@@ -190,6 +190,9 @@ DISCOVERY_SEED_COMPANIES     = list(_dsc.get("seed_companies", []))
 DISCOVERY_WORKDAY_MAJORS     = list(_dsc.get("workday_majors", []))
 DISCOVERY_DIRECTORY_URLS     = list(_dsc.get("directory_urls", []))
 DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
+# LLM name-brainstorm source for discovery (names verified downstream, so
+# hallucinations are harmless). None -> default 50; 0 disables.
+DISCOVERY_BRAINSTORM_NAMES   = _dsc.get("brainstorm_names")
 DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
                                 for n in _dsc.get("name_blocklist", [])}
 
