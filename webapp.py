@@ -143,9 +143,39 @@ OPS = {
         "fn": lambda p: local_tech.backfill_board_descriptions(
             limit=_int(p, "limit")),
     },
+    "backfill-workday": {
+        "label": "Backfill Workday JDs",
+        "fn": lambda p: __import__(
+            "jobcrawler.fetchers.workday",
+            fromlist=["backfill_workday_descriptions"]
+        ).backfill_workday_descriptions(limit=_int(p, "limit")),
+    },
+    "nlx": {
+        "label": "NLx ingest",
+        "fn": lambda p: _op_nlx(p),
+    },
+    "discover-local": {
+        "label": "Discover local companies",
+        "fn": lambda p: __import__(
+            "jobcrawler.discovery.local_sourcing",
+            fromlist=["populate_companies"]).populate_companies(),
+    },
+    "score-missions": {
+        "label": "Score missions",
+        "fn": lambda p: __import__(
+            "jobcrawler.discovery.local_sourcing",
+            fromlist=["score_missions"]
+        ).score_missions(rescore_all=bool(p.get("rescore"))),
+    },
+    "add-board": {
+        "label": "Add company board",
+        "fn": lambda p: __import__(
+            "jobcrawler.discovery.local_sourcing", fromlist=["add_board"]
+        ).add_board((p.get("name") or "").strip(), (p.get("url") or "").strip()),
+    },
     "prune": {
         "label": "Prune dead boards",
-        "fn": lambda p: (lambda c: (store.prune_dead_boards(c), c.close()))(_conn()),
+        "fn": lambda p: _op_prune(p),
     },
     "dedup": {
         "label": "Dedup companies",
@@ -158,6 +188,32 @@ OPS = {
             company=p.get("company", ""), location=p.get("location", "")),
     },
 }
+
+
+def _op_nlx(p):
+    """Pull NC postings for bot-gated employers (Meta/Google/Qualcomm...)
+    from the federal NLx feed and run them through the local-tech ingest."""
+    from jobcrawler.fetchers.careeronestop import fetch_nlx_company
+    names = [n.strip() for n in (p.get("companies") or "").split(",") if n.strip()]
+    if not names:
+        print("  [!] give a comma-separated list of employer names")
+        return
+    total = 0
+    for name in names:
+        jobs = fetch_nlx_company(name)
+        print(f"  {name}: {len(jobs)} NLx posting(s) in NC")
+        if jobs:
+            total += local_tech.ingest_external_jobs(jobs, source="nlx")
+    print(f"  {total} new job(s) ingested from the NLx feed.")
+
+
+def _op_prune(p):
+    conn = _conn()
+    try:
+        store.prune_dead_boards(
+            conn, deactivate_offmission=bool(p.get("offmission")))
+    finally:
+        conn.close()
 
 
 @app.post("/api/run/<name>")
@@ -293,6 +349,31 @@ def api_active(cid):
     conn.commit()
     conn.close()
     return jsonify(ok=True, active=bool(on))
+
+
+@app.post("/api/import/companies")
+def api_import():
+    """Upsert companies from an exported roster JSON (idempotent — tags
+    merge, existing mission scores survive None fields)."""
+    f = request.files.get("file")
+    if not f:
+        return jsonify(error="no file uploaded"), 400
+    import tempfile
+    with tempfile.NamedTemporaryFile("wb", suffix=".json", delete=False) as t:
+        f.save(t)
+        tmp = t.name
+    try:
+        conn = _conn()
+        n = store.import_companies(conn, tmp)
+        conn.close()
+    except Exception as e:
+        return jsonify(error=f"import failed: {e}"), 400
+    finally:
+        try:
+            Path(tmp).unlink()
+        except OSError:
+            pass
+    return jsonify(ok=True, imported=n)
 
 
 @app.get("/api/export/companies")
