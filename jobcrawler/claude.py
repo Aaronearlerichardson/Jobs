@@ -1,7 +1,10 @@
 """Claude API wrapper + search-expansion prompts."""
 
+import atexit
 import json
+import os
 import re
+import threading
 
 import requests
 
@@ -122,27 +125,167 @@ _THINKING_DEFAULT_MODELS = ("claude-sonnet-5", "claude-opus-5",
                             "claude-fable-5", "claude-mythos-5")
 
 
+# --------------------------------------------------------------------------- #
+#  Prompt caching.                                                             #
+#                                                                              #
+#  Every call here is the same shape: a big STABLE system prompt (the rubric +  #
+#  the candidate profile) plus a small per-posting user turn. A crawl scores    #
+#  hundreds of jobs against a byte-identical system prompt, so a cache          #
+#  breakpoint at the end of `system` turns that prefix into a 0.1x read after   #
+#  the first write (1.25x). Placement is the whole trick: the breakpoint sits   #
+#  on the system block, NEVER on the user turn, which differs every request.    #
+#                                                                              #
+#  Below the model's minimum cacheable prefix (1024 tokens on Sonnet 5, 512 on  #
+#  Opus 5) the API silently declines to cache and bills normally — no error and #
+#  no premium — so marking every call is safe. As of 2026-08 that means the     #
+#  fit screen (~1.5k tokens) and deep verify (~1.8k) cache; the tech-bar and    #
+#  mission prompts (~0.7k / ~0.5k) are under Sonnet 5's floor and simply don't. #
+#                                                                              #
+#  CLAUDE_PROMPT_CACHE=0 disables; CLAUDE_CACHE_TTL=1h buys the 1-hour cache    #
+#  (2x writes) for runs whose calls are spread more than 5 minutes apart.       #
+# --------------------------------------------------------------------------- #
+
+_CACHE_ENABLED = os.environ.get("CLAUDE_PROMPT_CACHE", "1").lower() \
+    not in ("0", "false", "no", "off")
+_CACHE_TTL = os.environ.get("CLAUDE_CACHE_TTL", "5m").strip().lower()
+
+# Scoring runs inside ThreadPoolExecutor pools, and a cache entry is only
+# readable once the first response has started — N workers firing at once
+# would each pay a full-price write of the same prefix. The first caller for a
+# given (model, system) claims the prefix and the rest wait for it to land, so
+# the pool pays one write and N-1 reads. Bounded: if the leader hangs or errors
+# the followers go ahead anyway and just miss the cache.
+_GATE_WAIT_S = 90
+_GATE_LOCK = threading.Lock()
+_PREFIX_GATES = {}
+
+# Cumulative token accounting, so cache behaviour is observable rather than
+# assumed (a silent invalidator shows up here as cache_read stuck at 0).
+_USAGE_LOCK = threading.Lock()
+_USAGE = {"calls": 0, "uncached_input": 0, "cache_write": 0,
+          "cache_read": 0, "output": 0}
+
+
+# Minimum cacheable prefix per model (Anthropic docs, 2026-08). Not monotonic
+# across generations — Opus 5 caches from 512 tokens, Sonnet 5 needs 1024,
+# Haiku 4.5 needs 4096 — so a prompt that caches on the verify model may
+# silently not cache on the screen model. Informational: we mark every call
+# regardless (below the floor the API just doesn't cache, at no extra cost).
+_CACHE_MIN_TOKENS = {
+    "claude-opus-5": 512, "claude-fable-5": 512, "claude-mythos-5": 512,
+    "claude-opus-4-8": 1024, "claude-sonnet-5": 1024, "claude-sonnet-4-6": 1024,
+    "claude-opus-4-7": 2048,
+    "claude-opus-4-6": 4096, "claude-haiku-4-5": 4096,
+}
+
+
+def min_cacheable_tokens(model=None):
+    """Smallest prefix the given model will cache; 1024 if unknown."""
+    name = model or CLAUDE_MODEL
+    for prefix, floor in _CACHE_MIN_TOKENS.items():
+        if name.startswith(prefix):
+            return floor
+    return 1024
+
+
+def _system_field(system_prompt, cache=True):
+    """`system` as a cache-marked block list, or the plain string when caching
+    is off. One breakpoint, on the last (only) system block — that covers the
+    whole tools->system prefix and leaves the varying user turn uncached."""
+    if not (cache and _CACHE_ENABLED and system_prompt):
+        return system_prompt
+    control = {"type": "ephemeral"}
+    if _CACHE_TTL == "1h":
+        control["ttl"] = "1h"
+    return [{"type": "text", "text": system_prompt, "cache_control": control}]
+
+
+def build_payload(system_prompt, user_content, max_tokens=1000,
+                  model=None, thinking=False, cache=True):
+    """The /v1/messages request body. Split out from the POST so the payload
+    shape (cache breakpoint placement, thinking guard) is testable offline."""
+    use_model = model or CLAUDE_MODEL
+    payload = {
+        "model":      use_model,
+        "max_tokens": max_tokens,
+        "system":     _system_field(system_prompt, cache),
+        "messages":   [{"role": "user", "content": user_content}],
+    }
+    if not thinking and use_model.startswith(_THINKING_DEFAULT_MODELS):
+        payload["thinking"] = {"type": "disabled"}
+    return payload
+
+
+def _claim_prefix(model, system_prompt):
+    """First caller for this prefix leads (returns the Event it must set when
+    its request finishes); everyone else waits for the leader, then proceeds.
+    Returns (event_to_set_or_None)."""
+    key = (model, hash(system_prompt))
+    with _GATE_LOCK:
+        event = _PREFIX_GATES.get(key)
+        if event is None:
+            event = threading.Event()
+            _PREFIX_GATES[key] = event
+            return event
+    event.wait(timeout=_GATE_WAIT_S)
+    return None
+
+
+def _record_usage(usage):
+    with _USAGE_LOCK:
+        _USAGE["calls"] += 1
+        _USAGE["uncached_input"] += int(usage.get("input_tokens") or 0)
+        _USAGE["cache_write"] += int(usage.get("cache_creation_input_tokens") or 0)
+        _USAGE["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+        _USAGE["output"] += int(usage.get("output_tokens") or 0)
+
+
+def cache_stats():
+    """Cumulative token counters for this process (a plain dict copy)."""
+    with _USAGE_LOCK:
+        return dict(_USAGE)
+
+
+def format_cache_stats():
+    """One-line summary. `hit` is the share of the CACHEABLE prefix served from
+    cache — 0% across a whole run with a large system prompt means something is
+    invalidating the prefix (a timestamp in it, a changed model, a changed
+    profile mid-run)."""
+    s = cache_stats()
+    cached = s["cache_read"] + s["cache_write"]
+    hit = (100.0 * s["cache_read"] / cached) if cached else 0.0
+    total_in = cached + s["uncached_input"]
+    return (f"  [claude] {s['calls']} call(s) | input {total_in:,} tok "
+            f"(cache read {s['cache_read']:,}, wrote {s['cache_write']:,}, "
+            f"uncached {s['uncached_input']:,}; {hit:.0f}% of cacheable prefix hit) "
+            f"| output {s['output']:,} tok")
+
+
+@atexit.register
+def _print_cache_stats_at_exit():
+    if _USAGE["calls"] and os.environ.get("CLAUDE_USAGE_SUMMARY", "1") != "0":
+        print(format_cache_stats())
+
+
 def call_claude_json(system_prompt, user_content, max_tokens=1000,
-                     model=None, thinking=False):
+                     model=None, thinking=False, cache=True):
     """POST to /v1/messages, return the JSON block from the text response.
 
     `model` overrides config.CLAUDE_MODEL for this call (the deep-verify
     pass runs a stronger model than the screen). `thinking=True` leaves the
     model's default adaptive thinking on (5-family models) — pair it with a
     max_tokens large enough for thinking + the JSON; the default False
-    pins thinking off so small structured calls can't be truncated by it."""
+    pins thinking off so small structured calls can't be truncated by it.
+    `cache=False` opts this call out of the system-prompt cache breakpoint
+    (see the prompt-caching block above); the default is on everywhere."""
     if ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
         print("  [!] Set ANTHROPIC_API_KEY env var (or edit config.py).")
         return {}
     use_model = model or CLAUDE_MODEL
-    payload = {
-        "model":      use_model,
-        "max_tokens": max_tokens,
-        "system":     system_prompt,
-        "messages":   [{"role": "user", "content": user_content}],
-    }
-    if not thinking and use_model.startswith(_THINKING_DEFAULT_MODELS):
-        payload["thinking"] = {"type": "disabled"}
+    payload = build_payload(system_prompt, user_content, max_tokens,
+                            use_model, thinking, cache)
+    lead = _claim_prefix(use_model, system_prompt) \
+        if (cache and _CACHE_ENABLED and system_prompt) else None
     try:
         r = requests.post(
             "https://api.anthropic.com/v1/messages",
@@ -156,6 +299,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         )
         r.raise_for_status()
         data = r.json()
+        _record_usage(data.get("usage") or {})
         text = next(
             (b["text"] for b in data.get("content", []) if b.get("type") == "text"),
             "",
@@ -180,6 +324,11 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     except Exception as e:
         print(f"  [!] Claude call failed: {e}")
         return {}
+    finally:
+        # Release any threads waiting on this prefix — including on failure,
+        # so one bad request can't stall a scoring pool for _GATE_WAIT_S.
+        if lead is not None:
+            lead.set()
 
 
 def expand_search(term):
