@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "capture-server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["capture.py"],
+      "port": 8877
+    },
+    {
+      "name": "webui",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["webapp.py"],
+      "port": 5533
+    },
+    {
+      "name": "webui-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["webapp.py", "--port=5599"],
+      "port": 5599
+    }
+  ]
+}
