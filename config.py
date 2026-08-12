@@ -113,6 +113,12 @@ MAX_DESC_CHARS = 12000
 import tomllib
 
 
+# Canonical location of the user's (gitignored) profile; the Settings tab
+# writes here (jobcrawler/profile_edit.py).
+PROFILE_PATH = SCRIPT_DIR / "profile.toml"
+PROFILE_EXAMPLE_PATH = SCRIPT_DIR / "profile.example.toml"
+
+
 def _load_profile():
     for fname in ("profile.toml", "profile.example.toml"):
         p = SCRIPT_DIR / fname
@@ -225,6 +231,58 @@ DISCOVERY_PRIORITY_COMPANIES = [
     (c.get("name"), c.get("ats"), c.get("slug"))
     for c in _dsc.get("priority_companies", [])
 ]
+
+# --- UI tracks (webapp.py) — [tracks.<id>] tables ------------------------------
+# Each track bundles a DB, a jobs.track value, ranking knobs, and the UI
+# filter defaults that flip on switch. When the section is absent, the two
+# built-in tracks are synthesized so existing installs work unchanged.
+_DEFAULT_TRACKS = {
+    "local_tech": {
+        "label": "Local", "db": "local_tech.db", "track": "local-tech",
+        "engine": "local",
+        "rank_by": "fit", "min_mission": 0.2, "min_fit_default": 0.0,
+        "willing_to_move_default": False, "remote_requires_watch": True,
+        "default": True,
+    },
+    "remote_neural": {
+        "label": "Remote neural", "db": "neural.db", "track": "remote-neural",
+        "engine": "neural",
+        "rank_by": "fit", "min_mission": None, "min_fit_default": 0.5,
+        "willing_to_move_default": True, "remote_requires_watch": False,
+        "default": False,
+    },
+}
+
+
+def _build_ui_tracks(raw):
+    tracks = {}
+    for tid, t in (raw or _DEFAULT_TRACKS).items():
+        if not isinstance(t, dict):
+            continue
+        tracks[tid] = {
+            "id": tid,
+            "label": str(t.get("label") or tid),
+            "db_path": SCRIPT_DIR / str(t.get("db") or f"{tid}.db"),
+            "track": str(t.get("track") or tid.replace("_", "-")),
+            # Which crawl machinery this track runs on — "local" (the
+            # location-scoped crawler, jobcrawler/tracks/local_tech.py) or
+            # "neural" (the location-agnostic runner, remote_neural_run.py).
+            # Code keys ops off the ENGINE, never off the user-chosen id.
+            "engine": str(t.get("engine") or "local"),
+            "rank_by": str(t.get("rank_by") or "fit"),
+            "min_mission": (float(t["min_mission"])
+                            if t.get("min_mission") is not None else None),
+            "min_fit_default": float(t.get("min_fit_default", 0.0)),
+            "willing_to_move_default": bool(t.get("willing_to_move_default", False)),
+            "remote_requires_watch": bool(t.get("remote_requires_watch", False)),
+            "default": bool(t.get("default", False)),
+        }
+    return tracks
+
+
+UI_TRACKS = _build_ui_tracks(_PROFILE.get("tracks"))
+DEFAULT_TRACK = next((tid for tid, t in UI_TRACKS.items() if t["default"]),
+                     next(iter(UI_TRACKS), None))
 
 # =========================================================================
 #  HTTP

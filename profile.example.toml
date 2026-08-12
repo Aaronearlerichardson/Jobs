@@ -60,6 +60,43 @@ hard_negations = []
 us_markers = []
 non_us_regions = []
 
+# ---------------------------------------------------------------------------
+# Tracks — the web UI's switchable search profiles. Each [tracks.<id>] table
+# defines: which SQLite DB the UI reads (`db`, relative to the data dir), the
+# jobs.track value (`track`), ranking knobs (`rank_by`, `min_mission`), and
+# the UI filter defaults applied when you switch to the track
+# (`min_fit_default` for the fit slider, `willing_to_move_default` for the
+# relocate checkbox). `remote_requires_watch = true` hides remote rows unless
+# the company carries the human-set "watch" tag (precision rule for
+# locality-focused tracks). `default = true` marks the track the UI opens on.
+# Omit the whole [tracks] section to get the built-in two-track default.
+# ---------------------------------------------------------------------------
+[tracks.local_tech]
+label = "Local"
+db = "local_tech.db"
+track = "local-tech"
+# `engine` names the crawl machinery, not the track: "local" (the
+# location-scoped crawler) or "neural" (the location-agnostic neural runner).
+# Track ids/labels/dbs are yours to rename; engines are fixed code paths, and
+# operations in the UI enable themselves by engine.
+engine = "local"
+rank_by = "fit"
+min_mission = 0.2
+min_fit_default = 0.0
+willing_to_move_default = false
+remote_requires_watch = true
+default = true
+
+[tracks.remote_neural]
+label = "Remote"
+db = "neural.db"
+track = "remote-neural"
+engine = "neural"
+rank_by = "fit"
+min_fit_default = 0.5
+willing_to_move_default = true
+remote_requires_watch = false
+
 [policy]
 # Large companies to keep active despite an "other" mission score, crawling
 # only their aligned roles. Leave empty if you don't want special-casing.

@@ -340,11 +340,19 @@ python webapp.py        ->  http://127.0.0.1:5533
 Everything above in one local page (Flask + a single self-contained
 [webui/index.html](webui/index.html), light/dark, no build step):
 
+* **Tracks** — a header dropdown switches between the search tracks defined
+  in `profile.toml [tracks.*]` (each bundles a DB, crawl engine, ranking
+  knobs, and UI filter defaults). Every tab, stat, and operation re-scopes
+  to the selected track.
 * **Jobs** — the exact digest ranking (fit, combined, verified badge, axis
-  meters, gates, age/NEW/stale chips), filters (search, min fit, geo, age,
+  meters, gates, age/NEW/stale chips), filters (search, min fit, geo bucket
+  local/remote/**relocation**, a "willing to relocate" toggle, age,
   verified-only, watched-companies, include closed/decided), row expand for
   the full deep-verify reason + description, and one-click dispositions
-  (dismiss/reject prompt for the --why note that teaches the scorer).
+  (dismiss/reject prompt for the --why note that teaches the scorer). The
+  geo bucket is derived live from each posting's location against your
+  `[locality]` config — jobs you'd have to move for stay hidden until you
+  opt in.
 * **Pipeline** — applied/interviewing/saved/rejected/dismissed groups, with
   the closed-after-you-applied flag and change/clear actions.
 * **Companies** — roster with mission tier/score, open-job counts,
@@ -356,7 +364,14 @@ Everything above in one local page (Flask + a single self-contained
   tunes the brainstorm, 0 disables), a standalone ATS dork sweep, mission
   scoring, prune, dedup, manual job add, and add-company-board — run as
   background tasks with the console streamed live into the page (one at a
-  time; buttons lock while something runs).
+  time; buttons lock while something runs). One **Crawl** command serves
+  every track — it dispatches on the track's configured engine.
+* **Settings** — edit `profile.toml` from the browser: chip-style editors
+  for every keyword/exclude/location/locality list (global and per-track),
+  numeric fit weights/gate penalties, per-track UI defaults, and a
+  validated raw-TOML editor for everything else. Each save backs the file
+  up to `config_backups/` (last 20 kept) and gracefully restarts the server
+  so import-time config snapshots refresh — the page reconnects itself.
 
 The UI talks to the same SQLite store and modules as the CLI, so the two are
 interchangeable; start it from a shell where `ANTHROPIC_API_KEY` is set or

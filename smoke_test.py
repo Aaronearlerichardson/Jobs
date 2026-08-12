@@ -363,6 +363,59 @@ def main():
     check("closed-loop JD does not trip marker",
           not cf._CLOSED_TEXT_RE.search("develop closed-loop neurostimulation"))
 
+    # 11. UI tracks + live geo bucket (webapp)
+    print("[ui tracks + geo bucket]")
+    import config
+    import webapp
+    check("UI_TRACKS parsed from profile", len(config.UI_TRACKS) >= 2)
+    check("default track set", config.DEFAULT_TRACK in config.UI_TRACKS)
+    fallback = config._build_ui_tracks(None)
+    check("tracks fallback synthesizes",
+          len(fallback) == 2 and any(t["default"] for t in fallback.values()))
+    check("every track has an engine",
+          all(t["engine"] in ("local", "neural") for t in config.UI_TRACKS.values()))
+    check("ops keyed by engine, not track id",
+          all("tracks" not in o for o in webapp.OPS.values()))
+    check("geo local", webapp._geo_tag({"location": "Durham, NC"}) == "local")
+    check("geo remote", webapp._geo_tag({"location": "Remote - US"}) == "remote")
+    check("geo relocation", webapp._geo_tag({"location": "Boston, MA"}) == "relocation")
+    check("stored remote_eligible wins on empty location",
+          webapp._geo_tag({"location": "", "remote_eligible": 1}) == "remote")
+    check("stored geo_mode=remote wins",
+          webapp._geo_tag({"location": "Austin, TX", "geo_mode": "remote"}) == "remote")
+
+    # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
+    print("[profile edit]")
+    from jobcrawler import profile_edit as pe
+    raw, src = pe.read_raw()
+    check("read_raw finds a profile", bool(raw) and src is not None)
+    check("current profile validates", pe.validate(raw) == [])
+    check("bad TOML rejected", any("syntax" in e for e in pe.validate("not [valid")))
+    check("missing sections rejected",
+          any("keywords" in e for e in pe.validate("x = 1")))
+    check("out-of-range weight rejected", any("0..1" in e for e in pe.validate(
+        "[keywords]\n[locations]\n[locality]\n[fit]\nweights = {domain = 1.5}")))
+    check("non-string keyword list rejected", any("list of strings" in e
+          for e in pe.validate("[locations]\n[locality]\n[keywords]\ncore = [1, 2]")))
+    import tomllib as _toml
+    new_text = pe.apply_updates({"keywords.core": ["smoke-a", "smoke-b"],
+                                 "fit.weights.domain": 0.31})
+    parsed = _toml.loads(new_text)
+    check("apply_updates sets values",
+          parsed["keywords"]["core"] == ["smoke-a", "smoke-b"]
+          and parsed["fit"]["weights"]["domain"] == 0.31)
+    before = _toml.loads(raw)
+    check("apply_updates leaves other sections intact",
+          all(parsed[k] == before[k] for k in before
+              if k not in ("keywords", "fit")))
+    # Comments INSIDE a replaced array are expected to go with the old value;
+    # everything outside the touched paths must survive verbatim — the
+    # section-banner comment lines are a good untouched-region proxy.
+    banner = [l for l in raw.splitlines() if l.startswith("# ---")]
+    check("comments outside touched values survive",
+          all(l in new_text for l in banner)
+          and pe.validate(new_text) == [])
+
     print(f"\n{'ALL GREEN' if not FAILS else 'FAILURES: ' + ', '.join(FAILS)}")
     sys.exit(1 if FAILS else 0)
 

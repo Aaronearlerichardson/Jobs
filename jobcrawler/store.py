@@ -136,16 +136,29 @@ _DROPPED_COLUMNS = {
 
 
 def _ensure_columns(conn):
+    # Concurrency-tolerant: the web UI opens several connections to the same
+    # DB at once (one per API request), and on a DB this process hasn't
+    # migrated yet they all read PRAGMA table_info before any ALTER lands —
+    # every loser then raises "duplicate column name" (or "no such column"
+    # for drops). Both mean "another connection already did it": skip.
     for table, cols in _MIGRATIONS.items():
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for col, decl in cols.items():
             if col not in existing:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                try:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+                except sqlite3.OperationalError as e:
+                    if "duplicate column" not in str(e).lower():
+                        raise
     for table, cols in _DROPPED_COLUMNS.items():
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for col in cols:
             if col in existing:
-                conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                try:
+                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
+                except sqlite3.OperationalError as e:
+                    if "no such column" not in str(e).lower():
+                        raise
     conn.commit()
 
 

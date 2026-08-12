@@ -4,6 +4,8 @@ lxml>=5.0.0
 
 # Local web UI (python webapp.py -> http://127.0.0.1:5533)
 flask>=3.0.0
+# Comment-preserving TOML writer for the Settings tab (profile.toml editing).
+tomlkit>=0.12
 
 # Free Google alternative for the web-search fetcher.
 # DDG text search, no API key.
