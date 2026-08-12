@@ -86,6 +86,27 @@ min_fit_default = 0.0
 willing_to_move_default = false
 remote_requires_watch = true
 default = true
+# ---------------------------------------------------------------------------
+# Crawl methodology — every knob below defaults from `engine`, so omit what
+# you don't need to change. One crawl pipeline (jobcrawler/tracks/runner.py)
+# serves every track; these keys ARE the difference between tracks.
+# ---------------------------------------------------------------------------
+# keyword_mode = "extend"      # "extend": [keywords.<id>] ADDs to the global
+#                              # tiers; "replace": they BECOME the tiers
+# accept_remote = false        # allow remote listings through the fetch filter
+# sources = { store = true, priority_companies = false, aggregators = false, websearch = false, location_scoped = true }
+#   # store: active companies from this track's DB
+#   # priority_companies: [discovery] priority_companies, fetched first
+#   # aggregators: Discourse/RemoteOK/Remotive/HN/RSS feeds
+#   # websearch: DDG web-search queries
+#   # location_scoped: store boards fetched through the [locality] filter
+#   #   (whole-board for watched companies); false = lightweight ATS sweep
+# store_tag = ""               # only sweep store companies with this tag
+# require_core_anchor = false  # gate: posting must hit a CORE keyword
+# geo_gate = true              # gate: drop non-local, non-remote postings
+# verify_top = 15              # deep-verify the top N after scoring (0 = skip)
+# cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
+# email = false                # email the digest after each crawl
 
 [tracks.remote_neural]
 label = "Remote"
@@ -96,6 +117,9 @@ rank_by = "fit"
 min_fit_default = 0.5
 willing_to_move_default = true
 remote_requires_watch = false
+# neural-engine defaults: keyword_mode="replace", require_core_anchor=true,
+# geo_gate=false, store_tag="neural", cost_guard=300,
+# sources = { store=true, priority_companies=true, aggregators=true, websearch=true, location_scoped=false }
 
 [policy]
 # Large companies to keep active despite an "other" mission score, crawling

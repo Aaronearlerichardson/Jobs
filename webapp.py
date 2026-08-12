@@ -25,7 +25,6 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 
 import config
 from jobcrawler import nc, profile_edit, remote_filter, store
-from jobcrawler.fetchers import company as company_fetch
 from jobcrawler.tracks import local_tech
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
@@ -262,29 +261,22 @@ OPS = {
 
 
 def _op_crawl(p):
-    """ONE crawl command for every track: the difference between engines is
-    configuration ([tracks.*].engine), not a separate button. The "local"
-    engine runs the location-scoped store crawl; the "neural" engine runs the
-    location-agnostic sweep (priority companies + aggregators + web search)
-    against the track's own DB. Each engine swaps the shared keyword lists
-    to its focus — _run_op restores the baseline before every op, so runs
-    can't leak keywords into each other. Params not applicable to the active
-    engine are simply ignored."""
+    """ONE crawl command for every track: jobcrawler/tracks/runner.run_track,
+    the single pipeline whose methodology (keyword handling, source families,
+    gates, scoring budget, digest/email) comes entirely from the track's
+    profile.toml [tracks.*] config. The track's keyword focus swaps the
+    shared keyword lists — _run_op restores the baseline before every op, so
+    runs can't leak keywords into each other."""
+    from jobcrawler.tracks import runner
     t = config.UI_TRACKS.get(p.get("track") or config.DEFAULT_TRACK)
-    if t and t["engine"] == "neural":
-        from jobcrawler.tracks import remote_neural_run
-        argv = ["--commit"]
-        if not p.get("no_fit"):
-            argv.append("--fit")
-        if p.get("no_websearch"):
-            argv.append("--no-websearch")
-        if p.get("confirm_cost"):
-            argv.append("--confirm-cost")
-        remote_neural_run.main(argv)
-    else:
-        local_tech.run(max_workers=_int(p, "workers", 6),
-                       top_n=_int(p, "top", 15),
-                       verify=not p.get("no_verify"))
+    runner.run_track(
+        t, commit=True,
+        fit=not p.get("no_fit"),
+        verify=False if p.get("no_verify") else None,   # None = track config
+        websearch=False if p.get("no_websearch") else None,
+        confirm_cost=bool(p.get("confirm_cost")),
+        max_workers=_int(p, "workers", 6),
+        top_n=_int(p, "top", 15))
 
 
 def _op_nlx(p):

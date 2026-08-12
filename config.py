@@ -253,12 +253,58 @@ _DEFAULT_TRACKS = {
     },
 }
 
+# Crawl-methodology defaults per engine. Every key is overridable in the
+# track's [tracks.<id>] table; the engine just picks which legacy behavior
+# bundle applies when a key is absent, so existing profiles keep working.
+#   keyword_mode        "extend" (track keywords ADD to the global tiers) or
+#                       "replace" (track keywords BECOME the tiers)
+#   accept_remote       cfg.ACCEPT_REMOTE while this track crawls
+#   sources             which source families the crawl assembles
+#     .store            active companies from the track's own DB
+#     .priority_companies  [discovery] priority_companies, fetched first
+#     .aggregators      Discourse/RemoteOK/Remotive/HN/RSS feeds
+#     .websearch        DDG web-search queries
+#     .location_scoped  store boards fetched through the locality filter
+#                       (whole-board for watched/neural-tagged companies);
+#                       False = lightweight ATS sweep, location-agnostic
+#   store_tag           only sweep store companies carrying this tag (None=all)
+#   require_core_anchor gate: posting must hit a CORE keyword
+#   geo_gate            gate: drop non-local non-remote postings (locality
+#                       from [locality]); False = stamp remote_eligible only
+#   verify_top          deep-verify the top N after scoring (0 = skip)
+#   cost_guard          max postings scored per run without confirm (0 = off)
+#   email               email the digest after a crawl (CLI --send overrides)
+_ENGINE_CRAWL_DEFAULTS = {
+    "local": {
+        "keyword_mode": "extend", "accept_remote": False,
+        "sources": {"store": True, "priority_companies": False,
+                    "aggregators": False, "websearch": False,
+                    "location_scoped": True},
+        "store_tag": None, "require_core_anchor": False, "geo_gate": True,
+        "verify_top": 15, "cost_guard": 0, "email": False,
+    },
+    "neural": {
+        "keyword_mode": "replace", "accept_remote": True,
+        "sources": {"store": True, "priority_companies": True,
+                    "aggregators": True, "websearch": True,
+                    "location_scoped": False},
+        "store_tag": "neural", "require_core_anchor": True, "geo_gate": False,
+        "verify_top": 0, "cost_guard": 300, "email": False,
+    },
+}
+
 
 def _build_ui_tracks(raw):
     tracks = {}
     for tid, t in (raw or _DEFAULT_TRACKS).items():
         if not isinstance(t, dict):
             continue
+        engine = str(t.get("engine") or "local")
+        eng_defaults = _ENGINE_CRAWL_DEFAULTS.get(
+            engine, _ENGINE_CRAWL_DEFAULTS["local"])
+        src = dict(eng_defaults["sources"])
+        src.update({k: bool(v) for k, v in (t.get("sources") or {}).items()
+                    if k in src})
         tracks[tid] = {
             "id": tid,
             "label": str(t.get("label") or tid),
@@ -268,7 +314,7 @@ def _build_ui_tracks(raw):
             # location-scoped crawler, jobcrawler/tracks/local_tech.py) or
             # "neural" (the location-agnostic runner, remote_neural_run.py).
             # Code keys ops off the ENGINE, never off the user-chosen id.
-            "engine": str(t.get("engine") or "local"),
+            "engine": engine,
             "rank_by": str(t.get("rank_by") or "fit"),
             "min_mission": (float(t["min_mission"])
                             if t.get("min_mission") is not None else None),
@@ -276,6 +322,20 @@ def _build_ui_tracks(raw):
             "willing_to_move_default": bool(t.get("willing_to_move_default", False)),
             "remote_requires_watch": bool(t.get("remote_requires_watch", False)),
             "default": bool(t.get("default", False)),
+            # --- crawl methodology (jobcrawler/tracks/runner.py) -----------
+            "keyword_mode": str(t.get("keyword_mode")
+                                or eng_defaults["keyword_mode"]),
+            "accept_remote": bool(t.get("accept_remote",
+                                        eng_defaults["accept_remote"])),
+            "sources": src,
+            "store_tag": (str(t["store_tag"]) if t.get("store_tag")
+                          else eng_defaults["store_tag"]),
+            "require_core_anchor": bool(t.get("require_core_anchor",
+                                              eng_defaults["require_core_anchor"])),
+            "geo_gate": bool(t.get("geo_gate", eng_defaults["geo_gate"])),
+            "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
+            "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
+            "email": bool(t.get("email", eng_defaults["email"])),
         }
     return tracks
 

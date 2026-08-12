@@ -384,6 +384,50 @@ def main():
     check("stored geo_mode=remote wins",
           webapp._geo_tag({"location": "Austin, TX", "geo_mode": "remote"}) == "remote")
 
+    # 11b. unified crawl runner (one pipeline, methodology from [tracks.*])
+    print("[unified runner]")
+    from jobcrawler.tracks import runner
+    lt_t = runner.track_for_engine("local")
+    rn_t = runner.track_for_engine("neural")
+    check("track_for_engine resolves both engines",
+          lt_t["engine"] == "local" and rn_t["engine"] == "neural")
+    check("crawl methodology keys parsed",
+          all(k in lt_t for k in ("keyword_mode", "sources", "store_tag",
+                                  "require_core_anchor", "geo_gate",
+                                  "verify_top", "cost_guard", "email")))
+    check("engine defaults: local extends, neural replaces",
+          lt_t["keyword_mode"] == "extend" and rn_t["keyword_mode"] == "replace")
+    check("engine defaults: gates differ",
+          lt_t["geo_gate"] and not rn_t["geo_gate"]
+          and rn_t["require_core_anchor"] and not lt_t["require_core_anchor"])
+    base_core = list(config.CORE_KEYWORDS)
+    runner.apply_keyword_focus(config, lt_t)
+    check("extend preserves base tiers",
+          config.CORE_KEYWORDS[:len(base_core)] == base_core
+          and config.ACCEPT_REMOTE is False)
+    runner.apply_keyword_focus(config, rn_t)
+    check("replace swaps tiers + enables remote",
+          "bci" in config.CORE_KEYWORDS and config.ACCEPT_REMOTE is True)
+    check("core_anchor uses live CORE list",
+          runner.core_anchor("EEG Data Engineer") == "eeg"
+          and runner.core_anchor("Fraud Analyst", "a recognized leader") is None)
+    # restore pristine keywords for any later checks
+    config.CORE_KEYWORDS[:] = base_core
+    specs_l = runner.build_sources(config, lt_t)
+    specs_n = runner.build_sources(config, rn_t)
+    check("local sources are company-linked store boards",
+          specs_l and all(s["company"] is not None for s in specs_l))
+    check("neural sources are sweep-style (no company rows)",
+          specs_n and all(s["company"] is None for s in specs_n))
+    check("priority companies starred and first",
+          [s for s in specs_n[:6] if s["platform"].endswith("*")])
+    check("websearch toggle removes its sources",
+          len(runner.build_sources(config, rn_t, include_websearch=False))
+          < len(specs_n))
+    check("legacy entry points delegate to runner",
+          "runner" in __import__("inspect").getsource(lt.run)
+          and "runner" in __import__("inspect").getsource(rnr.main))
+
     # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
     print("[profile edit]")
     from jobcrawler import profile_edit as pe

@@ -365,7 +365,11 @@ Everything above in one local page (Flask + a single self-contained
   scoring, prune, dedup, manual job add, and add-company-board — run as
   background tasks with the console streamed live into the page (one at a
   time; buttons lock while something runs). One **Crawl** command serves
-  every track — it dispatches on the track's configured engine.
+  every track: a single pipeline (`jobcrawler/tracks/runner.py`) whose
+  methodology — keyword handling (`keyword_mode`), source families
+  (`sources`), gates (`require_core_anchor`, `geo_gate`), scoring budget
+  (`verify_top`, `cost_guard`), and digest email — comes entirely from the
+  track's `[tracks.*]` config, with sensible defaults per `engine`.
 * **Settings** — edit `profile.toml` from the browser: chip-style editors
   for every keyword/exclude/location/locality list (global and per-track),
   numeric fit weights/gate penalties, per-track UI defaults, and a

@@ -213,30 +213,18 @@ def exclude_reason(title, description="", allow_defense=False):
 
 
 # --------------------------------------------------------------------------- #
-#  Keyword focus — same mechanism as the remote-neural track.                   #
+#  Keyword focus — unified in runner.apply_keyword_focus.                       #
 # --------------------------------------------------------------------------- #
 
 def apply_to_config(cfg):
-    """Broaden the shared keyword filter with the health/bio/science domain
-    terms and force a local crawl. Mutates the live list objects in place so
-    ``filters.is_relevant`` (which imported them at load time) sees the
-    change without a re-import — in-memory only, never config.py on disk.
-
-    Specific terms go to CORE (stand-alone, full-text); generic ones go to
-    DOMAIN and the everyday-tools list to SKILL, so a generic word only
-    counts paired with a skill in the posting head — benefits boilerplate
-    ("medical, dental, vision") can no longer tier-match every US job ad."""
-    have = {k.lower() for k in cfg.CORE_KEYWORDS}
-    added = [k for k in DOMAIN_TARGET_KEYWORDS if k.lower() not in have]
-    cfg.CORE_KEYWORDS.extend(added)
-    have_d = {k.lower() for k in cfg.DOMAIN_KEYWORDS}
-    added_d = [k for k in DOMAIN_TARGET_GENERIC if k.lower() not in have_d]
-    cfg.DOMAIN_KEYWORDS.extend(added_d)
-    have_s = {k.lower() for k in cfg.SKILL_KEYWORDS}
-    added_s = [k for k in LOCAL_SKILL_KEYWORDS if k.lower() not in have_s]
-    cfg.SKILL_KEYWORDS.extend(added_s)
-    cfg.ACCEPT_REMOTE = False
-    return added + added_d + added_s
+    """Back-compat shim: keyword focus is now a per-track config concern
+    (profile.toml [tracks.*].keyword_mode + [keywords.<id>]) applied by
+    jobcrawler/tracks/runner.apply_keyword_focus — "extend" mode adds this
+    track's specific terms to CORE (stand-alone, full-text), generic ones to
+    DOMAIN, and the everyday-tools list to SKILL, so a generic word only
+    counts paired with a skill in the posting head."""
+    from . import runner
+    runner.apply_keyword_focus(cfg, runner.track_for_engine("local"))
 
 
 def is_domain_target(title, description=""):
@@ -318,11 +306,14 @@ def heuristic_score(title, description=""):
 #  Runner.                                                                      #
 # --------------------------------------------------------------------------- #
 
-def _keep_job(company, job):
+def _keep_job(company, job, geo_gate=True):
     """Local-track posting filter, shared by the full crawl and single-company
     crawls: exclude gate, technical-title gate, plus the health-keyword gate
     for multi-division conglomerates (keep only their aligned-subdivision
-    roles — focused companies were already mission-vetted and skip it)."""
+    roles — focused companies were already mission-vetted and skip it).
+    `geo_gate=False` (a [tracks.*] methodology switch — see runner.py) skips
+    the whole-board geography check, letting out-of-area postings through
+    with their remote signal stamped downstream instead."""
     title = job.get("title", "")
     if not is_technical_role(title):
         return False
@@ -337,7 +328,7 @@ def _keep_job(company, job):
     if exclude_reason(title, job.get("description", ""),
                       allow_defense=_is_watched(company)):
         return False
-    if _whole_board(company):
+    if geo_gate and _whole_board(company):
         # Neural/BCI-tagged and watched companies are fetched with no
         # location restriction (see run()/crawl_company()), which lets their
         # remote and onsite-elsewhere reqs through the fetch. Gate here:
@@ -359,13 +350,13 @@ def _keep_job(company, job):
     return True
 
 
-def _score_job(resume, company, job):
+def _score_job(resume, company, job, track=TRACK):
     company_fetch.hydrate_description(job)
     res = score_resume_fit(resume, job["title"], job.get("description", ""))
     return {
         "job_id": job["id"], "company_id": company["id"], "company_name": company["name"],
         "title": job["title"], "url": job["url"], "location": job["location"],
-        "track": TRACK,
+        "track": track,
         "geo_mode": geo_mode(job["location"], job.get("description", "")) or "onsite",
         "description": (job.get("description", "") or "")[:config.MAX_DESC_CHARS],
         "posted_at": job.get("posted_at"),
@@ -423,191 +414,57 @@ def crawl_company(conn, resume, company, max_workers=6):
     return (len(jobs), len(kept), n_new)
 
 
-def run(max_workers=6, top_n=15, verify=True):
-    """
-    Live local crawl: active store companies -> NC postings (parallel) ->
-    exclude + technical gate -> resume-fit-score NEW jobs (parallel) ->
-    deep-verify the top N (full-JD requirements read; `verify=False` skips)
-    -> store + digest ranked by fit. NEVER emails.
-    """
-    resume = resume_text()
-    if not resume:
-        print("  [!] No resume text — fit scores will be null. Set config.RESUME_PATH.")
-    apply_to_config(config)  # so Duke/UNC keyword-gated fetchers surface health-bio jobs
-    conn = store.connect()
-    companies = store.get_companies(conn, active_only=True)
-
-    bar = "=" * 66
-    print(f"\n{bar}\n  {TAG} crawl - {datetime.now():%Y-%m-%d %H:%M}"
-          f"\n  {len(companies)} active compan(ies)\n{bar}\n")
-    if not companies:
-        print("  [!] Company store is empty. Populate it first:\n"
-              "        python discover.py --local                   (NC sourcing pass)\n"
-              "        python crawler.py --import-companies FILE    (shared roster)\n")
-
-    # Fetch every company's board in parallel (remote-neural's thread pool;
-    # per-company politeness lives inside each fetcher). NC-scoped for most
-    # companies; neural/BCI-tagged companies get their WHOLE board pulled
-    # (no location restriction) so an explicitly-remote posting can surface
-    # here too — _keep_job() applies the geo gate afterward.
-    sources = [(c["name"], c["ats"] or "?",
-                (lambda cc=c: company_fetch.fetch_company(
-                    cc, None if _whole_board(cc) else company_fetch.NC_RE)))
-               for c in companies]
-    fetched = fetch_all(sources)
-
-    to_score, n_fetched, n_tech, n_skip = [], 0, 0, 0
-    watch_hits = []   # (company, job, in_pipeline) new postings at watched cos
-    n_closed = n_reopened = 0
-    for c, (jobs, err) in zip(companies, fetched):
-        if err is not None:
-            print(f"  {c['name']:26} [!] fetch error: {err}")
-            continue
-        # Open/closed sync against this fetch. Guarded to non-empty
-        # snapshots: fetchers soft-fail to [] (dead board, HTTP 404), which
-        # must never read as "every job here closed".
-        status_note = ""
-        if jobs and c.get("id"):
-            n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs, track=TRACK)
-            n_reopened += n_re
-            n_closed += n_cl
-            if n_cl or n_re:
-                status_note = (f"  [{n_cl} closed"
-                               + (f", {n_re} reopened" if n_re else "") + "]")
-        n_fetched += len(jobs)
-        kept = [j for j in jobs if _keep_job(c, j)]
-        n_tech += len(kept)
-        fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
-        n_skip += len(kept) - len(fresh)
-        for j in fresh:
-            to_score.append((c, j))
-        if _is_watched(c):
-            # Watch section: EVERY new technical, non-excluded posting at a
-            # watched company, any geography. Ones outside the scoring
-            # pipeline (onsite elsewhere) are stored unscored so they aren't
-            # re-flagged as new next run and closed-tracking covers them;
-            # location is shown so Aaron judges applicability himself.
-            fresh_ids = {f["id"] for f in fresh}
-            for j in jobs:
-                if (store.job_exists(conn, j["id"]) and j["id"] not in fresh_ids) \
-                        or not is_technical_role(j.get("title", "")) \
-                        or exclude_reason(j.get("title", ""),
-                                          j.get("description", ""),
-                                          allow_defense=True):
-                    continue
-                in_pipeline = j["id"] in fresh_ids
-                watch_hits.append((c, j, in_pipeline))
-                if not in_pipeline:
-                    store.upsert_job(conn, {
-                        "job_id": j["id"], "company_id": c["id"],
-                        "company_name": c["name"], "title": j.get("title"),
-                        "url": j.get("url"), "location": j.get("location"),
-                        "track": TRACK,
-                        "geo_mode": geo_mode(j.get("location", ""),
-                                             j.get("description", "")),
-                        "posted_at": j.get("posted_at"),
-                        "description": (j.get("description") or "")[:config.MAX_DESC_CHARS]})
-        scope = "brd" if _whole_board(c) else "NC "
-        print(f"  {c['name']:26} {len(jobs):3} {scope} -> {len(kept):2} technical "
-              f"-> {len(fresh):2} new{status_note}")
-
-    print(f"\n  scoring {len(to_score)} new job(s) against resume "
-          f"({n_skip} already scored)...")
+def self_heal_unscored(conn, resume, track=TRACK, max_workers=6):
+    """Self-heal: the fresh-only crawl loop never revisits an already-stored
+    job, so a row that was ingested bodyless (unscorable -> NULL score) would
+    stay out of the ranking forever even once its description is recovered.
+    Score any NULL-score row that now carries a real body (hydrated by
+    backfill_board_descriptions, or by an earlier run). Returns #scored."""
+    from ..fit import MIN_DESC_CHARS
+    _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
+    pending = [dict(r) for r in conn.execute(
+        "SELECT job_id, title, description FROM jobs "
+        "WHERE track = ? AND resume_fit_score IS NULL "
+        "AND COALESCE(status,'open') != 'closed' "
+        f"AND (disposition IS NULL OR disposition NOT IN ({_ph})) "
+        "AND length(COALESCE(description,'')) >= ?",
+        (track, *store.RANKING_EXCLUDED_DISPOSITIONS, MIN_DESC_CHARS)).fetchall()]
+    if not pending:
+        return 0
+    print(f"  self-heal: scoring {len(pending)} newly-described "
+          f"job(s) that were previously unscorable...")
     scored = 0
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(_score_job, resume, c, j): j for c, j in to_score}
+        futs = {ex.submit(score_resume_fit, resume, r["title"],
+                          r.get("description", "")): r for r in pending}
         for fut in as_completed(futs):
+            r = futs[fut]
             try:
-                store.upsert_job(conn, fut.result())
-                scored += 1
+                res = fut.result()
             except Exception as e:
-                print(f"    [!] scoring error: {e}")
+                print(f"    [!] self-heal scoring error: {e}")
+                continue
+            if res.score is not None:
+                store.update_job_scores(conn, r["job_id"], res.as_columns())
+                scored += 1
+    return scored
 
-    # Self-heal: the fresh-only loop above never revisits an already-stored
-    # job, so a row that was ingested bodyless (unscorable -> NULL score) would
-    # stay out of the ranking forever even once its description is recovered.
-    # Score any NULL-score row that now carries a real body (hydrated by
-    # backfill_board_descriptions, or by an earlier run before this pass).
-    if resume:
-        from ..fit import MIN_DESC_CHARS
-        _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
-        pending = [dict(r) for r in conn.execute(
-            "SELECT job_id, title, description FROM jobs "
-            "WHERE track = ? AND resume_fit_score IS NULL "
-            "AND COALESCE(status,'open') != 'closed' "
-            f"AND (disposition IS NULL OR disposition NOT IN ({_ph})) "
-            "AND length(COALESCE(description,'')) >= ?",
-            (TRACK, *store.RANKING_EXCLUDED_DISPOSITIONS, MIN_DESC_CHARS)).fetchall()]
-        if pending:
-            print(f"  self-heal: scoring {len(pending)} newly-described "
-                  f"job(s) that were previously unscorable...")
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                futs = {ex.submit(score_resume_fit, resume, r["title"],
-                                  r.get("description", "")): r for r in pending}
-                for fut in as_completed(futs):
-                    r = futs[fut]
-                    try:
-                        res = fut.result()
-                    except Exception as e:
-                        print(f"    [!] self-heal scoring error: {e}")
-                        continue
-                    if res.score is not None:
-                        store.update_job_scores(conn, r["job_id"], res.as_columns())
-                        scored += 1
 
-    # Deep second pass on the finalists BEFORE the digest is written: the
-    # screen above scored (possibly clipped) text once per job; the top of
-    # the list is what Aaron acts on, so it gets a full-JD requirements
-    # read (fit.verify_fit). Skipped with --no-verify or when unscorable.
-    if verify and resume:
-        verify_top(top_n=top_n, max_workers=max_workers, conn=conn)
+def run(max_workers=6, top_n=15, verify=True):
+    """
+    Live local crawl: active store companies -> locality-scoped postings ->
+    exclude + technical gate -> resume-fit-score NEW jobs -> deep-verify the
+    top N -> store + digest ranked by fit. NEVER emails (unless the track's
+    config says otherwise).
 
-    # Geography enforced at the query layer (not the `track` label): only
-    # NC-locatable postings appear in the local search, whatever ingested
-    # them — plus explicitly-remote postings at WATCHED companies only
-    # (ranked_jobs checks the watch tag itself; the old unscoped remote
-    # exception let 87 remote-anywhere rows — slug-collision boards,
-    # India/Brazil remotes, a crypto exchange — into a 534-row ranking).
-    # Remote-but-NC postings rank as local regardless, because their
-    # location string now carries the NC evidence (multi-location capture
-    # in the fetchers). Rank by résumé fit, not fit×mission: most local
-    # companies sit in the same health-tech mission tier, so the
-    # near-constant mission factor only inflates and compresses the ranking.
-    # combined is still shown per row.
-    #
-    # But the roster is NOT uniformly on-mission (~70 active companies score
-    # "other"), and ranking on fit alone lets an off-mission employer's senior
-    # ML role win on function/seniority: a games studio rec-sys job ranked top-20
-    # at fit 0.40 against a mission of 0.03. MIN_MISSION_FOR_RANKING drops what
-    # has been *judged* off-mission; jobs with no mission score at all are kept.
-    ranked = store.ranked_jobs(conn, track=TRACK, location_re=company_fetch.NC_RE,
-                               rank_by="fit", allow_geo_modes={"remote"},
-                               min_mission=MIN_MISSION_FOR_RANKING)
-    write_digest(ranked, watch_hits=watch_hits, pipeline=store.get_pipeline(conn))
-
-    if watch_hits:
-        print(f"\n  {bar}\n  WATCHED COMPANIES - NEW POSTINGS THIS RUN\n  {bar}")
-        for c, j, in_pipeline in watch_hits:
-            note = "scored" if in_pipeline else "listed only (outside local scope)"
-            print(f"  [WATCH] {c['name']}: {(j.get('title') or '')[:56]}")
-            print(f"          [{j.get('location') or '?'}]  ({note})")
-            print(f"          {j.get('url')}")
-
-    print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
-    for j in ranked[:top_n]:
-        fit = j["resume_fit_score"]
-        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-        comb = j.get("combined_score")
-        cs = f"{comb:.2f}" if isinstance(comb, float) else "n/a"
-        tier = j.get("mission_tier") or "?"
-        print(f"  {TAG} fit={fs} (combined={cs}) [{j.get('geo_mode','?')}] "
-              f"[{_age_tag(j)}] {(j['title'] or '')[:48]}")
-        print(f"        {j['company_name']} ({tier})  -  {j.get('fit_reason','')}")
-        print(f"        {j['url']}")
-    print(f"\n  {len(ranked)} open job(s) in ranking; {scored} newly scored, "
-          f"{n_closed} marked closed, {n_reopened} reopened this run.")
-    print(f"  *** NO EMAIL SENT (preview) ***\n")
-    return ranked
+    The pipeline itself lives in jobcrawler/tracks/runner.py (one runner for
+    every track; methodology comes from profile.toml [tracks.*]) — this is
+    the back-compat entry point for the default local-engine track.
+    """
+    from . import runner
+    return runner.run_track(runner.track_for_engine("local"),
+                            fit=True, commit=True, verify=verify,
+                            max_workers=max_workers, top_n=top_n)
 
 
 def backfill_board_descriptions(max_workers=8, limit=None, min_len=200):
@@ -782,7 +639,8 @@ def _live_jd(row):
     return text if len(text) > len(stored) else stored
 
 
-def verify_top(top_n=15, max_workers=4, rounds=2, conn=None):
+def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, track=TRACK,
+               min_mission=MIN_MISSION_FOR_RANKING):
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
     each of the current top `top_n` jobs not already verified (fit_reason
     carrying the 'deep:' marker), re-fetch the freshest full posting text
@@ -806,10 +664,10 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None):
         conn = store.connect()
     n_done = 0
     for rnd in range(rounds):
-        ranked = store.ranked_jobs(conn, track=TRACK,
+        ranked = store.ranked_jobs(conn, track=track,
                                    location_re=company_fetch.NC_RE,
                                    rank_by="fit", allow_geo_modes={"remote"},
-                                   min_mission=MIN_MISSION_FOR_RANKING,
+                                   min_mission=min_mission,
                                    limit=top_n)
         todo = [r for r in ranked if "deep:" not in (r.get("fit_reason") or "")]
         if not todo:

@@ -23,17 +23,6 @@ from datetime import datetime
 
 from ..digest import send_gmail
 
-from .. import store as store_mod
-from ..fetchers import (
-    fetch_discourse,
-    fetch_hnhiring,
-    fetch_remoteok,
-    fetch_remotive,
-    fetch_rss,
-    fetch_websearch,
-)
-from ..sources import ATS_REGISTRY, iter_store_sources
-
 import config
 
 TAG = "[REMOTE-NEURAL]"
@@ -112,16 +101,12 @@ def is_technical_role(title):
 
 
 def apply_to_config(cfg):
-    """Point the shared keyword filter at this track's focus and enable
-    remote listings. Mutates the existing list objects in place so
-    ``filters.is_relevant`` (which imported them at load time) sees the
-    change without a re-import.
-    """
-    cfg.CORE_KEYWORDS[:] = TRACK_CORE
-    cfg.DOMAIN_KEYWORDS[:] = TRACK_DOMAIN
-    cfg.SKILL_KEYWORDS[:] = TRACK_SKILL
-    cfg.INCLUDE_KEYWORDS[:] = TRACK_CORE + TRACK_DOMAIN + TRACK_SKILL
-    cfg.ACCEPT_REMOTE = True
+    """Back-compat shim: keyword focus is now a per-track config concern
+    (profile.toml [tracks.*].keyword_mode + [keywords.<id>]) applied by
+    jobcrawler/tracks/runner.apply_keyword_focus — "replace" mode points the
+    shared tiers at this track's focus wholesale and enables remote."""
+    from . import runner
+    runner.apply_keyword_focus(cfg, runner.track_for_engine("neural"))
 
 
 # =========================================================================
@@ -145,72 +130,10 @@ PRIORITY_COMPANIES = list(getattr(config, "DISCOVERY_PRIORITY_COMPANIES", []))
 WEBSEARCH_QUERIES = list(getattr(config, "REMOTE_NEURAL_WEBSEARCH_QUERIES", []))
 
 
-def build_sources(cfg, include_websearch=True, db_path=None):
-    """Assemble the ordered list of (name, platform, thunk) source specs:
-    priority companies, then the company store (tag: neural) — deduped in
-    that order so cross-source duplicates resolve deterministically. Heavy
-    onsite ATSes (Workday/SuccessFactors/PeopleAdmin) are deliberately
-    excluded: they're the local track's locality-bound employers, and the
-    remote filter would cull nearly all of their thousands of onsite reqs
-    anyway.
-
-    `db_path` selects which store's company roster to sweep — pass
-    config.NEURAL_DB_PATH (this track's own, isolated store); omitting it
-    falls back to store.connect()'s default (config.STORE_DB_PATH /
-    local_tech.db), which is almost never what this track wants.
-    """
-    sources, used = [], set()
-
-    def add(ats, name, slug, thunk, star=""):
-        key = (ats, str(slug))
-        if key not in used:
-            used.add(key)
-            sources.append((name, ats + star, thunk))
-
-    # 1) Priority targets.
-    for name, ats, slug in PRIORITY_COMPANIES:
-        mk, _tag, _pause = ATS_REGISTRY[ats]
-        add(ats, name, slug, mk(name, slug), star="*")
-
-    # 2) Company store sweep (populated by discovery / --import-companies).
-    try:
-        conn = store_mod.connect(db_path)
-        rows = store_mod.get_companies(conn, active_only=True, tag="neural")
-        conn.close()
-    except Exception as e:
-        print(f"  [!] company store unavailable ({e}); priority list only")
-        rows = []
-    for ats, name, slug, thunk in iter_store_sources(rows):
-        add(ats, name, slug, thunk)
-
-    # 4) Forums + aggregator feeds (remote-native boards).
-    for name, base, cat in cfg.DISCOURSE_BOARDS:
-        sources.append((name, "discourse",
-                        lambda n=name, b=base, c=cat: fetch_discourse(n, b, c)))
-    if getattr(cfg, "REMOTEOK_ENABLED", True):
-        sources.append(("RemoteOK", "remoteok", fetch_remoteok))
-    if getattr(cfg, "REMOTIVE_ENABLED", True):
-        sources.append(("Remotive", "remotive",
-                        lambda: fetch_remotive(category=cfg.REMOTIVE_CATEGORY)))
-    if getattr(cfg, "HNHIRING_ENABLED", True):
-        sources.append(("HN Who-is-hiring", "hn",
-                        lambda: fetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS)))
-    for label, url, default_loc in cfg.RSS_FEEDS:
-        # Config's RSS feeds are remote-only boards (WWR, Jobicy) — mark
-        # items with a structured remote hint so the runner trusts them.
-        is_remote_board = default_loc.strip().lower() == "remote"
-        sources.append((label, "rss",
-                        lambda l=label, u=url, d=default_loc, rb=is_remote_board:
-                            fetch_rss(l, u, default_location=d, remote_board=rb)))
-
-    # 5) Web searches (DDG -> JSON-LD).
-    if include_websearch:
-        for label, query, n in WEBSEARCH_QUERIES:
-            sources.append((label, "websearch",
-                            lambda l=label, q=query, m=n:
-                                fetch_websearch(l, q, max_results=m)))
-
-    return sources
+# NOTE: this track's source assembly (priority companies + tag-scoped store
+# sweep + aggregator feeds + web search) moved to the unified
+# jobcrawler/tracks/runner.build_sources, driven by profile.toml
+# [tracks.*].sources — see runner.py.
 
 
 # =========================================================================

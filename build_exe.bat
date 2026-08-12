@@ -26,8 +26,6 @@ python -m nuitka webapp.py ^
   --include-package=jobcrawler ^
   --include-data-files=webui/index.html=webui/index.html ^
   --include-data-files=profile.example.toml=profile.example.toml ^
-  --nofollow-import-to=playwright ^
-  --nofollow-import-to=playwright_stealth ^
   --assume-yes-for-downloads
 if errorlevel 1 (
   echo.
