@@ -224,6 +224,25 @@ def main():
     check("verify_fit refuses stub descriptions",
           fit.verify_fit("T", "too short").score is None)
 
+    # 9b-ii. prompt caching: the breakpoint must sit on the STABLE system
+    # prompt, never on the per-posting user turn (which would write a fresh
+    # cache entry per job and never read one).
+    print("[prompt cache]")
+    import jobcrawler.claude as claude
+    p = claude.build_payload("SYSTEM RUBRIC", "JOB TITLE: X")
+    check("system carries a cache breakpoint",
+          isinstance(p["system"], list)
+          and p["system"][0]["cache_control"]["type"] == "ephemeral")
+    check("user turn carries no breakpoint",
+          "cache_control" not in str(p["messages"]))
+    check("cache=False falls back to a plain system string",
+          claude.build_payload("S", "U", cache=False)["system"] == "S")
+    check("system prompt is byte-stable across calls",
+          claude.build_payload("S", "U1")["system"]
+          == claude.build_payload("S", "U2")["system"])
+    check("fit screen prompt clears the screen model's cache floor",
+          len(fit.build_system_prompt()) // 4 > claude.min_cacheable_tokens())
+
     # 9c. watchlist plumbing
     print("[watchlist]")
     conn = store.connect(":memory:")

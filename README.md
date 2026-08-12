@@ -60,6 +60,18 @@ mission tiers, locality, and discovery seeds. `config.py` is now just plumbing
 - **ANTHROPIC_API_KEY** powers the scorers (resume fit, technical bar, company
   mission) and Claude-driven discovery. Everything degrades gracefully without
   it (heuristic fallbacks, unscored missions).
+- **Prompt caching is on by default.** Every scorer sends the same stable
+  system prompt (rubric + profile) with a per-posting user turn, so
+  `jobcrawler/claude.py` puts a cache breakpoint at the end of `system`: the
+  first call in a run writes the prefix (1.25x) and the rest read it (0.1x),
+  which is roughly a 5-10x cut on input cost for a several-hundred-job crawl.
+  Each run prints a `[claude] ... % of cacheable prefix hit` line on exit —
+  a 0% hit rate over a long run means something is invalidating the prefix.
+  `CLAUDE_PROMPT_CACHE=0` disables it, `CLAUDE_CACHE_TTL=1h` buys the 1-hour
+  cache (2x writes; only worth it if calls are >5 min apart),
+  `CLAUDE_USAGE_SUMMARY=0` silences the summary line. Prompts below the
+  model's floor (1024 tokens on Sonnet 5, 512 on Opus 5) simply don't cache,
+  at no extra cost — today that's the tech-bar and company-mission prompts.
 - **GMAIL_APP_PASSWORD** is only needed for emailed digests (Google Account →
   Security → 2-Step Verification → "App passwords" → Mail).
 - **CAREERONESTOP_*** (optional) unlock the NLx feed for gated federal
@@ -520,6 +532,6 @@ corrupt the DB.
 | `jobcrawler/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `jobcrawler/store.py` | unified companies + jobs store (+ export/import, prune, `update_job_scores`) |
 | `jobcrawler/fit.py` | multi-axis résumé-fit rubric (axes + gates + deterministic combiner), templated from profile `[fit]`; calibration harness via `python -m jobcrawler.fit` |
-| `jobcrawler/claude.py` | Claude API wrapper + discovery/expansion/mission/tech-bar prompts; `score_resume_fit` delegates to `fit.py` |
+| `jobcrawler/claude.py` | Claude API wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts; `score_resume_fit` delegates to `fit.py` |
 | `jobcrawler/filters.py` / `remote_filter.py` / `nc.py` | keyword tiers, remote eligibility, locality — all driven by `profile.toml` |
 | `jobcrawler/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
