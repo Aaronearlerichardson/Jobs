@@ -65,21 +65,37 @@ def is_jobposting(obj):
     return "JobPosting" in str(t or "")
 
 
+def _one_location(loc):
+    """One jobLocation entry -> display string ('' when unreadable)."""
+    if not isinstance(loc, dict):
+        return str(loc or "").strip()
+    addr = loc.get("address", {})
+    if isinstance(addr, dict):
+        parts = [addr.get("addressLocality"),
+                 addr.get("addressRegion"),
+                 addr.get("addressCountry")]
+        joined = ", ".join(str(p) for p in parts if p and str(p).upper() != "UNAVAILABLE")
+        if joined:
+            return joined
+    if loc.get("name"):
+        return str(loc["name"])
+    return ""
+
+
 def _normalize_location(jp):
+    # Multi-location postings list several jobLocation entries; taking only
+    # the first hid every secondary site (a "Remote"-first posting with a
+    # Durham office read as just "Remote"). Join them all.
     loc = jp.get("jobLocation")
-    if isinstance(loc, list):
-        loc = loc[0] if loc else None
-    if isinstance(loc, dict):
-        addr = loc.get("address", {})
-        if isinstance(addr, dict):
-            parts = [addr.get("addressLocality"),
-                     addr.get("addressRegion"),
-                     addr.get("addressCountry")]
-            joined = ", ".join(str(p) for p in parts if p)
-            if joined:
-                return joined
-        if loc.get("name"):
-            return str(loc["name"])
+    locs = loc if isinstance(loc, list) else [loc] if loc else []
+    parts, seen = [], set()
+    for l in locs:
+        s = _one_location(l)
+        if s and s.lower() not in seen:
+            seen.add(s.lower())
+            parts.append(s)
+    if parts:
+        return "; ".join(parts)
     alr = jp.get("applicantLocationRequirements")
     if isinstance(alr, dict) and alr.get("name"):
         return str(alr["name"])

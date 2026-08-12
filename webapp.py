@@ -269,6 +269,10 @@ def _job_json(r, today, rank=None):
 @app.get("/api/jobs")
 def api_jobs():
     conn = _conn()
+    # NC-locatable rows, plus remote rows at WATCHED companies only —
+    # ranked_jobs enforces the watch check itself. The old unscoped remote
+    # exception let slug-collision boards and overseas remotes into the
+    # local list (see tracks/local_tech.py run()).
     rows = store.ranked_jobs(
         conn, track=local_tech.TRACK, location_re=company_fetch.NC_RE,
         rank_by="fit", allow_geo_modes={"remote"},

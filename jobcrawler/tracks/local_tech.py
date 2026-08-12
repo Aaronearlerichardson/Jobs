@@ -17,8 +17,9 @@ import config
 
 from .. import store
 from ..claude import score_resume_fit
-from ..filters import is_relevant
+from ..filters import is_relevant, scrub_boilerplate
 from ..fetchers import company as company_fetch
+from ..nc import NC_RE
 from ..parallel import fetch_all
 from ..remote_filter import remote_signal
 from ..resume import resume_text
@@ -35,6 +36,8 @@ MIN_MISSION_FOR_RANKING = 0.2
 #  Domain targets — health / bio / science (NOT requiring neural signals).      #
 # --------------------------------------------------------------------------- #
 
+# SPECIFIC health/bio/science terms — strong enough to stand alone anywhere
+# in a posting (they join CORE_KEYWORDS, full-text tier-1 matching).
 DOMAIN_TARGET_KEYWORDS = [
     # clinical & health ML
     "clinical machine learning", "clinical ml", "health ml", "healthcare ai",
@@ -47,9 +50,11 @@ DOMAIN_TARGET_KEYWORDS = [
     # leaked military RF/SDR roles (e.g. counter-drone) into a clinical search.
     "medical device", "medical-device", "physiological signal",
     "biosignal", "biosensor", "wearable sensor", "ecg", "eeg signal",
-    # diagnostics
-    "diagnostic", "diagnostics", "computational pathology", "digital pathology",
-    "radiology ai", "medical imaging", "image analysis", "biomarker",
+    # diagnostics (bare "diagnostic(s)" moved to the paired tier — it hit
+    # "GPU Compute Diagnostics" and friends at multi-division employers)
+    "computational pathology", "digital pathology", "molecular diagnostics",
+    "in vitro diagnostic", "radiology ai", "medical imaging",
+    "image analysis", "biomarker",
     # genomics & computational biology
     "genomics", "genomic", "computational biology", "computational biologist",
     "bioinformatics", "single-cell", "sequencing", "proteomics",
@@ -64,16 +69,40 @@ DOMAIN_TARGET_KEYWORDS = [
     # cross-cutting health-ML signal terms
     "biostatistics", "biostatistician", "epidemiolog", "medical ai",
     "clinical trial analytics",
-    # broadened: health / bio / science (mission need not be clinical); the
-    # LLM mission tier is the authoritative filter and drops "other".
-    "health", "healthcare", "medical", "clinical", "patient", "hospital",
+    # unambiguous single-word domain markers
     "biotech", "biotechnology", "life science", "life sciences",
-    "pharma", "pharmaceutical", "therapeutics", "drug",
-    "biology", "biological", "molecular", "immunolog", "oncolog", "cell ",
-    "chemistry", "biochemistry", "assay", "laboratory", "reagent",
+    "pharma", "pharmaceutical", "therapeutics",
+    "immunolog", "oncolog", "biochemistry",
     "scientific software", "scientific computing", "research software",
     "scientific instrument", "biomedical", "biopharma", "vaccine",
     "microbiolog", "neuroscience", "cardiolog", "radiolog", "pathology",
+]
+
+# GENERIC health words — real signal only in context. They fire on benefits
+# boilerplate ("medical, dental, vision", "health savings account", "drug-free
+# workplace") and infra prose ("service health checks"), so they join
+# DOMAIN_KEYWORDS instead: a hit counts only when PAIRED with a skill term in
+# the posting head (filters.is_relevant tier 2x3), never alone. This is what
+# made the multi-division keyword gate a sieve — is_relevant("Accountant",
+# <benefits boilerplate>) was True via CORE "health"/"medical"/"drug".
+# (bare "diagnostic(s)" is deliberately absent even here: at the
+# multi-division employers this gate exists for, it means GPU/system
+# diagnostics and pairs with "firmware"/"validation" into a false match,
+# while real health-diagnostics JDs always carry "clinical"/"laboratory"/
+# "health" too. The specific forms live in DOMAIN_TARGET_KEYWORDS.)
+DOMAIN_TARGET_GENERIC = [
+    "health", "healthcare", "medical", "clinical", "patient", "hospital",
+    "drug", "biology", "biological", "molecular", "cell ", "chemistry",
+    "assay", "laboratory", "reagent", "life-science",
+]
+
+# Local-track skill vocabulary added to SKILL_KEYWORDS for the pairing tier —
+# the track's technical bar is broader than the neural default (any genuine
+# technical/quant role), so the pair partner list needs the everyday tools.
+LOCAL_SKILL_KEYWORDS = [
+    "python", "sql", "matlab", "c++", "etl", "statistics", "statistical",
+    "data analysis", "data management", "data engineering", "automation",
+    "computer vision", "verification", "validation",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -130,10 +159,16 @@ def geo_mode(location, description=""):
     """
     Classify a posting's geography: "onsite" (Triangle/NC), "remote", or
     None (fails the local gate). Onsite wins when a posting is both local
-    and remote-friendly. Remote detection delegates to the shared
-    jobcrawler.remote_filter (workforce-context phrases, hard negations)
-    instead of a bare token list.
+    and remote-friendly — a "Remote; Durham, NC" multi-location posting is
+    LOCAL material, not a remote drop. The location FIELD is checked against
+    the full configured locality regex (nc.NC_RE — profile [locality], the
+    same terms the fetch filter uses); the loose GEO_ONSITE_TOKENS scan
+    covers body text ("hybrid from our Durham office"). Remote detection
+    delegates to the shared jobcrawler.remote_filter (workforce-context
+    phrases, hard negations) instead of a bare token list.
     """
+    if NC_RE.search(location or ""):
+        return "onsite"
     text = f"{location} {description}".lower()
     if any(_tok_in(t, text) for t in GEO_ONSITE_TOKENS):
         return "onsite"
@@ -158,18 +193,32 @@ EXCLUDE_ROLE_PHRASES = [
 # Title-only short/ambiguous tokens (avoid false hits in body prose).
 EXCLUDE_TITLE_TOKENS = ["cra", "csc"]
 
-DEFENSE_TERMS = [
-    "defense", "defence", "department of defense", "dod",
+# Defense/military exclusion, two tiers. STRONG terms are unambiguous — one
+# hit excludes. WEAK terms are words health postings use innocently, so a
+# single hit is ignored and TWO DISTINCT weak terms are required: "military"
+# alone is EEO boilerplate 126 times out of 135 in the stored corpus
+# ("military or veteran status" — scrubbed before matching, but belt and
+# suspenders), "combat" alone is "combating antibiotic resistance", "dod" /
+# "darpa" alone is a funding-source mention in an academic or health-IT JD,
+# and "sdr" alone is a Sales Development Representative. A real defense JD
+# (CoVar-class) names several of these at once.
+DEFENSE_TERMS_STRONG = [
     "weapon", "weapons", "weaponry", "armament", "munition", "missile",
-    "warfare", "warfighter", "combat", "military", "soldier",
+    "warfare", "warfighter",
     "security clearance", "ts/sci", "secret clearance", "active clearance",
-    "polygraph", "darpa", "raytheon", "lockheed", "northrop",
+    "raytheon", "lockheed", "northrop",
     # military RF / counter-drone / SIGINT (the SkySafe class)
     "counter-uas", "counter uas", "c-uas", "counter-drone", "counter drone",
-    "software-defined radio", "software defined radio", "sdr",
+    "software-defined radio", "software defined radio",
     "airspace security", "electronic warfare", "sigint",
     "signals intelligence", "spectrum dominance",
 ]
+DEFENSE_TERMS_WEAK = [
+    "defense", "defence", "department of defense", "dod", "military",
+    "combat", "soldier", "polygraph", "darpa", "sdr",
+]
+# Back-compat union (external callers/tests iterate DEFENSE_TERMS).
+DEFENSE_TERMS = DEFENSE_TERMS_STRONG + DEFENSE_TERMS_WEAK
 
 # Clearly non-health technical domains that can sneak a generic domain term.
 # Kept tight to avoid over-exclusion — "surveillance" is intentionally NOT
@@ -204,13 +253,19 @@ def exclude_reason(title, description="", allow_defense=False):
             return f"role-title: {tok.upper()}"
 
     if not allow_defense:
-        hit = next((d for d in DEFENSE_TERMS if _tok_in(d, text)), None)
+        # EEO/benefits boilerplate scrub first: "military or veteran status"
+        # must never read as a defense signal.
+        scrubbed = scrub_boilerplate(text)
+        hit = next((d for d in DEFENSE_TERMS_STRONG if _tok_in(d, scrubbed)), None)
         if hit:
             return f"defense: {hit}"
+        weak = [d for d in DEFENSE_TERMS_WEAK if _tok_in(d, scrubbed)]
+        if len(weak) >= 2:
+            return f"defense: {'+'.join(weak[:3])}"
         # Military RF-radar: only exclude "radar" in a defense/military context.
-        if "radar" in text and any(_tok_in(d, text) for d in
-                                   ("military", "defense", "defence", "weapon",
-                                    "warfare", "missile", "rf ")):
+        if "radar" in scrubbed and any(_tok_in(d, scrubbed) for d in
+                                       ("military", "defense", "defence", "weapon",
+                                        "warfare", "missile", "rf ")):
             return "defense: military radar"
 
     nc = next((d for d in NONCLINICAL_TERMS
@@ -228,17 +283,29 @@ def apply_to_config(cfg):
     """Broaden the shared keyword filter with the health/bio/science domain
     terms and force a local crawl. Mutates the live list objects in place so
     ``filters.is_relevant`` (which imported them at load time) sees the
-    change without a re-import — in-memory only, never config.py on disk."""
+    change without a re-import — in-memory only, never config.py on disk.
+
+    Specific terms go to CORE (stand-alone, full-text); generic ones go to
+    DOMAIN and the everyday-tools list to SKILL, so a generic word only
+    counts paired with a skill in the posting head — benefits boilerplate
+    ("medical, dental, vision") can no longer tier-match every US job ad."""
     have = {k.lower() for k in cfg.CORE_KEYWORDS}
     added = [k for k in DOMAIN_TARGET_KEYWORDS if k.lower() not in have]
     cfg.CORE_KEYWORDS.extend(added)
+    have_d = {k.lower() for k in cfg.DOMAIN_KEYWORDS}
+    added_d = [k for k in DOMAIN_TARGET_GENERIC if k.lower() not in have_d]
+    cfg.DOMAIN_KEYWORDS.extend(added_d)
+    have_s = {k.lower() for k in cfg.SKILL_KEYWORDS}
+    added_s = [k for k in LOCAL_SKILL_KEYWORDS if k.lower() not in have_s]
+    cfg.SKILL_KEYWORDS.extend(added_s)
     cfg.ACCEPT_REMOTE = False
-    return added
+    return added + added_d + added_s
 
 
 def is_domain_target(title, description=""):
     text = f"{title} {description}".lower()
-    return any(k.lower() in text for k in DOMAIN_TARGET_KEYWORDS)
+    return any(k.lower() in text
+               for k in DOMAIN_TARGET_KEYWORDS + DOMAIN_TARGET_GENERIC)
 
 
 # --------------------------------------------------------------------------- #
@@ -335,12 +402,22 @@ def _keep_job(company, job):
         return False
     if _whole_board(company):
         # Neural/BCI-tagged and watched companies are fetched with no
-        # location restriction (see run()/crawl_company()) so their remote
-        # postings can surface here — but that also lets their
-        # onsite-elsewhere reqs through the fetch. Gate those out here
-        # instead: onsite-in-NC or explicitly-remote passes,
-        # onsite-anywhere-else does not (watch-section listing is separate).
-        if geo_mode(job.get("location", ""), job.get("description", "")) is None:
+        # location restriction (see run()/crawl_company()), which lets their
+        # remote and onsite-elsewhere reqs through the fetch. Gate here:
+        #   watched  -> NC-onsite or explicitly-remote is scored (the watch
+        #               tag is human-curated, and ranked_jobs admits watched
+        #               remotes into the local list);
+        #   neural   -> NC-onsite ONLY. The machine-set neural tag proved
+        #               untrustworthy for an out-of-area exception — slug
+        #               collisions (an EEG company's row pointing at a global
+        #               AI board) flooded the ranking with remote-anywhere
+        #               junk. Their remote roles are the remote-neural
+        #               track's job.
+        gm = geo_mode(job.get("location", ""), job.get("description", ""))
+        if _is_watched(company):
+            if gm is None:
+                return False
+        elif gm != "onsite":
             return False
     return True
 
@@ -549,10 +626,15 @@ def run(max_workers=6, top_n=15, verify=True):
         verify_top(top_n=top_n, max_workers=max_workers, conn=conn)
 
     # Geography enforced at the query layer (not the `track` label): only
-    # NC-locatable postings appear in the local search, whatever ingested them
-    # -- plus explicitly-remote postings (neural/BCI companies only; see
-    # geo_mode()/_is_neural_tagged()). Rank by résumé fit, not fit×mission:
-    # most local companies sit in the same health-tech mission tier, so the
+    # NC-locatable postings appear in the local search, whatever ingested
+    # them — plus explicitly-remote postings at WATCHED companies only
+    # (ranked_jobs checks the watch tag itself; the old unscoped remote
+    # exception let 87 remote-anywhere rows — slug-collision boards,
+    # India/Brazil remotes, a crypto exchange — into a 534-row ranking).
+    # Remote-but-NC postings rank as local regardless, because their
+    # location string now carries the NC evidence (multi-location capture
+    # in the fetchers). Rank by résumé fit, not fit×mission: most local
+    # companies sit in the same health-tech mission tier, so the
     # near-constant mission factor only inflates and compresses the ranking.
     # combined is still shown per row.
     #
@@ -1016,18 +1098,19 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False):
             j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
         # Local-tech is a Triangle/NC track: gate ingested jobs on the same
         # NC location filter the live crawl applies inside its fetchers, with
-        # one relaxation — a posting from a neural/BCI-tagged company still
-        # passes when it's explicitly remote (the local-tech <-> neural-track
-        # geo overlap; see geo_mode()). Without the NC/remote gate at all,
-        # agent-sourced boards (LinkedIn/Indeed) would inject any CA/TX
-        # posting into the local top-10. Enforced even for curated adds.
+        # one relaxation — a posting from a WATCHED company still passes when
+        # it's explicitly remote (matching ranked_jobs' watch-scoped remote
+        # admission; the machine-set neural tag no longer earns the
+        # exception). Without the NC/remote gate at all, agent-sourced
+        # boards (LinkedIn/Indeed) would inject any CA/TX posting into the
+        # local top-10. Enforced even for curated adds.
         loc = j.get("location", "") or ""
         company_id = store.company_id_by_name(conn, j.get("company"))
         company_row = store.get_company(conn, company_id) if company_id else None
         is_local = bool(company_fetch.NC_RE.search(loc))
-        is_remote_neural = (_whole_board(company_row)
-                            and geo_mode(loc, j.get("description", "")) == "remote")
-        if not (is_local or is_remote_neural):
+        is_remote_watched = (_is_watched(company_row)
+                             and geo_mode(loc, j.get("description", "")) == "remote")
+        if not (is_local or is_remote_watched):
             n_nonlocal += 1
             continue
         if not curated:

@@ -61,15 +61,30 @@ def _cxs_detail_url(job_url):
     return f"{host}/wday/cxs/{tenant}/{site}/{rest}"
 
 
+def _cxs_tenant_variants(detail_url):
+    """The CXS URL as-is plus, for hyphenated tenants, the underscore-tenant
+    form: vhr-unither.wd5's working path segment is vhr_unither (observed
+    live; the hyphen form 422s). Applies only to the /wday/cxs/<tenant>/
+    segment — the HOST keeps its hyphen."""
+    urls = [detail_url]
+    m = re.match(r"(https://([^./]+)\.[^/]+/wday/cxs/)([^/]+)(/.*)", detail_url)
+    if m and "-" in m.group(3):
+        urls.append(f"{m.group(1)}{m.group(3).replace('-', '_')}{m.group(4)}")
+    return urls
+
+
 def _cxs_description(detail_url, timeout=25):
     """GET a CXS job-detail endpoint; return (plain_text_description, remoteType)."""
-    try:
-        r = requests.get(detail_url, timeout=timeout, headers=_JSON_HEADERS)
-        r.raise_for_status()
-        info = r.json().get("jobPostingInfo", {}) or {}
-    except Exception:
-        return None, None
-    return _text_from_html(info.get("jobDescription", "")), info.get("remoteType")
+    for url in _cxs_tenant_variants(detail_url):
+        try:
+            r = requests.get(url, timeout=timeout, headers=_JSON_HEADERS)
+            if r.status_code != 200:
+                continue
+            info = r.json().get("jobPostingInfo", {}) or {}
+        except Exception:
+            continue
+        return _text_from_html(info.get("jobDescription", "")), info.get("remoteType")
+    return None, None
 
 
 def fetch_workday_description(job_url):

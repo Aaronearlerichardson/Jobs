@@ -57,6 +57,22 @@ def _get_json(url, label, **kw):
         return None
 
 
+def _merge_locations(primary, extras):
+    """One location string carrying every location a posting names: the
+    primary field first, then any secondary office/location not already
+    present in it. Multi-location postings often show only 'Remote' (or one
+    HQ city) in the primary field while the NC site hides in the secondary
+    list — the location filter and geo logic must see them all."""
+    loc = (primary or "").strip()
+    seen = loc.lower()
+    for e in extras or []:
+        e = (e or "").strip()
+        if e and e.lower() not in seen:
+            loc = f"{loc}; {e}" if loc else e
+            seen = loc.lower()
+    return loc
+
+
 def fetch_greenhouse_all(slug, loc_re=None):
     out = []
     try:
@@ -65,7 +81,9 @@ def fetch_greenhouse_all(slug, loc_re=None):
         if not isinstance(data, dict):
             return out
         for j in data.get("jobs", []):
-            loc = j.get("location", {}).get("name", "")
+            loc = _merge_locations(
+                j.get("location", {}).get("name", ""),
+                [o.get("name", "") for o in (j.get("offices") or [])])
             if not _loc_ok(loc_re, loc):
                 continue
             desc = BeautifulSoup(j.get("content", "") or "", "html.parser").get_text(" ")
@@ -87,14 +105,20 @@ def fetch_lever_all(slug, loc_re=None):
         if not isinstance(data, list):
             return out
         for j in data:
-            loc = j.get("categories", {}).get("location", "")
+            cats = j.get("categories", {}) or {}
+            loc = _merge_locations(
+                cats.get("location", ""),
+                (cats.get("allLocations") or j.get("allLocations") or []))
             if not _loc_ok(loc_re, loc):
                 continue
-            out.append({"id": f"lv_{slug}_{j.get('id')}", "title": j.get("text", ""),
-                        "url": j.get("hostedUrl", ""), "location": loc,
-                        "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
-                        "ats": "lever", "_wd": None,
-                        "posted_at": norm_posted_date(j.get("createdAt"))})
+            job = {"id": f"lv_{slug}_{j.get('id')}", "title": j.get("text", ""),
+                   "url": j.get("hostedUrl", ""), "location": loc,
+                   "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
+                   "ats": "lever", "_wd": None,
+                   "posted_at": norm_posted_date(j.get("createdAt"))}
+            if str(j.get("workplaceType", "")).lower() == "remote":
+                job["remote_hint"] = "lever:workplaceType"
+            out.append(job)
     except Exception as e:
         print(f"    [!] lever {slug}: {e}")
     return out
@@ -108,38 +132,178 @@ def fetch_ashby_all(slug, loc_re=None):
         if not isinstance(data, dict):
             return out
         for j in data.get("jobPostings", []):
-            loc = j.get("location", "") or ""
+            secondary = []
+            for s in (j.get("secondaryLocations") or []):
+                secondary.append(s.get("location", "") if isinstance(s, dict) else str(s))
+            loc = _merge_locations(j.get("location", "") or "", secondary)
             if not _loc_ok(loc_re, loc):
                 continue
-            out.append({"id": f"ashby_{slug}_{j.get('id')}", "title": j.get("title", ""),
-                        "url": j.get("jobUrl", "") or f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
-                        "location": loc, "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
-                        "ats": "ashby", "_wd": None,
-                        "posted_at": norm_posted_date(j.get("publishedDate")
-                                                      or j.get("publishedAt"))})
+            job = {"id": f"ashby_{slug}_{j.get('id')}", "title": j.get("title", ""),
+                   "url": j.get("jobUrl", "") or f"https://jobs.ashbyhq.com/{slug}/{j.get('id')}",
+                   "location": loc, "description": (j.get("descriptionPlain") or "")[:_DESC_MAX],
+                   "ats": "ashby", "_wd": None,
+                   "posted_at": norm_posted_date(j.get("publishedDate")
+                                                 or j.get("publishedAt"))}
+            if j.get("isRemote"):
+                job["remote_hint"] = "ashby:isRemote"
+            out.append(job)
     except Exception as e:
         print(f"    [!] ashby {slug}: {e}")
     return out
+
+
+# Multi-location Workday rows list as literally "2 Locations" / "12 Locations"
+# in locationsText — a string no locality regex can match, which silently
+# dropped most multi-city reqs (NVIDIA Durham+Santa-Clara postings, BD
+# "Firmware Engineer, Durham" + one more site). Those rows are rescued via
+# the externalPath location slug and, failing that, the CXS detail's full
+# location list (cached on disk — locations rarely change).
+_WD_N_LOCATIONS_RE = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
+_WD_LOC_CACHE_TTL = 3 * 24 * 3600
+
+
+def _wd_cxs_headers():
+    return {**HEADERS, "Accept": "application/json",
+            "Content-Type": "application/json"}
+
+
+# The /wday/cxs/{tenant}/ PATH segment is the internal tenant id, which for
+# hyphenated subdomains is usually the UNDERSCORE form: vhr-unither.wd5's
+# jobs endpoint is /wday/cxs/vhr_unither/External/jobs, and the hyphen form
+# 422s. Observed live in the browser's own network traffic. Resolved once
+# per tenant per process.
+_WD_CXS_TENANT = {}
+
+
+def _wd_cxs_tenant(tenant, pod, site):
+    """The tenant id that works in this board's /wday/cxs/ path."""
+    key = (tenant, pod, site)
+    if key in _WD_CXS_TENANT:
+        return _WD_CXS_TENANT[key]
+    resolved = tenant
+    variants = [tenant] + ([tenant.replace("-", "_")] if "-" in tenant else [])
+    for cand in variants:
+        try:
+            r = SESSION.post(
+                f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{cand}/{site}/jobs",
+                json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
+                timeout=20, headers=_wd_cxs_headers())
+            if r.status_code == 200 and isinstance(r.json().get("total"), int):
+                resolved = cand
+                break
+        except Exception:
+            continue
+    _WD_CXS_TENANT[key] = resolved
+    return resolved
+
+
+def _wd_path_location(path):
+    """The human-readable location slug Workday embeds in externalPath:
+    '/job/US-NC-Remote/Field-Application-Engineer_JR123' -> 'US NC Remote'."""
+    m = re.match(r"/job/([^/]+)/", path or "")
+    return m.group(1).replace("-", " ") if m else ""
+
+
+def _wd_detail_locations(tenant, pod, site, path):
+    """All locations of one Workday req from its CXS detail JSON (primary +
+    additionalLocations), disk-cached. Returns a list of location strings
+    ([] on any failure — callers must treat that as 'unknown', not 'no')."""
+    cache = _BOARD_CACHE_DIR / "wdloc"
+    key = hashlib.sha1(f"{tenant}|{path}".encode("utf-8")).hexdigest()
+    p = cache / f"{key}.json"
+    try:
+        if time.time() - p.stat().st_mtime <= _WD_LOC_CACHE_TTL:
+            return json.loads(p.read_text("utf-8")).get("locs", [])
+    except Exception:
+        pass
+    # NOTE: externalPath already starts with "/job/"; the CXS detail URL is
+    # {site}{path}, NOT {site}/job{path} (the doubled form 406s).
+    api = (f"https://{tenant}.wd{pod}.myworkdayjobs.com"
+           f"/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}{path}")
+    locs = []
+    try:
+        r = SESSION.get(api, timeout=20,
+                        headers={**HEADERS, "Accept": "application/json"})
+        if r.status_code == 200:
+            info = r.json().get("jobPostingInfo", {}) or {}
+            locs = [info.get("location", "")] \
+                + list(info.get("additionalLocations", []) or [])
+            locs = [l for l in locs if l]
+    except Exception:
+        return []
+    if locs:  # cache only decided outcomes, like the board cache
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"locs": locs}), encoding="utf-8")
+        except Exception:
+            pass
+    return locs
+
+
+def _wd_location_facets(api, hdr, loc_re):
+    """Server-side location filter: read page-0 facets, collect the ids of
+    every location-flavored value whose descriptor matches loc_re, grouped
+    by the facetParameter that owns it ('locations' on most tenants).
+    Returns an appliedFacets dict, or {} when the tenant exposes none —
+    callers fall back to free-text search. Solves tenants like Labcorp
+    whose searchText ignores state names ('North Carolina' -> 2 hits vs
+    191 real NC reqs across 46 city facet values)."""
+    try:
+        r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1,
+                                    "offset": 0, "searchText": ""},
+                         timeout=25, headers=hdr)
+        facets = r.json().get("facets", []) or []
+    except Exception:
+        return {}
+
+    applied = {}
+
+    def walk(values, param):
+        for v in values or []:
+            p = v.get("facetParameter") or param
+            if v.get("id") and loc_re.search(v.get("descriptor") or ""):
+                applied.setdefault(p, []).append(v["id"])
+            walk(v.get("values"), p)
+
+    for f in facets:
+        if re.search(r"location|country|region|city|state",
+                     f.get("facetParameter") or "", re.I):
+            walk(f.get("values"), f.get("facetParameter"))
+    return applied
 
 
 def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolina",
                       page_size=20, max_pages=60):
     """List postings (title/location/path only). Descriptions hydrated later.
 
-    `search_text` narrows the Workday CXS search server-side (a full
-    Medtronic/IQVIA board is thousands of reqs); pass "" to sweep all.
+    Location scoping, most-precise first:
+      1. loc_re given and the tenant exposes location facets -> appliedFacets
+         (server-side, catches multi-location reqs the text filter can't).
+      2. loc_re given, no usable facets -> `search_text` free-text narrowing
+         (legacy behavior), still with the multi-location rescue below.
+    Either way, a row whose locationsText fails loc_re gets two more chances:
+    the externalPath location slug, then the CXS detail's full location list
+    ("2 Locations" rows). Rescued rows carry the REAL joined location string
+    so downstream geo logic sees the NC evidence.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
-    api = f"{host}/wday/cxs/{tenant}/{site}/jobs"
+    api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
     link = f"{host}/en-US/{site}"
-    hdr = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
+    hdr = _wd_cxs_headers()
+
+    applied_facets = {}
+    if loc_re is not None:
+        applied_facets = _wd_location_facets(api, hdr, loc_re)
+    body_extra = ({"appliedFacets": applied_facets, "searchText": ""}
+                  if applied_facets else
+                  {"appliedFacets": {}, "searchText": search_text})
+
     out = []
     for page in range(max_pages):
         try:
-            r = SESSION.post(api, json={"appliedFacets": {}, "limit": page_size,
-                                         "offset": page * page_size,
-                                         "searchText": search_text},
-                              timeout=25, headers=hdr)
+            r = SESSION.post(api, json={**body_extra, "limit": page_size,
+                                        "offset": page * page_size},
+                             timeout=25, headers=hdr)
             posts = r.json().get("jobPostings", []) or []
         except Exception as e:
             print(f"    [!] workday {tenant} p{page}: {e}")
@@ -148,9 +312,27 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolin
             break
         for p in posts:
             loc = p.get("locationsText", "") or ""
-            if not _loc_ok(loc_re, loc):
-                continue
             path = p.get("externalPath", "") or ""
+            if not _loc_ok(loc_re, loc):
+                # Rescue 1: the externalPath's location slug (free).
+                slug_loc = _wd_path_location(path)
+                if _loc_ok(loc_re, slug_loc):
+                    loc = f"{slug_loc}" + (f" ({loc})" if loc else "")
+                # Rescue 2: "N Locations" rows — full list via CXS detail.
+                elif _WD_N_LOCATIONS_RE.match(loc) and path:
+                    locs = _wd_detail_locations(tenant, pod, site, path)
+                    if not any(_loc_ok(loc_re, l) for l in locs):
+                        continue
+                    loc = "; ".join(locs)
+                else:
+                    continue
+            elif _WD_N_LOCATIONS_RE.match(loc) and path:
+                # Facet-filtered fetch already vouches this req is in-area,
+                # but "2 Locations" is useless downstream (geo_mode, ranking
+                # location filters) — resolve the real list.
+                locs = _wd_detail_locations(tenant, pod, site, path)
+                if locs:
+                    loc = "; ".join(locs)
             jid = path.rsplit("/", 1)[-1] if path else str(abs(hash(p.get("title", "") + loc)))
             out.append({"id": f"wd_{tenant}_{jid}", "title": p.get("title", ""),
                         "url": f"{link}{path}" if path else host, "location": loc,
@@ -195,6 +377,61 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
     return out
 
 
+# iCIMS's WAF 405s Chrome-like UAs that arrive without Chrome's client-hint
+# headers (sec-ch-ua etc.) — i.e. exactly what a requests session claiming
+# Chrome looks like. A plain Mozilla platform UA passes. Module-level so the
+# hydration path can reuse it.
+_ICIMS_HEADERS = {**HEADERS,
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+_ICIMS_LOC_CACHE_TTL = 7 * 24 * 3600
+_ICIMS_META_CAP = 150            # detail GETs per fetch call, tops
+
+
+def _icims_job_meta(url, need_desc=False):
+    """(location, description) for one iCIMS posting from its own detail
+    page. `?in_iframe=1` serves the full server-rendered document — JSON-LD
+    included — even on tenants whose search UI is a JS shell (careers-sas).
+    Location is disk-cached (postings rarely move); description is not, so
+    pass need_desc=True to force a fetch past the location cache.
+    Returns ('', '') on a miss."""
+    m = re.search(r"/jobs/(\d+)/", url or "")
+    if not m:
+        return "", ""
+    cache = _BOARD_CACHE_DIR / "icimsloc"
+    host = re.sub(r"^https?://", "", url).split("/")[0]
+    p = cache / f"{host}_{m.group(1)}.json"
+    cached_loc = None
+    try:
+        if time.time() - p.stat().st_mtime <= _ICIMS_LOC_CACHE_TTL:
+            cached_loc = json.loads(p.read_text("utf-8")).get("loc", "")
+    except Exception:
+        pass
+    sep = "&" if "?" in url else "?"
+    detail_url = url if "in_iframe" in url else f"{url}{sep}in_iframe=1"
+    if cached_loc is not None and not need_desc:
+        return cached_loc, ""    # description fetched on demand by hydration
+    from .jsonld import _normalize_description, _normalize_location, extract_jsonld, is_jobposting
+    loc = desc = ""
+    try:
+        r = SESSION.get(detail_url, timeout=20, headers=_ICIMS_HEADERS)
+        if r.status_code == 200:
+            for obj in extract_jsonld(r.text):
+                if is_jobposting(obj):
+                    loc = _normalize_location(obj)
+                    loc = "" if loc == "Unknown" else loc
+                    desc = _normalize_description(obj)
+                    break
+    except Exception:
+        return "", ""
+    if loc:
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps({"loc": loc}), encoding="utf-8")
+        except Exception:
+            pass
+    return loc, desc
+
+
 def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
     """
     Best-effort iCIMS scrape via the public job-search page. iCIMS is often
@@ -202,22 +439,23 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
 
     searchLocation is a free-text query some tenants don't parse ("NC" gets
     'No Results Found' on careers-sas / incareers-acentra) — so a located
-    search that comes back empty is retried WITHOUT the location param, with
-    loc_re (or, failing that, the whole-board pull) doing the filtering.
+    search that comes back empty is retried WITHOUT the location param.
     Paginated: server-rendered tenants expose ?pr=N result pages.
+
+    Locations are REAL, not assumed: rows first try a "City, ST" read from
+    their own search-row text; anything still unlocated is resolved from the
+    posting's detail page (JSON-LD via ?in_iframe=1, disk-cached) before
+    loc_re filtering. Only a located-search row that resists both keeps the
+    loc_label approximation — the server already filtered those to the area.
+    (The old code stamped EVERY row loc_label, so a global tenant's Austin
+    and remote postings all entered the store labeled "NC".)
     """
     out = []
-    # iCIMS's WAF 405s Chrome-like UAs that arrive without Chrome's
-    # client-hint headers (sec-ch-ua etc.) — i.e. exactly what a requests
-    # session claiming Chrome looks like. A plain Mozilla platform UA
-    # passes. Scoped here so other boards keep the shared session UA.
-    icims_headers = {**HEADERS,
-                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
-    def _one_page(params):
+    def _one_page(params, located):
         found = []
         r = SESSION.get(f"https://{tenant}.icims.com/jobs/search?ss=1&in_iframe=1"
-                        + params, timeout=20, headers=icims_headers)
+                        + params, timeout=20, headers=_ICIMS_HEADERS)
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a.iCIMS_Anchor, a[href*='/jobs/']"):
             # Row anchors carry a screen-reader label ("Requisition Title")
@@ -232,38 +470,38 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
             if not title or not jid:
                 continue
             row = a.find_parent()
-            loc = row.get_text(" ") if row else ""
-            if not _loc_ok(loc_re, loc) and not _loc_ok(loc_re, title):
-                continue
+            row_text = row.get_text(" ") if row else ""
+            lm = _LOC_TEXT_RE.search(row_text)
+            loc = (lm.group(0).strip() if lm else (loc_label if located else ""))
             found.append({"id": f"icims_{tenant}_{jid.group(1)}",
                           "title": title, "url": href if href.startswith("http")
-                          else f"https://{tenant}.icims.com{href}", "location": loc_label,
-                          "description": "", "ats": "icims", "_wd": None})
+                          else f"https://{tenant}.icims.com{href}", "location": loc,
+                          "description": "", "ats": "icims", "_wd": None,
+                          "_row_text": row_text})
         return found
 
     try:
-        out = _one_page(f"&searchLocation={search_location}")
+        out = _one_page(f"&searchLocation={search_location}", located=True)
         if not out:
-            for page in range(1, 9):   # locationless, paged; loc_re filters
-                batch = _one_page(f"&pr={page - 1}" if page > 1 else "")
+            for page in range(1, 9):   # locationless, paged
+                batch = _one_page(f"&pr={page - 1}" if page > 1 else "", located=False)
                 if not batch:
                     break
                 out.extend(batch)
         if not out:
             # Fully JS-rendered tenant (careers-sas): the search page serves a
             # shell, but /sitemap.xml lists every live posting. Titles come
-            # from the URL slug; location is unknown here, so rows carry
-            # loc_label and the caller's hydration/geo chain refines them.
+            # from the URL slug; locations resolved per job below.
             from urllib.parse import unquote
             r = SESSION.get(f"https://{tenant}.icims.com/sitemap.xml",
-                            timeout=20, headers=icims_headers)
+                            timeout=20, headers=_ICIMS_HEADERS)
             for u in re.findall(r"<loc>([^<]+)</loc>", r.text):
                 m = re.search(r"/jobs/(\d+)/([^/]+)/job", u)
                 if not m:
                     continue
                 title = unquote(m.group(2)).replace("---", " - ").replace("-", " ").strip()
                 out.append({"id": f"icims_{tenant}_{m.group(1)}", "title": title,
-                            "url": u, "location": loc_label,
+                            "url": u, "location": "",
                             "description": "", "ats": "icims", "_wd": None})
         # De-dup across pages (last page repeats on some tenants).
         seen, uniq = set(), []
@@ -272,6 +510,22 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
                 seen.add(j["id"])
                 uniq.append(j)
         out = uniq
+        # Resolve unlocated rows from their own detail pages (cached), then
+        # apply the location filter against what the posting really says.
+        n_meta = 0
+        for j in out:
+            if not j["location"] and n_meta < _ICIMS_META_CAP:
+                loc, desc = _icims_job_meta(j["url"])
+                n_meta += 1
+                if loc:
+                    j["location"] = loc
+                if desc and not j["description"]:
+                    j["description"] = desc[:_DESC_MAX]
+            j.pop("_row_text", None)
+        if loc_re is not None:
+            out = [j for j in out
+                   if _loc_ok(loc_re, j["location"])
+                   or (not j["location"] and _loc_ok(loc_re, j["title"]))]
     except Exception as e:
         print(f"    [!] icims {tenant}: {e}")
     return out
@@ -561,11 +815,24 @@ def hydrate_description(job):
         return job
     if job.get("ats") == "workday" and job.get("_wd"):
         tenant, pod, site, path = job["_wd"]
-        api = f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/job{path}"
+        # externalPath already begins "/job/..." — appending it to ".../job"
+        # doubled the segment and 406'd, silently pushing every Workday row
+        # onto the slower public-page JSON-LD fallback below.
+        api = (f"https://{tenant}.wd{pod}.myworkdayjobs.com"
+               f"/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}{path}")
         try:
             r = SESSION.get(api, timeout=20, headers={**HEADERS, "Accept": "application/json"})
-            html = r.json().get("jobPostingInfo", {}).get("jobDescription", "") or ""
+            info = r.json().get("jobPostingInfo", {}) or {}
+            html = info.get("jobDescription", "") or ""
             job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:_DESC_MAX]
+            # Same JSON carries the req's full location list — upgrade a
+            # useless "2 Locations" locationsText to the real thing.
+            locs = [info.get("location", "")] \
+                + list(info.get("additionalLocations", []) or [])
+            locs = [l for l in locs if l]
+            if locs and (not job.get("location")
+                         or _WD_N_LOCATIONS_RE.match(job["location"] or "")):
+                job["location"] = "; ".join(locs)
         except Exception:
             pass
     elif job.get("ats") == "smartrecruiters" and job.get("_sr"):
@@ -590,6 +857,14 @@ def hydrate_description(job):
         if m:
             from .rippling import fetch_description
             job["description"] = fetch_description(m.group(1), m.group(2))[:_DESC_MAX]
+    elif job.get("ats") == "icims" and job.get("url"):
+        # The ?in_iframe=1 document is server-rendered with JSON-LD even on
+        # JS-shell tenants; it also names the posting's real location(s).
+        loc, desc = _icims_job_meta(job["url"], need_desc=True)
+        if desc:
+            job["description"] = desc[:_DESC_MAX]
+        if loc and (job.get("location") or "").strip() in ("", "NC"):
+            job["location"] = loc
     elif job.get("ats") == "wpjson" and job.get("url"):
         # Outbound apply page (restor3d: Arcoro/BirdDog portal). Server-
         # rendered; the JD sits in #portalViewRequirement. The generic
@@ -700,25 +975,31 @@ def probe_job_open(url):
         return None, "bot-gated aggregator host"
 
     # Workday: the CXS JSON detail endpoint is authoritative and JS-free.
-    from .workday import _cxs_detail_url
+    # Hyphenated tenants need the underscore tenant id in the CXS path
+    # (vhr_unither), so each variant is tried before concluding anything.
+    from .workday import _cxs_detail_url, _cxs_tenant_variants
     cxs = _cxs_detail_url(url)
     if cxs:
-        try:
-            r = SESSION.get(cxs, timeout=20,
-                            headers={**HEADERS, "Accept": "application/json"})
-        except Exception as e:
-            return None, f"workday cxs fetch error: {e}"
-        if r.status_code in (404, 410):
-            return False, f"workday cxs HTTP {r.status_code}"
-        if r.status_code != 200:
-            return None, f"workday cxs HTTP {r.status_code}"
-        try:
-            info = r.json().get("jobPostingInfo") or {}
-        except ValueError:
-            return None, "workday cxs non-JSON"
-        if info.get("jobDescription") or info.get("title"):
-            return True, "workday cxs: posting live"
-        return False, "workday cxs: no jobPostingInfo"
+        last_status = None
+        for u in _cxs_tenant_variants(cxs):
+            try:
+                r = SESSION.get(u, timeout=20,
+                                headers={**HEADERS, "Accept": "application/json"})
+            except Exception as e:
+                return None, f"workday cxs fetch error: {e}"
+            last_status = r.status_code
+            if r.status_code != 200:
+                continue
+            try:
+                info = r.json().get("jobPostingInfo") or {}
+            except ValueError:
+                return None, "workday cxs non-JSON"
+            if info.get("jobDescription") or info.get("title"):
+                return True, "workday cxs: posting live"
+            return False, "workday cxs: no jobPostingInfo"
+        if last_status in (404, 410):
+            return False, f"workday cxs HTTP {last_status}"
+        return None, f"workday cxs HTTP {last_status}"
 
     try:
         r = SESSION.get(url, timeout=20, headers=HEADERS, allow_redirects=True)

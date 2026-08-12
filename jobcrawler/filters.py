@@ -65,9 +65,43 @@ def _excluded(title, text):
 # ad if the pairing scanned full text.
 _PAIR_SCAN_CHARS = 1200
 
+# Boilerplate idioms that contain domain-looking words without meaning them:
+# benefits sections ("medical, dental, vision", "health savings account",
+# "drug-free workplace"), EEO statements ("military or veteran status" — the
+# defense gate's #1 false positive: 126 of 1116 stored JDs), vaccination
+# policies, and infra-health prose ("service health checks"). Scrubbed from
+# text before keyword/exclusion matching. Shared with the local track's
+# defense gate via scrub_boilerplate().
+_BOILERPLATE_RE = re.compile("|".join((
+    # benefits
+    r"medical[,/&\s]+(?:dental|vision)(?:[,/&\s]+(?:dental|vision))?(?:\s+(?:insurance|coverage|benefits|plans?))?",
+    r"health\s+(?:insurance|savings|benefits?|plans?|coverage|reimbursement)",
+    r"health\s*(?:&|and)\s*well(?:ness|-?being)",
+    r"drug[-\s]free\s+work(?:place|\s*environment)",
+    r"drug\s+(?:screen(?:ing)?|test(?:ing)?)",
+    r"(?:covid(?:-19)?\s+)?vaccin(?:e|ation)\s+(?:policy|requirement|status)",
+    # EEO
+    r"military\s+(?:or\s+|and\s+|/\s*)?veteran'?s?\s+status",
+    r"veteran'?s?\s+(?:or\s+|and\s+|/\s*)?military\s+status",
+    r"military\s+(?:status|service|spouses?|caregivers?|leave|families|obligations?)",
+    r"protected\s+veterans?", r"veterans?'?s?\s+status", r"uniformed\s+services?",
+    r"status\s+as\s+an?\s+(?:protected\s+)?veteran",
+    # infra-health prose
+    r"(?:system|service|cluster|application|platform|code(?:base)?)\s+health",
+    r"health\s+(?:checks?|monitoring|metrics)",
+    r"health\s+of\s+(?:the|our|your)",
+)), re.I)
+
+
+def scrub_boilerplate(text):
+    """`text` with benefits/EEO/infra-health idioms blanked — for matchers
+    whose keywords those idioms would otherwise false-trigger ("medical",
+    "health", "drug", "military")."""
+    return _BOILERPLATE_RE.sub(" ", text or "")
+
 
 def is_relevant(title, description=""):
-    text = (title + " " + description).lower()
+    text = scrub_boilerplate((title + " " + description).lower())
     if _excluded(title, text):
         return False
 
@@ -83,7 +117,7 @@ def is_relevant(title, description=""):
 
     # Tier 2 x Tier 3: adjacent medical/bio domain + transferable skill.
     # Head-only scan — see _PAIR_SCAN_CHARS.
-    head = (title + " " + description[:_PAIR_SCAN_CHARS]).lower()
+    head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
     return _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS)
 
 
@@ -92,7 +126,7 @@ def classify_relevance(title, description=""):
     Debug helper - returns which tier caused a match, or None.
     Not used by the crawler; handy for tuning the lists.
     """
-    text = (title + " " + description).lower()
+    text = scrub_boilerplate((title + " " + description).lower())
     if _excluded(title, text):
         return None
     if _kw_in(text, CORE_KEYWORDS):
@@ -101,7 +135,7 @@ def classify_relevance(title, description=""):
     extras = [k for k in INCLUDE_KEYWORDS if k.lower() not in tiered]
     if extras and _kw_in(text, extras):
         return "EXTRA"
-    head = (title + " " + description[:_PAIR_SCAN_CHARS]).lower()
+    head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
     if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
         return "DOMAIN+SKILL"
     return None

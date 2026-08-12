@@ -710,8 +710,13 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
 
     `allow_geo_modes` (an iterable of stored `geo_mode` values, e.g.
     {"remote"}) admits rows that fail `location_re` but whose own geo_mode
-    already qualifies them — e.g. a remote neural/BCI posting whose location
-    string reads "Remote", not a Triangle/NC place name.
+    already qualifies them — ONLY at companies carrying the 'watch' tag.
+    Watch is the one human-curated tag ("show me everything at this
+    employer"), so it can be trusted with an out-of-area exception; the
+    machine-set 'neural' tag cannot — auto-probed boards include slug
+    collisions (an EEG company's row that actually points at a global AI
+    board), and an unscoped geo_mode exception let 87 remote-anywhere rows
+    into a 534-row local ranking.
 
     `min_mission` drops jobs at companies we positively know are off-mission
     (effective mission below the floor). Needed when ranking by "fit", which
@@ -730,7 +735,7 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     rejected/dismissed disappear — except 'saved' (shortlisted), which
     stays visible."""
     q = """
-      SELECT j.*, c.mission_tier, c.mission_score
+      SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
     """
     conds, args = [], []
@@ -746,10 +751,15 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     if conds:
         q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+    def _watched(r):
+        tags = {t.strip() for t in (r.get("company_tags") or "").split(",")}
+        return "watch" in tags
+
     if location_re is not None:
         rows = [r for r in rows
                 if location_re.search(r.get("location") or "")
-                or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes)]
+                or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes
+                    and _watched(r))]
     def _effective_mission(r):
         # A conglomerate's own mission score is ~0.05 (off-mission overall),
         # but a job here already passed the health keyword filter at crawl
