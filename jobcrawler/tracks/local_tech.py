@@ -34,49 +34,16 @@ MIN_MISSION_FOR_RANKING = 0.2
 
 # --------------------------------------------------------------------------- #
 #  Domain targets — health / bio / science (NOT requiring neural signals).      #
+#  Source lists live in profile.toml [keywords.local_tech] (config.py exposes  #
+#  them via KEYWORDS_BY_TRACK) — NOT hardcoded here, so they're editable       #
+#  without touching code. Empty dict/list -> track applies nothing extra.      #
 # --------------------------------------------------------------------------- #
+
+_TRACK_KEYWORDS = getattr(config, "KEYWORDS_BY_TRACK", {}).get("local_tech", {})
 
 # SPECIFIC health/bio/science terms — strong enough to stand alone anywhere
 # in a posting (they join CORE_KEYWORDS, full-text tier-1 matching).
-DOMAIN_TARGET_KEYWORDS = [
-    # clinical & health ML
-    "clinical machine learning", "clinical ml", "health ml", "healthcare ai",
-    "clinical ai", "clinical data scientist", "health data scientist",
-    "clinical informatics", "health informatics", "biomedical data",
-    "clinical nlp", "ehr", "electronic health record", "real-world data",
-    "real world evidence", "population health",
-    # medical-device ML & signal processing.
-    # NOTE: bare "signal processing" was removed — it is domain-agnostic and
-    # leaked military RF/SDR roles (e.g. counter-drone) into a clinical search.
-    "medical device", "medical-device", "physiological signal",
-    "biosignal", "biosensor", "wearable sensor", "ecg", "eeg signal",
-    # diagnostics (bare "diagnostic(s)" moved to the paired tier — it hit
-    # "GPU Compute Diagnostics" and friends at multi-division employers)
-    "computational pathology", "digital pathology", "molecular diagnostics",
-    "in vitro diagnostic", "radiology ai", "medical imaging",
-    "image analysis", "biomarker",
-    # genomics & computational biology
-    "genomics", "genomic", "computational biology", "computational biologist",
-    "bioinformatics", "single-cell", "sequencing", "proteomics",
-    "systems biology",
-    # pharma computational R&D
-    "drug discovery", "computational chemistry", "cheminformatics",
-    "molecular modeling", "pharmacometrics", "quantitative pharmacology",
-    "computational drug",
-    # digital health & wearables
-    "digital health", "digital biomarker", "remote patient monitoring",
-    "wearable", "telehealth", "connected health", "mhealth",
-    # cross-cutting health-ML signal terms
-    "biostatistics", "biostatistician", "epidemiolog", "medical ai",
-    "clinical trial analytics",
-    # unambiguous single-word domain markers
-    "biotech", "biotechnology", "life science", "life sciences",
-    "pharma", "pharmaceutical", "therapeutics",
-    "immunolog", "oncolog", "biochemistry",
-    "scientific software", "scientific computing", "research software",
-    "scientific instrument", "biomedical", "biopharma", "vaccine",
-    "microbiolog", "neuroscience", "cardiolog", "radiolog", "pathology",
-]
+DOMAIN_TARGET_KEYWORDS = list(_TRACK_KEYWORDS.get("core", []))
 
 # GENERIC health words — real signal only in context. They fire on benefits
 # boilerplate ("medical, dental, vision", "health savings account", "drug-free
@@ -90,30 +57,22 @@ DOMAIN_TARGET_KEYWORDS = [
 # diagnostics and pairs with "firmware"/"validation" into a false match,
 # while real health-diagnostics JDs always carry "clinical"/"laboratory"/
 # "health" too. The specific forms live in DOMAIN_TARGET_KEYWORDS.)
-DOMAIN_TARGET_GENERIC = [
-    "health", "healthcare", "medical", "clinical", "patient", "hospital",
-    "drug", "biology", "biological", "molecular", "cell ", "chemistry",
-    "assay", "laboratory", "reagent", "life-science",
-]
+DOMAIN_TARGET_GENERIC = list(_TRACK_KEYWORDS.get("domain", []))
 
 # Local-track skill vocabulary added to SKILL_KEYWORDS for the pairing tier —
 # the track's technical bar is broader than the neural default (any genuine
 # technical/quant role), so the pair partner list needs the everyday tools.
-LOCAL_SKILL_KEYWORDS = [
-    "python", "sql", "matlab", "c++", "etl", "statistics", "statistical",
-    "data analysis", "data management", "data engineering", "automation",
-    "computer vision", "verification", "validation",
-]
+LOCAL_SKILL_KEYWORDS = list(_TRACK_KEYWORDS.get("skill", []))
 
 # --------------------------------------------------------------------------- #
 #  Geographic gate — Triangle/NC onsite, remote via the shared remote filter.  #
 # --------------------------------------------------------------------------- #
-
-GEO_ONSITE_TOKENS = [
-    "durham", "raleigh", "chapel hill", "morrisville", "cary",
-    "research triangle park", "research triangle", "the triangle",
-    "rtp", "north carolina", "nc",
-]
+#  Body-text onsite tokens used to be a separate hardcoded GEO_ONSITE_TOKENS
+#  list; that duplicated profile.toml [locality] (word_tokens/substrings),
+#  which nc.NC_RE already compiles with the same word-boundary/substring
+#  rules. geo_mode() below now reuses NC_RE for both the location field and
+#  the body-text scan — add any missing local place name to [locality]
+#  substrings instead of a second list here.
 
 _SHORT = 3
 
@@ -160,17 +119,14 @@ def geo_mode(location, description=""):
     Classify a posting's geography: "onsite" (Triangle/NC), "remote", or
     None (fails the local gate). Onsite wins when a posting is both local
     and remote-friendly — a "Remote; Durham, NC" multi-location posting is
-    LOCAL material, not a remote drop. The location FIELD is checked against
-    the full configured locality regex (nc.NC_RE — profile [locality], the
-    same terms the fetch filter uses); the loose GEO_ONSITE_TOKENS scan
-    covers body text ("hybrid from our Durham office"). Remote detection
+    LOCAL material, not a remote drop. Both the location FIELD and the body
+    text are checked against the full configured locality regex (nc.NC_RE —
+    profile [locality], the same terms the fetch filter uses) so "hybrid
+    from our Durham office" still counts as onsite. Remote detection
     delegates to the shared jobcrawler.remote_filter (workforce-context
     phrases, hard negations) instead of a bare token list.
     """
-    if NC_RE.search(location or ""):
-        return "onsite"
-    text = f"{location} {description}".lower()
-    if any(_tok_in(t, text) for t in GEO_ONSITE_TOKENS):
+    if NC_RE.search(f"{location or ''} {description or ''}"):
         return "onsite"
     if remote_signal(location, description):
         return "remote"
@@ -179,19 +135,17 @@ def geo_mode(location, description=""):
 
 # --------------------------------------------------------------------------- #
 #  Exclude gate — low-tech clinical-ops roles + defense/military.               #
+#  Source lists live in profile.toml [exclude.local_tech] (config.py exposes   #
+#  them via EXCLUDE_BY_TRACK) — NOT hardcoded here.                            #
 # --------------------------------------------------------------------------- #
 
+_TRACK_EXCLUDE = getattr(config, "EXCLUDE_BY_TRACK", {}).get("local_tech", {})
+
 # Multiword/unambiguous phrases: matched anywhere in title+description.
-EXCLUDE_ROLE_PHRASES = [
-    "clinical research associate", "study coordinator",
-    "clinical research coordinator", "clinical trial coordinator",
-    "research coordinator", "site monitor", "site monitoring",
-    "clinical monitor", "scribe", "data entry", "data-entry",
-    "patient recruiter", "study assistant",
-]
+EXCLUDE_ROLE_PHRASES = list(_TRACK_EXCLUDE.get("role_phrases", []))
 
 # Title-only short/ambiguous tokens (avoid false hits in body prose).
-EXCLUDE_TITLE_TOKENS = ["cra", "csc"]
+EXCLUDE_TITLE_TOKENS = list(_TRACK_EXCLUDE.get("title_tokens", []))
 
 # Defense/military exclusion, two tiers. STRONG terms are unambiguous — one
 # hit excludes. WEAK terms are words health postings use innocently, so a
@@ -202,21 +156,8 @@ EXCLUDE_TITLE_TOKENS = ["cra", "csc"]
 # "darpa" alone is a funding-source mention in an academic or health-IT JD,
 # and "sdr" alone is a Sales Development Representative. A real defense JD
 # (CoVar-class) names several of these at once.
-DEFENSE_TERMS_STRONG = [
-    "weapon", "weapons", "weaponry", "armament", "munition", "missile",
-    "warfare", "warfighter",
-    "security clearance", "ts/sci", "secret clearance", "active clearance",
-    "raytheon", "lockheed", "northrop",
-    # military RF / counter-drone / SIGINT (the SkySafe class)
-    "counter-uas", "counter uas", "c-uas", "counter-drone", "counter drone",
-    "software-defined radio", "software defined radio",
-    "airspace security", "electronic warfare", "sigint",
-    "signals intelligence", "spectrum dominance",
-]
-DEFENSE_TERMS_WEAK = [
-    "defense", "defence", "department of defense", "dod", "military",
-    "combat", "soldier", "polygraph", "darpa", "sdr",
-]
+DEFENSE_TERMS_STRONG = list(_TRACK_EXCLUDE.get("defense_strong", []))
+DEFENSE_TERMS_WEAK = list(_TRACK_EXCLUDE.get("defense_weak", []))
 # Back-compat union (external callers/tests iterate DEFENSE_TERMS).
 DEFENSE_TERMS = DEFENSE_TERMS_STRONG + DEFENSE_TERMS_WEAK
 
@@ -224,11 +165,7 @@ DEFENSE_TERMS = DEFENSE_TERMS_STRONG + DEFENSE_TERMS_WEAK
 # Kept tight to avoid over-exclusion — "surveillance" is intentionally NOT
 # here (disease surveillance is clinical). Matched on word boundaries so
 # e.g. a bare "defi" can't substring-match "defined"/"defibrillator".
-NONCLINICAL_TERMS = [
-    "blockchain", "cryptocurrency", "crypto wallet", "web3",
-    "decentralized finance", "osint", "ad tech", "adtech", "ad-tech",
-    "sportsbook", "igaming",
-]
+NONCLINICAL_TERMS = list(_TRACK_EXCLUDE.get("nonclinical", []))
 
 
 def exclude_reason(title, description="", allow_defense=False):

@@ -355,10 +355,31 @@ MIN_DESC_CHARS = 200
 # application at a role the candidate cannot hold. Deliberately does NOT
 # match "eligible for" / "ability to obtain" a clearance — the candidate is
 # a clearable US citizen, so only holding-one-today requirements gate.
-_CLEARANCE_RE = re.compile(
-    r"\b(?:active|current)\s+"
-    r"(?:(?:us|u\.s\.|government|dod|top[-\s]?secret|ts/?\s?sci|secret)\s+)*"
-    r"(?:security\s+)?clearance", re.I)
+# verbs/qualifiers come from config.FIT_CLEARANCE_VERBS/_QUALIFIERS
+# (profile.toml [fit] clearance_verbs / clearance_qualifiers), falling back
+# to these defaults when unconfigured.
+_DEFAULT_CLEARANCE_VERBS = ("active", "current")
+_DEFAULT_CLEARANCE_QUALIFIERS = (
+    "us", "u\\.s\\.", "government", "dod", "top[-\\s]?secret", "ts/?\\s?sci", "secret",
+)
+
+
+def _clearance_regex():
+    cfg_verbs = getattr(config, "FIT_CLEARANCE_VERBS", None)
+    cfg_quals = getattr(config, "FIT_CLEARANCE_QUALIFIERS", None)
+    # Config values are plain words (escaped here); the built-in defaults are
+    # already hand-tuned regex fragments (character classes for spacing
+    # variants like "top secret" / "top-secret"), used verbatim.
+    verbs = [re.escape(v) for v in cfg_verbs] if cfg_verbs else list(_DEFAULT_CLEARANCE_VERBS)
+    quals = [re.escape(q).replace(r"\ ", r"[-\s]") for q in cfg_quals] if cfg_quals \
+        else list(_DEFAULT_CLEARANCE_QUALIFIERS)
+    return re.compile(
+        rf"\b(?:{'|'.join(verbs)})\s+"
+        rf"(?:(?:{'|'.join(quals)})\s+)*"
+        r"(?:security\s+)?clearance", re.I)
+
+
+_CLEARANCE_RE = _clearance_regex()
 
 
 def _clearance_required(text):

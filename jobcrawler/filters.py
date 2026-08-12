@@ -71,8 +71,9 @@ _PAIR_SCAN_CHARS = 1200
 # defense gate's #1 false positive: 126 of 1116 stored JDs), vaccination
 # policies, and infra-health prose ("service health checks"). Scrubbed from
 # text before keyword/exclusion matching. Shared with the local track's
-# defense gate via scrub_boilerplate().
-_BOILERPLATE_RE = re.compile("|".join((
+# defense gate via scrub_boilerplate(). Source list: config.EXCLUDE_BOILERPLATE_PHRASES
+# (profile.toml [exclude] boilerplate_phrases).
+_DEFAULT_BOILERPLATE_PHRASES = (
     # benefits
     r"medical[,/&\s]+(?:dental|vision)(?:[,/&\s]+(?:dental|vision))?(?:\s+(?:insurance|coverage|benefits|plans?))?",
     r"health\s+(?:insurance|savings|benefits?|plans?|coverage|reimbursement)",
@@ -90,7 +91,11 @@ _BOILERPLATE_RE = re.compile("|".join((
     r"(?:system|service|cluster|application|platform|code(?:base)?)\s+health",
     r"health\s+(?:checks?|monitoring|metrics)",
     r"health\s+of\s+(?:the|our|your)",
-)), re.I)
+)
+_BOILERPLATE_RE = re.compile(
+    "|".join(getattr(config, "EXCLUDE_BOILERPLATE_PHRASES", None) or _DEFAULT_BOILERPLATE_PHRASES),
+    re.I,
+)
 
 
 def scrub_boilerplate(text):

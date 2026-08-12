@@ -1,9 +1,11 @@
 """Remote-eligibility detection.
 
 Self-contained, side-effect-free module used by the remote-focused track
-(``track_remote_neural.py``). It does NOT touch ``config`` or the shared
-location filter, so it can be added/removed without disturbing the local
-(onsite) crawl path or a parallel track.
+(``track_remote_neural.py``). It does NOT touch the shared location filter,
+so it can be added/removed without disturbing the local (onsite) crawl path
+or a parallel track. Its term lists DO come from ``config``/profile.toml
+[locations] (falling back to built-in defaults when unconfigured), so
+they're editable in one place like every other keyword list.
 
 A posting is "remote-eligible" if its *location* field or its *body* text
 advertises remote / distributed / work-from-anywhere / US-remote work,
@@ -24,10 +26,16 @@ remote-neural track surfaces these for human review before emailing:
 
 import re
 
+try:
+    import config
+except Exception:                      # importable standalone
+    config = None
+
 # Location-field signals. The location string is short and ATS-curated
 # ("Remote", "Remote, US", "Remote - United States", "Distributed"), so a
-# bare token here is a reliable signal.
-_LOC_REMOTE_TOKENS = (
+# bare token here is a reliable signal. Source: config.REMOTE_LOC_TOKENS
+# (profile.toml [locations] remote_tokens); falls back to these defaults.
+_DEFAULT_LOC_REMOTE_TOKENS = (
     "remote",
     "work from home",
     "work-from-home",
@@ -41,11 +49,13 @@ _LOC_REMOTE_TOKENS = (
     "virtual",
     "wfh",
 )
+_LOC_REMOTE_TOKENS = tuple(getattr(config, "REMOTE_LOC_TOKENS", None) or _DEFAULT_LOC_REMOTE_TOKENS)
 
 # Body signals. Stricter than the location field: "distributed" / "anywhere"
 # must appear in a workforce phrase, never bare, to avoid matching
 # "distributed systems", "distributed training", "anywhere from 5-10 years".
-_BODY_REMOTE_PHRASES = (
+# Source: config.REMOTE_BODY_PHRASES (profile.toml [locations] remote_phrases).
+_DEFAULT_BODY_REMOTE_PHRASES = (
     "fully remote",
     "100% remote",
     "remote-first",
@@ -83,12 +93,14 @@ _BODY_REMOTE_PHRASES = (
     "this role is remote",
     "position is remote",
 )
+_BODY_REMOTE_PHRASES = tuple(getattr(config, "REMOTE_BODY_PHRASES", None) or _DEFAULT_BODY_REMOTE_PHRASES)
 
 # Hard negations. If any of these appear, the posting is treated as NOT
 # remote-eligible regardless of stray "remote" mentions. Conservative by
 # design — the track prefers to drop a borderline posting over emailing a
-# false positive.
-_HARD_NEGATIONS = (
+# false positive. Source: config.REMOTE_HARD_NEGATIONS (profile.toml
+# [locations] hard_negations).
+_DEFAULT_HARD_NEGATIONS = (
     "not remote",
     "no remote",
     "non-remote",
@@ -116,6 +128,7 @@ _HARD_NEGATIONS = (
     "relocation is required",
     "no relocation",
 )
+_HARD_NEGATIONS = tuple(getattr(config, "REMOTE_HARD_NEGATIONS", None) or _DEFAULT_HARD_NEGATIONS)
 
 # "wfh" needs word boundaries so it doesn't match inside other tokens.
 _WFH_RE = re.compile(r"\bwfh\b")
@@ -182,12 +195,13 @@ def remote_signal_for(job):
 # Unknown/ambiguous locations pass: better a stray non-US posting in the
 # digest than a real US-remote role silently dropped.
 
-_US_MARKERS = (
+_DEFAULT_US_MARKERS = (
     "us", "u.s", "usa", "united states", "america", "americas",
     "north america", "worldwide", "global", "anywhere", "world",
 )
+_US_MARKERS = tuple(getattr(config, "REMOTE_US_MARKERS", None) or _DEFAULT_US_MARKERS)
 
-_NON_US_REGIONS = (
+_DEFAULT_NON_US_REGIONS = (
     "philippines", "india", "pakistan", "bangladesh", "nigeria", "kenya",
     "south africa", "europe", "emea", "apac", "asia", "africa", "latam",
     "latin america", "south america", "canada", "uk", "united kingdom",
@@ -196,6 +210,7 @@ _NON_US_REGIONS = (
     "brazil", "argentina", "mexico", "colombia", "vietnam", "indonesia",
     "china", "japan", "singapore",
 )
+_NON_US_REGIONS = tuple(getattr(config, "REMOTE_NON_US_REGIONS", None) or _DEFAULT_NON_US_REGIONS)
 
 
 def _region_match(token, text):

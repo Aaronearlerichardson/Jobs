@@ -34,6 +34,8 @@ from ..fetchers import (
 )
 from ..sources import ATS_REGISTRY, iter_store_sources
 
+import config
+
 TAG = "[REMOTE-NEURAL]"
 TRACK = "remote-neural"
 
@@ -41,48 +43,21 @@ TRACK = "remote-neural"
 # =========================================================================
 #  KEYWORD FOCUS — tier model as in filters.is_relevant: CORE alone passes
 #  (a neural-signal term is a strong signal); DOMAIN+SKILL passes (clinical
-#  mission + technical skill, for roles that don't name a modality).
+#  mission + technical skill, for roles that don't name a modality). Source
+#  lists live in profile.toml [keywords.remote_neural] (config.py exposes
+#  them via KEYWORDS_BY_TRACK) — NOT hardcoded here.
 # =========================================================================
 
+_TRACK_KEYWORDS = getattr(config, "KEYWORDS_BY_TRACK", {}).get("remote_neural", {})
+
 # Tier 1 — neural signals. Standalone signal.
-TRACK_CORE = [
-    # BCI / neural interfaces
-    "bci", "brain-computer", "brain computer", "brain machine",
-    "neural interface", "neural interfaces", "neural decoding",
-    "neural decoder", "neuroprosthetic", "neuroprosthesis",
-    "neurotech", "neural signal", "neural signals",
-    "neural signal processing", "neurostimulation", "closed-loop",
-    "cortical", "intracortical",
-    # Electrophysiology modalities
-    "eeg", "ieeg", "ecog", "electrocorticography", "lfp",
-    "meg", "magnetoencephalography", "emg", "fnirs",
-    "spike sorting", "electrophysiology",
-    "neural recording", "neural data", "neuroimaging",
-    "neuroscience", "neuroscientist", "computational neuroscience",
-    # Tooling the user specifically knows
-    "mne-python", "neuralink",
-]
+TRACK_CORE = list(_TRACK_KEYWORDS.get("core", []))
 
 # Tier 2 — clinical / health mission. Needs a SKILL pair.
-TRACK_DOMAIN = [
-    "clinical", "clinic", "health", "healthcare", "medical",
-    "digital health", "healthtech", "patient", "neurology",
-    "neurological", "epilepsy", "seizure", "sleep", "psychiatry",
-    "mental health", "brain health", "therapeutic", "diagnostic",
-    "biosignal", "physiological", "implantable", "wearable",
-    "medical device", "biomedical",
-]
+TRACK_DOMAIN = list(_TRACK_KEYWORDS.get("domain", []))
 
 # Tier 3 — high technical bar. Needs a DOMAIN pair.
-TRACK_SKILL = [
-    "machine learning", "deep learning", "pytorch", "tensorflow",
-    "jax", "signal processing", "dsp", "time series",
-    "neural network", "ml engineer", "research engineer",
-    "applied scientist", "data science", "data scientist",
-    "algorithms", "computer vision", "real-time", "embedded",
-    "firmware", "numpy", "scipy", "decoding", "modeling",
-    "software engineer",
-]
+TRACK_SKILL = list(_TRACK_KEYWORDS.get("skill", []))
 
 
 # ─── Neural anchor gate ──────────────────────────────────────────────────
@@ -157,37 +132,17 @@ def apply_to_config(cfg):
 # now (see remote_neural_run.main / config.NEURAL_DB_PATH) — these are the
 # named BCI-company targets, not a remote-only shortlist; onsite postings
 # surface too, with remote_eligible stamped per-job rather than gated.
-PRIORITY_COMPANIES = [
-    ("Beacon Biosignals",      "greenhouse", "beaconbiosignals"),
-    ("Neuralink",              "greenhouse", "neuralink"),
-    ("Precision Neuroscience", "kula",       "precision-neuroscience"),
-    ("Paradromics",            "jazzhr",     "paradromicsinc"),
-    ("Synchron",               "adp",        "d290c04e-0230-4cd9-8bf0-f116bfab1405|19000101_000003"),
-    ("Merge Labs",             "greenhouse", "merge"),
-    # Blackrock Neurotech deliberately omitted: the company store's stored
-    # slug (bamboohr/blackrock) resolves to an unrelated company (BlackRock
-    # Asphalt, Tampa FL). The correct board is unresolved as of this pass
-    # (see the migration notes) — add it here once a real slug is found.
-]
+# Source: profile.toml [discovery] priority_companies (config.DISCOVERY_PRIORITY_COMPANIES).
+# Blackrock Neurotech deliberately omitted there: the company store's stored
+# slug (bamboohr/blackrock) resolves to an unrelated company (BlackRock
+# Asphalt, Tampa FL). The correct board is unresolved as of this pass (see
+# the migration notes) — add it once a real slug is found.
+PRIORITY_COMPANIES = list(getattr(config, "DISCOVERY_PRIORITY_COMPANIES", []))
 
 # Remote-leaning web searches for general neural-ML roles. (label, query,
-# max_results). Each result URL is parsed for JSON-LD JobPosting.
-WEBSEARCH_QUERIES = [
-    ("Neural-ML on WeWorkRemotely",
-     '("neural" OR "BCI" OR "EEG" OR "neurotech" OR "brain-computer") '
-     '("engineer" OR "scientist") site:weworkremotely.com', 12),
-    ("Neural-ML on Himalayas",
-     '("neural" OR "BCI" OR "EEG" OR "neural decoding" OR "neurotech") '
-     'site:himalayas.app', 12),
-    ("Neural-ML on Remote.co",
-     '("neural" OR "BCI" OR "EEG" OR "neuroscience") site:remote.co', 12),
-    ("Neural-ML remote on Lever",
-     '("neural" OR "BCI" OR "EEG" OR "neural signal") '
-     '("remote") site:jobs.lever.co', 12),
-    ("Neural-ML remote on Ashby",
-     '("neural" OR "BCI" OR "EEG" OR "neural decoding") '
-     '("remote") site:jobs.ashbyhq.com', 12),
-]
+# max_results). Each result URL is parsed for JSON-LD JobPosting. Source:
+# config.REMOTE_NEURAL_WEBSEARCH_QUERIES.
+WEBSEARCH_QUERIES = list(getattr(config, "REMOTE_NEURAL_WEBSEARCH_QUERIES", []))
 
 
 def build_sources(cfg, include_websearch=True, db_path=None):

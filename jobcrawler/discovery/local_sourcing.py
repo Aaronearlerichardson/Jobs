@@ -717,7 +717,9 @@ def add_board(name, url):
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing
 # them wastes fetch slots. Skipped when picking result URLs to resolve.
-_AGGREGATOR_HOSTS = (
+# Source: config.DISCOVERY_AGGREGATOR_HOSTS (profile.toml [discovery]
+# aggregator_hosts); falls back to these defaults when unconfigured.
+_DEFAULT_AGGREGATOR_HOSTS = (
     "linkedin.com", "indeed.", "glassdoor.", "ziprecruiter.com", "simplyhired.com",
     "builtin.com", "rocketreach.co", "careerjet.", "monster.com", "dice.com",
     "lensa.com", "jobcase.com", "themuse.com", "wellfound.com", "levels.fyi",
@@ -725,6 +727,9 @@ _AGGREGATOR_HOSTS = (
     "getro.com", "jooble.org", "adzuna.", "snagajob.com", "careers.tufts.edu",
     "google.com/search", "bing.com", "facebook.com", "twitter.com", "x.com",
     "youtube.com", "crunchbase.com", "pitchbook.com", "zippia.com",
+)
+_AGGREGATOR_HOSTS = tuple(
+    getattr(config, "DISCOVERY_AGGREGATOR_HOSTS", None) or _DEFAULT_AGGREGATOR_HOSTS
 )
 
 
@@ -734,14 +739,17 @@ def _is_aggregator(url):
 
 # Generic words that don't distinguish a company's domain — excluded when
 # matching a result host to a name, so "medicaljobs.com" doesn't match
-# "Sampson Regional Medical Center" on the word "medical".
-_GENERIC_NAME_WORDS = {
+# "Sampson Regional Medical Center" on the word "medical". Source:
+# config.DISCOVERY_GENERIC_NAME_WORDS (profile.toml [discovery]
+# generic_name_words); falls back to these defaults when unconfigured.
+_DEFAULT_GENERIC_NAME_WORDS = {
     "medical", "center", "centre", "health", "healthcare", "regional",
     "group", "services", "systems", "system", "technology", "technologies",
     "imaging", "solutions", "associates", "partners", "care", "clinic",
     "hospital", "labs", "laboratories", "company", "corporation", "global",
     "national", "american", "international", "the", "and", "inc", "llc",
 }
+_GENERIC_NAME_WORDS = getattr(config, "DISCOVERY_GENERIC_NAME_WORDS", None) or _DEFAULT_GENERIC_NAME_WORDS
 
 
 def _host_matches_name(url, name):

@@ -23,15 +23,42 @@ skill = [
     "data pipeline", "machine learning",
 ]
 
+# ---------------------------------------------------------------------------
+# Per-track keyword overrides. A track's apply_to_config() can swap or extend
+# the [keywords] tiers above with a [keywords.<track_name>] table while that
+# track runs — see jobcrawler/tracks/*.py. Optional; omit if you have no
+# per-track tracks that need their own vocabulary.
+# ---------------------------------------------------------------------------
+[keywords.example_track]
+core = []
+domain = []
+skill = []
+
 [exclude]
 phrases = ["phd required", "must have a phd", "clearance required"]
 title_phrases = ["manager", "director", "intern"]
+# Regex fragments (ORed together) scrubbed from text before keyword/exclusion
+# matching — for boilerplate that contains domain-looking words without
+# meaning them (benefits sections, EEO statements, infra-health prose).
+boilerplate_phrases = []
+
+# Optional per-track exclude overrides, e.g. [exclude.example_track] with
+# role_phrases / title_tokens / defense_strong / defense_weak / nonclinical —
+# see jobcrawler/tracks/local_tech.py for the shape.
 
 [locations]
 onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]
 remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "anywhere"]
 accept_remote = true
 exclude = []
+
+# Remote-eligibility detection (jobcrawler/remote_filter.py). Falls back to
+# built-in generic defaults when left empty.
+remote_tokens = []
+remote_phrases = []
+hard_negations = []
+us_markers = []
+non_us_regions = []
 
 [policy]
 # Large companies to keep active despite an "other" mission score, crawling
@@ -96,3 +123,27 @@ name_search_queries = [
     "<your industry> startups <your region>",
 ]
 name_blocklist = []          # normalized names to drop (bad slug collisions)
+
+# Job aggregators / company-directory sites skipped when picking result URLs
+# to resolve during discovery (they're never the employer's own ATS board).
+aggregator_hosts = []
+# Generic words excluded when matching a search-result host to a company
+# name (so "medicaljobs.com" doesn't match on the word "medical").
+generic_name_words = []
+# Prioritized named company targets fetched (and deduped) first by tracks
+# that use one — see jobcrawler/tracks/remote_neural.py.
+priority_companies = [
+    # { name = "Example Co", ats = "greenhouse", slug = "examples" },
+]
+
+# ---------------------------------------------------------------------------
+# Fit rubric (jobcrawler/fit.py) — optional; fit.py falls back to built-in
+# defaults when this whole block is absent.
+# ---------------------------------------------------------------------------
+[fit]
+# Deterministic backstop for the "clearance" gate: verbs are the demand
+# words, qualifiers are the optional clearance-type words that may sit
+# between the verb and "clearance". Falls back to built-in defaults
+# (active/current + us/dod/top-secret/ts-sci/secret) when left empty.
+clearance_verbs = []
+clearance_qualifiers = []

@@ -142,12 +142,29 @@ INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
 EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
 EXCLUDE_TITLE_PHRASES = list(_exc.get("title_phrases", []))
+# Regex fragments (ORed together in jobcrawler/filters.scrub_boilerplate) for
+# benefits/EEO/infra-health idioms that contain domain-looking words without
+# meaning them.
+EXCLUDE_BOILERPLATE_PHRASES = list(_exc.get("boilerplate_phrases", []))
+
+# Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
+# tables. Tracks read their own sub-dict (e.g. KEYWORDS_BY_TRACK.get("local_tech"))
+# instead of hardcoding their vocabulary; see jobcrawler/tracks/*.py.
+KEYWORDS_BY_TRACK = {k: v for k, v in _kw.items() if isinstance(v, dict)}
+EXCLUDE_BY_TRACK   = {k: v for k, v in _exc.items() if isinstance(v, dict)}
 
 LOCATION_ONSITE_INCLUDE = list(_loc.get("onsite", []))
 LOCATION_REMOTE_INCLUDE = list(_loc.get("remote", []))
 ACCEPT_REMOTE           = bool(_loc.get("accept_remote", False))
 LOCATION_EXCLUDE        = list(_loc.get("exclude", []))
 LOCATION_INCLUDE        = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
+
+# --- Remote-eligibility detection (jobcrawler/remote_filter.py) ---------------
+REMOTE_LOC_TOKENS     = list(_loc.get("remote_tokens", []))
+REMOTE_BODY_PHRASES   = list(_loc.get("remote_phrases", []))
+REMOTE_HARD_NEGATIONS = list(_loc.get("hard_negations", []))
+REMOTE_US_MARKERS     = list(_loc.get("us_markers", []))
+REMOTE_NON_US_REGIONS = list(_loc.get("non_us_regions", []))
 
 # --- Candidate identity (injected into Claude prompts; jobcrawler/claude.py) --
 CANDIDATE_SUMMARY   = (_cand.get("summary") or "").strip()
@@ -168,6 +185,10 @@ FIT_REGION        = ", ".join(_fitp.get("region_terms", [])) or None
 # How many of your own --mark decisions (applied/dismissed, each) are fed to
 # the fit scorer as few-shot calibration. None -> default 3; 0 disables.
 FIT_DISPOSITION_EXAMPLES = _fitp.get("disposition_examples")
+# Deterministic "clearance" gate backstop (jobcrawler/fit.py _CLEARANCE_RE).
+# Empty -> fit.py falls back to its own built-in defaults.
+FIT_CLEARANCE_VERBS      = list(_fitp.get("clearance_verbs", []))
+FIT_CLEARANCE_QUALIFIERS = list(_fitp.get("clearance_qualifiers", []))
 
 # --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
@@ -195,6 +216,15 @@ DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
 DISCOVERY_BRAINSTORM_NAMES   = _dsc.get("brainstorm_names")
 DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
                                 for n in _dsc.get("name_blocklist", [])}
+# Job-aggregator hosts to skip, and generic words to ignore, when resolving a
+# search result to a company's own ATS board (jobcrawler/discovery/local_sourcing.py).
+DISCOVERY_AGGREGATOR_HOSTS    = tuple(_dsc.get("aggregator_hosts", []))
+DISCOVERY_GENERIC_NAME_WORDS  = set(_dsc.get("generic_name_words", []))
+# Named company targets a track fetches first (list of {name, ats, slug}).
+DISCOVERY_PRIORITY_COMPANIES = [
+    (c.get("name"), c.get("ats"), c.get("slug"))
+    for c in _dsc.get("priority_companies", [])
+]
 
 # =========================================================================
 #  HTTP
@@ -312,6 +342,26 @@ WEBSEARCH_QUERIES: list[tuple] = [
         '("engineer" OR "scientist") site:builtin.com',
         15,
     ),
+]
+
+# Remote-leaning web searches used by the REMOTE-NEURAL track specifically
+# (jobcrawler/tracks/remote_neural.py) — separate from the general
+# WEBSEARCH_QUERIES above. (label, query, max_results).
+REMOTE_NEURAL_WEBSEARCH_QUERIES: list[tuple] = [
+    ("Neural-ML on WeWorkRemotely",
+     '("neural" OR "BCI" OR "EEG" OR "neurotech" OR "brain-computer") '
+     '("engineer" OR "scientist") site:weworkremotely.com', 12),
+    ("Neural-ML on Himalayas",
+     '("neural" OR "BCI" OR "EEG" OR "neural decoding" OR "neurotech") '
+     'site:himalayas.app', 12),
+    ("Neural-ML on Remote.co",
+     '("neural" OR "BCI" OR "EEG" OR "neuroscience") site:remote.co', 12),
+    ("Neural-ML remote on Lever",
+     '("neural" OR "BCI" OR "EEG" OR "neural signal") '
+     '("remote") site:jobs.lever.co', 12),
+    ("Neural-ML remote on Ashby",
+     '("neural" OR "BCI" OR "EEG" OR "neural decoding") '
+     '("remote") site:jobs.ashbyhq.com', 12),
 ]
 
 # =========================================================================
