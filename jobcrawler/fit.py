@@ -57,7 +57,7 @@ DEFAULT_WEIGHTS = {
     "function":  0.34,   # role discipline from the JD BODY, not the title
     "stack":     0.33,   # explicit tool overlap, load-bearing tools weighted
     "seniority": 0.08,   # clears the bar without being wildly over/under
-}  # calibrated on the anchor set below: MAE 0.04, rank-agreement 0.88
+}  # calibrated on the 17-role anchor set below: MAE 0.036, rank-agreement 0.91
 
 # A failed gate multiplies the base score. We take the WORST (min) gate rather
 # than the product, so a doubly-disqualified role sinks once, hard, instead of
@@ -520,6 +520,28 @@ _ANCHORS = {
     # 0.69 off the EEG preamble (truncated JD); the deep read found a TPM
     # seat needing 8+ yrs program mgmt + end-to-end GCP — wrong archetype.
     "Ceribell Sr Mgr Applied AI":   (dict(domain=.35, function=.30, stack=.35, seniority=.45), ["management"], .20, "TPM/GCP seat at an EEG company; domain halo"),
+    # ---- Aug 2026 census anchors: one per rule added 2026-08-11. ----------
+    # CoVar guards the clearance gate's NEGATIVE space: citizenship +
+    # clearance-ELIGIBILITY requirements must NOT gate (the candidate is a
+    # citizen). His DSP toolkit re-pointed at RF: function/stack high,
+    # domain rock-bottom, no gates — a contender on fit; the abysmal
+    # company MISSION (not this score) is what keeps it out of the ranking.
+    "CoVar Signal Processing Eng":  (dict(domain=.15, function=.80, stack=.70, seniority=1.0), [], .52, "his DSP toolkit at a defense shop; eligibility-only, no gate"),
+    # Vadum-class guards the clearance PENALTY as the worst (only) gate: an
+    # algorithm seat demanding an ACTIVE TS/SCI he doesn't hold. (Vadum's
+    # bench RF/FPGA variants trip embedded too; kept clearance-only here so
+    # a penalty regression can't hide behind worst-gate selection.)
+    "Vadum DSP (active TS/SCI)":    (dict(domain=.15, function=.60, stack=.55, seniority=1.0), ["clearance"], .21, "cleared-shop DSP; active clearance he lacks"),
+    # Guards the production-quality fit_cap (census screen risk #1): a
+    # design-assurance QE posting whose core is CAPA/complaints/post-market
+    # — the cap bounds FUNCTION at/below 0.45 despite the design-controls
+    # keyword overlap with his DHF/ISO 14971/510(k) background.
+    "Teleflex Sr QE (CAPA-heavy)":  (dict(domain=.45, function=.40, stack=.30, seniority=.90), [], .38, "production-quality ops core; cap holds function under .45"),
+    # Lane-2 CAD-automation seat (census Tier-1, scorer ~0.48): encodes the
+    # CURRENT profile stance that device R&D/automation without ML is
+    # mid-tier. If the strengths list is ever rewritten to elevate Python
+    # CAD/design-controls pairing, RAISE this hand score to match.
+    "restor3d Automation Engineer": (dict(domain=.42, function=.45, stack=.50, seniority=.78), [], .48, "Python CAD automation under 21 CFR 820; no ML/neural content"),
 }
 
 
