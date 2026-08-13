@@ -12,14 +12,14 @@ the location, or relax the BCI constraint — and lets you pivot between them:
 | **local-tech** | Triangle/NC location (~2.5 h ring), technical bar, health/bio/science mission | neural requirement | `python run_scraper.py --track local_tech` |
 
 Those specifics are just the shipped profile — swap `profile.toml` and the
-tracks retarget any field/region. Both tracks share the fetchers, discovery
-pipeline, company store, Claude scorers, and parallel fetch pool; they differ
-only in gates and ranking. A third, older mode (`python run_scraper.py` with no
-flags) runs the classic keyword crawl and emails a digest.
+tracks retarget any field/region: a track is pure configuration
+(`[tracks.*]`: engine, db, sources, gates, scoring budget, digest email) run
+through ONE pipeline (`scrapers/runner.py`). `python run_scraper.py` with no
+flags refreshes every configured track — the daily-refresh entry.
 
 ```
-DISCOVERY                    STORE (local_tech.db)            CRAWL
-discover.py ..............>  companies                        run_scraper.py --track ...
+DISCOVERY                    STORE (data/*.db)                CRAWL
+discover.py ..............>  companies                        run_scraper.py [--track X]
   Claude suggestions           (ats, slug, mission score,       fetch boards (parallel)
   BCIWiki directory             tags: neural | nc_local,        -> gates (per track)
   local sourcing / dorking      active flag)                    -> score (resume fit /
@@ -84,7 +84,7 @@ mission tiers, locality, and discovery seeds. `config.py` is now just plumbing
 ```
 python discover.py --local                # source local companies into the store
 python discover.py --score-missions       # tier the new companies
-python run_scraper.py --track local_tech      # or --track remote-neural
+python run_scraper.py --track local_tech      # or --track remote_neural, or no flags = all tracks
 ```
 
 (There is no more `--import-seeds` — the company roster is stored in the DB, not
@@ -482,7 +482,7 @@ is the checked-in template). Sections:
 | `[candidate]` | who you are — injected verbatim into every Claude scoring/discovery prompt |
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, the `domain_ladder`, your `stack_core`/`stack_anti`, and `region_terms` (all optional; sensible defaults) |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
-| `[locality]` | what counts as "local" for the local track (`jobcrawler/nc.py`) |
+| `[locality]` | what counts as "local" for the local track (`core/locality.py`) |
 | `[discovery]` | seed company names, Workday majors, directory URLs, web-search name queries |
 
 **Relevance model:** a job passes if it hits any `core` term, OR a `domain` +

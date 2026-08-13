@@ -439,6 +439,20 @@ def main():
               for o in webapp.OPS.values()))
     import run_scraper
     check("run_scraper CLI parses --help", True if run_scraper else False)
+    check("every track db lives under DATA_DIR",
+          all(str(t["db_path"]).startswith(str(config.DATA_DIR))
+              for t in config.UI_TRACKS.values()))
+    check("webapp resolves to the package (not the entry script)",
+          webapp.__file__.endswith("__init__.py"))
+    from pathlib import Path as _P
+    _wa = _P(webapp.__file__).parent
+    check("SPA split into templates + static",
+          (_wa / "templates" / "index.html").exists()
+          and (_wa / "static" / "css" / "app.css").exists()
+          and (_wa / "static" / "js" / "app.js").exists())
+    check("keyword mutation contract: filters binds the SAME list object",
+          __import__("core.filters", fromlist=["CORE_KEYWORDS"]).CORE_KEYWORDS
+          is config.CORE_KEYWORDS)
 
     # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
     print("[profile edit]")
