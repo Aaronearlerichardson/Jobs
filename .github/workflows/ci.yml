@@ -50,9 +50,14 @@ jobs:
         run: |
           test ! -f profile.toml || { echo "profile.toml must not be committed"; exit 1; }
           python -c "
-          import config, sys
+          import config
           assert config.PROFILE_SOURCE == 'profile.example.toml', config.PROFILE_SOURCE
-          assert config.ANTHROPIC_API_KEY == 'YOUR_ANTHROPIC_API_KEY_HERE', 'API key leaked into CI'
+          # No USABLE key: the placeholder (or anything blank, which config
+          # resolves to the placeholder). Checking for a real key shape too,
+          # so a leaked secret fails loudly rather than quietly spending.
+          key = config.ANTHROPIC_API_KEY
+          assert key == 'YOUR_ANTHROPIC_API_KEY_HERE', 'API key leaked into CI'
+          assert not key.startswith('sk-'), 'API key leaked into CI'
           print('profile:', config.PROFILE_SOURCE, '| tracks:', list(config.UI_TRACKS))
           "
 

@@ -18,25 +18,37 @@ from pathlib import Path
 #  SECRETS (env-var first, fallbacks kept for local dev only)
 # =========================================================================
 
-GMAIL_ADDRESS      = os.environ.get("GMAIL_ADDRESS",      "jakdaxter31@gmail.com")
-GMAIL_APP_PASSWORD = os.environ.get("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HERE")
-ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
+def env(name, default=""):
+    """An env var's value, treating BLANK as unset.
+
+    `os.environ.get(name, default)` returns "" when the variable exists but
+    is empty — so `ANTHROPIC_API_KEY=""` (a CI runner exporting it, a shell
+    profile clearing it) read as "a key is configured" and the scorers tried
+    to authenticate with nothing instead of degrading to their offline
+    fallbacks. Blank means absent everywhere in this file.
+    """
+    return (os.environ.get(name) or "").strip() or default
+
+
+GMAIL_ADDRESS      = env("GMAIL_ADDRESS",      "jakdaxter31@gmail.com")
+GMAIL_APP_PASSWORD = env("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HERE")
+ANTHROPIC_API_KEY  = env("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
 # Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
 # pricing ($3/$15 per MTok; intro $2/$10 through 2026-08-31, cheaper than the
 # Sonnet 4.6 it replaces). NOTE for 5-family models: thinking is ON by
 # default and max_tokens caps thinking+text together — core/claude.py
 # disables thinking for these small structured-JSON calls.
-CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-5")
+CLAUDE_MODEL       = env("CLAUDE_MODEL", "claude-sonnet-5")
 # Deep-verify pass over ranking finalists only (~15-30 calls/run, judgment-
 # heavy): Opus 5 with adaptive thinking. $5/$25 per MTok, but bounded volume.
-CLAUDE_VERIFY_MODEL = os.environ.get("CLAUDE_VERIFY_MODEL", "claude-opus-5")
+CLAUDE_VERIFY_MODEL = env("CLAUDE_VERIFY_MODEL", "claude-opus-5")
 
 # CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
 # (NLx) feed, where federal contractors must list openings (VEVRAA). Register
 # at https://www.careeronestop.org/Developers/WebAPI/registration.aspx; DOL
 # emails a UserId + token. Used by `python crawler.py --nlx "Meta,Google"`.
-CAREERONESTOP_USER_ID = os.environ.get("CAREERONESTOP_USER_ID", "")
-CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
+CAREERONESTOP_USER_ID = env("CAREERONESTOP_USER_ID")
+CAREERONESTOP_TOKEN   = env("CAREERONESTOP_TOKEN")
 
 # =========================================================================
 #  PATHS
