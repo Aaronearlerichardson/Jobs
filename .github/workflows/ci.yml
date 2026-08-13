@@ -1,11 +1,12 @@
 name: CI
 
-# Only around main: every PR that targets it (gates the merge) and every
-# push that lands on it. Day-to-day work on feature branches doesn't spend
-# CI minutes — a full Nuitka build on three OSes is not cheap.
+# Every pull request (whatever branch it targets) and every push to main
+# gets the full treatment: the offline test job, then the three-OS build.
+# Builds only start if the tests pass (`needs: test`), and a new push to the
+# same ref cancels the run in flight (see `concurrency`), so the expensive
+# compile isn't spent on superseded work.
 on:
   pull_request:
-    branches: [main]
   push:
     branches: [main]
   workflow_dispatch:
@@ -116,6 +117,8 @@ jobs:
 
   build:
     name: Build (${{ matrix.os }})
+    # Gated on the tests: a green build of broken code is not worth the
+    # three-OS compile time.
     needs: test
     runs-on: ${{ matrix.os }}
     strategy:

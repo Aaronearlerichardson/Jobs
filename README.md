@@ -252,8 +252,8 @@ derive their inputs from whichever profile is loaded, so the same tests pass
 on your `profile.toml` and on the shipped `profile.example.toml`; write tests
 redirect `PROFILE_PATH`/`DATA_DIR` to a `tmp_path`.
 
-`.github/workflows/ci.yml` runs **only around `main`** (PRs targeting it and
-pushes to it — a three-OS Nuitka build is not cheap):
+`.github/workflows/ci.yml` runs on **every pull request** (whatever branch it
+targets) and on **pushes to `main`**:
 
 - **test** (Ubuntu) — asserts the run really is example-profile + API-free,
   then byte-compiles, lints (pyflakes), validates the example profile, runs
@@ -261,7 +261,9 @@ pushes to it — a three-OS Nuitka build is not cheap):
   API and the asset cache-busting.
 - **build** (Ubuntu + Windows + macOS) — `python build_app.py`, then
   *launches the built binary* and requires its API to answer; a build that
-  compiles but can't boot is not a pass. Artifacts upload per OS.
+  compiles but can't boot is not a pass. Artifacts upload per OS. Runs only
+  after the tests pass, and a new push to the same branch cancels the run in
+  flight, so a three-OS compile is never spent on superseded work.
 
 `python smoke_test.py` still works — it's a shim that runs pytest.
 
