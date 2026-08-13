@@ -393,6 +393,33 @@ def main():
           webapp._geo_tag({"location": "Austin, TX", "geo_mode": "remote"}) == "remote")
 
     # 11b. unified crawl runner (one pipeline, methodology from [tracks.*])
+    # 11a. one store, many tracks: jobs.track is a SET
+    print("[track membership]")
+    import tempfile
+    from pathlib import Path as _P
+    _tmpdb = _P(tempfile.mkdtemp()) / "jobs.db"
+    _c = store.connect(_tmpdb)
+    store.upsert_job(_c, {"job_id": "x1", "title": "EEG Engineer",
+                          "url": "u", "location": "Durham, NC",
+                          "track": "local-tech"})
+    store.upsert_job(_c, {"job_id": "x1", "title": "EEG Engineer",
+                          "url": "u", "location": "Durham, NC",
+                          "track": "remote-neural"})
+    _row = _c.execute("SELECT track FROM jobs WHERE job_id='x1'").fetchone()
+    check("second track ADDS to the row (no steal)",
+          store.track_set(_row["track"]) == {"local-tech", "remote-neural"})
+    check("both tracks see the shared row",
+          len(store.ranked_jobs(_c, track="local-tech")) == 1
+          and len(store.ranked_jobs(_c, track="remote-neural")) == 1)
+    check("an unrelated track does not",
+          store.ranked_jobs(_c, track="nope") == [])
+    check("track_set tolerates NULL/empty", store.track_set(None) == set()
+          and store.join_tracks(set()) is None)
+    _c.close()
+    check("every configured track points at a real db path",
+          all(t["db_path"].name.endswith(".db")
+              for t in config.UI_TRACKS.values()))
+
     print("[unified runner]")
     lt_t = runner.track_for_engine("local")
     rn_t = runner.track_for_engine("neural")

@@ -276,7 +276,7 @@ also stored per axis (`fit_domain`, `fit_function`, `fit_stack`,
 so you can query and sort on any axis:
 
 ```
-sqlite3 local_tech.db "SELECT resume_fit_score, fit_domain, fit_stack, fit_gates, title \
+sqlite3 data/jobs.db "SELECT resume_fit_score, fit_domain, fit_stack, fit_gates, title \
   FROM jobs WHERE fit_gates IS NULL ORDER BY resume_fit_score DESC LIMIT 20"
 ```
 
@@ -385,10 +385,10 @@ browser once the server is up). To ship the UI to a machine **without Python
 or any pip installs**, run `build_exe.bat`: it compiles the whole app with
 [Nuitka](https://nuitka.net) into a self-contained folder,
 `webapp.dist\`, whose `JobCrawlerUI.exe` bundles CPython, Flask, the crawler
-package, and lxml. The exe finds its data (`local_tech.db`, `profile.toml`,
+package, and lxml. The exe finds its data (`jobs.db`, `profile.toml`,
 résumé, `job_reports\`) in this order: a `JOBS_DATA_DIR` env var if set; its
 own folder when data already sits there; the folder **above** it when that
-holds `local_tech.db` (so a dist folder still inside this project uses the
+holds `jobs.db` (so a dist folder still inside this project uses the
 project's real data rather than spawning a second empty DB); otherwise its
 own folder, creating a fresh DB there — the copied-to-a-new-machine case.
 The header of the UI always shows which DB file is live.
@@ -519,18 +519,21 @@ forwards to `run_scraper.py` — but repoint them when convenient. Note
 
 ## Data model & files
 
-One SQLite store per track, under `data/` (`core/store.py`; default
-`data/local_tech.db` + `data/neural.db`, filenames from `[tracks.*].db`):
+One SQLite store for everything — `data/jobs.db` (`core/store.py`). A track
+can still get its own file via `[tracks.*].db`, but by default they share:
 
 - **companies** — name, ats, slug / Workday triple / careers_url, NC job count,
   cached mission tier + score, `tags` (`neural`, `nc_local`, `multi_division` —
   which tracks crawl it), `source` (`discovery:<term>` / `local_sourcing` /
   `ats_dork` / `page_capture` / `manual` / `nlx`), `active` flag.
-- **jobs** — stable job_id (dedup), track, geo_mode, remote/neural signals,
+- **jobs** — stable job_id (dedup), `track`, geo_mode, remote/neural signals,
   description, résumé-fit score + reason, the per-axis breakdown (`fit_domain`,
   `fit_function`, `fit_stack`, `fit_seniority`, `fit_gates`), first/last seen.
   The combined résumé-fit×mission ranking score is computed at read time, not
   stored.
+  `track` is a comma-separated **set**, not one value: a posting that belongs
+  to two tracks is one row visible to both, and a second track's crawl adds
+  its name rather than stealing the row (`store.track_set`).
 
 Schema migrations are additive/automatic; old DBs upgrade in place (and shed
 retired columns). All local data lives in the gitignored `data/` directory

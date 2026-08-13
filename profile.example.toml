@@ -73,7 +73,7 @@ non_us_regions = []
 # ---------------------------------------------------------------------------
 [tracks.local_tech]
 label = "Local"
-db = "local_tech.db"
+db = "jobs.db"
 track = "local-tech"
 # `engine` names the crawl machinery, not the track: "local" (the
 # location-scoped crawler) or "neural" (the location-agnostic neural runner).
@@ -114,7 +114,7 @@ default = true
 
 [tracks.remote_neural]
 label = "Remote"
-db = "neural.db"
+db = "jobs.db"
 track = "remote-neural"
 engine = "neural"
 rank_by = "fit"

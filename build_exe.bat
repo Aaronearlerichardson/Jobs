@@ -8,7 +8,7 @@ rem packages + lxml etc.) - copy it to any Windows machine and double-click
 rem the exe; no Python or pip installs needed there. Data resolution:
 rem JOBS_DATA_DIR env var if set; else <exe dir>\data when it holds a DB;
 rem else the exe's folder itself (legacy layout); else <parent>\data when
-rem that holds local_tech.db (dist inside this repo -> uses the repo's real
+rem that holds jobs.db (dist inside this repo -> uses the repo's real
 rem data); else a fresh <exe dir>\data. Set ANTHROPIC_API_KEY in the
 rem environment for the scoring operations.
 rem

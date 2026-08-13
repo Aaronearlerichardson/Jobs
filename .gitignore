@@ -43,3 +43,4 @@ data/
 
 # DDG search cache (bounded web-search step)
 .cache/
+.junie/

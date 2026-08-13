@@ -1,7 +1,9 @@
 """
-Unified SQLite store shared by every track: a `companies` table (with a
-cached mission score and scope tags) and a `jobs` table (per-job scores,
-dedup state, and per-track fields).
+One SQLite store (data/jobs.db) shared by every track: a `companies` table
+(with a cached mission score and scope tags) and a `jobs` table (per-job
+scores, dedup state, track membership). `jobs.track` is a comma-separated
+SET, so a posting that belongs to two tracks is ONE row visible to both —
+see track_set() and the LIKE-based filters that read it.
 
 Design (merged from both development tracks):
   * The company row carries the mission judgment once, so individual jobs
@@ -64,7 +66,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     title          TEXT,
     url            TEXT,
     location       TEXT,
-    track          TEXT,                  -- remote-neural|local-tech|classic
+    track          TEXT,                  -- comma-separated SET of track names
     geo_mode       TEXT,                  -- onsite|remote
     remote_eligible INTEGER,              -- 1 when the remote filter passed
     remote_signal  TEXT,                  -- phrase/hint that marked it remote
@@ -171,6 +173,34 @@ def connect(path=None):
     conn.executescript(_INDEXES)
     conn.commit()
     return conn
+
+
+# --------------------------------------------------------------------------- #
+#  Track membership                                                            #
+# --------------------------------------------------------------------------- #
+#
+# jobs.track holds a comma-separated SET of track names, not one name: the
+# same posting can belong to several tracks (a neural-company job in your
+# area is both local and neural material), and one store now serves every
+# track. Same shape as companies.tags, and matched the same way in SQL.
+
+def track_set(value):
+    """The set of track names in a stored `track` value ('' / None -> set())."""
+    return {t.strip() for t in (value or "").split(",") if t.strip()}
+
+
+def join_tracks(tracks):
+    """Canonical stored form for a set of track names (sorted, comma-joined)."""
+    return ",".join(sorted(t for t in tracks if t)) or None
+
+
+# SQL fragment + arg for "this row belongs to track ?" — the comma-delimited
+# LIKE that get_companies already uses for tags.
+_TRACK_MATCH_SQL = "(',' || COALESCE(j.track,'') || ',') LIKE ?"
+
+
+def _track_match_arg(track):
+    return f"%,{track},%"
 
 
 # --------------------------------------------------------------------------- #
@@ -428,6 +458,17 @@ def upsert_job(conn, j):
     remote = j.get("remote_eligible")
     if remote is not None:
         remote = int(bool(remote))
+    # `track` is a SET (see track_set): a posting can legitimately belong to
+    # several tracks at once — a neural-company job in your area is both
+    # local and neural material — so a second track's crawl ADDS its label
+    # instead of stealing the row. Merged here in Python; the ON CONFLICT
+    # clause below just writes the union.
+    track = j.get("track")
+    if track and not new:
+        prev = conn.execute("SELECT track FROM jobs WHERE job_id=?",
+                            (j["job_id"],)).fetchone()
+        track = join_tracks(track_set(prev["track"] if prev else None)
+                            | track_set(track))
     conn.execute(
         """INSERT INTO jobs
             (job_id, company_id, company_name, title, url, location, track,
@@ -457,7 +498,7 @@ def upsert_job(conn, j):
              closed_at=CASE WHEN excluded.status='closed'
                             THEN closed_at ELSE NULL END""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
-         j.get("url"), j.get("location"), j.get("track"), j.get("geo_mode"),
+         j.get("url"), j.get("location"), track, j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("neural_signal"),
          j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
@@ -640,7 +681,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
                 "posted_at=COALESCE(posted_at, ?) WHERE job_id=?",
                 (now, p, r["job_id"]))
             continue
-        if track is not None and r["track"] != track:
+        if track is not None and track not in track_set(r["track"]):
             continue
         if (r["status"] or "open") == "closed":
             continue
@@ -753,8 +794,8 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     """
     conds, args = [], []
     if track:
-        conds.append("j.track = ?")
-        args.append(track)
+        conds.append(_TRACK_MATCH_SQL)
+        args.append(_track_match_arg(track))
     if not include_closed:
         conds.append("COALESCE(j.status,'open') != 'closed'")
     if not include_dispositioned:

@@ -10,7 +10,6 @@ Two entry points:
   * run_ddgs_dorks()  — fully automated via the ddgs package (DuckDuckGo).
 """
 
-import re
 import time
 
 import config

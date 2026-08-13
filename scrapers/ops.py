@@ -172,11 +172,13 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
     pending = [dict(r) for r in conn.execute(
         "SELECT job_id, title, description FROM jobs "
-        "WHERE track = ? AND resume_fit_score IS NULL "
+        "WHERE (',' || COALESCE(track,'') || ',') LIKE ? "
+        "AND resume_fit_score IS NULL "
         "AND COALESCE(status,'open') != 'closed' "
         f"AND (disposition IS NULL OR disposition NOT IN ({_ph})) "
         "AND length(COALESCE(description,'')) >= ?",
-        (track, *store.RANKING_EXCLUDED_DISPOSITIONS, MIN_DESC_CHARS)).fetchall()]
+        (f"%,{track},%", *store.RANKING_EXCLUDED_DISPOSITIONS,
+         MIN_DESC_CHARS)).fetchall()]
     if not pending:
         return 0
     print(f"  self-heal: scoring {len(pending)} newly-described "
@@ -289,8 +291,8 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
              f"(disposition IS NULL OR disposition NOT IN ({ph}))"]
     args = list(store.RANKING_EXCLUDED_DISPOSITIONS)
     if track:
-        conds.append("track = ?")
-        args.append(track)
+        conds.append("(',' || COALESCE(track,'') || ',') LIKE ?")
+        args.append(f"%,{track},%")
     if described_only:
         conds.append("length(COALESCE(description,'')) >= ?")
         args.append(MIN_DESC_CHARS)

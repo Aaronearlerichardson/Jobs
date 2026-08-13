@@ -122,9 +122,46 @@ function jobFilters(j) {
   return true;
 }
 
+/* Say WHY rows are missing, and offer the one-click undo. A count that
+   silently drops from 1400 to 690 reads as a bug; naming the filter that
+   did it doesn't. */
+function renderFilterSummary(shown) {
+  const el = $("#filtersummary");
+  if (!el) return;
+  const hidden = state.jobs.length - shown.length;
+  if (!hidden) { el.textContent = ""; return; }
+  const t = currentTrack();
+  const geo = $("#f-geo").value;
+  const bits = [];
+  if (!geo && !$("#f-move").checked) {
+    const n = state.jobs.filter(j => j.geo_bucket === "relocation").length;
+    if (n) bits.push(`<b>${n}</b> would need relocating (<button data-fix="move">show them</button>)`);
+  }
+  if (t?.remote_requires_watch && geo !== "remote") {
+    const n = state.jobs.filter(j => j.geo_bucket === "remote" && j.us_ok && !j.watched).length;
+    if (n) bits.push(`<b>${n}</b> remote at companies you don't watch (<button data-fix="remote">show them</button>)`);
+  }
+  const nonUs = state.jobs.filter(j => j.geo_bucket === "remote" && !j.us_ok).length;
+  if (nonUs) bits.push(`<b>${nonUs}</b> remote outside the US`);
+  const mf = parseFloat($("#f-fit").value || "0");
+  if (mf > 0) {
+    const n = state.jobs.filter(j => !(j.resume_fit_score >= mf)).length;
+    if (n) bits.push(`<b>${n}</b> below the ${mf} fit cutoff`);
+  }
+  el.innerHTML = bits.length
+    ? `${hidden} hidden — ${bits.join(" · ")}`
+    : `${hidden} hidden by the filters above.`;
+  el.querySelectorAll("button[data-fix]").forEach(b => b.onclick = () => {
+    if (b.dataset.fix === "move") $("#f-move").checked = true;
+    if (b.dataset.fix === "remote") $("#f-geo").value = "remote";
+    renderJobs();
+  });
+}
+
 function renderJobs() {
   const rows = state.jobs.filter(jobFilters);
   $("#jobcount").textContent = `${rows.length} of ${state.jobs.length} shown`;
+  renderFilterSummary(rows);
   if (!rows.length) { $("#jobs").innerHTML = `<div class="empty">No jobs match.</div>`; return; }
   const body = rows.map(j => {
     const fit = j.resume_fit_score == null ? "–" : j.resume_fit_score.toFixed(2);
@@ -301,32 +338,58 @@ function renderCompanies() {
 }
 
 /* ---------------- operations ---------------- */
+/* Operation groups, in display order. `open` = expanded on load — the two
+   you actually run day to day; everything else is one click away. */
+const OP_GROUPS = [
+  ["routine",   "Everyday",            "What you run to get fresh jobs.", true],
+  ["scoring",   "Re-score",            "Redo the fit judgement after changing your résumé, rubric, or keywords.", false],
+  ["repair",    "Fill gaps & verify",  "Fix rows with missing text or a stale open/closed state.", false],
+  ["roster",    "Find more employers", "Grow the company list the crawl walks.", false],
+  ["cleanup",   "Roster cleanup",      "Prune and de-duplicate the company list.", false],
+];
+
+/* [id, title, "what it does", params, group, "when to use it"] */
 const OPS = [
-  ["crawl", "Crawl", "Run the active track's crawl — its engine, sources, keyword focus and DB all come from the track's config. Scores new jobs; verify/websearch flags apply where the engine supports them.",
+  ["crawl", "Crawl", "Fetches every company board this track follows, keeps the postings that pass its filters, and scores the new ones against your résumé.",
    [["top", "top N", 15], ["workers", "workers", 6], ["no_verify", "skip verify", false, "check"],
-    ["no_websearch", "skip web search", false, "check"], ["no_fit", "skip fit scoring", false, "check"]]],
-  ["sync", "Sync statuses", "Re-fetch boards; reconcile open/closed + backfill posting dates. No scoring, no API.",
-   [["top", "top N", 15]]],
-  ["verify", "Deep-verify top N", "Full-JD requirements read of the ranking's finalists (Opus verify model).",
-   [["top", "top N", 15]]],
-  ["check-closed", "Probe stale URLs", "Probe jobs no board has vouched for lately; close the provably dead.",
-   [["stale_days", "stale days", 2], ["limit", "limit", ""]]],
-  ["rescore", "Rescore all", "Re-screen every described, undecided open job with the current rubric.",
-   [["described_only", "described only", true, "check"]]],
-  ["backfill-descriptions", "Backfill descriptions", "Fetch full JD text for rows missing a body (any ATS, board title-match).",
-   [["limit", "limit", ""]]],
-  ["backfill-workday", "Backfill Workday JDs", "Fetch full JD text for stored Workday rows via the CXS endpoint.",
-   [["limit", "limit", ""]]],
-  ["nlx", "NLx ingest", "Pull NC postings for bot-gated employers (Meta, Google, Qualcomm…) from the federal NLx feed.",
-   [["companies", "companies (comma-sep)", "", "wide"]]],
-  ["discover-local", "Discover local companies", "Full sourcing pass: directories + web search + LLM brainstorm + ATS-dork sweep → new roster rows (long).",
-   [["no_dork", "skip dork sweep", false, "check"]]],
-  ["dork", "ATS dork sweep", "Search-indexed board URLs only (site:greenhouse/lever/… + locality) — finds employers by their postings, no name guessing.", []],
-  ["score-missions", "Score missions", "Mission-tier any active company that has a board but no score yet.",
-   [["rescore", "re-score all", false, "check"]]],
-  ["prune", "Prune dead boards", "Deactivate companies whose ATS board 404s.",
-   [["offmission", "also off-mission", false, "check"]]],
-  ["dedup", "Dedup companies", "Merge duplicate company rows pointing at the same board.", []],
+    ["no_websearch", "skip web search", false, "check"], ["no_fit", "skip fit scoring", false, "check"]],
+   "routine", "The main one — run it daily. Uses the Claude API."],
+  ["sync", "Refresh open/closed", "Re-checks the same boards and marks vanished postings closed, without re-scoring anything.",
+   [["top", "top N", 15]],
+   "routine", "Cheap and free — run when you just want the list to be accurate."],
+  ["rescore", "Re-score every job", "Re-runs the fit score on every open, undecided job using the current résumé and rubric.",
+   [["described_only", "described only", true, "check"]],
+   "scoring", "After you edit your résumé, the fit weights, or your keywords. Costs one API call per job."],
+  ["verify", "Deep-verify the top N", "Re-reads the FULL posting for the highest-ranked jobs and re-scores them — catches disqualifiers buried at the bottom of long descriptions.",
+   [["top", "top N", 15]],
+   "scoring", "Before you start applying, so the top of your list is trustworthy."],
+  ["backfill-descriptions", "Fetch missing descriptions", "Finds stored jobs with no description text and pulls it from the company's board.",
+   [["limit", "limit", ""]],
+   "repair", "When jobs show 'no description; unscored'."],
+  ["backfill-workday", "Fetch missing Workday text", "Same, for Workday postings, which need a separate request.",
+   [["limit", "limit", ""]],
+   "repair", "If Workday employers show empty descriptions."],
+  ["check-closed", "Probe stale postings", "Opens the URL of anything no board has confirmed lately and closes what's provably gone.",
+   [["stale_days", "stale days", 2], ["limit", "limit", ""]],
+   "repair", "When you suspect dead links are still ranking."],
+  ["discover-local", "Find new companies", "Full sourcing pass — directories, web search, an LLM brainstorm, and a board-URL sweep — adding employers it can verify.",
+   [["no_dork", "skip dork sweep", false, "check"]],
+   "roster", "Occasionally, to widen the search. Slow (many minutes) and uses the API."],
+  ["dork", "Find boards by posting", "Searches for job-board URLs in your area instead of guessing company names.",
+   [],
+   "roster", "A faster, cheaper alternative to the full pass."],
+  ["score-missions", "Score company missions", "Asks the model how well each company matches the mission tiers you defined, which feeds ranking.",
+   [["rescore", "re-score all", false, "check"]],
+   "roster", "After adding companies, so they can be ranked."],
+  ["nlx", "Import from the NLx feed", "Pulls local postings for employers whose own site blocks crawlers (Meta, Google…) from the federal job feed.",
+   [["companies", "company names, comma-separated", "", "wide"]],
+   "roster", "For big employers you can't otherwise see. Needs a free CareerOneStop key."],
+  ["prune", "Deactivate dead boards", "Turns off companies whose board no longer loads, so the crawl stops wasting time on them.",
+   [["offmission", "also off-mission", false, "check"]],
+   "cleanup", "When crawls report many fetch errors."],
+  ["dedup", "Merge duplicate companies", "Combines company rows that point at the same board.",
+   [],
+   "cleanup", "If the same employer appears twice."],
 ];
 
 function opParam([k, lab, dv, type]) {
@@ -337,17 +400,24 @@ function opParam([k, lab, dv, type]) {
   return `<label class="loc">${lab} <input data-p="${k}" value="${dv}"></label>`;
 }
 
-function renderOps() {
-  const allowed = new Set(currentTrack()?.ops || OPS.map(o => o[0]));
-  $("#opcards").innerHTML = OPS.map(([name, label, desc, params]) => `
-    <div class="op ${allowed.has(name) ? "" : "dim"}"><h3>${label}</h3><p>${desc}</p>
+function opCard(name, label, desc, params, when, allowed) {
+  const off = !allowed.has(name);
+  return `<div class="op ${off ? "dim" : ""}"><h3>${label}</h3><p>${desc}</p>
+      ${when ? `<p class="fieldhelp"><b>When:</b> ${when}</p>` : ""}
       ${params.filter(p => p[3] === "wide").map(opParam).join("")}
       <div class="row">
         ${params.filter(p => p[3] !== "wide").map(opParam).join("")}
-        <button class="run" data-op="${name}" ${allowed.has(name) ? "" : "disabled title='not available on this track'"}>Run</button>
-      </div></div>`).join("") + `
-    <div class="op ${allowed.has("add-job") ? "" : "dim"}"><h3>Add manual job</h3>
-      <p>Curated add: registers the company, pulls its board's other local jobs.</p>
+        <button class="run" data-op="${name}" ${off ? "disabled title='not available on this track'" : ""}>Run</button>
+      </div></div>`;
+}
+
+function renderOps() {
+  const allowed = new Set(currentTrack()?.ops || OPS.map(o => o[0]));
+  // "Add by hand" cards are hand-written (multi-field forms), grouped last.
+  const manual = `
+    <div class="op ${allowed.has("add-job") ? "" : "dim"}"><h3>Add one job</h3>
+      <p>Adds a posting you found yourself, registers its company, and pulls that company's other in-scope jobs.</p>
+      <p class="fieldhelp"><b>When:</b> you spotted something the crawl missed.</p>
       <input class="wide" data-a="url" placeholder="posting URL">
       <input class="wide" data-a="title" placeholder="title">
       <input class="wide" data-a="company" placeholder="company">
@@ -355,12 +425,31 @@ function renderOps() {
         <input data-a="location" placeholder="location" style="width:150px">
         <button class="run" data-op="add-job" ${allowed.has("add-job") ? "" : "disabled"}>Add</button>
       </div></div>
-    <div class="op ${allowed.has("add-board") ? "" : "dim"}"><h3>Add company board</h3>
-      <p>Register a company by its careers/board URL: resolves the ATS, counts local jobs, mission-scores it.</p>
+    <div class="op ${allowed.has("add-board") ? "" : "dim"}"><h3>Add one company</h3>
+      <p>Give a careers-page URL: it works out which job board the company uses, counts local openings, and scores its mission.</p>
+      <p class="fieldhelp"><b>When:</b> you know an employer worth following.</p>
       <input class="wide" data-a="name" placeholder="company name">
       <input class="wide" data-a="url" placeholder="careers / board URL">
       <div class="row"><button class="run" data-op="add-board" ${allowed.has("add-board") ? "" : "disabled"}>Add</button></div>
     </div>`;
+
+  const groups = OP_GROUPS.map(([id, title, hint, open]) => {
+    const cards = OPS.filter(o => o[4] === id)
+      .map(([n, l, d, p, , when]) => opCard(n, l, d, p, when, allowed)).join("");
+    const body = id === "roster" ? cards + manual : cards;
+    if (!body) return "";
+    return `<details class="grp" ${open ? "open" : ""}>
+      <summary>${esc(title)} <span class="hint">${esc(hint)}</span></summary>
+      <div class="grpbody"><div class="ops">${body}</div></div></details>`;
+  }).join("");
+
+  $("#opcards").innerHTML = `
+    <div class="primer"><h3>Running things</h3>
+      <p>Everything here runs on the <b>${esc(currentTrack()?.label || "current")}</b> track
+         and streams its output to the log below. One at a time.</p>
+      <p>Greyed-out cards don't apply to this track — switch tracks in the header.
+         Anything that scores jobs uses the Claude API and costs money; the rest is free.</p>
+    </div>${groups}`;
   document.querySelectorAll("button[data-op]").forEach(b => b.onclick = async () => {
     const card = b.closest(".op");
     const params = {};
@@ -409,10 +498,35 @@ const getPath = (o, p) => p.split(".").reduce((x, k) => (x == null ? x : x[k]), 
 const chipVals = {};          // dotted path -> live array of strings
 let rawDirty = false;
 
+/* Plain-language help per config key, shown under its label. Keyed by the
+   LAST path segment so it covers the global and per-track copies alike. */
+const FIELD_HELP = {
+  core: "Strong terms. One hit anywhere in a posting makes it relevant on its own.",
+  domain: "Weak terms — an industry or subject. Only counts when a skill term also appears near the top.",
+  skill: "Weak terms — tools and methods. Only counts when a domain term also appears.",
+  phrases: "Drops a posting if the phrase appears anywhere in it.",
+  title_phrases: "Drops a posting only if the phrase is in the job TITLE.",
+  boilerplate_phrases: "Regex patterns blanked out before matching, so benefits/EEO wording can't trigger your keywords.",
+  role_phrases: "Job kinds you never want, matched anywhere in the posting.",
+  title_tokens: "Short abbreviations that only make sense in a title (e.g. CRA).",
+  defense_strong: "One hit is enough to drop the posting.",
+  defense_weak: "Innocent on their own — takes two different hits to drop a posting.",
+  nonclinical: "Off-topic industries to drop even when they use your keywords.",
+  onsite: "Places you'd commute to. Postings must name one of these.",
+  remote: "Words in a location field that mean remote.",
+  exclude: "Locations to always reject.",
+  word_tokens: "Short/ambiguous local terms, matched as whole words only (so “nc” can't hit “clinic”).",
+  substrings: "Distinctive place names, matched anywhere in the text.",
+  state_suffix: "State abbreviation(s) used to recognise a “City, ST” address.",
+};
+
 function chipField(path, label) {
   chipVals[path] = (getPath(state.config, path) || []).slice();
+  const help = FIELD_HELP[path.split(".").pop()];
   return `<div class="chipfield" data-path="${esc(path)}">
-    <div class="chiplab">${esc(label)}</div><div class="chips"></div>
+    <div class="chiplab">${esc(label)}</div>
+    ${help ? `<div class="fieldhelp">${esc(help)}</div>` : ""}
+    <div class="chips"></div>
     <input class="chipadd" placeholder="type + Enter to add"></div>`;
 }
 function renderChips(cf) {
@@ -443,6 +557,12 @@ const chkField = (path, label, val) =>
 const txtField = (path, label, val) =>
   `<input class="txt" data-txt="${esc(path)}" placeholder="${esc(label)}" value="${esc(val ?? "")}" title="${esc(label)}">`;
 
+/* A track id ("local_tech") shown the way the user named it ("Local clinical"). */
+function trackLabel(id) {
+  return (state.tracks.find(t => t.id === id) || {}).label
+      || (state.config?.tracks?.[id] || {}).label || id;
+}
+
 function settingsCard(title, desc, body) {
   return `<div class="setcard"><h3>${esc(title)}</h3>${desc ? `<p>${esc(desc)}</p>` : ""}
     ${body}<div class="row"><button class="run savecard">Save &amp; restart</button></div></div>`;
@@ -450,40 +570,43 @@ function settingsCard(title, desc, body) {
 
 function renderSettings() {
   const c = state.config || {};
-  const cards = [];
   const isTable = v => v && typeof v === "object" && !Array.isArray(v);
+  // group id -> cards
+  const g = {terms: [], filters: [], scoring: [], advanced: []};
 
   // Keywords: global tiers + one card per track sub-table — built from
   // whatever the profile actually contains, nothing hardcoded.
   const kw = c.keywords || {};
-  cards.push(settingsCard("Keywords", "Tier model: any CORE hit is relevant; DOMAIN needs a SKILL pair.",
+  g.terms.push(settingsCard("Keywords", "The words that decide whether a posting is relevant at all.",
     ["core", "domain", "skill"].map(k => chipField(`keywords.${k}`, k)).join("")));
   for (const [sub, tbl] of Object.entries(kw)) {
     if (!isTable(tbl)) continue;
-    cards.push(settingsCard(`Keywords — ${sub}`, `Track-specific additions ([keywords.${sub}]).`,
+    g.terms.push(settingsCard(`Keywords — ${trackLabel(sub)}`,
+      `Extra terms used only while the ${trackLabel(sub)} track runs.`,
       Object.keys(tbl).map(k => chipField(`keywords.${sub}.${k}`, k)).join("")));
   }
 
   // Excludes: global lists + track sub-tables.
   const exc = c.exclude || {};
   const excLists = Object.entries(exc).filter(([, v]) => Array.isArray(v));
-  cards.push(settingsCard("Excludes", "Phrases that drop a posting (title_phrases match the title only).",
+  g.filters.push(settingsCard("Excludes", "Wording that disqualifies a posting even if the keywords matched.",
     excLists.map(([k]) => chipField(`exclude.${k}`, k)).join("")));
   for (const [sub, tbl] of Object.entries(exc)) {
     if (!isTable(tbl)) continue;
-    cards.push(settingsCard(`Excludes — ${sub}`, `Track-specific exclusions ([exclude.${sub}]).`,
+    g.filters.push(settingsCard(`Excludes — ${trackLabel(sub)}`,
+      `Extra exclusions used only while the ${trackLabel(sub)} track runs.`,
       Object.keys(tbl).filter(k => Array.isArray(tbl[k]))
         .map(k => chipField(`exclude.${sub}.${k}`, k)).join("")));
   }
 
   // Locations + locality.
   const loc = c.locations || {};
-  cards.push(settingsCard("Locations", "Location-field filters for the shared fetch path.",
+  g.filters.push(settingsCard("Locations", "Which location strings a posting may carry.",
     ["onsite", "remote", "exclude"].map(k => chipField(`locations.${k}`, k)).join("") +
     `<div class="row">${chkField("locations.accept_remote", "accept remote listings", loc.accept_remote)}</div>`));
   const lcl = c.locality || {};
-  cards.push(settingsCard("Locality", "What counts as “local” — drives the geo bucket and the local track's gate.",
-    txtField("locality.name", "locality name", lcl.name) +
+  g.filters.push(settingsCard("Your area", "What counts as “local”. Decides which jobs are marked local, remote, or would-need-relocation.",
+    txtField("locality.name", "area name (label only)", lcl.name) +
     ["word_tokens", "substrings", "state_suffix"].map(k => chipField(`locality.${k}`, k)).join("")));
 
   // Fit scoring: weights + gate penalties, keys from the profile itself.
@@ -498,24 +621,32 @@ function renderSettings() {
     return `<div class="numgrid">${
       entries.map(([k, v]) => numField(`fit.${group}.${k}`, k, v)).join("")}</div>`;
   };
-  cards.push(settingsCard("Fit scoring", "Axis weights and gate penalties (0..1). Ladder/stack live in the raw editor.",
-    `<div class="chiplab">weights</div>${numGrid("weights")}
-     <div class="chiplab">gate penalties</div>${numGrid("gate_penalty")}`));
+  g.scoring.push(settingsCard("Fit scoring", "How much each part of the résumé judgement counts, 0–1.",
+    `<div class="chiplab">weights</div>
+     <div class="fieldhelp">Relative importance of each axis. They don't need to add up to 1.</div>
+     ${numGrid("weights")}
+     <div class="chiplab">gate penalties</div>
+     <div class="fieldhelp">What a dealbreaker does to the score — lower bites harder. 0.2 means “cut the score to a fifth”.</div>
+     ${numGrid("gate_penalty")}`));
 
   // Tracks: label + UI defaults per configured track.
   for (const [tid, t] of Object.entries(c.tracks || {})) {
     if (!isTable(t)) continue;
-    cards.push(settingsCard(`Track — ${tid}`, `Engine: ${t.engine || "local"} · db: ${t.db || "?"} (change via raw editor)`,
-      txtField(`tracks.${tid}.label`, "label", t.label) +
-      `<div class="numgrid">${numField(`tracks.${tid}.min_fit_default`, "min fit default", t.min_fit_default)}</div>
-       <div class="row">${chkField(`tracks.${tid}.willing_to_move_default`, "willing to move by default", t.willing_to_move_default)}
-       ${chkField(`tracks.${tid}.remote_requires_watch`, "remote rows need watch tag", t.remote_requires_watch)}</div>`));
+    g.scoring.push(settingsCard(`Track — ${t.label || tid}`,
+      `Runs the ${t.engine || "local"} crawl over ${t.db || "?"}. Rename it or change its starting filters here; sources and gates live in the raw editor.`,
+      txtField(`tracks.${tid}.label`, "name shown in the header", t.label) +
+      `<div class="numgrid">${numField(`tracks.${tid}.min_fit_default`, "opening min-fit filter", t.min_fit_default)}</div>
+       <div class="fieldhelp">Where the Jobs tab's filters start when you switch to this track.</div>
+       <div class="row">${chkField(`tracks.${tid}.willing_to_move_default`, "show relocation jobs by default", t.willing_to_move_default)}
+       ${chkField(`tracks.${tid}.remote_requires_watch`, "only show remote jobs at watched companies", t.remote_requires_watch)}</div>`));
   }
 
   // Raw TOML editor — the escape hatch for everything else.
-  cards.push(`<div class="setcard rawcard"><h3>Raw profile.toml</h3>
-    <p>Full profile (source: ${esc(state.configSource || "?")}) — candidate, mission,
-       discovery, fit ladder, per-track db/engine, and anything not covered above.</p>
+  g.advanced.push(`<div class="setcard rawcard"><h3>Raw profile.toml</h3>
+    <p>The whole file (currently: ${esc(state.configSource || "?")}). Everything the cards
+       above cover, plus the parts they don't: who you are, mission tiers, discovery
+       sources, the domain ladder, and each track's engine/sources/gates.</p>
+    <p class="fieldhelp">Validate before saving — a syntax error is refused, not written.</p>
     <textarea id="rawtoml" spellcheck="false">${esc(state.configRaw || "")}</textarea>
     <div class="valerrs" id="valerrs"></div>
     <div class="row">
@@ -523,8 +654,28 @@ function renderSettings() {
       <button class="run" id="rawsave">Save &amp; restart</button>
     </div></div>`);
 
+  const GROUPS = [
+    ["terms", "Search terms", "What you're looking for.", true],
+    ["filters", "Filters", "What to throw away, and where you'll work.", false],
+    ["scoring", "Scoring & tracks", "How jobs are judged and ranked.", false],
+    ["advanced", "Everything else (raw file)", "Direct access to the whole config file.", false],
+  ];
   const root = $("#setcards");
-  root.innerHTML = cards.join("");
+  root.innerHTML = `
+    <div class="primer"><h3>How a job gets in front of you</h3>
+      <p><b>1. Relevance</b> — a posting is kept if it hits one <code>core</code> term,
+         or one <code>domain</code> term <i>and</i> one <code>skill</code> term.
+         Keep <code>core</code> narrow; use the paired tiers for adjacent work.</p>
+      <p><b>2. Filters</b> — excludes, your area, and the job-title test drop the rest.</p>
+      <p><b>3. Scoring</b> — survivors are scored against your résumé, then ranked.</p>
+      <p>Saving any card writes <b>profile.toml</b>, keeps a backup, and restarts the
+         server so every part picks the change up.</p>
+    </div>` +
+    GROUPS.map(([id, title, hint, open]) => g[id].length ? `
+      <details class="grp" ${open ? "open" : ""}>
+        <summary>${esc(title)} <span class="hint">${esc(hint)}</span></summary>
+        <div class="grpbody"><div class="settings">${g[id].join("")}</div></div>
+      </details>` : "").join("");
   wireChipFields(root);
 
   root.querySelectorAll(".savecard").forEach(b => b.onclick = async () => {

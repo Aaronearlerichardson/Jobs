@@ -59,14 +59,16 @@ if "__compiled__" in globals():
     # found — the exe's own folder (copied-to-another-machine layout), else
     # the folder ABOVE the dist dir (dist still inside the checkout), else
     # the exe's folder (fresh install; profile.example.toml fallback).
+    _DB_NAMES = ("jobs.db", "local_tech.db")     # current, then pre-rename
     APP_HOME = next((d for d in (_exe_dir, _exe_dir.parent)
                      if (d / "profile.toml").exists()
-                     or (d / "data" / "local_tech.db").exists()), _exe_dir)
+                     or any((d / "data" / n).exists() for n in _DB_NAMES)),
+                    _exe_dir)
     if _env_home:
         DATA_DIR = Path(_env_home)
-    elif (APP_HOME / "data" / "local_tech.db").exists():
+    elif any((APP_HOME / "data" / n).exists() for n in _DB_NAMES):
         DATA_DIR = APP_HOME / "data"
-    elif (APP_HOME / "local_tech.db").exists():
+    elif any((APP_HOME / n).exists() for n in _DB_NAMES):
         DATA_DIR = APP_HOME          # legacy flat layout (pre-data/ builds)
     else:
         DATA_DIR = APP_HOME / "data"
@@ -78,17 +80,14 @@ else:
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Unified store: companies (cached mission scores, scope tags) + jobs
-# (dedup state, per-track fields, resume-fit scores). Shared by every
-# track — see store.py. Named local_tech.db for continuity with the
-# pre-merge local-track store; existing DBs migrate in place.
-STORE_DB_PATH = DATA_DIR / "local_tech.db"
+# The store: companies (cached mission scores, scope tags) + jobs (dedup
+# state, resume-fit scores, track membership). ONE file for every track —
+# jobs.track is a comma-separated SET, so a posting that belongs to two
+# tracks is one row visible to both (see store.track_set).
+STORE_DB_PATH = DATA_DIR / "jobs.db"
 
-# The neural sweep track's own store — kept separate from STORE_DB_PATH so
-# its location-agnostic sweep of neural/BCI companies never commingles with
-# the local track's jobs table again. Same schema; seeded from a one-time
-# copy of the companies table.
-NEURAL_DB_PATH = DATA_DIR / "neural.db"
+# A track can still get its own file via [tracks.*].db — the default is
+# that they all share jobs.db.
 
 # Resume used for per-job fit scoring (gitignored — personal). Extracted
 # lazily by resume.py.
@@ -247,14 +246,14 @@ DISCOVERY_PRIORITY_COMPANIES = [
 # built-in tracks are synthesized so existing installs work unchanged.
 _DEFAULT_TRACKS = {
     "local_tech": {
-        "label": "Local", "db": "local_tech.db", "track": "local-tech",
+        "label": "Local", "db": "jobs.db", "track": "local-tech",
         "engine": "local",
         "rank_by": "fit", "min_mission": 0.2, "min_fit_default": 0.0,
         "willing_to_move_default": False, "remote_requires_watch": True,
         "default": True,
     },
     "remote_neural": {
-        "label": "Remote neural", "db": "neural.db", "track": "remote-neural",
+        "label": "Remote neural", "db": "jobs.db", "track": "remote-neural",
         "engine": "neural",
         "rank_by": "fit", "min_mission": None, "min_fit_default": 0.5,
         "willing_to_move_default": True, "remote_requires_watch": False,
