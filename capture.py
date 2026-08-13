@@ -38,7 +38,7 @@ except Exception:
 
 from jobcrawler import store
 from jobcrawler.page_capture import parse_page
-from jobcrawler.tracks.local_tech import ingest_external_jobs
+from jobcrawler.ops import ingest_external_jobs
 
 PORT_DEFAULT = 8877
 
@@ -261,7 +261,7 @@ def main():
     args = ap.parse_args()
 
     if args.add:
-        from jobcrawler.tracks.local_tech import add_manual_job
+        from jobcrawler.ops import add_manual_job
         add_manual_job(url=args.url, title=args.title, company=args.company,
                        location=args.location, description=args.desc,
                        pull_board=not args.no_board)

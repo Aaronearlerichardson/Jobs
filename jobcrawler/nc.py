@@ -41,3 +41,20 @@ NC_HQ_RE = re.compile(
 def is_nc(text):
     """True if `text` names a configured-local location (profile [locality])."""
     return bool(NC_RE.search(text or ""))
+
+
+def geo_mode(location, description=""):
+    """Classify a posting's geography: "onsite" (configured locality),
+    "remote", or None (neither). Onsite wins when a posting is both local
+    and remote-friendly — a "Remote; Durham, NC" multi-location posting is
+    LOCAL material, not a remote drop. Both the location FIELD and the body
+    text are checked against the full locality regex (NC_RE — profile
+    [locality]) so "hybrid from our Durham office" still counts as onsite.
+    Remote detection delegates to jobcrawler.remote_filter (workforce-
+    context phrases, hard negations) instead of a bare token list."""
+    from .remote_filter import remote_signal
+    if NC_RE.search(f"{location or ''} {description or ''}"):
+        return "onsite"
+    if remote_signal(location, description):
+        return "remote"
+    return None

@@ -107,6 +107,10 @@ default = true
 # verify_top = 15              # deep-verify the top N after scoring (0 = skip)
 # cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl
+# exclude_gate = true          # apply the [exclude.<id>] role/defense tables
+# tech_title_regex = "..."     # the technical-title gate (case-insensitive
+#                              # regex a title must match before scoring spend);
+#                              # engine defaults cover the common cases
 
 [tracks.remote_neural]
 label = "Remote"

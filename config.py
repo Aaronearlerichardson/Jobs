@@ -274,6 +274,10 @@ _DEFAULT_TRACKS = {
 #   verify_top          deep-verify the top N after scoring (0 = skip)
 #   cost_guard          max postings scored per run without confirm (0 = off)
 #   email               email the digest after a crawl (CLI --send overrides)
+#   tech_title_regex    the technical-title gate (case-insensitive regex a
+#                       title must match before any API spend)
+#   exclude_gate        apply the [exclude.<id>] role/defense/nonclinical
+#                       tables to postings (False = skip entirely)
 _ENGINE_CRAWL_DEFAULTS = {
     "local": {
         "keyword_mode": "extend", "accept_remote": False,
@@ -282,6 +286,14 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": True},
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
         "verify_top": 15, "cost_guard": 0, "email": False,
+        "exclude_gate": True,
+        "tech_title_regex": (
+            r"engineer|scientist|develop|program(mer|ming)?|software|\bdata\b|"
+            r"analyst|analytics|machine learning|\bml\b|\bai\b|bioinformatic|"
+            r"biostatist|computational|informatics|quality|validation|"
+            r"verification|\bqa\b|\btest\b|devops|infrastructure|platform|"
+            r"database|statistician|scientific|automation|architect|"
+            r"research associate|\br&d\b|modeling|python"),
     },
     "neural": {
         "keyword_mode": "replace", "accept_remote": True,
@@ -290,6 +302,17 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": False},
         "store_tag": "neural", "require_core_anchor": True, "geo_gate": False,
         "verify_top": 0, "cost_guard": 300, "email": False,
+        "exclude_gate": False,
+        "tech_title_regex": (
+            r"\b("
+            r"engineer|engineering|developer|scientist|neuroscientist|"
+            r"researcher|research|ml|machine learning|deep learning|ai|"
+            r"algorithm|algorithms|software|firmware|hardware|data|analytics|"
+            r"analyst|computational|quantitative|programmer|architect|"
+            r"signal processing|decoding|robotics|systems|sciences|"
+            r"technologist|informatics|bioinformatics|neurotech|devops|sre|"
+            r"reliability|platform|modeling|simulation"
+            r")\b"),
     },
 }
 
@@ -336,6 +359,10 @@ def _build_ui_tracks(raw):
             "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
             "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
             "email": bool(t.get("email", eng_defaults["email"])),
+            "exclude_gate": bool(t.get("exclude_gate",
+                                       eng_defaults["exclude_gate"])),
+            "tech_title_regex": str(t.get("tech_title_regex")
+                                    or eng_defaults["tech_title_regex"]),
         }
     return tracks
 

@@ -32,11 +32,11 @@ from datetime import datetime
 
 import config
 
-from .. import store
-from ..parallel import fetch_all
-from ..remote_filter import remote_signal_for, us_eligible
-from ..resume import resume_text
-from ..sources import ATS_REGISTRY, iter_store_sources
+from . import store
+from .parallel import fetch_all
+from .remote_filter import remote_signal_for, us_eligible
+from .resume import resume_text
+from .sources import ATS_REGISTRY, iter_store_sources
 
 # Rough per-posting cost for the cost_guard message: ~700 input tokens
 # (cached system prompt) + ~120 output at a blended per-token rate.
@@ -111,8 +111,8 @@ def build_sources(cfg, t, include_websearch=None):
     lightweight ATS sweep, aggregators, web search — persisted via
     mark_seen). Priority companies come first so cross-source duplicates
     resolve deterministically."""
-    from . import local_tech as lt
-    from ..fetchers import company as company_fetch
+    from . import ops
+    from .fetchers import company as company_fetch
 
     src = t["sources"]
     use_ws = src["websearch"] if include_websearch is None else include_websearch
@@ -152,7 +152,7 @@ def build_sources(cfg, t, include_websearch=None):
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if lt._whole_board(cc)
+                        cc, None if ops._whole_board(cc)
                         else company_fetch.NC_RE)),
                     company=c, key=("store", (c["name"] or "").lower()))
         else:
@@ -163,7 +163,7 @@ def build_sources(cfg, t, include_websearch=None):
 
     # 3) Forums + aggregator feeds (remote-native boards).
     if src["aggregators"]:
-        from ..fetchers import (fetch_discourse, fetch_hnhiring,
+        from .fetchers import (fetch_discourse, fetch_hnhiring,
                                 fetch_remoteok, fetch_remotive, fetch_rss)
         for name, base, cat in cfg.DISCOURSE_BOARDS:
             add(name, "discourse",
@@ -184,7 +184,7 @@ def build_sources(cfg, t, include_websearch=None):
 
     # 4) Web searches (DDG -> JSON-LD).
     if use_ws:
-        from ..fetchers import fetch_websearch
+        from .fetchers import fetch_websearch
         for label, query, n in getattr(cfg, "REMOTE_NEURAL_WEBSEARCH_QUERIES", []):
             add(label, "websearch",
                 lambda l=label, q=query, m=n: fetch_websearch(l, q, max_results=m))
@@ -246,12 +246,10 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     skips resume scoring; `commit=False` is the legacy neural preview (no
     DB writes). Returns the ranked list (company-linked crawls) or the
     surfaced match list."""
-    from . import local_tech as lt
-    from . import remote_neural as rn
+    from . import digest_md, gates, ops
+    from .nc import NC_RE, geo_mode
 
     engine = t["engine"]
-    tech_ok = (lt.is_technical_role if engine == "local"
-               else rn.is_technical_role)
     send = t["email"] if send is None else send
     verify_n = (t["verify_top"] if verify is None
                 else (top_n if verify else 0))
@@ -321,14 +319,14 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 if t["require_core_anchor"] and not core_anchor(
                         j.get("title", ""), j.get("description", "")):
                     continue
-                if not lt._keep_job(c, j, geo_gate=t["geo_gate"]):
+                if not ops._keep_job(c, j, t):
                     continue
                 kept.append(j)
             fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
             n_seen += len(kept) - len(fresh)
             for j in fresh:
                 to_score.append((c, j))
-            if lt._is_watched(c):
+            if ops._is_watched(c):
                 # Watch section: EVERY new technical, non-excluded posting
                 # at a watched company, any geography — out-of-scope ones
                 # stored unscored so they aren't re-flagged next run.
@@ -336,10 +334,10 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 for j in jobs:
                     if (store.job_exists(conn, j["id"])
                             and j["id"] not in fresh_ids) \
-                            or not lt.is_technical_role(j.get("title", "")) \
-                            or lt.exclude_reason(j.get("title", ""),
-                                                 j.get("description", ""),
-                                                 allow_defense=True):
+                            or not gates.is_technical_role(j.get("title", ""), t) \
+                            or (t["exclude_gate"] and gates.exclude_reason(
+                                j.get("title", ""), j.get("description", ""),
+                                allow_defense=True, track_id=t["id"])):
                         continue
                     in_pipeline = j["id"] in fresh_ids
                     watch_hits.append((c, j, in_pipeline))
@@ -349,8 +347,8 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                             "company_name": c["name"], "title": j.get("title"),
                             "url": j.get("url"), "location": j.get("location"),
                             "track": t["track"],
-                            "geo_mode": lt.geo_mode(j.get("location", ""),
-                                                    j.get("description", "")),
+                            "geo_mode": geo_mode(j.get("location", ""),
+                                                 j.get("description", "")),
                             "posted_at": j.get("posted_at"),
                             "description": (j.get("description") or "")
                                            [:config.MAX_DESC_CHARS]})
@@ -369,13 +367,13 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                     if not nsig:
                         continue
                 neural_here += 1
-                if not tech_ok(title):
+                if not gates.is_technical_role(title, t):
                     continue
                 tech_here += 1
-                if engine == "local" and lt.exclude_reason(
-                        title, job.get("description", "")):
+                if t["exclude_gate"] and gates.exclude_reason(
+                        title, job.get("description", ""), track_id=t["id"]):
                     continue
-                if t["geo_gate"] and lt.geo_mode(
+                if t["geo_gate"] and geo_mode(
                         job.get("location", ""),
                         job.get("description", "")) is None:
                     continue
@@ -411,8 +409,8 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
         print(f"\n  scoring {len(to_score)} new job(s) against resume "
               f"({n_seen} already scored)...")
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {ex.submit(lt._score_job, resume, c, j,
-                              track=t["track"]): j for c, j in to_score}
+            futs = {ex.submit(ops._score_job, resume, c, j,
+                              t["track"]): j for c, j in to_score}
             for fut in as_completed(futs):
                 try:
                     row = fut.result()
@@ -435,14 +433,14 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 "company_name": c["name"], "title": j.get("title"),
                 "url": j.get("url"), "location": j.get("location"),
                 "track": t["track"],
-                "geo_mode": lt.geo_mode(j.get("location", ""),
-                                        j.get("description", "")) or "onsite",
+                "geo_mode": geo_mode(j.get("location", ""),
+                                     j.get("description", "")) or "onsite",
                 "posted_at": j.get("posted_at"),
                 "description": (j.get("description") or "")
                                [:config.MAX_DESC_CHARS]})
 
     if fit and matches and resume and not guard_tripped:
-        from ..claude import score_resume_fit
+        from .claude import score_resume_fit
         print(f"  scoring {len(matches)} match(es) against resume...")
 
         def _one(j):
@@ -463,12 +461,11 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     # ─── Self-heal + deep-verify (company-linked crawls) ──────────────────
     if resume and commit and t["sources"]["store"] \
             and t["sources"]["location_scoped"] and not guard_tripped:
-        scored += lt.self_heal_unscored(conn, resume, track=t["track"],
-                                        max_workers=max_workers)
+        scored += ops.self_heal_unscored(conn, resume, track=t["track"],
+                                         max_workers=max_workers)
     if verify_n and resume and commit and not guard_tripped:
-        lt.verify_top(top_n=verify_n, max_workers=max(2, max_workers // 2),
-                      conn=conn, track=t["track"],
-                      min_mission=t["min_mission"])
+        ops.verify_top(top_n=verify_n, max_workers=max(2, max_workers // 2),
+                       conn=conn, t=t)
 
     # ─── Funnel summary ───────────────────────────────────────────────────
     print(f"\n{bar}")
@@ -483,11 +480,11 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     if t["sources"]["store"] and t["sources"]["location_scoped"]:
         ranked = store.ranked_jobs(
             conn, track=t["track"],
-            location_re=(lt.company_fetch.NC_RE if t["geo_gate"] else None),
+            location_re=(NC_RE if t["geo_gate"] else None),
             rank_by=t["rank_by"], allow_geo_modes={"remote"},
             min_mission=t["min_mission"])
-        lt.write_digest(ranked, watch_hits=watch_hits,
-                        pipeline=store.get_pipeline(conn))
+        digest_md.write_ranked_digest(ranked, t, watch_hits=watch_hits,
+                                      pipeline=store.get_pipeline(conn))
         if watch_hits:
             print(f"\n  {bar}\n  WATCHED COMPANIES - NEW POSTINGS THIS RUN\n  {bar}")
             for c, j, in_pipeline in watch_hits:
@@ -501,7 +498,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             fs = (f"{j['resume_fit_score']:.2f}"
                   if isinstance(j.get("resume_fit_score"), float) else "n/a")
             print(f"  fit={fs} [{j.get('geo_mode', '?')}] "
-                  f"[{lt._age_tag(j)}] {(j['title'] or '')[:48]}")
+                  f"[{digest_md.age_tag(j)}] {(j['title'] or '')[:48]}")
             print(f"        {j['company_name']} "
                   f"({j.get('mission_tier') or '?'})  -  "
                   f"{j.get('fit_reason', '')}")
@@ -530,10 +527,11 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             print(f"     url     : {j['url']}")
             if j.get("description"):
                 print(f"     blurb   : {_short(j['description'], 160)}")
-        digest_path = rn.write_digest(matches, config.REPORT_DIR)
+        digest_path = digest_md.write_matches_digest(matches,
+                                                     config.REPORT_DIR, t)
         print(f"\n  Digest -> {digest_path}")
         if send:
-            rn.send_digest(matches, config)
+            digest_md.send_matches_digest(matches, t, config)
         elif matches:
             print("  (email suppressed — enable [tracks.*].email or --send)")
 

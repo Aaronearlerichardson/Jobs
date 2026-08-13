@@ -189,7 +189,7 @@ def main():
 
     if args.nlx:
         from jobcrawler.fetchers.careeronestop import fetch_nlx_company
-        from jobcrawler.tracks.local_tech import ingest_external_jobs
+        from jobcrawler.ops import ingest_external_jobs
         total = 0
         for name in [n.strip() for n in args.nlx.split(",") if n.strip()]:
             jobs = fetch_nlx_company(name)
@@ -203,8 +203,23 @@ def main():
         args.track = "local-tech"
 
     if args.track == "remote-neural":
-        from jobcrawler.tracks.remote_neural_run import main as run_track
-        run_track(passthrough)
+        # Legacy CLI for the default neural-engine track: same flags as the
+        # old remote_neural_run module, delegating to the unified runner.
+        tp = argparse.ArgumentParser()
+        tp.add_argument("--commit", action="store_true")
+        tp.add_argument("--send", action="store_true")
+        tp.add_argument("--fit", action="store_true")
+        tp.add_argument("--no-websearch", action="store_true")
+        tp.add_argument("--samples", type=int, default=5)
+        tp.add_argument("--confirm-cost", action="store_true")
+        targs = tp.parse_args(passthrough)
+        from jobcrawler import runner
+        runner.run_track(runner.track_for_engine("neural"),
+                         fit=targs.fit, commit=targs.commit,
+                         send=targs.send or None,
+                         websearch=not targs.no_websearch,
+                         confirm_cost=targs.confirm_cost,
+                         samples=targs.samples)
         raise SystemExit(0)
 
     if args.track == "local-tech":
@@ -253,20 +268,20 @@ def main():
                              "rewrite the digest, then stop — no crawl")
         targs = tp.parse_args(passthrough)
         if targs.verify_top is not None:
-            from jobcrawler.tracks.local_tech import verify_top_cli
+            from jobcrawler.ops import verify_top_cli
             verify_top_cli(top_n=targs.verify_top, max_workers=targs.workers)
         elif targs.sync_status:
-            from jobcrawler.tracks.local_tech import sync_status_all
+            from jobcrawler.ops import sync_status_all
             sync_status_all(top_n=targs.top)
         elif targs.check_closed:
-            from jobcrawler.tracks.local_tech import check_closed_jobs
+            from jobcrawler.ops import check_closed_jobs
             check_closed_jobs(max_workers=targs.workers, limit=targs.limit,
                               stale_days=targs.stale_days)
         elif targs.backfill_descriptions:
             from jobcrawler.fetchers.workday import backfill_workday_descriptions
             backfill_workday_descriptions(max_workers=targs.workers, limit=targs.limit)
         elif targs.backfill_board_descriptions:
-            from jobcrawler.tracks.local_tech import backfill_board_descriptions
+            from jobcrawler.ops import backfill_board_descriptions
             backfill_board_descriptions(max_workers=targs.workers, limit=targs.limit)
         elif targs.backfill_axes:
             from jobcrawler import store
@@ -274,12 +289,14 @@ def main():
             store.backfill_axis_columns(conn)
             conn.close()
         elif targs.rescore:
-            from jobcrawler.tracks.local_tech import rescore_all
+            from jobcrawler.ops import rescore_all
             rescore_all(max_workers=targs.workers, described_only=targs.described_only)
         else:
-            from jobcrawler.tracks.local_tech import run as run_track
-            run_track(max_workers=targs.workers, top_n=targs.top,
-                      verify=not targs.no_verify)
+            from jobcrawler import runner
+            runner.run_track(runner.track_for_engine("local"),
+                             fit=True, commit=True,
+                             verify=not targs.no_verify,
+                             max_workers=targs.workers, top_n=targs.top)
         raise SystemExit(0)
 
     if passthrough:

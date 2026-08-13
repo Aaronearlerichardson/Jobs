@@ -22,9 +22,10 @@ def main():
     import jobcrawler.nc as nc
     import jobcrawler.resume as resume
     import jobcrawler.fetchers.company as cf
-    import jobcrawler.tracks.local_tech as lt
-    import jobcrawler.tracks.remote_neural as rn
-    import jobcrawler.tracks.remote_neural_run as rnr
+    import jobcrawler.digest_md as digest_md
+    import jobcrawler.gates as gates
+    import jobcrawler.ops as ops
+    import jobcrawler.runner as runner
     import jobcrawler.discovery.sniffer as sniffer
     import jobcrawler.discovery.local_sourcing as ls
     import jobcrawler.discovery.ats_dork as dork
@@ -36,32 +37,40 @@ def main():
     check("Durham, NC is NC", nc.is_nc("Durham, NC"))
     check("Boston, MA is not NC", not nc.is_nc("Boston, MA"))
     check("'clinic' does not hit 'nc'", not nc.is_nc("outpatient clinic"))
-    check("geo_mode onsite", lt.geo_mode("Durham, NC") == "onsite")
-    check("geo_mode remote", lt.geo_mode("Remote - US") == "remote")
-    check("geo_mode none", lt.geo_mode("Boston, MA") is None)
+    check("geo_mode onsite", nc.geo_mode("Durham, NC") == "onsite")
+    check("geo_mode remote", nc.geo_mode("Remote - US") == "remote")
+    check("geo_mode none", nc.geo_mode("Boston, MA") is None)
     check("'distributed training' is not remote",
-          lt.geo_mode("", "we do distributed training at scale") is None)
+          nc.geo_mode("", "we do distributed training at scale") is None)
 
-    # 3. exclude gate (the substring-bug fixes)
+    # 3. exclude gate (config-driven per track id; the substring-bug fixes)
     print("[exclude gate]")
-    check("CRA excluded", bool(lt.exclude_reason("Clinical Research Associate (CRA)")))
-    check("scribe not in 'describe'", not lt.exclude_reason("Engineer", "you will describe systems"))
-    check("defi not in 'defibrillator'", not lt.exclude_reason("Engineer", "implantable defibrillator"))
-    check("DoD radar excluded", bool(lt.exclude_reason("RF Engineer", "military radar for DoD")))
+    local_t = runner.track_for_engine("local")
+    neural_t = runner.track_for_engine("neural")
+    _exc = lambda *a, **k: gates.exclude_reason(*a, track_id=local_t["id"], **k)
+    check("CRA excluded", bool(_exc("Clinical Research Associate (CRA)")))
+    check("scribe not in 'describe'", not _exc("Engineer", "you will describe systems"))
+    check("defi not in 'defibrillator'", not _exc("Engineer", "implantable defibrillator"))
+    check("DoD radar excluded", bool(_exc("RF Engineer", "military radar for DoD")))
+    check("neural track has no exclude vocabulary (empty table = no-op)",
+          not gates.exclude_reason("Combat Systems Radar Engineer",
+                                   "missile defense", track_id=neural_t["id"]))
 
-    # 4. technical pre-filter
+    # 4. technical pre-filter (per-track regex from [tracks.*].tech_title_regex)
     print("[technical filter]")
-    check("engineer is technical", lt.is_technical_role("Quality Engineer"))
-    check("data manager is technical", lt.is_technical_role("Clinical Data Manager"))
-    check("nurse not technical", not lt.is_technical_role("Registered Nurse"))
+    check("engineer is technical", gates.is_technical_role("Quality Engineer", local_t))
+    check("data manager is technical", gates.is_technical_role("Clinical Data Manager", local_t))
+    check("nurse not technical", not gates.is_technical_role("Registered Nurse", local_t))
+    check("per-track title regexes differ",
+          local_t["tech_title_regex"] != neural_t["tech_title_regex"])
+    check("quality is local-technical but not neural-technical",
+          gates.is_technical_role("Quality Engineer II", local_t)
+          and not gates.is_technical_role("Quality Specialist", neural_t))
 
-    # 5. remote-neural gates
-    print("[remote-neural gates]")
-    check("EEG anchors", rn.is_neural_role("EEG Data Engineer"))
-    check("'recognized' doesn't anchor ecog", not rn.is_neural_role("Fraud Analyst",
-                                                                    "a recognized leader"))
-    check("subcortical anchors cortical", rn.is_neural_role("Scientist", "subcortical recordings"))
-    check("controller not technical title", not rn.is_technical_role("Corporate Controller"))
+    # 5. neural-engine gates (core anchor + technical title)
+    print("[neural gates]")
+    check("controller not technical title",
+          not gates.is_technical_role("Corporate Controller", neural_t))
     from jobcrawler.remote_filter import is_remote_eligible, us_eligible
     check("remote location eligible", is_remote_eligible("Remote, US"))
     check("hard negation vetoes", not is_remote_eligible("Remote", "this role is not remote"))
@@ -250,7 +259,7 @@ def main():
     check("watch tag set", store.set_company_tag(conn, "w", "watch") == "watch")
     row = store.get_companies(conn, active_only=False)[0]
     check("watched company gets whole board",
-          lt._is_watched(row) and lt._whole_board(row))
+          ops._is_watched(row) and ops._whole_board(row))
     check("watch tag removed", store.set_company_tag(conn, "W", "watch", add=False) == "")
     check("unknown company -> None", store.set_company_tag(conn, "Nope", "watch") is None)
     conn.close()
@@ -326,14 +335,14 @@ def main():
     check("status sync backfills posted_at", got == "2026-07-15")
     conn.close()
     check("age NEW on first-seen-today",
-          lt._age_tag({"first_seen": datetime.now().isoformat()}) == "NEW")
-    check("age in days", lt._age_tag(
+          digest_md.age_tag({"first_seen": datetime.now().isoformat()}) == "NEW")
+    check("age in days", digest_md.age_tag(
         {"first_seen": "2026-01-01T00:00:00",
          "posted_at": (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")}) == "6d")
-    check("age stale flag", lt._age_tag(
+    check("age stale flag", digest_md.age_tag(
         {"first_seen": "2026-01-01T00:00:00",
          "posted_at": (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d")}) == "60d!")
-    check("age unknown", lt._age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?")
+    check("age unknown", digest_md.age_tag({"first_seen": "2026-01-01T00:00:00"}) == "?")
 
     # 9f. discovery expansion: brainstorm knob + dork wiring (offline)
     print("[discovery expansion]")
@@ -386,7 +395,6 @@ def main():
 
     # 11b. unified crawl runner (one pipeline, methodology from [tracks.*])
     print("[unified runner]")
-    from jobcrawler.tracks import runner
     lt_t = runner.track_for_engine("local")
     rn_t = runner.track_for_engine("neural")
     check("track_for_engine resolves both engines",
@@ -424,9 +432,12 @@ def main():
     check("websearch toggle removes its sources",
           len(runner.build_sources(config, rn_t, include_websearch=False))
           < len(specs_n))
-    check("legacy entry points delegate to runner",
-          "runner" in __import__("inspect").getsource(lt.run)
-          and "runner" in __import__("inspect").getsource(rnr.main))
+    check("gates read config, not hardcoded track keys",
+          gates._exclude_tables(local_t["id"])["role_phrases"]
+          and not gates._exclude_tables("no_such_track")["role_phrases"])
+    check("every webapp op is engine-agnostic or names a real engine",
+          all(o.get("engine") in (None, "local", "neural")
+              for o in webapp.OPS.values()))
 
     # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
     print("[profile edit]")

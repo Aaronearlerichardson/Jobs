@@ -25,7 +25,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 
 import config
 from jobcrawler import nc, profile_edit, remote_filter, store
-from jobcrawler.tracks import local_tech
+from jobcrawler import digest_md, ops
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -105,7 +105,7 @@ class _Tee(io.TextIOBase):
 
 
 # Pristine keyword lists, captured before any track's apply_to_config()
-# mutates them. Both tracks now run in THIS process: local_tech extends the
+# mutates them. Every track runs in THIS process: extend-mode tracks grow the
 # shared lists, remote_neural REPLACES them — without a reset between ops,
 # running one track's crawl would poison the next one's keyword filter.
 _BASELINE_KW = (list(config.CORE_KEYWORDS), list(config.DOMAIN_KEYWORDS),
@@ -156,8 +156,13 @@ def _int(p, key, default=None):
     return int(v) if v else default
 
 
+def _op_track(p):
+    """The track cfg an op should run against (api_run injects p["track"])."""
+    return config.UI_TRACKS.get(p.get("track") or config.DEFAULT_TRACK)
+
+
 # Each op declares which crawl ENGINE it needs ("local" = the location-scoped
-# crawler in tracks/local_tech.py, "neural" = the location-agnostic runner,
+# crawler, "neural" = the location-agnostic sweep — jobcrawler/runner.py),
 # None = engine-agnostic store maintenance that runs against whichever
 # track's DB is active). Ops are matched to the active track by its
 # profile-configured `engine` — never by the user-chosen track id.
@@ -169,32 +174,35 @@ OPS = {
     },
     "sync": {
         "label": "Sync statuses",
-        "engine": "local",
-        "fn": lambda p: local_tech.sync_status_all(top_n=_int(p, "top", 15)),
+        "engine": None,
+        "fn": lambda p: ops.sync_status_all(top_n=_int(p, "top", 15),
+                                            t=_op_track(p)),
     },
     "verify": {
         "label": "Deep-verify top N",
-        "engine": "local",
-        "fn": lambda p: local_tech.verify_top_cli(top_n=_int(p, "top", 15),
-                                                  max_workers=4),
+        "engine": None,
+        "fn": lambda p: ops.verify_top_cli(top_n=_int(p, "top", 15),
+                                           max_workers=4, t=_op_track(p)),
     },
     "check-closed": {
         "label": "Probe stale URLs",
-        "engine": "local",
-        "fn": lambda p: local_tech.check_closed_jobs(
-            stale_days=_int(p, "stale_days", 2), limit=_int(p, "limit")),
+        "engine": None,
+        "fn": lambda p: ops.check_closed_jobs(
+            stale_days=_int(p, "stale_days", 2), limit=_int(p, "limit"),
+            t=_op_track(p)),
     },
     "rescore": {
         "label": "Rescore all",
-        "engine": "local",
-        "fn": lambda p: local_tech.rescore_all(
-            described_only=bool(p.get("described_only", True))),
+        "engine": None,
+        "fn": lambda p: ops.rescore_all(
+            described_only=bool(p.get("described_only", True)),
+            t=_op_track(p)),
     },
     "backfill-descriptions": {
         "label": "Backfill descriptions",
-        "engine": "local",
-        "fn": lambda p: local_tech.backfill_board_descriptions(
-            limit=_int(p, "limit")),
+        "engine": None,
+        "fn": lambda p: ops.backfill_board_descriptions(
+            limit=_int(p, "limit"), t=_op_track(p)),
     },
     "backfill-workday": {
         "label": "Backfill Workday JDs",
@@ -252,10 +260,11 @@ OPS = {
     },
     "add-job": {
         "label": "Add manual job",
-        "engine": "local",
-        "fn": lambda p: local_tech.add_manual_job(
+        "engine": None,
+        "fn": lambda p: ops.add_manual_job(
             url=p.get("url", ""), title=p.get("title", ""),
-            company=p.get("company", ""), location=p.get("location", "")),
+            company=p.get("company", ""), location=p.get("location", ""),
+            t=_op_track(p)),
     },
 }
 
@@ -292,7 +301,7 @@ def _op_nlx(p):
         jobs = fetch_nlx_company(name)
         print(f"  {name}: {len(jobs)} NLx posting(s) in NC")
         if jobs:
-            total += local_tech.ingest_external_jobs(jobs, source="nlx")
+            total += ops.ingest_external_jobs(jobs, source="nlx")
     print(f"  {total} new job(s) ingested from the NLx feed.")
 
 
@@ -368,7 +377,7 @@ def _geo_tag(r):
 def _job_json(r, today, rank=None):
     d = {k: r.get(k) for k in _JOB_FIELDS}
     d["rank"] = rank
-    d["age"] = local_tech._age_tag(r, today)
+    d["age"] = digest_md.age_tag(r, today)
     d["verified"] = "deep:" in (r.get("fit_reason") or "")
     d["geo_bucket"] = _geo_tag(r)
     d["relocation_required"] = d["geo_bucket"] == "relocation"
@@ -419,7 +428,7 @@ def api_job(job_id):
     if not row:
         return jsonify(error="not found"), 404
     d = dict(row)
-    d["age"] = local_tech._age_tag(d, _today())
+    d["age"] = digest_md.age_tag(d, _today())
     return jsonify(d)
 
 
