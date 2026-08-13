@@ -1,5 +1,10 @@
 # Jobs Crawler
 
+[![CI](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml/badge.svg)](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/Aaronearlerichardson/Jobs/branch/main/graph/badge.svg)](https://codecov.io/gh/Aaronearlerichardson/Jobs)
+[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml)
+[![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml)
+
 A configurable job-search crawler. **Your entire search — what you want, where,
 and who you are — lives in one `profile.toml`; the code stays generic.** It
 ships with an example profile for a genuinely hard case: *there aren't many BCI
@@ -244,6 +249,7 @@ python run_scraper.py --db alt.db ...                # isolated store (concurren
 pip install -r requirements-dev.txt
 pytest                                   # the whole suite (offline, ~8s)
 pytest tests/test_store.py -k closed     # one area
+pytest --cov --cov-report=term-missing   # with coverage (see .coveragerc)
 ```
 
 The suite (`tests/`) is **offline by contract** — no network, no Claude API,
@@ -255,10 +261,12 @@ redirect `PROFILE_PATH`/`DATA_DIR` to a `tmp_path`.
 `.github/workflows/ci.yml` runs on **every pull request** (whatever branch it
 targets) and on **pushes to `main`**:
 
-- **test** (Ubuntu) — asserts the run really is example-profile + API-free,
-  then byte-compiles, lints (pyflakes), validates the example profile, runs
-  pytest, checks every CLI `--help`, and boots the web app to exercise the
-  API and the asset cache-busting.
+- **test** (Ubuntu × Python 3.12, 3.13, 3.14 — each reports independently) —
+  asserts the run really is example-profile + API-free, then byte-compiles,
+  lints (pyflakes), validates the example profile, runs pytest with
+  coverage, checks every CLI `--help`, and boots the web app to exercise the
+  API and the asset cache-busting. Coverage lands in the job summary; the
+  3.13 leg uploads it for the badge.
 - **build** (Ubuntu + Windows + macOS) — `python build_app.py`, then
   *launches the built binary* and requires its API to answer; a build that
   compiles but can't boot is not a pass. Artifacts upload per OS. Runs only
