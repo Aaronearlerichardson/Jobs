@@ -72,12 +72,6 @@ else:
 # the pre-merge local-track store; existing DBs migrate in place.
 STORE_DB_PATH = SCRIPT_DIR / "local_tech.db"
 
-# Back-compat aliases. DB_PATH used to be a standalone per-track seen-jobs
-# DB (seen_jobs_remote.db); jobcrawler/db.py now adapts old callers onto
-# the unified store.
-DB_PATH            = STORE_DB_PATH
-LOCAL_TECH_DB_PATH = STORE_DB_PATH
-
 # The REMOTE-NEURAL track's own store — kept separate from STORE_DB_PATH so
 # its (now location-agnostic; see jobcrawler/tracks/remote_neural_run.py)
 # sweep of neural/BCI companies never commingles with local-tech's jobs
@@ -395,9 +389,6 @@ DISCOURSE_BOARDS = [
     ("Neurostars Announcements", "https://neurostars.org",      6),
 ]
 
-# (company_name, page_url, css_selector_or_None)
-CUSTOM_COMPANIES: list[tuple[str, str, str | None]] = []
-
 # Conglomerates (from profile.toml [policy]) whose OVERALL mission scores
 # "other" but which run aligned subdivisions worth surfacing. Kept ACTIVE,
 # crawled through the keyword filter (only aligned roles survive), and ranked
@@ -410,88 +401,11 @@ MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.
 def is_multi_division(name):
     """True if `name` is a known multi-division conglomerate (profile policy)."""
     return (name or "").strip().lower() in MULTI_DIVISION_COMPANIES
-# =========================================================================
-#  NEW GENERIC SOURCES (JSON-LD + sitemap + web search)
-# =========================================================================
-#
-# These cover the bulk of Google-for-Jobs-visible listings without any
-# per-vendor scraper. Modern career pages embed schema.org JobPosting
-# records in <script type="application/ld+json">; we parse that directly.
 
-# (company_name, careers_page_url)
-# Fetcher will look for JSON-LD on the index page first, then follow
-# job-like links and parse JSON-LD from each.
-JSONLD_COMPANIES: list[tuple[str, str]] = [
-    # ("Example Co", "https://example.com/careers"),
-]
 
-# (company_name, sitemap_url, url_filter_regex_or_None)
-# url_filter_regex is applied to the URL path.  None = default job-URL hints.
-SITEMAP_COMPANIES: list[tuple[str, str, str | None]] = [
-    # ("Example Co", "https://example.com/sitemap.xml", r"/jobs?/"),
-]
-
-# (label, query_string, max_results)
-# DuckDuckGo text search; each result URL is then parsed for JSON-LD.
-# Use site: / inurl: operators to narrow.  Free, no API key, rate-limited
-# by DDG (a few queries per minute is comfortable).
-#
-# NOTE: the Greenhouse site: query was dropped - DDG's index for
-# boards.greenhouse.io is extremely stale (every hit we tried 404'd).
-# Lever's is also stale but less so; we keep it as a long-tail sweep.
-# The aggregator queries below (weworkremotely, himalayas, remote.co)
-# cover non-company-owned boards where the job URLs stay live.
-WEBSEARCH_QUERIES: list[tuple] = [
-    (
-        "Neural engineers on Lever",
-        '("neural" OR "BCI" OR "EEG") ("engineer" OR "scientist") '
-        'site:jobs.lever.co',
-        15,
-    ),
-    (
-        "Neural engineers on Ashby",
-        '("neural" OR "BCI" OR "EEG") ("engineer" OR "scientist") '
-        'site:jobs.ashbyhq.com',
-        15,
-    ),
-    (
-        "Neural jobs on WeWorkRemotely",
-        '("neural" OR "BCI" OR "EEG" OR "neuroscience" OR "biomedical") '
-        'site:weworkremotely.com',
-        15,
-        True,                                       # remote-only board
-    ),
-    (
-        "Neural jobs on Himalayas",
-        '("neural" OR "BCI" OR "EEG" OR "neuroscience" OR "biomedical") '
-        'site:himalayas.app',
-        15,
-        True,                                       # remote-only board
-    ),
-    (
-        "Neural jobs on Remote.co",
-        '("neural" OR "BCI" OR "EEG" OR "neuroscience" OR "biomedical") '
-        'site:remote.co',
-        15,
-        True,                                       # remote-only board
-    ),
-    (
-        "Scientific computing on Wellfound",
-        '("neural" OR "biomedical" OR "neuroscience" OR "signal processing") '
-        '("engineer" OR "scientist") site:wellfound.com',
-        15,
-    ),
-    (
-        "Research jobs on BuiltIn",
-        '("neural" OR "neuroscience" OR "BCI" OR "biomedical") '
-        '("engineer" OR "scientist") site:builtin.com',
-        15,
-    ),
-]
-
-# Remote-leaning web searches used by the REMOTE-NEURAL track specifically
-# (jobcrawler/tracks/remote_neural.py) — separate from the general
-# WEBSEARCH_QUERIES above. (label, query, max_results).
+# Web searches for the sweep-style crawl (runner.build_sources, enabled by
+# [tracks.*].sources.websearch). (label, query, max_results). DuckDuckGo
+# text search; each result URL is parsed for JSON-LD JobPosting.
 REMOTE_NEURAL_WEBSEARCH_QUERIES: list[tuple] = [
     ("Neural-ML on WeWorkRemotely",
      '("neural" OR "BCI" OR "EEG" OR "neurotech" OR "brain-computer") '

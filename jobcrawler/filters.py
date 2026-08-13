@@ -19,10 +19,6 @@ from config import (
     EXCLUDE_PHRASES,
     EXCLUDE_TITLE_PHRASES,
     INCLUDE_KEYWORDS,
-    LOCATION_EXCLUDE,
-    LOCATION_INCLUDE,
-    LOCATION_ONSITE_INCLUDE,
-    LOCATION_REMOTE_INCLUDE,
     SKILL_KEYWORDS,
 )
 
@@ -144,54 +140,3 @@ def classify_relevance(title, description=""):
     if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
         return "DOMAIN+SKILL"
     return None
-
-
-# --------------------------------------------------------------------- #
-#  Location                                                              #
-# --------------------------------------------------------------------- #
-
-# Short tokens (<= 3 chars) use word-boundary matching. Everything longer
-# uses plain substring so multi-word filter entries keep working.
-_SHORT_TOKEN_LEN = 3
-
-
-def _loc_match(token, text):
-    """
-    Match `token` (already lowercased) inside `text` (already lowercased).
-    Short tokens use \\b...\\b to avoid "nc" matching inside "clinical".
-    """
-    t = token.lower()
-    if len(t) <= _SHORT_TOKEN_LEN:
-        return re.search(rf"\b{re.escape(t)}\b", text) is not None
-    return t in text
-
-
-def is_location_allowed(location):
-    """
-    True if `location` passes the configured filters.
-
-    Order of checks:
-      1. Empty location -> allowed (many fetchers return "Unknown").
-      2. LOCATION_EXCLUDE hit -> denied.
-      3. LOCATION_ONSITE_INCLUDE hit -> allowed.
-      4. ACCEPT_REMOTE and LOCATION_REMOTE_INCLUDE hit -> allowed.
-    """
-    if not location:
-        return True
-    loc = location.lower()
-    if any(_loc_match(bad, loc) for bad in LOCATION_EXCLUDE):
-        return False
-    if any(_loc_match(good, loc) for good in LOCATION_ONSITE_INCLUDE):
-        return True
-    if getattr(config, "ACCEPT_REMOTE", True):
-        if any(_loc_match(good, loc) for good in LOCATION_REMOTE_INCLUDE):
-            return True
-    # Legacy / dynamic entries appended to LOCATION_INCLUDE.
-    bucketed = {t.lower() for t in LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE}
-    extras = [t for t in LOCATION_INCLUDE if t.lower() not in bucketed]
-    if extras and any(_loc_match(good, loc) for good in extras):
-        return True
-    # If no filter lists are populated at all, fall through and allow.
-    if not (LOCATION_ONSITE_INCLUDE or LOCATION_REMOTE_INCLUDE or LOCATION_INCLUDE):
-        return True
-    return False

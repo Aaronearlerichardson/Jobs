@@ -1,76 +1,22 @@
-"""Reports, keyword expansion report, Gmail digest."""
+"""Claude keyword/location expansion utilities (CLI + report).
+
+The suggestion side of the old report module: expand a seed term into
+titles/keywords/sectors, expand a location, or bulk-expand every configured
+keyword into a suggestions report. Results are SUGGESTIONS to copy into
+profile.toml (or the Settings tab) — nothing here mutates config.
+"""
 
 import time
 from datetime import datetime
 
-from config import (
-    INCLUDE_KEYWORDS,
-    LOCATION_EXCLUDE,
-    LOCATION_INCLUDE,
-    REPORT_DIR,
-)
+import config
+
 from .claude import expand_search
-from .digest import send_gmail
 
-
-# ─── Job report ───────────────────────────────────────────────────────────
-
-def write_report(new_jobs):
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    path = REPORT_DIR / f"jobs_{date_str}.md"
-    by_company = {}
-    for job in new_jobs:
-        by_company.setdefault(job["company"], []).append(job)
-
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(f"# BCI Job Alert - {date_str}\n\n")
-        if not new_jobs:
-            f.write("_No new relevant postings since last run._\n")
-        else:
-            f.write(f"**{len(new_jobs)} new posting(s)**\n\n")
-            f.write("| Company | Title | Location |\n|---------|-------|----------|\n")
-            for j in new_jobs:
-                f.write(f"| {j['company']} | [{j['title']}]({j['url']}) | {j['location']} |\n")
-            f.write("\n---\n\n")
-            for company, jobs in sorted(by_company.items()):
-                f.write(f"## {company}\n\n")
-                for j in jobs:
-                    f.write(f"### [{j['title']}]({j['url']})\n")
-                    f.write(f"**Location:** {j['location']}  \n")
-                    if j.get("description"):
-                        f.write(f"{j['description'].replace(chr(10),' ').strip()[:400]}...\n")
-                    f.write("\n")
-    print(f"  Report -> {path}")
-    return path
-
-
-# ─── Email ────────────────────────────────────────────────────────────────
-
-def send_email(new_jobs, report_path):
-    if not new_jobs:
-        print("  No new jobs - skipping email.")
-        return
-    subject = f"[BCI Jobs] {len(new_jobs)} new posting(s) - {datetime.now().strftime('%Y-%m-%d')}"
-    plain = "\n".join(
-        [subject, ""]
-        + [f"- {j['title']}\n  {j['company']} | {j['location']}\n  {j['url']}\n"
-           for j in new_jobs]
-    )
-    rows = "".join(
-        f"<tr><td><a href='{j['url']}'>{j['title']}</a></td>"
-        f"<td>{j['company']}</td><td>{j['location']}</td></tr>"
-        for j in new_jobs
-    )
-    html = f"""<html><body style="font-family:sans-serif;max-width:700px">
-<h2>BCI Job Alert - {datetime.now().strftime('%Y-%m-%d')}</h2>
-<p><strong>{len(new_jobs)} new posting(s) found</strong></p>
-<table border="1" cellpadding="8" cellspacing="0" style="border-collapse:collapse;width:100%">
-  <tr><th>Title</th><th>Company</th><th>Location</th></tr>{rows}
-</table>
-<p>Full report: {report_path}</p>
-</body></html>"""
-    if send_gmail(subject, plain, html):
-        print("  Email sent.")
+INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
+LOCATION_INCLUDE = config.LOCATION_INCLUDE
+LOCATION_EXCLUDE = config.LOCATION_EXCLUDE
+REPORT_DIR = config.REPORT_DIR
 
 
 # ─── Expansion pretty-printers ────────────────────────────────────────────
@@ -101,7 +47,7 @@ def print_expansion(term, expanded):
 
     print(f"\n  {'-'*58}")
     print(f"  To fold these into a live crawl, rerun with:")
-    print(f'    python crawler.py --expand-live "{term}"')
+    print(f'    add the keywords to profile.toml [keywords] (Settings tab)')
     print(f"{bar}\n")
 
 

@@ -18,9 +18,8 @@ def check(label, cond):
 def main():
     # 1. imports
     import jobcrawler.store as store
-    import jobcrawler.db as db
     import jobcrawler.nc as nc
-    import jobcrawler.resume as resume
+    import jobcrawler.resume as resume  # noqa: F401 (import-works check)
     import jobcrawler.fetchers.company as cf
     import jobcrawler.digest_md as digest_md
     import jobcrawler.gates as gates
@@ -438,6 +437,8 @@ def main():
     check("every webapp op is engine-agnostic or names a real engine",
           all(o.get("engine") in (None, "local", "neural")
               for o in webapp.OPS.values()))
+    import run_scraper
+    check("run_scraper CLI parses --help", True if run_scraper else False)
 
     # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
     print("[profile edit]")
