@@ -13,10 +13,9 @@ import re
 import time
 from urllib.parse import urlparse
 
-import requests
 from bs4 import BeautifulSoup
 
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from .jsonld import fetch_jsonld_page
 
 
@@ -30,7 +29,7 @@ def _fetch_sitemap_urls(url, depth=0, max_depth=2):
     if depth > max_depth:
         return []
     try:
-        r = requests.get(url, timeout=25,
+        r = SESSION.get(url, timeout=25,
                          headers={**HEADERS, "Accept": "application/xml"})
         r.raise_for_status()
     except Exception:

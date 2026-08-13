@@ -13,9 +13,8 @@ Used for Paradromics (subdomain ``paradromicsinc``), whose careers site is
 import re
 import time
 
-import requests
 
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from .jsonld import fetch_jsonld_page
 
 _APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
@@ -24,7 +23,7 @@ _APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
 def fetch_jazzhr(company_name, subdomain, max_jobs=60, per_job_delay=0.3):
     base = f"https://{subdomain}.applytojob.com"
     try:
-        r = requests.get(base + "/", timeout=20, headers=HEADERS)
+        r = SESSION.get(base + "/", timeout=20, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] JazzHR {company_name}: {e}")

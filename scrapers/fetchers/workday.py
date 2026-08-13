@@ -16,12 +16,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
-import requests
 
 import config
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from ..util import norm_posted_date, stable_id
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
@@ -77,7 +76,7 @@ def _cxs_description(detail_url, timeout=25):
     """GET a CXS job-detail endpoint; return (plain_text_description, remoteType)."""
     for url in _cxs_tenant_variants(detail_url):
         try:
-            r = requests.get(url, timeout=timeout, headers=_JSON_HEADERS)
+            r = SESSION.get(url, timeout=timeout, headers=_JSON_HEADERS)
             if r.status_code != 200:
                 continue
             info = r.json().get("jobPostingInfo", {}) or {}
@@ -114,7 +113,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
         body = {"appliedFacets": {}, "limit": page_size,
                 "offset": page * page_size, "searchText": ""}
         try:
-            r = requests.post(api, json=body, timeout=25, headers=wd_headers)
+            r = SESSION.post(api, json=body, timeout=25, headers=wd_headers)
             r.raise_for_status()
             data = r.json()
         except Exception as e:

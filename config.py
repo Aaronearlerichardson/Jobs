@@ -423,6 +423,12 @@ MULTI_DIVISION_COMPANIES = {s.strip().lower()
                             for s in _pol.get("multi_division", [])}
 MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.6))
 
+# Honor robots.txt: skip paths a host asks crawlers to leave alone, and
+# obey its Crawl-delay. On by default — it costs one cached request per
+# host, and the endpoints this crawler uses are permissive (Lever, for
+# instance, publishes `Allow: /` with `Crawl-delay: 1`). See scrapers/robots.py.
+RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
+
 
 def is_multi_division(name):
     """True if `name` is a known multi-division conglomerate (profile policy)."""

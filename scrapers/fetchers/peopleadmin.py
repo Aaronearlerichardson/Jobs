@@ -2,11 +2,10 @@
 
 import re
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from ..util import stable_id
 
 
@@ -17,7 +16,7 @@ def fetch_peopleadmin(host, company_name):
     """
     url = f"https://{host}/postings/search.atom"
     try:
-        r = requests.get(url, timeout=25,
+        r = SESSION.get(url, timeout=25,
                          headers={**HEADERS, "Accept": "application/atom+xml"})
         r.raise_for_status()
     except Exception as e:

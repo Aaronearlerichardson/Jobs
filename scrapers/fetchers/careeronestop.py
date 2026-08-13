@@ -24,11 +24,10 @@ until you open the URL. Better a shallow lead than an invisible job.
 import re
 from urllib.parse import quote
 
-import requests
 
 import config
 
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from ..util import stable_id
 
 # v2 — v1 was retired and returns a blanket 401 even with valid credentials.
@@ -83,7 +82,7 @@ def fetch_nlx_company(name, location="North Carolina", days=60,
         url = (f"{_API}/{quote(uid)}/{quote(name)}/{quote(location)}/25/0/0/"
                f"{page * page_size}/{page_size}/{days}")
         try:
-            r = requests.get(url, timeout=25, headers=hdr,
+            r = SESSION.get(url, timeout=25, headers=hdr,
                              params={"showFilters": "false",
                                      "enableJobDescriptionSnippet": "true"})
         except Exception as e:

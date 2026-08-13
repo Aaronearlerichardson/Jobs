@@ -22,8 +22,32 @@ from config import USER_AGENT
 HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
 
+class PoliteSession(Session):
+    """A Session that consults robots.txt before every request.
+
+    Doing it here rather than in each fetcher means one chokepoint for the
+    whole crawler: every call site inherits the check, the per-host
+    `Crawl-delay` pacing, and connection pooling, and there's no way to add
+    a fetcher that quietly skips them.
+
+    A disallowed path raises RobotsDisallowed rather than returning a fake
+    response — fetchers already try/except their requests and report the
+    reason, so it shows up in the crawl log like any other fetch failure.
+    Set `[policy] respect_robots = false` in profile.toml to disable (the
+    check, not the pooling).
+    """
+
+    def request(self, method, url, *args, **kwargs):
+        # Imported lazily: robots.py imports HEADERS from this module.
+        from .robots import CACHE, RobotsDisallowed
+        if not CACHE.allowed(url):
+            raise RobotsDisallowed(f"robots.txt disallows {url}")
+        CACHE.wait_turn(url)               # honor Crawl-delay, per host
+        return super().request(method, url, *args, **kwargs)
+
+
 def _build_session():
-    s = Session()
+    s = PoliteSession()
     s.headers.update(HEADERS)
     # Pool a handful of connections per host; discovery probes fan across a
     # few ATS hosts and re-hit each many times. max_retries=0 keeps failure

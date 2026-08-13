@@ -17,11 +17,10 @@ scrape returned nothing because the board is client-rendered.
 
 import time
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
 _JSON = {**HEADERS, "Accept": "application/json"}
@@ -29,7 +28,7 @@ _JSON = {**HEADERS, "Accept": "application/json"}
 
 def parse_board(slug, timeout=20):
     """Return the raw listing (list of job dicts) for one board slug."""
-    r = requests.get(_API.format(slug=slug), timeout=timeout, headers=_JSON)
+    r = SESSION.get(_API.format(slug=slug), timeout=timeout, headers=_JSON)
     r.raise_for_status()
     data = r.json()
     return data if isinstance(data, list) else (data.get("jobs") or [])
@@ -50,7 +49,7 @@ def fetch_description(slug, uuid, timeout=15):
     ``{company, role}`` HTML dict — 'role' is the actual JD (put first);
     'company' is the shared boilerplate."""
     try:
-        r = requests.get(f"{_API.format(slug=slug)}/{uuid}", timeout=timeout, headers=_JSON)
+        r = SESSION.get(f"{_API.format(slug=slug)}/{uuid}", timeout=timeout, headers=_JSON)
         r.raise_for_status()
         d = r.json().get("description")
     except Exception:
