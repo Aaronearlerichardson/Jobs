@@ -37,8 +37,8 @@ venv/
 
 # Personal search profile (keywords/locations) — profile.example.toml is the template
 profile.toml
-# Timestamped profile backups written by the web UI's Settings tab before each save
-config_backups/
+# All local data: DBs, resume, job_reports/, captures/, caches, profile backups
+data/
 
 # DDG search cache (bounded web-search step)
 .cache/

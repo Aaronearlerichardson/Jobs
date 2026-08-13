@@ -42,48 +42,58 @@ CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
 #  PATHS
 # =========================================================================
 
-# Where the app's data lives (DB, profile.toml, résumé, job_reports/).
-# Running from source: this file's directory. In a compiled build (Nuitka
-# defines "__compiled__" in every compiled module), resolved in order:
+# SCRIPT_DIR = where the CODE lives (this file's directory; the exe's dir
+# when compiled). profile.toml sits here.
+# DATA_DIR = where the DATA lives (DBs, résumé, job_reports/, caches,
+# captures, profile backups) — data/ under the app dir by default, or the
+# JOBS_DATA_DIR env var. In a compiled build (Nuitka defines "__compiled__"
+# in every compiled module) the data dir is probed in order:
 #   1. JOBS_DATA_DIR env var — explicit override.
-#   2. The exe's own folder, when it already holds data (local_tech.db or
-#      profile.toml) — the copied-to-another-machine case.
-#   3. The exe folder's PARENT, when THAT holds local_tech.db — i.e. the
-#      dist folder still lives inside the project checkout; use the real
-#      project data instead of spawning a second empty DB beside the exe.
-#   4. Otherwise the exe's folder (fresh install: a new DB is created there).
+#   2. <exe dir>/data, when it already holds a DB — the normal layout.
+#   3. The exe's own folder, when THAT holds data (local_tech.db or
+#      profile.toml) — the legacy copied-to-another-machine case.
+#   4. <exe dir's PARENT>/data, when that holds a DB — i.e. the dist folder
+#      still lives inside the project checkout; use the real project data
+#      instead of spawning a second empty DB beside the exe.
+#   5. Otherwise <exe dir>/data (fresh install: created on first connect).
 if "__compiled__" in globals():
     _exe_dir = Path(sys.argv[0]).resolve().parent
+    SCRIPT_DIR = _exe_dir
     _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
     if _env_home:
-        SCRIPT_DIR = Path(_env_home)
+        DATA_DIR = Path(_env_home)
+    elif (_exe_dir / "data" / "local_tech.db").exists():
+        DATA_DIR = _exe_dir / "data"
     elif (_exe_dir / "local_tech.db").exists() or (_exe_dir / "profile.toml").exists():
-        SCRIPT_DIR = _exe_dir
-    elif (_exe_dir.parent / "local_tech.db").exists():
-        SCRIPT_DIR = _exe_dir.parent
+        DATA_DIR = _exe_dir
+    elif (_exe_dir.parent / "data" / "local_tech.db").exists():
+        DATA_DIR = _exe_dir.parent / "data"
     else:
-        SCRIPT_DIR = _exe_dir
+        DATA_DIR = _exe_dir / "data"
 else:
     SCRIPT_DIR = Path(__file__).parent
+    _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
+    DATA_DIR = Path(_env_home) if _env_home else SCRIPT_DIR / "data"
+
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # Unified store: companies (cached mission scores, scope tags) + jobs
 # (dedup state, per-track fields, resume-fit scores). Shared by every
-# track — see jobcrawler/store.py. Named local_tech.db for continuity with
-# the pre-merge local-track store; existing DBs migrate in place.
-STORE_DB_PATH = SCRIPT_DIR / "local_tech.db"
+# track — see store.py. Named local_tech.db for continuity with the
+# pre-merge local-track store; existing DBs migrate in place.
+STORE_DB_PATH = DATA_DIR / "local_tech.db"
 
-# The REMOTE-NEURAL track's own store — kept separate from STORE_DB_PATH so
-# its (now location-agnostic; see jobcrawler/tracks/remote_neural_run.py)
-# sweep of neural/BCI companies never commingles with local-tech's jobs
-# table again. Same schema (jobcrawler/store.py); seeded from a one-time
+# The neural sweep track's own store — kept separate from STORE_DB_PATH so
+# its location-agnostic sweep of neural/BCI companies never commingles with
+# the local track's jobs table again. Same schema; seeded from a one-time
 # copy of the companies table.
-NEURAL_DB_PATH = SCRIPT_DIR / "neural.db"
+NEURAL_DB_PATH = DATA_DIR / "neural.db"
 
 # Resume used for per-job fit scoring (gitignored — personal). Extracted
-# lazily by jobcrawler/resume.py.
-RESUME_PATH = SCRIPT_DIR / "Aaron 2026 Resume.docx"
+# lazily by resume.py.
+RESUME_PATH = DATA_DIR / "Aaron 2026 Resume.docx"
 
-REPORT_DIR  = SCRIPT_DIR / "job_reports"
+REPORT_DIR  = DATA_DIR / "job_reports"
 
 # One cap for JD text everywhere — fetchers, hydration, DB storage, and the
 # scoring prompt (see jobcrawler/fit.py clip_desc, which keeps head + tail so
@@ -325,7 +335,7 @@ def _build_ui_tracks(raw):
         tracks[tid] = {
             "id": tid,
             "label": str(t.get("label") or tid),
-            "db_path": SCRIPT_DIR / str(t.get("db") or f"{tid}.db"),
+            "db_path": DATA_DIR / str(t.get("db") or f"{tid}.db"),
             "track": str(t.get("track") or tid.replace("_", "-")),
             # Which crawl machinery this track runs on — "local" (the
             # location-scoped crawler, jobcrawler/tracks/local_tech.py) or

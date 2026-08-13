@@ -240,8 +240,8 @@ def main():
     ap = argparse.ArgumentParser(description="Manual page capture for the job crawler")
     ap.add_argument("files", nargs="*", help="Saved .html pages to ingest (Ctrl+S fallback)")
     ap.add_argument("--serve", action="store_true", help="Run the capture server (default when no files)")
-    ap.add_argument("--watch", nargs="?", const="captures", metavar="FOLDER",
-                    help="Watch FOLDER (default ./captures) and ingest every "
+    ap.add_argument("--watch", nargs="?", const="", metavar="FOLDER",
+                    help="Watch FOLDER (default data/captures) and ingest every "
                          "page saved into it — no userscript manager needed")
     ap.add_argument("--port", type=int, default=PORT_DEFAULT)
     ap.add_argument("--url", default="", help="Original page URL for a single ingested file "
@@ -273,8 +273,9 @@ def main():
             html = p.read_text(encoding="utf-8", errors="replace")
             ingest_html(args.url or _url_from_saved(html), html, label=p.name)
         return
-    if args.watch:
-        watch(args.watch)
+    if args.watch is not None:
+        import config
+        watch(args.watch or str(config.DATA_DIR / "captures"))
         return
     serve(args.port)
 

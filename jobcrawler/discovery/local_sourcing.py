@@ -40,7 +40,7 @@ from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
 #     so one throttled query abandons after ~budget seconds instead of stalling
 #     the whole crawl. A timed-out/empty result is NOT cached, so it retries
 #     next run (we only cache genuine non-empty hits).
-_DDG_CACHE_DIR = config.SCRIPT_DIR / ".cache" / "ddg"
+_DDG_CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
 _DDG_CACHE_TTL = 7 * 24 * 3600      # seconds
 _DDG_WALL_BUDGET = 25.0             # hard per-query wall-clock cap (seconds)
 

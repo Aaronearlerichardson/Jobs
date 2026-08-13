@@ -113,8 +113,8 @@ def backup_then_write(text):
     target = config.PROFILE_PATH
     backup = None
     if target.exists():
-        bdir = target.parent / BACKUP_DIR_NAME
-        bdir.mkdir(exist_ok=True)
+        bdir = config.DATA_DIR / BACKUP_DIR_NAME
+        bdir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         backup = bdir / f"profile-{stamp}.toml"
         shutil.copy2(target, backup)

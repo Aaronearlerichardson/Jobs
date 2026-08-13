@@ -1319,7 +1319,7 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
 # dead — is re-checked within the window rather than pinned by a stale negative.
 # Transient fetch failures are NOT cached (only decided outcomes), so a network
 # blip never suppresses a real board.
-_BOARD_CACHE_DIR = config.SCRIPT_DIR / ".cache" / "board"
+_BOARD_CACHE_DIR = config.DATA_DIR / ".cache" / "board"
 _BOARD_CACHE_TTL = 6 * 3600      # seconds
 
 
