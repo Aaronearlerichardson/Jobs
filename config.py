@@ -42,38 +42,39 @@ CAREERONESTOP_TOKEN   = os.environ.get("CAREERONESTOP_TOKEN",   "")
 #  PATHS
 # =========================================================================
 
-# SCRIPT_DIR = where the CODE lives (this file's directory; the exe's dir
-# when compiled). profile.toml sits here.
-# DATA_DIR = where the DATA lives (DBs, résumé, job_reports/, caches,
-# captures, profile backups) — data/ under the app dir by default, or the
-# JOBS_DATA_DIR env var. In a compiled build (Nuitka defines "__compiled__"
-# in every compiled module) the data dir is probed in order:
-#   1. JOBS_DATA_DIR env var — explicit override.
-#   2. <exe dir>/data, when it already holds a DB — the normal layout.
-#   3. The exe's own folder, when THAT holds data (local_tech.db or
-#      profile.toml) — the legacy copied-to-another-machine case.
-#   4. <exe dir's PARENT>/data, when that holds a DB — i.e. the dist folder
-#      still lives inside the project checkout; use the real project data
-#      instead of spawning a second empty DB beside the exe.
-#   5. Otherwise <exe dir>/data (fresh install: created on first connect).
+# Three roots:
+#   SCRIPT_DIR — where the CODE lives (this file's directory; the exe's dir
+#                when compiled). Bundled read-only assets live here.
+#   APP_HOME   — where profile.toml lives. From source: SCRIPT_DIR. Compiled:
+#                probed (see below), because the dist folder may sit INSIDE
+#                the project checkout, whose root holds the real profile.
+#   DATA_DIR   — where the DATA lives (DBs, résumé, job_reports/, caches,
+#                captures, profile backups): JOBS_DATA_DIR env var, else
+#                data/ under APP_HOME (legacy flat layouts still probed).
 if "__compiled__" in globals():
     _exe_dir = Path(sys.argv[0]).resolve().parent
     SCRIPT_DIR = _exe_dir
     _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
+    # APP_HOME: first place a real profile.toml (or an existing data/) is
+    # found — the exe's own folder (copied-to-another-machine layout), else
+    # the folder ABOVE the dist dir (dist still inside the checkout), else
+    # the exe's folder (fresh install; profile.example.toml fallback).
+    APP_HOME = next((d for d in (_exe_dir, _exe_dir.parent)
+                     if (d / "profile.toml").exists()
+                     or (d / "data" / "local_tech.db").exists()), _exe_dir)
     if _env_home:
         DATA_DIR = Path(_env_home)
-    elif (_exe_dir / "data" / "local_tech.db").exists():
-        DATA_DIR = _exe_dir / "data"
-    elif (_exe_dir / "local_tech.db").exists() or (_exe_dir / "profile.toml").exists():
-        DATA_DIR = _exe_dir
-    elif (_exe_dir.parent / "data" / "local_tech.db").exists():
-        DATA_DIR = _exe_dir.parent / "data"
+    elif (APP_HOME / "data" / "local_tech.db").exists():
+        DATA_DIR = APP_HOME / "data"
+    elif (APP_HOME / "local_tech.db").exists():
+        DATA_DIR = APP_HOME          # legacy flat layout (pre-data/ builds)
     else:
-        DATA_DIR = _exe_dir / "data"
+        DATA_DIR = APP_HOME / "data"
 else:
     SCRIPT_DIR = Path(__file__).parent
+    APP_HOME = SCRIPT_DIR
     _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
-    DATA_DIR = Path(_env_home) if _env_home else SCRIPT_DIR / "data"
+    DATA_DIR = Path(_env_home) if _env_home else APP_HOME / "data"
 
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -118,17 +119,21 @@ import tomllib
 
 
 # Canonical location of the user's (gitignored) profile; the Settings tab
-# writes here (core/profile_edit.py).
-PROFILE_PATH = SCRIPT_DIR / "profile.toml"
-PROFILE_EXAMPLE_PATH = SCRIPT_DIR / "profile.example.toml"
+# writes here (core/profile_edit.py). APP_HOME so a compiled build inside
+# the checkout finds the project's real profile, not a fresh template copy
+# beside the exe. The example template falls back to the bundled copy in
+# the dist folder (SCRIPT_DIR) when APP_HOME has none.
+PROFILE_PATH = APP_HOME / "profile.toml"
+PROFILE_EXAMPLE_PATH = (APP_HOME / "profile.example.toml"
+                        if (APP_HOME / "profile.example.toml").exists()
+                        else SCRIPT_DIR / "profile.example.toml")
 
 
 def _load_profile():
-    for fname in ("profile.toml", "profile.example.toml"):
-        p = SCRIPT_DIR / fname
+    for p in (PROFILE_PATH, PROFILE_EXAMPLE_PATH):
         if p.exists():
             with open(p, "rb") as fh:
-                return tomllib.load(fh), fname
+                return tomllib.load(fh), p.name
     return {}, None
 
 

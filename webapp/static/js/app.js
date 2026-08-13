@@ -487,9 +487,17 @@ function renderSettings() {
     ["word_tokens", "substrings", "state_suffix"].map(k => chipField(`locality.${k}`, k)).join("")));
 
   // Fit scoring: weights + gate penalties, keys from the profile itself.
+  // An absent group isn't broken — the built-in defaults apply; say so
+  // instead of rendering an empty grid.
   const fit = c.fit || {};
-  const numGrid = (group) => `<div class="numgrid">${
-    Object.entries(fit[group] || {}).map(([k, v]) => numField(`fit.${group}.${k}`, k, v)).join("")}</div>`;
+  const numGrid = (group) => {
+    const entries = Object.entries(fit[group] || {});
+    if (!entries.length)
+      return `<p class="loc" style="margin:0 0 10px">not set — built-in defaults
+              apply (add a [fit] ${group} table via the raw editor to override)</p>`;
+    return `<div class="numgrid">${
+      entries.map(([k, v]) => numField(`fit.${group}.${k}`, k, v)).join("")}</div>`;
+  };
   cards.push(settingsCard("Fit scoring", "Axis weights and gate penalties (0..1). Ladder/stack live in the raw editor.",
     `<div class="chiplab">weights</div>${numGrid("weights")}
      <div class="chiplab">gate penalties</div>${numGrid("gate_penalty")}`));
