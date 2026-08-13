@@ -458,12 +458,12 @@ scoring operations will no-op (the header shows a warning).
 **Launchers.** Double-click `run_webui.bat` to start from source (opens your
 browser once the server is up). To ship the UI to a machine **without Python
 or any pip installs**, run `build_exe.bat`: it compiles the whole app with
-[Nuitka](https://nuitka.net) into a self-contained folder,
-`webapp.dist\`, whose `JobCrawlerUI.exe` bundles CPython, Flask, the crawler
+[Nuitka](https://nuitka.net) into a self-contained single-file binary,
+`JobCrawlerUI.exe`, which bundles CPython, Flask, the crawler
 package, and lxml. The exe finds its data (`jobs.db`, `profile.toml`,
 résumé, `job_reports\`) in this order: a `JOBS_DATA_DIR` env var if set; its
 own folder when data already sits there; the folder **above** it when that
-holds `jobs.db` (so a dist folder still inside this project uses the
+holds `jobs.db` (so a build folder still inside this project uses the
 project's real data rather than spawning a second empty DB); otherwise its
 own folder, creating a fresh DB there — the copied-to-a-new-machine case.
 The header of the UI always shows which DB file is live.

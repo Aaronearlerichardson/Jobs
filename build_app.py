@@ -4,10 +4,9 @@
     python build_app.py            # build for the current platform
     python build_app.py --check    # print the command without running it
 
-Output: `webapp.dist/` — self-contained (bundled CPython + Flask + the
-crawler packages + lxml), copy it anywhere and run the binary; no Python or
-pip needed on the target. Windows gets JobCrawlerUI.exe, macOS/Linux get
-job-crawler-ui.
+Output: single-file binary (`JobCrawlerUI.exe` or `job-crawler-ui`) —
+self-contained (bundled CPython + Flask + the crawler packages + lxml),
+copy it anywhere and run; no Python or pip needed on the target.
 
 Data resolution at RUNTIME (config.py): JOBS_DATA_DIR if set; else
 <app dir>/data when it holds a DB; else the app's own folder (legacy flat
@@ -41,7 +40,7 @@ PACKAGES = ["core", "scrapers", "discovery", "webapp"]
 
 def build_command():
     cmd = [sys.executable, "-m", "nuitka", "webapp.py",
-           "--standalone", f"--output-filename={OUTPUT_NAME}",
+           "--onefile", f"--output-filename={OUTPUT_NAME}",
            "--assume-yes-for-downloads"]
     cmd += [f"--include-package={p}" for p in PACKAGES]
     cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]
@@ -59,11 +58,14 @@ def main():
         subprocess.run([sys.executable, "-m", "pip", "install", "nuitka"],
                        check=True)
     rc = subprocess.run(cmd, cwd=ROOT).returncode
-    out = ROOT / "webapp.dist" / OUTPUT_NAME
+    # Nuitka --onefile produces the binary in the current directory or
+    # output-dir, but the script previously expected it in webapp.dist/
+    # (which --standalone creates). With --onefile, we'll just check the root.
+    out = ROOT / OUTPUT_NAME
     if rc == 0 and out.exists():
         print(f"\nBuild OK: {out}")
     else:
-        print("\nBuild FAILED - see output above.")
+        print(f"\nBuild FAILED - expected {out}")
         rc = rc or 1
     return rc
 

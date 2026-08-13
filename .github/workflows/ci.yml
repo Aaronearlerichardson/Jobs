@@ -9,6 +9,7 @@ on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -192,9 +193,9 @@ jobs:
         # for a first run on a fresh machine.
         shell: bash
         run: |
-          BIN=webapp.dist/JobCrawlerUI.exe
-          [ -f "$BIN" ] || BIN=webapp.dist/job-crawler-ui
-          "$BIN" --port=5601 --no-open &
+          BIN=JobCrawlerUI.exe
+          [ -f "$BIN" ] || BIN=job-crawler-ui
+          ./"$BIN" --port=5601 --no-open &
           for i in $(seq 1 60); do
             curl -sf -m 2 http://127.0.0.1:5601/api/stats > /dev/null && break
             sleep 1
@@ -208,5 +209,38 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: job-crawler-${{ matrix.os }}
-          path: webapp.dist/
+          path: |
+            JobCrawlerUI.exe
+            job-crawler-ui
           retention-days: 7
+
+  release:
+    name: GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare assets
+        run: |
+          mkdir release
+          mv artifacts/job-crawler-ubuntu-latest/job-crawler-ui release/job-crawler-linux
+          mv artifacts/job-crawler-windows-latest/JobCrawlerUI.exe release/JobCrawlerUI.exe
+          mv artifacts/job-crawler-macos-latest/job-crawler-ui release/job-crawler-macos
+          chmod +x release/job-crawler-linux release/job-crawler-macos
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/job-crawler-linux
+            release/JobCrawlerUI.exe
+            release/job-crawler-macos
+          generate_release_notes: true
+          draft: false
+          prerelease: false

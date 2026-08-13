@@ -20,6 +20,10 @@ local_tech_companies.txt
 webapp.build/
 webapp.dist/
 webapp.onefile-build/
+JobCrawlerUI.exe
+job-crawler-ui
+job-crawler-linux
+job-crawler-macos
 
 # Python cruft
 __pycache__/

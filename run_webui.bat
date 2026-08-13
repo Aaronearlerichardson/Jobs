@@ -14,6 +14,6 @@ if errorlevel 1 (
   echo If the error above is a missing module ^(e.g. flask^), install the
   echo requirements into THIS python first:  pip install -r requirements.txt
   echo If python itself was not found, use the standalone build instead:
-  echo run build_exe.bat once, then launch webapp.dist\JobCrawlerUI.exe.
+  echo run build_exe.bat once, then launch JobCrawlerUI.exe.
 )
 pause
