@@ -1,12 +1,14 @@
 """All HTTP routes: jobs/pipeline/companies/stats/tracks, the background-op
 API, config editing (Settings tab), and the SPA itself."""
 
+import hashlib
 import io
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
-from flask import jsonify, request, send_file, send_from_directory
+from flask import jsonify, make_response, request, send_file
 
 import config
 from core import digest_md, locality, profile_edit, remote_filter, store
@@ -360,8 +362,38 @@ def api_stats():
     return jsonify(stats)
 
 
+def _asset_version():
+    """Fingerprint of the front-end files, for cache-busting."""
+    h = hashlib.md5()
+    for p in sorted((Path(app.root_path) / "static").rglob("*")):
+        if p.is_file():
+            h.update(p.name.encode())
+            h.update(str(p.stat().st_mtime_ns).encode())
+    return h.hexdigest()[:10]
+
+
 @app.get("/")
 def index():
     # Served as a plain file, NOT via Jinja — the SPA's JS contains
-    # template-looking fragments a render pass would corrupt.
-    return send_from_directory(Path(app.root_path) / "templates", "index.html")
+    # template-looking fragments a render pass would corrupt. The only
+    # rewriting is a cache-buster stamped onto the asset URLs: the CSS/JS
+    # live at fixed paths, so a browser that cached an older copy would
+    # otherwise keep serving it across restarts (a half-written app.js
+    # renders the shell with no tiles, no jobs, and no error you'd notice).
+    html = (Path(app.root_path) / "templates" / "index.html").read_text(
+        encoding="utf-8")
+    html = re.sub(r'(?<=["\'])(/static/[^"\']+?)(?:\?v=[^"\']*)?(?=["\'])',
+                  lambda m: f"{m.group(1)}?v={_asset_version()}", html)
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.after_request
+def _no_store_assets(resp):
+    """Never let the browser reuse a stale front-end. Single-user localhost:
+    correctness beats the microscopic win from caching a 40 KB file."""
+    if request.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
