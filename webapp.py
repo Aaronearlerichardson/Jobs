@@ -24,8 +24,8 @@ from pathlib import Path
 from flask import Flask, jsonify, request, send_file, send_from_directory
 
 import config
-from jobcrawler import nc, profile_edit, remote_filter, store
-from jobcrawler import digest_md, ops
+from core import digest_md, locality, profile_edit, remote_filter, store
+from scrapers import ops
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -162,7 +162,7 @@ def _op_track(p):
 
 
 # Each op declares which crawl ENGINE it needs ("local" = the location-scoped
-# crawler, "neural" = the location-agnostic sweep — jobcrawler/runner.py),
+# crawler, "neural" = the location-agnostic sweep — scrapers/runner.py),
 # None = engine-agnostic store maintenance that runs against whichever
 # track's DB is active). Ops are matched to the active track by its
 # profile-configured `engine` — never by the user-chosen track id.
@@ -208,7 +208,7 @@ OPS = {
         "label": "Backfill Workday JDs",
         "engine": "local",
         "fn": lambda p: __import__(
-            "jobcrawler.fetchers.workday",
+            "scrapers.fetchers.workday",
             fromlist=["backfill_workday_descriptions"]
         ).backfill_workday_descriptions(limit=_int(p, "limit")),
     },
@@ -221,7 +221,7 @@ OPS = {
         "label": "Discover local companies",
         "engine": "local",
         "fn": lambda p: __import__(
-            "jobcrawler.discovery.local_sourcing",
+            "discovery.local_sourcing",
             fromlist=["populate_companies"]
         ).populate_companies(dork=not p.get("no_dork")),
     },
@@ -229,14 +229,14 @@ OPS = {
         "label": "ATS dork sweep",
         "engine": "local",
         "fn": lambda p: __import__(
-            "jobcrawler.discovery.ats_dork", fromlist=["run_ddgs_dorks"]
+            "discovery.ats_dork", fromlist=["run_ddgs_dorks"]
         ).run_ddgs_dorks(),
     },
     "score-missions": {
         "label": "Score missions",
         "engine": "local",
         "fn": lambda p: __import__(
-            "jobcrawler.discovery.local_sourcing",
+            "discovery.local_sourcing",
             fromlist=["score_missions"]
         ).score_missions(rescore_all=bool(p.get("rescore"))),
     },
@@ -244,7 +244,7 @@ OPS = {
         "label": "Add company board",
         "engine": "local",
         "fn": lambda p: __import__(
-            "jobcrawler.discovery.local_sourcing", fromlist=["add_board"]
+            "discovery.local_sourcing", fromlist=["add_board"]
         ).add_board((p.get("name") or "").strip(), (p.get("url") or "").strip()),
     },
     "prune": {
@@ -270,13 +270,13 @@ OPS = {
 
 
 def _op_crawl(p):
-    """ONE crawl command for every track: jobcrawler/tracks/runner.run_track,
+    """ONE crawl command for every track: scrapers/runner.run_track,
     the single pipeline whose methodology (keyword handling, source families,
     gates, scoring budget, digest/email) comes entirely from the track's
     profile.toml [tracks.*] config. The track's keyword focus swaps the
     shared keyword lists — _run_op restores the baseline before every op, so
     runs can't leak keywords into each other."""
-    from jobcrawler.tracks import runner
+    from core.tracks import runner
     t = config.UI_TRACKS.get(p.get("track") or config.DEFAULT_TRACK)
     runner.run_track(
         t, commit=True,
@@ -291,7 +291,7 @@ def _op_crawl(p):
 def _op_nlx(p):
     """Pull NC postings for bot-gated employers (Meta/Google/Qualcomm...)
     from the federal NLx feed and run them through the local-tech ingest."""
-    from jobcrawler.fetchers.careeronestop import fetch_nlx_company
+    from scrapers.fetchers.careeronestop import fetch_nlx_company
     names = [n.strip() for n in (p.get("companies") or "").split(",") if n.strip()]
     if not names:
         print("  [!] give a comma-separated list of employer names")
@@ -366,7 +366,7 @@ def _geo_tag(r):
     of whatever process ingested it) and overloaded (NULL/onsite ambiguity),
     so it's only consulted as a secondary remote signal."""
     loc = r.get("location") or ""
-    if nc.NC_RE.search(loc):
+    if locality.NC_RE.search(loc):
         return "local"
     if (r.get("remote_eligible") or r.get("geo_mode") == "remote"
             or remote_filter.remote_signal(loc)):

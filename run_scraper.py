@@ -121,7 +121,7 @@ def main(argv=None):
 
     # ── one-shot store / roster commands ────────────────────────────────
     if args.dedup:
-        from jobcrawler import store
+        from core import store
         conn = store.connect(t["db_path"] if t else None)
         n = store.dedup_companies(conn)
         conn.close()
@@ -129,7 +129,7 @@ def main(argv=None):
         return
 
     if args.watch or args.unwatch:
-        from jobcrawler import store
+        from core import store
         name = args.watch or args.unwatch
         conn = store.connect(t["db_path"] if t else None)
         tags = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
@@ -143,7 +143,7 @@ def main(argv=None):
         return
 
     if args.mark:
-        from jobcrawler import store
+        from core import store
         disp, ref = args.mark
         conn = store.connect(t["db_path"] if t else None)
         row, err = store.set_disposition(conn, ref, disp, note=args.why)
@@ -160,7 +160,7 @@ def main(argv=None):
         return
 
     if args.pipeline:
-        from jobcrawler import store
+        from core import store
         conn = store.connect(t["db_path"] if t else None)
         rows = store.get_pipeline(conn)
         conn.close()
@@ -176,7 +176,7 @@ def main(argv=None):
         return
 
     if args.prune:
-        from jobcrawler import store
+        from core import store
         conn = store.connect(t["db_path"] if t else None)
         n_dead, n_off = store.prune_dead_boards(
             conn, deactivate_offmission=args.prune_offmission)
@@ -187,7 +187,7 @@ def main(argv=None):
         return
 
     if args.export_companies or args.import_companies:
-        from jobcrawler import store
+        from core import store
         conn = store.connect(t["db_path"] if t else None)
         if args.export_companies:
             n = store.export_companies(conn, args.export_companies)
@@ -199,7 +199,7 @@ def main(argv=None):
         return
 
     if args.score:
-        from jobcrawler.claude import score_technical_bar
+        from core.claude import score_technical_bar
         score, reason, mission = score_technical_bar(args.score)
         if score is None:
             print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
@@ -208,8 +208,8 @@ def main(argv=None):
         return
 
     if args.nlx:
-        from jobcrawler.fetchers.careeronestop import fetch_nlx_company
-        from jobcrawler.ops import ingest_external_jobs
+        from scrapers.fetchers.careeronestop import fetch_nlx_company
+        from scrapers.ops import ingest_external_jobs
         total = 0
         for name in [n.strip() for n in args.nlx.split(",") if n.strip()]:
             jobs = fetch_nlx_company(name)
@@ -221,64 +221,64 @@ def main(argv=None):
 
     # ── keyword expansion tools ─────────────────────────────────────────
     if args.expand:
-        from jobcrawler.claude import expand_search
-        from jobcrawler.expand import print_expansion
+        from core.claude import expand_search
+        from core.expand import print_expansion
         expanded = expand_search(args.expand)
         if expanded:
             print_expansion(args.expand, expanded)
         return
 
     if args.expand_location:
-        from jobcrawler.claude import expand_location
-        from jobcrawler.expand import print_location_expansion
+        from core.claude import expand_location
+        from core.expand import print_location_expansion
         expanded = expand_location(args.expand_location)
         if expanded:
             print_location_expansion(args.expand_location, expanded)
         return
 
     if args.keyword_report:
-        from jobcrawler.expand import generate_keyword_report
+        from core.expand import generate_keyword_report
         generate_keyword_report()
         return
 
     # ── maintenance ─────────────────────────────────────────────────────
     if args.verify_top is not None:
-        from jobcrawler.ops import verify_top_cli
+        from scrapers.ops import verify_top_cli
         verify_top_cli(top_n=args.verify_top, max_workers=args.workers, t=t)
         return
     if args.sync_status:
-        from jobcrawler.ops import sync_status_all
+        from scrapers.ops import sync_status_all
         sync_status_all(top_n=args.top, t=t)
         return
     if args.check_closed:
-        from jobcrawler.ops import check_closed_jobs
+        from scrapers.ops import check_closed_jobs
         check_closed_jobs(max_workers=args.workers, limit=args.limit,
                           stale_days=args.stale_days, t=t)
         return
     if args.backfill_descriptions:
-        from jobcrawler.fetchers.workday import backfill_workday_descriptions
+        from scrapers.fetchers.workday import backfill_workday_descriptions
         backfill_workday_descriptions(max_workers=args.workers,
                                       limit=args.limit)
         return
     if args.backfill_board_descriptions:
-        from jobcrawler.ops import backfill_board_descriptions
+        from scrapers.ops import backfill_board_descriptions
         backfill_board_descriptions(max_workers=args.workers,
                                     limit=args.limit, t=t)
         return
     if args.backfill_axes:
-        from jobcrawler import store
+        from core import store
         conn = store.connect(t["db_path"] if t else None)
         store.backfill_axis_columns(conn)
         conn.close()
         return
     if args.rescore:
-        from jobcrawler.ops import rescore_all
+        from scrapers.ops import rescore_all
         rescore_all(max_workers=args.workers,
                     described_only=args.described_only, t=t)
         return
 
     # ── the crawl (daily refresh): one track, or every configured track ──
-    from jobcrawler import runner
+    from scrapers import runner
     tracks = [t] if t else list(config.UI_TRACKS.values())
     for tcfg in tracks:
         runner.run_track(tcfg,

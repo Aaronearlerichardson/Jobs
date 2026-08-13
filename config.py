@@ -24,7 +24,7 @@ ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KE
 # Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
 # pricing ($3/$15 per MTok; intro $2/$10 through 2026-08-31, cheaper than the
 # Sonnet 4.6 it replaces). NOTE for 5-family models: thinking is ON by
-# default and max_tokens caps thinking+text together — jobcrawler/claude.py
+# default and max_tokens caps thinking+text together — core/claude.py
 # disables thinking for these small structured-JSON calls.
 CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL",       "claude-sonnet-5")
 # Deep-verify pass over ranking finalists only (~15-30 calls/run, judgment-
@@ -96,7 +96,7 @@ RESUME_PATH = DATA_DIR / "Aaron 2026 Resume.docx"
 REPORT_DIR  = DATA_DIR / "job_reports"
 
 # One cap for JD text everywhere — fetchers, hydration, DB storage, and the
-# scoring prompt (see jobcrawler/fit.py clip_desc, which keeps head + tail so
+# scoring prompt (see core/fit.py clip_desc, which keeps head + tail so
 # a requirements block at the END of a long posting survives). The old
 # per-site caps (2000/2500/4000) silently fed the scorer only the opening
 # company boilerplate of long JDs: Ceribell's Sr Manager posting was 20k
@@ -118,7 +118,7 @@ import tomllib
 
 
 # Canonical location of the user's (gitignored) profile; the Settings tab
-# writes here (jobcrawler/profile_edit.py).
+# writes here (core/profile_edit.py).
 PROFILE_PATH = SCRIPT_DIR / "profile.toml"
 PROFILE_EXAMPLE_PATH = SCRIPT_DIR / "profile.example.toml"
 
@@ -152,14 +152,14 @@ INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
 EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
 EXCLUDE_TITLE_PHRASES = list(_exc.get("title_phrases", []))
-# Regex fragments (ORed together in jobcrawler/filters.scrub_boilerplate) for
+# Regex fragments (ORed together in core/filters.scrub_boilerplate) for
 # benefits/EEO/infra-health idioms that contain domain-looking words without
 # meaning them.
 EXCLUDE_BOILERPLATE_PHRASES = list(_exc.get("boilerplate_phrases", []))
 
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own sub-dict (e.g. KEYWORDS_BY_TRACK.get("local_tech"))
-# instead of hardcoding their vocabulary; see jobcrawler/tracks/*.py.
+# instead of hardcoding their vocabulary; see scrapers/runner.py.
 KEYWORDS_BY_TRACK = {k: v for k, v in _kw.items() if isinstance(v, dict)}
 EXCLUDE_BY_TRACK   = {k: v for k, v in _exc.items() if isinstance(v, dict)}
 
@@ -169,20 +169,20 @@ ACCEPT_REMOTE           = bool(_loc.get("accept_remote", False))
 LOCATION_EXCLUDE        = list(_loc.get("exclude", []))
 LOCATION_INCLUDE        = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
 
-# --- Remote-eligibility detection (jobcrawler/remote_filter.py) ---------------
+# --- Remote-eligibility detection (core/remote_filter.py) ---------------
 REMOTE_LOC_TOKENS     = list(_loc.get("remote_tokens", []))
 REMOTE_BODY_PHRASES   = list(_loc.get("remote_phrases", []))
 REMOTE_HARD_NEGATIONS = list(_loc.get("hard_negations", []))
 REMOTE_US_MARKERS     = list(_loc.get("us_markers", []))
 REMOTE_NON_US_REGIONS = list(_loc.get("non_us_regions", []))
 
-# --- Candidate identity (injected into Claude prompts; jobcrawler/claude.py) --
+# --- Candidate identity (injected into Claude prompts; core/claude.py) --
 CANDIDATE_SUMMARY   = (_cand.get("summary") or "").strip()
 CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
 CANDIDATE_FIT_CAPS  = list(_cand.get("fit_caps", []))
 CANDIDATE_AVOID     = (_cand.get("avoid") or "").strip()
 
-# --- Fit rubric (jobcrawler/fit.py) — optional [fit] block; defaults apply if
+# --- Fit rubric (core/fit.py) — optional [fit] block; defaults apply if
 #     absent. weights/gate_penalty are dicts; domain_ladder is a list of
 #     {score, terms=[...]}; stack_* / region_terms are lists joined to text. ---
 _fitp = _PROFILE.get("fit", {})
@@ -195,12 +195,12 @@ FIT_REGION        = ", ".join(_fitp.get("region_terms", [])) or None
 # How many of your own --mark decisions (applied/dismissed, each) are fed to
 # the fit scorer as few-shot calibration. None -> default 3; 0 disables.
 FIT_DISPOSITION_EXAMPLES = _fitp.get("disposition_examples")
-# Deterministic "clearance" gate backstop (jobcrawler/fit.py _CLEARANCE_RE).
+# Deterministic "clearance" gate backstop (core/fit.py _CLEARANCE_RE).
 # Empty -> fit.py falls back to its own built-in defaults.
 FIT_CLEARANCE_VERBS      = list(_fitp.get("clearance_verbs", []))
 FIT_CLEARANCE_QUALIFIERS = list(_fitp.get("clearance_qualifiers", []))
 
-# --- Mission taxonomy (employer-alignment ladder; jobcrawler/claude.py) -------
+# --- Mission taxonomy (employer-alignment ladder; core/claude.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
 MISSION_TIERS = [
     {"name": t["name"], "desc": t.get("desc", ""),
@@ -210,13 +210,13 @@ MISSION_TIERS = [
 MISSION_BULLSEYE_REGEX = (_mis.get("bullseye_regex") or "").strip()
 MISSION_BULLSEYE_TIER  = (_mis.get("bullseye_tier") or "").strip()
 
-# --- Locality (what counts as "local"; jobcrawler/nc.py) ----------------------
+# --- Locality (what counts as "local"; core/locality.py) ----------------------
 LOCALITY_NAME         = (_lcl.get("name") or "local").strip()
 LOCALITY_WORD_TOKENS  = list(_lcl.get("word_tokens", []))
 LOCALITY_SUBSTRINGS   = list(_lcl.get("substrings", []))
 LOCALITY_STATE_SUFFIX = list(_lcl.get("state_suffix", []))
 
-# --- Discovery sourcing (discover.py --local; jobcrawler/discovery/local_sourcing) -
+# --- Discovery sourcing (discover.py --local; discovery/local_sourcing) -
 DISCOVERY_SEED_COMPANIES     = list(_dsc.get("seed_companies", []))
 DISCOVERY_WORKDAY_MAJORS     = list(_dsc.get("workday_majors", []))
 DISCOVERY_DIRECTORY_URLS     = list(_dsc.get("directory_urls", []))
@@ -227,7 +227,7 @@ DISCOVERY_BRAINSTORM_NAMES   = _dsc.get("brainstorm_names")
 DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
                                 for n in _dsc.get("name_blocklist", [])}
 # Job-aggregator hosts to skip, and generic words to ignore, when resolving a
-# search result to a company's own ATS board (jobcrawler/discovery/local_sourcing.py).
+# search result to a company's own ATS board (discovery/local_sourcing.py).
 DISCOVERY_AGGREGATOR_HOSTS    = tuple(_dsc.get("aggregator_hosts", []))
 DISCOVERY_GENERIC_NAME_WORDS  = set(_dsc.get("generic_name_words", []))
 # Named company targets a track fetches first (list of {name, ats, slug}).
@@ -338,7 +338,7 @@ def _build_ui_tracks(raw):
             "db_path": DATA_DIR / str(t.get("db") or f"{tid}.db"),
             "track": str(t.get("track") or tid.replace("_", "-")),
             # Which crawl machinery this track runs on — "local" (the
-            # location-scoped crawler, jobcrawler/tracks/local_tech.py) or
+            # location-scoped crawler, scrapers/ops.py) or
             # "neural" (the location-agnostic runner, remote_neural_run.py).
             # Code keys ops off the ENGINE, never off the user-chosen id.
             "engine": engine,
@@ -349,7 +349,7 @@ def _build_ui_tracks(raw):
             "willing_to_move_default": bool(t.get("willing_to_move_default", False)),
             "remote_requires_watch": bool(t.get("remote_requires_watch", False)),
             "default": bool(t.get("default", False)),
-            # --- crawl methodology (jobcrawler/tracks/runner.py) -----------
+            # --- crawl methodology (scrapers/runner.py) -----------
             "keyword_mode": str(t.get("keyword_mode")
                                 or eng_defaults["keyword_mode"]),
             "accept_remote": bool(t.get("accept_remote",

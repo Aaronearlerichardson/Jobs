@@ -17,21 +17,21 @@ def check(label, cond):
 
 def main():
     # 1. imports
-    import jobcrawler.store as store
-    import jobcrawler.nc as nc
-    import jobcrawler.resume as resume  # noqa: F401 (import-works check)
-    import jobcrawler.fetchers.company as cf
-    import jobcrawler.digest_md as digest_md
-    import jobcrawler.gates as gates
-    import jobcrawler.ops as ops
-    import jobcrawler.runner as runner
-    import jobcrawler.discovery.sniffer as sniffer
-    import jobcrawler.discovery.local_sourcing as ls
-    import jobcrawler.discovery.ats_dork as dork
-    from jobcrawler.discovery.probes import PROBES
+    import core.store as store
+    import core.locality as nc
+    import core.resume as resume  # noqa: F401 (import-works check)
+    import scrapers.fetchers.company as cf
+    import core.digest_md as digest_md
+    import core.gates as gates
+    import scrapers.ops as ops
+    import scrapers.runner as runner
+    import discovery.sniffer as sniffer
+    import discovery.local_sourcing as ls
+    import discovery.ats_dork as dork
+    from discovery.probes import PROBES
     print("[imports OK]")
 
-    # 2. NC locality detection (single source of truth: jobcrawler/nc.py)
+    # 2. NC locality detection (single source of truth: core/locality.py)
     print("[NC locality]")
     check("Durham, NC is NC", nc.is_nc("Durham, NC"))
     check("Boston, MA is not NC", not nc.is_nc("Boston, MA"))
@@ -70,7 +70,7 @@ def main():
     print("[neural gates]")
     check("controller not technical title",
           not gates.is_technical_role("Corporate Controller", neural_t))
-    from jobcrawler.remote_filter import is_remote_eligible, us_eligible
+    from core.remote_filter import is_remote_eligible, us_eligible
     check("remote location eligible", is_remote_eligible("Remote, US"))
     check("hard negation vetoes", not is_remote_eligible("Remote", "this role is not remote"))
     check("Philippines remote not US-eligible", not us_eligible("Philippines Remote"))
@@ -105,7 +105,7 @@ def main():
 
     # 7. HN parser (merged: field classifiers + full text + safe sentence split)
     print("[hn parser]")
-    from jobcrawler.fetchers.hnhiring import _parse_post
+    from scrapers.fetchers.hnhiring import _parse_post
     c, r, l, _ = _parse_post("Acme Neuro | Remote (US) | $150k-190k | Senior ML Engineer | Full-time")
     check("role found out of order", r == "Senior ML Engineer")
     check("location classified", "Remote" in l)
@@ -209,7 +209,7 @@ def main():
     # profile gate_penalty merges over defaults instead of replacing them
     print("[fit rubric]")
     import config as _config
-    import jobcrawler.fit as fit
+    import core.fit as fit
     long_jd = "INTRO " + ("boilerplate " * 2000) + "REQUIREMENTS: 8+ years TPM"
     clipped = fit.clip_desc(long_jd, max_chars=5000)
     check("clip keeps the requirements tail",
@@ -236,7 +236,7 @@ def main():
     # prompt, never on the per-posting user turn (which would write a fresh
     # cache entry per job and never read one).
     print("[prompt cache]")
-    import jobcrawler.claude as claude
+    import core.claude as claude
     p = claude.build_payload("SYSTEM RUBRIC", "JOB TITLE: X")
     check("system carries a cache breakpoint",
           isinstance(p["system"], list)
@@ -287,7 +287,7 @@ def main():
     ids = [r["job_id"] for r in store.ranked_jobs(conn, track="local-tech")]
     check("dismissed+applied leave ranking, saved stays", ids == ["gh_d_100"])
     check("pipeline lists all three", len(store.get_pipeline(conn)) == 3)
-    from jobcrawler.fit import disposition_examples_block
+    from core.fit import disposition_examples_block
     block = disposition_examples_block(conn, 3)
     check("few-shot block carries decisions + why-note",
           'PURSUED: "Data Engineer"' in block and "wrong archetype" in block)
@@ -300,7 +300,7 @@ def main():
     print("[posted dates]")
     from datetime import datetime, timedelta
 
-    from jobcrawler.util import norm_posted_date
+    from scrapers.util import norm_posted_date
     today = datetime.now().strftime("%Y-%m-%d")
     check("ISO datetime w/ tz", norm_posted_date("2026-08-04T09:42:41-04:00") == "2026-08-04")
     check("epoch-ms string (Lever)",
@@ -349,13 +349,13 @@ def main():
           ls.brainstorm_company_names(n=0) == [])
     check("populate_companies grew a dork switch",
           "dork" in ls.populate_companies.__code__.co_varnames)
-    from jobcrawler.discovery.ats_dork import DORK_QUERIES
+    from discovery.ats_dork import DORK_QUERIES
     check("dork queries built from profile locality",
           len(DORK_QUERIES) >= 4 and any("greenhouse" in q for q in DORK_QUERIES))
     # Parallel JS pass safety property: several probe instances can coexist
     # and tear down cleanly without ever launching a browser (lazy launch).
     from contextlib import ExitStack
-    from jobcrawler.discovery.probes import WorkdayJsProbe
+    from discovery.probes import WorkdayJsProbe
     with ExitStack() as _stack:
         _probes = [_stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
         check("K probe instances coexist unlaunched",
@@ -442,7 +442,7 @@ def main():
 
     # 12. profile editing (validate + tomlkit round-trip, no writes to repo)
     print("[profile edit]")
-    from jobcrawler import profile_edit as pe
+    from core import profile_edit as pe
     raw, src = pe.read_raw()
     check("read_raw finds a profile", bool(raw) and src is not None)
     check("current profile validates", pe.validate(raw) == [])
