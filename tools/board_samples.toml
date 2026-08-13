@@ -1,0 +1,52 @@
+# Sample boards for the health canary (tools/check_boards.py).
+#
+# These are NOT search targets — they're public boards used to answer one
+# question per ATS: "is this platform's API still there and still shaped the
+# way our fetcher expects?" Pick employers that reliably have openings; the
+# check makes one request per board, nightly.
+#
+# Only SINGLE-REQUEST platforms belong here. Paginating ones (Workday,
+# SuccessFactors, UltiPro, PeopleAdmin) would have the canary walk thousands
+# of postings to prove one endpoint is alive, which is neither polite nor
+# necessary.
+#
+# `min_jobs` is the floor below which the board is reported degraded — set it
+# well under the board's normal size so ordinary hiring slowdowns don't cry
+# wolf. A small employer that legitimately empties out should be replaced
+# here rather than have its floor set to 0.
+
+[[board]]
+ats = "greenhouse"
+name = "Databricks"
+slug = "databricks"
+min_jobs = 1
+
+[[board]]
+ats = "lever"
+name = "Veeva"
+slug = "veeva"
+min_jobs = 1
+
+[[board]]
+ats = "ashby"
+name = "Vanta"
+slug = "vanta"
+min_jobs = 1
+
+[[board]]
+ats = "bamboohr"
+name = "EMS Biomedical"
+slug = "ems"
+min_jobs = 1
+
+[[board]]
+ats = "kula"
+name = "Precision Neuroscience"
+slug = "precision-neuroscience"
+min_jobs = 1
+
+[[board]]
+ats = "rippling"
+name = "Blackrock Neurotech"
+slug = "blackrockneurotech"
+min_jobs = 1

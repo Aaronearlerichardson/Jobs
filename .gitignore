@@ -47,3 +47,4 @@ data/
 coverage.xml
 .coverage
 htmlcov/
+boards_status.json

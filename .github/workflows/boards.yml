@@ -1,0 +1,68 @@
+name: Boards
+
+# Deliberately NOT part of the merge gate. These checks make real network
+# requests, so they fail for reasons that have nothing to do with a PR —
+# a site is down, a runner's IP gets challenged, a board is briefly empty.
+# A gate that red-lights for reasons the author can't fix is a gate people
+# learn to ignore. This runs on a schedule instead and publishes status.
+on:
+  schedule:
+    - cron: "17 6 * * *"        # 06:17 UTC daily, off the top of the hour
+  workflow_dispatch:
+
+permissions:
+  contents: write               # commits the status table + badge data
+
+concurrency:
+  group: boards
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: ATS board health
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Check boards
+        # Never fails the run: a red badge is the report, not an incident.
+        # Use --fail-on-broken locally when you want a non-zero exit.
+        run: |
+          python tools/check_boards.py \
+            --json boards_status.json \
+            --markdown BOARDS.md \
+            --badge .github/badges/boards.json
+
+      - name: Job summary
+        if: always()
+        run: cat BOARDS.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the raw results as an artifact
+        # Machine-readable detail, downloadable from the run — deliberately
+        # not committed (it changes every night and nothing reads it from
+        # the tree; BOARDS.md and the badge are the published surface).
+        uses: actions/upload-artifact@v4
+        with:
+          name: boards_status
+          path: boards_status.json
+          retention-days: 30
+
+      - name: Publish status
+        # Commits made with GITHUB_TOKEN do not trigger workflows, so this
+        # cannot loop back into CI.
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add BOARDS.md .github/badges/boards.json
+          git diff --staged --quiet || git commit -m "chore: board health $(date -u +%Y-%m-%d)"
+          git push

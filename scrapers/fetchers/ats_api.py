@@ -79,18 +79,26 @@ def fetch_ashby(slug, company_name):
     if not isinstance(data, dict):
         return []
     jobs = []
-    for job in data.get("jobPostings", []):
+    # The posting-api returns {"jobs": [...], "apiVersion": ...}. This read
+    # "jobPostings" and the department field "departmentName", so EVERY
+    # Ashby board silently yielded zero postings (a missing key is an empty
+    # list, and the caller can't tell that from "no matches"). Caught by the
+    # board canary — see tools/check_boards.py.
+    for job in data.get("jobs", []):
         title = job.get("title", "")
         jid   = job.get("id", "")
         jurl  = job.get("jobUrl", "") or f"https://jobs.ashbyhq.com/{slug}/{jid}"
         loc   = job.get("location", "Unknown") or "Unknown"
-        dept  = job.get("departmentName", "")
+        dept  = " ".join(x for x in (job.get("department"), job.get("team")) if x)
         desc  = job.get("descriptionPlain", "") or ""
         if is_relevant(f"{title} {dept}", desc):
             rec = {"id": f"ashby_{slug}_{jid}", "company": company_name,
                    "title": title, "url": jurl, "location": loc,
-                   "description": desc}
-            if job.get("isRemote") is True:
+                   "description": desc,
+                   "posted_at": job.get("publishedAt")}
+            # workplaceType is the structured signal; isRemote is the older
+            # boolean. Either one beats regexing the location string.
+            if job.get("isRemote") is True or job.get("workplaceType") == "Remote":
                 rec["remote_hint"] = "ashby:isRemote"
             jobs.append(rec)
     return jobs

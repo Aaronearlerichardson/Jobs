@@ -1,0 +1,128 @@
+{
+ "jobs": [
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8559344002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 6418982002,
+   "location": {
+    "name": "Tokyo, Japan"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks Japan K.K.",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Field Engineering"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 8559344002,
+   "updated_at": "2026-08-11T14:54:39-04:00",
+   "requisition_id": "FEQ327R203",
+   "title": "\u30bd\u30ea\u30e5\u30fc\u30b7\u30e7\u30f3\u30a2\u30fc\u30ad\u30c6\u30af\u30c8 (\u30d7\u30ea\u30bb\u30fc\u30eb\u30b9)",
+   "company_name": "Databricks",
+   "first_published": "2026-06-29T02:02:50-04:00",
+   "language": "en",
+   "application_deadline": null,
+   "content": "&lt;p data-renderer-start-pos=&quot;1648&quot;&gt;FEQ327R203 [redacted for the fixture]",
+   "departments": [
+    {
+     "id": 4105217002,
+     "name": "Field Engineering - Other",
+     "child_ids": [],
+     "parent_id": 4069106002
+    }
+   ],
+   "offices": [
+    {
+     "id": 4029277002,
+     "name": "Tokyo, Japan",
+     "location": "Tokyo, Japan",
+     "child_ids": [],
+     "parent_id": 4033856002
+    }
+   ],
+   "ai_disclaimer": null,
+   "include_ai_disclaimer": null,
+   "ai_opt_out_request_url": null
+  },
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8428882002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 6366831002,
+   "location": {
+    "name": "Tokyo, Japan"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks Japan K.K.",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Field Engineering"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 8428882002,
+   "updated_at": "2026-08-11T14:54:36-04:00",
+   "requisition_id": "CSQ327R31",
+   "title": "\u30c7\u30ea\u30d0\u30ea\u30fc\u30bd\u30ea\u30e5\u30fc\u30b7\u30e7\u30f3\u30a2\u30fc\u30ad\u30c6\u30af\u30c8",
+   "company_name": "Databricks",
+   "first_published": "2026-03-05T06:43:29-05:00",
+   "language": "ja",
+   "application_deadline": null,
+   "content": "&lt;p&gt;CSQ327R31&lt;/p&gt;\n&lt;p&gt;Databricks\u306f\u3001\u304a\u5ba2\u69d8\u304cAI\u30d7\u30e9\u30c3\u30c8 [redacted for the fixture]",
+   "departments": [
+    {
+     "id": 4001270002,
+     "name": "Delivery Solutions Architects",
+     "child_ids": [],
+     "parent_id": 4069106002
+    }
+   ],
+   "offices": [
+    {
+     "id": 4029277002,
+     "name": "Tokyo, Japan",
+     "location": "Tokyo, Japan",
+     "child_ids": [],
+     "parent_id": 4033856002
+    }
+   ],
+   "ai_disclaimer": null,
+   "include_ai_disclaimer": null,
+   "ai_opt_out_request_url": null
+  }
+ ]
+}

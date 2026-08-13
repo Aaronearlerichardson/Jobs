@@ -4,6 +4,7 @@
 [![codecov](https://codecov.io/gh/Aaronearlerichardson/Jobs/branch/main/graph/badge.svg)](https://codecov.io/gh/Aaronearlerichardson/Jobs)
 [![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey)](https://github.com/Aaronearlerichardson/Jobs/actions/workflows/ci.yml)
+[![Boards](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Aaronearlerichardson/Jobs/main/.github/badges/boards.json)](BOARDS.md)
 
 A configurable job-search crawler. **Your entire search — what you want, where,
 and who you are — lives in one `profile.toml`; the code stays generic.** It
@@ -175,12 +176,13 @@ Some employers can't be crawled directly. Route by type:
 
 - **Secretly on a standard ATS** (e.g. NVIDIA on Workday) — just add the board:
   `python discover.py --add-board "NVIDIA" https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite`.
-- **Bot-gated custom sites** (Meta, Google, Qualcomm — no public feed):
+- **Sites with no public feed** (Meta, Google, Qualcomm):
   - **NLx feed** — `python run_scraper.py --nlx "Meta,Google,Qualcomm"`. Federal
     contractors must list US openings via the National Labor Exchange; this
     reads them through the free **CareerOneStop** API (register at
-    careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`). No
-    scraping, no bot walls. Results carry a description snippet.
+    careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`).
+    An official government API — nothing is scraped. Results carry a
+    description snippet.
   - **Manual** — browse the site yourself and add postings with `capture.py`
     (metacareers.com is parsed; any single job via `capture.py --add`).
 - **Multi-division conglomerates** — list them in profile `[policy].multi_division`
@@ -191,8 +193,12 @@ Some employers can't be crawled directly. Route by type:
 
 ## Manual page capture — `capture.py`
 
-For gated boards (LinkedIn, Indeed, metacareers): **you** browse logged in as
-yourself; the crawler just keeps what you saw. No automation touches your account.
+Sites that require a login (LinkedIn, Indeed, metacareers) are **never
+fetched by this tool**. Instead, *you* browse them yourself, signed in as
+yourself, and the crawler parses the page your own browser already loaded.
+No automation touches those sites or your account — and their hosts are on
+an explicit skip list (`_GATED_HOST_RE` in `scrapers/fetchers/company.py`),
+so even a stale link there is reported "unverifiable" rather than fetched.
 
 ```
 python capture.py                 # capture server on http://127.0.0.1:8877/
@@ -274,6 +280,37 @@ targets) and on **pushes to `main`**:
   flight, so a three-OS compile is never spent on superseded work.
 
 `python smoke_test.py` still works — it's a shim that runs pytest.
+
+### Board health (the other half of "does it work?")
+
+Coverage says whether code ran; it can't say whether **Greenhouse still
+answers on the same endpoint with the same JSON shape**. The fetchers
+swallow HTTP errors and return `[]` on purpose — one dead board must not
+abort a crawl — so a platform that changes its payload fails *silently*:
+job counts just quietly drop.
+
+```
+python tools/check_boards.py                 # one request per platform
+python tools/check_boards.py --fail-on-broken
+```
+
+`.github/workflows/boards.yml` runs it nightly and publishes
+**[BOARDS.md](BOARDS.md)** plus the badge above. Two design notes:
+
+- It is **not** part of the merge gate. Network checks fail for reasons a PR
+  author can't fix (site down, runner IP challenged), and a gate that
+  red-lights for unfixable reasons is one people learn to ignore.
+- It **widens the keyword filter** before judging a board. `is_relevant()`
+  runs *inside* each fetcher, so "0 jobs" would otherwise conflate "the
+  board is broken" with "nothing matched your search". Statuses separate
+  `blocked` (rate-limited/challenged — not our bug) from `broken` (4xx/5xx)
+  from `degraded` (reachable but suspiciously empty).
+
+This paid for itself immediately: it caught `fetch_ashby` reading a
+`jobPostings` key from a payload whose key is `jobs`, which had been
+returning **zero postings for every Ashby board** with no error. Recorded
+fixtures in `tests/fixtures/` (real responses, prose redacted) now pin the
+parsers offline — `tests/test_fetcher_parsers.py`.
 
 ---
 
