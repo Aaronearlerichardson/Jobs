@@ -15,7 +15,6 @@ Replaces the old ``custom`` treatment of Rippling boards, whose static HTML
 scrape returned nothing because the board is client-rendered.
 """
 
-import re
 import time
 
 import requests

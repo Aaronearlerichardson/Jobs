@@ -32,9 +32,12 @@ BOOT_ID = uuid.uuid4().hex
 STATE = {"bound_port": int(os.environ.get("WEBUI_PORT", "5533")),
          "restarting": False}
 
-from . import routes  # noqa: E402,F401  — registers the @app routes
+from . import routes  # noqa: E402  — registers the @app routes
 
-# Re-exports: the public surface tests and tooling poke at.
-from .ops import OPS  # noqa: E402,F401
-from .routes import _geo_tag  # noqa: E402,F401
-from .server import main  # noqa: E402,F401
+# Re-exports: the public surface tests and tooling poke at. Listed in
+# __all__ so they read as deliberate rather than as stray imports.
+from .ops import OPS  # noqa: E402
+from .routes import _geo_tag  # noqa: E402
+from .server import main  # noqa: E402
+
+__all__ = ["app", "BOOT_ID", "STATE", "OPS", "routes", "_geo_tag", "main"]

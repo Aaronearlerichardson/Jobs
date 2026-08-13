@@ -6,7 +6,6 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
-from pathlib import Path
 
 import os
 
@@ -507,7 +506,7 @@ def print_summary(result):
     if unconfirmed:
         leads = [c for c in unconfirmed if c.ats_lead]
         if leads:
-            print(f"\n  Detected ATS (manual add, not auto-fetchable):")
+            print("\n  Detected ATS (manual add, not auto-fetchable):")
             for c in leads:
                 print(f"    > {c.name:<30} {c.ats_lead}")
         print(f"\n  Unconfirmed ({len(unconfirmed)}):")

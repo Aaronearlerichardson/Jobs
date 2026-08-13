@@ -230,12 +230,40 @@ live board; `--prune-offmission` additionally retires `other`-tier companies
 
 ```
 python run_scraper.py --expand "eeg engineer"        # Claude: alt titles/keywords/sectors
-python run_scraper.py python run_scraper.py --expand-location "NC"         # location synonym expansion
+python run_scraper.py --expand-location "NC"         # location synonym expansion
 python run_scraper.py --keyword-report               # bulk-expand profile keywords
 python run_scraper.py --score "job description..."   # technical-bar score one posting
 python run_scraper.py --db alt.db ...                # isolated store (concurrent runs)
-python smoke_test.py                             # offline regression guard
 ```
+
+---
+
+## Tests & CI
+
+```
+pip install -r requirements-dev.txt
+pytest                                   # the whole suite (offline, ~8s)
+pytest tests/test_store.py -k closed     # one area
+```
+
+The suite (`tests/`) is **offline by contract** — no network, no Claude API,
+no writes to your real profile or store. Fixtures in `tests/conftest.py`
+derive their inputs from whichever profile is loaded, so the same tests pass
+on your `profile.toml` and on the shipped `profile.example.toml`; write tests
+redirect `PROFILE_PATH`/`DATA_DIR` to a `tmp_path`.
+
+`.github/workflows/ci.yml` runs **only around `main`** (PRs targeting it and
+pushes to it — a three-OS Nuitka build is not cheap):
+
+- **test** (Ubuntu) — asserts the run really is example-profile + API-free,
+  then byte-compiles, lints (pyflakes), validates the example profile, runs
+  pytest, checks every CLI `--help`, and boots the web app to exercise the
+  API and the asset cache-busting.
+- **build** (Ubuntu + Windows + macOS) — `python build_app.py`, then
+  *launches the built binary* and requires its API to answer; a build that
+  compiles but can't boot is not a pass. Artifacts upload per OS.
+
+`python smoke_test.py` still works — it's a shim that runs pytest.
 
 ---
 

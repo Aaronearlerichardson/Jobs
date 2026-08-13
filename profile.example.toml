@@ -24,27 +24,48 @@ skill = [
 ]
 
 # ---------------------------------------------------------------------------
-# Per-track keyword overrides. A track's apply_to_config() can swap or extend
-# the [keywords] tiers above with a [keywords.<track_name>] table while that
-# track runs — see jobcrawler/tracks/*.py. Optional; omit if you have no
-# per-track tracks that need their own vocabulary.
+# Per-track keyword overrides. The table name must match a [tracks.<id>] id
+# below. `keyword_mode` on that track decides whether these ADD to the tiers
+# above ("extend") or REPLACE them ("replace") while that track runs.
 # ---------------------------------------------------------------------------
-[keywords.example_track]
-core = []
-domain = []
-skill = []
+[keywords.local_tech]
+# Extends the tiers above (this track's engine default is "extend").
+core = ["staff engineer", "principal engineer"]
+domain = ["marketplace", "developer tools"]
+skill = ["typescript", "postgres", "terraform"]
+
+[keywords.remote_neural]
+# REPLACES the tiers above (the neural engine's default is "replace"), so
+# list everything this track should match, not just additions.
+core = ["distributed systems", "database internals", "compilers"]
+domain = ["infrastructure", "developer platform", "observability"]
+skill = ["rust", "go", "kubernetes", "postgres"]
 
 [exclude]
 phrases = ["phd required", "must have a phd", "clearance required"]
 title_phrases = ["manager", "director", "intern"]
 # Regex fragments (ORed together) scrubbed from text before keyword/exclusion
 # matching — for boilerplate that contains domain-looking words without
-# meaning them (benefits sections, EEO statements, infra-health prose).
-boilerplate_phrases = []
+# meaning them (benefits sections, EEO statements, "system health" prose).
+boilerplate_phrases = [
+    'medical[,/&\s]+(?:dental|vision)',
+    'health\s+(?:insurance|savings|benefits?)',
+    '(?:system|service|platform)\s+health',
+]
 
-# Optional per-track exclude overrides, e.g. [exclude.example_track] with
-# role_phrases / title_tokens / defense_strong / defense_weak / nonclinical —
-# see jobcrawler/tracks/local_tech.py for the shape.
+# Per-track exclusions. Table name matches a [tracks.<id>] id; applied only
+# while that track runs, and only when its `exclude_gate` is on.
+[exclude.local_tech]
+# Job kinds you never want, matched anywhere in the posting.
+role_phrases = ["data entry", "sales development representative"]
+# Short abbreviations that only make sense in a title.
+title_tokens = ["sdr", "bdr"]
+# One hit is enough to drop the posting.
+defense_strong = ["weapons", "munitions", "electronic warfare"]
+# Innocent alone — two DIFFERENT hits are needed to drop a posting.
+defense_weak = ["defense", "military", "combat"]
+# Off-topic industries to drop even when they use your keywords.
+nonclinical = ["blockchain", "cryptocurrency", "sportsbook"]
 
 [locations]
 onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]

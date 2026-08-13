@@ -1,0 +1,7 @@
+# Development / CI extras (the app itself needs only requirements.txt).
+-r requirements.txt
+
+pytest>=8.0
+pyflakes>=3.0
+# Standalone build (build_app.py); only needed when producing a binary.
+nuitka>=2.0

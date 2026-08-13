@@ -46,8 +46,8 @@ def print_expansion(term, expanded):
         print(f"    - {s}")
 
     print(f"\n  {'-'*58}")
-    print(f"  To fold these into a live crawl, rerun with:")
-    print(f'    add the keywords to profile.toml [keywords] (Settings tab)')
+    print("  To fold these into a live crawl, rerun with:")
+    print('    add the keywords to profile.toml [keywords] (Settings tab)')
     print(f"{bar}\n")
 
 
@@ -71,7 +71,7 @@ def print_location_expansion(term, expanded):
         print(f"    - {x}{marker}")
 
     print(f"\n  {'-'*58}")
-    print(f"  Copy entries you want into LOCATION_INCLUDE / LOCATION_EXCLUDE.")
+    print("  Copy entries you want into LOCATION_INCLUDE / LOCATION_EXCLUDE.")
     print(f"{bar}\n")
 
 
@@ -113,7 +113,7 @@ def generate_keyword_report(delay=0.5):
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# Keyword Expansion Report - {date_str}\n\n")
         f.write(f"Seeded from **{len(INCLUDE_KEYWORDS)}** existing keyword(s) in `INCLUDE_KEYWORDS`.\n")
-        f.write(f"Suggestions ranked by how many seed terms surfaced them.\n\n")
+        f.write("Suggestions ranked by how many seed terms surfaced them.\n\n")
 
         f.write("## New keywords to consider\n\n")
         f.write("Items marked `[already in list]` are in `INCLUDE_KEYWORDS`.\n\n")

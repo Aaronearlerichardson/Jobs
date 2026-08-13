@@ -392,9 +392,8 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                  for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
                   if _NONALNUM_RE.sub("", m.lower()) not in found]
-        try:
-            import playwright.sync_api  # noqa: F401 — availability check only
-        except ImportError:
+        import importlib.util
+        if importlib.util.find_spec("playwright.sync_api") is None:
             if missed:
                 print(f"    [js] playwright not installed; skipping JS probe "
                       f"of {len(missed)} major(s)")
@@ -859,7 +858,6 @@ def score_missions(max_workers=6, rescore_all=False):
     keyless/failed scoring passes."""
     from core.claude import score_company_mission
     from core.store import connect, get_companies, upsert_company
-    from scrapers.sources import store_slug
 
     conn = connect()
     cos = [c for c in get_companies(conn, active_only=True)
