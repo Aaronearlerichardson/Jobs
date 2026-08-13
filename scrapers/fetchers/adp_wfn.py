@@ -13,11 +13,10 @@ Each requisition has itemID, requisitionTitle, postDate, and
 
 import time
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
         "/events/staffing/v1/job-requisitions")
@@ -38,7 +37,7 @@ def _location_str(req):
 
 def _fetch_description(item_id, cid, ccid, timeout=15):
     try:
-        r = requests.get(
+        r = SESSION.get(
             f"{_API}/{item_id}",
             params={"cid": cid, "ccId": ccid, "locale": "en_US"},
             timeout=timeout, headers=_JSON_HEADERS,
@@ -61,7 +60,7 @@ def fetch_adp(cid, ccid, company_name, page_size=50, max_pages=10,
     jobs, details_fetched = [], 0
     for page in range(max_pages):
         try:
-            r = requests.get(
+            r = SESSION.get(
                 _API,
                 params={"cid": cid, "ccId": ccid, "locale": "en_US",
                         "$top": page_size, "$skip": page * page_size},

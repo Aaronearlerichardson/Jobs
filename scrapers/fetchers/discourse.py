@@ -1,16 +1,15 @@
 """Discourse forum job-category feed."""
 
-import requests
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 
 def fetch_discourse(display_name, base_url, category_id):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     dsc_headers = {**HEADERS, "Accept": "application/json"}
     try:
-        r = requests.get(url, timeout=20, headers=dsc_headers)
+        r = SESSION.get(url, timeout=20, headers=dsc_headers)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Discourse {display_name}: {e}")

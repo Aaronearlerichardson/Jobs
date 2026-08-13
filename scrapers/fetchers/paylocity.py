@@ -17,11 +17,10 @@ import json
 import re
 import time
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
 _DETAIL = "https://recruiting.paylocity.com/Recruiting/Jobs/Details/{jid}"
@@ -30,7 +29,7 @@ _PAGEDATA_RE = re.compile(r"pageData\s*=\s*(\{.*?\});", re.S)
 
 def parse_board(guid, timeout=20):
     """Return the raw ``pageData.Jobs`` list for one board GUID."""
-    r = requests.get(_BOARD.format(guid=guid), timeout=timeout, headers=HEADERS)
+    r = SESSION.get(_BOARD.format(guid=guid), timeout=timeout, headers=HEADERS)
     r.raise_for_status()
     m = _PAGEDATA_RE.search(r.text)
     if not m:
@@ -53,7 +52,7 @@ def location_str(job):
 def fetch_description(job_id, timeout=15):
     """Full JD text for one posting, from its server-rendered detail page."""
     try:
-        r = requests.get(_DETAIL.format(jid=job_id), timeout=timeout, headers=HEADERS)
+        r = SESSION.get(_DETAIL.format(jid=job_id), timeout=timeout, headers=HEADERS)
         r.raise_for_status()
         el = BeautifulSoup(r.text, "html.parser").select_one(
             ".job-preview-details, [class*=job-preview]")

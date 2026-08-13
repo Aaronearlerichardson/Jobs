@@ -10,9 +10,8 @@ So we use it the way the rest of discovery works: harvest names here, then
 run them through validate_candidate (slug probe + careers-page ATS sniff)
 """
 
-import requests
 
-from scrapers.http import HEADERS
+from scrapers.http import SESSION, HEADERS
 
 API_URL = "https://bciwiki.org/api.php"
 
@@ -45,7 +44,7 @@ def _category_members(category, max_items=2000, timeout=25):
             **cont,
         }
         try:
-            r = requests.get(API_URL, params=params, headers=HEADERS, timeout=timeout)
+            r = SESSION.get(API_URL, params=params, headers=HEADERS, timeout=timeout)
             r.raise_for_status()
             data = r.json()
         except Exception as e:

@@ -8,6 +8,8 @@ import threading
 
 import requests
 
+from scrapers.http import SESSION
+
 import config
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
@@ -287,7 +289,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     lead = _claim_prefix(use_model, system_prompt) \
         if (cache and _CACHE_ENABLED and system_prompt) else None
     try:
-        r = requests.post(
+        r = SESSION.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key":         ANTHROPIC_API_KEY,

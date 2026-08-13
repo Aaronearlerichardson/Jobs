@@ -13,11 +13,10 @@ WeWorkRemotely feeds:
 import html
 import re
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 from ..util import stable_id
 
 
@@ -81,7 +80,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
     the parsed region is an eligibility constraint, not an office.
     """
     try:
-        r = requests.get(url, timeout=25, headers=HEADERS)
+        r = SESSION.get(url, timeout=25, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] RSS {source_label}: {e}")

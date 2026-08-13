@@ -14,10 +14,9 @@ import html
 import re
 import time
 
-import requests
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 BASE = "https://hacker-news.firebaseio.com/v0"
 
@@ -85,7 +84,7 @@ def _strip_html(s):
 
 def _get_json(url, timeout=15):
     try:
-        r = requests.get(url, timeout=timeout, headers=HEADERS)
+        r = SESSION.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
         return r.json()
     except Exception as e:

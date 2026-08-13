@@ -13,10 +13,9 @@ Schema (per job):
 import html
 import re
 
-import requests
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 API_URL = "https://remoteok.com/api"
 
@@ -33,7 +32,7 @@ def fetch_remoteok(max_jobs=500):
     Returns a list of job dicts in the standard crawler shape.
     """
     try:
-        r = requests.get(API_URL, timeout=25, headers=HEADERS)
+        r = SESSION.get(API_URL, timeout=25, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:

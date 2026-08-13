@@ -13,10 +13,9 @@ is_relevant() filter is narrower than any single Remotive category.
 import html
 import re
 
-import requests
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 API_URL = "https://remotive.com/api/remote-jobs"
 
@@ -39,7 +38,7 @@ def fetch_remotive(category=None, max_jobs=None):
         url = f"{API_URL}?category={category}"
 
     try:
-        r = requests.get(url, timeout=25, headers=HEADERS)
+        r = SESSION.get(url, timeout=25, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:

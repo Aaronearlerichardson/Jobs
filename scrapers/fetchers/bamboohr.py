@@ -12,11 +12,10 @@ and expose two unauthenticated JSON endpoints:
 
 import time
 
-import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
-from ..http import HEADERS
+from ..http import SESSION, HEADERS
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 
@@ -36,7 +35,7 @@ def _is_remote(job):
 
 def _fetch_description(base, jid, timeout=15):
     try:
-        r = requests.get(f"{base}/careers/{jid}/detail",
+        r = SESSION.get(f"{base}/careers/{jid}/detail",
                          timeout=timeout, headers=_JSON_HEADERS)
         r.raise_for_status()
         opening = (r.json().get("result") or {}).get("jobOpening") or {}
@@ -49,7 +48,7 @@ def _fetch_description(base, jid, timeout=15):
 def fetch_bamboohr(subdomain, company_name, max_details=40, detail_delay=0.2):
     base = f"https://{subdomain}.bamboohr.com"
     try:
-        r = requests.get(f"{base}/careers/list", timeout=20,
+        r = SESSION.get(f"{base}/careers/list", timeout=20,
                          headers=_JSON_HEADERS)
         r.raise_for_status()
         entries = r.json().get("result") or []
