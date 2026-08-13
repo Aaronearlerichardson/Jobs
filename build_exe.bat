@@ -4,12 +4,12 @@ rem
 rem     webapp.dist\JobCrawlerUI.exe
 rem
 rem The dist folder is self-contained (bundled CPython + Flask + the crawler
-rem package + lxml etc.) - copy it to any Windows machine and double-click
+rem packages + lxml etc.) - copy it to any Windows machine and double-click
 rem the exe; no Python or pip installs needed there. Data resolution:
-rem JOBS_DATA_DIR env var if set; else the exe's folder when it already has
-rem data; else the PARENT folder when it holds local_tech.db (dist inside
-rem this repo -> uses the repo's real DB); else the exe's folder with a
-rem fresh DB (copied to a new machine). Set ANTHROPIC_API_KEY in the
+rem JOBS_DATA_DIR env var if set; else <exe dir>\data when it holds a DB;
+rem else the exe's folder itself (legacy layout); else <parent>\data when
+rem that holds local_tech.db (dist inside this repo -> uses the repo's real
+rem data); else a fresh <exe dir>\data. Set ANTHROPIC_API_KEY in the
 rem environment for the scoring operations.
 rem
 rem Playwright (optional headless-browser probes for JS-only boards) is
@@ -23,8 +23,12 @@ python -m pip show nuitka >nul 2>&1 || python -m pip install nuitka
 python -m nuitka webapp.py ^
   --standalone ^
   --output-filename=JobCrawlerUI.exe ^
-  --include-package=jobcrawler ^
-  --include-data-files=webui/index.html=webui/index.html ^
+  --include-package=core ^
+  --include-package=scrapers ^
+  --include-package=discovery ^
+  --include-package=webapp ^
+  --include-data-files=webapp/templates/index.html=webapp/templates/index.html ^
+  --include-data-dir=webapp/static=webapp/static ^
   --include-data-files=profile.example.toml=profile.example.toml ^
   --assume-yes-for-downloads
 if errorlevel 1 (

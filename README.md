@@ -8,18 +8,18 @@ the location, or relax the BCI constraint — and lets you pivot between them:
 
 | Track | Keeps | Relaxes | Command |
 |---|---|---|---|
-| **remote-neural** | neural signals (BCI/EEG/iEEG/ECoG/...), high technical bar, clinical mission | location → remote (US-eligible) | `python crawler.py --track remote-neural` |
-| **local-tech** | Triangle/NC location (~2.5 h ring), technical bar, health/bio/science mission | neural requirement | `python crawler.py --track local-tech` |
+| **remote-neural** | neural signals (BCI/EEG/iEEG/ECoG/...), high technical bar, clinical mission | location → remote (US-eligible) | `python run_scraper.py --track remote_neural` |
+| **local-tech** | Triangle/NC location (~2.5 h ring), technical bar, health/bio/science mission | neural requirement | `python run_scraper.py --track local_tech` |
 
 Those specifics are just the shipped profile — swap `profile.toml` and the
 tracks retarget any field/region. Both tracks share the fetchers, discovery
 pipeline, company store, Claude scorers, and parallel fetch pool; they differ
-only in gates and ranking. A third, older mode (`python crawler.py` with no
+only in gates and ranking. A third, older mode (`python run_scraper.py` with no
 flags) runs the classic keyword crawl and emails a digest.
 
 ```
 DISCOVERY                    STORE (local_tech.db)            CRAWL
-discover.py ..............>  companies                        crawler.py --track ...
+discover.py ..............>  companies                        run_scraper.py --track ...
   Claude suggestions           (ats, slug, mission score,       fetch boards (parallel)
   BCIWiki directory             tags: neural | nc_local,        -> gates (per track)
   local sourcing / dorking      active flag)                    -> score (resume fit /
@@ -62,7 +62,7 @@ mission tiers, locality, and discovery seeds. `config.py` is now just plumbing
   it (heuristic fallbacks, unscored missions).
 - **Prompt caching is on by default.** Every scorer sends the same stable
   system prompt (rubric + profile) with a per-posting user turn, so
-  `jobcrawler/claude.py` puts a cache breakpoint at the end of `system`: the
+  `core/claude.py` puts a cache breakpoint at the end of `system`: the
   first call in a run writes the prefix (1.25x) and the rest read it (0.1x),
   which is roughly a 5-10x cut on input cost for a several-hundred-job crawl.
   Each run prints a `[claude] ... % of cacheable prefix hit` line on exit —
@@ -84,7 +84,7 @@ mission tiers, locality, and discovery seeds. `config.py` is now just plumbing
 ```
 python discover.py --local                # source local companies into the store
 python discover.py --score-missions       # tier the new companies
-python crawler.py --track local-tech      # or --track remote-neural
+python run_scraper.py --track local_tech      # or --track remote-neural
 ```
 
 (There is no more `--import-seeds` — the company roster is stored in the DB, not
@@ -104,11 +104,11 @@ priority companies, then store companies tagged `neural`, then forums and
 remote boards (RemoteOK/Remotive/HN/RSS), and optional DDG web searches.
 
 ```
-python crawler.py --track remote-neural                  # read-only preview
-python crawler.py --track remote-neural --commit         # persist to store
-python crawler.py --track remote-neural --send           # email the digest
-python crawler.py --track remote-neural --fit            # resume-fit-rank matches
-python crawler.py --track remote-neural --no-websearch   # skip flaky DDG
+python run_scraper.py --track remote_neural --preview        # read-only preview
+python run_scraper.py --track remote_neural                    # crawl + persist
+python run_scraper.py --track remote_neural --send             # email the digest
+python run_scraper.py --track remote_neural --no-fit           # skip resume-fit scoring
+python run_scraper.py --track remote_neural --no-websearch     # skip flaky DDG
 ```
 
 ### local-tech
@@ -119,7 +119,7 @@ titles, resume-fit-scores each new job in parallel, and writes a digest ranked
 by a combined **√(resume-fit × company-mission)** score. Never emails.
 
 ```
-python crawler.py --track local-tech [--top 20] [--workers 8]
+python run_scraper.py --track local_tech [--top 20] [--workers 8]
 ```
 
 Companies carry a cached mission score (bullseye = 1.0 → down the profile's
@@ -155,8 +155,8 @@ Medical) — such hits carry `VERIFY:` notes through reports. Eyeball them.
 ### Sharing / backing up the roster
 
 ```
-python crawler.py --export-companies roster.json    # dump the roster (secrets-free)
-python crawler.py --import-companies roster.json    # upsert a shared roster
+python run_scraper.py --export-companies roster.json    # dump the roster (secrets-free)
+python run_scraper.py --import-companies roster.json    # upsert a shared roster
 ```
 
 `roster.json` is the diffable, shareable "starter set" that replaced the old
@@ -171,7 +171,7 @@ Some employers can't be crawled directly. Route by type:
 - **Secretly on a standard ATS** (e.g. NVIDIA on Workday) — just add the board:
   `python discover.py --add-board "NVIDIA" https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite`.
 - **Bot-gated custom sites** (Meta, Google, Qualcomm — no public feed):
-  - **NLx feed** — `python crawler.py --nlx "Meta,Google,Qualcomm"`. Federal
+  - **NLx feed** — `python run_scraper.py --nlx "Meta,Google,Qualcomm"`. Federal
     contractors must list US openings via the National Labor Exchange; this
     reads them through the free **CareerOneStop** API (register at
     careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`). No
@@ -214,8 +214,8 @@ Company names seen become **leads** → `discover.py --resolve-leads`.
 ## Maintenance
 
 ```
-python crawler.py --prune                     # deactivate dead (404) ATS boards
-python crawler.py --prune --prune-offmission  # also drop off-mission "other" companies
+python run_scraper.py --prune                     # deactivate dead (404) ATS boards
+python run_scraper.py --prune --prune-offmission  # also drop off-mission "other" companies
 ```
 
 `--prune` probes every active Greenhouse/Lever/Ashby/BambooHR board and
@@ -229,12 +229,11 @@ live board; `--prune-offmission` additionally retires `other`-tier companies
 ## Keyword & scoring utilities
 
 ```
-python crawler.py --expand "eeg engineer"        # Claude: alt titles/keywords/sectors
-python crawler.py --expand-live TERM             # ...folded into this run
-python crawler.py --expand-location "NC"         # location synonym expansion
-python crawler.py --keyword-report               # bulk-expand profile keywords
-python crawler.py --score "job description..."   # technical-bar score one posting
-python crawler.py --db alt.db ...                # isolated store (concurrent runs)
+python run_scraper.py --expand "eeg engineer"        # Claude: alt titles/keywords/sectors
+python run_scraper.py python run_scraper.py --expand-location "NC"         # location synonym expansion
+python run_scraper.py --keyword-report               # bulk-expand profile keywords
+python run_scraper.py --score "job description..."   # technical-bar score one posting
+python run_scraper.py --db alt.db ...                # isolated store (concurrent runs)
 python smoke_test.py                             # offline regression guard
 ```
 
@@ -243,7 +242,7 @@ python smoke_test.py                             # offline regression guard
 ## Résumé-fit scoring
 
 Each job gets a résumé-fit score in [0, 1] from a **multi-axis rubric**
-(`jobcrawler/fit.py`), not a single opaque number. The LLM scores four
+(`core/fit.py`), not a single opaque number. The LLM scores four
 orthogonal axes and flags disqualifying gates; Python combines them (a weighted
 geometric mean times the worst gate penalty), so the math is transparent and
 tunable:
@@ -268,7 +267,7 @@ stops scoring like your pipeline work.
 Everything is profile-driven: weights, gate penalties, the domain ladder, your
 stack vocabulary, and region terms live in `profile.toml [fit]` (omit it for the
 built-in neural/biosignal defaults). The rubric is calibrated against a small
-anchor set — run `python -m jobcrawler.fit` to print the predicted-vs-hand table
+anchor set — run `python -m core.fit` to print the predicted-vs-hand table
 after retuning weights.
 
 **Stored columns.** `resume_fit_score` is the combined scalar; the breakdown is
@@ -288,10 +287,10 @@ value — so fetch the bodies first.
 ### Re-scoring & description backfill
 
 ```
-python crawler.py --local-tech --backfill-descriptions            # fetch full JD text for stored Workday jobs (CXS)
-python crawler.py --local-tech --backfill-descriptions --limit 20 # try a small batch first
-python crawler.py --local-tech --rescore                          # re-score every stored job with the current rubric/profile
-python crawler.py --local-tech --rescore --described-only         # ...only jobs that already have a JD body
+python run_scraper.py --track local_tech --backfill-descriptions            # fetch full JD text for stored Workday jobs (CXS)
+python run_scraper.py --track local_tech --backfill-descriptions --limit 20 # try a small batch first
+python run_scraper.py --track local_tech --rescore                          # re-score every stored job with the current rubric/profile
+python run_scraper.py --track local_tech --rescore --described-only         # ...only jobs that already have a JD body
 ```
 
 Workday serves each job's full description as plain JSON from
@@ -305,11 +304,11 @@ block, or the prompt — a normal crawl only scores jobs it hasn't seen.
 ### Deep verification & the watchlist
 
 ```
-python crawler.py --track local-tech                     # crawl deep-verifies the top N before writing the digest
-python crawler.py --track local-tech --no-verify         # skip the second pass
-python crawler.py --track local-tech --verify-top 15     # re-verify the current top 15 (no crawl), rewrite digest
-python crawler.py --watch "Ceribell"                     # never miss a new technical posting there
-python crawler.py --unwatch "Ceribell"
+python run_scraper.py --track local_tech                     # crawl deep-verifies the top N before writing the digest
+python run_scraper.py --track local_tech --no-verify         # skip the second pass
+python run_scraper.py --track local_tech --verify-top 15     # re-verify the current top 15 (no crawl), rewrite digest
+python run_scraper.py --watch "Ceribell"                     # never miss a new technical posting there
+python run_scraper.py --unwatch "Ceribell"
 ```
 
 Scoring is two-pass. The **screen** scores every new job once on up to
@@ -338,7 +337,7 @@ python webapp.py        ->  http://127.0.0.1:5533
 ```
 
 Everything above in one local page (Flask + a single self-contained
-[webui/index.html](webui/index.html), light/dark, no build step):
+[webapp/](webapp/) (templates/index.html + static/css+js), light/dark, no build step):
 
 * **Tracks** — a header dropdown switches between the search tracks defined
   in `profile.toml [tracks.*]` (each bundles a DB, crawl engine, ranking
@@ -365,7 +364,7 @@ Everything above in one local page (Flask + a single self-contained
   scoring, prune, dedup, manual job add, and add-company-board — run as
   background tasks with the console streamed live into the page (one at a
   time; buttons lock while something runs). One **Crawl** command serves
-  every track: a single pipeline (`jobcrawler/tracks/runner.py`) whose
+  every track: a single pipeline (`scrapers/runner.py`) whose
   methodology — keyword handling (`keyword_mode`), source families
   (`sources`), gates (`require_core_anchor`, `geo_gate`), scoring budget
   (`verify_top`, `cost_guard`), and digest email — comes entirely from the
@@ -403,11 +402,11 @@ are fast.
 ### Dispositions — record your decisions, teach the scorer
 
 ```
-python crawler.py --mark applied gh_beaconbiosignals_4361153009
-python crawler.py --mark dismissed 6113860004 --why "TPM seat, wrong archetype"
-python crawler.py --mark saved <url>          # shortlist; stays in the ranking
-python crawler.py --mark clear <job>          # undo
-python crawler.py --pipeline                  # everything you've dispositioned
+python run_scraper.py --mark applied gh_beaconbiosignals_4361153009
+python run_scraper.py --mark dismissed 6113860004 --why "TPM seat, wrong archetype"
+python run_scraper.py --mark saved <url>          # shortlist; stays in the ranking
+python run_scraper.py --mark clear <job>          # undo
+python run_scraper.py --pipeline                  # everything you've dispositioned
 ```
 
 `JOB` is a job_id, any unique fragment of one, or the posting URL.
@@ -439,10 +438,10 @@ deliberately kept separate from `posted_at` (when it actually went up).
 ### Closed-job tracking
 
 ```
-python crawler.py --track local-tech                        # crawl also syncs open/closed per board
-python crawler.py --track local-tech --sync-status          # reconcile statuses only (no scoring/API) + rewrite digest
-python crawler.py --track local-tech --check-closed         # probe rows no board has vouched for lately
-python crawler.py --track local-tech --check-closed --stale-days 5 --limit 20
+python run_scraper.py --track local_tech                        # crawl also syncs open/closed per board
+python run_scraper.py --track local_tech --sync-status          # reconcile statuses only (no scoring/API) + rewrite digest
+python run_scraper.py --track local_tech --check-closed         # probe rows no board has vouched for lately
+python run_scraper.py --track local_tech --check-closed --stale-days 5 --limit 20
 ```
 
 Every job row carries `status` (`open`/`closed`) and `closed_at`. The crawl
@@ -503,7 +502,7 @@ sourcing all follow. `config.py` needs no edits.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "python" `
-           -Argument "C:\Users\Jakda\git\Jobs\crawler.py --track local-tech" `
+           -Argument "C:\Users\Jakda\git\Jobs\run_scraper.py --track local_tech" `
            -WorkingDirectory "C:\Users\Jakda\git\Jobs"
 $trigger = New-ScheduledTaskTrigger -Daily -At "8:00AM"
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -StartWhenAvailable
@@ -511,13 +510,17 @@ Register-ScheduledTask -TaskName "Jobs Crawler" -Action $action -Trigger $trigge
 ```
 
 (Or Task Scheduler GUI: daily trigger → program `python`, arguments
-`crawler.py --track ...`, "Start in" = the repo folder.)
+`run_scraper.py --track ...`, "Start in" = the repo folder. Existing tasks
+that still point at `crawler.py` keep working — it's a deprecation shim that
+forwards to `run_scraper.py` — but repoint them when convenient. Note
+`run_scraper.py` with NO flags now refreshes EVERY configured track.)
 
 ---
 
 ## Data model & files
 
-One SQLite store, `local_tech.db` (`jobcrawler/store.py`):
+One SQLite store per track, under `data/` (`core/store.py`; default
+`data/local_tech.db` + `data/neural.db`, filenames from `[tracks.*].db`):
 
 - **companies** — name, ats, slug / Workday triple / careers_url, NC job count,
   cached mission tier + score, `tags` (`neural`, `nc_local`, `multi_division` —
@@ -530,8 +533,10 @@ One SQLite store, `local_tech.db` (`jobcrawler/store.py`):
   stored.
 
 Schema migrations are additive/automatic; old DBs upgrade in place (and shed
-retired columns). Runtime artifacts (all gitignored): `local_tech.db`,
-`profile.toml`, `job_reports/*.md`, `captures/`, `*.log`.
+retired columns). All local data lives in the gitignored `data/` directory
+(DBs, resume, `job_reports/*.md`, `captures/`, caches, profile backups);
+override its location with the `JOBS_DATA_DIR` env var. `profile.toml`
+stays at the app root beside `config.py`.
 
 **One writer at a time:** SQLite locking does not span the boundary between your
 shell and an agent sandbox mounting the same folder — two concurrent writers
@@ -541,16 +546,21 @@ corrupt the DB.
 
 | Module | Role |
 |---|---|
-| `crawler.py` / `discover.py` / `capture.py` | entry points: crawl/maintain, roster growth, manual capture |
-| `config.py` / `profile.toml` | plumbing (config.py) vs. all search criteria (profile.toml) |
-| `jobcrawler/tracks/` | the two tracks (gates, ranking, digests) |
-| `jobcrawler/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `jobcrawler/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap + CareerOneStop/NLx); `workday.py` also pulls full JD text via the CXS per-job endpoint and exposes `backfill_workday_descriptions` |
-| `jobcrawler/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
-| `jobcrawler/discovery/` | pipeline, slug probes, careers-page sniffer, BCIWiki, local sourcing (+ web-search name harvest), dorking; `apply.py` upserts into the store |
-| `jobcrawler/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
-| `jobcrawler/store.py` | unified companies + jobs store (+ export/import, prune, `update_job_scores`) |
-| `jobcrawler/fit.py` | multi-axis résumé-fit rubric (axes + gates + deterministic combiner), templated from profile `[fit]`; calibration harness via `python -m jobcrawler.fit` |
-| `jobcrawler/claude.py` | Claude API wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts; `score_resume_fit` delegates to `fit.py` |
-| `jobcrawler/filters.py` / `remote_filter.py` / `nc.py` | keyword tiers, remote eligibility, locality — all driven by `profile.toml` |
-| `jobcrawler/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
+| `run_scraper.py` / `webapp.py` | entry points: daily refresh + maintenance CLI, web UI launcher (`crawler.py` = deprecation shim) |
+| `discover.py` / `capture.py` | entry points: roster growth, manual page capture |
+| `config.py` / `profile.toml` | plumbing (config.py: paths, DATA_DIR, track parsing) vs. all search criteria (profile.toml) |
+| `data/` | every local artifact: DBs, resume, `job_reports/`, `captures/`, caches, profile backups (gitignored; `JOBS_DATA_DIR` overrides) |
+| `scrapers/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
+| `scrapers/ops.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
+| `scrapers/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
+| `scrapers/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/DDG/JSON-LD/sitemap + CareerOneStop/NLx); `workday.py` also pulls full JD text via the CXS per-job endpoint |
+| `scrapers/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
+| `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
+| `discovery/` | pipeline, slug probes, careers-page sniffer, BCIWiki, local sourcing (+ web-search name harvest), dorking; `apply.py` upserts into the store |
+| `core/store.py` | unified companies + jobs store (+ export/import, prune, `update_job_scores`) |
+| `core/fit.py` | multi-axis résumé-fit rubric (axes + gates + deterministic combiner), templated from profile `[fit]`; calibration harness via `python -m core.fit` |
+| `core/claude.py` | Claude API wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts; `score_resume_fit` delegates to `fit.py` |
+| `core/gates.py` / `core/digest_md.py` | config-driven title/exclude gates; ranked + matches digest renderers |
+| `core/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all driven by `profile.toml` |
+| `webapp/` | Flask package: `routes.py`, `ops.py` (op registry), `server.py` (restart/ports), `templates/` + `static/` (the SPA) |
+| `scrapers/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
