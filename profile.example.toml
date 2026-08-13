@@ -23,15 +23,128 @@ skill = [
     "data pipeline", "machine learning",
 ]
 
+# ---------------------------------------------------------------------------
+# Per-track keyword overrides. The table name must match a [tracks.<id>] id
+# below. `keyword_mode` on that track decides whether these ADD to the tiers
+# above ("extend") or REPLACE them ("replace") while that track runs.
+# ---------------------------------------------------------------------------
+[keywords.local_tech]
+# Extends the tiers above (this track's engine default is "extend").
+core = ["staff engineer", "principal engineer"]
+domain = ["marketplace", "developer tools"]
+skill = ["typescript", "postgres", "terraform"]
+
+[keywords.remote_neural]
+# REPLACES the tiers above (the neural engine's default is "replace"), so
+# list everything this track should match, not just additions.
+core = ["distributed systems", "database internals", "compilers"]
+domain = ["infrastructure", "developer platform", "observability"]
+skill = ["rust", "go", "kubernetes", "postgres"]
+
 [exclude]
 phrases = ["phd required", "must have a phd", "clearance required"]
 title_phrases = ["manager", "director", "intern"]
+# Regex fragments (ORed together) scrubbed from text before keyword/exclusion
+# matching — for boilerplate that contains domain-looking words without
+# meaning them (benefits sections, EEO statements, "system health" prose).
+boilerplate_phrases = [
+    'medical[,/&\s]+(?:dental|vision)',
+    'health\s+(?:insurance|savings|benefits?)',
+    '(?:system|service|platform)\s+health',
+]
+
+# Per-track exclusions. Table name matches a [tracks.<id>] id; applied only
+# while that track runs, and only when its `exclude_gate` is on.
+[exclude.local_tech]
+# Job kinds you never want, matched anywhere in the posting.
+role_phrases = ["data entry", "sales development representative"]
+# Short abbreviations that only make sense in a title.
+title_tokens = ["sdr", "bdr"]
+# One hit is enough to drop the posting.
+defense_strong = ["weapons", "munitions", "electronic warfare"]
+# Innocent alone — two DIFFERENT hits are needed to drop a posting.
+defense_weak = ["defense", "military", "combat"]
+# Off-topic industries to drop even when they use your keywords.
+nonclinical = ["blockchain", "cryptocurrency", "sportsbook"]
 
 [locations]
 onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]
 remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "anywhere"]
 accept_remote = true
 exclude = []
+
+# Remote-eligibility detection (jobcrawler/remote_filter.py). Falls back to
+# built-in generic defaults when left empty.
+remote_tokens = []
+remote_phrases = []
+hard_negations = []
+us_markers = []
+non_us_regions = []
+
+# ---------------------------------------------------------------------------
+# Tracks — the web UI's switchable search profiles. Each [tracks.<id>] table
+# defines: which SQLite DB the UI reads (`db`, relative to the data dir), the
+# jobs.track value (`track`), ranking knobs (`rank_by`, `min_mission`), and
+# the UI filter defaults applied when you switch to the track
+# (`min_fit_default` for the fit slider, `willing_to_move_default` for the
+# relocate checkbox). `remote_requires_watch = true` hides remote rows unless
+# the company carries the human-set "watch" tag (precision rule for
+# locality-focused tracks). `default = true` marks the track the UI opens on.
+# Omit the whole [tracks] section to get the built-in two-track default.
+# ---------------------------------------------------------------------------
+[tracks.local_tech]
+label = "Local"
+db = "jobs.db"
+track = "local-tech"
+# `engine` names the crawl machinery, not the track: "local" (the
+# location-scoped crawler) or "neural" (the location-agnostic neural runner).
+# Track ids/labels/dbs are yours to rename; engines are fixed code paths, and
+# operations in the UI enable themselves by engine.
+engine = "local"
+rank_by = "fit"
+min_mission = 0.2
+min_fit_default = 0.0
+willing_to_move_default = false
+remote_requires_watch = true
+default = true
+# ---------------------------------------------------------------------------
+# Crawl methodology — every knob below defaults from `engine`, so omit what
+# you don't need to change. One crawl pipeline (jobcrawler/tracks/runner.py)
+# serves every track; these keys ARE the difference between tracks.
+# ---------------------------------------------------------------------------
+# keyword_mode = "extend"      # "extend": [keywords.<id>] ADDs to the global
+#                              # tiers; "replace": they BECOME the tiers
+# accept_remote = false        # allow remote listings through the fetch filter
+# sources = { store = true, priority_companies = false, aggregators = false, websearch = false, location_scoped = true }
+#   # store: active companies from this track's DB
+#   # priority_companies: [discovery] priority_companies, fetched first
+#   # aggregators: Discourse/RemoteOK/Remotive/HN/RSS feeds
+#   # websearch: DDG web-search queries
+#   # location_scoped: store boards fetched through the [locality] filter
+#   #   (whole-board for watched companies); false = lightweight ATS sweep
+# store_tag = ""               # only sweep store companies with this tag
+# require_core_anchor = false  # gate: posting must hit a CORE keyword
+# geo_gate = true              # gate: drop non-local, non-remote postings
+# verify_top = 15              # deep-verify the top N after scoring (0 = skip)
+# cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
+# email = false                # email the digest after each crawl
+# exclude_gate = true          # apply the [exclude.<id>] role/defense tables
+# tech_title_regex = "..."     # the technical-title gate (case-insensitive
+#                              # regex a title must match before scoring spend);
+#                              # engine defaults cover the common cases
+
+[tracks.remote_neural]
+label = "Remote"
+db = "jobs.db"
+track = "remote-neural"
+engine = "neural"
+rank_by = "fit"
+min_fit_default = 0.5
+willing_to_move_default = true
+remote_requires_watch = false
+# neural-engine defaults: keyword_mode="replace", require_core_anchor=true,
+# geo_gate=false, store_tag="neural", cost_guard=300,
+# sources = { store=true, priority_companies=true, aggregators=true, websearch=true, location_scoped=false }
 
 [policy]
 # Large companies to keep active despite an "other" mission score, crawling
@@ -96,3 +209,27 @@ name_search_queries = [
     "<your industry> startups <your region>",
 ]
 name_blocklist = []          # normalized names to drop (bad slug collisions)
+
+# Job aggregators / company-directory sites skipped when picking result URLs
+# to resolve during discovery (they're never the employer's own ATS board).
+aggregator_hosts = []
+# Generic words excluded when matching a search-result host to a company
+# name (so "medicaljobs.com" doesn't match on the word "medical").
+generic_name_words = []
+# Prioritized named company targets fetched (and deduped) first by tracks
+# that use one — see jobcrawler/tracks/remote_neural.py.
+priority_companies = [
+    # { name = "Example Co", ats = "greenhouse", slug = "examples" },
+]
+
+# ---------------------------------------------------------------------------
+# Fit rubric (jobcrawler/fit.py) — optional; fit.py falls back to built-in
+# defaults when this whole block is absent.
+# ---------------------------------------------------------------------------
+[fit]
+# Deterministic backstop for the "clearance" gate: verbs are the demand
+# words, qualifiers are the optional clearance-type words that may sit
+# between the verb and "clearance". Falls back to built-in defaults
+# (active/current + us/dod/top-secret/ts-sci/secret) when left empty.
+clearance_verbs = []
+clearance_qualifiers = []

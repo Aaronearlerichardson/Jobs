@@ -36,9 +36,9 @@ try:
 except Exception:
     pass
 
-from jobcrawler import store
-from jobcrawler.page_capture import parse_page
-from jobcrawler.tracks.local_tech import ingest_external_jobs
+from core import store
+from scrapers.page_capture import parse_page
+from scrapers.ops import ingest_external_jobs
 
 PORT_DEFAULT = 8877
 
@@ -109,18 +109,24 @@ INDEX_HTML = """<!doctype html><meta charset="utf-8">
 </body>"""
 
 
-def _record_companies(names, source_site):
-    """Record captured company names as inactive store leads."""
+def _record_companies(names, source_site, sites=None):
+    """Record captured company names as inactive store leads. `sites` maps a
+    company name -> its own website (from JSON-LD hiringOrganization); stored as
+    careers_url so `discover.py --resolve-leads` can probe {domain}/careers
+    instead of guessing the domain from the name."""
+    sites = sites or {}
     fresh = []
     conn = store.connect()
     have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
     for n in sorted({n.strip() for n in names if n and n.strip()}):
         if n.lower() in have:
             continue
-        store.upsert_company(conn, {
-            "name": n, "active": 0, "source": "page_capture",
-            "notes": f"seen on {source_site}; resolve board via discover.py --local",
-        })
+        row = {"name": n, "active": 0, "source": "page_capture",
+               "notes": f"seen on {source_site}; resolve board via "
+                        f"discover.py --resolve-leads"}
+        if sites.get(n):
+            row["careers_url"] = sites[n]
+        store.upsert_company(conn, row)
         fresh.append(n)
     conn.close()
     return fresh
@@ -131,7 +137,10 @@ def ingest_html(url, html, label=""):
     summary dict."""
     jobs, source = parse_page(url, html)
     ingested = ingest_external_jobs(jobs, source=source) if jobs else 0
-    new_cos = _record_companies((j.get("company") for j in jobs), source)
+    # Company name -> its own website, when the page exposed it (JSON-LD).
+    sites = {j["company"]: j["company_url"] for j in jobs
+             if j.get("company") and j.get("company_url")}
+    new_cos = _record_companies((j.get("company") for j in jobs), source, sites)
     tag = label or url or source
     print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
           + (f", {len(new_cos)} new compan(ies): {', '.join(new_cos[:6])}"
@@ -231,8 +240,8 @@ def main():
     ap = argparse.ArgumentParser(description="Manual page capture for the job crawler")
     ap.add_argument("files", nargs="*", help="Saved .html pages to ingest (Ctrl+S fallback)")
     ap.add_argument("--serve", action="store_true", help="Run the capture server (default when no files)")
-    ap.add_argument("--watch", nargs="?", const="captures", metavar="FOLDER",
-                    help="Watch FOLDER (default ./captures) and ingest every "
+    ap.add_argument("--watch", nargs="?", const="", metavar="FOLDER",
+                    help="Watch FOLDER (default data/captures) and ingest every "
                          "page saved into it — no userscript manager needed")
     ap.add_argument("--port", type=int, default=PORT_DEFAULT)
     ap.add_argument("--url", default="", help="Original page URL for a single ingested file "
@@ -252,7 +261,7 @@ def main():
     args = ap.parse_args()
 
     if args.add:
-        from jobcrawler.tracks.local_tech import add_manual_job
+        from scrapers.ops import add_manual_job
         add_manual_job(url=args.url, title=args.title, company=args.company,
                        location=args.location, description=args.desc,
                        pull_board=not args.no_board)
@@ -264,8 +273,9 @@ def main():
             html = p.read_text(encoding="utf-8", errors="replace")
             ingest_html(args.url or _url_from_saved(html), html, label=p.name)
         return
-    if args.watch:
-        watch(args.watch)
+    if args.watch is not None:
+        import config
+        watch(args.watch or str(config.DATA_DIR / "captures"))
         return
     serve(args.port)
 

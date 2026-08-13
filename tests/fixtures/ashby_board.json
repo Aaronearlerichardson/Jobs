@@ -1,0 +1,53 @@
+{
+ "jobs": [
+  {
+   "id": "fe5fd1a4-12ff-4703-bed5-6c2f34ba7768",
+   "title": "Senior Account Executive, Growth Stage",
+   "department": "Revenue",
+   "team": "Account Executives",
+   "employmentType": "FullTime",
+   "location": "Remote U.S.",
+   "secondaryLocations": [],
+   "publishedAt": "2026-04-21T12:35:37.500+00:00",
+   "isListed": true,
+   "isRemote": true,
+   "workplaceType": "Remote",
+   "address": {
+    "postalAddress": {
+     "addressRegion": "",
+     "addressCountry": "USA",
+     "addressLocality": ""
+    }
+   },
+   "jobUrl": "https://jobs.ashbyhq.com/vanta/fe5fd1a4-12ff-4703-bed5-6c2f34ba7768",
+   "applyUrl": "https://jobs.ashbyhq.com/vanta/fe5fd1a4-12ff-4703-bed5-6c2f34ba7768/application",
+   "descriptionHtml": "<p style=\"min-height:1.5em\">At Vanta, our mission is to help [redacted for the fixture]",
+   "descriptionPlain": "At Vanta, our mission is to help businesses earn and prove t [redacted for the fixture]"
+  },
+  {
+   "id": "cf4358d4-1f34-40cc-b5b4-31a2e001136f",
+   "title": "Sales Development Representative, Inbound",
+   "department": "Revenue",
+   "team": "Sales Development",
+   "employmentType": "FullTime",
+   "location": "San Francisco, CA",
+   "secondaryLocations": [],
+   "publishedAt": "2026-07-17T20:18:58.727+00:00",
+   "isListed": true,
+   "isRemote": null,
+   "workplaceType": null,
+   "address": {
+    "postalAddress": {
+     "addressRegion": "California ",
+     "addressCountry": "USA",
+     "addressLocality": "San Francisco"
+    }
+   },
+   "jobUrl": "https://jobs.ashbyhq.com/vanta/cf4358d4-1f34-40cc-b5b4-31a2e001136f",
+   "applyUrl": "https://jobs.ashbyhq.com/vanta/cf4358d4-1f34-40cc-b5b4-31a2e001136f/application",
+   "descriptionHtml": "<p style=\"min-height:1.5em\">At Vanta, our mission is to help [redacted for the fixture]",
+   "descriptionPlain": "At Vanta, our mission is to help businesses earn and prove t [redacted for the fixture]"
+  }
+ ],
+ "apiVersion": "1"
+}

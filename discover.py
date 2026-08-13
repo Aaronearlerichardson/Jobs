@@ -15,7 +15,7 @@ import argparse
 import sys
 
 from config import INCLUDE_KEYWORDS
-from jobcrawler.discovery import (
+from discovery import (
     apply_to_store,
     bciwiki_seed_candidates,
     discover,
@@ -58,8 +58,13 @@ def main():
     ap.add_argument("--rescore-missions", action="store_true",
                     help="Re-score mission for ALL active companies")
     ap.add_argument("--resolve-leads", action="store_true",
-                    help="Resolve page-capture company leads (from capture.py) "
-                         "into crawlable boards and activate the hits")
+                    help="Resolve boardless company leads (from capture.py) into "
+                         "crawlable boards and activate the hits: careers-page "
+                         "sniff first (collision-safe), slug-probe fallback, every "
+                         "board validated by a live fetch")
+    ap.add_argument("--all-leads", action="store_true",
+                    help="With --resolve-leads: resolve EVERY inactive boardless "
+                         "lead, not just capture.py's page_capture ones")
     ap.add_argument("--dork", "--ats-dork", action="store_true", dest="dork",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
                          "board URLs for local companies into the company store")
@@ -102,27 +107,27 @@ def main():
         return
 
     if args.local:
-        from jobcrawler.discovery.local_sourcing import populate_companies
+        from discovery.local_sourcing import populate_companies
         populate_companies()
         return
 
     if args.add_board:
-        from jobcrawler.discovery.local_sourcing import add_board
+        from discovery.local_sourcing import add_board
         add_board(*args.add_board)
         return
 
     if args.score_missions or args.rescore_missions:
-        from jobcrawler.discovery.local_sourcing import score_missions
+        from discovery.local_sourcing import score_missions
         score_missions(rescore_all=args.rescore_missions)
         return
 
     if args.resolve_leads:
-        from jobcrawler.discovery.local_sourcing import resolve_leads
-        resolve_leads()
+        from discovery.local_sourcing import resolve_leads
+        resolve_leads(all_leads=args.all_leads, limit=args.limit)
         return
 
     if args.dork:
-        from jobcrawler.discovery.ats_dork import run_ddgs_dorks
+        from discovery.ats_dork import run_ddgs_dorks
         added, checked = run_ddgs_dorks()
         print(f"\n  {added} new NC board(s) added to the store "
               f"({checked} extracted from dork results)")

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Job Crawler</title>
+<link rel="stylesheet" href="/static/css/app.css">
+</head>
+<body>
+
+<header>
+  <h1>Job Crawler</h1>
+  <select class="trackpick" id="trackpick" title="Switch search track"></select>
+  <span class="sub" id="dbpath"></span>
+  <span class="spacer"></span>
+  <span class="keywarn" id="keywarn" hidden>⚠ ANTHROPIC_API_KEY not set — scoring operations will no-op</span>
+  <button class="themebtn" id="themebtn" title="Toggle color scheme">◐ theme</button>
+</header>
+
+<div class="tiles" id="tiles"></div>
+
+<nav>
+  <button data-tab="jobs" class="on">Jobs</button>
+  <button data-tab="pipeline">Pipeline</button>
+  <button data-tab="companies">Companies</button>
+  <button data-tab="ops">Operations</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <section id="tab-jobs">
+    <div class="filters">
+      <input type="text" id="f-search" placeholder="search title / company…" size="26">
+      <label>min fit <input type="number" id="f-fit" min="0" max="1" step="0.05" value="0" style="width:64px"></label>
+      <label>geo
+        <select id="f-geo">
+          <option value="">any</option><option value="local">local</option>
+          <option value="remote">remote</option>
+          <option value="relocation">relocation</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="f-move"> willing to relocate</label>
+      <label>age
+        <select id="f-age">
+          <option value="">any</option><option value="new">NEW today</option>
+          <option value="fresh">≤ 7 days</option><option value="stale">45d+ stale</option>
+        </select>
+      </label>
+      <label><input type="checkbox" id="f-verified"> verified only</label>
+      <label><input type="checkbox" id="f-watched"> watched companies</label>
+      <label><input type="checkbox" id="f-closed"> include closed</label>
+      <label><input type="checkbox" id="f-disp"> include decided</label>
+      <span class="sub" id="jobcount"></span>
+    </div>
+    <div class="filtersummary" id="filtersummary"></div>
+    <div id="jobs"></div>
+  </section>
+
+  <section id="tab-pipeline" hidden><div id="pipeline"></div></section>
+
+  <section id="tab-companies" hidden>
+    <div class="filters">
+      <input type="text" id="c-search" placeholder="search companies…" size="26">
+      <label><input type="checkbox" id="c-activeonly" checked> active only</label>
+      <a href="/api/export/companies" download>export roster JSON</a>
+      <label class="loc">import roster
+        <input type="file" id="c-import" accept=".json" style="max-width:210px"></label>
+    </div>
+    <div id="companies"></div>
+  </section>
+
+  <section id="tab-ops" hidden>
+    <div class="statusline">
+      <span class="pill" id="oppill">idle</span>
+      <span class="sub" id="opinfo"></span>
+    </div>
+    <div id="opcards"></div>
+    <div id="oplog"></div>
+  </section>
+
+  <section id="tab-settings" hidden>
+    <p class="sub" style="margin:0 0 12px">
+      Edits are written to <b>profile.toml</b> (a timestamped backup lands in
+      <code>config_backups/</code>) and the server restarts itself so every
+      module picks the change up. Saving is blocked while an operation runs.
+    </p>
+    <div id="setcards"></div>
+  </section>
+</main>
+
+<div id="overlay"><div class="box" id="overlaymsg">Config saved — restarting…</div></div>
+
+<div id="toast"></div>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

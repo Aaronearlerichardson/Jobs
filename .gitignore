@@ -16,6 +16,15 @@ captures/
 cro_names.txt
 local_tech_companies.txt
 
+# Nuitka build outputs (build_exe.bat)
+webapp.build/
+webapp.dist/
+webapp.onefile-build/
+JobCrawlerUI.exe
+job-crawler-ui
+job-crawler-linux
+job-crawler-macos
+
 # Python cruft
 __pycache__/
 *.pyc
@@ -26,9 +35,20 @@ venv/
 # Editor
 .idea/
 .vscode/
+.claude/
 *.swp
 .DS_Store
 *.bak
 
 # Personal search profile (keywords/locations) — profile.example.toml is the template
 profile.toml
+# All local data: DBs, resume, job_reports/, captures/, caches, profile backups
+data/
+
+# DDG search cache (bounded web-search step)
+.cache/
+.junie/
+coverage.xml
+.coverage
+htmlcov/
+boards_status.json
