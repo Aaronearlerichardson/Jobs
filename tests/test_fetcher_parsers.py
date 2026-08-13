@@ -56,7 +56,7 @@ def fake_get(monkeypatch):
             @property
             def text(self):
                 return json.dumps(payload)
-        monkeypatch.setattr(ats_api.requests, "get",
+        monkeypatch.setattr(ats_api.SESSION, "get",
                             lambda *a, **k: _Resp())
     return _install
 
