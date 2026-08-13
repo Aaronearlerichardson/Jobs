@@ -57,6 +57,10 @@ def main():
                       capture_output=True).returncode:
         subprocess.run([sys.executable, "-m", "pip", "install", "nuitka"],
                        check=True)
+    if subprocess.run([sys.executable, "-m", "pip", "show", "zstandard"],
+                      capture_output=True).returncode:
+        subprocess.run([sys.executable, "-m", "pip", "install", "zstandard"],
+                       check=True)
     rc = subprocess.run(cmd, cwd=ROOT).returncode
     # Nuitka --onefile produces the binary in the current directory or
     # output-dir, but the script previously expected it in webapp.dist/
