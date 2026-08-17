@@ -43,6 +43,40 @@ def is_nc(text):
     return bool(NC_RE.search(text or ""))
 
 
+# --------------------------------------------------------------------------- #
+#  Pulling a location OUT of scraped page text                                 #
+# --------------------------------------------------------------------------- #
+#
+# Custom/legacy boards (SuccessFactors tables, PeopleAdmin feeds, hand-rolled
+# careers pages) publish no location field — the city is just words in the
+# row. Scrapers recover it by searching that text for a place they recognise,
+# which means the vocabulary has to come from [locality]; a hard-coded city
+# list only ever works for the person who wrote it.
+
+_SHORT_TOKEN = 4          # <= this many chars: match on word boundaries
+
+
+def _alt(term):
+    esc = re.escape(term)
+    return rf"\b{esc}\b" if len(term) <= _SHORT_TOKEN else esc
+
+
+_SNIPPET_ALTS = [_alt(t) for t in (_WB + _SUB + [s for s in config.LOCALITY_STATE_SUFFIX if s])]
+# "Remote" always counts: it's a location on every board, in every field.
+_SNIPPET_ALTS.append(r"\bremote\b")
+
+# A recognised place plus up to 40 chars of trailing context, so "Durham" in
+# a table cell comes back as "Durham, NC 27701" rather than the bare word.
+LOCATION_SNIPPET_RE = re.compile(
+    rf"(?:{'|'.join(_SNIPPET_ALTS)})[^|\n]{{0,40}}", re.I)
+
+
+def location_snippet(text, default="See posting"):
+    """The first location-looking phrase in `text`, or `default`."""
+    m = LOCATION_SNIPPET_RE.search(text or "")
+    return m.group(0).strip(" ,-") if m else default
+
+
 def geo_mode(location, description=""):
     """Classify a posting's geography: "onsite" (configured locality),
     "remote", or None (neither). Onsite wins when a posting is both local

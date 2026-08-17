@@ -2,9 +2,98 @@
 
 import queue
 import re
+import threading
 import time
 
+import config
+
 from scrapers.http import HEADERS, SESSION
+
+
+# Whether the headless browser is usable is a PROCESS fact, not a per-probe
+# one. The JS pass runs several WorkdayJsProbe instances in parallel, each with
+# its own enabled flag, so one missing browser printed the failure once per
+# instance — and Playwright's launch error embeds a ten-line ASCII banner, so
+# four probes produced forty lines saying the same thing.
+_JS_NOTICE_LOCK = threading.Lock()
+_JS_NOTICES = set()
+
+
+def _js_notice_once(key, message):
+    """Print a `[js]` notice the first time `key` comes up. True if printed."""
+    with _JS_NOTICE_LOCK:
+        if key in _JS_NOTICES:
+            return False
+        _JS_NOTICES.add(key)
+    print(f"    [js] {message}")
+    return True
+
+
+def _js_launch_hint(exc):
+    """The actionable sentence from a Playwright launch error, without the box.
+
+    Playwright renders "run `playwright install`" inside a drawn ASCII frame.
+    That is helpful once and noise thereafter, and it buries the one detail
+    that differs between causes.
+    """
+    text = str(exc)
+    if "Executable doesn't exist" in text or "playwright install" in text:
+        return ("browser binary missing — run `playwright install chromium` "
+                "(the playwright package was upgraded without re-downloading "
+                "its browsers)")
+    return text.split("\n", 1)[0].strip()
+
+
+def _report_js_disabled(detail):
+    """Say the JS fallback is off, once per process. True if we reported."""
+    return _js_notice_once("disabled", f"{detail}; JS workday probe disabled")
+
+
+def _clear_js_disabled():
+    """A successful launch re-arms the notice, so a later failure in a
+    long-lived process (the web UI runs many passes) is still reported."""
+    with _JS_NOTICE_LOCK:
+        _JS_NOTICES.discard("disabled")
+
+
+def launch_chromium(pw, **kwargs):
+    """Launch headless Chromium, falling back to a browser the machine has.
+
+    Playwright's own pinned build is tried first — it is the most predictable
+    and the only one whose version we control. But it only exists if somebody
+    ran `playwright install`, which is a separate step from `pip install` and
+    so is routinely missing: on CI runners, on a fresh clone, and on any
+    machine where the playwright PACKAGE was upgraded without re-downloading
+    its browsers (the package pins a build number, so an upgrade silently
+    invalidates the browser already on disk).
+
+    `channel=` drives an already-installed branded browser instead. GitHub's
+    hosted runners ship Chrome and Edge, and most desktops have one, so this
+    turns "JS probe disabled" into "JS probe works" with no download.
+
+    Returns (browser, channel) where channel is None for the bundled build.
+    Re-raises the FIRST failure if every channel fails, because that one names
+    the missing bundled build — the actionable error for someone who meant to
+    run `playwright install`.
+    """
+    first_error = None
+    for channel in config.BROWSER_CHANNELS:
+        try:
+            opts = dict(kwargs)
+            if channel:
+                opts["channel"] = channel
+            browser = pw.chromium.launch(**opts)
+        except Exception as e:
+            if first_error is None:
+                first_error = e
+            continue
+        if channel:
+            _js_notice_once(
+                f"channel:{channel}",
+                f"using the system {channel} browser "
+                f"(playwright's own build is not installed)")
+        return browser, channel
+    raise first_error
 
 
 def probe_greenhouse(slug):
@@ -36,7 +125,9 @@ def probe_ashby(slug):
         r = SESSION.get(url, timeout=10, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
-        return (True, len(r.json().get("jobPostings", [])))
+        # Posting API key is "jobs" (not the embed payload's "jobPostings").
+        data = r.json()
+        return (True, len(data.get("jobs", data.get("jobPostings", []))))
     except Exception:
         return (False, 0)
 
@@ -397,12 +488,12 @@ class WorkdayJsProbe:
             # intended callers but not for an opportunistic fallback.
             from playwright.sync_api import sync_playwright
         except ImportError:
-            print("    [js] playwright not installed; JS workday probe disabled")
+            _report_js_disabled("playwright not installed")
             self._enabled = False
             return None
         try:
             pw = self._stack.enter_context(sync_playwright())
-            browser = pw.chromium.launch(headless=True)
+            browser, _channel = launch_chromium(pw, headless=True)
             self._stack.callback(browser.close)
             context = browser.new_context(
                 user_agent=BROWSER_UA,
@@ -413,9 +504,9 @@ class WorkdayJsProbe:
             self._stack.callback(context.close)
             self._page = context.new_page()
             self._launched = True
+            _clear_js_disabled()
         except Exception as e:
-            print(f"    [js] Playwright browser launch failed ({e}); "
-                  "JS workday probe disabled")
+            _report_js_disabled(f"browser launch failed: {_js_launch_hint(e)}")
             self._enabled = False
             self._stack.close()
             return None

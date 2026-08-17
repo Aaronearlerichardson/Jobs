@@ -47,7 +47,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements-dev.txt
+          pip install -r envs/requirements-dev.txt
 
       - name: Confirm the run is profile-example + API-free
         # profile.toml is gitignored, so a clean checkout has none and
@@ -171,7 +171,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt nuitka
+          pip install -r envs/requirements.txt nuitka
 
       - name: Cache the Nuitka compiler downloads + ccache
         uses: actions/cache@v4
@@ -180,7 +180,7 @@ jobs:
             ~/.cache/Nuitka
             ~/AppData/Local/Nuitka/Nuitka/Cache
             ~/Library/Caches/Nuitka
-          key: nuitka-${{ matrix.os }}-py312-${{ hashFiles('requirements.txt') }}
+          key: nuitka-${{ matrix.os }}-py312-${{ hashFiles('envs/requirements.txt') }}
           restore-keys: nuitka-${{ matrix.os }}-py312-
 
       - name: Build the standalone app

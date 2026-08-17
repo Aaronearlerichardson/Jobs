@@ -36,7 +36,7 @@ class TestOps:
         assert all("tracks" not in o for o in webapp.OPS.values())
 
     def test_every_op_names_a_real_engine_or_is_agnostic(self):
-        assert all(o.get("engine") in (None, "local", "neural")
+        assert all(o.get("engine") in (None, "local", "sweep")
                    for o in webapp.OPS.values())
 
     def test_every_op_has_a_callable(self):
@@ -97,3 +97,102 @@ class TestAssets:
         v1 = routes._asset_version()
         assert v1 == routes._asset_version()        # stable
         assert len(v1) == 10
+
+
+class TestOpConcurrency:
+    """One operation at a time, enforced where it can actually be enforced.
+
+    The route checked `_running()` and then called `_run_op()` as two steps.
+    Two /api/run requests landing together both passed the check and both
+    started, so the crawl ran twice — and because each op swaps sys.stdout for
+    a tee that appends to TASK["log"], the second tee wrapped the first and
+    every printed line was recorded once per layer. The duplicate output in
+    the run log was the visible half; the duplicated work was the expensive
+    half.
+    """
+
+    @staticmethod
+    def _noisy(label, lines=3, pause=0.05):
+        import time
+
+        def fn():
+            for i in range(lines):
+                print(f"{label}-{i}")
+                time.sleep(pause)
+        return fn
+
+    @staticmethod
+    def _drain():
+        import time
+
+        from webapp import ops
+        while ops._running():
+            time.sleep(0.02)
+        time.sleep(0.15)          # let the worker's finally block land
+
+    def test_second_op_is_refused_while_the_first_runs(self):
+        from webapp import ops
+        assert ops._run_op("first", self._noisy("a")) is True
+        assert ops._run_op("second", self._noisy("b")) is False
+        self._drain()
+
+    def test_simultaneous_claims_start_exactly_one(self):
+        import threading
+
+        from webapp import ops
+        results, lock = [], threading.Lock()
+
+        def claim():
+            r = ops._run_op("x", self._noisy("x", lines=1))
+            with lock:
+                results.append(r)
+
+        threads = [threading.Thread(target=claim) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert results.count(True) == 1, "more than one op claimed the slot"
+        assert results.count(False) == 11
+        self._drain()
+
+    def test_log_records_each_line_once(self):
+        from webapp import ops
+        ops._run_op("solo", self._noisy("line"))
+        self._drain()
+        recorded = [l for l in ops.TASK["log"] if l.startswith("line-")]
+        assert recorded == ["line-0", "line-1", "line-2"]
+
+    def test_stdout_is_restored_when_the_op_ends(self):
+        import sys
+
+        from webapp import ops
+        before = sys.stdout
+        ops._run_op("solo", self._noisy("z", lines=1))
+        self._drain()
+        assert sys.stdout is before, "the tee outlived its operation"
+
+    def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
+        import sys
+
+        from webapp import ops
+
+        def boom():
+            raise RuntimeError("op exploded")
+
+        before = sys.stdout
+        assert ops._run_op("boom", boom) is True
+        self._drain()
+        assert sys.stdout is before
+        assert ops._running() is False
+        assert "RuntimeError" in (ops.TASK["error"] or "")
+        assert ops._run_op("after", self._noisy("ok", lines=1)) is True
+        self._drain()
+
+    def test_prints_outside_an_operation_do_not_reach_the_log(self):
+        from webapp import ops
+        ops._run_op("solo", self._noisy("q", lines=1))
+        self._drain()
+        n = len(ops.TASK["log"])
+        print("this line belongs to no operation")
+        assert len(ops.TASK["log"]) == n

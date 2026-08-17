@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Job crawler — daily refresh + maintenance CLI.
 
-    python run_scraper.py                        # crawl EVERY configured track
-    python run_scraper.py --track local_tech     # crawl one track
-    python run_scraper.py --track remote_neural --preview --no-fit
-    python run_scraper.py --sync-status          # maintenance (add --track)
+    python run_scraper.py                   # crawl EVERY configured track
+    python run_scraper.py --track local     # crawl one track
+    python run_scraper.py --track remote --preview --no-fit
+    python run_scraper.py --sync-status     # maintenance (add --track)
     python run_scraper.py --mark applied <job|url> --why "..."
+    python run_scraper.py --where           # where are my profile and data?
 
-Tracks come from profile.toml [tracks.*] (any id you define); legacy names
-("local-tech"/"remote-neural") match a track's jobs.track value. The old
-crawler.py forwards here, so scheduled tasks keep working.
+Tracks come from your profile's [tracks.*] tables — the ids are whatever you
+named them, and a track's jobs.track value works too. The old crawler.py
+forwards here, so scheduled tasks keep working.
 """
 
 import argparse
@@ -24,7 +25,7 @@ except Exception:
 
 
 def _resolve_track(name):
-    """A configured track by id (local_tech) or jobs.track value (local-tech)."""
+    """A configured track by its id, or by its jobs.track value."""
     t = config.UI_TRACKS.get(name)
     if t:
         return t
@@ -41,8 +42,8 @@ def main(argv=None):
         epilog="No flags = crawl every configured track (the daily refresh).")
     # ── crawl scope ─────────────────────────────────────────────────────
     ap.add_argument("--track", metavar="ID",
-                    help="Operate on ONE configured track (profile.toml "
-                         "[tracks.*] id, or its jobs.track value)")
+                    help="Operate on ONE configured track (a [tracks.*] id "
+                         "from your profile, or its jobs.track value)")
     ap.add_argument("--preview", action="store_true",
                     help="Crawl without DB writes or email")
     ap.add_argument("--no-fit", action="store_true",
@@ -110,7 +111,17 @@ def main(argv=None):
                     help="Bulk-expand every configured keyword into a report")
     ap.add_argument("--score", metavar="TEXT",
                     help="Score one title/description on technical bar (0..1)")
+    ap.add_argument("--where", action="store_true",
+                    help="Print where this install keeps your profile and "
+                         "data, then exit")
     args = ap.parse_args(argv)
+
+    from core import bootstrap
+    bootstrap.ensure_profile()
+    if args.where:
+        for line in bootstrap.status_lines():
+            print(f"  {line}")
+        return
 
     t = _resolve_track(args.track) if args.track else None
     if args.db:

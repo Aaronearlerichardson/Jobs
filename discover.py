@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-discover.py - expand the crawler's company universe.
+discover.py - build the roster of companies to crawl.
 
-Asks Claude for likely employers in a sector, then probes public ATSes
-(Greenhouse/Lever/Ashby/Kula) to confirm which slugs are real. Outputs
-copy-paste dict entries you can drop straight into config.py.
+The crawler only searches employers it knows about, and that roster lives in
+the store's `companies` table. This is how it grows: describe a sector and
+Claude suggests employers, then every name is probed against the public
+applicant-tracking systems (Greenhouse/Lever/Ashby/...) to confirm which
+actually have a crawlable job board.
 
 Usage:
-    python discover.py "neurotech startups"
+    python discover.py "climate tech startups"
     python discover.py "medical device companies hiring ML engineers"
+    python discover.py --local          # employers in your [locality]
 """
 
 import argparse
@@ -28,12 +31,16 @@ from discovery import (
 def main():
     ap = argparse.ArgumentParser(description="Expand the crawler's company universe.")
     ap.add_argument("term", nargs="?",
-                    help="Sector/industry/term to search for (e.g. 'neurotech startups')")
+                    help="Sector/industry/term to search for "
+                         "(e.g. 'climate tech startups')")
     ap.add_argument("--from-keywords", action="store_true",
-                    help="Run discovery for each entry in INCLUDE_KEYWORDS")
+                    help="Run discovery once per keyword in your profile")
     ap.add_argument("--from-bciwiki", action="store_true",
                     help="Resolve the BCIWiki company directory "
-                         "(bciwiki.org Category:Companies) to crawlable boards")
+                         "(bciwiki.org, ~700 brain-computer-interface "
+                         "companies) to crawlable boards. A worked example of "
+                         "bulk-importing a public industry directory; only "
+                         "useful if that is your field.")
     ap.add_argument("--bciwiki-categories", default="companies",
                     help="Comma-separated BCIWiki categories to harvest "
                          "(companies,labs,organizations). Default: companies")
@@ -44,13 +51,14 @@ def main():
                          "--from-bciwiki (off by default for bulk: it's "
                          "single-threaded and dominates a large run)")
     ap.add_argument("--local", action="store_true",
-                    help="NC local-sourcing pass: curated seeds + RTP directory "
-                         "+ careers-page sniffing -> NC-verified boards, "
+                    help="Local-sourcing pass for your [locality]: profile "
+                         "seeds + configured directories + web-search name "
+                         "harvesting -> probed, locality-verified, "
                          "mission-scored into the company store")
     ap.add_argument("--add-board", nargs=2, metavar=("NAME", "URL"),
                     help="Register a known board directly: company name + its ATS "
-                         "board URL (or careers page). No guessing; NC-verifies, "
-                         "mission-scores, activates.")
+                         "board URL (or careers page). No guessing; "
+                         "locality-verifies, mission-scores, activates.")
     ap.add_argument("--score-missions", action="store_true",
                     help="Backfill mission scores for active companies that "
                          "have a board but no mission tier (seeds import "
@@ -71,12 +79,15 @@ def main():
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
-                    help="Insert confirmed candidates into config.py in place "
+                    help="Insert confirmed candidates into the company store "
                          "(deduped by slug, tagged with date/term for audit)")
     ap.add_argument("--dry-run", action="store_true",
                     help="With --apply, preview changes without writing the file")
 
     args = ap.parse_args()
+
+    from core import bootstrap
+    bootstrap.ensure_profile()
 
     if args.from_keywords:
         for kw in INCLUDE_KEYWORDS:

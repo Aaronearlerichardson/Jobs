@@ -1,32 +1,51 @@
 """
-Curated seed companies to merge into discovery results.
+Curated seed companies merged into discovery results.
 
-These are employers Claude's training data systematically misses for a
-given region — anchors in RTP's biotech / med-device / NC-tech corridor
-that rarely make it into Claude's top suggestions. Seeds are probed
-exactly like Claude candidates (validate_candidate sweeps all four
-ATSes when ats='unknown'), so you don't need to know the ATS upfront.
+The LLM that suggests employers for a discovery term has blind spots — it
+reliably misses the mid-size employers that anchor a specific region or
+niche, however obvious they are to someone who lives there. Seeds are your
+override: names you KNOW belong in the roster, probed exactly like suggested
+ones (validate_candidate sweeps every ATS when ats='unknown'), so you never
+need to know a company's ATS to seed it.
 
-Activation: seeds merge in only when the discovery term matches one of
+Everything here is configuration, not code — it lives in your profile:
+
+    [discovery]
+    seed_companies = [
+        "Example Health",                          # just a name, or
+        { name = "Example Labs", notes = "why" },  # a name plus a reminder
+    ]
+    # Optional. When set, seeds merge in ONLY for discovery terms mentioning
+    # one of these (e.g. your region), so a search for something unrelated
+    # isn't polluted by them. Omit to always merge.
+    seed_triggers = ["portland", "oregon", "pnw"]
+
+Short triggers (<= 3 chars) are word-boundary matched so "nc" can't fire
+inside "neuroscience".
 """
 
 import re
 
-# Case-insensitive triggers. Short tokens (<= 3 chars) use word-boundary
-# matching so "nc" in RTP_TRIGGERS won't false-match "neuroscience".
-RTP_TRIGGERS: tuple[str, ...] = (
-    "rtp", "raleigh", "durham", "chapel hill", "cary", "morrisville",
-    "apex", "triangle", "research triangle", "north carolina", "nc",
-)
+import config
 
 _SHORT_TOKEN_LEN = 3
 
 
+SEED_COMPANIES: list[dict] = config.DISCOVERY_SEED_COMPANIES
+SEED_TRIGGERS: tuple[str, ...] = tuple(
+    t.strip().lower() for t in config.DISCOVERY_SEED_TRIGGERS if t.strip()
+)
+
+
 def _matches_term(term: str) -> bool:
+    """True if `term` should pull the seeds in. No configured triggers means
+    the seeds are unconditional — the common case for a hand-picked list."""
+    if not SEED_TRIGGERS:
+        return True
     if not term:
         return False
     t = term.lower()
-    for trig in RTP_TRIGGERS:
+    for trig in SEED_TRIGGERS:
         if len(trig) <= _SHORT_TOKEN_LEN:
             if re.search(rf"\b{re.escape(trig)}\b", t):
                 return True
@@ -35,59 +54,23 @@ def _matches_term(term: str) -> bool:
     return False
 
 
-# Edit this list to curate seeds. Keep notes short — they render in the
-# discovery report's 'unconfirmed' table and help future-you remember
-# why a company is on the list.
-RTP_SEED_COMPANIES: list[dict] = [
-    # --- Biotech / pharma ---
-    {"name": "United Therapeutics",               "notes": "RTP biotech HQ"},
-    {"name": "Precision BioSciences",             "notes": "Durham gene editing"},
-    {"name": "Humacyte",                          "notes": "Durham regenerative med"},
-    {"name": "AskBio",                            "notes": "RTP gene therapy (Bayer)"},
-    {"name": "Locus Biosciences",                 "notes": "RTP phage therapeutics"},
-    {"name": "Seqirus",                           "notes": "Holly Springs vaccines"},
-    {"name": "bioMerieux",                        "notes": "Durham diagnostics"},
-
-    # --- Medical devices / health systems ---
-    {"name": "BD",                                "notes": "RTP medical devices"},
-    {"name": "LabCorp",                           "notes": "Burlington NC diagnostics"},
-    {"name": "Atrium Health",                     "notes": "Charlotte NC health"},
-
-    # --- CDMOs / bio manufacturing ---
-    {"name": "FUJIFILM Diosynth Biotechnologies", "notes": "Morrisville biopharma CDMO"},
-
-    # --- Tech — RTP-anchored ---
-    {"name": "Red Hat",                           "notes": "Raleigh open-source"},
-    {"name": "Epic Games",                        "notes": "Cary games/Unreal"},
-    {"name": "NetApp",                            "notes": "RTP storage"},
-    {"name": "Pendo",                             "notes": "Raleigh product analytics"},
-    {"name": "Bandwidth",                         "notes": "Raleigh CPaaS"},
-    {"name": "Pryon",                             "notes": "Raleigh enterprise AI"},
-    {"name": "Relias",                            "notes": "Cary learning/compliance"},
-    {"name": "Spreedly",                          "notes": "Durham payments"},
-    {"name": "WillowTree",                        "notes": "Durham digital products"},
-
-    # --- add more RTP seeds here ---
-]
-
-
 def seed_candidates_for(term: str) -> list[dict]:
     """
-    Return raw candidate dicts to merge with Claude's discovery output,
-    or [] if `term` doesn't mention anything in RTP_TRIGGERS.
+    Return raw candidate dicts to merge with the LLM's discovery output, or
+    [] if `term` doesn't match a configured trigger.
 
-    Dicts have the same shape as Claude's payload entries, so they flow
+    Dicts have the same shape as the LLM payload entries, so they flow
     through candidate_from_dict / validate_candidate unchanged.
     """
-    if not _matches_term(term):
+    if not SEED_COMPANIES or not _matches_term(term):
         return []
     return [
         {
             "name":        s["name"],
-            "ats":         "unknown",     # Fix B sweeps all four probes
+            "ats":         "unknown",     # probed against every ATS
             "slug_guess":  None,
             "careers_url": "",
-            "notes":       f"[seed] {s.get('notes', '')}".strip(),
+            "notes":       f"[seed] {s['notes']}".strip(),
         }
-        for s in RTP_SEED_COMPANIES
+        for s in SEED_COMPANIES
     ]

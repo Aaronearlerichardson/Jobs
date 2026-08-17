@@ -20,6 +20,7 @@ from contextlib import ExitStack
 from datetime import datetime
 
 import config
+from core import tags as company_tags
 
 from scrapers.http import HEADERS, SESSION
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
@@ -111,10 +112,18 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
 # candidate name in several dedup/lookup loops, so compile it once.
 _NONALNUM_RE = re.compile(r"[^a-z0-9]")
 
-SEED_COMPANIES = config.DISCOVERY_SEED_COMPANIES
+SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps notes
 MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
 _MAJORS_KEYS = {_NONALNUM_RE.sub("", m.lower()) for m in MAJORS_WORKDAY}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
+
+
+def _wd_search_text():
+    """Free-text location term for Workday's CXS search, from [locality] —
+    the same derivation the crawl fetcher uses, so a probe's count and the
+    later crawl agree on what "in your area" means."""
+    from scrapers.fetchers.company import _default_search_text
+    return _default_search_text()
 
 
 # Non-company noise seen in `/company/<slug>/` harvesting: image placeholders,
@@ -315,18 +324,19 @@ def _nc_count_ashby(slug):
     try:
         r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
                          timeout=15, headers=HEADERS)
-        return sum(1 for j in r.json().get("jobPostings", [])
+        data = r.json()
+        return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
                    if _has_nc(j.get("location", "")))
     except Exception:
         return 0
 
 
 def _nc_count_workday(tenant, pod, site):
-    """Query the Workday CXS search for NC postings (searchText hits location)."""
+    """Count Workday postings in your [locality] (searchText hits location)."""
     api = f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
     try:
         r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
-                                     "searchText": "North Carolina"},
+                                     "searchText": _wd_search_text()},
                           timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
         return int(r.json().get("total", 0) or 0)
     except Exception:
@@ -563,12 +573,18 @@ def _sample_titles(hit, n=6):
         if ats == "ashby":
             r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
                              timeout=15, headers=HEADERS)
-            return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
+            # Ashby's posting API says "jobs"; only Workday (below) says
+            # "jobPostings". Reading the wrong one here handed the mission
+            # scorer an empty title list, so every Ashby company was scored
+            # on its name alone.
+            data = r.json()
+            return [j.get("title", "") for j in
+                    data.get("jobs", data.get("jobPostings", []))[:n]]
         if ats == "workday":
             t, p, s = slug
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
             r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
-                                         "searchText": "North Carolina"},
+                                         "searchText": _wd_search_text()},
                               timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
     except Exception:
@@ -630,9 +646,9 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                 "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
                 "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
                 "careers_url": h.get("careers_url"),
-                "nc_job_count": h["nc"], "total_job_count": h["count"],
+                "local_job_count": h["nc"], "total_job_count": h["count"],
                 "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-                "tags": "nc_local", "source": "local_sourcing", "active": active,
+                "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
                 "last_probed": datetime.now().isoformat(),
             }
             upsert_company(conn, row)
@@ -703,8 +719,8 @@ def add_board(name, url):
         "wd_pod":    slug[1] if is_wd else None,
         "wd_site":   slug[2] if is_wd else None,
         "careers_url": found.get("careers_url") or url,
-        "nc_job_count": nc, "mission_tier": tier, "mission_score": score,
-        "mission_reason": reason, "tags": "nc_local" if nc else None,
+        "local_job_count": nc, "mission_tier": tier, "mission_score": score,
+        "mission_reason": reason, "tags": company_tags.LOCAL if nc else None,
         "source": "manual", "active": 1,
     })
     conn.close()
@@ -1081,10 +1097,10 @@ def resolve_leads(max_workers=8,
                    "wd_pod":    hit["slug"][1] if is_wd else None,
                    "wd_site":   hit["slug"][2] if is_wd else None,
                    "careers_url": hit.get("careers_url"),
-                   "nc_job_count": hit["nc"], "total_job_count": hit["count"],
+                   "local_job_count": hit["nc"], "total_job_count": hit["count"],
                    "mission_tier": tier, "mission_score": score,
                    "mission_reason": reason,
-                   "tags": "nc_local" if hit["nc"] else None,
+                   "tags": company_tags.LOCAL if hit["nc"] else None,
                    "source": c.get("source") or "resolve_leads", "active": active}
             upsert_company(conn, row)
             resolved.append(row)

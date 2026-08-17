@@ -136,10 +136,15 @@ def main():
         else:
             raise SystemExit(f"  [!] no free port in {port}..{port + 10}")
 
+    from core import bootstrap
+    bootstrap.ensure_profile()
+
     STATE["bound_port"] = port
     url = f"http://127.0.0.1:{port}"
     print(f"  job-crawler UI -> {url}")
-    print(f"  db: {config.STORE_DB_PATH}")
+    for line in bootstrap.status_lines():
+        print(f"  {line}")
+    print(f"  db      : {config.STORE_DB_PATH}")
     if config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
         print("  [!] ANTHROPIC_API_KEY not set - scoring operations will no-op.")
     print("  Ctrl+C (or close this window) to stop.")

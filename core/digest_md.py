@@ -110,7 +110,7 @@ def write_matches_digest(matches, report_dir, t):
                          else "n/a | ") if with_fit else ""
                 f.write(f"| {fit_c}{tag} | {j.get('company') or j.get('company_name')} | "
                         f"[{j['title']}]({j['url']}) | {j['location']} | "
-                        f"{j.get('neural_signal', '')} | "
+                        f"{j.get('anchor_signal', '')} | "
                         f"{j.get('remote_signal', '')} |\n")
     return path
 

@@ -73,6 +73,10 @@ function renderTiles() {
   $("#keywarn").hidden = !!s.api_key;
   $("#dbpath").textContent =
     `${s.screen_model} screen · ${s.verify_model} verify · ${s.db}`;
+  // Both paths matter and can live in different places (per-user data dir vs
+  // a profile kept beside the code), so name the profile rather than let the
+  // Settings tab save somewhere the user can't find.
+  $("#dbpath").title = `store: ${s.db}\nprofile: ${s.profile || "(example)"}`;
 }
 
 /* ---------------- jobs ---------------- */
@@ -456,11 +460,20 @@ function renderOps() {
     card.querySelectorAll("input[data-p]").forEach(i =>
       params[i.dataset.p] = i.type === "checkbox" ? i.checked : i.value);
     card.querySelectorAll("input[data-a]").forEach(i => params[i.dataset.a] = i.value);
+    // Disable on click, not on the next status poll. Until the poll came back
+    // the button stayed live, so a second click fired a second POST and the
+    // server started a second crawl. The poll re-derives disabled state either
+    // way, so this only closes the gap in between.
+    if (b.disabled) return;
+    b.disabled = true;
     try {
       await post(withTrack(`/api/run/${b.dataset.op}`), params);
       toast(`started: ${b.dataset.op}`);
       state.logTotal = 0; $("#oplog").textContent = "";
-    } catch (e) { toast(e.message); }
+    } catch (e) {
+      toast(e.message);
+      b.disabled = false;          // never started; let them retry
+    }
   });
 }
 

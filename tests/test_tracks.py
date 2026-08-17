@@ -10,8 +10,16 @@ class TestTrackConfig:
         assert cfg.DEFAULT_TRACK in cfg.UI_TRACKS
 
     def test_every_track_names_a_real_engine(self, cfg):
-        assert all(t["engine"] in ("local", "neural")
+        # Against the registry, not a literal list, so adding an engine
+        # doesn't need this test edited.
+        assert all(t["engine"] in cfg._ENGINE_CRAWL_DEFAULTS
                    for t in cfg.UI_TRACKS.values())
+
+    def test_retired_engine_names_still_resolve(self, cfg):
+        """A profile written against an older engine name keeps working."""
+        for legacy, current in cfg.ENGINE_ALIASES.items():
+            built = cfg._build_ui_tracks({"t": {"engine": legacy}})
+            assert built["t"]["engine"] == current
 
     def test_every_track_points_at_a_db(self, cfg):
         assert all(t["db_path"].name.endswith(".db")
@@ -28,16 +36,16 @@ class TestTrackConfig:
                     "geo_gate", "verify_top", "cost_guard", "email",
                     "exclude_gate", "tech_title_regex"))
 
-    def test_engine_defaults_differ(self, local_track, neural_track):
+    def test_engine_defaults_differ(self, local_track, sweep_track):
         assert local_track["keyword_mode"] == "extend"
-        assert neural_track["keyword_mode"] == "replace"
-        assert local_track["geo_gate"] and not neural_track["geo_gate"]
-        assert neural_track["require_core_anchor"]
+        assert sweep_track["keyword_mode"] == "replace"
+        assert local_track["geo_gate"] and not sweep_track["geo_gate"]
+        assert sweep_track["require_core_anchor"]
         assert not local_track["require_core_anchor"]
 
-    def test_track_for_engine_resolves_both(self, local_track, neural_track):
+    def test_track_for_engine_resolves_both(self, local_track, sweep_track):
         assert local_track["engine"] == "local"
-        assert neural_track["engine"] == "neural"
+        assert sweep_track["engine"] == "sweep"
 
 
 class TestKeywordFocus:
@@ -50,10 +58,10 @@ class TestKeywordFocus:
         assert cfg.CORE_KEYWORDS[:len(base)] == base
         assert cfg.ACCEPT_REMOTE is False
 
-    def test_replace_swaps_tiers_and_enables_remote(self, cfg, neural_track,
+    def test_replace_swaps_tiers_and_enables_remote(self, cfg, sweep_track,
                                                     pristine_keywords):
-        runner.apply_keyword_focus(cfg, neural_track)
-        track_core = list(cfg.KEYWORDS_BY_TRACK.get(neural_track["id"], {})
+        runner.apply_keyword_focus(cfg, sweep_track)
+        track_core = list(cfg.KEYWORDS_BY_TRACK.get(sweep_track["id"], {})
                           .get("core", []))
         assert cfg.ACCEPT_REMOTE is True
         if track_core:
@@ -79,18 +87,18 @@ class TestSourceAssembly:
         specs = runner.build_sources(cfg, local_track)
         assert all(s["company"] is not None for s in specs)
 
-    def test_sweep_sources_carry_no_company_row(self, cfg, neural_track):
-        specs = runner.build_sources(cfg, neural_track)
+    def test_sweep_sources_carry_no_company_row(self, cfg, sweep_track):
+        specs = runner.build_sources(cfg, sweep_track)
         assert all(s["company"] is None for s in specs)
 
-    def test_priority_companies_come_first_and_are_starred(self, cfg, neural_track):
+    def test_priority_companies_come_first_and_are_starred(self, cfg, sweep_track):
         prio = getattr(cfg, "DISCOVERY_PRIORITY_COMPANIES", [])
         if not prio:
             return                                  # none configured: nothing to order
-        specs = runner.build_sources(cfg, neural_track)
+        specs = runner.build_sources(cfg, sweep_track)
         assert [s for s in specs[:len(prio)] if s["platform"].endswith("*")]
 
-    def test_websearch_toggle_removes_sources(self, cfg, neural_track):
-        with_ws = runner.build_sources(cfg, neural_track)
-        without = runner.build_sources(cfg, neural_track, include_websearch=False)
+    def test_websearch_toggle_removes_sources(self, cfg, sweep_track):
+        with_ws = runner.build_sources(cfg, sweep_track)
+        without = runner.build_sources(cfg, sweep_track, include_websearch=False)
         assert len(without) <= len(with_ws)

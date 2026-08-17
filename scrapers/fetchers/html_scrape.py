@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import stable_id
+from core.locality import location_snippet
 
 
 def fetch_kula(company_name, kula_slug):
@@ -125,16 +126,7 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
             loc = "See posting"
             row = a.find_parent("tr") or a.find_parent("li") or a.find_parent("div")
             if row is not None:
-                text = row.get_text(" ", strip=True)
-                m = re.search(
-                    r"(Durham|Chapel Hill|Raleigh|Research Triangle|RTP|"
-                    r"Carrboro|Cary|Morrisville|Charlotte|Greensboro|"
-                    r"Winston[- ]Salem|Asheville|North Carolina|NC|"
-                    r"Remote|Virginia|VA|Richmond)[^|\n]{0,40}",
-                    text, flags=re.I,
-                )
-                if m:
-                    loc = m.group(0).strip(" ,-")
+                loc = location_snippet(row.get_text(" ", strip=True), loc)
 
             jid_m = re.search(r"/job/([^/?#]+)", href)
             jid = jid_m.group(1) if jid_m else stable_id(href)

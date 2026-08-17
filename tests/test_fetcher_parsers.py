@@ -157,3 +157,82 @@ class TestRelevanceGate:
         cfg.INCLUDE_KEYWORDS[:] = ["quantum basket weaving"]
         fake_get(load("greenhouse_board.json"))
         assert ats_api.fetch_greenhouse("databricks", "Databricks") == []
+
+
+class TestAshbyKeyAcrossCallSites:
+    """Every Ashby reader, not just the one that was patched.
+
+    The `jobs` vs `jobPostings` mix-up was found and fixed in
+    `ats_api.fetch_ashby`, but the same line had been copied into the
+    discovery probe, the NC counter, the mission-scoring title sampler and
+    the company fetcher. All four kept reading `jobPostings`, so Ashby
+    boards probed live-but-empty, never counted a local job, and were
+    mission-scored with no titles at all. Pinning every call site together
+    is what stops the next copy from going stale on its own.
+
+    The distinction is real, not cosmetic: Workday's API genuinely returns
+    `jobPostings`, which is why the wrong key looked plausible.
+    """
+
+    BOARD = {"apiVersion": "1", "jobs": [
+        {"id": "j1", "title": "Catalysis Scientist",
+         "location": "Morrisville, North Carolina", "jobUrl": "https://x/1",
+         "descriptionPlain": "...", "publishedAt": "2026-05-28T00:00:00Z",
+         "secondaryLocations": [], "isRemote": False},
+        {"id": "j2", "title": "Lab Technician",
+         "location": "Durham, NC", "jobUrl": "https://x/2",
+         "descriptionPlain": "...", "publishedAt": "2026-06-24T00:00:00Z",
+         "secondaryLocations": [], "isRemote": False},
+    ]}
+
+    @pytest.fixture
+    def ashby_board(self, monkeypatch):
+        """Serve BOARD to every module that reads the Ashby posting API."""
+        class _Resp:
+            status_code = 200
+            text = json.dumps(TestAshbyKeyAcrossCallSites.BOARD)
+
+            def json(self):
+                return TestAshbyKeyAcrossCallSites.BOARD
+
+        from discovery import local_sourcing, probes
+        from scrapers.fetchers import company
+        for mod in (probes, local_sourcing):
+            monkeypatch.setattr(mod.SESSION, "get", lambda *a, **k: _Resp())
+        monkeypatch.setattr(company, "_get_json",
+                            lambda *a, **k: TestAshbyKeyAcrossCallSites.BOARD)
+
+    def test_probe_reports_the_real_total(self, ashby_board):
+        from discovery.probes import probe_ashby
+        assert probe_ashby("susteon") == (True, 2)
+
+    def test_nc_counter_sees_local_jobs(self, ashby_board):
+        from discovery.local_sourcing import _nc_count_ashby
+        assert _nc_count_ashby("susteon") == 2
+
+    def test_mission_scorer_gets_titles(self, ashby_board):
+        from discovery.local_sourcing import _sample_titles
+        titles = _sample_titles({"ats": "ashby", "slug": "susteon"})
+        assert titles == ["Catalysis Scientist", "Lab Technician"]
+
+    def test_company_fetcher_returns_postings(self, ashby_board):
+        from scrapers.fetchers.company import fetch_ashby_all
+        jobs = fetch_ashby_all("susteon")
+        assert [j["title"] for j in jobs] == ["Catalysis Scientist", "Lab Technician"]
+        assert jobs[0]["location"] == "Morrisville, North Carolina"
+
+    def test_workday_branch_still_reads_job_postings(self, monkeypatch):
+        """Workday really does return `jobPostings`. The two branches sit in
+        one function, so a careless sweep would break Workday while fixing
+        Ashby — this pins the other direction."""
+        class _Resp:
+            status_code = 200
+
+            def json(self):
+                return {"jobPostings": [{"title": "Clinical Trial Liaison"}]}
+
+        from discovery import local_sourcing
+        monkeypatch.setattr(local_sourcing.SESSION, "post", lambda *a, **k: _Resp())
+        titles = local_sourcing._sample_titles(
+            {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
+        assert titles == ["Clinical Trial Liaison"]

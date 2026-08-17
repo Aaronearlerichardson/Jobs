@@ -248,13 +248,14 @@ def main():
                                               "(improves site-specific parsing)")
     # --add: hand-pick one job from a gated/JS site (Meta, Google, any custom
     # board) the auto-parsers can't reach. Bypasses the exclude/technical
-    # gates (you chose it) but keeps the NC location gate; also registers the
-    # company and pulls its other NC jobs when its board resolves.
+    # gates (you chose it) but keeps the locality gate; also registers the
+    # company and pulls its other local jobs when its board resolves.
     ap.add_argument("--add", action="store_true",
                     help="Add one curated job by fields (see --title/--company/--location)")
     ap.add_argument("--title", default="", help="With --add: the job title")
     ap.add_argument("--company", default="", help="With --add: the employer name")
-    ap.add_argument("--location", default="", help="With --add: the job location (must be NC to pass the gate)")
+    ap.add_argument("--location", default="", help="With --add: the job location (must be inside your "
+                         "[locality] to pass the gate)")
     ap.add_argument("--desc", default="", help="With --add: optional job description")
     ap.add_argument("--no-board", action="store_true",
                     help="With --add: don't also pull the company's other jobs")

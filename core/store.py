@@ -18,6 +18,8 @@ from datetime import datetime, timedelta
 
 import config
 
+from . import tags
+
 
 def combined_score(fit, mission):
     """Geometric mean sqrt(fit * mission) of the resume-fit and company
@@ -46,12 +48,12 @@ CREATE TABLE IF NOT EXISTS companies (
     wd_pod         INTEGER,
     wd_site        TEXT,
     careers_url    TEXT,
-    nc_job_count   INTEGER DEFAULT 0,
+    local_job_count INTEGER DEFAULT 0, -- openings inside your [locality]
     total_job_count INTEGER DEFAULT 0,
-    mission_tier   TEXT,              -- healthcare-tech|health-bio-science|community-driven-tech|other
-    mission_score  REAL,              -- 0..1 (health/tech relevance)
+    mission_tier   TEXT,              -- a tier name from profile [mission]
+    mission_score  REAL,              -- 0..1 (alignment with what you care about)
     mission_reason TEXT,
-    tags           TEXT,              -- comma tokens: neural,nc_local,remote_friendly
+    tags           TEXT,              -- comma scope tokens; see core/tags.py
     source         TEXT,              -- how it was discovered
     active         INTEGER DEFAULT 1, -- crawl this company?
     last_probed    TEXT,
@@ -70,7 +72,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     geo_mode       TEXT,                  -- onsite|remote
     remote_eligible INTEGER,              -- 1 when the remote filter passed
     remote_signal  TEXT,                  -- phrase/hint that marked it remote
-    neural_signal  TEXT,                  -- neural anchor term that matched
+    anchor_signal  TEXT,                  -- the CORE keyword that anchored it
     description    TEXT,
     resume_fit_score REAL,
     fit_reason     TEXT,
@@ -92,12 +94,17 @@ CREATE INDEX IF NOT EXISTS ix_jobs_track   ON jobs(track);
 _MIGRATIONS = {
     "companies": {
         "tags": "TEXT",
+        # No DEFAULT, unlike _SCHEMA's fresh-DB declaration: ADD COLUMN with a
+        # default writes that default into every existing row, which would
+        # make the _RENAMED_COLUMNS copy below (guarded on IS NULL) a no-op
+        # and silently drop the counts inherited from nc_job_count.
+        "local_job_count": "INTEGER",   # was nc_job_count
     },
     "jobs": {
         "track":           "TEXT",
         "remote_eligible": "INTEGER",
         "remote_signal":   "TEXT",
-        "neural_signal":   "TEXT",
+        "anchor_signal":   "TEXT",   # was neural_signal
         # Per-axis fit sub-scores (core/fit.py). resume_fit_score stays
         # the combined scalar; these expose the breakdown for querying/sorting.
         "fit_domain":      "REAL",
@@ -127,13 +134,23 @@ _MIGRATIONS = {
 DISPOSITIONS = ("saved", "applied", "interviewing", "rejected", "dismissed")
 RANKING_EXCLUDED_DISPOSITIONS = ("applied", "interviewing", "rejected", "dismissed")
 
-# Columns retired after the unified refactor. Dropped idempotently on connect
-# so existing DBs (which keep old columns under CREATE TABLE IF NOT EXISTS)
-# shed them too. All three were 100% NULL — mission/tech_bar_score became
-# company-level after unification; hq_location was never populated.
+# Columns whose CONTENT lives on under a new, field-neutral name: the old
+# ones were named for one user's search ("neural" anchors, "nc" for the local
+# region). new -> old; _ensure_columns copies old values across before the
+# old column is dropped, so no history is lost on an existing DB.
+_RENAMED_COLUMNS = {
+    "jobs":      {"anchor_signal": "neural_signal"},
+    "companies": {"local_job_count": "nc_job_count"},
+}
+
+# Columns retired for good. Dropped idempotently on connect so existing DBs
+# (which keep old columns under CREATE TABLE IF NOT EXISTS) shed them too.
+# mission/tech_bar_score became company-level after unification and
+# hq_location was never populated — all three were 100% NULL. The last two
+# are the _RENAMED_COLUMNS sources, dropped only after their copy runs.
 _DROPPED_COLUMNS = {
-    "jobs": ("mission", "tech_bar_score"),
-    "companies": ("hq_location",),
+    "jobs": ("mission", "tech_bar_score", "neural_signal"),
+    "companies": ("hq_location", "nc_job_count"),
 }
 
 
@@ -152,6 +169,15 @@ def _ensure_columns(conn):
                 except sqlite3.OperationalError as e:
                     if "duplicate column" not in str(e).lower():
                         raise
+    # Carry renamed columns' values across BEFORE the old ones are dropped.
+    # Only fills rows the new column hasn't got a value for, so re-running is
+    # a no-op and a re-crawl's fresh value is never overwritten by stale data.
+    for table, renames in _RENAMED_COLUMNS.items():
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for new, old in renames.items():
+            if new in existing and old in existing:
+                conn.execute(f"UPDATE {table} SET {new}={old} "
+                             f"WHERE {new} IS NULL AND {old} IS NOT NULL")
     for table, cols in _DROPPED_COLUMNS.items():
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
         for col in cols:
@@ -164,12 +190,36 @@ def _ensure_columns(conn):
     conn.commit()
 
 
+def _migrate_tags(conn):
+    """Rewrite retired company scope-tag tokens in place (core/tags.py).
+
+    The tags started out named after one user's search ('nc_local', 'neural')
+    and now say what they DO ('local', 'sweep'). Reads tolerate the old names
+    via tags.canonical(), but rewriting the stored tokens keeps SQL tag
+    filters — which match the literal token — honest. Idempotent, and done in
+    Python rather than SQL string surgery so a row that somehow holds both a
+    legacy name and its replacement collapses to one token instead of two.
+    Costs one scan of a table with hundreds of rows, not millions.
+    """
+    if not tags.ALIASES:
+        return
+    where = " OR ".join(["(',' || tags || ',') LIKE ?"] * len(tags.ALIASES))
+    rows = conn.execute(
+        f"SELECT id, tags FROM companies WHERE tags IS NOT NULL AND ({where})",
+        tuple(f"%,{legacy},%" for legacy in tags.ALIASES)).fetchall()
+    for row in rows:
+        conn.execute("UPDATE companies SET tags=? WHERE id=?",
+                     (tags.join(tags.parse(row["tags"])), row["id"]))
+    conn.commit()
+
+
 def connect(path=None):
     conn = sqlite3.connect(path or config.STORE_DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
     conn.commit()
     _ensure_columns(conn)
+    _migrate_tags(conn)
     conn.executescript(_INDEXES)
     conn.commit()
     return conn
@@ -209,7 +259,7 @@ def _track_match_arg(track):
 
 _COMPANY_COLS = (
     "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url",
-    "nc_job_count", "total_job_count", "mission_tier",
+    "local_job_count", "total_job_count", "mission_tier",
     "mission_score", "mission_reason", "tags", "source", "active",
     "last_probed", "notes",
 )
@@ -435,7 +485,7 @@ def get_companies(conn, active_only=True, missions=None, tag=None):
         args.append(f"%,{tag},%")
     if conds:
         q += " WHERE " + " AND ".join(conds)
-    q += " ORDER BY mission_score DESC, nc_job_count DESC"
+    q += " ORDER BY mission_score DESC, local_job_count DESC"
     return [dict(r) for r in conn.execute(q, args).fetchall()]
 
 
@@ -472,7 +522,7 @@ def upsert_job(conn, j):
     conn.execute(
         """INSERT INTO jobs
             (job_id, company_id, company_name, title, url, location, track,
-             geo_mode, remote_eligible, remote_signal, neural_signal,
+             geo_mode, remote_eligible, remote_signal, anchor_signal,
              description, resume_fit_score, fit_reason,
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
              posted_at, first_seen, last_seen, status)
@@ -483,7 +533,7 @@ def upsert_job(conn, j):
              geo_mode=COALESCE(excluded.geo_mode, geo_mode),
              remote_eligible=COALESCE(excluded.remote_eligible, remote_eligible),
              remote_signal=COALESCE(excluded.remote_signal, remote_signal),
-             neural_signal=COALESCE(excluded.neural_signal, neural_signal),
+             anchor_signal=COALESCE(excluded.anchor_signal, anchor_signal),
              description=excluded.description,
              resume_fit_score=COALESCE(excluded.resume_fit_score, resume_fit_score),
              fit_reason=COALESCE(NULLIF(excluded.fit_reason,''), fit_reason),
@@ -499,7 +549,7 @@ def upsert_job(conn, j):
                             THEN closed_at ELSE NULL END""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
          j.get("url"), j.get("location"), track, j.get("geo_mode"),
-         remote, j.get("remote_signal"), j.get("neural_signal"),
+         remote, j.get("remote_signal"), j.get("anchor_signal"),
          j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
@@ -874,7 +924,7 @@ def mark_seen(conn, job, track=None):
         "track":           track or job.get("track"),
         "remote_eligible": job.get("remote_eligible"),
         "remote_signal":   job.get("remote_signal"),
-        "neural_signal":   job.get("neural_signal"),
+        "anchor_signal":   job.get("anchor_signal"),
         "description":     (job.get("description") or "")[:config.MAX_DESC_CHARS],
         "posted_at":       job.get("posted_at"),
         "resume_fit_score": job.get("resume_fit_score"),

@@ -27,7 +27,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 _ANCHORS_ONLY = SoupStrainer("a")
 
 from ..http import HEADERS, SESSION
-from core.locality import NC_RE  # Triangle/NC locality — the local track's location gate
+from core.locality import NC_RE, location_snippet  # profile [locality]: the location gate
 from ..util import norm_posted_date
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
@@ -131,7 +131,10 @@ def fetch_ashby_all(slug, loc_re=None):
                          f"ashby {slug}")
         if not isinstance(data, dict):
             return out
-        for j in data.get("jobPostings", []):
+        # Ashby's posting API returns {"jobs": [...], "apiVersion": "1"}.
+        # `jobPostings` is the key in their GraphQL/embed payload, not this
+        # one — reading it here made every Ashby board look empty.
+        for j in data.get("jobs", data.get("jobPostings", [])):
             secondary = []
             for s in (j.get("secondaryLocations") or []):
                 secondary.append(s.get("location", "") if isinstance(s, dict) else str(s))
@@ -272,7 +275,21 @@ def _wd_location_facets(api, hdr, loc_re):
     return applied
 
 
-def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolina",
+def _default_search_text():
+    """A free-text location term for Workday's `searchText`, from [locality].
+
+    Prefer a spelled-out state/region suffix ("california") over a two-letter
+    abbreviation, which matches far too much in a free-text field; fall back
+    to the longest place name. Returns "" when no locality is configured,
+    which simply means an unnarrowed board pull."""
+    words = [s for s in config.LOCALITY_STATE_SUFFIX if len(s) > 2]
+    if words:
+        return max(words, key=len)
+    places = [s for s in config.LOCALITY_SUBSTRINGS if s]
+    return max(places, key=len) if places else ""
+
+
+def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                       page_size=20, max_pages=60):
     """List postings (title/location/path only). Descriptions hydrated later.
 
@@ -281,10 +298,14 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolin
          (server-side, catches multi-location reqs the text filter can't).
       2. loc_re given, no usable facets -> `search_text` free-text narrowing
          (legacy behavior), still with the multi-location rescue below.
-    Either way, a row whose locationsText fails loc_re gets two more chances:
-    the externalPath location slug, then the CXS detail's full location list
-    ("2 Locations" rows). Rescued rows carry the REAL joined location string
-    so downstream geo logic sees the NC evidence.
+      3. loc_re None -> the WHOLE board, unnarrowed.
+    In cases 1 and 2, a row whose locationsText fails loc_re gets two more
+    chances: the externalPath location slug, then the CXS detail's full
+    location list ("2 Locations" rows). Rescued rows carry the REAL joined
+    location string so downstream geo logic sees the evidence.
+
+    `search_text` defaults to a term derived from your [locality]; pass "" for
+    an explicitly unnarrowed pull.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
@@ -294,6 +315,11 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text="North Carolin
     applied_facets = {}
     if loc_re is not None:
         applied_facets = _wd_location_facets(api, hdr, loc_re)
+    # Never send a location term on a whole-board pull: loc_re=None IS the
+    # request for everything, and narrowing it anyway silently hid every
+    # out-of-area posting from callers that asked for the full board.
+    if search_text is None:
+        search_text = _default_search_text() if loc_re is not None else ""
     body_extra = ({"appliedFacets": applied_facets, "searchText": ""}
                   if applied_facets else
                   {"appliedFacets": {}, "searchText": search_text})
@@ -1123,15 +1149,8 @@ def fetch_successfactors_all(base_url, loc_re=None, step=25, max_pages=80):
                 loc = f"{m.group(1).replace('-', ' ').strip()}, {m.group(2)}"
             else:
                 row = a.find_parent("tr") or a.find_parent("li") or a.find_parent("div")
-                if row is not None:
-                    rm = re.search(
-                        r"(Durham|Chapel Hill|Raleigh|Research Triangle|RTP|Cary|"
-                        r"Morrisville|Charlotte|Greensboro|Winston[- ]Salem|Holly Springs|"
-                        r"North Carolina|\bNC\b|Remote)[^|\n]{0,40}",
-                        row.get_text(" ", strip=True), flags=re.I)
-                    loc = rm.group(0).strip(" ,-") if rm else "See posting"
-                else:
-                    loc = "See posting"
+                loc = (location_snippet(row.get_text(" ", strip=True))
+                       if row is not None else "See posting")
             if not _loc_ok(loc_re, loc):
                 continue
             jid_m = re.search(r"/job/[^/]+/(\d+)", href) or re.search(r"/job/([^/?#]+)", href)

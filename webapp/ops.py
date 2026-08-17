@@ -11,8 +11,11 @@ from core import store
 from scrapers import ops as maint
 
 TASK = {"name": None, "thread": None, "log": [], "started": None,
-        "ended": None, "error": None}
+        "ended": None, "error": None, "active": False}
 _LOG_LOCK = threading.Lock()
+# Guards the claim on TASK. Separate from _LOG_LOCK, which the Tee takes on
+# every write — holding one while waiting on the other would deadlock.
+_TASK_LOCK = threading.Lock()
 
 
 class _Tee(io.TextIOBase):
@@ -68,9 +71,20 @@ def _restore_keywords():
 
 
 def _run_op(name, fn):
+    """Start `fn` on a worker thread. Returns False if an operation is
+    already running.
+
+    The claim is taken under a lock rather than left to the caller's
+    `_running()` check. Two /api/run requests arriving together could both
+    pass that check before either set TASK["thread"], and the second op then
+    ran concurrently with the first — doing the whole crawl twice and, worse,
+    nesting the stdout tee: each layer appends to TASK["log"], so every line
+    landed in the browser log once per layer.
+    """
     def worker():
         orig = sys.stdout
-        sys.stdout = _Tee(orig)
+        tee = _Tee(orig)
+        sys.stdout = tee
         try:
             _restore_keywords()
             fn()
@@ -78,18 +92,39 @@ def _run_op(name, fn):
             TASK["error"] = f"{type(e).__name__}: {e}"
             print(f"  [!] operation failed: {TASK['error']}")
         finally:
-            sys.stdout = orig
+            # Only unwind our own layer. Blindly assigning `orig` back would
+            # restore a stale stream if anything else swapped stdout while we
+            # ran, permanently leaving a tee installed that copies every later
+            # print into the op log.
+            if sys.stdout is tee:
+                sys.stdout = orig
             TASK["ended"] = datetime.now().isoformat()
+            with _TASK_LOCK:
+                TASK["active"] = False
+
+    with _TASK_LOCK:
+        if _running():
+            return False
+        TASK["active"] = True          # claim before the thread exists —
+        TASK["thread"] = None          # an unstarted thread isn't yet alive
+        TASK.update(name=name, error=None, ended=None,
+                    started=datetime.now().isoformat())
     with _LOG_LOCK:
         TASK["log"].clear()
-    TASK.update(name=name, error=None, ended=None,
-                started=datetime.now().isoformat())
     t = threading.Thread(target=worker, daemon=True)
     TASK["thread"] = t
-    t.start()
+    try:
+        t.start()
+    except Exception:
+        with _TASK_LOCK:
+            TASK["active"] = False
+        raise
+    return True
 
 
 def _running():
+    if TASK["active"]:
+        return True
     t = TASK["thread"]
     return bool(t and t.is_alive())
 
@@ -158,7 +193,7 @@ def _op_dedup(p):
 
 
 # Each op declares which crawl ENGINE it needs ("local" = the location-scoped
-# crawler, "neural" = the location-agnostic sweep — scrapers/runner.py;
+# crawler, "sweep" = the location-agnostic one — scrapers/runner.py;
 # None = engine-agnostic, runs against whichever track is active). Ops are
 # matched to the active track by its profile-configured `engine` — never by
 # the user-chosen track id.

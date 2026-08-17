@@ -12,7 +12,7 @@ class TestSchema:
     def test_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert {"resume_fit_score", "track", "remote_eligible",
-                "neural_signal"} <= cols
+                "anchor_signal"} <= cols
 
     def test_migrations_are_idempotent(self, db):
         # A second connect() over the same schema must not raise.
@@ -22,9 +22,9 @@ class TestSchema:
 class TestCompanies:
     def test_tags_merge_on_upsert(self, db):
         store.upsert_company(db, {"name": "X", "ats": "greenhouse",
-                                  "slug": "x", "tags": "neural"})
-        store.upsert_company(db, {"name": "X", "tags": "nc_local"})
-        assert store.get_companies(db, tag="neural")[0]["tags"] == "nc_local,neural"
+                                  "slug": "x", "tags": "sweep"})
+        store.upsert_company(db, {"name": "X", "tags": "local"})
+        assert store.get_companies(db, tag="sweep")[0]["tags"] == "local,sweep"
 
     def test_watch_tag_roundtrip(self, db):
         store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})

@@ -310,13 +310,17 @@ class JsSniffer:
         try:
             from playwright.sync_api import sync_playwright
             from config import BROWSER_UA
+            from .probes import launch_chromium
             self._pw = sync_playwright().start()
-            self._browser = self._pw.chromium.launch(headless=True)
+            self._browser, _ = launch_chromium(self._pw, headless=True)
             self._page = self._browser.new_context(
                 user_agent=BROWSER_UA, viewport={"width": 1440, "height": 900},
                 locale="en-US").new_page()
         except Exception as e:
-            print(f"    [js-sniff] disabled ({e})")
+            # Same one-shot reporting as the Workday JS probe — a missing
+            # browser is one condition, not one per instance.
+            from .probes import _js_launch_hint, _report_js_disabled
+            _report_js_disabled(f"careers-page sniff: {_js_launch_hint(e)}")
             self._ok = False
         return self._page
 

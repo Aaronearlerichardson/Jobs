@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 
 import config
 
-from core import digest_md, gates, store
+from core import digest_md, gates, store, tags
 from core.claude import score_resume_fit
 from .fetchers import company as company_fetch
 from core.filters import is_relevant
@@ -47,14 +47,13 @@ def _ranked(conn, t, limit=None):
 #  Company-tag helpers (store roster semantics, shared by crawl + ops).        #
 # --------------------------------------------------------------------------- #
 
-def _is_neural_tagged(company):
-    """True if a company store row carries the 'neural' scope tag. Used to
-    relax the location-scoped geo gate for these companies specifically —
-    an explicitly REMOTE posting from one still counts as local material;
-    an onsite one outside the locality does not."""
+def _is_sweep_tagged(company):
+    """True if a company store row carries the 'sweep' scope tag (core/tags.py
+    — 'neural' in older stores). Its board is cheap to pull whole, so it is
+    fetched unfiltered; the geo gate is then applied per posting below."""
     if not company:
         return False
-    return "neural" in {t for t in (company.get("tags") or "").split(",") if t}
+    return tags.has(company.get("tags"), tags.SWEEP)
 
 
 def _is_watched(company):
@@ -64,14 +63,14 @@ def _is_watched(company):
     surface in a dedicated digest section regardless of rank or geography."""
     if not company:
         return False
-    return "watch" in {t for t in (company.get("tags") or "").split(",") if t}
+    return tags.has(company.get("tags"), tags.WATCH)
 
 
 def _whole_board(company):
     """Companies whose ENTIRE board is fetched (no location filter):
-    neural-tagged (remote postings count as local material) and watched
-    (never miss a new posting). Everyone else gets the locality-scoped pull."""
-    return _is_neural_tagged(company) or _is_watched(company)
+    sweep-tagged (cheap to pull whole) and watched (never miss a new
+    posting). Everyone else gets the locality-scoped pull."""
+    return _is_sweep_tagged(company) or _is_watched(company)
 
 
 # --------------------------------------------------------------------------- #
@@ -98,13 +97,13 @@ def _keep_job(company, job, t):
             allow_defense=_is_watched(company), track_id=t["id"]):
         return False
     if t["geo_gate"] and _whole_board(company):
-        # Neural-tagged and watched companies are fetched with no location
+        # Sweep-tagged and watched companies are fetched with no location
         # restriction, which lets their remote and onsite-elsewhere reqs
         # through the fetch. Gate here:
         #   watched -> local-onsite or explicitly-remote is scored (the
         #              watch tag is human-curated, and ranked_jobs admits
         #              watched remotes into the local list);
-        #   neural  -> local-onsite ONLY. The machine-set neural tag proved
+        #   sweep   -> local-onsite ONLY. That tag is machine-set and proved
         #              untrustworthy for an out-of-area exception (slug
         #              collisions flooded the ranking with remote junk).
         gm = geo_mode(job.get("location", ""), job.get("description", ""))
@@ -132,7 +131,7 @@ def _score_job(resume, company, job, track):
 
 def crawl_company(conn, resume, company, max_workers=6, t=None):
     """Fetch ONE store company's locality-scoped board (whole board for
-    watched/neural-tagged companies), apply the track's filters, resume-fit-
+    watched/sweep-tagged companies), apply the track's filters, resume-fit-
     score the new postings, and store them. Returns (n_fetched, n_kept,
     n_new). Used by the manual-add flow to pull a company's other jobs once
     it's in the roster."""
@@ -704,9 +703,9 @@ def add_manual_job(url, title, company, location, description="",
             "wd_pod": slug[1] if is_wd else None,
             "wd_site": slug[2] if is_wd else None,
             "careers_url": board.get("careers_url"),
-            "nc_job_count": board["nc"], "total_job_count": board["count"],
+            "local_job_count": board["nc"], "total_job_count": board["count"],
             "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-            "tags": "nc_local" if board["nc"] else None,
+            "tags": tags.LOCAL if board["nc"] else None,
             "source": "manual_add", "active": active,
         })
         print(f"    board resolved: {board['ats']} nc={board['nc']} "

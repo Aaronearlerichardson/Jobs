@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r envs/requirements.txt
 
       - name: Check boards
         # Never fails the run: a red badge is the report, not an incident.

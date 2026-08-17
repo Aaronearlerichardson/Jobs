@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import stable_id
+from core.locality import location_snippet
 
 
 def fetch_peopleadmin(host, company_name):
@@ -33,10 +34,6 @@ def fetch_peopleadmin(host, company_name):
     feed_loc = feed_title_el.get_text(strip=True) if feed_title_el else ""
     entries = soup.find_all("entry")
     jobs = []
-    _CITY_RE = re.compile(
-        r"(Chapel Hill|Durham|Raleigh|Carrboro|Research Triangle|RTP|"
-        r"Charlotte|Greensboro|Winston[- ]Salem|Asheville|"
-        r"North Carolina|NC|Remote)[^|\n]{0,40}", re.I)
     for e in entries:
         title_el = e.find("title")
         title    = title_el.get_text(strip=True) if title_el else ""
@@ -49,13 +46,10 @@ def fetch_peopleadmin(host, company_name):
         body_el = e.find("summary") or e.find("content")
         desc    = body_el.get_text(" ", strip=True) if body_el else ""
 
-        loc = "See posting"
-        m = _CITY_RE.search(desc)
-        if m:
-            loc = m.group(0).strip(" ,-")
-        elif feed_loc:
-            fm = _CITY_RE.search(feed_loc)
-            loc = fm.group(0).strip(" ,-") if fm else feed_loc[:60]
+        loc = location_snippet(desc, "")
+        if not loc and feed_loc:
+            loc = location_snippet(feed_loc, feed_loc[:60])
+        loc = loc or "See posting"
 
         jid_m = re.search(r"/postings/(\d+)", jurl)
         jid   = jid_m.group(1) if jid_m else stable_id(jurl)

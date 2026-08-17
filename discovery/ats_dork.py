@@ -16,7 +16,7 @@ import config
 
 from .sniffer import _SIGS
 from .probes import _extract_workday_triple
-from core import store
+from core import store, tags as company_tags
 from scrapers.fetchers import company as company_fetch
 from core.claude import score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal
@@ -132,14 +132,56 @@ def harvest_urls(urls, verbose=True):
             wd_tenant=slug[0] if ats == "workday" else None,
             wd_pod=slug[1] if ats == "workday" else None,
             wd_site=slug[2] if ats == "workday" else None,
-            nc_job_count=nc, total_job_count=nc, mission_tier=tier,
-            mission_score=score, mission_reason=reason, tags="nc_local",
+            local_job_count=nc, total_job_count=nc, mission_tier=tier,
+            mission_score=score, mission_reason=reason, tags=company_tags.LOCAL,
             source="ats_dork", active=active))
         added += 1
         if verbose:
             print(f"  {name[:26]:26} {ats:12} nc={nc:2} {str(tier):19} "
                   f"{score if score else 0:.2f} {'ACTIVE' if active else 'inactive'}")
     return added, len(boards)
+
+
+# ddgs builds its engine registry by WALKING ITS OWN PACKAGE DIRECTORY
+# (pkgutil.iter_modules in ddgs/engines/__init__.py). A compiled build has no
+# directory to walk, so the registry comes up empty and every search dies on
+# `ENGINES["text"]` — a bare KeyError('text'), raised before ddgs's own backend
+# error handling can run, so the whole sweep silently returns 0 results.
+# Fallback list only — a new ddgs release can add an engine this misses, which
+# costs that one backend rather than the whole sweep.
+_DDGS_ENGINE_MODULES = (
+    "annasarchive", "bing", "bing_images", "bing_news", "brave", "duckduckgo",
+    "duckduckgo_images", "duckduckgo_news", "duckduckgo_videos", "google",
+    "grokipedia", "mojeek", "startpage", "wikipedia", "yahoo", "yahoo_news",
+    "yandex",
+)
+
+
+def _ensure_ddgs_engines():
+    """Re-register ddgs's search engines when its own discovery came up empty.
+    No-op on a normal source run."""
+    import importlib
+    import inspect
+    try:
+        from ddgs.base import BaseSearchEngine
+        from ddgs.engines import ENGINES
+    except Exception:
+        return
+    if ENGINES.get("text"):
+        return
+    for modname in _DDGS_ENGINE_MODULES:
+        try:
+            module = importlib.import_module(f"ddgs.engines.{modname}")
+        except Exception:
+            continue
+        for _, cls in inspect.getmembers(module, inspect.isclass):
+            if (not issubclass(cls, BaseSearchEngine) or cls is BaseSearchEngine
+                    or cls.__name__.startswith("Base")
+                    or getattr(cls, "disabled", True)):
+                continue
+            name, category = getattr(cls, "name", None), getattr(cls, "category", None)
+            if isinstance(name, str) and isinstance(category, str):
+                ENGINES.setdefault(category, {})[name] = cls
 
 
 def _ddg_text(query, max_results, retries=2, pause=2.5):
@@ -154,6 +196,7 @@ def _ddg_text(query, max_results, retries=2, pause=2.5):
             from duckduckgo_search import DDGS
     except ImportError:
         return []
+    _ensure_ddgs_engines()
     for attempt in range(retries + 1):
         try:
             with DDGS() as ddg:
@@ -163,7 +206,9 @@ def _ddg_text(query, max_results, retries=2, pause=2.5):
             if attempt < retries:
                 time.sleep(pause * (attempt + 1))
                 continue
-            print(f"  [!] dork {query[:48]}...: {e}")
+            # Type included: a bare KeyError prints as just its key ('text'),
+            # which reads like a parsing quirk rather than a dead registry.
+            print(f"  [!] dork {query[:48]}...: {type(e).__name__}: {e}")
     return []
 
 

@@ -79,13 +79,18 @@ class TestTechnicalTitle:
     def test_nurse_is_not_technical(self, local_track):
         assert not gates.is_technical_role("Registered Nurse", local_track)
 
-    def test_controller_is_not_technical(self, neural_track):
-        # Neural employers put their modality in every posting's boilerplate,
-        # so the TITLE has to carry the technical signal.
-        assert not gates.is_technical_role("Corporate Controller", neural_track)
+    def test_controller_is_not_technical(self, sweep_track):
+        # A sweep track pulls whole boards, so every back-office title at a
+        # relevant employer arrives too: the TITLE has to carry the signal.
+        assert not gates.is_technical_role("Corporate Controller", sweep_track)
 
-    def test_tracks_can_differ(self, local_track, neural_track):
-        assert local_track["tech_title_regex"] != neural_track["tech_title_regex"]
+    def test_tracks_can_differ(self, local_track):
+        """Engines share a broad default, but a track can override it — the
+        gate reads the track's own regex, never a module-level constant."""
+        narrow = dict(local_track, tech_title_regex=r"\bbaker\b")
+        assert gates.is_technical_role("Sourdough Baker", narrow)
+        assert not gates.is_technical_role("Data Engineer", narrow)
+        assert gates.is_technical_role("Data Engineer", local_track)
 
     def test_empty_title_is_never_technical(self, local_track):
         assert not gates.is_technical_role("", local_track)

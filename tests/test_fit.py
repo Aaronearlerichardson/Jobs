@@ -72,6 +72,46 @@ class TestPromptCache:
         assert (claude.build_payload("S", "U1")["system"]
                 == claude.build_payload("S", "U2")["system"])
 
-    def test_screen_prompt_clears_the_cache_floor(self):
-        # Below the model's floor a prompt simply doesn't cache.
-        assert len(fit.build_system_prompt()) // 4 > claude.min_cacheable_tokens()
+    def test_screen_prompt_clears_the_cache_floor(self, cfg):
+        """A filled-in profile's screen prompt must clear the model's cache
+        floor — below it, nothing caches and a several-hundred-job crawl pays
+        full input price on every call.
+
+        Pinned to a REPRESENTATIVE profile rather than whatever is loaded: the
+        prompt is mostly the fixed rubric plus your [candidate] and [fit]
+        text, so the shipped example (deliberately terse) lands just under the
+        floor while any real profile clears it comfortably. That's a graceful
+        degradation, not a bug — see test_thin_profile_still_builds — but the
+        floor is only worth guarding for the case that should hit it.
+        """
+        saved = {k: getattr(cfg, k, None) for k in
+                 ("CANDIDATE_SUMMARY", "CANDIDATE_STRENGTHS", "FIT_STACK_CORE")}
+        cfg.CANDIDATE_SUMMARY = ("A senior engineer with a decade of experience "
+                                 "across research and production systems. " * 4)
+        cfg.CANDIDATE_STRENGTHS = [f"Strength number {i}: " + "detail " * 20
+                                   for i in range(4)]
+        cfg.FIT_STACK_CORE = ", ".join(f"tool{i}" for i in range(40))
+        try:
+            prompt = fit.build_system_prompt()
+        finally:
+            for k, v in saved.items():
+                setattr(cfg, k, v)
+        assert len(prompt) // 4 > claude.min_cacheable_tokens()
+
+    def test_thin_profile_still_builds(self, cfg):
+        """An empty profile must still produce a coherent rubric — a new user
+        runs their first crawl before filling anything in."""
+        keys = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
+                "FIT_DOMAIN_LADDER", "FIT_STACK_CORE", "FIT_STACK_ANTI",
+                "FIT_REGION", "LOCALITY_NAME", "LOCALITY_SUBSTRINGS")
+        saved = {k: getattr(cfg, k, None) for k in keys}
+        for k in keys:
+            setattr(cfg, k, [] if k.endswith(("KEYWORDS", "SUBSTRINGS")) else None)
+        try:
+            prompt = fit.build_system_prompt()
+        finally:
+            for k, v in saved.items():
+                setattr(cfg, k, v)
+        assert fit.FALLBACK_STACK_CORE in prompt
+        assert "remote" in prompt
+        assert "~0.15" in prompt          # the ladder's floor rung survives

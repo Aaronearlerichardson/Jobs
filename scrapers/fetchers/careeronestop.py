@@ -63,14 +63,42 @@ def _company_match(posted_company, queried_name):
     return bool(p and q) and (q <= p or p <= q)
 
 
-def fetch_nlx_company(name, location="North Carolina", days=60,
+def _default_location():
+    """A location term this API will accept, derived from [locality].
+
+    NOT `[locality].name` verbatim: that is a human label and may be
+    anything ("North Carolina / Research Triangle"). A `/` in it silently
+    becomes an extra path segment — `quote()` leaves `/` alone by default —
+    and the request 404s on a malformed path rather than failing loudly.
+    Prefer a spelled-out state/region term, else the longest place name."""
+    words = [s for s in config.LOCALITY_STATE_SUFFIX if len(s) > 2]
+    if words:
+        return max(words, key=len)
+    places = [s for s in config.LOCALITY_SUBSTRINGS if s]
+    if places:
+        return max(places, key=len)
+    # Last resort: the label, with anything path-breaking taken off.
+    return re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip()
+
+
+def fetch_nlx_company(name, location=None, days=60,
                       page_size=50, max_pages=6):
     """All NLx postings for one employer in `location`. Returns normalized
     job dicts ({id, title, company, url, location, description}) ready for
     ingest_external_jobs; company is canonicalized to `name` so the store's
-    company-linking (and the multi-division ranking floor) applies."""
+    company-linking (and the multi-division ranking floor) applies.
+
+    `location` defaults to a term derived from your [locality] — the API
+    requires a location segment in the path, so there is no "anywhere" to
+    fall back to. It wants a real place ("North Carolina", "Durham, NC"),
+    not a label."""
+    location = location or _default_location()
     creds = _creds()
     if not creds:
+        return []
+    if not location:
+        print("  [!] No [locality] configured — NLx needs a location "
+              "(a state or metro) to search. Set [locality].name.")
         return []
     uid, tok = creds
     hdr = {**HEADERS, "Authorization": f"Bearer {tok}", "Accept": "application/json"}
@@ -79,7 +107,11 @@ def fetch_nlx_company(name, location="North Carolina", days=60,
     for page in range(max_pages):
         # Path: /{userId}/{keyword}/{location}/{radius}/{sortCol}/{sortOrder}
         #       /{startRecord}/{limitRecord}/{days}
-        url = (f"{_API}/{quote(uid)}/{quote(name)}/{quote(location)}/25/0/0/"
+        # safe="" so a slash inside a company or location name is encoded
+        # rather than punched through as a new path segment (a 404 that
+        # looks like "the API is down" but is a malformed URL).
+        url = (f"{_API}/{quote(uid, safe='')}/{quote(name, safe='')}/"
+               f"{quote(location, safe='')}/25/0/0/"
                f"{page * page_size}/{page_size}/{days}")
         try:
             r = SESSION.get(url, timeout=25, headers=hdr,

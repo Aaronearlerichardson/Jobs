@@ -19,9 +19,21 @@ running app prints the paths it chose; `run_scraper.py --where` prints them
 without starting anything. Set ANTHROPIC_API_KEY in the environment for
 scoring.
 
-Playwright (optional headless probes for JS-only boards) is deliberately
-excluded — it needs its own browser download and cannot ship in a binary;
-those probes degrade gracefully without it.
+Playwright (headless probes for JS-only boards) IS bundled, driver included —
+that is most of the binary's size. Two separate pieces are needed to run a
+headless browser, and only one of them can ship:
+
+  * the DRIVER (~100 MB of node + JS under playwright/driver/) is package
+    DATA, so Nuitka needs --include-package-data; without it the modules
+    compile in but sync_playwright() cannot start at all.
+  * the BROWSER itself is a separate ~150 MB per-platform download that
+    lives outside the package, and is not bundled. The probes fall back to
+    a Chrome or Edge already on the machine ([policy] browser_channels),
+    which is what makes them work on a fresh install without asking anyone
+    to run `playwright install`.
+
+So: a machine with any Chrome or Edge gets working JS probes out of the box;
+a machine with neither degrades gracefully, as before.
 
 The first build downloads a C compiler if none is found and can take
 10-30 minutes; rebuilds are much faster.
@@ -44,7 +56,13 @@ DATA_DIRS = [("webapp/static", "webapp/static")]
 # it loads its search-engine backends by walking its own package directory at
 # runtime, so following the import alone leaves the compiled build with the
 # package but none of the engines, and every dork query dies on KeyError('text').
-PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs"]
+PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright"]
+
+# Packages whose non-Python files must ship too. playwright/driver/ holds the
+# node runtime and cli.js that sync_playwright() execs; playwright locates it
+# as `Path(inspect.getfile(playwright)).parent / "driver"`, so it has to land
+# beside the compiled module rather than anywhere else.
+DATA_PACKAGES = ["playwright"]
 
 
 def build_command():
@@ -52,6 +70,7 @@ def build_command():
            "--onefile", f"--output-filename={OUTPUT_NAME}",
            "--assume-yes-for-downloads"]
     cmd += [f"--include-package={p}" for p in PACKAGES]
+    cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
     cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]
     cmd += [f"--include-data-dir={src}={dst}" for src, dst in DATA_DIRS]
     return cmd

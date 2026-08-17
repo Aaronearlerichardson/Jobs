@@ -57,7 +57,11 @@ def api_run(name):
                              f"{track_cfg['engine']!r}"), 409
     params = request.get_json(silent=True) or {}
     params["track"] = track_cfg["id"]
-    _run_op(name, lambda: OPS[name]["fn"](params))
+    # The _running() check above is advisory — it gives a nicer message naming
+    # the running op. This is the authoritative one: it claims the slot under a
+    # lock, so two requests in the same instant can't both start an operation.
+    if not _run_op(name, lambda: OPS[name]["fn"](params)):
+        return jsonify(error=f"'{TASK['name']}' is already running"), 409
     return jsonify(ok=True, name=name)
 
 
@@ -355,6 +359,9 @@ def api_stats():
         "screen_model": config.CLAUDE_MODEL,
         "verify_model": config.CLAUDE_VERIFY_MODEL,
         "db": str(t["db_path"]),
+        # Where the Settings tab writes. Shown in the header because the two
+        # can diverge (a per-user data dir vs. a profile beside the code).
+        "profile": str(config.PROFILE_PATH),
         "track": t["id"],
         "boot_id": BOOT_ID,
     }

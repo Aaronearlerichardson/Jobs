@@ -93,33 +93,85 @@ def _effective_penalties():
     override = (getattr(config, "FIT_GATE_PENALTY", None) or {}) if config else {}
     return {**DEFAULT_GATE_PENALTY, **override}
 
-# Domain ladder + stack vocabulary default to a neural/biosignal candidate.
-# Override any of these from profile.toml [fit] (loaded via config.FIT_*); the
-# prompt renders whatever is loaded, so the taxonomy is data, not hard-code.
-DEFAULT_DOMAIN_LADDER = [
-    (1.00, "iEEG, ECoG, intracranial EEG, EEG, electrophysiology, high-gamma, neural decoding"),
-    (0.80, "LFP, spikes, single-unit, MEG, other neural, BCI, neurotech"),
-    (0.65, "EMG, ECG, EOG, PPG, other physiological biosignal, wearable sensors"),
-    (0.60, "fMRI, MRI, DTI, medical imaging, neuroimaging"),
-    (0.45, "clinical/EHR data, genomics, digital health, medical devices"),
-    (0.15, "no health, bio, or neural component"),
+# The domain ladder, stack vocabulary, and region are the parts of the rubric
+# that are ABOUT YOU, so there is no honest hard-coded default for them. Set
+# them explicitly in profile.toml [fit] (loaded via config.FIT_*) for a tuned
+# search; leave [fit] out and they are DERIVED from the profile you already
+# wrote — your keyword tiers are a serviceable domain ladder, your `skill`
+# tier is a serviceable stack, and [locality] is your region. The prompt
+# renders whatever is loaded, so the taxonomy is data either way.
+#
+# The last-resort literals below only apply to an empty profile.
+FALLBACK_DOMAIN_LADDER = [
+    (1.00, "the exact subject matter you work on"),
+    (0.15, "an unrelated field"),
 ]
-DEFAULT_STACK_CORE = ("Python, PyTorch, NumPy/SciPy, CUDA/CuPy, C/C++, MATLAB, SQL/SQLite, "
-                      "Bash, Git, CI/CD, AWS, SLURM/HPC, signal processing, BIDS/NWB, scikit-learn, MNE")
-DEFAULT_STACK_ANTI = ("Snowflake, dbt, Spark, Airflow, data-warehouse modeling, Kubernetes, "
-                      "Terraform, Kafka, Go, Rust, RTOS/firmware, PCB/analog, Salesforce, Power BI")
-DEFAULT_REGION = "remote, or Durham / Raleigh / Chapel Hill / Research Triangle (RTP), North Carolina"
+FALLBACK_STACK_CORE = "the tools named in your résumé"
+FALLBACK_REGION = "remote"
 
 
 def _cfg(name, default):
     return (getattr(config, name, None) or default) if config else default
 
 
+def _derived_domain_ladder():
+    """A domain ladder built from the profile's keyword tiers.
+
+    `core` terms are what you actually want (top rung), `domain` terms are the
+    adjacent fields you'd accept (middle), and everything else is the floor.
+    Crude next to a hand-tuned ladder, but it is genuinely YOURS on day one
+    instead of being someone else's field."""
+    core = _cfg("CORE_KEYWORDS", [])
+    domain = _cfg("DOMAIN_KEYWORDS", [])
+    rungs = []
+    if core:
+        rungs.append((1.00, ", ".join(core[:12])))
+    if domain:
+        rungs.append((0.60, ", ".join(domain[:12])))
+    if not rungs:
+        return FALLBACK_DOMAIN_LADDER
+    rungs.append((0.15, "no connection to any of the above"))
+    return rungs
+
+
+def _derived_region():
+    """The region string for the geo gate, from [locality]."""
+    name = _cfg("LOCALITY_NAME", "")
+    places = list(_cfg("LOCALITY_SUBSTRINGS", []))[:8]
+    if not name and not places:
+        return FALLBACK_REGION
+    where = name or ", ".join(places)
+    if places and name:
+        where = f"{name} ({', '.join(places)})"
+    return f"remote, or {where}"
+
+
 def _domain_ladder_text():
     ladder = _cfg("FIT_DOMAIN_LADDER", None)
     rungs = ([(r.get("score"), ", ".join(r.get("terms", []))) for r in ladder]
-             if ladder else DEFAULT_DOMAIN_LADDER)
+             if ladder else _derived_domain_ladder())
     return "; ".join(f"{txt} ~{score:.2f}" for score, txt in rungs)
+
+
+def _stack_core_text():
+    """The candidate's tools: [fit].stack_core, else the profile's `skill`
+    keyword tier — which is already a list of the tools they work with."""
+    return _cfg("FIT_STACK_CORE", None) or (
+        ", ".join(_cfg("SKILL_KEYWORDS", [])) or FALLBACK_STACK_CORE)
+
+
+def _anti_stack_clause():
+    """The 'tools that disqualify' half of the stack axis — only rendered when
+    the profile names some. There is no way to derive an anti-stack (the tools
+    you DON'T want are not implied by the ones you do), and inventing one
+    would silently penalise roles the user never objected to."""
+    anti = _cfg("FIT_STACK_ANTI", None)
+    if not anti:
+        return ""
+    return (f" If the JD centres on tools OUTSIDE that stack ({anti}), score"
+            " low no matter what the title says; if any of those is a stated"
+            " REQUIREMENT (required/must-have, not merely preferred), stack is"
+            " at most 0.20.")
 
 
 @dataclass
@@ -259,19 +311,17 @@ def _axes_and_gates_block() -> str:
   candidate's domain, graded on this ladder with partial credit for
   neighbours: {_domain_ladder_text()}.
   Score what the role itself works on, NOT the employer's product domain —
-  an internal-tooling, IT, TPM, or ops seat at an EEG company is NOT an EEG
-  role, however much the company boilerplate mentions the mission.
-- "function": how well the role's DISCIPLINE matches the candidate. Research /
-  ML-modelling / research-software / scientific-pipeline engineering score
-  high; analytics-warehouse data engineering, embedded/firmware, generic
-  backend/SRE, data-ops/analyst, and program/product-management or internal
-  AI-tooling/enablement seats score low EVEN IF the title overlaps.
+  an internal-tooling, IT, TPM, or ops seat at a company in the candidate's
+  field is NOT a role in that field, however much the company boilerplate
+  mentions the mission.
+- "function": how well the role's DISCIPLINE matches the kind of work the
+  candidate profile above describes. Judge from the JD BODY, not the title:
+  a role whose day-to-day is a different discipline scores low EVEN IF the
+  title overlaps, and one whose discipline matches scores high even if the
+  title is unfamiliar. People-management, program/product-management, and
+  internal enablement seats are different disciplines from hands-on work.
 - "stack": overlap of the tools the JD actually requires with the candidate's
-  stack ({_cfg("FIT_STACK_CORE", DEFAULT_STACK_CORE)}). Weight load-bearing
-  requirements heavily. If the JD centres on tools OUTSIDE that stack
-  ({_cfg("FIT_STACK_ANTI", DEFAULT_STACK_ANTI)}), score low no matter what the
-  title says; if any of those anti-stack tools is a stated REQUIREMENT
-  (required/must-have, not merely preferred), stack is at most 0.20.
+  stack ({_stack_core_text()}). Weight load-bearing requirements heavily.{_anti_stack_clause()}
 - "seniority": does the candidate clear the level without being wildly over- or
   under-qualified. Principal/Staff for a mid-level candidate scores low, as do
   people-management titles (Manager/Senior Manager/Director) and roles whose
@@ -279,7 +329,7 @@ def _axes_and_gates_block() -> str:
 
 Then set any GATES that apply (these are disqualifiers, not deductions):
 - "geo": true if the role is neither remote nor in the candidate's region
-  ({_cfg("FIT_REGION", DEFAULT_REGION)}).
+  ({_cfg("FIT_REGION", None) or _derived_region()}).
 - "embedded": true if the core work is firmware, PCB, analog, or RTOS.
 - "level": true if the role is below the candidate's technical bar (SOP
   execution, coordination, monitoring, manual data entry, analyst-only).

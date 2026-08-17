@@ -1,6 +1,13 @@
 # ---------------------------------------------------------------------------
-# Search profile TEMPLATE. Copy to `profile.toml` (gitignored) and edit for
-# your own search. config.py loads profile.toml if present, else this file.
+# YOUR SEARCH, in one file.
+#
+# This is the template. On first run the app copies it to your own
+# profile.toml in your per-user data directory (run `python run_scraper.py
+# --where` to see exactly where) — edit THAT copy, by hand or in the web UI's
+# Settings tab. The repository never holds your version.
+#
+# Nothing below is required to be filled in perfectly. Start with [keywords],
+# [locality], and [candidate]; the rest has working defaults.
 #
 # Relevance model: a job is relevant if it matches ANY `core` term, OR matches
 # a `domain` term AND a `skill` term. Keep `core` narrow (high-signal); let
@@ -28,15 +35,16 @@ skill = [
 # below. `keyword_mode` on that track decides whether these ADD to the tiers
 # above ("extend") or REPLACE them ("replace") while that track runs.
 # ---------------------------------------------------------------------------
-[keywords.local_tech]
+[keywords.local]
 # Extends the tiers above (this track's engine default is "extend").
 core = ["staff engineer", "principal engineer"]
 domain = ["marketplace", "developer tools"]
 skill = ["typescript", "postgres", "terraform"]
 
-[keywords.remote_neural]
-# REPLACES the tiers above (the neural engine's default is "replace"), so
-# list everything this track should match, not just additions.
+[keywords.remote]
+# REPLACES the tiers above (the sweep engine's default is "replace"), so list
+# everything this track should match, not just additions. A wide net needs a
+# tight core: this track gates on CORE terms alone.
 core = ["distributed systems", "database internals", "compilers"]
 domain = ["infrastructure", "developer platform", "observability"]
 skill = ["rust", "go", "kubernetes", "postgres"]
@@ -55,7 +63,7 @@ boilerplate_phrases = [
 
 # Per-track exclusions. Table name matches a [tracks.<id>] id; applied only
 # while that track runs, and only when its `exclude_gate` is on.
-[exclude.local_tech]
+[exclude.local]
 # Job kinds you never want, matched anywhere in the posting.
 role_phrases = ["data entry", "sales development representative"]
 # Short abbreviations that only make sense in a title.
@@ -73,7 +81,7 @@ remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "any
 accept_remote = true
 exclude = []
 
-# Remote-eligibility detection (jobcrawler/remote_filter.py). Falls back to
+# Remote-eligibility detection (core/remote_filter.py). Falls back to
 # built-in generic defaults when left empty.
 remote_tokens = []
 remote_phrases = []
@@ -82,24 +90,37 @@ us_markers = []
 non_us_regions = []
 
 # ---------------------------------------------------------------------------
-# Tracks — the web UI's switchable search profiles. Each [tracks.<id>] table
-# defines: which SQLite DB the UI reads (`db`, relative to the data dir), the
-# jobs.track value (`track`), ranking knobs (`rank_by`, `min_mission`), and
-# the UI filter defaults applied when you switch to the track
+# Tracks — the searches you switch between in the web UI's header dropdown.
+#
+# A track is pure configuration run through ONE pipeline (scrapers/runner.py).
+# Each [tracks.<id>] table defines: which SQLite DB it reads (`db`, relative
+# to your data dir), the jobs.track value (`track`), ranking knobs (`rank_by`,
+# `min_mission`), and the UI filter defaults applied when you switch to it
 # (`min_fit_default` for the fit slider, `willing_to_move_default` for the
 # relocate checkbox). `remote_requires_watch = true` hides remote rows unless
-# the company carries the human-set "watch" tag (precision rule for
-# locality-focused tracks). `default = true` marks the track the UI opens on.
-# Omit the whole [tracks] section to get the built-in two-track default.
+# the company carries the human-set "watch" tag (a precision rule for
+# location-focused tracks). `default = true` marks the track the UI opens on.
+#
+# The ids, labels, and DBs are yours to rename. Omit the whole [tracks]
+# section for the built-in two-track default (the same two shown here).
+#
+# Two tracks is a common shape but not a rule: run one track, or five. The
+# pair below is the classic "same search, two postures" setup — one that
+# holds your location and relaxes the subject matter, one that holds the
+# subject matter and relaxes location.
 # ---------------------------------------------------------------------------
-[tracks.local_tech]
+[tracks.local]
 label = "Local"
 db = "jobs.db"
-track = "local-tech"
-# `engine` names the crawl machinery, not the track: "local" (the
-# location-scoped crawler) or "neural" (the location-agnostic neural runner).
-# Track ids/labels/dbs are yours to rename; engines are fixed code paths, and
-# operations in the UI enable themselves by engine.
+track = "local"
+# `engine` names the crawl MACHINERY, not the track:
+#   "local" — location-scoped: asks each board for your region, so it stays
+#             cheap even against huge employers. Geo-gated.
+#   "sweep" — location-agnostic: whole boards plus aggregator feeds and web
+#             search, gated hard on your CORE keywords. (Older profiles may
+#             say "neural" here; it still resolves to "sweep".)
+# Engines are fixed code paths, and web UI operations enable themselves by
+# engine — so a track id can be anything, but the engine must be one of these.
 engine = "local"
 rank_by = "fit"
 min_mission = 0.2
@@ -109,8 +130,7 @@ remote_requires_watch = true
 default = true
 # ---------------------------------------------------------------------------
 # Crawl methodology — every knob below defaults from `engine`, so omit what
-# you don't need to change. One crawl pipeline (jobcrawler/tracks/runner.py)
-# serves every track; these keys ARE the difference between tracks.
+# you don't need to change. These keys ARE the difference between tracks.
 # ---------------------------------------------------------------------------
 # keyword_mode = "extend"      # "extend": [keywords.<id>] ADDs to the global
 #                              # tiers; "replace": they BECOME the tiers
@@ -118,11 +138,12 @@ default = true
 # sources = { store = true, priority_companies = false, aggregators = false, websearch = false, location_scoped = true }
 #   # store: active companies from this track's DB
 #   # priority_companies: [discovery] priority_companies, fetched first
-#   # aggregators: Discourse/RemoteOK/Remotive/HN/RSS feeds
-#   # websearch: DDG web-search queries
+#   # aggregators: [sources] forums/RSS/RemoteOK/Remotive/HN feeds
+#   # websearch: the [sources].websearch queries
 #   # location_scoped: store boards fetched through the [locality] filter
 #   #   (whole-board for watched companies); false = lightweight ATS sweep
 # store_tag = ""               # only sweep store companies with this tag
+#                              # ("local" / "sweep" / "watch"; core/tags.py)
 # require_core_anchor = false  # gate: posting must hit a CORE keyword
 # geo_gate = true              # gate: drop non-local, non-remote postings
 # verify_top = 15              # deep-verify the top N after scoring (0 = skip)
@@ -130,20 +151,22 @@ default = true
 # email = false                # email the digest after each crawl
 # exclude_gate = true          # apply the [exclude.<id>] role/defense tables
 # tech_title_regex = "..."     # the technical-title gate (case-insensitive
-#                              # regex a title must match before scoring spend);
-#                              # engine defaults cover the common cases
+#                              # regex a title must match before scoring spend).
+#                              # The default is broad and field-neutral; set
+#                              # this if your field's titles don't look like
+#                              # engineering titles.
 
-[tracks.remote_neural]
+[tracks.remote]
 label = "Remote"
 db = "jobs.db"
-track = "remote-neural"
-engine = "neural"
+track = "remote"
+engine = "sweep"
 rank_by = "fit"
 min_fit_default = 0.5
 willing_to_move_default = true
 remote_requires_watch = false
-# neural-engine defaults: keyword_mode="replace", require_core_anchor=true,
-# geo_gate=false, store_tag="neural", cost_guard=300,
+# sweep-engine defaults: keyword_mode="replace", require_core_anchor=true,
+# geo_gate=false, store_tag="sweep", cost_guard=300,
 # sources = { store=true, priority_companies=true, aggregators=true, websearch=true, location_scoped=false }
 
 [policy]
@@ -152,8 +175,38 @@ remote_requires_watch = false
 multi_division = []
 multi_division_mission_floor = 0.6
 
+# Honor robots.txt (default true). Turning this off disables the check, not
+# the connection pooling or the per-host Crawl-delay pacing.
+# respect_robots = true
+
+# robots.txt fetch timeout, split into (connect, read) seconds.
+#
+# Discovery probes speculative `careers.<name>.com` hosts. The ones whose
+# parent domain has wildcard DNS resolve to an edge that never completes a
+# handshake and burn the whole connect timeout; real boards connect in well
+# under half a second. Raise the connect value if you crawl over a slow or
+# high-latency link and start seeing "unreachable (ConnectTimeout)" for hosts
+# you know are live.
+#
+# Leave the read timeout generous: a host that connects promptly but is slow
+# to serve robots.txt is a real server with a real policy, and giving up early
+# means crawling something that asked you not to.
+robots_connect_timeout = 3.0
+robots_read_timeout = 10.0
+
+# Headless-browser resolution order for the JS probes (JS-rendered careers
+# pages that hide their ATS behind a script). "" is Playwright's own pinned
+# build, from `playwright install`; the others are browsers already on the
+# machine. Keeping the system browsers in the list means `pip install` alone
+# is enough — no 100 MB+ download — and is what lets the probes work on CI
+# runners. Reorder to prefer a system browser, or set to [""] to use only
+# Playwright's own build.
+browser_channels = ["", "chrome", "msedge"]
+
 # ---------------------------------------------------------------------------
-# Candidate identity — injected into the Claude scoring/expansion prompts.
+# Who you are — injected verbatim into every scoring/discovery prompt. This is
+# the single highest-leverage block in the file: the scorer judges every
+# posting against it. Write it the way you'd brief a recruiter.
 # ---------------------------------------------------------------------------
 [candidate]
 summary = "A senior software/data engineer targeting backend, ML, and platform roles at mission-driven companies."
@@ -167,11 +220,18 @@ fit_caps = [
     "If the job description is missing or trivially short: judge from the title alone and cap fit at 0.45.",
 ]
 avoid = "Avoid roles requiring an active security clearance or a PhD."
+# Your résumé drives per-job fit scoring. Put the file in your data directory
+# and either name it `resume.docx` (found automatically) or point at it here —
+# a filename relative to the data dir, or an absolute path. .docx, .txt, and
+# .md are readable; PDF is not. With no résumé, fit scoring simply turns off.
+# resume = "resume.docx"
 
 # ---------------------------------------------------------------------------
-# Mission taxonomy — employer-alignment ladder, highest first. Rename/reorder
-# tiers to match what you care about. The LAST tier is typically the inactive
-# catch-all. `band` = score range; `active` = whether to crawl that tier.
+# Mission taxonomy — how much you care about WHO the employer is, as a ladder,
+# highest first. Judged once per company (not once per job) and cached, then
+# combined with résumé fit for the ranking. Rename/reorder tiers freely. The
+# LAST tier is typically the inactive catch-all. `band` = score range;
+# `active` = whether to crawl that tier at all.
 # ---------------------------------------------------------------------------
 [mission]
 tiers = [
@@ -185,25 +245,70 @@ bullseye_regex = ''
 bullseye_tier  = "core-mission"
 
 # ---------------------------------------------------------------------------
-# Locality — what counts as "local" for the local track.
+# Locality — what counts as "local" for a location-scoped track. Name every
+# way your area shows up in a job posting: the metro, its towns, the state.
 # ---------------------------------------------------------------------------
 [locality]
 name = "San Francisco Bay Area"
+# Short/ambiguous tokens, matched on word boundaries so "sf" can't fire
+# inside "surf".
 word_tokens = ["sf", "ca"]
+# Distinctive names, matched as plain substrings.
 substrings = ["san francisco", "bay area", "oakland", "berkeley", "palo alto", "mountain view", "san jose"]
+# Recognises a "City, ST" address.
 state_suffix = ["ca", "california"]
 
 # ---------------------------------------------------------------------------
-# Discovery — company NAMES for `discover.py --local` to probe for public ATS
-# boards, plus recall levers. All a starting pool; the probe + locality check
-# filter it. Leave lists empty to rely purely on web-search harvesting.
+# Non-company job sources. The feeds below carry every kind of role and are
+# filtered by YOUR keywords, so the generic ones ship on. The forum and
+# web-search lists are empty by default: they encode a specific field's
+# vocabulary, and a generic guess would only waste requests.
+# Used by tracks whose `sources.aggregators` / `sources.websearch` are on.
+# ---------------------------------------------------------------------------
+[sources]
+remoteok = true              # remoteok.com/api
+remotive = true              # remotive.com/api/remote-jobs
+remotive_category = ""       # "software-dev", "data", ... ("" = all)
+hnhiring = true              # HN "Ask HN: Who is hiring?" threads
+hnhiring_max_threads = 2     # current + previous month
+
+# Discourse forums with a jobs category. Find `category_id` at
+# <forum>/categories — it's the number in the category's URL.
+discourse = [
+    # { label = "Some Community Jobs", url = "https://forum.example.org", category_id = 9 },
+]
+
+# RSS/Atom job feeds. OMIT this key to keep the built-in general remote-job
+# feeds; set it to [] to turn RSS off entirely; list your own to replace them.
+# rss = [
+#     { label = "Society job board", url = "https://example.org/jobs/feed", location = "Remote" },
+# ]
+
+# Web searches whose result pages are parsed for job postings. Write them the
+# way you'd type them into a search engine; `site:` narrows to one board.
+websearch = [
+    # { label = "My field on WeWorkRemotely", max_results = 12, query = '("term a" OR "term b") ("engineer" OR "scientist") site:weworkremotely.com' },
+]
+
+# ---------------------------------------------------------------------------
+# Discovery — how the roster of companies to crawl gets built (discover.py).
+# Everything here is a starting pool; each name is probed for a real job board
+# and locality-checked before it's added, so over-listing is cheap.
 # ---------------------------------------------------------------------------
 [discovery]
-seed_companies = []          # curated employer names to probe
+# Employers you already know belong in the roster. A bare name, or a name
+# with a note to remind you why it's here. You do NOT need to know their ATS.
+seed_companies = [
+    # "Example Health",
+    # { name = "Example Labs", notes = "the big employer everyone forgets" },
+]
+# Optional: only merge those seeds into discovery runs whose term mentions one
+# of these (usually your region). Omit to always merge them.
+seed_triggers = []
 workday_majors = []          # big employers to also try via the Workday fallback
 directory_urls = []          # e.g. a local chamber/association "/company/<slug>/" directory
 # The main recall lever — searches whose results are harvested for names, then
-# probed. Tailor to your region/domain.
+# probed. Tailor to your region/field.
 name_search_queries = [
     "tech companies in <your city>",
     "<your industry> startups <your region>",
@@ -211,20 +316,21 @@ name_search_queries = [
 name_blocklist = []          # normalized names to drop (bad slug collisions)
 
 # Job aggregators / company-directory sites skipped when picking result URLs
-# to resolve during discovery (they're never the employer's own ATS board).
+# to resolve during discovery (they're never the employer's own job board).
 aggregator_hosts = []
 # Generic words excluded when matching a search-result host to a company
 # name (so "medicaljobs.com" doesn't match on the word "medical").
 generic_name_words = []
-# Prioritized named company targets fetched (and deduped) first by tracks
-# that use one — see jobcrawler/tracks/remote_neural.py.
+# Named company targets fetched (and deduped) FIRST by tracks whose
+# `sources.priority_companies` is on.
 priority_companies = [
     # { name = "Example Co", ats = "greenhouse", slug = "examples" },
 ]
 
 # ---------------------------------------------------------------------------
-# Fit rubric (jobcrawler/fit.py) — optional; fit.py falls back to built-in
-# defaults when this whole block is absent.
+# Fit rubric (core/fit.py) — optional; fit.py falls back to built-in defaults
+# when this whole block is absent. Tune it once your first digests are in and
+# you can see which axis is misjudging you.
 # ---------------------------------------------------------------------------
 [fit]
 # Deterministic backstop for the "clearance" gate: verbs are the demand

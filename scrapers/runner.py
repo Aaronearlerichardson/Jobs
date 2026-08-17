@@ -1,9 +1,9 @@
 """ONE crawl pipeline for every track.
 
-Historically each track shipped its own runner module (local_tech.run(),
-remote_neural_run.main()) whose methodology differences — keyword handling,
-source families, gates, scoring budget, digest/email — were code. They are
-now CONFIGURATION: every knob lives in profile.toml [tracks.<id>] (parsed by
+Historically each track shipped its own runner module whose methodology
+differences — keyword handling, source families, gates, scoring budget,
+digest/email — were code. They are now CONFIGURATION: every knob lives in
+your profile's [tracks.<id>] table (parsed by
 config._build_ui_tracks, engine-derived defaults) and this module runs the
 same pipeline for any track:
 
@@ -19,11 +19,10 @@ same pipeline for any track:
                          rows mark_seen; ranked digest and/or match digest;
                          optional email
 
-The legacy entry points delegate here unchanged (local_tech.run, the
-remote_neural_run.main CLI with its --commit/--send/--fit/... flags), as
-does the web UI's single "crawl" op. The two ENGINE values still select the
-code-level bits that are not data — the technical-title regex, the exclude
-gate, digest rendering — but never the methodology.
+The legacy entry points delegate here unchanged, as does the web UI's
+single "crawl" op. The ENGINE value still selects the code-level bits that
+are not data — the technical-title regex, the exclude gate, digest
+rendering — but never the methodology.
 """
 
 import re
@@ -46,13 +45,14 @@ _EST_USD_PER_MTOK = 4.0
 
 
 def track_for_engine(engine):
-    """The configured track to use when a legacy engine-level entry point
-    (local_tech.run / remote_neural_run.main) is invoked without naming a
-    track: the default-flagged track with that engine, else the first."""
+    """The configured track to use when an engine-level entry point is
+    invoked without naming a track: the default-flagged track with that
+    engine, else the first. Legacy engine names resolve too."""
+    engine = config.ENGINE_ALIASES.get(engine, engine)
     cands = [t for t in config.UI_TRACKS.values() if t["engine"] == engine]
     if not cands:
         raise SystemExit(f"no [tracks.*] entry with engine={engine!r} "
-                         "in profile.toml")
+                         f"in {config.PROFILE_PATH}")
     return next((t for t in cands if t["default"]), cands[0])
 
 
@@ -87,11 +87,11 @@ def apply_keyword_focus(cfg, t):
 
 def core_anchor(title, description=""):
     """The require_core_anchor gate: the CORE keyword that anchors this
-    posting, or None. Short single-token acronyms (eeg, bci, ecog...) match
+    posting, or None. Short single-token acronyms (eeg, ecg, rf...) match
     on word boundaries — "ecog" fires inside "recognized" — while longer
     terms stay substring so "subcortical" still matches "cortical". Reads
     the LIVE config lists, so after apply_keyword_focus this is exactly the
-    track's own anchor vocabulary (the legacy NEURAL_ANCHORS gate)."""
+    track's own CORE keyword vocabulary."""
     text = f"{title} {description}".lower()
     for a in config.CORE_KEYWORDS:
         k = a.lower()
@@ -147,7 +147,7 @@ def build_sources(cfg, t, include_websearch=None):
             rows = []
         if src["location_scoped"]:
             # Full per-company board fetch through the locality filter —
-            # whole-board (no filter) for watched/neural-tagged companies,
+            # whole-board (no filter) for watched/sweep-tagged companies,
             # whose out-of-area rows the geo gate handles downstream.
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
@@ -185,7 +185,7 @@ def build_sources(cfg, t, include_websearch=None):
     # 4) Web searches (DDG -> JSON-LD).
     if use_ws:
         from .fetchers import fetch_websearch
-        for label, query, n in getattr(cfg, "REMOTE_NEURAL_WEBSEARCH_QUERIES", []):
+        for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):
             add(label, "websearch",
                 lambda l=label, q=query, m=n: fetch_websearch(l, q, max_results=m))
 
@@ -243,7 +243,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     OVERRIDE it for this run (None = use the config): `send` overrides
     t["email"], `verify` (bool) overrides t["verify_top"] (True -> top_n,
     False -> skip), `websearch` overrides sources.websearch. `fit=False`
-    skips resume scoring; `commit=False` is the legacy neural preview (no
+    skips resume scoring; `commit=False` is the legacy sweep preview (no
     DB writes). Returns the ranked list (company-linked crawls) or the
     surfaced match list."""
     from core import digest_md, gates
@@ -359,7 +359,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             # Sweep source: anchor + title (+ engine excludes) gates, remote
             # signal stamped (or geo-gated when configured), deduped across
             # sources, persisted via mark_seen.
-            neural_here = tech_here = surfaced = new_here = 0
+            anchor_here = tech_here = surfaced = new_here = 0
             for job in jobs:
                 title = job.get("title", "")
                 nsig = None
@@ -367,7 +367,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                     nsig = core_anchor(title, job.get("description", ""))
                     if not nsig:
                         continue
-                neural_here += 1
+                anchor_here += 1
                 if not gates.is_technical_role(title, t):
                     continue
                 tech_here += 1
@@ -392,11 +392,11 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 if sig is not None:
                     job["remote_signal"] = sig
                 if nsig:
-                    job["neural_signal"] = nsig
+                    job["anchor_signal"] = nsig
                 job["_new"] = new
                 job["_us_eligible"] = us_eligible(job.get("location", ""))
                 matches.append(job)
-            funnel.append((label, len(jobs), neural_here, tech_here,
+            funnel.append((label, len(jobs), anchor_here, tech_here,
                            surfaced,
                            "priority" if spec["platform"].endswith("*") else ""))
 
@@ -518,8 +518,8 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             print(f"\n  {i}. {j.get('track_tag', '')} {j['title']}")
             print(f"     company : {j.get('company') or j.get('company_name')}")
             print(f"     location: {j.get('location')}")
-            if j.get("neural_signal"):
-                print(f"     anchor  : {j['neural_signal']}")
+            if j.get("anchor_signal"):
+                print(f"     anchor  : {j['anchor_signal']}")
             if j.get("resume_fit_score") is not None:
                 print(f"     fit     : {j['resume_fit_score']:.2f}  "
                       f"({j.get('fit_reason', '')})")

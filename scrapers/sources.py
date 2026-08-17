@@ -6,10 +6,14 @@ serial orchestrator. Every crawl path iterates STORE company rows — the
 companies table is the single roster (config.py seed lists retired 2026-07;
 manage the roster with discover.py, --add-board, or --import-companies).
 
-Seed tags: the lightweight JSON-API boards (greenhouse/lever/.../adp) are
-the BCI-focused set -> "neural"; the heavyweight onsite RTP employers
-(workday/successfactors/peopleadmin) -> "nc_local".
+Seed tags (core/tags.py): the lightweight JSON-API boards
+(greenhouse/lever/.../adp) return their whole board in one cheap request, so
+they seed as "sweep". The heavyweight enterprise boards
+(workday/successfactors/peopleadmin) are expensive to pull whole and are
+queried per-region instead, so they seed as "local".
 """
+
+from core import tags
 
 from .fetchers import (
     fetch_adp,
@@ -29,25 +33,25 @@ from .fetchers import (
 
 # ats -> (thunk(name, slug) -> fetch callable, seed tag, politeness pause)
 ATS_REGISTRY = {
-    "greenhouse": (lambda n, s: lambda: fetch_greenhouse(s, n), "neural", 0.5),
-    "lever":      (lambda n, s: lambda: fetch_lever(s, n), "neural", 0.5),
-    "ashby":      (lambda n, s: lambda: fetch_ashby(s, n), "neural", 0.5),
-    "kula":       (lambda n, s: lambda: fetch_kula(n, s), "neural", 0.5),
-    "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s), "neural", 0.5),
-    "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n), "neural", 0.5),
-    "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n), "neural", 0.5),
-    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n), "nc_local", 0.5),
-    "rippling":   (lambda n, s: lambda: fetch_rippling(s, n), "neural", 0.5),
-    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n), "nc_local", 0.5),
+    "greenhouse": (lambda n, s: lambda: fetch_greenhouse(s, n), tags.SWEEP, 0.5),
+    "lever":      (lambda n, s: lambda: fetch_lever(s, n), tags.SWEEP, 0.5),
+    "ashby":      (lambda n, s: lambda: fetch_ashby(s, n), tags.SWEEP, 0.5),
+    "kula":       (lambda n, s: lambda: fetch_kula(n, s), tags.SWEEP, 0.5),
+    "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s), tags.SWEEP, 0.5),
+    "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n), tags.SWEEP, 0.5),
+    "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n), tags.SWEEP, 0.5),
+    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n), tags.LOCAL, 0.5),
+    "rippling":   (lambda n, s: lambda: fetch_rippling(s, n), tags.SWEEP, 0.5),
+    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n), tags.LOCAL, 0.5),
     "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
                                         st=s.split("|")[2]:
-                                 fetch_workday(t, p, st, n)), "nc_local", 1.0),
-    "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s), "nc_local", 1.0),
-    "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n), "nc_local", 1.0),
+                                 fetch_workday(t, p, st, n)), tags.LOCAL, 1.0),
+    "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s), tags.LOCAL, 1.0),
+    "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n), tags.LOCAL, 1.0),
 }
 
-# ATSes whose store rows the remote-neural track sweeps (lightweight JSON
-# APIs; the heavyweight onsite boards stay with the local track).
+# ATSes whose store rows a location-agnostic ("sweep") track pulls whole
+# (lightweight JSON APIs; the heavyweight boards stay location-scoped).
 LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr", "adp", "paylocity", "rippling", "ultipro")
 
 

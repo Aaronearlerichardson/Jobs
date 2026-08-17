@@ -14,6 +14,9 @@ import re
 import sys
 from pathlib import Path
 
+# Dependency-free (imports nothing, not even this module) — safe here.
+from core import tags
+
 # =========================================================================
 #  SECRETS (env-var first, fallbacks kept for local dev only)
 # =========================================================================
@@ -30,7 +33,9 @@ def env(name, default=""):
     return (os.environ.get(name) or "").strip() or default
 
 
-GMAIL_ADDRESS      = env("GMAIL_ADDRESS",      "jakdaxter31@gmail.com")
+# Digest email is opt-in and OFF until you set both of these — there is no
+# built-in address. Blank GMAIL_ADDRESS simply disables emailing (core/digest.py).
+GMAIL_ADDRESS      = env("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = env("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HERE")
 ANTHROPIC_API_KEY  = env("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
 # Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
@@ -57,39 +62,80 @@ CAREERONESTOP_TOKEN   = env("CAREERONESTOP_TOKEN")
 # Three roots:
 #   SCRIPT_DIR — where the CODE lives (this file's directory; the exe's dir
 #                when compiled). Bundled read-only assets live here.
-#   APP_HOME   — where profile.toml lives. From source: SCRIPT_DIR. Compiled:
-#                probed (see below), because the dist folder may sit INSIDE
-#                the project checkout, whose root holds the real profile.
-#   DATA_DIR   — where the DATA lives (DBs, résumé, job_reports/, caches,
-#                captures, profile backups): JOBS_DATA_DIR env var, else
-#                data/ under APP_HOME (legacy flat layouts still probed).
+#   APP_HOME   — the checkout / install root. From source: SCRIPT_DIR.
+#                Compiled: probed (see below), because the dist folder may sit
+#                INSIDE the project checkout, whose root holds the real data.
+#   DATA_DIR   — where YOUR data lives (DBs, résumé, profile.toml,
+#                job_reports/, caches, captures, backups). Resolved by
+#                `_resolve_data_dir` below — by default a per-user directory
+#                on your machine, OUTSIDE the checkout, so cloning the repo
+#                gives you the stock experience and your own data survives
+#                `git pull`, a re-clone, or deleting the checkout.
+
+APP_NAME = "JobCrawler"
+
+# Current DB filename, then the pre-rename one — probed when deciding whether
+# a directory is an existing install.
+_DB_NAMES = ("jobs.db", "local_tech.db")
+
+
+def _platform_data_dir():
+    """The conventional per-user application-data directory for this OS.
+
+    Windows: %LOCALAPPDATA%\\JobCrawler
+    macOS:   ~/Library/Application Support/JobCrawler
+    Linux:   $XDG_DATA_HOME/job-crawler (default ~/.local/share/job-crawler)
+    """
+    if sys.platform == "win32":
+        base = env("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
+        return Path(base) / APP_NAME
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / APP_NAME
+    base = env("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
+    return Path(base) / "job-crawler"
+
+
+def _looks_like_install(d):
+    """True if `d` already holds this app's data — a store, or a profile."""
+    return ((d / "profile.toml").exists()
+            or any((d / n).exists() for n in _DB_NAMES))
+
+
+def _resolve_data_dir(app_home):
+    """Where this machine's data lives, in precedence order:
+
+    1. JOBS_DATA_DIR — an explicit override, always wins.
+    2. <app_home>/data — an EXISTING in-checkout data dir. Never orphan an
+       install that predates the per-user default, and an easy opt-in for
+       anyone who deliberately wants portable/self-contained data: make the
+       folder and it is used.
+    3. <app_home> itself, if a DB sits there — the legacy flat layout.
+    4. The per-user OS data directory. The default for a fresh clone.
+    """
+    override = env("JOBS_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    if (app_home / "data").is_dir():
+        return app_home / "data"
+    if any((app_home / n).exists() for n in _DB_NAMES):
+        return app_home
+    return _platform_data_dir()
+
+
 if "__compiled__" in globals():
     _exe_dir = Path(sys.argv[0]).resolve().parent
     SCRIPT_DIR = _exe_dir
-    _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
-    # APP_HOME: first place a real profile.toml (or an existing data/) is
-    # found — the exe's own folder (copied-to-another-machine layout), else
-    # the folder ABOVE the dist dir (dist still inside the checkout), else
-    # the exe's folder (fresh install; profile.example.toml fallback).
-    _DB_NAMES = ("jobs.db", "local_tech.db")     # current, then pre-rename
+    # APP_HOME: first place that looks like an install — the exe's own folder
+    # (copied-to-another-machine layout), else the folder ABOVE the dist dir
+    # (dist still inside the checkout), else the exe's folder.
     APP_HOME = next((d for d in (_exe_dir, _exe_dir.parent)
-                     if (d / "profile.toml").exists()
-                     or any((d / "data" / n).exists() for n in _DB_NAMES)),
+                     if _looks_like_install(d) or (d / "data").is_dir()),
                     _exe_dir)
-    if _env_home:
-        DATA_DIR = Path(_env_home)
-    elif any((APP_HOME / "data" / n).exists() for n in _DB_NAMES):
-        DATA_DIR = APP_HOME / "data"
-    elif any((APP_HOME / n).exists() for n in _DB_NAMES):
-        DATA_DIR = APP_HOME          # legacy flat layout (pre-data/ builds)
-    else:
-        DATA_DIR = APP_HOME / "data"
 else:
     SCRIPT_DIR = Path(__file__).parent
     APP_HOME = SCRIPT_DIR
-    _env_home = os.environ.get("JOBS_DATA_DIR", "").strip()
-    DATA_DIR = Path(_env_home) if _env_home else APP_HOME / "data"
 
+DATA_DIR = _resolve_data_dir(APP_HOME)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 # The store: companies (cached mission scores, scope tags) + jobs (dedup
@@ -101,9 +147,8 @@ STORE_DB_PATH = DATA_DIR / "jobs.db"
 # A track can still get its own file via [tracks.*].db — the default is
 # that they all share jobs.db.
 
-# Resume used for per-job fit scoring (gitignored — personal). Extracted
-# lazily by resume.py.
-RESUME_PATH = DATA_DIR / "Aaron 2026 Resume.docx"
+# RESUME_PATH is resolved after the profile loads (it can name the file) —
+# see "RÉSUMÉ" below.
 
 REPORT_DIR  = DATA_DIR / "job_reports"
 
@@ -129,12 +174,27 @@ MAX_DESC_CHARS = 12000
 import tomllib
 
 
-# Canonical location of the user's (gitignored) profile; the Settings tab
-# writes here (core/profile_edit.py). APP_HOME so a compiled build inside
-# the checkout finds the project's real profile, not a fresh template copy
-# beside the exe. The example template falls back to the bundled copy in
-# the dist folder (SCRIPT_DIR) when APP_HOME has none.
-PROFILE_PATH = APP_HOME / "profile.toml"
+# Canonical location of YOUR profile; the Settings tab writes here
+# (core/profile_edit.py). Precedence:
+#   1. JOBS_PROFILE          — explicit override (full path to the file)
+#   2. <APP_HOME>/profile.toml — an EXISTING in-checkout profile. Keeps older
+#      installs working, and lets anyone deliberately keep the profile beside
+#      the code; a compiled build inside the checkout finds the real profile
+#      rather than a fresh template copy beside the exe.
+#   3. <DATA_DIR>/profile.toml — the default home for a fresh clone, and the
+#      file the Settings tab creates on first save.
+# The bundled profile.example.toml is the read-only fallback when none of the
+# above exists, so the app runs immediately after a clone.
+def _resolve_profile_path():
+    override = env("JOBS_PROFILE")
+    if override:
+        return Path(override).expanduser()
+    if (APP_HOME / "profile.toml").exists():
+        return APP_HOME / "profile.toml"
+    return DATA_DIR / "profile.toml"
+
+
+PROFILE_PATH = _resolve_profile_path()
 PROFILE_EXAMPLE_PATH = (APP_HOME / "profile.example.toml"
                         if (APP_HOME / "profile.example.toml").exists()
                         else SCRIPT_DIR / "profile.example.toml")
@@ -157,6 +217,7 @@ _cand = _PROFILE.get("candidate", {})
 _mis  = _PROFILE.get("mission", {})
 _lcl  = _PROFILE.get("locality", {})
 _dsc  = _PROFILE.get("discovery", {})
+_src  = _PROFILE.get("sources", {})
 
 # Tiered relevance: a job is relevant if it hits any CORE term, or a DOMAIN
 # term AND a SKILL term (see profile.example.toml).
@@ -198,6 +259,43 @@ CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
 CANDIDATE_FIT_CAPS  = list(_cand.get("fit_caps", []))
 CANDIDATE_AVOID     = (_cand.get("avoid") or "").strip()
 
+# =========================================================================
+#  RÉSUMÉ
+# =========================================================================
+#
+# Your résumé drives per-job fit scoring (core/resume.py extracts the text
+# lazily). It is personal data, so it lives in DATA_DIR, not the checkout.
+# Nothing here is required — with no résumé the crawler still runs and fit
+# scoring simply turns itself off.
+#
+#   1. JOBS_RESUME               — explicit path override
+#   2. [candidate] resume = "…"  — a filename (relative to DATA_DIR) or path
+#   3. the first resume.* in DATA_DIR, else the only document in there
+#
+# Formats core/resume.py can read. PDF is deliberately absent — it would be
+# read as garbled bytes rather than text, which is worse than no résumé.
+RESUME_SUFFIXES = (".docx", ".txt", ".md")
+
+
+def _resolve_resume_path():
+    override = env("JOBS_RESUME") or (_cand.get("resume") or "").strip()
+    if override:
+        p = Path(override).expanduser()
+        return p if p.is_absolute() else DATA_DIR / p
+    for suffix in RESUME_SUFFIXES:                    # resume.docx, resume.txt…
+        p = DATA_DIR / f"resume{suffix}"
+        if p.exists():
+            return p
+    # Otherwise: the single readable document sitting in DATA_DIR, whatever
+    # it's named ("Jane Doe 2026 Resume.docx"). Ambiguity is not guessed at —
+    # two candidates means you name one in [candidate].resume.
+    found = sorted(p for p in DATA_DIR.glob("*")
+                   if p.suffix.lower() in RESUME_SUFFIXES and p.is_file())
+    return found[0] if len(found) == 1 else DATA_DIR / "resume.docx"
+
+
+RESUME_PATH = _resolve_resume_path()
+
 # --- Fit rubric (core/fit.py) — optional [fit] block; defaults apply if
 #     absent. weights/gate_penalty are dicts; domain_ladder is a list of
 #     {score, terms=[...]}; stack_* / region_terms are lists joined to text. ---
@@ -233,7 +331,25 @@ LOCALITY_SUBSTRINGS   = list(_lcl.get("substrings", []))
 LOCALITY_STATE_SUFFIX = list(_lcl.get("state_suffix", []))
 
 # --- Discovery sourcing (discover.py --local; discovery/local_sourcing) -
-DISCOVERY_SEED_COMPANIES     = list(_dsc.get("seed_companies", []))
+
+
+def _seed_entry(e):
+    """A [discovery].seed_companies entry -> {"name", "notes"}. Accepts a bare
+    string or a { name, notes } table so the simple case stays a one-liner."""
+    if isinstance(e, str) and e.strip():
+        return {"name": e.strip(), "notes": ""}
+    if isinstance(e, dict) and e.get("name"):
+        return {"name": str(e["name"]).strip(),
+                "notes": str(e.get("notes", "")).strip()}
+    return None
+
+
+DISCOVERY_SEED_COMPANIES = [s for s in (_seed_entry(e)
+                                        for e in _dsc.get("seed_companies", []))
+                            if s]
+DISCOVERY_SEED_NAMES         = [s["name"] for s in DISCOVERY_SEED_COMPANIES]
+# Discovery terms that pull the seeds in (empty = always). See discovery/seeds.py.
+DISCOVERY_SEED_TRIGGERS      = list(_dsc.get("seed_triggers", []))
 DISCOVERY_WORKDAY_MAJORS     = list(_dsc.get("workday_majors", []))
 DISCOVERY_DIRECTORY_URLS     = list(_dsc.get("directory_urls", []))
 DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
@@ -257,16 +373,16 @@ DISCOVERY_PRIORITY_COMPANIES = [
 # filter defaults that flip on switch. When the section is absent, the two
 # built-in tracks are synthesized so existing installs work unchanged.
 _DEFAULT_TRACKS = {
-    "local_tech": {
-        "label": "Local", "db": "jobs.db", "track": "local-tech",
+    "local": {
+        "label": "Local", "db": "jobs.db", "track": "local",
         "engine": "local",
         "rank_by": "fit", "min_mission": 0.2, "min_fit_default": 0.0,
         "willing_to_move_default": False, "remote_requires_watch": True,
         "default": True,
     },
-    "remote_neural": {
-        "label": "Remote neural", "db": "jobs.db", "track": "remote-neural",
-        "engine": "neural",
+    "remote": {
+        "label": "Remote", "db": "jobs.db", "track": "remote",
+        "engine": "sweep",
         "rank_by": "fit", "min_mission": None, "min_fit_default": 0.5,
         "willing_to_move_default": True, "remote_requires_watch": False,
         "default": False,
@@ -298,7 +414,27 @@ _DEFAULT_TRACKS = {
 #                       title must match before any API spend)
 #   exclude_gate        apply the [exclude.<id>] role/defense/nonclinical
 #                       tables to postings (False = skip entirely)
+
+# The default technical-title gate: a posting whose TITLE doesn't match this
+# never costs an API call. Deliberately broad and field-neutral — it is a
+# cheap "is this a technical seat at all?" filter, not your search. Narrow it
+# (or widen it for a non-engineering field) per track with `tech_title_regex`.
+_DEFAULT_TECH_TITLE_REGEX = (
+    r"\b("
+    r"engineer|engineering|developer|develop|software|programmer|programming|"
+    r"architect|devops|sre|reliability|infrastructure|platform|security|"
+    r"data|database|analyst|analytics|statistician|quantitative|"
+    r"scientist|science|sciences|scientific|research|researcher|"
+    r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
+    r"simulation|computational|informatics|bioinformatics|biostatistics|"
+    r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
+    r"quality|validation|verification|qa|test|r&d|python"
+    r")\b"
+)
+
 _ENGINE_CRAWL_DEFAULTS = {
+    # "local" — a location-scoped crawl of the companies in your store. Asks
+    # each board for YOUR region, so it stays cheap on huge employers.
     "local": {
         "keyword_mode": "extend", "accept_remote": False,
         "sources": {"store": True, "priority_companies": False,
@@ -307,34 +443,26 @@ _ENGINE_CRAWL_DEFAULTS = {
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
         "verify_top": 15, "cost_guard": 0, "email": False,
         "exclude_gate": True,
-        "tech_title_regex": (
-            r"engineer|scientist|develop|program(mer|ming)?|software|\bdata\b|"
-            r"analyst|analytics|machine learning|\bml\b|\bai\b|bioinformatic|"
-            r"biostatist|computational|informatics|quality|validation|"
-            r"verification|\bqa\b|\btest\b|devops|infrastructure|platform|"
-            r"database|statistician|scientific|automation|architect|"
-            r"research associate|\br&d\b|modeling|python"),
+        "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
-    "neural": {
+    # "sweep" — a location-AGNOSTIC sweep: whole boards, plus aggregator feeds
+    # and web search, gated hard on your CORE keywords so the wider net
+    # doesn't flood the digest. (Named "neural" before v2 — see ENGINE_ALIASES.)
+    "sweep": {
         "keyword_mode": "replace", "accept_remote": True,
         "sources": {"store": True, "priority_companies": True,
                     "aggregators": True, "websearch": True,
                     "location_scoped": False},
-        "store_tag": "neural", "require_core_anchor": True, "geo_gate": False,
+        "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
         "verify_top": 0, "cost_guard": 300, "email": False,
         "exclude_gate": False,
-        "tech_title_regex": (
-            r"\b("
-            r"engineer|engineering|developer|scientist|neuroscientist|"
-            r"researcher|research|ml|machine learning|deep learning|ai|"
-            r"algorithm|algorithms|software|firmware|hardware|data|analytics|"
-            r"analyst|computational|quantitative|programmer|architect|"
-            r"signal processing|decoding|robotics|systems|sciences|"
-            r"technologist|informatics|bioinformatics|neurotech|devops|sre|"
-            r"reliability|platform|modeling|simulation"
-            r")\b"),
+        "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
 }
+
+# Retired engine name -> current one, so a profile written against the old
+# names keeps working (see core/tags.py for the same treatment of store tags).
+ENGINE_ALIASES = {"neural": "sweep"}
 
 
 def _build_ui_tracks(raw):
@@ -343,6 +471,7 @@ def _build_ui_tracks(raw):
         if not isinstance(t, dict):
             continue
         engine = str(t.get("engine") or "local")
+        engine = ENGINE_ALIASES.get(engine, engine)
         eng_defaults = _ENGINE_CRAWL_DEFAULTS.get(
             engine, _ENGINE_CRAWL_DEFAULTS["local"])
         src = dict(eng_defaults["sources"])
@@ -371,7 +500,7 @@ def _build_ui_tracks(raw):
             "accept_remote": bool(t.get("accept_remote",
                                         eng_defaults["accept_remote"])),
             "sources": src,
-            "store_tag": (str(t["store_tag"]) if t.get("store_tag")
+            "store_tag": (tags.canonical(t["store_tag"]) if t.get("store_tag")
                           else eng_defaults["store_tag"]),
             "require_core_anchor": bool(t.get("require_core_anchor",
                                               eng_defaults["require_core_anchor"])),
@@ -410,9 +539,15 @@ USER_AGENT = (
 # --apply,  or  crawler.py --import-companies roster.json.  What remains
 # below is non-ATS sources (forums / custom scrapes) and crawl policy.
 
+# Discourse forums with a jobs category, from profile [sources].discourse
+# ({ label, url, category_id }). Empty by default — these are field-specific
+# (a research forum, a language community), so there is no sensible universal
+# set. See profile.example.toml.
 DISCOURSE_BOARDS = [
-    ("MNE Forum Jobs",           "https://mne.discourse.group", 9),
-    ("Neurostars Announcements", "https://neurostars.org",      6),
+    (str(b.get("label") or b.get("url", "")), str(b.get("url", "")),
+     int(b.get("category_id", 0)))
+    for b in _src.get("discourse", [])
+    if b.get("url")
 ]
 
 # Conglomerates (from profile.toml [policy]) whose OVERALL mission scores
@@ -429,6 +564,37 @@ MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.
 # instance, publishes `Allow: /` with `Crawl-delay: 1`). See scrapers/robots.py.
 RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
 
+# robots.txt fetch timeouts, as (connect, read).
+#
+# Split because the two phases fail for different reasons. Discovery probes a
+# lot of speculative `careers.<name>.com` hosts; the ones whose parent domain
+# has wildcard DNS resolve to an edge that never completes a handshake, and
+# each burns the whole connect timeout. Measured Aug 2026 over 16 live boards
+# and company sites: connect median 147 ms, max 437 ms — so 3 s is ~7x the
+# slowest real handshake while cutting a dead host's cost by 70%.
+#
+# The READ timeout stays generous on purpose. A host that connects promptly
+# but is slow to serve robots.txt is a real server with a real policy, and
+# that is precisely the case where giving up early would have us crawl
+# something we were asked not to.
+#
+# Note the connect budget is per RESOLVED ADDRESS, not per host: a name with
+# two A records costs up to 2x before it gives up. That is the socket doing
+# the right thing (trying each address), and it is bounded by the record
+# count, so it is worth knowing about rather than working around.
+ROBOTS_CONNECT_TIMEOUT = float(_pol.get("robots_connect_timeout", 3.0))
+ROBOTS_READ_TIMEOUT    = float(_pol.get("robots_read_timeout", 10.0))
+
+# Headless-browser resolution order for the JS probes. "" is Playwright's own
+# pinned build; the rest are `channel=` names for browsers already on the
+# machine. Trying the system browsers means `pip install` alone is enough —
+# no separate `playwright install` download — which is what makes the probes
+# work on CI runners and on a machine whose playwright package was upgraded
+# without re-fetching its browsers. Order matters: the pinned build first,
+# because it is the only one whose version we control.
+BROWSER_CHANNELS = [c or None for c in
+                    _pol.get("browser_channels", ["", "chrome", "msedge"])]
+
 
 def is_multi_division(name):
     """True if `name` is a known multi-division conglomerate (profile policy)."""
@@ -436,23 +602,15 @@ def is_multi_division(name):
 
 
 # Web searches for the sweep-style crawl (runner.build_sources, enabled by
-# [tracks.*].sources.websearch). (label, query, max_results). DuckDuckGo
-# text search; each result URL is parsed for JSON-LD JobPosting.
-REMOTE_NEURAL_WEBSEARCH_QUERIES: list[tuple] = [
-    ("Neural-ML on WeWorkRemotely",
-     '("neural" OR "BCI" OR "EEG" OR "neurotech" OR "brain-computer") '
-     '("engineer" OR "scientist") site:weworkremotely.com', 12),
-    ("Neural-ML on Himalayas",
-     '("neural" OR "BCI" OR "EEG" OR "neural decoding" OR "neurotech") '
-     'site:himalayas.app', 12),
-    ("Neural-ML on Remote.co",
-     '("neural" OR "BCI" OR "EEG" OR "neuroscience") site:remote.co', 12),
-    ("Neural-ML remote on Lever",
-     '("neural" OR "BCI" OR "EEG" OR "neural signal") '
-     '("remote") site:jobs.lever.co', 12),
-    ("Neural-ML remote on Ashby",
-     '("neural" OR "BCI" OR "EEG" OR "neural decoding") '
-     '("remote") site:jobs.ashbyhq.com', 12),
+# [tracks.*].sources.websearch), from profile [sources].websearch
+# ({ label, query, max_results }). DuckDuckGo text search; each result URL is
+# parsed for JSON-LD JobPosting. Empty by default — the queries encode YOUR
+# field's vocabulary, so a generic default would only burn requests.
+WEBSEARCH_QUERIES: list[tuple] = [
+    (str(q.get("label") or q.get("query", ""))[:60], str(q.get("query", "")),
+     int(q.get("max_results", 12)))
+    for q in _src.get("websearch", [])
+    if q.get("query")
 ]
 
 # =========================================================================
@@ -463,32 +621,30 @@ REMOTE_NEURAL_WEBSEARCH_QUERIES: list[tuple] = [
 # every active listing, so they don't need per-company config.  Filtering
 # happens in the fetcher via is_relevant().
 
+# These are field-agnostic (they carry every kind of role and are filtered by
+# your keywords), so unlike the forum/websearch lists above they ship ON with
+# sensible defaults. Override any of them in profile [sources].
+
 # RemoteOK: single JSON endpoint at https://remoteok.com/api.
-# Set to False to skip entirely.
-REMOTEOK_ENABLED = True
+REMOTEOK_ENABLED = bool(_src.get("remoteok", True))
 
 # Remotive: https://remotive.com/api/remote-jobs (one category or all).
 # Categories: "software-dev", "data", "all-others", etc. None = all.
-REMOTIVE_ENABLED   = True
-REMOTIVE_CATEGORY: str | None = None
+REMOTIVE_ENABLED   = bool(_src.get("remotive", True))
+REMOTIVE_CATEGORY: str | None = _src.get("remotive_category") or None
 
 # Hacker News "Ask HN: Who is hiring?" monthly thread.
 # max_threads=2 covers the current + previous month's threads.
-HNHIRING_ENABLED     = True
-HNHIRING_MAX_THREADS = 2
+HNHIRING_ENABLED     = bool(_src.get("hnhiring", True))
+HNHIRING_MAX_THREADS = int(_src.get("hnhiring_max_threads", 2))
 
-# Generic RSS/Atom feeds. (label, url, default_location)
-# Seeded with WeWorkRemotely category feeds; add Jobicy, RemoteRocketship,
-# company blog RSS, etc.
-RSS_FEEDS: list[tuple[str, str, str]] = [
+# Generic RSS/Atom feeds — profile [sources].rss ({ label, url, location }).
+# Defaults to broad remote-job feeds; replace with your field's feeds
+# (a society job board, a company blog's careers RSS, a niche aggregator).
+_DEFAULT_RSS_FEEDS: list[tuple[str, str, str]] = [
     (
         "WeWorkRemotely - Programming",
         "https://weworkremotely.com/categories/remote-programming-jobs.rss",
-        "Remote",
-    ),
-    (
-        "WeWorkRemotely - Full-Stack",
-        "https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss",
         "Remote",
     ),
     (
@@ -502,6 +658,14 @@ RSS_FEEDS: list[tuple[str, str, str]] = [
         "Remote",
     ),
 ]
+# Presence of the key, not truthiness — `rss = []` deliberately means "no RSS
+# feeds", which is different from "I didn't configure any, use the defaults".
+RSS_FEEDS: list[tuple[str, str, str]] = ([
+    (str(f.get("label") or f.get("url", "")), str(f.get("url", "")),
+     str(f.get("location", "Remote")))
+    for f in (_src.get("rss") or [])
+    if f.get("url")
+] if "rss" in _src else _DEFAULT_RSS_FEEDS)
 
 # =========================================================================
 #  GATED-SITE CAPTURE CONFIG (Playwright)

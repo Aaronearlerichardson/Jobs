@@ -39,8 +39,8 @@ def local_track():
 
 
 @pytest.fixture(scope="session")
-def neural_track():
-    return _runner.track_for_engine("neural")
+def sweep_track():
+    return _runner.track_for_engine("sweep")
 
 
 @pytest.fixture(scope="session")
