@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a standalone distribution of the web UI with Nuitka.
+r"""Build a standalone distribution of the web UI with Nuitka.
 
     python build_app.py            # build for the current platform
     python build_app.py --check    # print the command without running it
@@ -8,11 +8,16 @@ Output: single-file binary (`JobCrawlerUI.exe` or `job-crawler-ui`) —
 self-contained (bundled CPython + Flask + the crawler packages + lxml),
 copy it anywhere and run; no Python or pip needed on the target.
 
-Data resolution at RUNTIME (config.py): JOBS_DATA_DIR if set; else
-<app dir>/data when it holds a DB; else the app's own folder (legacy flat
-layout); else <parent>/data when that holds jobs.db (a dist folder still
-inside the checkout uses the project's real data); else a fresh
-<app dir>/data. Set ANTHROPIC_API_KEY in the environment for scoring.
+Data resolution at RUNTIME (config.py): JOBS_DATA_DIR if set; else a `data`
+folder beside the binary, or beside its parent when the dist folder still
+sits inside the checkout (so a build never spawns a second empty store next
+to the project's real one); else the legacy flat layout; else the per-user
+application-data directory (%LOCALAPPDATA%\JobCrawler, ~/Library/Application
+Support/JobCrawler, $XDG_DATA_HOME/job-crawler) — the copied-to-a-new-machine
+case, which starts a clean install rather than inheriting anything. The
+running app prints the paths it chose; `run_scraper.py --where` prints them
+without starting anything. Set ANTHROPIC_API_KEY in the environment for
+scoring.
 
 Playwright (optional headless probes for JS-only boards) is deliberately
 excluded — it needs its own browser download and cannot ship in a binary;
@@ -35,7 +40,11 @@ DATA_FILES = [
     ("profile.example.toml", "profile.example.toml"),
 ]
 DATA_DIRS = [("webapp/static", "webapp/static")]
-PACKAGES = ["core", "scrapers", "discovery", "webapp"]
+# `ddgs` is listed explicitly even though it is only imported inside a function:
+# it loads its search-engine backends by walking its own package directory at
+# runtime, so following the import alone leaves the compiled build with the
+# package but none of the engines, and every dork query dies on KeyError('text').
+PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs"]
 
 
 def build_command():

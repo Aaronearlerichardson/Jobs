@@ -1,0 +1,5 @@
+name: jobs
+dependencies:
+  - pip
+  - pip:
+    - -r requirements-dev.txt
