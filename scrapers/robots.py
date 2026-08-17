@@ -45,6 +45,7 @@ RobotFileParser is still used for `Crawl-delay` (its parsing of that is
 fine, and it is not part of the RFC's matching rules).
 """
 
+import contextlib
 import re
 import socket
 import threading
@@ -141,6 +142,37 @@ def _match_group(groups, user_agent):
     return best or wildcard
 
 
+_quiet_lock = threading.Lock()
+_quiet_depth = 0
+
+
+@contextlib.contextmanager
+def quiet():
+    """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
+
+    Discovery guesses hostnames from a company name — `red.io`, `410.co`,
+    `united.ai` — and fetches them to find out whether they exist. Most do
+    not. Announcing "proceeding without restrictions" there describes a
+    politeness decision that is never acted on: nothing is crawled, because
+    the page fetch fails for the same reason robots.txt did. Reported
+    anyway, it buries the case the notice exists for — a host we believe is
+    a real board, whose robots.txt we could not read before crawling it.
+
+    Deliberately process-wide rather than thread-local: the speculative
+    fetches run on a thread pool, and the point is to cover those workers.
+    Operations are serialized (one at a time), so no real crawl is running
+    concurrently to be silenced by accident.
+    """
+    global _quiet_depth
+    with _quiet_lock:
+        _quiet_depth += 1
+    try:
+        yield
+    finally:
+        with _quiet_lock:
+            _quiet_depth -= 1
+
+
 def _is_dns_failure(exc, _depth=6):
     """True when `exc` bottoms out in a name-resolution error — i.e. the host
     does not exist, as opposed to a server that refused, hung, or failed TLS.
@@ -206,7 +238,7 @@ class RobotsCache:
             # no server to be impolite to and will never be crawled — most
             # candidates here are speculative `careers.<name>.com` guesses —
             # so saying it there is noise that buries the real cases.
-            if not _is_dns_failure(e):
+            if not _is_dns_failure(e) and not _quiet_depth:
                 print(f"    [robots] {origin}: unreachable ({type(e).__name__}); "
                       f"proceeding without restrictions")
             return _HostRules()

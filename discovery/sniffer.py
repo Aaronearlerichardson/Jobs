@@ -220,9 +220,16 @@ def _fetch_page(url, timeout=6):
 def _fetch_all(urls):
     """Fetch candidates concurrently (a miss otherwise pays ~26 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
-    evaluated in priority order regardless of completion order."""
-    with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
-        return dict(zip(urls, pool.map(_fetch_page, urls)))
+    evaluated in priority order regardless of completion order.
+
+    These are GUESSES — `<token>.io`, `<token>.co`, `careers.<token>.com` —
+    so their robots.txt failures are expected and say nothing worth logging;
+    `robots.quiet()` keeps the notice for hosts we actually mean to crawl.
+    """
+    from scrapers import robots
+    with robots.quiet():
+        with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
+            return dict(zip(urls, pool.map(_fetch_page, urls)))
 
 
 def _pack(ats, slug, careers_url):

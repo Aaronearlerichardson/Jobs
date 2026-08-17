@@ -474,3 +474,97 @@ class TestChromiumChannelFallback:
         pw = self.FakePlaywright({"chrome", "msedge"})
         assert launch_chromium(pw)[1] == "msedge"
         assert pw.tried == ["msedge"]
+
+
+class TestQuietSpeculativeProbes:
+    """The "unreachable" notice is for hosts we mean to crawl.
+
+    Discovery guesses hostnames from a company name — red.io, 410.co,
+    united.ai — and fetches them to learn whether they exist. Most do not,
+    and their robots.txt failure describes a politeness decision that is
+    never acted on: nothing gets crawled, because the page fetch fails for
+    the same reason. Those failures were always happening; robots.txt was
+    just the first code to report them, which turned a silent miss into a
+    line of log per guess and buried the notices that matter.
+    """
+
+    @staticmethod
+    def _fetch_with(exc, capsys):
+        import requests
+
+        from scrapers import robots
+
+        original = requests.get
+        requests.get = lambda *a, **k: (_ for _ in ()).throw(exc)
+        try:
+            return robots.RobotsCache()._fetch("https://example.com")
+        finally:
+            requests.get = original
+            capsys.readouterr()
+
+    def test_speculative_failures_are_silent(self, capsys):
+        import requests
+
+        from scrapers import robots
+
+        original = requests.get
+        requests.get = lambda *a, **k: (_ for _ in ()).throw(
+            requests.exceptions.SSLError("handshake"))
+        try:
+            with robots.quiet():
+                robots.RobotsCache()._fetch("https://red.io")
+        finally:
+            requests.get = original
+        assert capsys.readouterr().out == ""
+
+    def test_real_targets_still_report(self, capsys):
+        import requests
+
+        from scrapers import robots
+
+        original = requests.get
+        requests.get = lambda *a, **k: (_ for _ in ()).throw(
+            requests.exceptions.SSLError("handshake"))
+        try:
+            robots.RobotsCache()._fetch("https://jobs.example.com")
+        finally:
+            requests.get = original
+        assert "proceeding without restrictions" in capsys.readouterr().out
+
+    def test_quiet_does_not_leak_past_its_block(self):
+        from scrapers import robots
+        with robots.quiet():
+            pass
+        assert robots._quiet_depth == 0
+
+    def test_quiet_restores_on_exception(self):
+        from scrapers import robots
+        with pytest.raises(ValueError):
+            with robots.quiet():
+                raise ValueError("boom")
+        assert robots._quiet_depth == 0, "a raising probe must not mute the crawl"
+
+    def test_quiet_nests(self):
+        from scrapers import robots
+        with robots.quiet():
+            with robots.quiet():
+                assert robots._quiet_depth == 2
+            assert robots._quiet_depth == 1, "the inner exit silenced the outer block"
+        assert robots._quiet_depth == 0
+
+    def test_quiet_never_changes_what_is_allowed(self, capsys):
+        """Silence is a logging decision, not a politeness one."""
+        import requests
+
+        from scrapers import robots
+
+        original = requests.get
+        requests.get = lambda *a, **k: (_ for _ in ()).throw(
+            requests.exceptions.SSLError("handshake"))
+        try:
+            with robots.quiet():
+                rules = robots.RobotsCache()._fetch("https://red.io")
+        finally:
+            requests.get = original
+            capsys.readouterr()
+        assert rules.group is None and not rules.disallow_all   # still fails open

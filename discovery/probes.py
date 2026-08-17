@@ -399,11 +399,15 @@ def probe_workday(name: str, careers_url: str = ""):
 
     `validated=False` means the URL pattern was found but the CXS API
     """
+    # Candidate hosts here are name-guesses too — quiet their robots notices
+    # for the same reason the sniffer does (see scrapers.robots.quiet).
+    from scrapers import robots
     for url in _workday_candidate_urls(name, careers_url):
         try:
-            r = SESSION.get(
-                url, timeout=6, headers=HEADERS, allow_redirects=True,
-            )
+            with robots.quiet():
+                r = SESSION.get(
+                    url, timeout=6, headers=HEADERS, allow_redirects=True,
+                )
         except Exception:
             continue
         if r.status_code != 200:
