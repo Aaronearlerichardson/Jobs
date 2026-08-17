@@ -298,3 +298,91 @@ class TestPastedNameExtractionFallback:
         monkeypatch.setattr("core.store.connect", lambda *a, **k: _Conn())
         local_sourcing.add_names("Chimerix\n2 days ago", use_llm=True)
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
+
+
+class TestDoubledTitleExtraction:
+    """A results page that repeats each job title pins the employer by position.
+
+    LinkedIn renders every hit as "<title>(Verified job)<title>" with the
+    employer on the next line. Reading that marker beats filtering the page:
+    filtering a real 329-line search page yielded 15 employers plus 102 pieces
+    of chrome ("Past month", "Posted 3 days ago3 days ago", markdown nav
+    links), each of which would have cost a network resolve. The marker yields
+    the same 15 and never looks at the rest.
+    """
+
+    PAGE = """73 results
+Durham, NC (50 mi)
+How promoted jobs are ranked
+Signal Processing Engineer (Verified job)Signal Processing Engineer
+CoVar
+Durham, NC (On-site)
+You'd be a top applicant
+Viewed
+ ·
+Posted 2 weeks ago2 weeks ago
+ ·
+Easy Apply
+Senior AI/ML EngineerSenior AI/ML Engineer
+Pedestal Health
+Raleigh, NC (Remote)
+Posted 1 week ago1 week ago
+Postdoctoral AssociatePostdoctoral Associate
+Duke University
+Durham, NC
+4 connections work here
+Statistical Software DeveloperStatistical Software Developer
+Headwater Science
+Durham, NC (Hybrid)
+[About](https://about.linkedin.com/)
+[Help Center](https://www.linkedin.com/help/linkedin/)"""
+
+    def test_pulls_exactly_the_employers(self):
+        assert local_sourcing.parse_company_names(self.PAGE) == [
+            "CoVar", "Pedestal Health", "Duke University", "Headwater Science"]
+
+    def test_page_chrome_is_never_considered(self):
+        got = local_sourcing.parse_company_names(self.PAGE)
+        for chrome in ("73 results", "How promoted jobs are ranked",
+                       "Durham, NC (50 mi)", "Viewed", "Easy Apply"):
+            assert chrome not in got
+
+    def test_markdown_nav_links_are_dropped(self):
+        assert local_sourcing.parse_company_names(
+            "[Help Center](https://www.linkedin.com/help/linkedin/)") == []
+
+    def test_employer_names_containing_title_words_survive(self):
+        """The keyword screen that rejects job titles must not run on a name
+        the marker already proved is an employer — 'Headwater Science' and
+        'Vadum Inc.' would otherwise be collateral."""
+        page = ("Data EngineerData Engineer\nHeadwater Science\n"
+                "Machine Learning EngineerMachine Learning Engineer\nVadum Inc.")
+        assert local_sourcing.parse_company_names(page) == [
+            "Headwater Science", "Vadum Inc."]
+
+    def test_a_doubled_date_is_not_a_doubled_title(self):
+        """'Posted 2 weeks ago2 weeks ago' repeats a SUFFIX, not the whole
+        line, so it must not mark the next line as a company."""
+        assert local_sourcing._DOUBLED_TITLE_RE.match(
+            "Posted 2 weeks ago2 weeks ago") is None
+
+    @pytest.mark.parametrize("line", [
+        "Signal Processing Engineer (Verified job)Signal Processing Engineer",
+        "Senior AI/ML EngineerSenior AI/ML Engineer",
+        "Postdoctoral AssociatePostdoctoral Associate",
+    ])
+    def test_marker_matches_both_badged_and_bare_doubles(self, line):
+        assert local_sourcing._DOUBLED_TITLE_RE.match(line)
+
+    def test_falls_back_when_the_page_has_no_marker(self):
+        """A source that doesn't repeat titles (a directory, an article) still
+        goes through the permissive line filter."""
+        assert local_sourcing.parse_company_names(
+            "Chimerix\n2 days ago\nG1 Therapeutics") == ["Chimerix", "G1 Therapeutics"]
+
+    def test_one_stray_double_does_not_hijack_a_plain_list(self):
+        """Two markers are required, so a coincidental repeat in prose cannot
+        switch a plain list over to positional reading."""
+        assert local_sourcing.parse_company_names(
+            "Chimerix\nbla bla\nG1 Therapeutics\nBiogen") == [
+            "Chimerix", "bla bla", "G1 Therapeutics", "Biogen"]

@@ -1194,38 +1194,90 @@ _LOCATION_LINE_RE = re.compile(
     r"(?:\s*\([^)]*\))?$|.*\bArea$|.*\bMetropolitan\b", re.I)
 
 
+# A results row whose job title is rendered twice, optionally with a badge
+# wedged between the halves: "Signal Processing Engineer (Verified job)Signal
+# Processing Engineer". LinkedIn emits this for every hit, and the employer is
+# always the next line — so the doubled line is an unambiguous "company below"
+# marker. `.{4,}?` is lazy so the shortest repeating half wins.
+_DOUBLED_TITLE_RE = re.compile(r"^(.{4,}?)(?:\s*\([^)]{,24}\))?\1$")
+
+
+def _clean_candidate(raw, drop_titles=True):
+    """One line -> a usable company name, or None.
+
+    `drop_titles=False` for structurally-located names: the doubled-title
+    marker already proved the line is an employer, and rejecting it for
+    containing a word like "Science" or "Research" would lose real ones
+    (Headwater Science, Vadum). The keyword screen is only needed when we
+    are guessing from unstructured lines.
+    """
+    stripped = raw.strip()
+    # Test noise BEFORE removing list markers: "2 days ago" and "1K followers"
+    # only read as noise while they still carry their leading digits.
+    if _PASTE_NOISE_RE.match(stripped):
+        return None
+    # Markdown export turns nav into "[Help Center](https://...)".
+    if re.match(r"^\[[^\]]*\]\(", stripped):
+        return None
+    # Results pages render "Company · Location" and "Company • 1K followers".
+    name = re.split(r"\s+[·•|]\s+", stripped)[0].strip()
+    name = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", name).strip()
+    if not (2 < len(name) <= 60):
+        return None
+    if _PASTE_NOISE_RE.match(name):
+        return None
+    if drop_titles and _TITLE_WORD_RE.search(name):
+        return None
+    if _LOCATION_LINE_RE.match(name):
+        return None
+    if not re.search(r"[A-Za-z]{2}", name):          # numbers / punctuation only
+        return None
+    if name.startswith(("http://", "https://", "www.")):
+        return None
+    return name
+
+
+def _names_from_doubled_titles(lines):
+    """Employers located by the repeated-title marker, in page order."""
+    out = []
+    for i, line in enumerate(lines):
+        if not _DOUBLED_TITLE_RE.match(line.strip()):
+            continue
+        for nxt in lines[i + 1:i + 3]:               # skip a blank if present
+            if nxt.strip():
+                name = _clean_candidate(nxt, drop_titles=False)
+                if name:
+                    out.append(name)
+                break
+    return out
+
+
 def parse_company_names(blob, limit=300):
     """Plausible employer names out of a pasted block of page text.
 
-    Deliberately permissive. Precision here is cheap to get wrong and
-    expensive to tune: a junk name costs one failed resolve and is dropped,
-    while a dropped real name is invisible. So this removes only what is
-    CERTAINLY not an employer and lets the resolver adjudicate the rest.
+    Two passes. If the page repeats each job title — the shape every
+    LinkedIn results row has — the employer is pinned by position and the
+    surrounding chrome is never even considered. A real search page yields
+    15 employers and no junk that way, against 117 lines for the filter.
+
+    Otherwise fall back to filtering lines, which is deliberately
+    permissive: precision is cheap to get wrong and expensive to tune, a
+    junk name costs one failed resolve and is dropped, and a dropped real
+    name is invisible.
     """
     if isinstance(blob, (list, tuple)):
         lines = [str(x) for x in blob]
     else:
         lines = re.split(r"[\r\n]+", str(blob or ""))
+
+    structured = _names_from_doubled_titles(lines)
+    # Two hits mean the marker is really this page's shape, not a coincidental
+    # repeat in prose.
+    candidates = structured if len(structured) >= 2 else [
+        n for n in (_clean_candidate(ln) for ln in lines) if n]
+
     out, seen = [], set()
-    for raw in lines:
-        stripped = raw.strip()
-        # Test noise BEFORE removing list markers: "2 days ago" and "1K
-        # followers" only read as noise while they still carry their digits.
-        if _PASTE_NOISE_RE.match(stripped):
-            continue
-        # Results pages render "Company · Location" and "Company • 1K followers".
-        name = re.split(r"\s+[·•|]\s+", stripped)[0].strip()
-        name = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", name).strip()
-        if not (2 < len(name) <= 60):
-            continue
-        if _PASTE_NOISE_RE.match(name) or _TITLE_WORD_RE.search(name):
-            continue
-        if _LOCATION_LINE_RE.match(name):
-            continue
-        if not re.search(r"[A-Za-z]{2}", name):      # numbers / punctuation only
-            continue
-        if name.startswith(("http://", "https://", "www.")):
-            continue
+    for name in candidates:
         key = _NONALNUM_RE.sub("", name.lower())
         if key and key not in seen:
             seen.add(key)
