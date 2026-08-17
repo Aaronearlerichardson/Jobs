@@ -256,6 +256,13 @@ OPS = {
             fromlist=["populate_companies"]
         ).populate_companies(dork=not p.get("no_dork")),
     },
+    "add-names": {
+        "label": "Add companies from pasted text",
+        "engine": "local",
+        "fn": lambda p: __import__(
+            "discovery.local_sourcing", fromlist=["add_names"]
+        ).add_names(p.get("names") or "", use_llm=bool(p.get("use_llm"))),
+    },
     "dork": {
         "label": "ATS dork sweep",
         "engine": "local",

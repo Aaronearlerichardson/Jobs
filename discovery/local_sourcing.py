@@ -1153,3 +1153,191 @@ def format_config_block(confirmed):
         lines.append(f'    ("{t}", {p}, "{s}", "{h["name"]}"),  # {h["nc"]} NC / {h["count"]} total')
     lines.append("]")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+#  Paste-a-page ingest                                                         #
+# --------------------------------------------------------------------------- #
+#
+# Getting employers out of a site you are already browsing — a LinkedIn search,
+# a Built In list, a news article — comes down to harvesting NAMES. The crawler
+# never wants the source's job data: it resolves each name to the employer's
+# OWN board, which is fresher, complete, and carries a real apply URL. So this
+# surface can be dumb — take whatever text was on the page and let the existing
+# probe -> validate -> score chain decide what was real. Same contract
+# brainstorm_company_names() runs under: a name that isn't an employer simply
+# fails to resolve.
+
+# Lines that are never a company name in a pasted results page.
+_PASTE_NOISE_RE = re.compile(
+    r"^(?:"
+    r"promoted|easy apply|actively recruiting|be an early applicant|viewed|"
+    r"applied|saved|save|dismiss|see all|show more|load more|next|previous|"
+    r"remote|hybrid|on-?site|full-?time|part-?time|contract|internship|"
+    r"\d*\s*(?:day|week|month|hour|minute)s?\s*ago|reposted.*|"
+    r"[\d,]*\s*[km]?\s*(?:followers?|employees?|connections?|applicants?)|"
+    r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*"
+    r")\W*$", re.I)
+
+# A line that reads as a JOB TITLE rather than an employer. Results pages
+# interleave the two, and a title resolves to nothing, so this saves the probe.
+_TITLE_WORD_RE = re.compile(
+    r"\b(?:engineer|scientist|developer|analyst|manager|director|specialist|"
+    r"coordinator|associate|assistant|technician|architect|consultant|intern|"
+    r"lead|head of|vp|president|officer|administrator|nurse|physician|"
+    r"recruiter|designer|researcher|postdoc|fellow|programmer|statistician)\b",
+    re.I)
+
+# "Durham, NC" / "Durham, NC (Hybrid)" / "Raleigh-Durham-Chapel Hill Area"
+_LOCATION_LINE_RE = re.compile(
+    r"^[A-Z][\w.'-]+(?:[ \-][\w.'-]+)*,\s*(?:[A-Z]{2}|[A-Z][a-z]+)"
+    r"(?:\s*\([^)]*\))?$|.*\bArea$|.*\bMetropolitan\b", re.I)
+
+
+def parse_company_names(blob, limit=300):
+    """Plausible employer names out of a pasted block of page text.
+
+    Deliberately permissive. Precision here is cheap to get wrong and
+    expensive to tune: a junk name costs one failed resolve and is dropped,
+    while a dropped real name is invisible. So this removes only what is
+    CERTAINLY not an employer and lets the resolver adjudicate the rest.
+    """
+    if isinstance(blob, (list, tuple)):
+        lines = [str(x) for x in blob]
+    else:
+        lines = re.split(r"[\r\n]+", str(blob or ""))
+    out, seen = [], set()
+    for raw in lines:
+        stripped = raw.strip()
+        # Test noise BEFORE removing list markers: "2 days ago" and "1K
+        # followers" only read as noise while they still carry their digits.
+        if _PASTE_NOISE_RE.match(stripped):
+            continue
+        # Results pages render "Company · Location" and "Company • 1K followers".
+        name = re.split(r"\s+[·•|]\s+", stripped)[0].strip()
+        name = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", name).strip()
+        if not (2 < len(name) <= 60):
+            continue
+        if _PASTE_NOISE_RE.match(name) or _TITLE_WORD_RE.search(name):
+            continue
+        if _LOCATION_LINE_RE.match(name):
+            continue
+        if not re.search(r"[A-Za-z]{2}", name):      # numbers / punctuation only
+            continue
+        if name.startswith(("http://", "https://", "www.")):
+            continue
+        key = _NONALNUM_RE.sub("", name.lower())
+        if key and key not in seen:
+            seen.add(key)
+            out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def extract_names_llm(blob, limit=60):
+    """Ask the model which employers a pasted page mentions.
+
+    The regex path cannot tell "Fennec Pharmaceuticals" from a job title whose
+    words it has never seen. One call fixes that for a messy paste. Returns []
+    without an API key, so the caller falls back to the regex.
+    """
+    from core.claude import call_claude_json
+    system = ("You extract EMPLOYER NAMES from text copied off a job-search or "
+              "company-directory page. Return only organisations that could "
+              "employ someone. Never return job titles, locations, dates, "
+              "recruiter names, or UI labels. Return each company's plain name "
+              "without taglines.")
+    user = ('Return JSON {"companies": ["name", ...]} with at most '
+            f'{limit} entries, in the order they appear.\n\n'
+            f"---\n{str(blob or '')[:20000]}\n---")
+    try:
+        data = call_claude_json(system, user, max_tokens=2000)
+    except Exception as e:
+        print(f"    [!] name extraction failed ({type(e).__name__}: {e}); "
+              f"falling back to the text parser")
+        return []
+    names = [str(x).strip() for x in (data or {}).get("companies", [])
+             if str(x).strip()]
+    return [n for n in names if 2 < len(n) <= 60][:limit]
+
+
+def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
+    """Resolve pasted company names to boards and store the ones that verify.
+
+    Uses resolve_board_sniff_first(), not the slug-probe-first resolver: a name
+    a person pasted is exactly where a slug collision does the most damage
+    (guessing 'sas' lands on an unrelated 5-job board while the real SAS
+    Institute sits on iCIMS). Sniffing the company's own careers page cannot
+    collide that way; a probe-only hit is reported for a human glance.
+    """
+    from core.claude import score_company_mission, ACTIVE_MISSION_TIERS
+    from core.store import connect, upsert_company
+
+    if include_missions is None:
+        include_missions = ACTIVE_MISSION_TIERS
+    names = extract_names_llm(blob) if use_llm else []
+    if not names:
+        names = parse_company_names(blob)
+    if not names:
+        print("  no company names found in that text.")
+        return []
+
+    conn = connect()
+    existing = {_NONALNUM_RE.sub("", (r["name"] or "").lower())
+                for r in conn.execute("SELECT name FROM companies").fetchall()}
+    fresh = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in existing]
+    skipped = len(names) - len(fresh)
+    print(f"  {len(names)} name(s) parsed"
+          + (f", {skipped} already tracked" if skipped else "")
+          + f" -> resolving {len(fresh)}...")
+
+    written, unresolved = [], []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(resolve_board_sniff_first, n): n for n in fresh}
+        for fut in as_completed(futs):
+            name = futs[fut]
+            try:
+                hit = fut.result()
+            except Exception as e:
+                print(f"    [!] {name}: {type(e).__name__}: {e}")
+                hit = None
+            if not hit:
+                unresolved.append(name)
+                continue
+            titles = _sample_titles(hit)
+            tier, score, reason = score_company_mission(
+                hit["name"], " | ".join(t for t in titles if t))
+            active = 1 if (tier in include_missions or tier is None
+                           or config.is_multi_division(hit["name"])) else 0
+            slug = hit.get("slug")
+            is_wd = hit["ats"] == "workday"
+            upsert_company(conn, {
+                "name": hit["name"], "ats": hit["ats"],
+                "slug": None if is_wd else slug,
+                "wd_tenant": slug[0] if is_wd else None,
+                "wd_pod":    slug[1] if is_wd else None,
+                "wd_site":   slug[2] if is_wd else None,
+                "careers_url": hit.get("careers_url"),
+                "local_job_count": hit["nc"], "total_job_count": hit["count"],
+                "mission_tier": tier, "mission_score": score,
+                "mission_reason": reason, "tags": company_tags.LOCAL,
+                "source": "paste", "active": active,
+                "last_probed": datetime.now().isoformat(),
+            })
+            written.append(hit)
+            # via='probe' means the board came from a name-guess rather than
+            # the company's own careers page — worth a human glance.
+            flag = "  [verify: slug-guess]" if hit.get("via") == "probe" else ""
+            print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
+                  f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
+                  f"{'active' if active else 'inactive'}{flag}")
+    conn.commit()
+    conn.close()
+    if unresolved:
+        print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "
+              f"(not employers, or no board we can read):")
+        print("    " + ", ".join(unresolved[:25])
+              + (" ..." if len(unresolved) > 25 else ""))
+    print(f"\n  {len(written)} compan(ies) added.")
+    return written

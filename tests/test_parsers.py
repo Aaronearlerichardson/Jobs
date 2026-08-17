@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 
 import core.digest_md as digest_md
 import discovery.ats_dork as dork
+import discovery.local_sourcing as local_sourcing
 import discovery.sniffer as sniffer
 import scrapers.fetchers.company as company_fetch
 from scrapers.util import norm_posted_date
@@ -170,3 +171,130 @@ class TestDiscoveryWiring:
             probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
             assert len(probes) == 3
             assert not any(p._launched for p in probes)
+
+
+class TestPastedPageNames:
+    """Company names out of text copied off a results page.
+
+    The parser is deliberately permissive: a junk name costs one failed
+    resolve and is dropped by the same probe -> validate chain that guards
+    the LLM brainstorm, while a dropped real name is invisible. So these
+    pin the two things that actually matter — real employers survive, and
+    the specific noise a results page emits does not.
+    """
+
+    # Shaped like a LinkedIn job search: title / company / location / chrome.
+    RESULTS = """Senior Data Engineer
+Fennec Pharmaceuticals
+Durham, NC (Hybrid)
+Promoted
+2 days ago
+Clinical Research Scientist
+Locus Biosciences
+Research Triangle Park, NC
+Easy Apply
+Over 100 applicants
+Precision BioSciences · Durham, NC
+1K followers
+Principal Statistician
+Chimerix
+Raleigh-Durham-Chapel Hill Area
+Reposted 3 days ago
+G1 Therapeutics
+See all jobs
+Page 1 of 4"""
+
+    def test_finds_every_employer(self):
+        names = local_sourcing.parse_company_names(self.RESULTS)
+        assert set(names) == {
+            "Fennec Pharmaceuticals", "Locus Biosciences", "Precision BioSciences",
+            "Chimerix", "G1 Therapeutics",
+        }
+
+    def test_keeps_the_order_they_appeared_in(self):
+        names = local_sourcing.parse_company_names(self.RESULTS)
+        assert names[0] == "Fennec Pharmaceuticals"
+        assert names[-1] == "G1 Therapeutics"
+
+    @pytest.mark.parametrize("line", [
+        "2 days ago", "3 weeks ago", "Reposted 3 days ago", "Promoted",
+        "Easy Apply", "Actively recruiting", "1K followers", "10,001 employees",
+        "Over 100 applicants", "See all jobs", "Page 1 of 4", "Remote",
+        "Durham, NC", "Durham, NC (Hybrid)", "Raleigh-Durham-Chapel Hill Area",
+    ])
+    def test_page_furniture_is_dropped(self, line):
+        assert local_sourcing.parse_company_names(line) == []
+
+    @pytest.mark.parametrize("line", [
+        "Senior Data Engineer", "Clinical Research Scientist",
+        "Principal Statistician", "Director of Operations",
+        "Registered Nurse", "Software Developer II",
+    ])
+    def test_job_titles_are_dropped(self, line):
+        """Results pages interleave titles with employers; a title resolves to
+        nothing, so dropping it saves a pointless probe."""
+        assert local_sourcing.parse_company_names(line) == []
+
+    def test_a_digit_prefixed_stat_is_not_mistaken_for_a_list_item(self):
+        """Stripping list markers before the noise check turned '2 days ago'
+        into 'days ago' and '1K followers' into 'K followers', both of which
+        then looked like company names."""
+        assert local_sourcing.parse_company_names("2 days ago\n1K followers") == []
+
+    def test_numbered_lists_still_have_their_markers_stripped(self):
+        assert local_sourcing.parse_company_names(
+            "1. Fennec Pharmaceuticals\n2) Chimerix\n- G1 Therapeutics") == [
+            "Fennec Pharmaceuticals", "Chimerix", "G1 Therapeutics"]
+
+    def test_separator_suffixes_are_trimmed(self):
+        assert local_sourcing.parse_company_names(
+            "Precision BioSciences · Durham, NC\nChimerix • 1K followers") == [
+            "Precision BioSciences", "Chimerix"]
+
+    def test_duplicates_collapse_case_insensitively(self):
+        assert local_sourcing.parse_company_names(
+            "Chimerix\nCHIMERIX\nchimerix") == ["Chimerix"]
+
+    def test_accepts_a_list_as_well_as_a_blob(self):
+        assert local_sourcing.parse_company_names(
+            ["Chimerix", "2 days ago"]) == ["Chimerix"]
+
+    def test_empty_input_is_not_an_error(self):
+        for empty in ("", None, [], "   \n\n  "):
+            assert local_sourcing.parse_company_names(empty) == []
+
+    def test_urls_are_not_company_names(self):
+        assert local_sourcing.parse_company_names(
+            "https://linkedin.com/jobs/view/123\nwww.example.com\nChimerix") == ["Chimerix"]
+
+    def test_limit_is_honoured(self):
+        blob = "\n".join(f"Company {i} Bio" for i in range(50))
+        assert len(local_sourcing.parse_company_names(blob, limit=10)) == 10
+
+
+class TestPastedNameExtractionFallback:
+    def test_llm_extraction_falls_back_to_the_parser(self, monkeypatch):
+        """No API key (or a failed call) must not lose the paste — the regex
+        parser still runs, so the card works for free."""
+        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+                            lambda *a, **k: [])
+        captured = {}
+        monkeypatch.setattr(local_sourcing, "resolve_board_sniff_first",
+                            lambda n, *a, **k: captured.setdefault(n, None))
+
+        class _Conn:
+            def execute(self, *a):
+                return self
+
+            def fetchall(self):
+                return []
+
+            def commit(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("core.store.connect", lambda *a, **k: _Conn())
+        local_sourcing.add_names("Chimerix\n2 days ago", use_llm=True)
+        assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"

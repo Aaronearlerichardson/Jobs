@@ -167,6 +167,10 @@
   .op .row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
   .op input { width: 70px; }
   .op input.wide { width: 100%; margin-bottom: 6px; }
+  /* Paste target for the "add from a page" card: monospace so a pasted
+     results page keeps the line structure the parser reads it by. */
+  .op textarea.wide { width: 100%; margin-bottom: 6px; resize: vertical;
+                      font: 12px/1.4 ui-monospace, Menlo, Consolas, monospace; }
   .op button.run {
     background: var(--accent); border: 1px solid var(--accent); color: #fff;
     border-radius: 6px; padding: 4px 12px;

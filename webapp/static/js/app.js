@@ -429,6 +429,15 @@ function renderOps() {
         <input data-a="location" placeholder="location" style="width:150px">
         <button class="run" data-op="add-job" ${allowed.has("add-job") ? "" : "disabled"}>Add</button>
       </div></div>
+    <div class="op ${allowed.has("add-names") ? "" : "dim"}"><h3>Add companies from a page</h3>
+      <p>Paste text from anywhere — a LinkedIn search, a Built In list, a conference exhibitor list. It pulls the company names out, finds each employer's <i>own</i> job board, counts local openings, and scores its mission. Names that aren't real employers just fail to resolve and are dropped.</p>
+      <p class="fieldhelp"><b>When:</b> you're browsing somewhere the crawler can't reach. Select the results, copy, paste here — noise like "2 days ago" and "Easy Apply" is filtered out.</p>
+      <textarea class="wide" data-a="names" rows="6" placeholder="Paste the page text here - job titles, dates and locations are ignored"></textarea>
+      <div class="row">
+        <label title="Uses the Claude API to read a messy paste. The free text parser runs first; turn this on only if it missed companies."><input type="checkbox" data-p="use_llm"> messy paste (uses the API)</label>
+        <button class="run" data-op="add-names" ${allowed.has("add-names") ? "" : "disabled"}>Add</button>
+      </div>
+    </div>
     <div class="op ${allowed.has("add-board") ? "" : "dim"}"><h3>Add one company</h3>
       <p>Give a careers-page URL: it works out which job board the company uses, counts local openings, and scores its mission.</p>
       <p class="fieldhelp"><b>When:</b> you know an employer worth following.</p>
@@ -459,7 +468,10 @@ function renderOps() {
     const params = {};
     card.querySelectorAll("input[data-p]").forEach(i =>
       params[i.dataset.p] = i.type === "checkbox" ? i.checked : i.value);
-    card.querySelectorAll("input[data-a]").forEach(i => params[i.dataset.a] = i.value);
+    // textarea included: the paste-a-page card's payload is a whole block of
+    // text, which does not fit an <input>.
+    card.querySelectorAll("input[data-a], textarea[data-a]")
+      .forEach(i => params[i.dataset.a] = i.value);
     // Disable on click, not on the next status poll. Until the poll came back
     // the button stayed live, so a second click fired a second POST and the
     // server started a second crawl. The poll re-derives disabled state either
