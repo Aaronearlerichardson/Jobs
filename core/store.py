@@ -93,7 +93,10 @@ CREATE TABLE IF NOT EXISTS companies (
     source         TEXT,              -- how it was discovered
     active         INTEGER DEFAULT 1, -- crawl this company?
     last_probed    TEXT,
-    notes          TEXT
+    notes          TEXT,
+    created_at     TEXT,              -- first time this row was inserted
+    miss_reason    TEXT,              -- why it is not crawlable (see MISS_REASONS)
+    miss_at        TEXT               -- when that failure was last recorded
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -135,6 +138,15 @@ _MIGRATIONS = {
         # make the _RENAMED_COLUMNS copy below (guarded on IS NULL) a no-op
         # and silently drop the counts inherited from nc_job_count.
         "local_job_count": "INTEGER",   # was nc_job_count
+        # When the row was first inserted. Deliberately NOT backfilled on an
+        # existing DB: we do not know when a pre-migration row arrived, and a
+        # backfill would invent a roster-growth spike at migration time. NULL
+        # reads as "predates the column" (see roster_growth).
+        "created_at":  "TEXT",
+        # Why a candidate is not crawlable, and when we last found that out.
+        # See MISS_REASONS; rows carrying these are always active=0.
+        "miss_reason": "TEXT",
+        "miss_at":     "TEXT",
     },
     "jobs": {
         "track":           "TEXT",
@@ -297,8 +309,13 @@ _COMPANY_COLS = (
     "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url",
     "local_job_count", "total_job_count", "mission_tier",
     "mission_score", "mission_reason", "tags", "source", "active",
-    "last_probed", "notes",
+    "last_probed", "notes", "created_at", "miss_reason", "miss_at",
 )
+
+# Columns an upsert may write on INSERT but must never overwrite on UPDATE:
+# created_at is the row's birth stamp, so a re-probe of a known company must
+# leave it (and a legacy NULL) alone.
+_INSERT_ONLY_COLS = ("created_at",)
 
 
 def upsert_company(conn, c):
@@ -307,8 +324,29 @@ def upsert_company(conn, c):
     `tags` merge instead of overwrite: a company discovered by the local
     sourcing pass ("nc_local") and later by BCI discovery ("neural") keeps
     both scopes.
+
+    A new row is stamped with `created_at`, and re-upserting the same name
+    never moves that stamp -- it is the roster's birth record, not a
+    last-touched field (`last_probed` is that one, and it does move):
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever"})
+    >>> born = conn.execute("SELECT created_at FROM companies").fetchone()[0]
+    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "greenhouse"})
+    >>> conn.execute("SELECT created_at FROM companies").fetchone()[0] == born
+    True
+
+    Writing a board onto a row clears any miss recorded against it: a row
+    that has an `ats` is a company, not a miss (see record_miss).
+
+    >>> _ = record_miss(conn, "Zeta", "no-board-found")
+    >>> _ = upsert_company(conn, {"name": "Zeta", "ats": "ashby", "active": 1})
+    >>> conn.execute("SELECT miss_reason, miss_at FROM companies "
+    ...              "WHERE name='Zeta'").fetchone()[:]
+    (None, None)
     """
     c = {**c, "last_probed": c.get("last_probed") or datetime.now().isoformat()}
+    c.setdefault("created_at", datetime.now().isoformat())
     # Drop None-valued keys: an upsert must never erase an existing value
     # (e.g. a failed/keyless mission-scoring pass writing mission_score=None
     # over a previously scored company). Inserts still get NULL defaults.
@@ -321,15 +359,178 @@ def upsert_company(conn, c):
         c["tags"] = ",".join(sorted(merged))
     cols = [k for k in _COMPANY_COLS if k in c]
     placeholders = ", ".join("?" for _ in cols)
-    updates = ", ".join(f"{k}=excluded.{k}" for k in cols if k != "name")
+    updates = ", ".join(f"{k}=excluded.{k}" for k in cols
+                        if k != "name" and k not in _INSERT_ONLY_COLS)
     conn.execute(
         f"INSERT INTO companies ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(name) DO UPDATE SET {updates}",
         [c[k] for k in cols],
     )
+    if c.get("ats"):
+        conn.execute("UPDATE companies SET miss_reason=NULL, miss_at=NULL "
+                     "WHERE name=? AND miss_reason IS NOT NULL", (c["name"],))
     conn.commit()
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
     return row["id"] if row else None
+
+
+# --------------------------------------------------------------------------- #
+#  Misses                                                                      #
+# --------------------------------------------------------------------------- #
+#
+# A candidate that fails to become a crawlable company used to be printed and
+# thrown away, so the same name failed the same way on every run with no
+# record of why. It is now kept as an INACTIVE companies row carrying a
+# machine-readable `miss_reason` and a `miss_at` retry stamp. Same table on
+# purpose: name/source/careers_url/ats are exactly the columns a miss needs
+# to record, resolve_leads() already reprocesses boardless inactive rows, and
+# `active = 0` is the crawl's existing "do not fetch" switch -- a parallel
+# table would duplicate all three and add a second place a name can hide.
+
+# Reason FAMILIES. A stored reason is a family, optionally ':'-qualified with
+# the offending platform or error ("ats-unsupported:ukg",
+# "fetch-error:ReadTimeout"); miss_counts aggregates on the family so the
+# qualifier stays readable without fragmenting the tally.
+MISS_REASONS = (
+    "no-board-found",   # nothing resolved: sniff, slug-probe and websearch all missed
+    "board-dead",       # coordinates detected, but the live fetch returns nothing
+    "ats-unsupported",  # a real ATS we recognize but cannot fetch (:platform)
+    "no-local-jobs",    # board live and readable, zero openings in [locality]
+    "fetch-error",      # the resolution attempt itself raised (:ExceptionName)
+)
+
+
+def miss_family(reason):
+    """The family part of a miss reason: the token before any ':' qualifier.
+
+    >>> miss_family("no-local-jobs")
+    'no-local-jobs'
+    >>> miss_family("ats-unsupported:ukg")
+    'ats-unsupported'
+    >>> miss_family(None)
+    ''
+    """
+    return (reason or "").split(":", 1)[0]
+
+
+def record_miss(conn, name, reason, **fields):
+    """Record that `name` failed to become a crawlable company, and why.
+
+    The row is always written inactive, so it is invisible to every crawl
+    path (all of which read get_companies(active_only=True)):
+
+    >>> conn = connect(":memory:")
+    >>> _ = record_miss(conn, "Chiesi USA", "no-local-jobs", ats="greenhouse")
+    >>> [c["name"] for c in get_companies(conn, active_only=True)]
+    []
+    >>> [(c["name"], c["miss_reason"], c["active"])
+    ...  for c in get_companies(conn, active_only=False)]
+    [('Chiesi USA', 'no-local-jobs', 0)]
+
+    Re-recording the same name updates the reason in place rather than
+    growing a second row, so a name that keeps failing stays one worklist
+    entry:
+
+    >>> _ = record_miss(conn, "Chiesi USA", "board-dead")
+    >>> [(c["name"], c["miss_reason"])
+    ...  for c in get_companies(conn, active_only=False)]
+    [('Chiesi USA', 'board-dead')]
+
+    An ACTIVE company is never demoted by a miss -- a transient failure while
+    re-probing a working board must not drop it out of the roster. Returns
+    True when a miss was written, False when it was declined:
+
+    >>> _ = upsert_company(conn, {"name": "Locus", "ats": "lever", "active": 1})
+    >>> record_miss(conn, "Locus", "fetch-error:ReadTimeout")
+    False
+    >>> [c["name"] for c in get_companies(conn, active_only=True)]
+    ['Locus']
+    """
+    row = conn.execute("SELECT active FROM companies WHERE name=?",
+                       (name,)).fetchone()
+    if row and row["active"]:
+        return False
+    now = datetime.now().isoformat()
+    upsert_company(conn, {**fields, "name": name, "active": 0,
+                          "miss_reason": reason, "miss_at": now})
+    # upsert_company clears the miss columns whenever an `ats` is written (a
+    # row with a board is a company) -- but here the ats is part of the miss
+    # record itself ("board-dead" knows which board died), so put them back.
+    conn.execute("UPDATE companies SET miss_reason=?, miss_at=? WHERE name=?",
+                 (reason, now, name))
+    conn.commit()
+    return True
+
+
+def miss_counts(conn):
+    """Misses per reason family, biggest first: the "where are we losing
+    companies" tally.
+
+    >>> conn = connect(":memory:")
+    >>> for n, r in [("a", "no-local-jobs"), ("b", "no-local-jobs"),
+    ...              ("c", "ats-unsupported:ukg"),
+    ...              ("d", "ats-unsupported:taleo")]:
+    ...     _ = record_miss(conn, n, r)
+    >>> miss_counts(conn)
+    [('ats-unsupported', 2), ('no-local-jobs', 2)]
+    """
+    rows = conn.execute("SELECT miss_reason FROM companies "
+                        "WHERE miss_reason IS NOT NULL").fetchall()
+    tally = {}
+    for r in rows:
+        fam = miss_family(r["miss_reason"])
+        tally[fam] = tally.get(fam, 0) + 1
+    return sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+def recent_miss_names(conn, days=14):
+    """Names whose miss was recorded within `days`: the set a rerun skips
+    instead of re-probing.
+
+    >>> conn = connect(":memory:")
+    >>> _ = record_miss(conn, "Fresh", "no-board-found")
+    >>> _ = record_miss(conn, "Stale", "no-board-found")
+    >>> _ = conn.execute("UPDATE companies SET miss_at=? WHERE name='Stale'",
+    ...                  ((datetime.now() - timedelta(days=99)).isoformat(),))
+    >>> sorted(recent_miss_names(conn, days=14))
+    ['Fresh']
+
+    days=0 disables the skip, so a retry-everything run re-probes the lot:
+
+    >>> recent_miss_names(conn, days=0)
+    set()
+    """
+    if not days:
+        return set()
+    cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
+    return {r["name"] for r in conn.execute(
+        "SELECT name FROM companies WHERE miss_reason IS NOT NULL "
+        "AND miss_at IS NOT NULL AND miss_at >= ?", (cutoff,)).fetchall()}
+
+
+def roster_growth(conn, days=7):
+    """How many companies joined the roster in the last `days`.
+
+    Counts `created_at`, not `last_probed`: bulk mission re-scoring rewrites
+    last_probed on every row, so only created_at can answer "did the roster
+    grow this week".
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "New Co", "ats": "lever"})
+    >>> roster_growth(conn, days=7)
+    1
+
+    Rows that predate the column (created_at NULL on an upgraded DB) are
+    never counted as growth:
+
+    >>> _ = conn.execute("INSERT INTO companies (name) VALUES ('Legacy Co')")
+    >>> roster_growth(conn, days=7)
+    1
+    """
+    cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
+    return conn.execute(
+        "SELECT COUNT(*) FROM companies WHERE created_at >= ?",
+        (cutoff,)).fetchone()[0]
 
 
 def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
