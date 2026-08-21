@@ -867,16 +867,26 @@ def _websearch_board(name, max_results=8):
 
 
 def score_missions(max_workers=6, rescore_all=False):
-    """Backfill company mission scores: every active company with a board
-    and no mission_tier (or all of them, with rescore_all) gets sampled
-    titles + one score_company_mission call. Heals stores populated by
+    """Backfill company mission scores: every company with a board and no
+    mission_tier (or every ACTIVE one, with rescore_all) gets sampled titles
+    + one score_company_mission call. Heals stores populated by
     --import-companies / older seed imports (no scoring) or by
-    keyless/failed scoring passes."""
-    from core.claude import score_company_mission
+    keyless/failed scoring passes.
+
+    The unscored pass deliberately includes INACTIVE rows. A company whose
+    mission call failed can have been written active=0 by the add path that
+    created it, and that state is otherwise terminal: the sourcing passes all
+    skip boards already present in the store, so the row is never re-probed
+    and never re-scored. Reading only active rows made this healer blind to
+    exactly the rows it exists to heal. Scoring one of them to an active tier
+    reactivates it below. `rescore_all` stays active-only — it is a
+    re-judgement of the live roster, not a recovery pass, and widening it
+    would resurrect everything ever deactivated for being off-mission."""
+    from core.claude import ACTIVE_MISSION_TIERS, score_company_mission
     from core.store import connect, get_companies, upsert_company
 
     conn = connect()
-    cos = [c for c in get_companies(conn, active_only=True)
+    cos = [c for c in get_companies(conn, active_only=rescore_all)
            if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
     if not cos:
         print("  Nothing to score - every active company has a mission tier.")
@@ -908,13 +918,27 @@ def score_missions(max_workers=6, rescore_all=False):
             # deliberately keeping an off-mission employer crawled (Covar).
             update = {"name": c["name"], "mission_tier": tier,
                       "mission_score": score, "mission_reason": reason}
+            revived = False
             if (tier == "other" and not config.is_multi_division(c["name"])
                     and "watch" not in (c.get("tags") or "").split(",")):
                 update["active"] = 0
+            elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
+                                          or config.is_multi_division(c["name"])):
+                # The recovery half: this row reached an on-mission tier but
+                # is sitting inactive, which for an unscored row means its
+                # original mission call failed rather than judged it. Revive
+                # it. Dead boards are excluded — prune_dead_boards turns those
+                # off because the endpoint 404s, and a good mission score says
+                # nothing about whether the board still resolves.
+                if not str(c.get("notes") or "").startswith("deactivated: dead"):
+                    update["active"] = 1
+                    revived = True
             upsert_company(conn, update)
             n += 1
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = "  -> deactivated (off-mission)" if tier == "other" else ""
+            flag = ("  -> deactivated (off-mission)" if tier == "other"
+                    else "  -> REACTIVATED (was unscored + inactive)" if revived
+                    else "")
             print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
     conn.close()
     print(f"\n  {n} compan(ies) scored.")

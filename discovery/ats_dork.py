@@ -18,7 +18,7 @@ from .sniffer import _SIGS
 from .probes import _extract_workday_triple
 from core import store, tags as company_tags
 from scrapers.fetchers import company as company_fetch
-from core.claude import score_company_mission
+from core.claude import ACTIVE_MISSION_TIERS, score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal
 
 
@@ -126,7 +126,17 @@ def harvest_urls(urls, verbose=True):
             continue
         titles = _sample_titles({"ats": ats, "slug": slug})
         tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
-        active = 1 if tier in ("healthcare-tech", "health-bio-science") else 0
+        # Same activation rule as every other add path (populate_companies,
+        # add_names, resolve_leads, add_manual_job): the profile's active
+        # tiers, multi-division conglomerates, and — critically — `tier is
+        # None`, which means scoring was UNAVAILABLE (no API key, a failed
+        # or rate-limited call), not "off-mission". This line used to hard-
+        # code two tier names, which silently wrote a whole sweep inactive
+        # on any API hiccup and dropped profile tiers the user had enabled.
+        # An inactive row is near-unrecoverable here: harvest_urls skips
+        # boards already in the store, so the company is never re-probed.
+        active = 1 if (tier in ACTIVE_MISSION_TIERS or tier is None
+                       or config.is_multi_division(name)) else 0
         store.upsert_company(conn, dict(
             name=name, ats=ats, slug=slug if ats != "workday" else None,
             wd_tenant=slug[0] if ats == "workday" else None,

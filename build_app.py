@@ -56,13 +56,22 @@ DATA_DIRS = [("webapp/static", "webapp/static")]
 # it loads its search-engine backends by walking its own package directory at
 # runtime, so following the import alone leaves the compiled build with the
 # package but none of the engines, and every dork query dies on KeyError('text').
-PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright"]
+PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright",
+            "fake_useragent"]
 
 # Packages whose non-Python files must ship too. playwright/driver/ holds the
 # node runtime and cli.js that sync_playwright() execs; playwright locates it
 # as `Path(inspect.getfile(playwright)).parent / "driver"`, so it has to land
 # beside the compiled module rather than anywhere else.
-DATA_PACKAGES = ["playwright"]
+#
+# fake_useragent is the same shape of problem as ddgs above, one level deeper:
+# ddgs builds its request headers through it, and it reads its UA corpus from
+# package data (data/browsers.jsonl) at import. Compiled without that file the
+# module imports fine and then every search dies on
+# `FakeUserAgentError: Failed to load or parse browsers.json` — so the dork
+# sweep returned 0 results for every query in the packaged app while working
+# normally from a source checkout.
+DATA_PACKAGES = ["playwright", "fake_useragent"]
 
 
 def build_command():
