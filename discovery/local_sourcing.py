@@ -917,7 +917,8 @@ def score_missions(max_workers=6, rescore_all=False):
             update = {"name": c["name"], "mission_tier": tier,
                       "mission_score": score, "mission_reason": reason}
             revived = False
-            if (tier == "other" and not config.is_multi_division(c["name"])
+            if (tier is not None and tier not in ACTIVE_MISSION_TIERS
+                    and not config.is_multi_division(c["name"])
                     and "watch" not in (c.get("tags") or "").split(",")):
                 update["active"] = 0
             # NOT core.claude.is_active_mission: this is the REACTIVATION
@@ -942,7 +943,8 @@ def score_missions(max_workers=6, rescore_all=False):
             upsert_company(conn, update)
             n += 1
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = ("  -> deactivated (off-mission)" if tier == "other"
+            flag = ("  -> deactivated (off-mission)"
+                    if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
                     else "  -> REACTIVATED (was unscored + inactive)" if revived
                     else "")
             print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
