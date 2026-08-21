@@ -279,8 +279,15 @@ class TestPastedNameExtractionFallback:
         monkeypatch.setattr(local_sourcing, "extract_names_llm",
                             lambda *a, **k: [])
         captured = {}
-        monkeypatch.setattr(local_sourcing, "resolve_board_sniff_first",
-                            lambda n, *a, **k: captured.setdefault(n, None))
+
+        def _resolve(n, *a, **k):
+            # resolve_or_miss, not resolve_board_sniff_first: add_names now
+            # goes through the wrapper that also yields a miss reason, and
+            # the real one would hit the network on a failed resolve.
+            captured[n] = None
+            return None, "no-board-found"
+
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
 
         class _Conn:
             def execute(self, *a):
@@ -288,6 +295,9 @@ class TestPastedNameExtractionFallback:
 
             def fetchall(self):
                 return []
+
+            def fetchone(self):
+                return None
 
             def commit(self):
                 pass

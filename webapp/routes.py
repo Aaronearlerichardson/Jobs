@@ -361,6 +361,12 @@ def api_stats():
                         "WHERE disposition IN ('applied','interviewing')"),
         "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
         "companies_active": one("SELECT COUNT(*) FROM companies WHERE active=1"),
+        # Roster GROWTH, from companies.created_at. last_probed cannot answer
+        # this: a bulk mission re-score rewrites it on every row.
+        "companies_new_7d": store.roster_growth(conn, days=7),
+        # Candidates that failed to become crawlable companies, per reason
+        # family — the worklist behind a roster that stopped growing.
+        "company_misses": dict(store.miss_counts(conn)),
         "watched": one("SELECT COUNT(*) FROM companies WHERE "
                        "(','||COALESCE(tags,'')||',') LIKE '%,watch,%'"),
         "api_key": config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE",

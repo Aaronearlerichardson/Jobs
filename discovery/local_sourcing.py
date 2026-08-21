@@ -455,15 +455,29 @@ def probe_company(name, try_workday=True):
 
 def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True):
     """
-    Gather names + probe each. Returns (confirmed, checked) where confirmed
-    is a list of NC-local hit dicts. ``js_majors`` runs a headless-browser
-    Workday probe for big employers the static probe missed.
+    Gather names + probe each. Returns (confirmed, checked, misses) where
+    confirmed is a list of NC-local hit dicts and misses is one dict per
+    candidate that did NOT become one, carrying a ``reason`` code from
+    core.store.MISS_REASONS. ``js_majors`` runs a headless-browser Workday
+    probe for big employers the static probe missed.
+
+    Notes:
+        The misses used to be printed and dropped, so a name that failed
+        failed identically on every subsequent run with no record of why —
+        two thirds of the curated seed list was lost this way. The caller
+        persists them (see populate_companies).
+
+        A name the careers-page sniff cannot read anything off is reported
+        as plain ``no-board-found``, not a refined code: classify_miss()
+        would re-fetch every candidate URL for every one of the hundreds of
+        boardless names in a full pass. The on-demand paths (resolve_or_miss,
+        add_names, resolve_leads) work on tens of names and do classify.
     """
     names = gather_names(extra_names)
     n_wd = sum(1 for n in names if _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
           f"({n_wd} with Workday fallback)...")
-    hits = []
+    hits, sniff_misses = [], []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(probe_company, n,
                           _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS): n
@@ -544,7 +558,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
         def _sniff_one(n):
             s = sniff_ats(n)
             if not s:
-                return None
+                return {"name": n, "reason": "no-board-found"}
             ats = s["ats"]
             if ats == "workday":
                 t, p, site = s["triple"]
@@ -559,15 +573,27 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                 jobs = []
             nc = len(jobs)
             return {"name": n, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-                    "careers_url": s.get("careers_url")}
+                    "careers_url": s.get("careers_url"),
+                    # Coordinates were detected but the board yields nothing:
+                    # a dead/wrong board, not an absent one. Overwritten by
+                    # the nc>0 branch below when it does yield.
+                    "reason": "board-dead:" + ats}
 
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             for fut in as_completed({ex.submit(_sniff_one, n): n for n in todo}):
                 h = fut.result()
-                if h and h["nc"] > 0:
+                if h and h.get("nc"):
+                    h.pop("reason", None)
                     hits.append(h)
                     print(f"    [SNIFF] {h['name']:28} {h['ats']:14} "
                           f"{h['slug']!s:26} nc={h['nc']}")
+                elif h:
+                    sniff_misses.append(h)
+
+    # Names that reached a live board under SOME spelling, before the
+    # blocklist and the by-board dedup collapse them: they are accounted for
+    # by their surviving row and must not also be filed as no-board-found.
+    boarded = {h["name"] for h in hits}
 
     # Drop known bad name→board matches.
     hits = [h for h in hits
@@ -588,8 +614,23 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                        key=lambda h: h["nc"], reverse=True)
     dropped = sorted([h for h in hits if h["nc"] == 0],
                      key=lambda h: h["name"].lower())
+    # Every candidate that is not confirmed is a MISS with a reason: a live
+    # board with no local openings, a board whose coordinates read empty, or
+    # a name nothing could be found for. Deduped by name, confirmed wins.
+    misses = {}
+    for h in dropped:
+        misses[h["name"]] = {**h, "reason": "no-local-jobs"}
+    for h in sniff_misses:
+        misses.setdefault(h["name"], h)
+    for n in names:
+        if n not in boarded:
+            misses.setdefault(n, {"name": n, "reason": "no-board-found"})
+    for h in confirmed:
+        misses.pop(h["name"], None)
+    misses = sorted(misses.values(), key=lambda m: m["name"].lower())
     print(f"\n  live boards: {len(hits)}  |  NC-local confirmed: {len(confirmed)}  "
-          f"|  dropped (no NC jobs): {len(dropped)}")
+          f"|  dropped (no NC jobs): {len(dropped)}  "
+          f"|  misses recorded: {len(misses)}")
     print("\n  --- NC-LOCAL CONFIRMED (nc jobs / total) ---")
     for h in confirmed:
         print(f"    [OK]   {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
@@ -598,7 +639,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
     for h in dropped:
         print(f"    [drop] {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
               f"0/{h['count']}")
-    return confirmed, names
+    return confirmed, names, misses
 
 
 # --------------------------------------------------------------------------- #
@@ -686,14 +727,27 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     duplicate rows for the same board. Dork adds are upserted directly and
     are NOT included in the returned list.
 
+    Every candidate that did NOT become a company is written too, as an
+    inactive row carrying a `miss_reason` (core.store.record_miss), so the
+    failures are a queryable worklist instead of terminal scrollback.
+
     Returns the list of company dicts written by the name-based pass.
     """
-    from core.store import connect, upsert_company
+    from core.store import connect, upsert_company, record_miss, miss_counts
     from core.claude import score_company_mission, is_active_mission
 
-    confirmed, _ = discover_local(extra_names)
+    confirmed, _, misses = discover_local(extra_names)
     conn = connect()
     written = []
+
+    # Misses first: they are pure local writes, so the roster's failure
+    # record survives even if the mission-scoring pass below is interrupted.
+    n_miss = sum(record_miss(conn, m["name"], m["reason"], **_miss_row(m))
+                 for m in misses)
+    if misses:
+        print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
+              f"confirmed); store now holds: "
+              + ", ".join(f"{fam}={n}" for fam, n in miss_counts(conn)))
     print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
 
     # The title fetch (1 GET) + mission call (1 LLM request) per company are
@@ -1152,9 +1206,90 @@ def resolve_board_sniff_first(name, careers_url=""):
     return None
 
 
+def classify_miss(name, careers_url=""):
+    """Second look at a name that would not resolve: which core.store
+    MISS_REASONS code explains it.
+
+    Re-sniffs the careers page for detections resolve_board_sniff_first
+    discards — an ATS we can RECOGNIZE but not fetch (UKG/UltiPro, Taleo,
+    Jobvite, ...) is a very different problem from a company we could find
+    nothing for, and the two were previously indistinguishable.
+
+    Notes:
+        Costs one extra careers-page sniff, so it is called only on the
+        failure path and only by the on-demand resolvers — never per
+        candidate in a full discover_local pass.
+    """
+    from .sniffer import sniff_careers_ats, ATS_LEAD_PATTERNS
+    try:
+        lead = sniff_careers_ats(name, careers_url or "")
+    except Exception as e:
+        return f"fetch-error:{type(e).__name__}"
+    if not lead:
+        return "no-board-found"
+    ats = lead.get("ats") or "?"
+    if ats in {a for a, _ in ATS_LEAD_PATTERNS}:
+        return f"ats-unsupported:{ats}"
+    return f"board-dead:{ats}"
+
+
+def resolve_or_miss(name, careers_url=""):
+    """Resolve a company NAME to a crawlable board, or say why it failed.
+
+    Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
+    no hit is a failed resolution (see classify_miss); a hit WITH a reason is
+    a live, readable board that simply has no openings in your [locality]
+    (``no-local-jobs``) — worth keeping, not worth crawling today.
+
+    Notes:
+        The single entry point for "attempt a company, and record the
+        outcome either way". Callers persist the reason with
+        core.store.record_miss so a rerun can skip, retry or report it.
+    """
+    try:
+        hit = resolve_board_sniff_first(name, careers_url or "")
+    except Exception as e:
+        return None, f"fetch-error:{type(e).__name__}"
+    if not hit:
+        return None, classify_miss(name, careers_url)
+    if not hit.get("nc"):
+        return hit, "no-local-jobs"
+    return hit, None
+
+
+def _miss_row(m):
+    """The record_miss(**fields) payload for a discover_local miss dict:
+    whatever board coordinates the attempt DID establish, so a retry starts
+    from them instead of re-deriving them.
+
+    >>> _miss_row({"name": "X", "reason": "no-board-found"})
+    {'source': 'local_sourcing'}
+    >>> _miss_row({"name": "X", "ats": "greenhouse", "slug": "x",
+    ...            "nc": 0, "count": 4, "reason": "no-local-jobs"})["ats"]
+    'greenhouse'
+    >>> _miss_row({"name": "X", "ats": "workday", "slug": ("t", 5, "s"),
+    ...            "reason": "no-local-jobs"})["wd_tenant"]
+    't'
+    """
+    row = {"source": "local_sourcing"}
+    ats = m.get("ats")
+    if not ats:
+        return row
+    row["ats"] = ats
+    if ats == "workday" and isinstance(m.get("slug"), tuple):
+        row["wd_tenant"], row["wd_pod"], row["wd_site"] = m["slug"]
+    elif m.get("slug"):
+        row["slug"] = m["slug"]
+    if m.get("careers_url"):
+        row["careers_url"] = m["careers_url"]
+    if m.get("count"):
+        row["total_job_count"] = m["count"]
+    return row
+
+
 def resolve_leads(max_workers=8,
                   sources=("page_capture", "linkedin_search", "linkedin_company_search"),
-                  all_leads=False, limit=None):
+                  all_leads=False, limit=None, retry_days=14):
     """Resolve boardless company leads (banked by capture.py from browsed
     LinkedIn/Indeed pages, or by manual adds) into crawlable boards and
     activate the hits. Careers-page SNIFF first (collision-safe), slug-probe
@@ -1167,13 +1302,24 @@ def resolve_leads(max_workers=8,
     filter and takes every inactive boardless lead. Idempotent — rerunning
     retries only the still-unresolved leads."""
     from core.claude import score_company_mission, is_active_mission
-    from core.store import connect, get_companies as _store_companies, upsert_company
+    from core.store import (connect, get_companies as _store_companies,
+                            record_miss, recent_miss_names, upsert_company)
 
     conn = connect()
     leads = [c for c in _store_companies(conn, active_only=False)
              if not c.get("ats") and not c.get("active")]
     if not all_leads:
         leads = [c for c in leads if c.get("source") in sources]
+    # Skip leads that failed recently: without this every rerun re-probes
+    # every permanent miss, and the pass gets slower the longer it runs.
+    # retry_days=0 (or --all-leads) retries the lot.
+    if retry_days and not all_leads:
+        recent = recent_miss_names(conn, days=retry_days)
+        skipped_recent = [c for c in leads if c["name"] in recent]
+        leads = [c for c in leads if c["name"] not in recent]
+        if skipped_recent:
+            print(f"  skipping {len(skipped_recent)} lead(s) that missed in "
+                  f"the last {retry_days}d (--all-leads to retry them)")
     if limit:
         leads = leads[:int(limit)]
     if not leads:
@@ -1188,14 +1334,16 @@ def resolve_leads(max_workers=8,
     # Hard cap on the pass: a lead whose domains blackhole must become a
     # reported miss, not a hung command.
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(resolve_board_sniff_first, c["name"], c.get("careers_url") or ""): c
+    futs = {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""): c
             for c in leads}
     try:
         for fut in as_completed(futs, timeout=300):
-            c, hit = futs[fut], fut.result()
+            c, (hit, reason) = futs[fut], fut.result()
             if not hit:
-                print(f"    [miss] {c['name'][:34]:34} no live board found "
-                      f"(LinkedIn/Indeed-only or JS-gated employer?)")
+                # Was printed and forgotten; now the lead row keeps WHY, so
+                # the next run can skip it and the user can see the tally.
+                record_miss(conn, c["name"], reason, source=c.get("source"))
+                print(f"    [miss] {c['name'][:34]:34} {reason}")
                 continue
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
@@ -1224,6 +1372,8 @@ def resolve_leads(max_workers=8,
                   f"{str(tier):18} {ss}{flag}")
     except TimeoutError:
         stuck = [c["name"] for f, c in futs.items() if not f.done()]
+        for n in stuck:
+            record_miss(conn, n, "fetch-error:Timeout")
         print(f"    [!] timed out on {len(stuck)} lead(s): "
               f"{', '.join(stuck[:6])}{'...' if len(stuck) > 6 else ''} "
               f"(rerun --resolve-leads to retry — idempotent)")
@@ -1527,7 +1677,7 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
     collide that way; a probe-only hit is reported for a human glance.
     """
     from core.claude import score_company_mission, is_active_mission
-    from core.store import connect, upsert_company
+    from core.store import connect, record_miss, upsert_company
 
     names = extract_names_llm(blob) if use_llm else []
     if not names:
@@ -1547,16 +1697,20 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
 
     written, unresolved = [], []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(resolve_board_sniff_first, n): n for n in fresh}
+        futs = {ex.submit(resolve_or_miss, n): n for n in fresh}
         for fut in as_completed(futs):
             name = futs[fut]
             try:
-                hit = fut.result()
+                hit, reason = fut.result()
             except Exception as e:
                 print(f"    [!] {name}: {type(e).__name__}: {e}")
-                hit = None
+                hit, reason = None, f"fetch-error:{type(e).__name__}"
             if not hit:
-                unresolved.append(name)
+                # A pasted name that resolves to nothing used to be printed
+                # once and lost; keep it with a reason so the paste is a
+                # worklist, not a one-shot.
+                record_miss(conn, name, reason, source="paste")
+                unresolved.append((name, reason))
                 continue
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
@@ -1615,8 +1769,8 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
     conn.close()
     if unresolved:
         print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "
-              f"(not employers, or no board we can read):")
-        print("    " + ", ".join(unresolved[:25])
+              f"(kept as misses — see the companies table's miss_reason):")
+        print("    " + ", ".join(f"{n} [{r}]" for n, r in unresolved[:25])
               + (" ..." if len(unresolved) > 25 else ""))
     print(f"\n  {len(written)} compan(ies) added.")
     return written
