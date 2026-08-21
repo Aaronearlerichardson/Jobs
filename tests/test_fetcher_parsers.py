@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from scrapers.fetchers import ats_api
+from scrapers.fetchers import ats_api, hibob
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -143,6 +143,42 @@ class TestAshby:
     def test_http_error_returns_empty(self, fake_get, match_everything):
         fake_get({}, status=403)
         assert ats_api.fetch_ashby("x", "X") == []
+
+
+class TestHibob:
+    def test_parses_postings(self, fake_get, match_everything):
+        fake_get(load("hibob_board.json"))
+        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
+        assert jobs
+        j = jobs[0]
+        assert j["id"].startswith("hibob_liquidia_")
+        assert j["title"] and j["url"] == "https://liquidia.careers.hibob.com/jobs"
+        assert j["company"] == "Liquidia"
+
+    def test_description_html_is_stripped(self, fake_get, match_everything):
+        fake_get(load("hibob_board.json"))
+        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
+        assert all("<" not in j["description"] for j in jobs)
+
+    def test_location_combines_site_and_workspace_type(self, fake_get,
+                                                        match_everything):
+        fake_get(load("hibob_board.json"))
+        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
+        assert jobs[0]["location"] == "USA - Hybrid"
+
+    def test_remote_hint_from_workspace_type(self, fake_get, match_everything):
+        fake_get(load("hibob_board.json"))
+        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
+        remote = [j for j in jobs if j["location"].endswith("Remote")]
+        assert remote and remote[0].get("remote_hint") == "hibob:workspaceType"
+
+    def test_http_error_returns_empty(self, fake_get, match_everything):
+        fake_get({}, status=401)
+        assert hibob.fetch_hibob("x", "X") == []
+
+    def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
+        fake_get(["not", "a", "dict"])
+        assert hibob.fetch_hibob("x", "X") == []
 
 
 class TestRelevanceGate:

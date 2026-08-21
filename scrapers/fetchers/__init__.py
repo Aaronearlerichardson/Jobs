@@ -9,6 +9,7 @@ from .ats_api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
 from .careeronestop import fetch_nlx_company
 from .discourse import fetch_discourse
+from .hibob import fetch_hibob
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
 from .jazzhr import fetch_jazzhr
@@ -31,6 +32,7 @@ __all__ = [
     "fetch_custom",
     "fetch_discourse",
     "fetch_greenhouse",
+    "fetch_hibob",
     "fetch_hnhiring",
     "fetch_jazzhr",
     "fetch_jsonld_careers",
