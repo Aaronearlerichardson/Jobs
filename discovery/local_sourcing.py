@@ -171,20 +171,49 @@ _NAV_CHROME_RE = re.compile(
     re.I)
 
 
+# The job sites people paste FROM put their own brand in the page chrome, so
+# "Glassdoor"/"LinkedIn"/"Indeed" arrive looking exactly like a one-word
+# Title-Cased employer and no structural rule can tell them apart. Derived
+# from [discovery].aggregator_hosts rather than hardcoded, so a profile that
+# adds a regional job board gets its brand filtered too: 'glassdoor.' ->
+# 'glassdoor', 'linkedin.com' -> 'linkedin'.
+_AGGREGATOR_BRANDS = {
+    h.split(".")[0].lower()
+    for h in (getattr(config, "DISCOVERY_AGGREGATOR_HOSTS", None) or ())
+    if h.split(".")[0].isalpha()
+}
+
+
 def _is_nav_noise(name):
     """True if `name` is a pasted-page chrome line (nav item, CTA,
     notification badge) — the check behind the paste parser's
-    `_clean_candidate()`. Also covers a snake_case/slug-shaped name (an
-    UNDERSCORE-joined facet fragment, e.g. "company_types"), shared with
+    `_clean_candidate()`. Also covers two slug/label shapes, shared with
     `_looks_like_company()` below.
 
-    The underscore is required deliberately: a bare all-lowercase word with
-    no separator is not necessarily a slug — some real companies stylize
-    their name fully lowercase (restor3d, patientslikeme) — so only the
-    shape that's actually slug-specific gets rejected here.
+    >>> _is_nav_noise("company_types")          # underscore facet slug
+    True
+    >>> _is_nav_noise("what"), _is_nav_noise("where")   # bare form labels
+    (True, True)
+    >>> _is_nav_noise("restor3d"), _is_nav_noise("nCino")
+    (False, False)
+
+    Notes:
+        The two lowercase shapes are separated on purpose. An
+        UNDERSCORE-joined fragment ("company_types") is unambiguously a
+        facet slug. A bare all-lowercase run is only noise when it is also
+        all-ALPHABETIC: search-form labels ("what", "where", "remote") look
+        like that, while the real companies that stylize themselves
+        lowercase carry a digit or an interior capital (restor3d, nCino,
+        bioMerieux, 23andMe) and so survive. An earlier revision rejected
+        every `[a-z0-9_]+` run, which caught the labels but also ate
+        restor3d; the revision after it required an underscore, which saved
+        restor3d and let "what"/"where" back through Indeed pastes.
     """
     n = (name or "").strip()
-    return bool(_NAV_CHROME_RE.match(n) or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)+", n))
+    return bool(_NAV_CHROME_RE.match(n)
+                or n.lower() in _AGGREGATOR_BRANDS
+                or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)+", n)
+                or re.fullmatch(r"[a-z]+", n))
 
 
 def _looks_like_company(name):
