@@ -453,13 +453,26 @@ def probe_company(name, try_workday=True):
     return hit
 
 
-def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True):
+_DEFAULT_WEBSEARCH_CAP = 20
+
+
+def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
+                   websearch=True, websearch_cap=None, websearch_retry_days=14):
     """
     Gather names + probe each. Returns (confirmed, checked, misses) where
     confirmed is a list of NC-local hit dicts and misses is one dict per
     candidate that did NOT become one, carrying a ``reason`` code from
     core.store.MISS_REASONS. ``js_majors`` runs a headless-browser Workday
     probe for big employers the static probe missed.
+
+    ``websearch`` runs resolve_board_sniff_first's third step (DDG search for
+    a careers page) over names still boardless after probe+sniff, BOUNDED to
+    at most ``websearch_cap`` names (None -> config [discovery].websearch_cap,
+    else a small built-in default; 0 disables it) — a full gather is ~100+
+    names and DDG rate-limits hard, so this cannot run uncapped the way the
+    on-demand resolvers (resolve_or_miss et al.) do. Names that missed within
+    ``websearch_retry_days`` (core.store.recent_miss_names) are skipped
+    outright rather than re-spending budget on a name that just failed.
 
     Notes:
         The misses used to be printed and dropped, so a name that failed
@@ -589,6 +602,73 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True)
                           f"{h['slug']!s:26} nc={h['nc']}")
                 elif h:
                     sniff_misses.append(h)
+
+    # Websearch pass: the third resolve_board_sniff_first step, bounded, for
+    # names probe+sniff still could not board. This is the recovery path a
+    # measured 60-company gap study found 5 of 6 eventual resolutions came
+    # through (Eli Lilly, Fujifilm Diosynth Biotechnologies, Q2 Solutions,
+    # ...) — names on gov/acronym/product-named domains the slug-guesser and
+    # careers-page sniff can't reach on their own. Capped and skip-recent
+    # because DDG rate-limits hard: an earlier uncapped profile blocked
+    # ~1271s of a 1726s run in DDG's own retry/backoff (see ddg_text above).
+    if websearch:
+        cap = (config.DISCOVERY_WEBSEARCH_CAP if websearch_cap is None
+              else websearch_cap)
+        cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
+        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
+        if todo and cap > 0:
+            from core.store import connect as _connect, recent_miss_names
+            conn = _connect()
+            try:
+                recent = recent_miss_names(conn, days=websearch_retry_days)
+            finally:
+                conn.close()
+            todo = [n for n in todo if n not in recent][:cap]
+        else:
+            todo = []
+        print(f"  websearch-resolving {len(todo)} name(s) without a board "
+              f"(cap={cap})...")
+        if todo:
+            t0 = time.time()
+
+            def _websearch_one(n):
+                from scrapers.fetchers import company as company_fetch
+                w = _websearch_board(n)
+                if not w:
+                    return {"name": n, "reason": "no-board-found"}
+                ats = w["ats"]
+                if ats == "workday":
+                    t, p, site = w["triple"]
+                    comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
+                    slug = (t, p, site)
+                elif ats == "custom":
+                    comp = {"ats": "custom", "careers_url": w.get("careers_url")}
+                    slug = None
+                else:
+                    comp = {"ats": ats, "slug": w.get("slug"), "careers_url": w.get("careers_url")}
+                    slug = w.get("slug")
+                try:
+                    jobs = company_fetch.fetch_company_nc(comp)
+                except Exception:
+                    jobs = []
+                nc = len(jobs)
+                return {"name": n, "ats": ats, "slug": slug, "count": nc, "nc": nc,
+                        "careers_url": w.get("careers_url"),
+                        "reason": "board-dead:" + ats}
+
+            with ThreadPoolExecutor(max_workers=min(max_workers, len(todo))) as ex:
+                for fut in as_completed({ex.submit(_websearch_one, n): n for n in todo}):
+                    h = fut.result()
+                    if h and h.get("nc"):
+                        h.pop("reason", None)
+                        hits.append(h)
+                        print(f"    [WEBSEARCH] {h['name']:24} {h['ats']:14} "
+                              f"{h['slug']!s:26} nc={h['nc']}")
+                    elif h:
+                        sniff_misses.append(h)
+            print(f"  websearch pass: {time.time() - t0:.1f}s for "
+                  f"{len(todo)} name(s)")
 
     # Names that reached a live board under SOME spelling, before the
     # blocklist and the by-board dedup collapse them: they are accounted for
@@ -1169,6 +1249,16 @@ def resolve_board_sniff_first(name, careers_url=""):
                 "count": total, "nc": nc, "via": via}
 
     # 1) Authoritative: detect the ATS embedded on the company's own careers page.
+    # A `custom` sniff hit is held back rather than returned outright: a
+    # marketing/careers page with no real ATS embedded still classifies as
+    # `custom`, and a handful of scraped page fragments is enough for
+    # _validate_board's total > 0 to pass (Pfizer/Sanofi/AstraZeneca/Syngenta/
+    # Novozymes all resolved this way, each with a single-digit `total` that
+    # was never their real Workday board). Only a `custom` hit that already
+    # carries LOCAL jobs (nc > 0) is a genuine self-hosted board worth taking
+    # immediately; an nc == 0 custom hit is kept as a last-resort fallback so
+    # steps 2/3 get a chance to find the real ATS first.
+    fallback = None
     s = sniff_ats(name, careers_url or "")
     if s:
         if s["ats"] == "workday":
@@ -1178,7 +1268,9 @@ def resolve_board_sniff_first(name, careers_url=""):
         else:
             hit = _mk(s["ats"], s.get("slug"), s.get("careers_url"), "sniff")
         if hit:
-            return hit
+            if s["ats"] != "custom" or hit["nc"] > 0:
+                return hit
+            fallback = hit
 
     # 2) Fallback: name-guessed slug/Workday probe (collision risk -> validated).
     p = probe_company(name, try_workday=True)
@@ -1203,7 +1295,9 @@ def resolve_board_sniff_first(name, careers_url=""):
             hit = _mk(w["ats"], w.get("slug"), w.get("careers_url"), "websearch")
         if hit:
             return hit
-    return None
+
+    # Nothing better than the weak custom sniff turned up: it beats a miss.
+    return fallback
 
 
 def classify_miss(name, careers_url=""):

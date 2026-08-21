@@ -314,6 +314,10 @@ name_search_queries = [
     "<your industry> startups <your region>",
 ]
 name_blocklist = []          # normalized names to drop (bad slug collisions)
+# How many names discover_local's bulk pass will websearch-resolve per run,
+# after probe+sniff leave them unboarded (DDG rate-limits, so this is capped
+# rather than run over the whole gather). Omit for the built-in default (20).
+# websearch_cap = 20
 
 # Job aggregators / company-directory sites skipped when picking result URLs
 # to resolve during discovery (they're never the employer's own job board).

@@ -358,6 +358,11 @@ DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.get("name_search_queries", []))
 DISCOVERY_BRAINSTORM_NAMES   = _dsc.get("brainstorm_names")
 DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
                                 for n in _dsc.get("name_blocklist", [])}
+# Cap on how many still-unresolved names discover_local's bulk pass will
+# send through the websearch fallback (DDG-bound, so uncapped would risk
+# minutes of rate-limit stalls across a full ~100+ name gather). None -> a
+# small built-in default; 0 disables the bulk websearch pass entirely.
+DISCOVERY_WEBSEARCH_CAP      = _dsc.get("websearch_cap")
 # Job-aggregator hosts to skip, and generic words to ignore, when resolving a
 # search result to a company's own ATS board (discovery/local_sourcing.py).
 DISCOVERY_AGGREGATOR_HOSTS    = tuple(_dsc.get("aggregator_hosts", []))
