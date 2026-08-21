@@ -466,13 +466,10 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     probe for big employers the static probe missed.
 
     ``websearch`` runs resolve_board_sniff_first's third step (DDG search for
-    a careers page) over names still boardless after probe+sniff, BOUNDED to
-    at most ``websearch_cap`` names (None -> config [discovery].websearch_cap,
-    else a small built-in default; 0 disables it) — a full gather is ~100+
-    names and DDG rate-limits hard, so this cannot run uncapped the way the
-    on-demand resolvers (resolve_or_miss et al.) do. Names that missed within
-    ``websearch_retry_days`` (core.store.recent_miss_names) are skipped
-    outright rather than re-spending budget on a name that just failed.
+    a careers page) over names still boardless after probe+sniff, capped at
+    ``websearch_cap`` names (None -> config [discovery].websearch_cap, else a
+    small built-in default; 0 disables it). Names that missed within
+    ``websearch_retry_days`` (core.store.recent_miss_names) are skipped.
 
     Notes:
         The misses used to be printed and dropped, so a name that failed
@@ -485,6 +482,13 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         would re-fetch every candidate URL for every one of the hundreds of
         boardless names in a full pass. The on-demand paths (resolve_or_miss,
         add_names, resolve_leads) work on tens of names and do classify.
+
+        websearch defaults ON but is capped rather than run over the whole
+        gather (~100+ names): DDG rate-limits hard, and an earlier uncapped
+        profile blocked ~1271s of a 1726s run in DDG's own retry/backoff
+        (see ddg_text above) — the on-demand resolvers (resolve_or_miss et
+        al.) can afford to run it uncapped only because they work on tens of
+        names, not the full candidate gather.
     """
     names = gather_names(extra_names)
     n_wd = sum(1 for n in names if _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS)
