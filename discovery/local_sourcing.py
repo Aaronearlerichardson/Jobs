@@ -127,20 +127,72 @@ def _wd_search_text():
 
 
 # Non-company noise seen in `/company/<slug>/` harvesting: image placeholders,
-# nav/facet labels, listicle fragments — dropped before probing.
+# nav/facet labels, listicle fragments — dropped before probing. Matches as a
+# PREFIX (`\b`) because it comes from Title-Cased `/company/<slug>/` fragments
+# that are never followed by more real words ("Company Types", "Careers").
 _NAME_NOISE_RE = re.compile(
     r"^(fallback[\s-]?image|compan(y|ies)|directory|home|built in|search|menu|"
     r"about|contact|careers?|jobs?|privacy|terms|cookie|login|register|"
     r"company[\s_-]?types?|facility[\s_-]?types?|availability|operator|opt)\b",
     re.I)
 
+# Site chrome seen in a PASTED LinkedIn/Indeed/Glassdoor page (nav bar items,
+# sidebar CTAs, notification badges). Same idea as `_NAME_NOISE_RE` above —
+# extended for the paste surface rather than a parallel filter — but matches
+# the WHOLE line (`$`) instead of just a prefix: pasted text is free-running
+# sentences/titles, not slug fragments, so a prefix match would also reject a
+# real name that legitimately starts with one of these common words ("Company
+# 0 Bio", "Learning Care Group"). A bad name that slips past this doesn't just
+# get dropped — the downstream slug-guesser can resolve it to an unrelated
+# real company's board (see discover_local's NAME_BLOCKLIST for confirmed
+# collisions of this kind).
+_NAV_CHROME_RE = re.compile(
+    r"^(?:"
+    # bare top-nav words, whole-line only (a real name may legitimately
+    # START with one of these, e.g. "Home Depot", "Jobs.com")
+    r"home|jobs?|"
+    # LinkedIn top/side nav + CTAs
+    r"my network|messaging|notifications?(?:\s*\d+)?|for business|"
+    r"create (?:a |your )?cover letter|learning|"
+    r"people you (?:can|may) (?:reach out to|know)|"
+    r"people also (?:viewed|searched)|premium|my items|"
+    # Indeed nav + CTAs
+    r"find (?:a )?jobs?|job search|post (?:a |your )?job|employers?(?: home)?|"
+    r"upload (?:your )?resum[eé]|career advice|company reviews?|"
+    r"salary (?:guide|estimator|calculator)|salaries|find salaries|"
+    # Glassdoor nav + CTAs
+    r"for employers|explore|get hired|add a salary|add an interview|"
+    r"interview questions?|write a review|browse (?:jobs|companies)|"
+    r"community|reviews?|interviews?|companies|"
+    # shared UI chrome
+    r"saved jobs?|job alerts?|help center|sign (?:in|up)|see all|"
+    r"show more|load more|unlock (?:profile|insights)"
+    r")$",
+    re.I)
+
+
+def _is_nav_noise(name):
+    """True if `name` is a pasted-page chrome line (nav item, CTA,
+    notification badge) — the check behind the paste parser's
+    `_clean_candidate()`. Also covers a snake_case/slug-shaped name (an
+    UNDERSCORE-joined facet fragment, e.g. "company_types"), shared with
+    `_looks_like_company()` below.
+
+    The underscore is required deliberately: a bare all-lowercase word with
+    no separator is not necessarily a slug — some real companies stylize
+    their name fully lowercase (restor3d, patientslikeme) — so only the
+    shape that's actually slug-specific gets rejected here.
+    """
+    n = (name or "").strip()
+    return bool(_NAV_CHROME_RE.match(n) or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)+", n))
+
 
 def _looks_like_company(name):
     n = (name or "").strip()
     if not (2 < len(n) < 45) or not re.search(r"[A-Za-z]", n):
         return False
-    if _NAME_NOISE_RE.match(n) or re.fullmatch(r"[a-z0-9_]+", n):
-        return False   # snake_case slug / facet name, never a display name
+    if _NAME_NOISE_RE.match(n) or _is_nav_noise(n):
+        return False   # facet-slug noise, nav/CTA chrome, or a snake_case name
     if re.search(r"\b(jobs|startups?|startup week|ecosystem|degrees?)\b", n, re.I):
         return False   # listicle/region phrases, not employers
     return True
@@ -1206,7 +1258,8 @@ _PASTE_NOISE_RE = re.compile(
     r"remote|hybrid|on-?site|full-?time|part-?time|contract|internship|"
     r"\d*\s*(?:day|week|month|hour|minute)s?\s*ago|reposted.*|"
     r"[\d,]*\s*[km]?\s*(?:followers?|employees?|connections?|applicants?)|"
-    r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*"
+    r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*|"
+    r"\$[\d,.]+k?\s*-\s*\$[\d,.]+k?.*|\$[\d,.]+k?\s*(?:a|per|/)\s*(?:year|hour|month).*"
     r")\W*$", re.I)
 
 # A line that reads as a JOB TITLE rather than an employer. Results pages
@@ -1232,6 +1285,74 @@ _LOCATION_LINE_RE = re.compile(
 _DOUBLED_TITLE_RE = re.compile(r"^(.{4,}?)(?:\s*\([^)]{,24}\))?\1$")
 
 
+# Words that stay lowercase in a real Title-Case name ("Bank of America",
+# "University of North Carolina", "Bausch + Lomb") and so don't count as
+# evidence either way when judging capitalisation.
+_CASE_STOPWORDS = {
+    "of", "and", "for", "the", "a", "an", "in", "at", "to", "on", "or",
+    "&", "+", "de", "la", "le", "van", "von",
+}
+
+
+def _is_sentence_case(name):
+    """True if a MULTI-WORD `name` reads as sentence-case UI prose (only the
+    first significant word capitalised -- "Date posted", "Salary estimate")
+    rather than a Title-Case company name (every significant word
+    capitalised -- "Alpaca Health", "University of North Carolina").
+
+    Single-token names are never flagged: a legitimately-lowercase name
+    like "bioMerieux" or "nCino" has no second word to compare against, so
+    there is no sentence-vs-title signal to read.
+
+    >>> _is_sentence_case("Date posted")
+    True
+    >>> _is_sentence_case("Skip to main content")
+    True
+    >>> _is_sentence_case("Alpaca Health")
+    False
+    >>> _is_sentence_case("University of North Carolina")
+    False
+    >>> _is_sentence_case("bioMerieux")
+    False
+
+    Notes:
+        A name reduced to one significant word after stripping connector
+        words ("Bank of X" with X itself lowercase, or a bare "X of") is
+        left alone -- one word is not enough evidence to call sentence
+        case, and a false reject here is a lost real company, not a
+        dropped chrome line.
+    """
+    def _is_connector(w):
+        # A word only counts as one of the fixed CASE_STOPWORDS after
+        # stripping trailing punctuation, NOT the symbols that ARE
+        # stopwords ("+", "&") -- stripping those first would zero the
+        # token out and hide it from the membership check. A token with no
+        # letters at all (a bare number, "+", "&") never carries a case
+        # signal either way, so it's a connector too.
+        core = w.lower().strip(".,’")
+        return core in _CASE_STOPWORDS or not any(c.isalpha() for c in w)
+
+    words = name.split()
+    if len(words) < 2:
+        return False
+    significant = [w for w in words if not _is_connector(w)]
+    if len(significant) < 2:
+        return False
+
+    def _starts_upper(w):
+        core = w.lstrip("(\"'")
+        return bool(core) and core[0].isalpha() and core[0].isupper()
+
+    # Sentence case is defined by its shape: capitalised FIRST word, lower-
+    # case rest. A phrase that doesn't even start capitalised ("bla bla")
+    # isn't in that shape either way, so there's nothing to flag -- this
+    # also keeps a completely-lowercase throwaway phrase from being read as
+    # "sentence case" when it's really just not a name at all.
+    if not _starts_upper(significant[0]):
+        return False
+    return any(not _starts_upper(w) for w in significant[1:])
+
+
 def _clean_candidate(raw, drop_titles=True):
     """One line -> a usable company name, or None.
 
@@ -1254,10 +1375,14 @@ def _clean_candidate(raw, drop_titles=True):
     name = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", name).strip()
     if not (2 < len(name) <= 60):
         return None
-    if _PASTE_NOISE_RE.match(name):
+    if _PASTE_NOISE_RE.match(name) or _is_nav_noise(name):
         return None
     if drop_titles and _TITLE_WORD_RE.search(name):
         return None
+    if drop_titles and " / " in name:
+        return None        # breadcrumb/CTA pair ("Employers / Post Job"), not a name
+    if drop_titles and _is_sentence_case(name):
+        return None        # sentence-case UI prose ("Date posted"), not Title Case
     if _LOCATION_LINE_RE.match(name):
         return None
     if not re.search(r"[A-Za-z]{2}", name):          # numbers / punctuation only
@@ -1293,7 +1418,26 @@ def parse_company_names(blob, limit=300):
     Otherwise fall back to filtering lines, which is deliberately
     permissive: precision is cheap to get wrong and expensive to tune, a
     junk name costs one failed resolve and is dropped, and a dropped real
-    name is invisible.
+    name is invisible. Even so, LinkedIn/Indeed/Glassdoor navigation chrome
+    (menu items, notification badges, CTAs) is filtered out on sight, so it
+    never reaches the probe -> resolve chain that would otherwise attach a
+    slug-guessed board to a junk name:
+
+    >>> parse_company_names('''Home
+    ... My Network
+    ... Jobs
+    ... Messaging
+    ... Notifications
+    ... For Business
+    ... Create cover letter
+    ... Learning
+    ... People you can reach out to
+    ... Senior Data Engineer
+    ... Alpaca Health
+    ... Durham, NC (Hybrid)
+    ... IQVIA
+    ... Durham, NC''')
+    ['Alpaca Health', 'IQVIA']
     """
     if isinstance(blob, (list, tuple)):
         lines = [str(x) for x in blob]
@@ -1389,6 +1533,23 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             tier, score, reason = score_company_mission(
                 hit["name"], " | ".join(t for t in titles if t))
             active = is_active_mission(tier, hit["name"], include_missions)
+            # A pasted name is the weakest-sourced input this module accepts
+            # (no directory/seed curation behind it), and resolve_board_sniff_
+            # first's `via` marks HOW the board was found. 'websearch' is the
+            # weakest of the three: unlike 'sniff' (read off the company's own
+            # careers page) or 'probe' (a slug-guess, at least deterministic
+            # from the name), a websearch hit only means a search result's URL
+            # or an unrelated page happened to match. An NC-local job already
+            # on the board is one independent signal; absent that, require a
+            # second one — an NC HQ/office mention on the company's own site —
+            # before trusting it enough to write as an ACTIVE company. Make the
+            # weaker path visible either way rather than silently equal to a
+            # sniff/probe hit.
+            corroborated = True
+            if hit.get("via") == "websearch" and hit["nc"] == 0:
+                corroborated = nc_hq_signal(hit["name"], hit.get("careers_url"))
+                if not corroborated:
+                    active = False
             slug = hit.get("slug")
             is_wd = hit["ats"] == "workday"
             upsert_company(conn, {
@@ -1400,14 +1561,24 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
                 "careers_url": hit.get("careers_url"),
                 "local_job_count": hit["nc"], "total_job_count": hit["count"],
                 "mission_tier": tier, "mission_score": score,
-                "mission_reason": reason, "tags": company_tags.LOCAL,
+                "mission_reason": reason,
+                "tags": company_tags.LOCAL if (hit["nc"] or corroborated) else None,
                 "source": "paste", "active": active,
                 "last_probed": datetime.now().isoformat(),
             })
             written.append(hit)
             # via='probe' means the board came from a name-guess rather than
-            # the company's own careers page — worth a human glance.
-            flag = "  [verify: slug-guess]" if hit.get("via") == "probe" else ""
+            # the company's own careers page — worth a human glance. via=
+            # 'websearch' with no corroboration is weaker still — it was
+            # written inactive above and is flagged, not silently dropped.
+            if hit.get("via") == "probe":
+                flag = "  [verify: slug-guess]"
+            elif hit.get("via") == "websearch" and not corroborated:
+                flag = "  [UNVERIFIED: websearch-only, no NC signal - inactive]"
+            elif hit.get("via") == "websearch":
+                flag = "  [verify: websearch match]"
+            else:
+                flag = ""
             print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
                   f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
                   f"{'active' if active else 'inactive'}{flag}")

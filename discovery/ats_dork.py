@@ -10,6 +10,7 @@ Two entry points:
   * run_ddgs_dorks()  — fully automated via the ddgs package (DuckDuckGo).
 """
 
+import json
 import time
 
 import config
@@ -31,27 +32,91 @@ def _or_group(terms, n=8):
     return "(" + " OR ".join(f'"{t}"' if " " in t else t for t in picked) + ")"
 
 
-# Dork set derived from the loaded profile. DDG chokes on long `site:` + big
-# OR-group queries (returns nothing), so the site-scoped dorks use a SHORT
-# locality clause (top few terms); the free-text sweeps can afford more.
-_LOC = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS, n=8)
-_LOC_SITE = _or_group(config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS, n=4)
+_LOCALITY_TERMS = config.LOCALITY_SUBSTRINGS or config.LOCALITY_WORD_TOKENS
 _DOMAIN = _or_group(config.DOMAIN_KEYWORDS, n=6)
 _CORE = _or_group(config.CORE_KEYWORDS, n=6)
 
-DORK_QUERIES = [
-    f'site:boards.greenhouse.io {_LOC_SITE}',
-    f'site:job-boards.greenhouse.io {_LOC_SITE}',
-    f'site:jobs.lever.co {_LOC_SITE}',
-    f'site:jobs.ashbyhq.com {_LOC_SITE}',
-    f'site:jobs.smartrecruiters.com {_LOC_SITE}',
-    f'"myworkdayjobs.com" {_LOC_SITE}' + (f" {_DOMAIN}" if _DOMAIN else ""),
-]
-if _CORE:
-    # Bullseye sweep — target companies are often on custom boards / non-.com
-    # domains that name-guessing misses.
-    DORK_QUERIES.append(f'{_CORE} {_LOC} (careers OR jobs OR hiring)')
-DORK_QUERIES = [q for q in DORK_QUERIES if _LOC_SITE and _LOC_SITE in q or _CORE and _CORE in q]
+
+def _rotate_terms(terms, group_size, index):
+    """A deterministic, cyclically-rotating slice of `terms`, `group_size`
+    long, for rotation `index` (0, 1, 2, ...). Successive indices advance
+    through the whole list instead of always returning the same head, so
+    repeated dork sweeps cover different locality vocabulary — reproducibly:
+    the same (terms, group_size, index) always returns the same slice.
+
+    >>> _rotate_terms(["a", "b", "c", "d", "e", "f"], 2, 0)
+    ['a', 'b']
+    >>> _rotate_terms(["a", "b", "c", "d", "e", "f"], 2, 1)
+    ['c', 'd']
+    >>> _rotate_terms(["a", "b", "c", "d", "e", "f"], 2, 2)
+    ['e', 'f']
+
+    The index wraps around once every term has had a turn:
+
+    >>> _rotate_terms(["a", "b", "c", "d", "e", "f"], 2, 3)
+    ['a', 'b']
+
+    A `group_size` larger than the list is clamped, and an empty list of
+    terms is a no-op:
+
+    >>> _rotate_terms(["a", "b"], 5, 0)
+    ['a', 'b']
+    >>> _rotate_terms([], 4, 7)
+    []
+    """
+    if not terms:
+        return []
+    n = len(terms)
+    group_size = min(group_size, n)
+    start = (index * group_size) % n
+    return [terms[(start + i) % n] for i in range(group_size)]
+
+
+def build_dork_queries(rotation=0):
+    """The dork query set for rotation index `rotation`. DDG chokes on long
+    `site:` + big OR-group queries (returns nothing), so the site-scoped
+    dorks use a SHORT locality clause (top few terms of that rotation's
+    slice); the free-text sweep can afford more. `rotation=0` is the
+    original fixed top-4/top-8 selection; each further index rotates onto
+    the next slice of the profile's locality vocabulary (see
+    `_rotate_terms`), so successive sweeps explore beyond the same 25
+    top-ranked results DDG would otherwise return for an unchanging query.
+
+    >>> qs = build_dork_queries(0)
+    >>> any("greenhouse" in q for q in qs)
+    True
+    >>> any("icims" in q for q in qs)
+    True
+
+    Rotating changes which locality terms the site-scoped dorks carry
+    (assuming the profile has more than 4 locality terms configured):
+
+    >>> build_dork_queries(0) != build_dork_queries(1)
+    True
+    """
+    loc_site = _or_group(_rotate_terms(_LOCALITY_TERMS, 4, rotation), n=4)
+    loc_wide = _or_group(_rotate_terms(_LOCALITY_TERMS, 8, rotation), n=8)
+    queries = [
+        f'site:boards.greenhouse.io {loc_site}',
+        f'site:job-boards.greenhouse.io {loc_site}',
+        f'site:jobs.lever.co {loc_site}',
+        f'site:jobs.ashbyhq.com {loc_site}',
+        f'site:jobs.smartrecruiters.com {loc_site}',
+        f'site:jobs.jobvite.com {loc_site}',
+        f'site:*.icims.com {loc_site}',
+        f'site:*.bamboohr.com/careers {loc_site}',
+        f'"myworkdayjobs.com" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else ""),
+    ]
+    if _CORE:
+        # Bullseye sweep — target companies are often on custom boards /
+        # non-.com domains that name-guessing misses.
+        queries.append(f'{_CORE} {loc_wide} (careers OR jobs OR hiring)')
+    return [q for q in queries if loc_site and loc_site in q or _CORE and _CORE in q]
+
+
+# Module-level default (rotation 0) — unchanged shape from before rotation was
+# added, so existing callers that just want "the dork queries" keep working.
+DORK_QUERIES = build_dork_queries(0)
 
 # Non-slug path fragments the greenhouse/embed URL forms expose — never a real
 # board (boards.greenhouse.io/embed/job_board?for=<realslug>).
@@ -217,11 +282,14 @@ def _ensure_ddgs_engines():
                 ENGINES.setdefault(category, {})[name] = cls
 
 
-def _ddg_text(query, max_results, retries=2, pause=2.5):
+def _ddg_text(query, max_results, retries=2, pause=2.5, page=1):
     """One DDG query with retry/backoff. DDG rate-limits aggressively and
     surfaces it as an exception ("No results found."/"Ratelimit"), so a fresh
     session + a pause between attempts recovers far more than a single try.
-    Returns a list of result URLs (possibly empty)."""
+    `page` (1-based) asks the backend for a later results page — the lever
+    for getting past DDG's default top-`max_results` ceiling — and is passed
+    straight through to ddgs, which forwards unrecognised kwargs to the
+    underlying engine. Returns a list of result URLs (possibly empty)."""
     try:
         try:
             from ddgs import DDGS
@@ -233,7 +301,7 @@ def _ddg_text(query, max_results, retries=2, pause=2.5):
     for attempt in range(retries + 1):
         try:
             with DDGS() as ddg:
-                return [u for r in ddg.text(query, max_results=max_results)
+                return [u for r in ddg.text(query, max_results=max_results, page=page)
                         if (u := (r.get("href") or r.get("url")))]
         except Exception as e:
             if attempt < retries:
@@ -245,15 +313,70 @@ def _ddg_text(query, max_results, retries=2, pause=2.5):
     return []
 
 
-def run_ddgs_dorks(max_results=25, pause=2.5):
+# Persisted rotation counter, so successive runs advance through the locality
+# vocabulary instead of repeating the same slice (and a re-read reproduces
+# exactly which slice a past run covered) — deterministic, not `random`-based.
+_ROTATION_STATE_PATH = config.DATA_DIR / ".cache" / "dork_rotation.json"
+
+
+def _next_rotation_index():
+    """Read-then-increment the persisted rotation counter. Best-effort: a
+    read/write failure just falls back to index 0 (the original fixed
+    top-4/top-8 query set) rather than crashing the sweep."""
+    try:
+        idx = int(json.loads(_ROTATION_STATE_PATH.read_text("utf-8")).get("index", 0))
+    except Exception:
+        idx = 0
+    try:
+        _ROTATION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _ROTATION_STATE_PATH.write_text(json.dumps({"index": idx + 1}), encoding="utf-8")
+    except Exception:
+        pass
+    return idx
+
+
+def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
     """Automated dorking via ddgs (best-effort; DDG's ATS index is patchy).
     Queries are spaced out — hammering DDG back-to-back is what makes it start
-    returning 'No results found' mid-run."""
+    returning 'No results found' mid-run.
+
+    `rotation` selects which slice of the profile's locality vocabulary this
+    sweep's site-scoped dorks use (see `build_dork_queries`); left at its
+    default (None), it advances the persisted counter so each run covers a
+    different slice than the last one, and prints which slice it used so a
+    run's coverage is inspectable after the fact. Pass an explicit int for a
+    reproducible, non-advancing sweep (tests, or a deliberate re-run of a
+    specific slice).
+
+    `pages`>1 asks DDG for additional results pages on any query whose first
+    page came back full (a strong sign more results exist), past the
+    `max_results`-per-page ceiling — capped, and only pursued for a query
+    that used its whole first page, so an already-exhausted or rate-limited
+    query doesn't spend extra requests chasing nothing.
+    """
+    idx = _next_rotation_index() if rotation is None else rotation
+    queries = build_dork_queries(idx)
+    loc_slice = _rotate_terms(_LOCALITY_TERMS, 4, idx)
+    print(f"  [dork] rotation slice {idx} (locality terms: "
+          f"{', '.join(loc_slice) or '(none configured)'})")
+
     urls = []
-    for i, q in enumerate(DORK_QUERIES):
-        if i:
+    first = True
+    for q in queries:
+        if not first:
             time.sleep(pause)          # be gentle between queries
-        found = _ddg_text(q, max_results)
-        print(f"  [dork] {len(found):2} result(s)  {q[:60]}")
+        first = False
+        found = _ddg_text(q, max_results, page=1)
+        print(f"  [dork] {len(found):2} result(s)  page=1  {q[:60]}")
         urls += found
+        # A full first page suggests DDG has more to give; an empty or
+        # partial one means it doesn't (or it's already rate-limited), so
+        # don't burn extra requests paginating a query that came up short.
+        page = 2
+        while len(found) >= max_results and page <= pages:
+            time.sleep(pause)
+            found = _ddg_text(q, max_results, page=page)
+            print(f"  [dork] {len(found):2} result(s)  page={page}  {q[:60]}")
+            urls += found
+            page += 1
     return harvest_urls(urls)
