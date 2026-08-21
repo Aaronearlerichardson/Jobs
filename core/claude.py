@@ -27,6 +27,53 @@ _AVOID = config.CANDIDATE_AVOID or ""
 _MISSION_TIERS = tuple(t["name"] for t in config.MISSION_TIERS) or ("other",)
 ACTIVE_MISSION_TIERS = tuple(t["name"] for t in config.MISSION_TIERS if t["active"])
 
+
+def is_active_mission(tier, name, include_missions=None):
+    """The one activation rule: should a newly-sourced company be crawled?
+
+    `tier` is the mission tier from :func:`score_company_mission`, `name` the
+    company name, `include_missions` an optional override of the profile's
+    active tiers. Returns 1 (crawl it) or 0 (park it) — an int, because it
+    goes straight into the ``companies.active`` column.
+
+    A company is active when ANY of these hold:
+
+    * its tier is one of the active tiers,
+    * its tier is ``None`` — scoring was UNAVAILABLE, not negative,
+    * it is a multi-division conglomerate (profile policy).
+
+    >>> tiers = ("green", "blue")
+    >>> is_active_mission("green", "Nowhere Robotics", tiers)
+    1
+    >>> is_active_mission("red", "Nowhere Robotics", tiers)
+    0
+
+    An unavailable score must never read as "off-mission". A failed or
+    rate-limited call returns ``(None, None, "")``, and treating that as a
+    rejection buries a whole discovery sweep in inactive rows:
+
+    >>> is_active_mission(None, "Nowhere Robotics", tiers)
+    1
+
+    Omitting `include_missions` falls back to the profile's active tiers,
+    so the answer depends on the loaded profile rather than this literal:
+
+    >>> is_active_mission(ACTIVE_MISSION_TIERS[0], "Nowhere Robotics")
+    1
+
+    Notes:
+        This lived inline at six call sites (four in discovery/, one in
+        scrapers/ops.py, one in discovery/ats_dork.py). The ats_dork copy had
+        drifted to two hard-coded tier names and no ``tier is None`` arm,
+        which wrote entire sweeps inactive on any API hiccup — and harvest_urls
+        skips boards already in the store, so those rows were never re-probed.
+        tests/test_invariants.py keeps the rule single-sourced.
+    """
+    tiers = ACTIVE_MISSION_TIERS if include_missions is None else include_missions
+    return 1 if (tier in tiers or tier is None
+                 or config.is_multi_division(name)) else 0
+
+
 # Compiled bullseye pin (profile [mission].bullseye_regex); None when disabled.
 _BULLSEYE_RE = re.compile(config.MISSION_BULLSEYE_REGEX, re.I) \
     if config.MISSION_BULLSEYE_REGEX else None

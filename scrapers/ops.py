@@ -670,7 +670,7 @@ def add_manual_job(url, title, company, location, description="",
     it) but still geo-gated on location-scoped tracks. For bot-gated giants
     the board won't resolve, so only the one job lands and the company is
     recorded for a later retry. Returns a summary dict."""
-    from core.claude import ACTIVE_MISSION_TIERS, score_company_mission
+    from core.claude import is_active_mission, score_company_mission
     from discovery.local_sourcing import _sample_titles, resolve_company_board
 
     t = _t(t)
@@ -694,8 +694,7 @@ def add_manual_job(url, title, company, location, description="",
         titles = _sample_titles(board)
         tier, score, reason = score_company_mission(
             name, " | ".join(x for x in titles if x))
-        active = 1 if (tier in ACTIVE_MISSION_TIERS
-                       or config.is_multi_division(name) or tier is None) else 0
+        active = is_active_mission(tier, name)
         store.upsert_company(conn, {
             "name": name, "ats": board["ats"],
             "slug": None if is_wd else slug,

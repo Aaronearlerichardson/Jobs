@@ -18,7 +18,7 @@ from .sniffer import _SIGS
 from .probes import _extract_workday_triple
 from core import store, tags as company_tags
 from scrapers.fetchers import company as company_fetch
-from core.claude import ACTIVE_MISSION_TIERS, score_company_mission
+from core.claude import is_active_mission, score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal
 
 
@@ -60,7 +60,36 @@ _SLUG_STOP = {"embed", "job_board", "jobs", "js", "boards", "job-boards",
 
 
 def extract_boards_from_urls(urls):
-    """From a list of URLs, return de-duped [(ats, slug|triple)] board handles."""
+    """From a list of URLs, return de-duped [(ats, slug|triple)] board handles.
+
+    List in, list out: one handle per distinct board, in first-seen order.
+
+    >>> extract_boards_from_urls(["https://boards.greenhouse.io/acmebio/jobs/1",
+    ...                           "https://jobs.lever.co/acmebio/abc-def"])
+    [('greenhouse', 'acmebio'), ('lever', 'acmebio')]
+
+    The same board reached by several URLs collapses to one handle — a dork
+    sweep returns dozens of job links per board:
+
+    >>> extract_boards_from_urls(["https://boards.greenhouse.io/acmebio/jobs/1",
+    ...                           "https://boards.greenhouse.io/acmebio/jobs/2",
+    ...                           "https://boards.greenhouse.io/acmebio"])
+    [('greenhouse', 'acmebio')]
+
+    Workday handles are the (tenant, pod, site) triple, not a slug:
+
+    >>> extract_boards_from_urls(["https://acme.wd5.myworkdayjobs.com/en-US/External"])
+    [('workday', ('acme', 5, 'External'))]
+
+    URLs that are not boards contribute nothing, so an all-noise input is
+    an empty list rather than a list of bad handles:
+
+    >>> extract_boards_from_urls(["https://example.com/careers",
+    ...                           "https://www.linkedin.com/jobs/view/123"])
+    []
+    >>> extract_boards_from_urls([])
+    []
+    """
     out, seen = [], set()
     for u in urls:
         triple = _extract_workday_triple(u)
@@ -126,17 +155,11 @@ def harvest_urls(urls, verbose=True):
             continue
         titles = _sample_titles({"ats": ats, "slug": slug})
         tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
-        # Same activation rule as every other add path (populate_companies,
-        # add_names, resolve_leads, add_manual_job): the profile's active
-        # tiers, multi-division conglomerates, and — critically — `tier is
-        # None`, which means scoring was UNAVAILABLE (no API key, a failed
-        # or rate-limited call), not "off-mission". This line used to hard-
-        # code two tier names, which silently wrote a whole sweep inactive
-        # on any API hiccup and dropped profile tiers the user had enabled.
-        # An inactive row is near-unrecoverable here: harvest_urls skips
-        # boards already in the store, so the company is never re-probed.
-        active = 1 if (tier in ACTIVE_MISSION_TIERS or tier is None
-                       or config.is_multi_division(name)) else 0
+        # Shared activation rule (core.claude.is_active_mission) — the same
+        # call every other add path makes. An inactive row is near-
+        # unrecoverable here: harvest_urls skips boards already in the store,
+        # so the company is never re-probed.
+        active = is_active_mission(tier, name)
         store.upsert_company(conn, dict(
             name=name, ats=ats, slug=slug if ats != "workday" else None,
             wd_tenant=slug[0] if ats == "workday" else None,

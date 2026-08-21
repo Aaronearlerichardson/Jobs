@@ -33,21 +33,101 @@ ALIASES = {
 
 
 def canonical(tag):
-    """The current name for a possibly-legacy tag token."""
+    """The current name for a possibly-legacy tag token.
+
+    Case- and whitespace-insensitive; unknown tokens pass through unchanged
+    so a hand-written profile is never silently rewritten.
+
+    >>> canonical("watch")
+    'watch'
+    >>> canonical("  NC_Local ")
+    'local'
+    >>> canonical("neural")
+    'sweep'
+    >>> canonical("something-new")
+    'something-new'
+
+    Missing input is a token-free company, not an error:
+
+    >>> canonical(None), canonical("")
+    ('', '')
+    """
     t = (tag or "").strip().lower()
     return ALIASES.get(t, t)
 
 
 def parse(raw):
-    """A company row's `tags` string -> a set of canonical tokens."""
+    """A company row's `tags` string -> a set of canonical tokens.
+
+    Set order is not part of the contract, so sort before comparing —
+    the house style for any function whose output is unordered:
+
+    >>> sorted(parse("local,watch"))
+    ['local', 'watch']
+
+    Legacy tokens are canonicalised, and a legacy/current pair collapses
+    to one token rather than two:
+
+    >>> sorted(parse("nc_local, neural"))
+    ['local', 'sweep']
+    >>> sorted(parse("nc_local,local"))
+    ['local']
+
+    Blanks and empty fields yield the empty set:
+
+    >>> parse("local,,  ,") == {"local"}
+    True
+    >>> parse(None) == set()
+    True
+    """
     return {canonical(t) for t in (raw or "").split(",") if t.strip()}
 
 
 def join(tags):
-    """A set of tokens -> the stored `tags` string (None when empty)."""
+    """A set of tokens -> the stored `tags` string (None when empty).
+
+    Output is sorted, so the same token set always stores the same string
+    and a row does not churn between crawls:
+
+    >>> join({"watch", "local"})
+    'local,watch'
+    >>> join(["neural", "nc_local"])
+    'local,sweep'
+
+    Empty means SQL NULL, not the empty string — `tags IS NULL` is how the
+    store asks "no scope tokens":
+
+    >>> join([]) is None
+    True
+    >>> join(["", None]) is None
+    True
+
+    join/parse round-trip on any canonical token set:
+
+    >>> parse(join({"local", "watch"})) == {"local", "watch"}
+    True
+    """
     return ",".join(sorted({canonical(t) for t in tags if t})) or None
 
 
 def has(raw, tag):
-    """True if a company's stored `tags` includes `tag`, legacy names too."""
+    """True if a company's stored `tags` includes `tag`, legacy names too.
+
+    Either side may be legacy — a stored `nc_local` answers to `local`, and
+    a caller still asking for `nc_local` gets the row stored as `local`:
+
+    >>> has("local,watch", "watch")
+    True
+    >>> has("nc_local", "local")
+    True
+    >>> has("local", "nc_local")
+    True
+    >>> has("local", "sweep")
+    False
+
+    A NULL tags column is simply no tokens:
+
+    >>> has(None, "local")
+    False
+    """
     return canonical(tag) in parse(raw)

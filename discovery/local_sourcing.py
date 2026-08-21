@@ -608,10 +608,8 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     Returns the list of company dicts written by the name-based pass.
     """
     from core.store import connect, upsert_company
-    from core.claude import score_company_mission, ACTIVE_MISSION_TIERS
+    from core.claude import score_company_mission, is_active_mission
 
-    if include_missions is None:
-        include_missions = ACTIVE_MISSION_TIERS
     confirmed, _ = discover_local(extra_names)
     conn = connect()
     written = []
@@ -635,10 +633,10 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                 print(f"    [!] mission scoring failed for "
                       f"{futs[fut]['name']!r}: {e}")
                 continue
-            # Multi-division conglomerates stay active despite an "other"
-            # tier — their healthcare subdivisions are filtered at crawl time.
-            active = 1 if (tier in include_missions or tier is None
-                           or config.is_multi_division(h["name"])) else 0
+            # Shared activation rule (core.claude.is_active_mission):
+            # active tiers, an UNAVAILABLE (None) score, or a multi-division
+            # conglomerate whose subdivisions are filtered at crawl time.
+            active = is_active_mission(tier, h["name"], include_missions)
             row = {
                 "name": h["name"], "ats": h["ats"],
                 "slug": h["slug"] if h["ats"] != "workday" else None,
@@ -922,6 +920,14 @@ def score_missions(max_workers=6, rescore_all=False):
             if (tier == "other" and not config.is_multi_division(c["name"])
                     and "watch" not in (c.get("tags") or "").split(",")):
                 update["active"] = 0
+            # NOT core.claude.is_active_mission: this is the REACTIVATION
+            # half, and it deliberately does not revive on `tier is None`.
+            # A None tier with a non-None score means the model answered with
+            # a mission name outside the profile's taxonomy (score_company_
+            # mission nulls the tier but keeps the score), so the `continue`
+            # above did not fire. The helper would call that "unavailable" and
+            # revive the row; here an unrecognised answer must leave an
+            # already-inactive company alone. See tests/test_invariants.py.
             elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
                                           or config.is_multi_division(c["name"])):
                 # The recovery half: this row reached an on-mission tier but
@@ -1077,7 +1083,7 @@ def resolve_leads(max_workers=8,
     (default: capture.py's 'page_capture'). all_leads=True ignores the source
     filter and takes every inactive boardless lead. Idempotent — rerunning
     retries only the still-unresolved leads."""
-    from core.claude import score_company_mission, ACTIVE_MISSION_TIERS
+    from core.claude import score_company_mission, is_active_mission
     from core.store import connect, get_companies as _store_companies, upsert_company
 
     conn = connect()
@@ -1111,9 +1117,7 @@ def resolve_leads(max_workers=8,
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
                 c["name"], " | ".join(t for t in titles if t))
-            active = 1 if (tier in ACTIVE_MISSION_TIERS
-                           or config.is_multi_division(c["name"])
-                           or tier is None) else 0
+            active = is_active_mission(tier, c["name"])
             is_wd = hit["ats"] == "workday"
             row = {"name": c["name"], "ats": hit["ats"],
                    "slug": None if is_wd else hit["slug"],
@@ -1347,11 +1351,9 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
     Institute sits on iCIMS). Sniffing the company's own careers page cannot
     collide that way; a probe-only hit is reported for a human glance.
     """
-    from core.claude import score_company_mission, ACTIVE_MISSION_TIERS
+    from core.claude import score_company_mission, is_active_mission
     from core.store import connect, upsert_company
 
-    if include_missions is None:
-        include_missions = ACTIVE_MISSION_TIERS
     names = extract_names_llm(blob) if use_llm else []
     if not names:
         names = parse_company_names(blob)
@@ -1384,8 +1386,7 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
                 hit["name"], " | ".join(t for t in titles if t))
-            active = 1 if (tier in include_missions or tier is None
-                           or config.is_multi_division(hit["name"])) else 0
+            active = is_active_mission(tier, hit["name"], include_missions)
             slug = hit.get("slug")
             is_wd = hit["ats"] == "workday"
             upsert_company(conn, {

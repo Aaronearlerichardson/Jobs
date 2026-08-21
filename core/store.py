@@ -23,10 +23,46 @@ from . import tags
 
 def combined_score(fit, mission):
     """Geometric mean sqrt(fit * mission) of the resume-fit and company
-    mission scores (both 0..1). Returns None if either is missing, so a job
-    is only ranked once both factors are known. The geometric mean punishes
-    imbalance: a strong fit at a weak-mission company scores far below a job
-    that is solid on both axes (0.9*0.2 -> 0.42 < balanced 0.5*0.5 -> 0.50)."""
+    mission scores (both 0..1).
+
+    >>> combined_score(0.25, 0.64)
+    0.4
+    >>> combined_score(1.0, 1.0)
+    1.0
+
+    Floats are compared at a stated precision, never by their full repr —
+    the house rule for any numeric doctest:
+
+    >>> round(combined_score(0.9, 0.2), 4)
+    0.4243
+    >>> round(combined_score(0.5, 0.5), 4)
+    0.5
+
+    Those two lines are the point of the geometric mean: it punishes
+    imbalance, so a strong fit at a weak-mission company (0.42) ranks below
+    a job that is merely solid on both axes (0.50).
+
+    A missing factor is unranked, NOT zero — a job is only scored once both
+    axes are known:
+
+    >>> combined_score(None, 0.9) is None
+    True
+    >>> combined_score(0.9, None) is None
+    True
+
+    Negative input is out of domain and yields None rather than a
+    ``ValueError`` from ``sqrt`` or a bogus positive from sqrt(-a * -b):
+
+    >>> combined_score(-0.5, 0.5) is None
+    True
+    >>> combined_score(-0.5, -0.5) is None
+    True
+
+    Zero is a legitimate score and stays zero:
+
+    >>> combined_score(0.0, 0.9)
+    0.0
+    """
     if fit is None or mission is None:
         return None
     if fit < 0 or mission < 0:

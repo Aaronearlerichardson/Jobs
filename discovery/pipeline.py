@@ -76,7 +76,35 @@ _PAREN_RE = re.compile(r"\s*\([^)]*\)")
 
 
 def _normalize_name(name: str) -> str:
-    """Strip parentheticals and trailing corporate suffixes."""
+    """Strip parentheticals and trailing corporate suffixes.
+
+    >>> _normalize_name("Corcept Therapeutics (NC office)")
+    'Corcept'
+    >>> _normalize_name("United Therapeutics, Inc.")
+    'United'
+    >>> _normalize_name("Acme Corp")
+    'Acme'
+
+    Punctuation and runs of whitespace left behind by the stripping are
+    collapsed, so the result is always a clean single-spaced name:
+
+    >>> _normalize_name("  Acme  Corp  ")
+    'Acme'
+
+    A name with nothing to strip is returned as-is, and a missing name is
+    the empty string rather than an error:
+
+    >>> _normalize_name("Wolfspeed")
+    'Wolfspeed'
+    >>> _normalize_name(None)
+    ''
+
+    Notes:
+        "Therapeutics" and "Biosciences" count as suffixes here even though
+        they are part of the legal name. That is deliberate: ATS slugs are
+        far more often the head word than the full name, and slug_variants
+        keeps the unstripped form as a candidate anyway.
+    """
     s = _PAREN_RE.sub("", name or "")
     s = _SUFFIX_RE.sub("", s)
     # Clean up punctuation left behind by suffix stripping.
@@ -111,11 +139,49 @@ def slug_variants(name, first_guess):
     """
     Produce a deduped list of slug candidates from a company name.
 
-    Handles:
-      * parenthetical annotations ("Corcept Therapeutics (NC office)")
-      * slash-aliased names ("Cree / Wolfspeed")
-      * corporate suffixes (Inc, Corp, Ltd, LLC, Therapeutics, Biosciences)
-      * first-word truncation
+    `first_guess` (an ATS slug someone already proposed) is tried first when
+    given; the rest are derived from the name. Order is the probe order and
+    IS part of the contract, so it is asserted literally.
+
+    >>> slug_variants("Corcept Therapeutics (NC office)", None)
+    ['corcept-therapeutics', 'corcepttherapeutics', 'corcept']
+
+    A slash-aliased name is split and each half tried independently, with
+    `first_guess` still leading:
+
+    >>> slug_variants("Cree / Wolfspeed", "wolfspeed")
+    ['wolfspeed', 'cree']
+
+    When the list is long, print it one per line rather than wrapping a
+    repr — the house style for any output too wide to read on one line:
+
+    >>> for slug in slug_variants("Bio-Signal Technologies, Inc.", None):
+    ...     print(slug)
+    bio-signal-technologies-inc
+    bio-signaltechnologiesinc
+    bio-signal
+    bio-signal-technologies
+    bio-signaltechnologies
+    signal
+
+    Candidates shorter than 3 characters are dropped — they match unrelated
+    boards and never reach the intended employer, so "G.tec ..." never
+    probes the bare slug "g":
+
+    >>> "g" in slug_variants("G.tec Medical Engineering", None)
+    False
+
+    The list is deduped and capped at 8:
+
+    >>> len(slug_variants("Cree / Wolfspeed", "cree"))
+    2
+    >>> len(slug_variants("A Very Long Multi Word Company Name Ltd", None)) <= 8
+    True
+
+    An empty name produces no candidates rather than a junk one:
+
+    >>> slug_variants(None, None)
+    []
     """
     variants: list[str] = []
     if first_guess:

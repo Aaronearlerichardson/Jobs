@@ -85,7 +85,39 @@ jobs:
           "
 
       - name: Test suite (pytest, offline)
+        # testpaths covers tests/ AND the source trees, and addopts carries
+        # --doctest-modules, so this one command runs the fixture suite, the
+        # docstring doctests, and tests/test_invariants.py together.
         run: pytest -q --cov --cov-report=xml --cov-report=term
+
+      - name: Doctests alone (docstring claims are enforced, not asserted)
+        # The step above already ran these. Running them ALONE makes the
+        # collected count visible in the log and turns an empty collection
+        # into a failure: pytest exits 5 on "no tests collected", which
+        # reads as a pass to anyone skimming a green run. See
+        # docs/DOCSTRINGS.md for the rule these enforce.
+        #
+        # Paths are given explicitly (they override testpaths) so tests/ is
+        # excluded and the number printed is doctests only. Root webapp.py is
+        # omitted: the webapp/ package owns that module name, so collecting
+        # both is an import-file-mismatch error.
+        run: |
+          SRC="core scrapers discovery webapp tools"
+          MODS="build_app.py capture.py config.py crawler.py discover.py"
+          MODS="$MODS run_scraper.py smoke_test.py"
+          # -o addopts=-q replaces pytest.ini's addopts rather than adding
+          # to it: a second -q would make pytest -qq and swallow the very
+          # "N passed" line this step greps for.
+          pytest -o addopts=-q --doctest-modules $SRC $MODS > doctest.log 2>&1 || {
+            cat doctest.log; exit 1;
+          }
+          cat doctest.log
+          N=$(grep -Eo "^[0-9]+ passed" doctest.log | head -1)
+          test -n "$N" || {
+            echo "::error::no doctests collected - --doctest-modules is not reaching the source tree"
+            exit 1
+          }
+          echo "### Doctests (Python ${{ matrix.python }}): $N" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Coverage summary
         run: |

@@ -560,6 +560,17 @@ pytest tests/test_store.py -k closed     # one area
 pytest --cov --cov-report=term-missing   # with coverage
 ```
 
+`pytest` runs two things at once: the fixture-backed suite in `tests/`, and
+the **doctests embedded in the source** (`--doctest-modules` over `core`,
+`scrapers`, `discovery`, `webapp`, `tools` and the root modules). Docstrings
+here are held to a rule — *a docstring may only state a claim that a doctest
+or an invariant test enforces; everything else goes under `Notes:`* — because
+prose that drifted from the code has already cost this project a real
+misdiagnosis. The standard, with worked examples and the house style for
+awkward outputs, is **[docs/DOCSTRINGS.md](docs/DOCSTRINGS.md)**.
+`tests/test_invariants.py` carries the cross-module claims no single docstring
+can prove.
+
 The suite is **offline by contract** — no network, no LLM API, no writes to
 your real profile or store. Fixtures derive their inputs from whichever
 profile is loaded, so the same tests pass on your `profile.toml` and on the
