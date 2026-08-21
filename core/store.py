@@ -526,10 +526,18 @@ def roster_growth(conn, days=7):
     >>> _ = conn.execute("INSERT INTO companies (name) VALUES ('Legacy Co')")
     >>> roster_growth(conn, days=7)
     1
+
+    Neither are misses. A pass that resolves nothing but files fifty
+    failures grew the WORKLIST, not the roster, and must not read as growth:
+
+    >>> _ = record_miss(conn, "Nope Bio", "no-board-found")
+    >>> roster_growth(conn, days=7)
+    1
     """
     cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
     return conn.execute(
-        "SELECT COUNT(*) FROM companies WHERE created_at >= ?",
+        "SELECT COUNT(*) FROM companies "
+        "WHERE created_at >= ? AND miss_reason IS NULL",
         (cutoff,)).fetchone()[0]
 
 
