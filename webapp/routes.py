@@ -67,10 +67,18 @@ def api_run(name):
 
 @app.get("/api/run/status")
 def api_run_status():
+    # `since` is an ABSOLUTE line count (see _Tee's docstring in ops.py), not
+    # a raw index into TASK["log"] — that list gets its head chopped off once
+    # it passes 5000 lines, so a plain-index cursor goes stale on every trim
+    # and the browser re-renders lines it already showed. log_offset is how
+    # many lines have been trimmed away; subtracting it from the absolute
+    # cursor gives the correct index into what remains.
     since = _int(request.args, "since", 0) or 0
     with _LOG_LOCK:
-        lines = TASK["log"][since:]
-        total = len(TASK["log"])
+        offset = TASK["log_offset"]
+        start = max(0, since - offset)
+        lines = TASK["log"][start:]
+        total = offset + len(TASK["log"])
     return jsonify(running=_running(), name=TASK["name"],
                    started=TASK["started"], ended=TASK["ended"],
                    error=TASK["error"], lines=lines, total=total)

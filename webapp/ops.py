@@ -10,8 +10,8 @@ import config
 from core import store
 from scrapers import ops as maint
 
-TASK = {"name": None, "thread": None, "log": [], "started": None,
-        "ended": None, "error": None, "active": False}
+TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
+        "started": None, "ended": None, "error": None, "active": False}
 _LOG_LOCK = threading.Lock()
 # Guards the claim on TASK. Separate from _LOG_LOCK, which the Tee takes on
 # every write — holding one while waiting on the other would deadlock.
@@ -21,7 +21,19 @@ _TASK_LOCK = threading.Lock()
 class _Tee(io.TextIOBase):
     """stdout tee: real console keeps printing; the browser polls the copy.
     Swapped in globally while an operation runs so the crawl's many
-    worker-thread print()s are captured too."""
+    worker-thread print()s are captured too.
+
+    The browser tracks a cursor into the log (`since=<n>` on
+    /api/run/status) so a poll only re-sends lines it hasn't seen yet. That
+    cursor has to be an ABSOLUTE line count — total lines ever appended —
+    not a raw index into TASK["log"], because the list below gets its head
+    chopped off once it grows past 5000 lines. A raw-index cursor goes stale
+    the instant a trim shifts every surviving line down by 1000: the same
+    index now names an earlier line, and the client re-renders lines it
+    already showed (the browser-side duplication bug this class exists to
+    avoid). log_offset counts lines permanently dropped by trimming, so
+    routes.py can translate an absolute cursor back into a list index
+    (`since - log_offset`) that stays correct across trims."""
 
     def __init__(self, orig):
         self.orig = orig
@@ -39,6 +51,7 @@ class _Tee(io.TextIOBase):
                 TASK["log"].append(line)
                 if len(TASK["log"]) > 5000:
                     del TASK["log"][:1000]
+                    TASK["log_offset"] += 1000
         return len(s)
 
     def flush(self):
@@ -111,6 +124,7 @@ def _run_op(name, fn):
                     started=datetime.now().isoformat())
     with _LOG_LOCK:
         TASK["log"].clear()
+        TASK["log_offset"] = 0
     t = threading.Thread(target=worker, daemon=True)
     TASK["thread"] = t
     try:
@@ -173,6 +187,25 @@ def _op_nlx(p):
             total += maint.ingest_external_jobs(jobs, source="nlx",
                                                 t=_op_track(p))
     print(f"  {total} new job(s) ingested from the NLx feed.")
+
+
+def _op_discover(p):
+    """Free-text sector discovery — the discover.py flagship path, reachable
+    from the UI. Asks Claude for likely employers matching a sector/term,
+    probes each against the ATS registry, and (matching the CLI's
+    apply-by-default) upserts the confirmed ones into the roster unless the
+    caller asked for a dry run."""
+    from discovery import apply_to_store, discover, print_summary, write_discovery_report
+    term = (p.get("term") or "").strip()
+    if not term:
+        print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
+        return
+    result = discover(term)
+    print_summary(result)
+    if not p.get("no_report"):
+        write_discovery_report(result)
+    for line in apply_to_store(result, dry_run=bool(p.get("dry_run"))):
+        print(line)
 
 
 def _op_prune(p):
@@ -269,6 +302,11 @@ OPS = {
         "fn": lambda p: __import__(
             "discovery.ats_dork", fromlist=["run_ddgs_dorks"]
         ).run_ddgs_dorks(),
+    },
+    "discover-term": {
+        "label": "Discover companies by term",
+        "engine": "local",
+        "fn": lambda p: _op_discover(p),
     },
     "score-missions": {
         "label": "Score missions",

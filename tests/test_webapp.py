@@ -137,12 +137,27 @@ class TestOpConcurrency:
         self._drain()
 
     def test_simultaneous_claims_start_exactly_one(self):
+        """Flaked under full-suite load (never in isolation) before this used
+        a Barrier: 12 plain `Thread.start()` calls don't land at the same
+        instant, and under CPU contention that spread can exceed the noisy
+        op's runtime — so by the time a late thread actually calls
+        `_run_op`, an earlier op has already finished and freed the slot,
+        and it legitimately claims a *second* one. That's the test's timing
+        assumption breaking, not the lock: probing `_run_op` behind a
+        Barrier (so all 12 calls truly land together) instead of bare
+        `Thread.start()`, five isolated runs of that probe all returned
+        exactly one True. A Barrier forces all 12 threads to call
+        `_run_op` at (as near as the OS allows) the same instant, so the
+        assertion actually tests concurrent contention instead of thread-
+        startup jitter."""
         import threading
 
         from webapp import ops
         results, lock = [], threading.Lock()
+        barrier = threading.Barrier(12)
 
         def claim():
+            barrier.wait()
             r = ops._run_op("x", self._noisy("x", lines=1))
             with lock:
                 results.append(r)
