@@ -798,6 +798,69 @@ def _sample_titles(hit, n=6):
     return []
 
 
+def _would_regress_producing_company(conn, name, ats, slug, nc):
+    """True if writing this hit would repoint an ALREADY-ACTIVE, job-
+    producing company at a DIFFERENT board that yields FEWER local jobs
+    than the one already on file.
+
+    >>> from core.store import connect, upsert_company
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "custom",
+    ...                           "careers_url": "https://acme.example/careers",
+    ...                           "local_job_count": 3, "active": 1})
+
+    A different board with FEWER local jobs is a regression:
+
+    >>> _would_regress_producing_company(conn, "Acme", "workday",
+    ...                                  ("acme", 1, "Careers"), 0)
+    True
+
+    A different board with MORE (or equal) local jobs is not:
+
+    >>> _would_regress_producing_company(conn, "Acme", "workday",
+    ...                                  ("acme", 1, "Careers"), 5)
+    False
+
+    The SAME board never counts as a regression -- there is nothing to
+    repoint, whatever the live count says today:
+
+    >>> _would_regress_producing_company(conn, "Acme", "custom", None, 0)
+    False
+
+    A company with no ACTIVE row on file (new, or already inactive) has
+    nothing to protect:
+
+    >>> _would_regress_producing_company(conn, "Nobody", "workday",
+    ...                                  ("x", 1, "y"), 0)
+    False
+
+    Notes:
+        Guards discover_local's bulk pass (via populate_companies), which
+        upserts every confirmed hit unconditionally. A company whose
+        board changes stops matching its old job rows' board-native ids
+        (job_id is namespaced by ats+slug), and sync_job_statuses closes
+        those rows after external_grace_days once the crawler starts
+        fetching only the new board -- a wrong re-resolution silently
+        drops real, still-open postings from the roster.
+
+        Not needed on the resolve_leads/add_names paths: both already
+        filter to boardless/inactive rows before ever calling
+        resolve_board_sniff_first, so an active producing company never
+        reaches it there.
+    """
+    row = conn.execute(
+        "SELECT ats, slug, wd_tenant, wd_pod, wd_site, local_job_count "
+        "FROM companies WHERE name=? AND active=1", (name,)).fetchone()
+    if not row:
+        return False
+    old_nc = row["local_job_count"] or 0
+    if old_nc <= nc:
+        return False
+    old_slug = ((row["wd_tenant"], row["wd_pod"], row["wd_site"])
+               if row["ats"] == "workday" else row["slug"])
+    return (row["ats"], old_slug) != (ats, slug)
+
+
 def populate_companies(extra_names=None, include_missions=None, dork=True):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
@@ -851,6 +914,17 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
             except Exception as e:
                 print(f"    [!] mission scoring failed for "
                       f"{futs[fut]['name']!r}: {e}")
+                continue
+            # Don't let a re-discovered name silently repoint an already-
+            # producing company at a worse board (see
+            # _would_regress_producing_company): the old board's job rows
+            # stop matching once the crawler starts fetching only the new
+            # one, and sync_job_statuses quietly closes them.
+            if _would_regress_producing_company(conn, h["name"], h["ats"],
+                                                h["slug"], h["nc"]):
+                print(f"    [!] {h['name']:30} kept existing board -- new "
+                      f"hit ({h['ats']} nc={h['nc']}) has fewer local jobs "
+                      f"than the one already on file; not overwritten")
                 continue
             # Shared activation rule (core.claude.is_active_mission):
             # active tiers, an UNAVAILABLE (None) score, or a multi-division

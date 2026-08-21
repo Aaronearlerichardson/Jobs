@@ -396,3 +396,175 @@ Durham, NC (Hybrid)
         assert local_sourcing.parse_company_names(
             "Chimerix\nbla bla\nG1 Therapeutics\nBiogen") == [
             "Chimerix", "bla bla", "G1 Therapeutics", "Biogen"]
+
+
+class TestResolveBoardSniffFirstCustomShortCircuit:
+    """Offline coverage for the Task 1 fix: a `custom` sniff hit only wins
+    immediately when it already carries local jobs. No network — sniff_ats,
+    probe_company, _websearch_board and _validate_board are all faked."""
+
+    @staticmethod
+    def _sniff_custom(careers_url="https://x.example/careers"):
+        return lambda name, careers_url=careers_url: {
+            "ats": "custom", "careers_url": careers_url}
+
+    def test_weak_custom_hit_falls_through_to_probe_and_websearch(self, monkeypatch):
+        """nc == 0 on the custom hit must not short-circuit: both probe and
+        websearch get a chance before anything is returned."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        calls = {"probe": 0, "websearch": 0}
+
+        def _probe(name, try_workday=True):
+            calls["probe"] += 1
+            return None
+
+        def _websearch(name, max_results=8):
+            calls["websearch"] += 1
+            return None
+
+        monkeypatch.setattr(local_sourcing, "probe_company", _probe)
+        monkeypatch.setattr(local_sourcing, "_websearch_board", _websearch)
+        # The marketing page "validates" (a handful of scraped fragments)
+        # but has zero LOCAL jobs.
+        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (9, 0))
+
+        hit = local_sourcing.resolve_board_sniff_first("Pfizer")
+
+        assert calls == {"probe": 1, "websearch": 1}
+        assert hit is not None and hit["ats"] == "custom" and hit["nc"] == 0
+
+    def test_strong_custom_hit_short_circuits(self, monkeypatch):
+        """nc > 0 on the custom hit DOES win immediately: neither probe nor
+        websearch is ever called."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        calls = {"probe": 0, "websearch": 0}
+        monkeypatch.setattr(
+            local_sourcing, "probe_company",
+            lambda *a, **k: calls.update(probe=calls["probe"] + 1))
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda *a, **k: calls.update(websearch=calls["websearch"] + 1))
+        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (5, 2))
+
+        hit = local_sourcing.resolve_board_sniff_first("Science.xyz")
+
+        assert calls == {"probe": 0, "websearch": 0}
+        assert hit["ats"] == "custom" and hit["nc"] == 2 and hit["via"] == "sniff"
+
+    def test_held_custom_fallback_returned_when_nothing_better(self, monkeypatch):
+        """probe and websearch both miss entirely -> the weak custom hit,
+        not None, is the answer: it still beats no answer at all."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(local_sourcing, "_websearch_board", lambda *a, **k: None)
+        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (9, 0))
+
+        hit = local_sourcing.resolve_board_sniff_first("Novozymes")
+
+        assert hit is not None
+        assert hit["ats"] == "custom" and hit["nc"] == 0 and hit["via"] == "sniff"
+
+    def test_better_probe_hit_wins_over_held_fallback(self, monkeypatch):
+        """A real ATS found at step 2 (probe) beats the held custom
+        fallback, even though the custom hit was found first."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(
+            local_sourcing, "probe_company",
+            lambda name, try_workday=True: {
+                "name": name, "ats": "greenhouse", "slug": "acme",
+                "count": 10, "nc": 4})
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda *a, **k: pytest.fail("websearch must not run: probe already won"))
+
+        def _validate(comp):
+            return (9, 0) if comp["ats"] == "custom" else (10, 4)
+
+        monkeypatch.setattr(local_sourcing, "_validate_board", _validate)
+
+        hit = local_sourcing.resolve_board_sniff_first("Acme")
+
+        assert hit["ats"] == "greenhouse" and hit["nc"] == 4 and hit["via"] == "probe"
+
+    def test_better_websearch_hit_wins_over_held_fallback(self, monkeypatch):
+        """A real ATS found only at step 3 (websearch) beats the held
+        custom fallback when probe also misses."""
+        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda name, max_results=8: {
+                "ats": "workday", "triple": ("acme", 1, "Acme")})
+
+        def _validate(comp):
+            return (9, 0) if comp["ats"] == "custom" else (20, 6)
+
+        monkeypatch.setattr(local_sourcing, "_validate_board", _validate)
+
+        hit = local_sourcing.resolve_board_sniff_first("Acme")
+
+        assert hit["ats"] == "workday" and hit["nc"] == 6 and hit["via"] == "websearch"
+
+
+class TestDiscoverLocalWebsearchPass:
+    """Offline coverage for the Task 2 fix: discover_local's bulk pass now
+    runs a bounded websearch step for names probe+sniff left boardless.
+    gather_names, probe_company, _websearch_board, and core.store are all
+    faked -- no network, no real DB."""
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    def _patch_common(self, monkeypatch, names, recent=frozenset()):
+        monkeypatch.setattr(local_sourcing, "gather_names", lambda extra=None: list(names))
+        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        import core.store as store
+        monkeypatch.setattr(store, "connect", lambda *a, **k: self._FakeConn())
+        monkeypatch.setattr(store, "recent_miss_names",
+                            lambda conn, days=14: set(recent))
+
+    def test_websearch_cap_bounds_attempts(self, monkeypatch):
+        names = [f"Company {i}" for i in range(6)]
+        self._patch_common(monkeypatch, names)
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda name, max_results=8: calls.append(name))
+
+        local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=2)
+
+        assert len(calls) == 2
+
+    def test_websearch_cap_zero_disables_the_pass(self, monkeypatch):
+        names = ["Alpha", "Beta"]
+        # Deliberately do NOT patch core.store here: cap=0 must short-circuit
+        # before any DB connection is even attempted.
+        monkeypatch.setattr(local_sourcing, "gather_names", lambda extra=None: list(names))
+        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda name, max_results=8: calls.append(name))
+
+        local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=0)
+
+        assert calls == []
+
+    def test_recently_missed_names_are_skipped(self, monkeypatch):
+        names = ["Alpha", "Beta"]
+        self._patch_common(monkeypatch, names, recent={"Alpha"})
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "_websearch_board",
+            lambda name, max_results=8: calls.append(name))
+
+        local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False,
+            websearch=True, websearch_cap=10)
+
+        assert calls == ["Beta"]
