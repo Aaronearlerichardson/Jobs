@@ -340,6 +340,55 @@ def _name_domain_tokens(name: str) -> list[str]:
     return out
 
 
+# Generic/ambiguous domain tokens that collide with an unrelated company when
+# used as a truncated domain guess ("signal" from "Bio-Signal Technologies"
+# -> some unrelated signal-processing startup's board). Same collision class
+# as pipeline._GENERIC_SLUGS; kept as a separate small set here because
+# probes.py cannot import pipeline.py (pipeline imports probes — see the
+# "keep in sync" note on _DOMAIN_STOPWORDS above).
+_GENERIC_DOMAIN_WORDS = {
+    "signal", "neuro", "neural", "brain", "medical", "health", "data",
+    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
+    "bci", "ai", "research", "digital", "care", "vision", "sense",
+}
+
+
+def _risky_domain_tokens(name: str) -> set:
+    """The tokens from _name_domain_tokens(name) that are a TRUNCATED guess
+    at a multi-word company's domain: the bare first word, or a generic word
+    from _GENERIC_DOMAIN_WORDS. Same collision shape
+    pipeline._flag_for_verification calls out for slugs ("first-word slug -
+    confirm it's the same company") — a domain guess has no post-hoc job
+    count to sanity-check it against, so a hit reached ONLY through one of
+    these needs the fetched page to actually corroborate the company name
+    (see sniffer._corroborates) before it is trusted.
+
+    >>> sorted(_risky_domain_tokens("Galaxy Diagnostics"))
+    ['galaxy']
+    >>> sorted(_risky_domain_tokens("Lindy Biosciences"))
+    ['lindy']
+    >>> sorted(_risky_domain_tokens("United Therapeutics"))
+    ['united']
+
+    A single-word name has no "first word of a multi-word name" to be
+    truncated to — it's not a risky domain guess, just the whole name:
+
+    >>> _risky_domain_tokens("Pfizer")
+    set()
+
+    Notes:
+        "Red Hat Inc" -> stripped "redhat" is NOT flagged: dropping a
+        corporate suffix is precise (the domain really does omit "Inc"),
+        unlike collapsing a multi-word name down to one ambiguous word.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", (name or "").lower()) if w]
+    if len(words) < 2:
+        return set()
+    full = "".join(words)
+    return {t for t in _name_domain_tokens(name)
+           if t != full and (t == words[0] or t in _GENERIC_DOMAIN_WORDS)}
+
+
 def _workday_candidate_urls(name: str, careers_url: str) -> list[str]:
     """
     Careers-page URLs to scrape, in priority order. Caps at _URL_CAP to

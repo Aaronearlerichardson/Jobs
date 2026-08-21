@@ -149,6 +149,77 @@ def _candidate_urls(name, careers_url=""):
     return out
 
 
+# ─── Truncated-domain corroboration ───────────────────────────────────────
+#
+# _candidate_urls tries every domain TOKEN (full, suffix-stripped, bare
+# first word) across every path/TLD combo, all fetched concurrently, and
+# takes the first hit in priority order. If the precise (full) token's
+# domain times out while an ambiguous truncated token's domain answers —
+# "galaxydiagnostics.com" dead, "galaxy.com" live — that unrelated
+# company's board wins outright ("Galaxy Diagnostics" -> a 57-job board at
+# the fintech Galaxy.com, zero of them local, misreported as a live
+# no-local-jobs board instead of the wrong company it actually is). A hit
+# reached only through a risky token (probes._risky_domain_tokens) must
+# corroborate against the page content before it's trusted.
+
+def _risky_token_in_url(url, name):
+    """The risky domain token (probes._risky_domain_tokens) `url`'s host
+    was built from, or "" if the host isn't one of those — including when
+    it's ALSO reachable via a safe (full/suffix-stripped) token, since the
+    full token containing the risky one as a substring
+    ("galaxydiagnostics" contains "galaxy") must not itself count as risky.
+
+    >>> _risky_token_in_url("https://www.galaxy.com/careers", "Galaxy Diagnostics")
+    'galaxy'
+    >>> _risky_token_in_url("https://www.galaxydiagnostics.com/careers", "Galaxy Diagnostics")
+    ''
+    >>> _risky_token_in_url("https://www.unitedtherapeutics.com/careers", "United Therapeutics")
+    ''
+    """
+    from .probes import _name_domain_tokens, _risky_domain_tokens
+    risky = _risky_domain_tokens(name)
+    if not risky:
+        return ""
+    host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0]
+    safe = [t for t in _name_domain_tokens(name) if t not in risky]
+    if any(s and s in host for s in safe):
+        return ""
+    for t in risky:
+        if t and t in host:
+            return t
+    return ""
+
+
+def _corroborates(text, name, skip_token=""):
+    """True if `text` actually mentions `name` beyond the (possibly
+    generic/truncated) domain token that reached it — the check a
+    risky-token hit (see _risky_token_in_url) must pass before it's
+    trusted. Requires a distinctive word (>=4 letters) from `name`, other
+    than `skip_token`, to appear in the text.
+
+    >>> _corroborates("Careers at Galaxy Diagnostics", "Galaxy Diagnostics", "galaxy")
+    True
+    >>> _corroborates("Galaxy Digital hires blockchain engineers",
+    ...                "Galaxy Diagnostics", "galaxy")
+    False
+    >>> _corroborates("", "Galaxy Diagnostics", "galaxy")
+    False
+
+    A name with nothing left to check (every word is the skipped token, or
+    too short) doesn't block the hit — there's no more precision to ask
+    for:
+
+    >>> _corroborates("anything", "Q2", "q2")
+    True
+    """
+    words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
+            if len(w) >= 4 and w != skip_token]
+    if not words:
+        return True
+    blob = (text or "").lower()
+    return any(w in blob for w in words)
+
+
 # ─── Detection ───────────────────────────────────────────────────────────
 
 def _detect(text, final_url=""):
@@ -260,6 +331,13 @@ def sniff_ats(name, careers_url="", timeout=6):
         r = responses.get(url)
         if r is None:
             continue
+        # A hit reached only through a truncated/generic domain guess
+        # ("galaxy.com" for "Galaxy Diagnostics") must corroborate against
+        # the page before it's trusted — otherwise the precise domain
+        # timing out hands the whole result to an unrelated company.
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
+            continue
         hit = _detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
             return _pack(hit[1], hit[2], r.url)
@@ -284,6 +362,9 @@ def sniff_careers_ats(name, careers_url=""):
     for url in urls:
         r = responses.get(url)
         if r is None:
+            continue
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
             continue
         hit = _detect(r.text, r.url)
         if not hit:
@@ -340,16 +421,20 @@ class JsSniffer:
         if not page:
             return None
         for url in _candidate_urls(name, careers_url):
+            risky_tok = _risky_token_in_url(url, name)
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)
             except Exception:
                 continue
             for _ in range(2):
                 try:
-                    hit = _detect(page.content(), page.url)
+                    content = page.content()
+                    hit = _detect(content, page.url)
                 except Exception:
-                    hit = None
+                    content, hit = "", None
                 if hit and hit[0] in ("fetchable", "semi"):
+                    if risky_tok and not _corroborates(content, name, risky_tok):
+                        break
                     return _pack(hit[1], hit[2], page.url)
                 try:
                     page.wait_for_load_state("networkidle", timeout=6000)
