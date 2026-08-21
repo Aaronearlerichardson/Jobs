@@ -222,6 +222,17 @@ def probe_ultipro(slug):
         return (False, 0)
 
 
+def probe_hibob(tenant):
+    """Confirm a HiBob board by its tenant subdomain (live job count from
+    the public job-ad API)."""
+    from scrapers.fetchers.hibob import parse_board
+    try:
+        jobs = parse_board(tenant)
+        return (len(jobs) > 0, len(jobs))
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
@@ -233,6 +244,7 @@ PROBES = {
     "paylocity":  probe_paylocity,
     "rippling":   probe_rippling,
     "ultipro":    probe_ultipro,
+    "hibob":      probe_hibob,
 }
 
 

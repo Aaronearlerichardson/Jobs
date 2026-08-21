@@ -765,6 +765,38 @@ def fetch_rippling_all(slug, loc_re=None, max_details=200, detail_delay=0.15):
     return out
 
 
+def fetch_hibob_all(tenant, loc_re=None):
+    """Full HiBob board, ungated (mirrors fetchers.hibob.fetch_hibob without
+    its is_relevant() gate). The description is inline in the listing, so —
+    like UltiPro — there's no separate detail call to skip."""
+    from bs4 import BeautifulSoup
+
+    from .hibob import location_str, parse_board
+
+    try:
+        raw = parse_board(tenant)
+    except Exception as e:
+        print(f"    [!] HiBob {tenant}: {e}")
+        return []
+    out = []
+    for j in raw:
+        jid = str(j.get("id") or "")
+        title = (j.get("title") or "").strip()
+        if not jid or not title:
+            continue
+        loc = location_str(j)
+        if not _loc_ok(loc_re, loc):
+            continue
+        desc = BeautifulSoup(j.get("description") or "", "html.parser").get_text(" ", strip=True)
+        job = {"id": f"hibob_{tenant}_{jid[:12]}", "title": title,
+               "url": f"https://{tenant}.careers.hibob.com/jobs",
+               "location": loc, "description": desc, "ats": "hibob", "_wd": None}
+        if str(j.get("workspaceType", "")).lower() == "remote":
+            job["remote_hint"] = "hibob:workspaceType"
+        out.append(job)
+    return out
+
+
 def fetch_ultipro_all(slug, loc_re=None):
     """Full UKG Pro (UltiPro) board, ungated (mirrors fetchers.ultipro.fetch_ultipro
     without its is_relevant() gate). BriefDescription is inline, so no detail call."""
@@ -1444,6 +1476,7 @@ FETCHERS = {
     "paylocity":       lambda c, lr: fetch_paylocity_all(c["slug"], lr),
     "rippling":        lambda c, lr: fetch_rippling_all(c["slug"], lr),
     "ultipro":         lambda c, lr: fetch_ultipro_all(c["slug"], lr),
+    "hibob":           lambda c, lr: fetch_hibob_all(c["slug"], lr),
     "workday":         lambda c, lr: fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: fetch_icims_all(c["slug"], lr),

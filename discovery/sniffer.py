@@ -42,6 +42,9 @@ ATS_LINK_PATTERNS = [
     ("paylocity", re.compile(r"recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})", re.I)),
     # Rippling: board slug in ats.rippling.com/<slug>/jobs (public JSON API).
     ("rippling", re.compile(r"ats\.rippling\.com/([a-z0-9][a-z0-9-]+)/jobs", re.I)),
+    # HiBob: tenant subdomain of careers.hibob.com (public JSON API at
+    # <tenant>.careers.hibob.com/api/job-ad — see fetchers/hibob.py).
+    ("hibob", re.compile(r"([a-z0-9][a-z0-9-]+)\.careers\.hibob\.com", re.I)),
 ]
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
@@ -82,7 +85,8 @@ _BAD_SUBDOMAINS = ("www", "help", "support", "blog", "app", "careers", "jobs", "
 # it's itself a dead slug-guess against a JSON ATS (already covered by
 # slug probing upstream).
 _FETCHABLE_HOST_RE = re.compile(
-    r"(greenhouse\.io|lever\.co|ashbyhq\.com|kula\.ai|applytojob\.com|bamboohr\.com)",
+    r"(greenhouse\.io|lever\.co|ashbyhq\.com|kula\.ai|applytojob\.com|bamboohr\.com|"
+    r"careers\.hibob\.com)",
     re.I,
 )
 
