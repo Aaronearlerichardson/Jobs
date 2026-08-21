@@ -79,10 +79,16 @@ def main():
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
-                    help="Insert confirmed candidates into the company store "
-                         "(deduped by slug, tagged with date/term for audit)")
+                    help="Deprecated no-op: confirmed candidates are applied "
+                         "to the company store by default now (deduped by "
+                         "slug, tagged with date/term for audit). Kept only "
+                         "so old scripts/muscle memory that pass --apply "
+                         "keep working.")
     ap.add_argument("--dry-run", action="store_true",
-                    help="With --apply, preview changes without writing the file")
+                    help="Probe candidates and print/report on them WITHOUT "
+                         "writing anything to the company store (the old "
+                         "default behavior — use this to preview before "
+                         "committing).")
 
     args = ap.parse_args()
 
@@ -95,9 +101,8 @@ def main():
             print_summary(result)
             if not args.no_report:
                 write_discovery_report(result)
-            if args.apply:
-                for line in apply_to_store(result, dry_run=args.dry_run):
-                    print(line)
+            for line in apply_to_store(result, dry_run=args.dry_run):
+                print(line)
         return
 
     if args.from_bciwiki:
@@ -112,9 +117,8 @@ def main():
         print_summary(result)
         if not args.no_report:
             write_discovery_report(result)
-        if args.apply:
-            for line in apply_to_store(result, dry_run=args.dry_run):
-                print(line)
+        for line in apply_to_store(result, dry_run=args.dry_run):
+            print(line)
         return
 
     if args.local:
@@ -152,9 +156,8 @@ def main():
     print_summary(result)
     if not args.no_report:
         write_discovery_report(result)
-    if args.apply:
-        for line in apply_to_store(result, dry_run=args.dry_run):
-            print(line)
+    for line in apply_to_store(result, dry_run=args.dry_run):
+        print(line)
 
 
 if __name__ == "__main__":
