@@ -226,3 +226,48 @@ class TestTrackMembership:
 
     def test_join_tracks_is_canonical(self):
         assert store.join_tracks({"b", "a"}) == "a,b"
+
+
+class TestMisses:
+    """Candidates that failed to become companies are kept, with a reason —
+    and must stay invisible to every crawl path."""
+
+    def test_miss_rows_never_reach_the_crawl(self, db):
+        store.upsert_company(db, {"name": "Live Co", "ats": "lever",
+                                  "slug": "live", "active": 1})
+        before = len(store.get_companies(db, active_only=True))
+        for name, reason in [("Advarra", "ats-unsupported:ukg"),
+                             ("Chiesi USA", "no-local-jobs"),
+                             ("Cognito Therapeutics", "no-local-jobs")]:
+            assert store.record_miss(db, name, reason, ats="greenhouse")
+        assert len(store.get_companies(db, active_only=True)) == before
+        assert len(store.get_companies(db, active_only=False)) == before + 3
+
+    def test_a_miss_never_deactivates_a_working_company(self, db):
+        store.upsert_company(db, {"name": "Live Co", "ats": "lever",
+                                  "slug": "live", "active": 1})
+        assert store.record_miss(db, "Live Co", "fetch-error:ReadTimeout") is False
+        assert store.get_companies(db, active_only=True)[0]["name"] == "Live Co"
+
+    def test_resolving_a_miss_clears_the_reason(self, db):
+        store.record_miss(db, "Liquidia", "ats-unsupported:hibob")
+        store.upsert_company(db, {"name": "Liquidia", "ats": "hibob",
+                                  "slug": "liquidia", "active": 1})
+        row = store.get_companies(db, active_only=True)[0]
+        assert row["miss_reason"] is None and row["miss_at"] is None
+
+    def test_counts_aggregate_on_the_family_not_the_qualifier(self, db):
+        store.record_miss(db, "a", "ats-unsupported:ukg")
+        store.record_miss(db, "b", "ats-unsupported:taleo")
+        store.record_miss(db, "c", "no-board-found")
+        assert store.miss_counts(db) == [("ats-unsupported", 2),
+                                         ("no-board-found", 1)]
+
+    def test_created_at_survives_a_reprobe_that_moves_last_probed(self, db):
+        store.upsert_company(db, {"name": "X", "ats": "lever", "slug": "x"})
+        row = db.execute("SELECT created_at, last_probed FROM companies").fetchone()
+        store.upsert_company(db, {"name": "X", "mission_score": 0.5})
+        after = db.execute("SELECT created_at, last_probed FROM companies").fetchone()
+        assert after["created_at"] == row["created_at"]
+        assert after["last_probed"] >= row["last_probed"]
+        assert store.roster_growth(db, days=7) == 1
