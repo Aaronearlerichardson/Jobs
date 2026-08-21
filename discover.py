@@ -76,6 +76,19 @@ def main():
     ap.add_argument("--dork", "--ats-dork", action="store_true", dest="dork",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
                          "board URLs for local companies into the company store")
+    ap.add_argument("--snowball", action="store_true",
+                    help="Mine ALREADY-STORED job descriptions for "
+                         "third-party company names (partners/parents/"
+                         "acquirers/investors/clients) not in the roster. "
+                         "Report only, nothing written to the store; see "
+                         "--snowball-min-mentions/--snowball-llm.")
+    ap.add_argument("--snowball-min-mentions", type=int, default=2,
+                    help="With --snowball: minimum distinct postings a name "
+                         "must appear in (default: 2)")
+    ap.add_argument("--snowball-llm", action="store_true",
+                    help="With --snowball: run the optional Claude "
+                         "refinement pass over the heuristic candidates "
+                         "(needs an API key)")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
@@ -142,6 +155,12 @@ def main():
         added, checked = run_ddgs_dorks()
         print(f"\n  {added} new NC board(s) added to the store "
               f"({checked} extracted from dork results)")
+        return
+
+    if args.snowball:
+        from discovery.snowball import run_snowball
+        run_snowball(min_mentions=args.snowball_min_mentions,
+                    use_llm=args.snowball_llm)
         return
 
     if not args.term:
