@@ -392,6 +392,11 @@ def upsert_company(conn, c):
 # "fetch-error:ReadTimeout"); miss_counts aggregates on the family so the
 # qualifier stays readable without fragmenting the tally.
 MISS_REASONS = (
+    # no-board-found qualifiers (discovery.sniffer.diagnose_no_board):
+    #   :wrong-domain          a candidate resolved to an unrelated company
+    #   :domain-unreachable    not one candidate URL answered
+    #   :careers-page-no-ats   real job board found, but no known ATS on it
+    #   :site-only-no-careers  domain answers, nothing careers-shaped on it
     "no-board-found",   # nothing resolved: sniff, slug-probe and websearch all missed
     "board-dead",       # coordinates detected, but the live fetch returns nothing
     "ats-unsupported",  # a real ATS we recognize but cannot fetch (:platform)
