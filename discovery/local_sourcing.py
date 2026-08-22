@@ -1387,18 +1387,29 @@ def classify_miss(name, careers_url=""):
     Jobvite, ...) is a very different problem from a company we could find
     nothing for, and the two were previously indistinguishable.
 
+    A bare "no-board-found" is itself four different problems (nothing
+    resolves, the domain is dead, a careers page exists with no known ATS,
+    or a candidate resolved to someone else's site) — sniffer.diagnose_no_board
+    tells them apart, appended as the ':'-qualifier a rerun's miss_counts
+    already knows how to aggregate past (see core.store.miss_family).
+
     Notes:
-        Costs one extra careers-page sniff, so it is called only on the
-        failure path and only by the on-demand resolvers — never per
-        candidate in a full discover_local pass.
+        Costs one extra careers-page sniff (plus diagnose_no_board's own,
+        on the no-board-found path), so it is called only on the failure
+        path and only by the on-demand resolvers — never per candidate in
+        a full discover_local pass.
     """
-    from .sniffer import sniff_careers_ats, ATS_LEAD_PATTERNS
+    from .sniffer import sniff_careers_ats, ATS_LEAD_PATTERNS, diagnose_no_board
     try:
         lead = sniff_careers_ats(name, careers_url or "")
     except Exception as e:
         return f"fetch-error:{type(e).__name__}"
     if not lead:
-        return "no-board-found"
+        try:
+            sub = diagnose_no_board(name, careers_url or "")
+        except Exception:
+            sub = ""
+        return f"no-board-found:{sub}" if sub else "no-board-found"
     ats = lead.get("ats") or "?"
     if ats in {a for a, _ in ATS_LEAD_PATTERNS}:
         return f"ats-unsupported:{ats}"

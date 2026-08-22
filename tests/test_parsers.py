@@ -39,6 +39,107 @@ class TestSniffer:
                 "smartrecruiters"} <= set(PROBES)
 
 
+class _FakeResp:
+    def __init__(self, text, url):
+        self.text = text
+        self.url = url
+
+
+def _stub_fetch_all(monkeypatch, mapping):
+    """Replace sniffer._fetch_all with a lookup into `mapping` (url -> html),
+    so no network call happens; any URL not in `mapping` fetches as None."""
+    def _fake(urls):
+        return {u: (_FakeResp(mapping[u], u) if u in mapping else None)
+                for u in urls}
+    monkeypatch.setattr(sniffer, "_fetch_all", _fake)
+
+
+class TestRootScan:
+    """sniff_ats/sniff_careers_ats fall back to the bare homepage when every
+    careers-path candidate misses (Task 2: NALA Membranes / Merakris
+    Therapeutics reference their ATS on the root page, not a /careers path)."""
+
+    def test_sniff_ats_recovers_ats_badge_on_homepage(self, monkeypatch):
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="https://jobs.lever.co/acmegenomics">Jobs</a>'})
+        hit = sniffer.sniff_ats("Acme Genomics")
+        assert hit == {"ats": "lever", "slug": "acmegenomics",
+                       "careers_url": root}
+
+    def test_sniff_careers_ats_falls_back_to_root_as_a_lead(self, monkeypatch):
+        # Ashby has no probe-confirmable count path for a bare slug fixture
+        # here, so this exercises the unconfirmed-lead branch of the
+        # root-scan fallback.
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="acme-genomics.dayforcehcm.com/careers/openings">Jobs</a>'})
+        lead = sniffer.sniff_careers_ats("Acme Genomics")
+        assert lead["confirmed"] is False
+        assert lead["ats"] == "dayforce"
+
+    def test_no_root_fallback_when_a_candidate_already_hit(self, monkeypatch):
+        # A hit on a real careers-path candidate must win outright -- the
+        # root scan only runs when nothing else did.
+        candidate = "https://www.acmegenomics.com/careers"
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {
+            candidate: '<a href="https://jobs.lever.co/acmegenomics">Jobs</a>',
+            root: '<a href="https://boards.greenhouse.io/wrongone">Jobs</a>'})
+        hit = sniffer.sniff_ats("Acme Genomics")
+        assert hit["ats"] == "lever"
+
+    def test_risky_root_token_still_needs_corroboration(self, monkeypatch):
+        # "Galaxy Diagnostics" -> root guess "galaxy.com" is a truncated
+        # (risky) token; a page that doesn't mention "diagnostics" must not
+        # be trusted even when it's the only thing that answered.
+        root = "https://www.galaxy.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: '<a href="https://jobs.lever.co/galaxyfintech">Jobs</a>'})
+        assert sniffer.sniff_ats("Galaxy Diagnostics") is None
+
+    def test_risky_root_token_recovered_when_it_corroborates(self, monkeypatch):
+        root = "https://www.galaxy.com/"
+        _stub_fetch_all(monkeypatch, {
+            root: ('Careers at Galaxy Diagnostics<br>'
+                   '<a href="https://jobs.lever.co/galaxydx">Jobs</a>')})
+        hit = sniffer.sniff_ats("Galaxy Diagnostics")
+        assert hit and hit["ats"] == "lever"
+
+
+class TestDiagnoseNoBoard:
+    """The four "no-board-found" qualifiers classify_miss appends (Task 1)."""
+
+    def test_domain_unreachable_when_nothing_answers(self, monkeypatch):
+        _stub_fetch_all(monkeypatch, {})
+        assert sniffer.diagnose_no_board("Acme Genomics") == "domain-unreachable"
+
+    def test_site_only_no_careers_when_a_page_answers_with_nothing_on_it(
+            self, monkeypatch):
+        root = "https://www.acmegenomics.com/"
+        _stub_fetch_all(monkeypatch, {root: "<html><body>Welcome</body></html>"})
+        assert (sniffer.diagnose_no_board("Acme Genomics")
+                == "site-only-no-careers")
+
+    def test_careers_page_no_ats_when_real_job_links_but_no_ats(
+            self, monkeypatch):
+        careers = "https://www.acmegenomics.com/careers"
+        html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
+                '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
+                '<a href="/careers/data-scientist-3">Data Scientist</a>')
+        _stub_fetch_all(monkeypatch, {careers: html})
+        assert (sniffer.diagnose_no_board("Acme Genomics")
+                == "careers-page-no-ats")
+
+    def test_wrong_domain_when_only_a_risky_token_answers_uncorroborated(
+            self, monkeypatch):
+        root = "https://www.galaxy.com/careers"
+        _stub_fetch_all(monkeypatch, {
+            root: "<html><body>Galaxy Digital hires blockchain engineers</body></html>"})
+        assert (sniffer.diagnose_no_board("Galaxy Diagnostics")
+                == "wrong-domain")
+
+
 class TestCustomBoardLinks:
     def test_real_job_links_detected(self):
         html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'

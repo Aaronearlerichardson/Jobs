@@ -118,6 +118,63 @@ _COMBOS = [
 _SNIFF_URL_CAP = 26
 
 
+def _root_urls(name, careers_url=""):
+    """Bare-domain URLs to scan when every careers-page candidate misses.
+
+    A domain token can be crowded out of _candidate_urls by the cap before
+    its root ("com", "/") combo is ever tried (multi-token names burn the
+    cap on earlier careers-path combos first) -- so a company whose ATS
+    badge sits on the homepage itself (no dedicated /careers page) never
+    gets looked at. This is a small, separate list scanned only on the
+    failure path, not folded into the capped candidate list.
+
+    >>> _root_urls("Merakris Therapeutics")
+    ['https://www.merakristherapeutics.com/', 'https://www.merakris.com/']
+
+    A recorded careers_url's own host goes first -- it is a better-known
+    base than any name guess:
+
+    >>> _root_urls("Acme", "https://acme.io/careers")[0]
+    'https://acme.io/'
+    """
+    urls = []
+    if careers_url:
+        base_m = re.match(r"(https?://[^/]+)", careers_url)
+        if base_m:
+            urls.append(base_m.group(1) + "/")
+    for tok in _name_domain_tokens(name):
+        u = f"https://www.{tok}.com/"
+        if u not in urls:
+            urls.append(u)
+    return urls
+
+
+def _scan_root(name, careers_url=""):
+    """Fetch _root_urls(name, careers_url) and return the first fetchable/
+    semi-fetchable ATS hit (packed like sniff_ats), else None.
+
+    A hit reached only through a risky (truncated/generic) domain token
+    must still corroborate the company name on the page -- the same rule
+    _candidate_urls hits are held to -- so scanning the root doesn't hand
+    the galaxy.com collision a second way in.
+    """
+    urls = _root_urls(name, careers_url)
+    if not urls:
+        return None
+    responses = _fetch_all(urls)
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
+            continue
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
+            continue
+        hit = _detect(r.text, r.url)
+        if hit and hit[0] in ("fetchable", "semi"):
+            return _pack(hit[1], hit[2], r.url)
+    return None
+
+
 def _candidate_urls(name, careers_url=""):
     urls = []
     if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
@@ -348,6 +405,12 @@ def sniff_ats(name, careers_url="", timeout=6):
             listing = custom_board_listing_url(r.url, r.text)
             if listing:
                 custom = {"ats": "custom", "careers_url": listing}
+    # Every careers-path candidate missed: a company whose ATS badge sits on
+    # the homepage itself (no dedicated /careers page -- see _root_urls)
+    # still has one more place to look before this is a miss.
+    root_hit = _scan_root(name, careers_url)
+    if root_hit:
+        return root_hit
     return custom
 
 
@@ -379,7 +442,78 @@ def sniff_careers_ats(name, careers_url=""):
             lead_slug = "|".join(map(str, slug)) if isinstance(slug, tuple) else slug
             lead = {"confirmed": False, "ats": ats, "slug": lead_slug,
                     "source_url": r.url}
-    return lead
+    if lead:
+        return lead
+    # No candidate careers-path yielded even an unconfirmable lead -- try the
+    # bare homepage (see sniff_ats's matching fallback / _root_urls).
+    root_hit = _scan_root(name, careers_url)
+    if root_hit:
+        ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
+        count = _confirm_coords(ats, slug) if ats != "workday" else None
+        if count is not None:
+            return {"confirmed": True, "ats": ats, "slug": slug,
+                    "count": count, "source_url": root_hit["careers_url"]}
+        slug_str = "|".join(map(str, slug)) if isinstance(slug, tuple) else slug
+        return {"confirmed": False, "ats": ats, "slug": slug_str,
+                "source_url": root_hit["careers_url"]}
+    return None
+
+
+# ─── "no-board-found" subcategories ───────────────────────────────────────
+#
+# A bare "no-board-found" means "we don't know why" -- which of the very
+# different failure modes below it was is invisible until someone probes by
+# hand. diagnose_no_board turns the sniff's own fetch results into one of
+# four qualifiers (discovery.local_sourcing.classify_miss appends it to the
+# "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
+
+def diagnose_no_board(name, careers_url=""):
+    """Why sniff_careers_ats found nothing for `name`, one of:
+
+    - "wrong-domain": a candidate answered only via a truncated/generic
+      domain token (see probes._risky_domain_tokens) and failed to
+      corroborate the company name -- the page belongs to someone else.
+    - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
+      timeout on every guess) -- likely defunct or acquired.
+    - "careers-page-no-ats": at least one page answered and looks like a
+      real self-hosted job board (>=3 genuine job-detail links), but no
+      recognized ATS is embedded on it.
+    - "site-only-no-careers": at least one page answered, but none of them
+      is a careers page or has a detectable ATS -- the domain resolves,
+      nothing else does.
+
+    A name with no domain tokens to guess and no careers_url hint has no
+    candidate URL to even attempt:
+
+    >>> diagnose_no_board("")
+    'domain-unreachable'
+
+    The other three qualifiers all need a live fetch to demonstrate (a real
+    candidate response, not just an empty candidate list), so they are
+    covered by tests/test_parsers.py::TestDiagnoseNoBoard instead of a
+    doctest here.
+
+    Notes:
+        Costs its own fetch pass (re-derives the candidate list rather than
+        reusing sniff_careers_ats's), so it is called only on the already-
+        established failure path in classify_miss, never per candidate in
+        a bulk pass.
+    """
+    urls = _candidate_urls(name, careers_url) + _root_urls(name, careers_url)
+    if not urls:
+        return "domain-unreachable"
+    responses = _fetch_all(urls)
+    hits = [(u, r) for u, r in responses.items() if r is not None]
+    if not hits:
+        return "domain-unreachable"
+    saw_custom_board = False
+    for url, r in hits:
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
+            return "wrong-domain"
+        if not saw_custom_board and _looks_like_custom_board(r.text):
+            saw_custom_board = True
+    return "careers-page-no-ats" if saw_custom_board else "site-only-no-careers"
 
 
 # ─── Headless-browser sniffer (JS-rendered careers pages) ────────────────
