@@ -156,7 +156,8 @@ def _scan_root(name, careers_url=""):
     A hit reached only through a risky (truncated/generic) domain token
     must still corroborate the company name on the page -- the same rule
     _candidate_urls hits are held to -- so scanning the root doesn't hand
-    the galaxy.com collision a second way in.
+    the galaxy.com collision a second way in (network path, so covered by
+    tests/test_parsers.py::TestRootScan rather than a doctest here).
     """
     urls = _root_urls(name, careers_url)
     if not urls:
