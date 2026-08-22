@@ -470,17 +470,25 @@ def sniff_careers_ats(name, careers_url=""):
 def diagnose_no_board(name, careers_url=""):
     """Why sniff_careers_ats found nothing for `name`, one of:
 
-    - "wrong-domain": a candidate answered only via a truncated/generic
-      domain token (see probes._risky_domain_tokens) and failed to
-      corroborate the company name -- the page belongs to someone else.
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
       timeout on every guess) -- likely defunct or acquired.
-    - "careers-page-no-ats": at least one page answered and looks like a
-      real self-hosted job board (>=3 genuine job-detail links), but no
+    - "wrong-domain": every page that DID answer was reached only through a
+      truncated/generic domain token (see probes._risky_domain_tokens) and
+      none corroborated the company name -- the precise domain never
+      answered, so all we have is someone else's page (the galaxy.com
+      shape: "galaxydiagnostics.com" dead, "galaxy.com" live).
+    - "careers-page-no-ats": at least one legitimately-reached page (a safe
+      token, or a risky one that DID corroborate) looks like a real
+      self-hosted job board (>=3 genuine job-detail links), but no
       recognized ATS is embedded on it.
-    - "site-only-no-careers": at least one page answered, but none of them
-      is a careers page or has a detectable ATS -- the domain resolves,
-      nothing else does.
+    - "site-only-no-careers": at least one legitimately-reached page
+      answered, but none of them is a careers page or has a detectable
+      ATS -- the domain resolves, nothing else does.
+
+    A risky-token hit is judged only when nothing safer answered: if the
+    real domain (or any corroborating page) responds too, a coincidental
+    unrelated site at a truncated-token guess is just noise, not evidence
+    this company's domain is wrong.
 
     A name with no domain tokens to guess and no careers_url hint has no
     candidate URL to even attempt:
@@ -506,14 +514,18 @@ def diagnose_no_board(name, careers_url=""):
     hits = [(u, r) for u, r in responses.items() if r is not None]
     if not hits:
         return "domain-unreachable"
-    saw_custom_board = False
+    safe_hits, saw_risky_uncorroborated = [], False
     for url, r in hits:
         risky_tok = _risky_token_in_url(url, name)
         if risky_tok and not _corroborates(r.text, name, risky_tok):
-            return "wrong-domain"
-        if not saw_custom_board and _looks_like_custom_board(r.text):
-            saw_custom_board = True
-    return "careers-page-no-ats" if saw_custom_board else "site-only-no-careers"
+            saw_risky_uncorroborated = True
+            continue
+        safe_hits.append(r)
+    if not safe_hits:
+        return "wrong-domain" if saw_risky_uncorroborated else "domain-unreachable"
+    if any(_looks_like_custom_board(r.text) for r in safe_hits):
+        return "careers-page-no-ats"
+    return "site-only-no-careers"
 
 
 # ─── Headless-browser sniffer (JS-rendered careers pages) ────────────────

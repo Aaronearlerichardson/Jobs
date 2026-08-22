@@ -139,6 +139,21 @@ class TestDiagnoseNoBoard:
         assert (sniffer.diagnose_no_board("Galaxy Diagnostics")
                 == "wrong-domain")
 
+    def test_risky_uncorroborated_noise_ignored_when_a_safe_page_answers(
+            self, monkeypatch):
+        # The precise domain DOES answer (just with nothing careers-shaped
+        # on it); an unrelated site coincidentally living at the truncated
+        # "galaxy.com" guess must not override that with "wrong-domain" --
+        # that reason is reserved for when the precise domain is the one
+        # that's dead (see the sibling test above).
+        safe = "https://www.galaxydiagnostics.com/"
+        risky = "https://www.galaxy.com/careers"
+        _stub_fetch_all(monkeypatch, {
+            safe: "<html><body>Welcome to Galaxy Diagnostics</body></html>",
+            risky: "<html><body>Galaxy Digital hires blockchain engineers</body></html>"})
+        assert (sniffer.diagnose_no_board("Galaxy Diagnostics")
+                == "site-only-no-careers")
+
 
 class TestCustomBoardLinks:
     def test_real_job_links_detected(self):
