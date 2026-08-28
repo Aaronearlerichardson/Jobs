@@ -204,22 +204,31 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
 # --------------------------------------------------------------------------- #
 
 def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
-                                t=None):
+                                t=None, retry_days=3):
     """One-shot: fill in full JD text for stored jobs missing it (any
     company-linked row whose description is shorter than min_len chars —
     the default matches core.fit.MIN_DESC_CHARS), via each company's
     own ATS board. Batched per company so a board with several stale rows is
-    fetched once. Safe to re-run."""
+    fetched once. Safe to re-run: a row that failed within the last
+    `retry_days` days is skipped (its desc_checked_at stamp), so reruns
+    don't re-fetch every board to fail on the same vanished postings
+    (retry_days=0 retries everything)."""
     t = _t(t)
     conn = store.connect(t["db_path"])
+    cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
+              if retry_days else "9999")
     rows = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, url, company_id FROM jobs "
+        "SELECT job_id, title, url, company_id, desc_checked_at FROM jobs "
         "WHERE company_id IS NOT NULL "
         "AND COALESCE(status,'open') != 'closed' "
         "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
+    recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
+    rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
     if limit:
         rows = rows[:int(limit)]
-    print(f"  backfilling {len(rows)} description(s) via company board(s)...")
+    print(f"  backfilling {len(rows)} description(s) via company board(s)..."
+          + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
+             if recent else ""))
 
     by_company = {}
     for r in rows:
@@ -254,6 +263,10 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                 company_fetch.hydrate_description(stub)
                 desc = stub.get("description")
             if not desc:
+                conn.execute("UPDATE jobs SET desc_checked_at=? "
+                             "WHERE job_id=?",
+                             (datetime.now().isoformat(), r["job_id"]))
+                conn.commit()
                 continue
             conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
                          (desc[:config.MAX_DESC_CHARS], r["job_id"]))

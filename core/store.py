@@ -113,6 +113,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     remote_signal  TEXT,                  -- phrase/hint that marked it remote
     anchor_signal  TEXT,                  -- the CORE keyword that anchored it
     description    TEXT,
+    desc_checked_at TEXT,                 -- last FAILED description backfill
+                                          -- attempt (ops.backfill_* skip
+                                          -- recently-checked rows)
     resume_fit_score REAL,
     fit_reason     TEXT,
     first_seen     TEXT,
@@ -171,6 +174,12 @@ _MIGRATIONS = {
         "disposition":      "TEXT",
         "disposition_note": "TEXT",
         "disposition_at":   "TEXT",
+        # Last FAILED description-backfill attempt. The backfill ops skip
+        # rows checked in the last few days: a posting that has dropped off
+        # its board never matches, and without this stamp every rerun
+        # re-fetched the same boards to fail on the same rows ("0 of 18
+        # backfilled" three runs in a row, 2026-08-28 session logs).
+        "desc_checked_at":  "TEXT",
     },
 }
 
@@ -550,15 +559,28 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     """Deactivate active companies whose JSON-API ATS board no longer resolves
     (a hard 404/error — the source of the crawl's `HTTP 404` spam), and
     optionally off-mission `other`-tier companies (excluding multi-division).
-    Only greenhouse/lever/ashby/bamboohr are probed — their board endpoint
-    cleanly distinguishes "exists" (200) from "dead" (404). Returns
-    (n_dead, n_offmission)."""
+    Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
+    from "dead" (404) are probed. Returns (n_dead, n_offmission)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     import config
     from discovery.probes import (probe_greenhouse, probe_lever,
                                    probe_ashby, probe_bamboohr)
+
+    def _ultipro_alive(slug):
+        # Not discovery.probes.probe_ultipro: its ok flag means "has jobs",
+        # which would prune a live-but-currently-empty board. Dead here
+        # means the board REQUEST fails (the 404 spam three roster rows
+        # produced in every 2026-08-28 crawl log); an empty listing is
+        # alive.
+        from scrapers.fetchers.ultipro import parse_board
+        try:
+            return (True, len(parse_board(slug)))
+        except Exception:
+            return (False, 0)
+
     PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
-             "ashby": probe_ashby, "bamboohr": probe_bamboohr}
+             "ashby": probe_ashby, "bamboohr": probe_bamboohr,
+             "ultipro": _ultipro_alive}
 
     rows = [c for c in get_companies(conn, active_only=True)
             if c.get("ats") in PROBE and c.get("slug")]

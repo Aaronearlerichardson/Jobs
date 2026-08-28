@@ -13,6 +13,7 @@ This merges the two sniffers built independently on the remote-neural and
 import html
 import logging
 import re
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 from bs4 import BeautifulSoup, SoupStrainer
@@ -387,6 +388,10 @@ _BOARD_GENERIC = {"jobs", "job", "careers", "career", "external", "site",
 _NAME_GENERIC = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
                  "the", "and", "of", "gmbh", "ag", "sa"}
 
+# (name, tenant) pairs whose foreign-board verdict was already printed this
+# process — the verdicts themselves are cached in core.claude.
+_FOREIGN_ANNOUNCED = set()
+
 
 def _tenant_affinity(name, triple):
     """True if a sniffed Workday (tenant, pod, site) shares an identity
@@ -450,14 +455,26 @@ def _foreign_board(name, triple):
         return False
     from core.claude import board_is_own
     own = board_is_own(name, triple[0], triple[2])
+    # Announce each (name, board) verdict ONCE — the sniff scans many
+    # candidate URLs that embed the same board link, and the 2026-08-28
+    # discover log repeated the same skip line 3x per company. Single write,
+    # not print(): this runs on sniff worker threads, and print()'s separate
+    # text/newline writes let another thread splice its line into this one.
+    key = (name, triple[0])
     if own is False:
-        print(f"    [!] {name}: sniffed Workday board {triple[0]}/{triple[2]}"
-              f" belongs to another employer (parent/shared board) - skipped")
+        if key not in _FOREIGN_ANNOUNCED:
+            _FOREIGN_ANNOUNCED.add(key)
+            sys.stdout.write(
+                f"    [!] {name}: sniffed Workday board {triple[0]}/"
+                f"{triple[2]} belongs to another employer (parent/shared "
+                f"board) - skipped\n")
         return True
-    if own is None:
-        print(f"    [?] {name}: Workday tenant {triple[0]!r} shares no token "
-              f"with the name and can't be verified offline - keeping; worth "
-              f"a human glance")
+    if own is None and key not in _FOREIGN_ANNOUNCED:
+        _FOREIGN_ANNOUNCED.add(key)
+        sys.stdout.write(
+            f"    [?] {name}: Workday tenant {triple[0]!r} shares no token "
+            f"with the name and can't be verified offline - keeping; worth "
+            f"a human glance\n")
     return False
 
 

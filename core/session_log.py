@@ -47,9 +47,15 @@ KEEP = 60
 _FMT = "%(asctime)s %(levelname)-8s %(name)s | %(message)s"
 _DATEFMT = "%Y-%m-%d %H:%M:%S"
 
-# Third-party loggers that emit per-connection DEBUG chatter; capped so the
-# file's DEBUG channel stays about THIS application's decisions.
-_NOISY = ("urllib3", "requests", "charset_normalizer", "playwright")
+# Third-party loggers capped at WARNING so the file stays about THIS
+# application's decisions: urllib3/requests/playwright emit per-connection
+# DEBUG chatter, werkzeug logs an INFO access line for EVERY request — the
+# browser polls /api/run/status every ~1.5s, which buried a web-UI op's real
+# records under hundreds of poll lines (2026-08-28 discover-term log) — and
+# asyncio announces its event-loop policy at DEBUG. Their WARNING+ records
+# (retries, request failures) still land.
+_NOISY = ("urllib3", "requests", "charset_normalizer", "playwright",
+          "werkzeug", "asyncio")
 
 # Flags that tune or scope a run rather than naming what kind of run it is.
 # A session whose only flags are these is the daily crawl.
