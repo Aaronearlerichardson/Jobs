@@ -15,7 +15,8 @@ import json
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
+                                as_completed, wait as fut_wait)
 from contextlib import ExitStack
 from datetime import datetime
 
@@ -44,6 +45,42 @@ from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
 _DDG_CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
 _DDG_CACHE_TTL = 7 * 24 * 3600      # seconds
 _DDG_WALL_BUDGET = 25.0             # hard per-query wall-clock cap (seconds)
+
+# Resolution watchdog: abandon a pass's remaining names if NO resolution
+# completes for this long. Generous on purpose — a normal resolve chains a
+# handful of 6-15s-bounded fetches; only a genuinely wedged one exceeds this.
+RESOLVE_STALL_S = 300.0
+
+
+def _drain_or_abandon(ex, futs, consume, stalled):
+    """Drain `futs` ({future: name}) through consume(future, name); if no
+    future completes within RESOLVE_STALL_S, report each remaining name to
+    stalled(name) instead and shut the executor down WITHOUT joining its
+    threads.
+
+    Notes:
+        The `with ThreadPoolExecutor(...)` form joins every worker on exit,
+        so one wedged resolution (fetch_company_nc on a sprawling "custom
+        board" is bounded per request, not in total) used to hold the web
+        UI's one-op-at-a-time slot until the app was restarted — 2026-08-28:
+        an add-names run finished 59 of 60 names in 8 minutes, then hung
+        >1h on the last. Behavior is enforced by tests/test_parsers.py::
+        TestResolutionStallWatchdog.
+    """
+    pending = set(futs)
+    while pending:
+        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
+                                 return_when=FIRST_COMPLETED)
+        if not done:
+            for fut in pending:
+                n = futs[fut]
+                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
+                      f"- abandoned")
+                stalled(n)
+            break
+        for fut in done:
+            consume(fut, futs[fut])
+    ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _ddg_cache_path(key):
@@ -166,7 +203,32 @@ _NAV_CHROME_RE = re.compile(
     r"community|reviews?|interviews?|companies|"
     # shared UI chrome
     r"saved jobs?|job alerts?|help center|sign (?:in|up)|see all|"
-    r"show more|load more|unlock (?:profile|insights)"
+    r"show more|load more|unlock (?:profile|insights)|"
+    # LinkedIn COMPANY/PROFILE page chrome (the 2026-08-28 add-names paste
+    # was a company page, not a results page, and 45 of its 63 lines
+    # reached the resolver: nav tabs, CTAs, sidebar labels)
+    r"about|apply|more|overview|posts?|life|people|events|"
+    r"advertising|ad choices|chart|beta|company|company-wide|competitors|"
+    r"similar pages|affiliated pages|locations|verified page|"
+    r"visit website|follow(?:ing)?|unfollow|connect|message|share|"
+    r"show\b.*|see\b.*|navigating to\b.*|skip to\b.*|"
+    r"(?:the )?latest hiring trends?.*|in my network|"
+    # LinkedIn industry/sector labels (rendered as bare lines on company
+    # pages; "Biotech" resolved by websearch to an unrelated real board)
+    r"biotech(?:nology)?(?: research)?|pharma(?:ceuticals?)?|biology|"
+    r"research|healthcare|health care|business services|"
+    r"staffing (?:and|&) recruiting|artificial intelligence|"
+    r"machine learning|ai/ml|software development|"
+    r"information technology(?: (?:and|&) services)?|"
+    # JD section headers (job-detail pastes interleave these)
+    r"(?:job )?summary|(?:preferred |minimum |basic )?qualifications|"
+    r"essential duties(?: (?:and|&) responsibilit\w*)?|"
+    r"(?:key )?responsibilities|experience (?:and|&) qualifications|"
+    r"requirements|benefits|compensation|education|"
+    # footer chrome
+    r"privacy(?: (?:&|and) terms)?|terms|cookie(?:s| policy)?|"
+    r"accessibility|user agreement|copyright policy|brand policy|"
+    r"community guidelines|language"
     r")$",
     re.I)
 
@@ -197,6 +259,15 @@ def _is_nav_noise(name):
     >>> _is_nav_noise("restor3d"), _is_nav_noise("nCino")
     (False, False)
 
+    A MULTI-word run of pure-lowercase pure-alpha words is prose, not a
+    name ("in the past day"); lowercase brands carry a digit or interior
+    capital and are single tokens anyway:
+
+    >>> _is_nav_noise("in the past day")
+    True
+    >>> _is_nav_noise("bioMerieux Clinical Diagnostics")
+    False
+
     Notes:
         The two lowercase shapes are separated on purpose. An
         UNDERSCORE-joined fragment ("company_types") is unambiguously a
@@ -213,7 +284,7 @@ def _is_nav_noise(name):
     return bool(_NAV_CHROME_RE.match(n)
                 or n.lower() in _AGGREGATOR_BRANDS
                 or re.fullmatch(r"[a-z0-9]+(?:_[a-z0-9]+)+", n)
-                or re.fullmatch(r"[a-z]+", n))
+                or re.fullmatch(r"[a-z]+(?: [a-z]+)*", n))
 
 
 def _looks_like_company(name):
@@ -238,7 +309,12 @@ def _names_from_html(html):
         s = slug.lower()
         if s in _STOP_SLUGS or "fallback-image" in s:
             continue
-        out.add(slug.replace("-", " ").title())
+        # Crunchbase-style duplicate slugs carry a single-digit suffix
+        # ("genomics-plc-1"), which title-cases into a bogus "Genomics Plc 1"
+        # company name. Multi-digit tails stay: they are part of real names
+        # (intel-471).
+        s = re.sub(r"-\d$", "", slug)
+        out.add(s.replace("-", " ").title())
     return {n for n in out if _looks_like_company(n)}
 
 
@@ -733,11 +809,43 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 from core.locality import NC_HQ_RE as _NC_HQ_RE  # "<Triangle city>, NC" HQ/office signal
 
 
+def _hq_match_beyond_brand(text, name):
+    """True if `text` carries a "<place>, ST" match whose place is NOT just
+    the company's own name.
+
+    Garner Health is a New York company, but "Garner" is also a configured
+    locality town — so every page of garnerhealth.com address-matched and
+    the 2026-08-28 discover run activated it as NC-local with zero NC jobs.
+    A match whose place tokens all appear in the company name is brand
+    text; a match on any OTHER configured place still counts:
+
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health")
+    False
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio")
+    True
+    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health")
+    True
+    >>> _hq_match_beyond_brand("no address here", "Acme Bio")
+    False
+    """
+    squashed = _NONALNUM_RE.sub("", (name or "").lower())
+    for m in _NC_HQ_RE.finditer(text or ""):
+        toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
+        place_toks = toks[:-1] or toks          # drop the state suffix token
+        if all(t in squashed for t in place_toks):
+            continue
+        return True
+    return False
+
+
 def nc_hq_signal(name, careers_url="", board_jobs=None):
     """
     True if the company has a verifiable NC presence — used to TRACK local
     companies that currently have no NC openings. Checks the board's job
     locations first (cheap), then the company site/careers/contact pages.
+    Page-text matches that are just the company's own brand name don't
+    count (see _hq_match_beyond_brand); a JOB posted in a locality town is
+    a genuine signal regardless of what the company is called.
     """
     if board_jobs:
         for j in board_jobs:
@@ -757,7 +865,7 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
         seen.add(u)
         try:
             r = SESSION.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
-            if r.status_code == 200 and _NC_HQ_RE.search(r.text):
+            if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
                 return True
         except Exception:
             continue
@@ -1099,7 +1207,7 @@ def _websearch_board(name, max_results=8):
     """
     from scrapers.http import HEADERS as _H
     from scrapers.fetchers.company import custom_board_listing_url
-    from .sniffer import _detect, _pack
+    from .sniffer import _detect, _foreign_board, _pack
 
     def _search(query):
         out = []
@@ -1132,8 +1240,13 @@ def _websearch_board(name, max_results=8):
             hit = _detect(r.text, r.url)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
+            # An own-page Workday embed can still be a parent conglomerate's
+            # shared board (seqirus.com links to CSL's 'csl' tenant), which
+            # would attribute every sibling company's jobs to this one —
+            # same guard as the sniffer.
             if hit and hit[0] in ("fetchable", "semi") and (own or _slug_matches_name(hit[2], name)):
-                return _pack(hit[1], hit[2], r.url)
+                if not (hit[1] == "workday" and _foreign_board(name, hit[2])):
+                    return _pack(hit[1], hit[2], r.url)
             # Custom self-hosted board: only on the company's OWN domain —
             # otherwise a third-party jobs site with ≥3 listings
             # (healthecareers, dotmed, expertini, …) resolves as the board.
@@ -1621,7 +1734,17 @@ _PASTE_NOISE_RE = re.compile(
     r"\d*\s*(?:day|week|month|hour|minute)s?\s*ago|reposted.*|"
     r"[\d,]*\s*[km]?\s*(?:followers?|employees?|connections?|applicants?)|"
     r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*|"
-    r"\$[\d,.]+k?\s*-\s*\$[\d,.]+k?.*|\$[\d,.]+k?\s*(?:a|per|/)\s*(?:year|hour|month).*"
+    r"\$.*|"                     # any $-leading line: salary in every format
+    # LinkedIn company/profile page stat lines ("11 results", "615 on
+    # LinkedIn", "501-1000 employees", "2 year growth", "42Fair Match",
+    # "4 connections work here", "75% have a Doctor of Philosophy")
+    r"[\d,\-–]+\s*(?:results?|notifications?|on linkedin|"
+    r"year growth|fair match|employees?)|"
+    r"\d+\s*(?:company |school )?(?:alumni|connections?)\s+works? here.*|"
+    r"\d+%.*|"
+    r"401\(k\).*|"
+    r"in the past \w+|"
+    r".*(?:©|\(c\)|�)\s*\d{4}.*|.*\bcorporation\b\W*\d{4}"
     r")\W*$", re.I)
 
 # A line that reads as a JOB TITLE rather than an employer. Results pages
@@ -1630,13 +1753,18 @@ _TITLE_WORD_RE = re.compile(
     r"\b(?:engineer|scientist|developer|analyst|manager|director|specialist|"
     r"coordinator|associate|assistant|technician|architect|consultant|intern|"
     r"lead|head of|vp|president|officer|administrator|nurse|physician|"
-    r"recruiter|designer|researcher|postdoc|fellow|programmer|statistician)\b",
+    r"recruiter|designer|researcher|postdoc|fellow|programmer|"
+    r"(?:bio)?statistician)\b",
     re.I)
 
-# "Durham, NC" / "Durham, NC (Hybrid)" / "Raleigh-Durham-Chapel Hill Area"
+# "Durham, NC" / "Durham, NC (Hybrid)" / "Raleigh-Durham-Chapel Hill Area" /
+# "North Carolina, United States (Remote)" — the region after the comma may
+# be several words, and a clipped paste can truncate the trailing "(Remote)"
+# to "(R", so the closing paren is optional.
 _LOCATION_LINE_RE = re.compile(
-    r"^[A-Z][\w.'-]+(?:[ \-][\w.'-]+)*,\s*(?:[A-Z]{2}|[A-Z][a-z]+)"
-    r"(?:\s*\([^)]*\))?$|.*\bArea$|.*\bMetropolitan\b", re.I)
+    r"^[A-Z][\w.'-]+(?:[ \-][\w.'-]+)*,\s*"
+    r"(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+    r"(?:\s*\([^)]*\)?)?$|.*\bArea$|.*\bMetropolitan\b", re.I)
 
 
 # A results row whose job title is rendered twice, optionally with a badge
@@ -1669,6 +1797,16 @@ def _is_sentence_case(name):
     >>> _is_sentence_case("Date posted")
     True
     >>> _is_sentence_case("Skip to main content")
+    True
+
+    A capitalised CONNECTOR first word still starts the shape — these two
+    slipped through when the check skipped straight to the first
+    significant word ("my" / "latest") and read its lowercase as
+    "doesn't even start capitalised":
+
+    >>> _is_sentence_case("In my network")
+    True
+    >>> _is_sentence_case("The latest hiring trend")
     True
     >>> _is_sentence_case("Alpaca Health")
     False
@@ -1709,10 +1847,15 @@ def _is_sentence_case(name):
     # case rest. A phrase that doesn't even start capitalised ("bla bla")
     # isn't in that shape either way, so there's nothing to flag -- this
     # also keeps a completely-lowercase throwaway phrase from being read as
-    # "sentence case" when it's really just not a name at all.
-    if not _starts_upper(significant[0]):
+    # "sentence case" when it's really just not a name at all. The shape
+    # starts at the LITERAL first word, connector or not: "In my network"
+    # begins capitalised even though "In" carries no case signal itself.
+    if not _starts_upper(words[0]):
         return False
-    return any(not _starts_upper(w) for w in significant[1:])
+    rest = significant[1:] if significant[0] == words[0] else significant
+    if not rest:
+        return False
+    return any(not _starts_upper(w) for w in rest)
 
 
 def _clean_candidate(raw, drop_titles=True):
@@ -1777,13 +1920,15 @@ def parse_company_names(blob, limit=300):
     surrounding chrome is never even considered. A real search page yields
     15 employers and no junk that way, against 117 lines for the filter.
 
-    Otherwise fall back to filtering lines, which is deliberately
-    permissive: precision is cheap to get wrong and expensive to tune, a
-    junk name costs one failed resolve and is dropped, and a dropped real
-    name is invisible. Even so, LinkedIn/Indeed/Glassdoor navigation chrome
-    (menu items, notification badges, CTAs) is filtered out on sight, so it
-    never reaches the probe -> resolve chain that would otherwise attach a
-    slug-guessed board to a junk name:
+    Otherwise fall back to filtering lines. Permissiveness is no longer
+    cheap: a junk name that reaches the resolver costs a full sniff ->
+    probe -> websearch chain, is PERSISTED as a miss row either way
+    (add_names records every unresolved name), and a generic word can
+    websearch-resolve to an unrelated real company's board (2026-08-28:
+    "Biotech" landed on Dianthus Therapeutics' greenhouse board, ACTIVE).
+    So page chrome, stat lines, sector labels and JD section headers are
+    filtered out on sight; a dropped real name is still the rarer, cheaper
+    mistake, so the filters key on shapes no employer name takes:
 
     >>> parse_company_names('''Home
     ... My Network
@@ -1879,9 +2024,30 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
           + f" -> resolving {len(fresh)}...")
 
     written, unresolved = [], []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(resolve_or_miss, n): n for n in fresh}
-        for fut in as_completed(futs):
+    # No `with`: the executor's exit joins every worker, and one wedged
+    # resolution then holds the web UI's one-op-at-a-time slot until the app
+    # is restarted (2026-08-28: 59 of 60 pasted names finished in 8 minutes,
+    # the 60th hung for over an hour — fetch_company on a sprawling "custom
+    # board" is bounded per request, not in total). The watchdog below
+    # abandons the stragglers instead: if NO name completes for
+    # RESOLVE_STALL_S, the remainder are recorded as misses and the executor
+    # is shut down without waiting on its threads.
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    futs = {ex.submit(resolve_or_miss, n): n for n in fresh}
+    pending = set(futs)
+    while pending:
+        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
+                                 return_when=FIRST_COMPLETED)
+        if not done:
+            for stuck in pending:
+                n = futs[stuck]
+                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
+                      f"- abandoned")
+                record_miss(conn, n, "fetch-error:stalled", source="paste")
+                unresolved.append((n, "fetch-error:stalled"))
+            pending = set()
+            break
+        for fut in done:
             name = futs[fut]
             try:
                 hit, reason = fut.result()
@@ -1948,6 +2114,7 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
                   f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
                   f"{'active' if active else 'inactive'}{flag}")
+    ex.shutdown(wait=False, cancel_futures=True)
     conn.commit()
     conn.close()
     if unresolved:

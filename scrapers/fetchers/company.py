@@ -12,6 +12,7 @@ is pulled and the caller's own filter chain decides.
 import hashlib
 import json
 import re
+import sys
 import time
 
 import config
@@ -804,7 +805,11 @@ def fetch_ultipro_all(slug, loc_re=None):
     try:
         opps = parse_board(slug)
     except Exception as e:
-        print(f"    [!] UltiPro {slug.split('|')[0]}: {e}")
+        # Single write, not print(): this runs on fetch worker threads, and
+        # print()'s separate text/newline writes let a concurrently printing
+        # thread splice its line into the middle of this one (seen fused with
+        # a [SNIFF] line in the 2026-08-28 discover session log).
+        sys.stdout.write(f"    [!] UltiPro {slug.split('|')[0]}: {e}\n")
         return []
     code = slug.split("|")[0]
     out = []

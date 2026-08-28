@@ -11,6 +11,7 @@ The listing carries the ``BriefDescription`` inline, so no per-job detail call
 is needed. The store slug is ``"<CODE>|<GUID>"``.
 """
 
+import sys
 import time
 
 import requests
@@ -75,7 +76,9 @@ def fetch_ultipro(slug, company_name):
     try:
         opps = parse_board(slug)
     except Exception as e:
-        print(f"    [!] UltiPro {company_name}: {e}")
+        # Single write (worker-thread print interleaves mid-line otherwise —
+        # see fetch_ultipro_all's twin note in fetchers/company.py).
+        sys.stdout.write(f"    [!] UltiPro {company_name}: {e}\n")
         return []
     code = slug.split("|")[0]
     out = []

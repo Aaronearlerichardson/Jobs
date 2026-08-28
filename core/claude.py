@@ -440,6 +440,45 @@ def score_company_mission(name, context=""):
     return tier, score, reason
 
 
+_BOARD_OWNER_SYSTEM = (
+    "You judge job-board ownership. Given a company name and the Workday "
+    "tenant + career-site tokens its careers page links to, decide whether "
+    "that tenant is the company's OWN hiring board — including former "
+    "names, rebrands and merged identities (Merck & Co. posts on tenant "
+    "'msd') — or a DIFFERENT organization's board, typically a parent "
+    "conglomerate's shared board that also lists many sibling companies "
+    "(Genedata linking to Danaher's 'danaher'/'DanaherJobs'). "
+    'Reply with JSON only: {"same_employer": true|false, "reason": "<one line>"}'
+)
+
+_BOARD_OWNER_CACHE = {}
+
+
+def board_is_own(company, tenant, site=""):
+    """True/False: is the Workday tenant `company`'s own board? None when
+    the API is unavailable or the reply is malformed — callers keep the
+    hit on None (offline behavior unchanged) and only reject on a clear
+    False. Verdicts are cached per (company, tenant) for the process.
+
+    Notes:
+        Consulted only for tenants that share no identity token with the
+        company name (discovery.sniffer._foreign_board), so this costs a
+        call on the rare mismatch, not per sniff. The asymmetric default
+        matters: a wrong "keep" mislabels one company until a human looks,
+        a wrong "reject" silently loses a real board forever.
+    """
+    key = (str(company).lower(), str(tenant).lower())
+    if key in _BOARD_OWNER_CACHE:
+        return _BOARD_OWNER_CACHE[key]
+    user = f"COMPANY: {company}\nWORKDAY TENANT: {tenant}\nCAREER SITE: {site}"
+    result = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=120)
+    verdict = (bool(result["same_employer"])
+               if result and "same_employer" in result else None)
+    if verdict is not None:
+        _BOARD_OWNER_CACHE[key] = verdict
+    return verdict
+
+
 def score_resume_fit(resume, title, description=""):
     """Delegate to the multi-axis rubric in core/fit.py; returns a
     FitResult (`.score`, `.axes`, `.gates`, `.reason`, and `.as_columns()` /

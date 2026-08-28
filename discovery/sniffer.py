@@ -172,6 +172,8 @@ def _scan_root(name, careers_url=""):
             continue
         hit = _detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
+            if hit[1] == "workday" and _foreign_board(name, hit[2]):
+                continue
             return _pack(hit[1], hit[2], r.url)
     return None
 
@@ -374,6 +376,87 @@ def _pack(ats, slug, careers_url):
     return out
 
 
+# Tokens that appear in tenant/site strings for structural reasons and say
+# nothing about WHOSE board it is.
+_BOARD_GENERIC = {"jobs", "job", "careers", "career", "external", "site",
+                  "portal", "search", "global", "en", "us", "www", "com"}
+_NAME_GENERIC = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
+                 "the", "and", "of", "gmbh", "ag", "sa"}
+
+
+def _tenant_affinity(name, triple):
+    """True if a sniffed Workday (tenant, pod, site) shares an identity
+    token with the company name — tenant OR site, either direction, or a
+    4+-char shared prefix (tenants abbreviate: 'vhr-unither').
+
+    >>> _tenant_affinity("KBI Biopharma", ("jsrglobal", 1, "KBI_Biopharma"))
+    True
+    >>> _tenant_affinity("Bioventus", ("osv-bioventus", 501, "External"))
+    True
+    >>> _tenant_affinity("United Therapeutics", ("vhr-unither", 5, "External"))
+    True
+
+    No affinity does NOT mean wrong — Merck & Co. really posts on tenant
+    'msd' — it means "cannot be confirmed from the strings alone", which is
+    what routes the hit to _foreign_board's LLM check:
+
+    >>> _tenant_affinity("Genedata", ("danaher", 1, "DanaherJobs"))
+    False
+    >>> _tenant_affinity("Merck & Co.", ("msd", 5, "SearchJobs"))
+    False
+    """
+    tenant, _, site = triple
+    board = f"{tenant} {re.sub(r'([a-z])([A-Z])', r'\\1 \\2', str(site))}"
+    board_toks = [t for t in re.findall(r"[a-z0-9]+", board.lower())
+                  if len(t) >= 3 and t not in _BOARD_GENERIC]
+    name_words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
+                  if w not in _NAME_GENERIC]
+    squashed_name = "".join(name_words)
+    squashed_board = "".join(board_toks)
+    for bt in board_toks:
+        if bt in squashed_name:
+            return True
+    for nw in name_words:
+        if len(nw) >= 3 and nw in squashed_board:
+            return True
+    for bt in board_toks:
+        for nw in name_words:
+            if len(bt) >= 5 and len(nw) >= 5 and bt[:4] == nw[:4]:
+                return True
+    return False
+
+
+def _foreign_board(name, triple):
+    """True when a sniffed Workday triple should NOT be attributed to
+    `name`: the strings share no identity token AND the LLM judges the
+    tenant to be another employer's (typically a parent conglomerate's
+    shared board).
+
+    Notes:
+        Genedata's careers page legitimately links to Danaher's
+        danaher/DanaherJobs board — but confirming that board AS Genedata
+        made the daily crawl ingest every Danaher opco's local job under
+        Genedata's name (2026-08-28 discover session, nc=28). The string
+        check alone can't reject it: Merck & Co. really does post on
+        tenant 'msd', so a bare mismatch must stay (that's also the
+        offline behavior — with no API key the verdict is unknown and the
+        hit is kept, flagged in the log for a human glance).
+    """
+    if _tenant_affinity(name, triple):
+        return False
+    from core.claude import board_is_own
+    own = board_is_own(name, triple[0], triple[2])
+    if own is False:
+        print(f"    [!] {name}: sniffed Workday board {triple[0]}/{triple[2]}"
+              f" belongs to another employer (parent/shared board) - skipped")
+        return True
+    if own is None:
+        print(f"    [?] {name}: Workday tenant {triple[0]!r} shares no token "
+              f"with the name and can't be verified offline - keeping; worth "
+              f"a human glance")
+    return False
+
+
 # ─── Public API ──────────────────────────────────────────────────────────
 
 def sniff_ats(name, careers_url="", timeout=6):
@@ -398,7 +481,10 @@ def sniff_ats(name, careers_url="", timeout=6):
             continue
         hit = _detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
-            return _pack(hit[1], hit[2], r.url)
+            if hit[1] == "workday" and _foreign_board(name, hit[2]):
+                hit = None      # keep scanning; the custom fallback may
+            else:               # still capture the company's OWN listings
+                return _pack(hit[1], hit[2], r.url)
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
@@ -434,6 +520,8 @@ def sniff_careers_ats(name, careers_url=""):
         if not hit:
             continue
         kind, ats, slug = hit
+        if ats == "workday" and _foreign_board(name, slug):
+            continue
         if kind == "fetchable" and ats != "workday":
             count = _confirm_coords(ats, slug)
             if count is not None:

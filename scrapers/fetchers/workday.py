@@ -173,7 +173,7 @@ def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200):
     def _one(r):
         return r["job_id"], fetch_workday_description(r["url"])
 
-    n = 0
+    n, empty = 0, []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for fut in as_completed({ex.submit(_one, r): r for r in rows}):
             try:
@@ -182,11 +182,19 @@ def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200):
                 print(f"    [!] backfill error: {e}")
                 continue
             if not text:
+                empty.append(jid)
                 continue
             conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
                          (text[:config.MAX_DESC_CHARS], jid))
             conn.commit()
             n += 1
     conn.close()
+    # "0 of 4 backfilled" with no why was undiagnosable from the session
+    # log; name the silent failures (CXS answered but returned no JD text —
+    # usually a posting that closed since it was stored).
+    if empty:
+        print(f"    [!] {len(empty)} fetch(es) returned no JD text "
+              f"(posting gone from CXS?): "
+              + ", ".join(empty[:5]) + (" ..." if len(empty) > 5 else ""))
     print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n

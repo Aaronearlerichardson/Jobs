@@ -426,6 +426,56 @@ class TestPastedNameExtractionFallback:
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
 
 
+class TestAddNamesStallWatchdog:
+    """One wedged resolution must not hold add_names — and the web UI's
+    one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
+    finished in 8 minutes; the 60th hung for over an hour and wedged the op
+    slot until the app was restarted."""
+
+    class _Conn:
+        def execute(self, *a):
+            return self
+
+        def fetchall(self):
+            return []
+
+        def fetchone(self):
+            return None
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    def test_a_hung_resolve_is_abandoned_and_recorded(self, monkeypatch):
+        import threading
+        release = threading.Event()
+
+        def _resolve(n, *a, **k):
+            if n.startswith("Hangs"):
+                release.wait(10)      # far past the patched stall window
+            return None, "no-board-found"
+
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
+        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
+        misses = []
+        monkeypatch.setattr(
+            "core.store.record_miss",
+            lambda conn, n, r, **kw: misses.append((n, r)))
+        monkeypatch.setattr("core.store.connect",
+                            lambda *a, **k: self._Conn())
+        try:
+            out = local_sourcing.add_names("Chimerix\nHangs Forever Inc")
+        finally:
+            release.set()             # unblock the abandoned worker thread
+        assert out == []
+        assert ("Hangs Forever Inc", "fetch-error:stalled") in misses, \
+            "the wedged name was not abandoned as a recorded miss"
+        assert any(n == "Chimerix" for n, _ in misses), \
+            "names that resolved before the stall must still be processed"
+
+
 class TestDoubledTitleExtraction:
     """A results page that repeats each job title pins the employer by position.
 
@@ -508,10 +558,13 @@ Durham, NC (Hybrid)
 
     def test_one_stray_double_does_not_hijack_a_plain_list(self):
         """Two markers are required, so a coincidental repeat in prose cannot
-        switch a plain list over to positional reading."""
+        switch a plain list over to positional reading. (Positional reading
+        would return nothing but the line after the stray double; every real
+        name surviving proves line mode ran. "bla bla" itself is multi-word
+        lowercase prose, which the line filter now drops on sight.)"""
         assert local_sourcing.parse_company_names(
             "Chimerix\nbla bla\nG1 Therapeutics\nBiogen") == [
-            "Chimerix", "bla bla", "G1 Therapeutics", "Biogen"]
+            "Chimerix", "G1 Therapeutics", "Biogen"]
 
 
 class TestResolveBoardSniffFirstCustomShortCircuit:

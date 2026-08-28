@@ -307,6 +307,12 @@ def _ddg_text(query, max_results, retries=2, pause=2.5, page=1):
             if attempt < retries:
                 time.sleep(pause * (attempt + 1))
                 continue
+            # "No results found." is DDG's way of returning an empty page
+            # (and sometimes a disguised throttle — hence the retries above);
+            # once the retries are spent it's an expected empty, and the
+            # "[dork] 0 result(s)" line that follows already reports it.
+            if "no results" in str(e).lower():
+                return []
             # Type included: a bare KeyError prints as just its key ('text'),
             # which reads like a parsing quirk rather than a dead registry.
             print(f"  [!] dork {query[:48]}...: {type(e).__name__}: {e}")
