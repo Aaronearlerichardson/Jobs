@@ -19,8 +19,17 @@ if str(ROOT) not in sys.path:                      # importable as `pytest tests
     sys.path.insert(0, str(ROOT))
 
 import config as _config                           # noqa: E402
+import core.session_log as _session_log            # noqa: E402
 import core.store as _store                        # noqa: E402
 import scrapers.runner as _runner                  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _session_logs_to_tmp(tmp_path, monkeypatch):
+    """Session logs never land in the real data dir during tests. The
+    webapp op runner opens one per op, and several tests drive it."""
+    monkeypatch.setattr(_session_log, "_log_dir",
+                        lambda: tmp_path / "session-logs")
 
 
 # --------------------------------------------------------------------------- #

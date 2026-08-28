@@ -4,10 +4,11 @@ to the browser via /api/run/status polling)."""
 import io
 import sys
 import threading
+import time
 from datetime import datetime
 
 import config
-from core import store
+from core import session_log, store
 from scrapers import ops as maint
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
@@ -19,9 +20,12 @@ _TASK_LOCK = threading.Lock()
 
 
 class _Tee(io.TextIOBase):
-    """stdout tee: real console keeps printing; the browser polls the copy.
-    Swapped in globally while an operation runs so the crawl's many
-    worker-thread print()s are captured too.
+    """stdout tee: real console keeps printing; the browser polls the copy,
+    and an optional `sink` file (the session log — see core/session_log.py)
+    gets a third copy as it streams, so UI-triggered runs are reviewable
+    after the fact just like CLI ones. Swapped in globally while an
+    operation runs so the crawl's many worker-thread print()s are captured
+    too.
 
     The browser tracks a cursor into the log (`since=<n>` on
     /api/run/status) so a poll only re-sends lines it hasn't seen yet. That
@@ -35,8 +39,9 @@ class _Tee(io.TextIOBase):
     routes.py can translate an absolute cursor back into a list index
     (`since - log_offset`) that stays correct across trims."""
 
-    def __init__(self, orig):
+    def __init__(self, orig, sink=None):
         self.orig = orig
+        self.sink = sink
         self._buf = ""
 
     def write(self, s):
@@ -44,6 +49,11 @@ class _Tee(io.TextIOBase):
             self.orig.write(s)
         except Exception:
             pass
+        if self.sink is not None:
+            try:
+                self.sink.write(s)
+            except Exception:
+                pass
         with _LOG_LOCK:
             self._buf += s
             while "\n" in self._buf:
@@ -96,7 +106,13 @@ def _run_op(name, fn):
     """
     def worker():
         orig = sys.stdout
-        tee = _Tee(orig)
+        t0 = time.monotonic()
+        try:
+            _, log_fh = session_log.open_log(f"webui-{name}",
+                                             f"web UI op {name!r}")
+        except OSError:
+            log_fh = None            # a full/read-only disk can't block the op
+        tee = _Tee(orig, sink=log_fh)
         sys.stdout = tee
         try:
             _restore_keywords()
@@ -105,6 +121,8 @@ def _run_op(name, fn):
             TASK["error"] = f"{type(e).__name__}: {e}"
             print(f"  [!] operation failed: {TASK['error']}")
         finally:
+            if log_fh is not None:
+                session_log.footer(log_fh, t0)
             # Only unwind our own layer. Blindly assigning `orig` back would
             # restore a stale stream if anything else swapped stdout while we
             # ran, permanently leaving a tee installed that copies every later

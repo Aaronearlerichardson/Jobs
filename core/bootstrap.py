@@ -50,7 +50,8 @@ def ensure_profile(announce=True):
 
 
 def status_lines():
-    """Two lines naming where this install reads its settings and data from.
+    """Lines naming where this install reads its settings and data from,
+    and where session logs land.
 
     Worth printing on every run: the #1 confusion with a tool that has both a
     checkout and a per-user data dir is not knowing which store you just
@@ -59,4 +60,5 @@ def status_lines():
     return [f"profile : {config.PROFILE_PATH}"
             + ("" if config.PROFILE_PATH.exists()
                else f"  (missing — using {config.PROFILE_EXAMPLE_PATH.name})"),
-            f"data    : {config.DATA_DIR}"]
+            f"data    : {config.DATA_DIR}",
+            f"logs    : {config.DATA_DIR / 'logs'}"]

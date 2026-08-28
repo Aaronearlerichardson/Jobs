@@ -116,6 +116,9 @@ def main(argv=None):
                          "data, then exit")
     args = ap.parse_args(argv)
 
+    from core import session_log
+    session_log.start(list(argv) if argv is not None else sys.argv[1:])
+
     from core import bootstrap
     bootstrap.ensure_profile()
     if args.where:
