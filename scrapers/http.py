@@ -8,10 +8,19 @@ fresh handshake per request. Call sites use `SESSION.get(...)` /
 pass headers explicitly (the session already carries them as defaults).
 """
 
+import logging
+
 from requests import Session
 from requests.adapters import HTTPAdapter
 
 from config import USER_AGENT
+
+# File-only request trace (core/session_log.py installs the handler; there
+# is no console handler, so this never reaches the terminal). One record
+# per request is the single most useful diagnostic when reading a session
+# log after the fact: which URLs a pass actually hit, what answered, how
+# slowly.
+_log = logging.getLogger("http")
 
 # Advertise only gzip/deflate — NOT brotli. requests would otherwise offer `br`
 # (brotlicffi is installed), and some servers' chunked brotli responses crash
@@ -41,9 +50,17 @@ class PoliteSession(Session):
         # Imported lazily: robots.py imports HEADERS from this module.
         from .robots import CACHE, RobotsDisallowed
         if not CACHE.allowed(url):
+            _log.debug("%s %s -> robots.txt disallow", method, url)
             raise RobotsDisallowed(f"robots.txt disallows {url}")
         CACHE.wait_turn(url)               # honor Crawl-delay, per host
-        return super().request(method, url, *args, **kwargs)
+        try:
+            r = super().request(method, url, *args, **kwargs)
+        except Exception as e:
+            _log.debug("%s %s -> %s", method, url, type(e).__name__)
+            raise
+        _log.debug("%s %s -> %s in %.2fs", method, url, r.status_code,
+                   r.elapsed.total_seconds())
+        return r
 
 
 def _build_session():

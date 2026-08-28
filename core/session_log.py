@@ -1,22 +1,39 @@
-"""Mirror everything a run prints into a per-session log file.
+"""Per-session log files: timestamped, levelled records of everything a run
+prints — plus DEBUG detail that is logged but never printed.
 
-The crawler talks entirely through print(): sources tried, misses, scores,
-digests, tracebacks. That output used to vanish with the console window.
-`start()` tees sys.stdout and sys.stderr into
-``<DATA_DIR>/logs/session-<stamp>-<mode>.log`` so a later reader — you, or
-Claude reviewing whether a change actually improved a run — can pull up the
-exact output of any past session.
+Every record in the file carries a timestamp, a level and a source name::
+
+    2026-08-28 15:41:22 INFO     console | probing 171 candidate compan(ies)...
+    2026-08-28 15:41:24 DEBUG    http    | GET https://boards-api.greenhouse.io/... -> 200 in 0.31s
+    2026-08-28 15:41:29 WARNING  console | [!] greenhouse arine: HTTP 404
+
+Two kinds of record end up here:
+
+* **Console mirror** — sys.stdout/sys.stderr are tee'd, so everything the
+  crawler prints reaches the console unchanged AND lands in the file as a
+  levelled record (logger ``console``; ``[!]`` lines as WARNING, stderr as
+  ERROR, everything else INFO).
+* **File-only detail** — anything sent through the stdlib ``logging`` module
+  (``logging.getLogger(__name__).debug(...)``) is written to the session
+  file by the handler installed here, and NEVER printed: no console handler
+  exists. This is the channel for per-request HTTP traces, cache hits, and
+  other diagnostics too chatty for the terminal.
 
 Notes:
-    run_scraper.main() calls start() right after argument parsing, so the
-    whole session is captured including the final traceback of a crash
-    (Python prints it to stderr before atexit handlers run). The offline
-    test suite never calls start(); tests/test_session_log.py exercises it
-    against a tmp directory instead of your real data dir.
+    run_scraper.main() calls start() right after argument parsing;
+    webapp/ops.py opens one SessionLog per UI operation and streams its
+    browser tee into it. The offline test suite never calls start()
+    (tests/conftest.py points _log_dir at a tmp directory, autouse);
+    tests/test_session_log.py enforces the record format, the level
+    routing, and the logged-but-not-printed contract. Noisy third-party
+    loggers (urllib3 et al.) are capped at WARNING so a DEBUG root level
+    doesn't flood the file with connection chatter.
 """
 
 import atexit
+import logging
 import sys
+import threading
 import time
 from datetime import datetime
 
@@ -25,6 +42,14 @@ import config
 # How many session logs to keep. A daily crawl plus ad-hoc maintenance runs
 # stays under this for roughly a month of history.
 KEEP = 60
+
+# One record per line: timestamp, level, source logger, message.
+_FMT = "%(asctime)s %(levelname)-8s %(name)s | %(message)s"
+_DATEFMT = "%Y-%m-%d %H:%M:%S"
+
+# Third-party loggers that emit per-connection DEBUG chatter; capped so the
+# file's DEBUG channel stays about THIS application's decisions.
+_NOISY = ("urllib3", "requests", "charset_normalizer", "playwright")
 
 # Flags that tune or scope a run rather than naming what kind of run it is.
 # A session whose only flags are these is the daily crawl.
@@ -97,33 +122,135 @@ def _clean(mode):
     return "".join(c for c in mode if c.isalnum() or c == "-") or "crawl"
 
 
-class _Tee:
-    """Writes to the original stream and the log file; reads everything
-    else (isatty, encoding, ...) from the original stream.
+def _level_for(line, err):
+    """The record level for one mirrored console line.
+
+    >>> _level_for("  [!] greenhouse arine: HTTP 404", err=False) == logging.WARNING
+    True
+    >>> _level_for("  42 new job(s)", err=False) == logging.INFO
+    True
+    >>> _level_for("Traceback (most recent call last):", err=True) == logging.ERROR
+    True
+    """
+    if err:
+        return logging.ERROR
+    if line.lstrip().startswith(("[!]", "[?]")):
+        return logging.WARNING
+    return logging.INFO
+
+
+class SessionLog:
+    """One session's log file: a logging handler feeding it, plus the
+    line-buffered console mirror. duck-types as a write()-able sink so the
+    webapp's stdout tee can stream into it unchanged.
 
     Notes:
-        The sink write is wrapped so a closed log file (interpreter
+        The handler is attached to the ROOT logger, so any module's
+        ``logging.getLogger(__name__)`` records land in the file with no
+        wiring — and nowhere else, because no console handler exists.
+        close() detaches the handler, restores the root level and stamps
+        the footer; it is safe to call more than once (and runs atexit for
+        CLI sessions, so a crash still gets a footer after Python prints
+        the traceback to the tee'd stderr).
+    """
+
+    def __init__(self, mode, invocation, now=None):
+        log_dir = _log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        _prune(log_dir)
+
+        now = now or datetime.now()
+        self.path = log_dir / f"session-{now:%Y%m%d-%H%M%S}-{_clean(mode)}.log"
+        self._fh = open(self.path, "w", encoding="utf-8", errors="replace",
+                        buffering=1)
+        self._fh.write(f"# job crawler session\n"
+                       f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
+                       f"# run     : {invocation}\n\n")
+        self._t0 = time.monotonic()
+        self._buf = {False: "", True: ""}     # partial console lines, by err
+        self._lock = threading.Lock()
+        self._closed = False
+
+        self._handler = logging.StreamHandler(self._fh)
+        self._handler.setFormatter(logging.Formatter(_FMT, datefmt=_DATEFMT))
+        root = logging.getLogger()
+        self._prev_root_level = root.level
+        root.addHandler(self._handler)
+        root.setLevel(logging.DEBUG)
+        for name in _NOISY:
+            noisy = logging.getLogger(name)
+            if noisy.level == logging.NOTSET or noisy.level < logging.WARNING:
+                noisy.setLevel(logging.WARNING)
+
+    # ── console mirror ──────────────────────────────────────────────────
+    def write(self, text):
+        """Sink API for a stdout tee: mirror `text` as console records."""
+        self.feed(text, err=False)
+        return len(text)
+
+    def flush(self):
+        pass                                  # records are emitted per line
+
+    def feed(self, text, err=False):
+        """Buffer tee'd console output; emit one record per complete line."""
+        if self._closed:
+            return
+        with self._lock:
+            self._buf[err] += text
+            while "\n" in self._buf[err]:
+                line, self._buf[err] = self._buf[err].split("\n", 1)
+                self._route(line, err)
+
+    def _route(self, line, err):
+        if not line.strip():
+            return                            # layout blanks aren't records
+        logging.getLogger("console").log(_level_for(line, err), "%s", line)
+
+    # ── teardown ────────────────────────────────────────────────────────
+    def close(self):
+        if self._closed:
+            return
+        with self._lock:
+            for err in (False, True):
+                if self._buf[err].strip():
+                    self._route(self._buf[err], err)
+                self._buf[err] = ""
+        self._closed = True
+        root = logging.getLogger()
+        root.removeHandler(self._handler)
+        root.setLevel(self._prev_root_level)
+        try:
+            self._fh.write(f"\n# ended   : {datetime.now():%Y-%m-%d %H:%M:%S}"
+                           f"  ({time.monotonic() - self._t0:.0f}s)\n")
+            self._fh.close()
+        except ValueError:
+            pass
+
+
+class _Tee:
+    """Writes to the original stream and mirrors into the SessionLog; reads
+    everything else (isatty, encoding, ...) from the original stream.
+
+    Notes:
+        The mirror side is wrapped so a closed session log (interpreter
         teardown, double finish) can never break console output.
     """
 
-    def __init__(self, stream, sink):
+    def __init__(self, stream, session, err=False):
         self._stream = stream
-        self._sink = sink
+        self._session = session
+        self._err = err
 
     def write(self, text):
         n = self._stream.write(text)
         try:
-            self._sink.write(text)
+            self._session.feed(text, err=self._err)
         except ValueError:
             pass
         return n
 
     def flush(self):
         self._stream.flush()
-        try:
-            self._sink.flush()
-        except ValueError:
-            pass
 
     def __getattr__(self, name):
         return getattr(self._stream, name)
@@ -146,63 +273,40 @@ def _prune(log_dir, keep=KEEP):
 
 
 def open_log(mode, invocation, now=None):
-    """Create a fresh session log with the standard header; returns
-    (path, open file). The caller owns writing to and closing the file —
-    start() below does both for CLI runs, webapp/ops.py streams its
-    browser-tee'd output into one per UI operation.
+    """Create a fresh SessionLog (file + attached logging handler). The
+    caller owns close() — start() below wires it up for CLI runs,
+    webapp/ops.py streams its browser-tee'd output into one per UI
+    operation.
 
     Notes:
         Also prunes the log directory down to KEEP files, so every entry
         point that opens a log enforces retention. `now` exists for tests.
     """
-    log_dir = _log_dir()
-    log_dir.mkdir(parents=True, exist_ok=True)
-    _prune(log_dir)
-
-    now = now or datetime.now()
-    path = log_dir / f"session-{now:%Y%m%d-%H%M%S}-{_clean(mode)}.log"
-    fh = open(path, "w", encoding="utf-8", errors="replace", buffering=1)
-    fh.write(f"# job crawler session\n"
-             f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
-             f"# run     : {invocation}\n\n")
-    return path, fh
-
-
-def footer(fh, t0):
-    """Stamp the closing timestamp + elapsed seconds and close `fh`.
-    Safe on an already-closed file.
-    """
-    try:
-        fh.write(f"\n# ended   : {datetime.now():%Y-%m-%d %H:%M:%S}"
-                 f"  ({time.monotonic() - t0:.0f}s)\n")
-        fh.close()
-    except ValueError:
-        pass
+    return SessionLog(mode, invocation, now=now)
 
 
 def start(argv, now=None):
     """Begin mirroring stdout/stderr into a new session log; returns its
-    path. finish() (registered atexit) restores the streams and stamps a
-    footer with the elapsed time.
+    path. finish() (registered atexit) restores the streams, detaches the
+    logging handler and stamps a footer with the elapsed time.
 
     Notes:
         argv is the CLI argument list *without* the program name, exactly
         what run_scraper.main() received. `now` exists for tests.
     """
-    path, fh = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
+    session = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
 
     out, err = sys.stdout, sys.stderr
-    sys.stdout = _Tee(out, fh)
-    sys.stderr = _Tee(err, fh)
-    t0 = time.monotonic()
+    sys.stdout = _Tee(out, session)
+    sys.stderr = _Tee(err, session, err=True)
 
     def _finish():
         sys.stdout, sys.stderr = out, err
-        footer(fh, t0)
+        session.close()
 
     _active.append(_finish)
     atexit.register(finish)
-    return path
+    return session.path
 
 
 def finish():

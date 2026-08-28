@@ -4,7 +4,6 @@ to the browser via /api/run/status polling)."""
 import io
 import sys
 import threading
-import time
 from datetime import datetime
 
 import config
@@ -21,11 +20,11 @@ _TASK_LOCK = threading.Lock()
 
 class _Tee(io.TextIOBase):
     """stdout tee: real console keeps printing; the browser polls the copy,
-    and an optional `sink` file (the session log — see core/session_log.py)
-    gets a third copy as it streams, so UI-triggered runs are reviewable
-    after the fact just like CLI ones. Swapped in globally while an
-    operation runs so the crawl's many worker-thread print()s are captured
-    too.
+    and an optional `sink` SessionLog (see core/session_log.py) gets a
+    third copy as it streams — mirrored there as timestamped, levelled
+    records — so UI-triggered runs are reviewable after the fact just like
+    CLI ones. Swapped in globally while an operation runs so the crawl's
+    many worker-thread print()s are captured too.
 
     The browser tracks a cursor into the log (`since=<n>` on
     /api/run/status) so a poll only re-sends lines it hasn't seen yet. That
@@ -106,13 +105,12 @@ def _run_op(name, fn):
     """
     def worker():
         orig = sys.stdout
-        t0 = time.monotonic()
         try:
-            _, log_fh = session_log.open_log(f"webui-{name}",
-                                             f"web UI op {name!r}")
+            slog = session_log.open_log(f"webui-{name}",
+                                        f"web UI op {name!r}")
         except OSError:
-            log_fh = None            # a full/read-only disk can't block the op
-        tee = _Tee(orig, sink=log_fh)
+            slog = None              # a full/read-only disk can't block the op
+        tee = _Tee(orig, sink=slog)
         sys.stdout = tee
         try:
             _restore_keywords()
@@ -121,8 +119,8 @@ def _run_op(name, fn):
             TASK["error"] = f"{type(e).__name__}: {e}"
             print(f"  [!] operation failed: {TASK['error']}")
         finally:
-            if log_fh is not None:
-                session_log.footer(log_fh, t0)
+            if slog is not None:
+                slog.close()
             # Only unwind our own layer. Blindly assigning `orig` back would
             # restore a stale stream if anything else swapped stdout while we
             # ran, permanently leaving a tee installed that copies every later

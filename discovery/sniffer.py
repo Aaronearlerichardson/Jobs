@@ -11,10 +11,14 @@ This merges the two sniffers built independently on the remote-neural and
 """
 
 import html
+import logging
 import re
 from concurrent.futures import ThreadPoolExecutor
 
 from bs4 import BeautifulSoup, SoupStrainer
+
+# File-only diagnostics (session log DEBUG channel — never printed).
+_log = logging.getLogger("discovery.sniffer")
 
 _ANCHORS_ONLY = SoupStrainer("a")
 
@@ -467,6 +471,8 @@ def sniff_ats(name, careers_url="", timeout=6):
     if not urls:
         return None
     responses = _fetch_all(urls)
+    _log.debug("sniff %s: %d candidate URL(s), %d answered", name, len(urls),
+               sum(1 for r in responses.values() if r is not None))
     custom = None
     for url in urls:
         r = responses.get(url)
@@ -484,6 +490,8 @@ def sniff_ats(name, careers_url="", timeout=6):
             if hit[1] == "workday" and _foreign_board(name, hit[2]):
                 hit = None      # keep scanning; the custom fallback may
             else:               # still capture the company's OWN listings
+                _log.debug("sniff %s: %s %r found on %s",
+                           name, hit[1], hit[2], r.url)
                 return _pack(hit[1], hit[2], r.url)
         if custom is None:
             # Custom board: resolve to the page that actually holds the

@@ -2,6 +2,7 @@
 
 import atexit
 import json
+import logging
 import os
 import re
 import threading
@@ -12,6 +13,9 @@ from scrapers.http import SESSION
 
 import config
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+# File-only per-call trace (session log DEBUG channel — never printed).
+_log = logging.getLogger("claude")
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +352,12 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         )
         r.raise_for_status()
         data = r.json()
-        _record_usage(data.get("usage") or {})
+        usage = data.get("usage") or {}
+        _record_usage(usage)
+        _log.debug("%s: %s in / %s out tokens (cache read: %s)",
+                   use_model, usage.get("input_tokens"),
+                   usage.get("output_tokens"),
+                   usage.get("cache_read_input_tokens", 0))
         text = next(
             (b["text"] for b in data.get("content", []) if b.get("type") == "text"),
             "",

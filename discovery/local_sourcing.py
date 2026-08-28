@@ -12,6 +12,7 @@ health / bio / science / tech employers with a Triangle-NC presence:
 
 import hashlib
 import json
+import logging
 import re
 import threading
 import time
@@ -22,6 +23,9 @@ from datetime import datetime
 
 import config
 from core import tags as company_tags
+
+# File-only diagnostics (session log DEBUG channel — never printed).
+_log = logging.getLogger("discovery")
 
 from scrapers.http import HEADERS, SESSION
 from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
@@ -113,6 +117,7 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
     key = f"{query}||{max_results}"
     cached = _ddg_cache_get(key)
     if cached is not None:
+        _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
         return cached
     try:
         from ddgs import DDGS
@@ -134,6 +139,10 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
     th.start()
     th.join(budget)
     out = box["v"] or []
+    if th.is_alive():
+        _log.debug("ddg timed out after %.0fs: %s", budget, query)
+    else:
+        _log.debug("ddg live query, %d result(s): %s", len(out), query)
     if out:                              # cache only genuine hits
         _ddg_cache_put(key, out)
     return out
