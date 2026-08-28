@@ -672,16 +672,21 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                     # the nc>0 branch below when it does yield.
                     "reason": "board-dead:" + ats}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for fut in as_completed({ex.submit(_sniff_one, n): n for n in todo}):
-                h = fut.result()
-                if h and h.get("nc"):
-                    h.pop("reason", None)
-                    hits.append(h)
-                    print(f"    [SNIFF] {h['name']:28} {h['ats']:14} "
-                          f"{h['slug']!s:26} nc={h['nc']}")
-                elif h:
-                    sniff_misses.append(h)
+        def _sniff_done(fut, n):
+            h = fut.result()
+            if h and h.get("nc"):
+                h.pop("reason", None)
+                hits.append(h)
+                print(f"    [SNIFF] {h['name']:28} {h['ats']:14} "
+                      f"{h['slug']!s:26} nc={h['nc']}")
+            elif h:
+                sniff_misses.append(h)
+
+        ex = ThreadPoolExecutor(max_workers=max_workers)
+        _drain_or_abandon(
+            ex, {ex.submit(_sniff_one, n): n for n in todo}, _sniff_done,
+            lambda n: sniff_misses.append(
+                {"name": n, "reason": "fetch-error:stalled"}))
 
     # Websearch pass: the third resolve_board_sniff_first step, bounded, for
     # names probe+sniff still could not board. This is the recovery path a
@@ -737,16 +742,22 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                         "careers_url": w.get("careers_url"),
                         "reason": "board-dead:" + ats}
 
-            with ThreadPoolExecutor(max_workers=min(max_workers, len(todo))) as ex:
-                for fut in as_completed({ex.submit(_websearch_one, n): n for n in todo}):
-                    h = fut.result()
-                    if h and h.get("nc"):
-                        h.pop("reason", None)
-                        hits.append(h)
-                        print(f"    [WEBSEARCH] {h['name']:24} {h['ats']:14} "
-                              f"{h['slug']!s:26} nc={h['nc']}")
-                    elif h:
-                        sniff_misses.append(h)
+            def _websearch_done(fut, n):
+                h = fut.result()
+                if h and h.get("nc"):
+                    h.pop("reason", None)
+                    hits.append(h)
+                    print(f"    [WEBSEARCH] {h['name']:24} {h['ats']:14} "
+                          f"{h['slug']!s:26} nc={h['nc']}")
+                elif h:
+                    sniff_misses.append(h)
+
+            ex = ThreadPoolExecutor(max_workers=min(max_workers, len(todo)))
+            _drain_or_abandon(
+                ex, {ex.submit(_websearch_one, n): n for n in todo},
+                _websearch_done,
+                lambda n: sniff_misses.append(
+                    {"name": n, "reason": "fetch-error:stalled"}))
             print(f"  websearch pass: {time.time() - t0:.1f}s for "
                   f"{len(todo)} name(s)")
 
@@ -2024,97 +2035,81 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
           + f" -> resolving {len(fresh)}...")
 
     written, unresolved = [], []
-    # No `with`: the executor's exit joins every worker, and one wedged
-    # resolution then holds the web UI's one-op-at-a-time slot until the app
-    # is restarted (2026-08-28: 59 of 60 pasted names finished in 8 minutes,
-    # the 60th hung for over an hour — fetch_company on a sprawling "custom
-    # board" is bounded per request, not in total). The watchdog below
-    # abandons the stragglers instead: if NO name completes for
-    # RESOLVE_STALL_S, the remainder are recorded as misses and the executor
-    # is shut down without waiting on its threads.
+
+    def _stalled(n):
+        record_miss(conn, n, "fetch-error:stalled", source="paste")
+        unresolved.append((n, "fetch-error:stalled"))
+
+    def _consume(fut, name):
+        try:
+            hit, reason = fut.result()
+        except Exception as e:
+            print(f"    [!] {name}: {type(e).__name__}: {e}")
+            hit, reason = None, f"fetch-error:{type(e).__name__}"
+        if not hit:
+            # A pasted name that resolves to nothing used to be printed
+            # once and lost; keep it with a reason so the paste is a
+            # worklist, not a one-shot.
+            record_miss(conn, name, reason, source="paste")
+            unresolved.append((name, reason))
+            return
+        titles = _sample_titles(hit)
+        tier, score, reason = score_company_mission(
+            hit["name"], " | ".join(t for t in titles if t))
+        active = is_active_mission(tier, hit["name"], include_missions)
+        # A pasted name is the weakest-sourced input this module accepts
+        # (no directory/seed curation behind it), and resolve_board_sniff_
+        # first's `via` marks HOW the board was found. 'websearch' is the
+        # weakest of the three: unlike 'sniff' (read off the company's own
+        # careers page) or 'probe' (a slug-guess, at least deterministic
+        # from the name), a websearch hit only means a search result's URL
+        # or an unrelated page happened to match. An NC-local job already
+        # on the board is one independent signal; absent that, require a
+        # second one — an NC HQ/office mention on the company's own site —
+        # before trusting it enough to write as an ACTIVE company. Make the
+        # weaker path visible either way rather than silently equal to a
+        # sniff/probe hit.
+        corroborated = True
+        if hit.get("via") == "websearch" and hit["nc"] == 0:
+            corroborated = nc_hq_signal(hit["name"], hit.get("careers_url"))
+            if not corroborated:
+                active = False
+        slug = hit.get("slug")
+        is_wd = hit["ats"] == "workday"
+        upsert_company(conn, {
+            "name": hit["name"], "ats": hit["ats"],
+            "slug": None if is_wd else slug,
+            "wd_tenant": slug[0] if is_wd else None,
+            "wd_pod":    slug[1] if is_wd else None,
+            "wd_site":   slug[2] if is_wd else None,
+            "careers_url": hit.get("careers_url"),
+            "local_job_count": hit["nc"], "total_job_count": hit["count"],
+            "mission_tier": tier, "mission_score": score,
+            "mission_reason": reason,
+            "tags": company_tags.LOCAL if (hit["nc"] or corroborated) else None,
+            "source": "paste", "active": active,
+            "last_probed": datetime.now().isoformat(),
+        })
+        written.append(hit)
+        # via='probe' means the board came from a name-guess rather than
+        # the company's own careers page — worth a human glance. via=
+        # 'websearch' with no corroboration is weaker still — it was
+        # written inactive above and is flagged, not silently dropped.
+        if hit.get("via") == "probe":
+            flag = "  [verify: slug-guess]"
+        elif hit.get("via") == "websearch" and not corroborated:
+            flag = "  [UNVERIFIED: websearch-only, no NC signal - inactive]"
+        elif hit.get("via") == "websearch":
+            flag = "  [verify: websearch match]"
+        else:
+            flag = ""
+        print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
+              f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
+              f"{'active' if active else 'inactive'}{flag}")
+
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(resolve_or_miss, n): n for n in fresh}
-    pending = set(futs)
-    while pending:
-        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
-                                 return_when=FIRST_COMPLETED)
-        if not done:
-            for stuck in pending:
-                n = futs[stuck]
-                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
-                      f"- abandoned")
-                record_miss(conn, n, "fetch-error:stalled", source="paste")
-                unresolved.append((n, "fetch-error:stalled"))
-            pending = set()
-            break
-        for fut in done:
-            name = futs[fut]
-            try:
-                hit, reason = fut.result()
-            except Exception as e:
-                print(f"    [!] {name}: {type(e).__name__}: {e}")
-                hit, reason = None, f"fetch-error:{type(e).__name__}"
-            if not hit:
-                # A pasted name that resolves to nothing used to be printed
-                # once and lost; keep it with a reason so the paste is a
-                # worklist, not a one-shot.
-                record_miss(conn, name, reason, source="paste")
-                unresolved.append((name, reason))
-                continue
-            titles = _sample_titles(hit)
-            tier, score, reason = score_company_mission(
-                hit["name"], " | ".join(t for t in titles if t))
-            active = is_active_mission(tier, hit["name"], include_missions)
-            # A pasted name is the weakest-sourced input this module accepts
-            # (no directory/seed curation behind it), and resolve_board_sniff_
-            # first's `via` marks HOW the board was found. 'websearch' is the
-            # weakest of the three: unlike 'sniff' (read off the company's own
-            # careers page) or 'probe' (a slug-guess, at least deterministic
-            # from the name), a websearch hit only means a search result's URL
-            # or an unrelated page happened to match. An NC-local job already
-            # on the board is one independent signal; absent that, require a
-            # second one — an NC HQ/office mention on the company's own site —
-            # before trusting it enough to write as an ACTIVE company. Make the
-            # weaker path visible either way rather than silently equal to a
-            # sniff/probe hit.
-            corroborated = True
-            if hit.get("via") == "websearch" and hit["nc"] == 0:
-                corroborated = nc_hq_signal(hit["name"], hit.get("careers_url"))
-                if not corroborated:
-                    active = False
-            slug = hit.get("slug")
-            is_wd = hit["ats"] == "workday"
-            upsert_company(conn, {
-                "name": hit["name"], "ats": hit["ats"],
-                "slug": None if is_wd else slug,
-                "wd_tenant": slug[0] if is_wd else None,
-                "wd_pod":    slug[1] if is_wd else None,
-                "wd_site":   slug[2] if is_wd else None,
-                "careers_url": hit.get("careers_url"),
-                "local_job_count": hit["nc"], "total_job_count": hit["count"],
-                "mission_tier": tier, "mission_score": score,
-                "mission_reason": reason,
-                "tags": company_tags.LOCAL if (hit["nc"] or corroborated) else None,
-                "source": "paste", "active": active,
-                "last_probed": datetime.now().isoformat(),
-            })
-            written.append(hit)
-            # via='probe' means the board came from a name-guess rather than
-            # the company's own careers page — worth a human glance. via=
-            # 'websearch' with no corroboration is weaker still — it was
-            # written inactive above and is flagged, not silently dropped.
-            if hit.get("via") == "probe":
-                flag = "  [verify: slug-guess]"
-            elif hit.get("via") == "websearch" and not corroborated:
-                flag = "  [UNVERIFIED: websearch-only, no NC signal - inactive]"
-            elif hit.get("via") == "websearch":
-                flag = "  [verify: websearch match]"
-            else:
-                flag = ""
-            print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
-                  f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
-                  f"{'active' if active else 'inactive'}{flag}")
-    ex.shutdown(wait=False, cancel_futures=True)
+    _drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
+                      _consume, _stalled)
     conn.commit()
     conn.close()
     if unresolved:

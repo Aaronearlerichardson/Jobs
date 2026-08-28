@@ -426,11 +426,32 @@ class TestPastedNameExtractionFallback:
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
 
 
-class TestAddNamesStallWatchdog:
-    """One wedged resolution must not hold add_names — and the web UI's
-    one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
+class TestResolutionStallWatchdog:
+    """One wedged resolution must not hold a resolution pass — and the web
+    UI's one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
     finished in 8 minutes; the 60th hung for over an hour and wedged the op
-    slot until the app was restarted."""
+    slot until the app was restarted. The shared helper behind add_names and
+    discover_local's sniff/websearch passes is _drain_or_abandon."""
+
+    def test_drain_or_abandon_abandons_only_the_stuck_future(self, monkeypatch):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
+        release = threading.Event()
+        consumed, stalled = [], []
+        ex = ThreadPoolExecutor(max_workers=2)
+        futs = {ex.submit(lambda: "ok"): "fast",
+                ex.submit(release.wait, 10): "slow"}
+        try:
+            local_sourcing._drain_or_abandon(
+                ex, futs,
+                lambda fut, n: consumed.append((n, fut.result())),
+                stalled.append)
+        finally:
+            release.set()
+        assert consumed == [("fast", "ok")]
+        assert stalled == ["slow"]
 
     class _Conn:
         def execute(self, *a):
