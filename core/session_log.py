@@ -57,6 +57,23 @@ _DATEFMT = "%Y-%m-%d %H:%M:%S"
 _NOISY = ("urllib3", "requests", "charset_normalizer", "playwright",
           "werkzeug", "asyncio")
 
+# Logger namespaces whose DEBUG records belong in the file: this
+# application's own. Every other DEBUG source is some dependency's
+# internals — the blocklist above can't enumerate them all (ddgs' Rust HTTP
+# bridge alone emits hyper_util connection-pool and h2 frame traces, which
+# flooded the 2026-08-28 discover-local log) — so DEBUG is allowlisted by
+# first name component while INFO+ passes from anyone.
+_APP_DEBUG_ROOTS = {"console", "http", "claude", "core", "scrapers",
+                    "discovery", "webapp", "capture", "config", "tools"}
+
+
+class _AppDebugOnly(logging.Filter):
+    """Pass every record at INFO+; pass DEBUG only from this app's loggers."""
+
+    def filter(self, record):
+        return (record.levelno > logging.DEBUG
+                or record.name.split(".", 1)[0] in _APP_DEBUG_ROOTS)
+
 # Flags that tune or scope a run rather than naming what kind of run it is.
 # A session whose only flags are these is the daily crawl.
 _MODIFIERS = {
@@ -173,12 +190,18 @@ class SessionLog:
                        f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
                        f"# run     : {invocation}\n\n")
         self._t0 = time.monotonic()
-        self._buf = {False: "", True: ""}     # partial console lines, by err
+        # Partial console lines, keyed by (writing thread, err). Per THREAD,
+        # not per stream: print() issues separate text/newline writes, and a
+        # shared buffer let a fetch worker's line fuse into the middle of a
+        # progress line (seen repeatedly in the 2026-08-28 session logs) —
+        # with per-thread assembly every record is one thread's whole line.
+        self._buf = {}
         self._lock = threading.Lock()
         self._closed = False
 
         self._handler = logging.StreamHandler(self._fh)
         self._handler.setFormatter(logging.Formatter(_FMT, datefmt=_DATEFMT))
+        self._handler.addFilter(_AppDebugOnly())
         root = logging.getLogger()
         self._prev_root_level = root.level
         root.addHandler(self._handler)
@@ -198,14 +221,20 @@ class SessionLog:
         pass                                  # records are emitted per line
 
     def feed(self, text, err=False):
-        """Buffer tee'd console output; emit one record per complete line."""
+        """Buffer tee'd console output per writing thread; emit one record
+        per complete line."""
         if self._closed:
             return
+        key = (threading.get_ident(), err)
         with self._lock:
-            self._buf[err] += text
-            while "\n" in self._buf[err]:
-                line, self._buf[err] = self._buf[err].split("\n", 1)
+            buf = self._buf.get(key, "") + text
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
                 self._route(line, err)
+            if buf:
+                self._buf[key] = buf
+            else:
+                self._buf.pop(key, None)
 
     def _route(self, line, err):
         if not line.strip():
@@ -217,10 +246,10 @@ class SessionLog:
         if self._closed:
             return
         with self._lock:
-            for err in (False, True):
-                if self._buf[err].strip():
-                    self._route(self._buf[err], err)
-                self._buf[err] = ""
+            for (_tid, err), rest in self._buf.items():
+                if rest.strip():
+                    self._route(rest, err)
+            self._buf.clear()
         self._closed = True
         root = logging.getLogger()
         root.removeHandler(self._handler)

@@ -41,7 +41,12 @@ class _Tee(io.TextIOBase):
     def __init__(self, orig, sink=None):
         self.orig = orig
         self.sink = sink
-        self._buf = ""
+        # Partial lines keyed by writing thread: print() issues separate
+        # text/newline writes, and one shared buffer let a fetch worker's
+        # line fuse into the middle of a progress line in the browser log
+        # (and the session log — its SessionLog sink assembles per-thread
+        # the same way).
+        self._bufs = {}
 
     def write(self, s):
         try:
@@ -53,14 +58,19 @@ class _Tee(io.TextIOBase):
                 self.sink.write(s)
             except Exception:
                 pass
+        key = threading.get_ident()
         with _LOG_LOCK:
-            self._buf += s
-            while "\n" in self._buf:
-                line, self._buf = self._buf.split("\n", 1)
+            buf = self._bufs.get(key, "") + s
+            while "\n" in buf:
+                line, buf = buf.split("\n", 1)
                 TASK["log"].append(line)
                 if len(TASK["log"]) > 5000:
                     del TASK["log"][:1000]
                     TASK["log_offset"] += 1000
+            if buf:
+                self._bufs[key] = buf
+            else:
+                self._bufs.pop(key, None)
         return len(s)
 
     def flush(self):

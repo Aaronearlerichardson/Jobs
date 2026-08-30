@@ -777,6 +777,24 @@ def upsert_job(conn, j):
     """
     now = datetime.now().isoformat()
     new = not job_exists(conn, j["job_id"])
+    if new and j.get("url"):
+        # Same posting arriving under a NEW id scheme — a company's ats/
+        # tenant changed (Keebler custom_* -> rippling_*) or a fetcher's id
+        # format did (Duke sf__<slug> -> sf_<tenant>_<num>). Re-key the
+        # existing row instead of inserting a duplicate: dupes double-rank
+        # and double-spend deep-verify (17 such URL pairs in the 2026-08-28
+        # store). Title must match too — some custom boards give several
+        # DISTINCT postings one landing URL, and those must stay separate
+        # rows.
+        prev = conn.execute(
+            "SELECT job_id, title FROM jobs WHERE url=?",
+            (j["url"],)).fetchone()
+        if (prev is not None
+                and (prev["title"] or "").strip().lower()
+                == (j.get("title") or "").strip().lower()):
+            conn.execute("UPDATE jobs SET job_id=? WHERE job_id=?",
+                         (j["job_id"], prev["job_id"]))
+            new = False
     remote = j.get("remote_eligible")
     if remote is not None:
         remote = int(bool(remote))

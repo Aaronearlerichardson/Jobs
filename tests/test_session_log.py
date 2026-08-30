@@ -90,6 +90,26 @@ class TestStartFinish:
         assert "Starting new HTTPS" not in text
         assert "Retrying request" in text
 
+    def test_debug_is_allowlisted_to_app_loggers(self, monkeypatch):
+        """The blocklist can't enumerate every dependency (ddgs' Rust HTTP
+        bridge alone logs hyper_util/h2 frame traces at DEBUG, which flooded
+        the 2026-08-28 discover-local log): DEBUG passes only from this
+        app's own namespaces, INFO+ from anyone."""
+        monkeypatch.setattr(sys, "stdout", io.StringIO())
+        monkeypatch.setattr(sys, "stderr", io.StringIO())
+        path = session_log.start([], now=datetime(2026, 8, 28, 9, 30, 5))
+        logging.getLogger("hyper_util.client.legacy.pool").debug(
+            "reuse idle connection")
+        logging.getLogger("h2.codec.framed_write").debug("send frame=Headers")
+        logging.getLogger("hyper_util.anything").info("third-party info line")
+        logging.getLogger("scrapers.fetchers.workday").debug("app debug line")
+        session_log.finish()
+        text = path.read_text(encoding="utf-8")
+        assert "reuse idle connection" not in text
+        assert "send frame=Headers" not in text
+        assert "third-party info line" in text
+        assert "app debug line" in text
+
     def test_finish_detaches_the_handler_and_is_idempotent(self, monkeypatch):
         fake_out = io.StringIO()
         monkeypatch.setattr(sys, "stdout", fake_out)
@@ -106,6 +126,40 @@ class TestStartFinish:
         assert "post-close record" not in text, \
             "close() must detach the file handler from the root logger"
         assert sys.stdout is fake_out
+
+
+class TestThreadInterleaving:
+    def test_concurrent_partial_writes_never_fuse_lines(
+            self, monkeypatch, tmp_path):
+        """print() writes text and newline separately; a worker thread's
+        half-written line plus another thread's full line used to land in
+        the file fused into one record (repeatedly seen in the 2026-08-28
+        session logs). Lines are assembled per writing thread."""
+        import threading
+        monkeypatch.setattr(sys, "stdout", io.StringIO())
+        monkeypatch.setattr(sys, "stderr", io.StringIO())
+        path = session_log.start([], now=datetime(2026, 8, 28, 9, 30, 4))
+        tee = sys.stdout                       # the installed tee
+        wrote_partial = threading.Event()
+        interloper_done = threading.Event()
+
+        def worker():
+            tee.write("worker-half ")          # no newline yet
+            wrote_partial.set()
+            interloper_done.wait(5)
+            tee.write("worker-rest\n")
+
+        t = threading.Thread(target=worker)
+        t.start()
+        assert wrote_partial.wait(5)
+        tee.write("[!] interloper line\n")     # whole line, main thread
+        interloper_done.set()
+        t.join(5)
+        session_log.finish()
+
+        text = path.read_text(encoding="utf-8")
+        assert _record("WARNING", "[!] interloper line").search(text)
+        assert _record("INFO", "worker-half worker-rest").search(text)
 
 
 class TestRetention:

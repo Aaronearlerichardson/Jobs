@@ -271,3 +271,40 @@ class TestMisses:
         assert after["created_at"] == row["created_at"]
         assert after["last_probed"] >= row["last_probed"]
         assert store.roster_growth(db, days=7) == 1
+
+
+class TestUpsertJobUrlRekey:
+    """A posting that arrives under a NEW job_id scheme (company ats/tenant
+    change, fetcher id-format change) must re-key its existing row, not
+    duplicate it — the 2026-08-28 store held 17 URL pairs like Duke's
+    sf__<slug> -> sf_<tenant>_<num> and Keebler's custom_* -> rippling_*,
+    each double-ranking and double-spending deep-verify."""
+
+    _URL = "https://acme.io/jobs/42"
+
+    def _job(self, job_id, title="Medical Lab Scientist"):
+        return {"job_id": job_id, "company_name": "Acme", "title": title,
+                "url": self._URL, "location": "Durham, NC",
+                "track": "local-tech"}
+
+    def test_same_url_and_title_rekeys_the_existing_row(self, db):
+        assert store.upsert_job(db, self._job("sf__old-slug")) is True
+        db.execute("UPDATE jobs SET disposition='saved' WHERE job_id='sf__old-slug'")
+        first_seen = db.execute("SELECT first_seen FROM jobs").fetchone()[0]
+
+        assert store.upsert_job(db, self._job("sf_tenant_123")) is False
+        rows = db.execute("SELECT job_id, disposition, first_seen FROM jobs "
+                          "WHERE url=?", (self._URL,)).fetchall()
+        assert len(rows) == 1, "the re-ingest must not duplicate the row"
+        assert rows[0]["job_id"] == "sf_tenant_123"
+        assert rows[0]["disposition"] == "saved", \
+            "the user's decision must survive the re-key"
+        assert rows[0]["first_seen"] == first_seen
+
+    def test_different_title_on_a_shared_url_stays_a_separate_row(self, db):
+        # Some custom boards give several distinct postings one landing URL.
+        store.upsert_job(db, self._job("c_1", title="Data Engineer"))
+        store.upsert_job(db, self._job("c_2", title="Research Scientist"))
+        n = db.execute("SELECT COUNT(*) FROM jobs WHERE url=?",
+                       (self._URL,)).fetchone()[0]
+        assert n == 2

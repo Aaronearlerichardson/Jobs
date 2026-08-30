@@ -371,7 +371,12 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
             print(f"  [!] Claude returned no text "
                   f"(stop_reason={data.get('stop_reason')})")
             return {}
-        return json.loads(cleaned)
+        # strict=False: the model occasionally emits a literal newline/tab
+        # INSIDE a JSON string value ("reason": "...line one
+        # line two..."), which strict json.loads rejects as "Invalid
+        # control character" and cost a company its mission score in the
+        # 2026-08-28 discover-local session. Lenient parsing reads it fine.
+        return json.loads(cleaned, strict=False)
     except requests.HTTPError as e:
         body = getattr(e.response, "text", "")[:300]
         print(f"  [!] Claude API error: {e}  body={body!r}")
@@ -450,37 +455,50 @@ def score_company_mission(name, context=""):
 
 
 _BOARD_OWNER_SYSTEM = (
-    "You judge job-board ownership. Given a company name and the Workday "
-    "tenant + career-site tokens its careers page links to, decide whether "
-    "that tenant is the company's OWN hiring board — including former "
-    "names, rebrands and merged identities (Merck & Co. posts on tenant "
-    "'msd') — or a DIFFERENT organization's board, typically a parent "
-    "conglomerate's shared board that also lists many sibling companies "
-    "(Genedata linking to Danaher's 'danaher'/'DanaherJobs'). "
+    "You judge job-board ownership. Given a company name and evidence about "
+    "the ATS board its name resolved to (tenant/slug tokens, the board's "
+    "display name, sample job titles), decide whether that board is the "
+    "company's OWN hiring board — including former names, rebrands and "
+    "merged identities (Merck & Co. posts on Workday tenant 'msd') — or a "
+    "DIFFERENT organization's board: a parent conglomerate's shared board "
+    "(Genedata linking to Danaher's 'danaher'/'DanaherJobs'), or an "
+    "unrelated company that happens to hold a colliding short slug "
+    "(greenhouse 'ripple' is Ripple the payments company, not Ripple "
+    "Neuro). Sample job titles reveal the board's real industry — weigh "
+    "them heavily when given. "
     'Reply with JSON only: {"same_employer": true|false, "reason": "<one line>"}'
 )
 
 _BOARD_OWNER_CACHE = {}
 
 
-def board_is_own(company, tenant, site=""):
-    """True/False: is the Workday tenant `company`'s own board? None when
-    the API is unavailable or the reply is malformed — callers keep the
-    hit on None (offline behavior unchanged) and only reject on a clear
-    False. Verdicts are cached per (company, tenant) for the process.
+def board_is_own(company, board, site="", titles=()):
+    """True/False: is `board` (a Workday tenant, or "<ats>:<slug>")
+    `company`'s own hiring board? None when the API is unavailable or the
+    reply is malformed — callers keep the hit on None (offline behavior
+    unchanged) and only reject on a clear False. Verdicts are cached per
+    (company, board) for the process.
 
     Notes:
-        Consulted only for tenants that share no identity token with the
-        company name (discovery.sniffer._foreign_board), so this costs a
-        call on the rare mismatch, not per sniff. The asymmetric default
-        matters: a wrong "keep" mislabels one company until a human looks,
-        a wrong "reject" silently loses a real board forever.
+        Consulted only for collision-prone resolutions — a Workday tenant
+        sharing no token with the name (discovery.sniffer._foreign_board),
+        or a first-word/generic slug probe hit (discovery.pipeline) — so
+        this costs a call on the rare suspect, not per resolve. The
+        asymmetric default matters: a wrong "keep" mislabels one company
+        until a human looks, a wrong "reject" silently loses a real board
+        forever. `titles` (sample postings from the board) is the decisive
+        evidence for slug collisions.
     """
-    key = (str(company).lower(), str(tenant).lower())
+    key = (str(company).lower(), str(board).lower())
     if key in _BOARD_OWNER_CACHE:
         return _BOARD_OWNER_CACHE[key]
-    user = f"COMPANY: {company}\nWORKDAY TENANT: {tenant}\nCAREER SITE: {site}"
-    result = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=120)
+    user = f"COMPANY: {company}\nBOARD: {board}"
+    if site:
+        user += f"\nBOARD DISPLAY NAME / SITE: {site}"
+    if titles:
+        user += "\nSAMPLE JOB TITLES: " + " | ".join(
+            t for t in list(titles)[:8] if t)
+    result = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150)
     verdict = (bool(result["same_employer"])
                if result and "same_employer" in result else None)
     if verdict is not None:

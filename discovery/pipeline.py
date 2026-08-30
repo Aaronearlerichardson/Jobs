@@ -221,32 +221,100 @@ _GENERIC_SLUGS = {
 }
 
 
-def _flag_for_verification(c, claimed_ats, slug):
-    """Tag a confirmed hit whose identity deserves a human look.
+def _slug_collision_risk(name, slug):
+    """True for the slug shapes that confirm unrelated boards.
 
     Slug probes confirm "a board with this slug exists", not "this is the
     company Claude meant" — "seer" (proteomics) confirms for Seer Medical
-    (epilepsy), "nuro" (autonomous vehicles) for a BCI division. Flag the
-    two collision-prone patterns so reports/--apply carry a VERIFY note.
+    (epilepsy), "ripple" (payments) for Ripple Neuro.
+
+    >>> _slug_collision_risk("Ripple Neuro", "ripple")
+    True
+    >>> _slug_collision_risk("Bio-Signal Technologies", "signal")
+    True
+    >>> _slug_collision_risk("Spark", "spark")
+    True
+    >>> _slug_collision_risk("Cala Health", "calahealth")
+    False
     """
+    name_words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    single_token = "-" not in slug
+    if len(name_words) >= 2 and slug == name_words[0]:
+        return True
+    if len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
+        return True
+    # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
+    # short common token that collides with a large unrelated board
+    # ("inter" -> 158 jobs at a fintech).
+    return (len(name_words) == 1 and single_token
+            and (slug in _GENERIC_SLUGS or len(slug) <= 5))
+
+
+def _board_evidence(ats, slug, n=6):
+    """(display_name, sample_titles) for a probed board, best-effort — the
+    identity evidence _probe_identity_ok hands the LLM. Empty on ATSes
+    without a cheap metadata endpoint or on any fetch error.
+    """
+    from scrapers.http import HEADERS, SESSION
+    try:
+        if ats == "greenhouse":
+            r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}",
+                            timeout=10, headers=HEADERS)
+            display = (r.json().get("name") or "").strip()
+            r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}"
+                            f"/jobs?content=false", timeout=10, headers=HEADERS)
+            return display, [j.get("title", "")
+                             for j in r.json().get("jobs", [])[:n]]
+        if ats == "lever":
+            r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+                            timeout=10, headers=HEADERS)
+            return "", [j.get("text", "") for j in r.json()[:n]]
+        if ats == "ashby":
+            r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+                            timeout=10, headers=HEADERS)
+            data = r.json()
+            return "", [j.get("title", "") for j in
+                        data.get("jobs", data.get("jobPostings", []))[:n]]
+    except Exception:
+        pass
+    return "", []
+
+
+def _probe_identity_ok(name, ats, slug):
+    """False only when the LLM positively identifies the probed board as a
+    DIFFERENT employer's (judging from the board's display name and sample
+    job titles). True on a match, no evidence, or no API key — a wrong
+    "keep" is flagged for a human, a wrong "reject" loses a real board.
+
+    Notes:
+        The check that keeps "Ripple Neuro" from confirming onto the
+        payments company's 127-job greenhouse board named "Ripple"
+        (2026-08-28 discover-term session) — the slug-shape flags alone
+        marked it [VERIFY] but still wrote it to the store, ACTIVE, where
+        its pre-existing name-based mission score kept it crawled.
+    """
+    display, titles = _board_evidence(ats, slug)
+    if not display and not titles:
+        return True
+    from core.claude import board_is_own
+    return board_is_own(name, f"{ats}:{slug}", site=display,
+                        titles=titles) is not False
+
+
+def _flag_for_verification(c, claimed_ats, slug):
+    """Tag a confirmed hit whose identity deserves a human look (see
+    _slug_collision_risk for the collision-prone shapes)."""
     flags = []
     if claimed_ats in PROBES and c.ats != claimed_ats:
         flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
     name_words = re.findall(r"[a-z0-9]+", c.name.lower())
-    single_token = "-" not in slug
-    if len(name_words) >= 2 and slug == name_words[0]:
-        flags.append("first-word slug - confirm it's the same company")
-    elif len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
-        # A generic word fragment ("signal", "neuro") that matched some
-        # unrelated board — high collision risk from a multi-word name.
-        flags.append(f"generic slug '{slug}' - likely a different company")
-    elif len(name_words) == 1 and single_token and (slug in _GENERIC_SLUGS
-                                                    or len(slug) <= 5):
-        # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
-        # short common token that collides with a large unrelated board
-        # ("inter" -> 158 jobs at a fintech). These slip past the checks
-        # above, which require a multi-word name.
-        flags.append(f"single-word name slug '{slug}' - confirm identity")
+    if _slug_collision_risk(c.name, slug):
+        if len(name_words) >= 2 and slug == name_words[0]:
+            flags.append("first-word slug - confirm it's the same company")
+        elif len(name_words) >= 2:
+            flags.append(f"generic slug '{slug}' - likely a different company")
+        else:
+            flags.append(f"single-word name slug '{slug}' - confirm identity")
     if flags:
         note = "[VERIFY: " + "; ".join(flags) + "]"
         c.notes = f"{c.notes} {note}".strip() if c.notes else note
@@ -292,6 +360,16 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print):
             ok, count = probe_fn(slug)
             time.sleep(delay)
             if ok:
+                # A collision-shaped slug hit must survive an identity
+                # check before it confirms: the [VERIFY] flag alone still
+                # wrote Ripple Neuro onto the payments company's board.
+                if (_slug_collision_risk(c.name, slug)
+                        and not _probe_identity_ok(c.name, ats_name, slug)):
+                    c.tried_slugs.append(
+                        f"[rejected: {ats_name} '{slug}' = another employer]")
+                    print(f"    [!] {c.name}: {ats_name} board '{slug}' "
+                          f"judged another employer's - rejected")
+                    continue
                 c.confirmed  = True
                 c.slug_guess = slug
                 c.job_count  = count

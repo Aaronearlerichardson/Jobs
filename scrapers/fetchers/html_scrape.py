@@ -128,12 +128,19 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
             if row is not None:
                 loc = location_snippet(row.get_text(" ", strip=True), loc)
 
-            jid_m = re.search(r"/job/([^/?#]+)", href)
+            # Numeric requisition id first, slug fallback — and the id token
+            # comes from the BOARD URL, not the (sometimes empty) display
+            # name. Must stay identical to fetchers/company.py's
+            # fetch_successfactors_all: the two schemes ingesting the same
+            # board (profile feed + company store) gave every Duke posting
+            # two rows, double-ranked and double-deep-verified (2026-08-28).
+            jid_m = (re.search(r"/job/[^/]+/(\d+)", href)
+                     or re.search(r"/job/([^/?#]+)", href))
             jid = jid_m.group(1) if jid_m else stable_id(href)
             new_on_page += 1
             if is_relevant(title):
                 jobs.append({
-                    "id":          f"sf_{company_name.replace(' ','_')}_{jid}",
+                    "id":          f"sf_{re.sub(r'[^a-z0-9]+', '', base_url.lower())[-16:]}_{jid}",
                     "company":     company_name,
                     "title":       title,
                     "url":         href,

@@ -238,6 +238,14 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     for cid, rs in by_company.items():
         company = store.get_company(conn, cid)
         if not company or not company.get("ats"):
+            # No board to fetch IS a failed attempt — stamp these rows too,
+            # or they are re-selected (and silently re-counted) every run
+            # while never even printing a company line.
+            for r in rs:
+                conn.execute("UPDATE jobs SET desc_checked_at=? "
+                             "WHERE job_id=?",
+                             (datetime.now().isoformat(), r["job_id"]))
+            conn.commit()
             continue
         # Batched board pull for the common case (one fetch per company);
         # boards we can't pull simply yield no title matches, and each row

@@ -58,6 +58,30 @@ class TestBackfillRetryThrottle:
         assert "backfilling 1 description(s)" in out
         assert fetched, "retry_days=0 must retry the row"
 
+    def test_rows_of_boardless_companies_are_stamped_too(
+            self, tmp_path, capsys):
+        """A company row with no ats has no board to fetch — that IS a
+        failed attempt. Unstamped, these rows were re-selected (and
+        silently re-counted, never printed) on every run: the 2026-08-28
+        20:00 log said "backfilling 18" while only 14 rows ever appeared."""
+        dbp = tmp_path / "t.db"
+        conn = store.connect(dbp)
+        cid = store.upsert_company(conn, {"name": "Boardless Co"})
+        store.upsert_job(conn, {
+            "job_id": "bl_1", "company_id": cid,
+            "company_name": "Boardless Co", "title": "Engineer",
+            "url": "https://boardless.io/1", "location": "Durham, NC",
+            "track": "local-tech"})
+        conn.close()
+        t = {"db_path": dbp}
+
+        ops.backfill_board_descriptions(t=t)
+        assert "backfilling 1 description(s)" in capsys.readouterr().out
+        ops.backfill_board_descriptions(t=t)
+        out = capsys.readouterr().out
+        assert "backfilling 0 description(s)" in out
+        assert "1 skipped: failed in the last 3d" in out
+
     def test_a_successful_backfill_is_not_throttled(
             self, tmp_path, monkeypatch, capsys):
         dbp = tmp_path / "t.db"
