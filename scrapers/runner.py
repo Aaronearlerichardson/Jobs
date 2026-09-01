@@ -484,8 +484,17 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             location_re=(NC_RE if t["geo_gate"] else None),
             rank_by=t["rank_by"], allow_geo_modes={"remote"},
             min_mission=t["min_mission"])
-        digest_md.write_ranked_digest(ranked, t, watch_hits=watch_hits,
-                                      pipeline=store.get_pipeline(conn))
+        pipeline = store.get_pipeline(conn)
+        digest_path = digest_md.write_ranked_digest(
+            ranked, t, watch_hits=watch_hits, pipeline=pipeline)
+        if send:
+            if digest_md.send_ranked_digest(ranked, t, watch_hits=watch_hits,
+                                            pipeline=pipeline):
+                digest_md.toast(t, len(digest_md.new_ranked_rows(ranked, t)),
+                                digest_path)
+        else:
+            print(f"  (email suppressed — enable [tracks.{t['id']}].email "
+                  f"or pass --send)")
         if watch_hits:
             print(f"\n  {bar}\n  WATCHED COMPANIES - NEW POSTINGS THIS RUN\n  {bar}")
             for c, j, in_pipeline in watch_hits:
@@ -536,7 +545,6 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
         elif matches:
             print("  (email suppressed — enable [tracks.*].email or --send)")
 
-    if not send:
-        print("  *** NO EMAIL SENT ***\n")
+    print("")
     conn.close()
     return ranked if ranked is not None else matches

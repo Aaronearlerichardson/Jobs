@@ -15,3 +15,8 @@ ddgs>=5.0.0
 # After install, also run: `playwright install chromium`
 playwright>=1.44.0
 playwright-stealth>=1.0.6
+
+# Optional, Windows-only, NOT installed by default - desktop toast when a
+# digest is emailed ([tracks.*].notify = true). Absent, the toast is
+# silently skipped. Install by hand if you want it:
+#   winotify>=1.1.0
