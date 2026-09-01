@@ -179,6 +179,16 @@ multi_division_mission_floor = 0.6
 # the connection pooling or the per-host Crawl-delay pacing.
 # respect_robots = true
 
+# Hosts to crawl WITHOUT consulting robots.txt while respect_robots stays
+# on. Crawl-delay pacing still applies. Lowercase hostnames; a leading dot
+# matches every subdomain. Use it for machine-facing endpoints on a host
+# whose robots.txt blanket-disallows `*` for the HTML site's sake:
+# SmartRecruiters' public postings API (api.smartrecruiters.com publishes
+# `Disallow: /` for everyone but LinkedInBot) and PeopleAdmin's Atom feed
+# (<tenant>.peopleadmin.com/postings/search.atom). Each entry is your call
+# to make about that host, so the list is empty by default.
+# robots_exempt_hosts = ["api.smartrecruiters.com", ".peopleadmin.com"]
+
 # robots.txt fetch timeout, split into (connect, read) seconds.
 #
 # Discovery probes speculative `careers.<name>.com` hosts. The ones whose

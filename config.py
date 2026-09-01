@@ -569,6 +569,15 @@ MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.
 # instance, publishes `Allow: /` with `Crawl-delay: 1`). See scrapers/robots.py.
 RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
 
+# Hosts whose robots.txt is NOT consulted even while RESPECT_ROBOTS is on.
+# Crawl-delay pacing still applies. Entries are lowercase hostnames; a
+# leading dot matches every subdomain (".peopleadmin.com" covers
+# unc.peopleadmin.com). Meant for machine-facing endpoints — a vendor's
+# public postings API, an Atom feed — sitting on a host whose robots.txt
+# blanket-disallows `*` because it was written for the HTML site.
+ROBOTS_EXEMPT_HOSTS = tuple(
+    s.strip().lower() for s in _pol.get("robots_exempt_hosts", []) if s.strip())
+
 # robots.txt fetch timeouts, as (connect, read).
 #
 # Split because the two phases fail for different reasons. Discovery probes a

@@ -288,9 +288,44 @@ class RobotsCache:
 
     # -- public API -------------------------------------------------------
 
+    @staticmethod
+    def host_exempt(url):
+        """Is `url`'s host on config.ROBOTS_EXEMPT_HOSTS? Exact match, or a
+        dotted entry matching the host's suffix (".peopleadmin.com" covers
+        unc.peopleadmin.com). Case-insensitive; the port is ignored.
+
+        >>> import config
+        >>> _saved = getattr(config, "ROBOTS_EXEMPT_HOSTS", ())
+        >>> config.ROBOTS_EXEMPT_HOSTS = ("api.smartrecruiters.com", ".peopleadmin.com")
+        >>> RobotsCache.host_exempt("https://api.smartrecruiters.com/v1/companies/x/postings")
+        True
+        >>> RobotsCache.host_exempt("https://unc.peopleadmin.com/postings/search.atom")
+        True
+        >>> RobotsCache.host_exempt("https://peopleadmin.com/")
+        False
+        >>> RobotsCache.host_exempt("https://jobs.smartrecruiters.com/x")
+        False
+        >>> config.ROBOTS_EXEMPT_HOSTS = _saved
+        """
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return False
+        for entry in getattr(config, "ROBOTS_EXEMPT_HOSTS", ()):
+            if entry.startswith("."):
+                if host.endswith(entry) and host != entry[1:]:
+                    return True
+            elif host == entry:
+                return True
+        return False
+
     def allowed(self, url):
-        """May we fetch `url`? True when robots is absent/permissive."""
+        """May we fetch `url`? True when robots is absent/permissive, or
+        when the host is exempted in the profile (see host_exempt) — the
+        exemption skips the robots.txt fetch for that request entirely,
+        while wait_turn still paces the host."""
         if not getattr(config, "RESPECT_ROBOTS", True):
+            return True
+        if self.host_exempt(url):
             return True
         rules = self._rules(url)
         if rules is None or rules.group is None:

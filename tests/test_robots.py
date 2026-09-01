@@ -74,6 +74,44 @@ class TestSpecificity:
         assert not allows(body, "/api/internal/x")
 
 
+class TestExemptHosts:
+    """[policy] robots_exempt_hosts: a host on the list is fetched without
+    consulting its robots.txt (SmartRecruiters' public postings API and
+    PeopleAdmin's Atom feed both sit behind a blanket `Disallow: /`),
+    without turning the check off for every other host."""
+
+    @pytest.fixture
+    def cache(self, monkeypatch):
+        import config
+        from scrapers.robots import RobotsCache, _HostRules
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
+        monkeypatch.setattr(config, "ROBOTS_EXEMPT_HOSTS",
+                            ("api.smartrecruiters.com", ".peopleadmin.com"),
+                            raising=False)
+        c = RobotsCache()
+        fetched = []
+
+        def _blanket(origin):
+            fetched.append(origin)
+            return _HostRules(disallow_all=True)
+
+        monkeypatch.setattr(c, "_fetch", _blanket)
+        c.fetched = fetched
+        return c
+
+    def test_exempt_host_is_allowed_without_a_robots_fetch(self, cache):
+        assert cache.allowed("https://api.smartrecruiters.com/v1/companies/x/postings")
+        assert cache.fetched == []
+
+    def test_dotted_entry_covers_subdomains_only(self, cache):
+        assert cache.allowed("https://unc.peopleadmin.com/postings/search.atom")
+        assert not cache.allowed("https://peopleadmin.com/postings/search.atom")
+
+    def test_other_hosts_still_obey_their_robots(self, cache):
+        assert not cache.allowed("https://jobs.smartrecruiters.com/x")
+        assert cache.fetched == ["https://jobs.smartrecruiters.com"]
+
+
 class TestGroups:
     def test_blanket_disallow(self):
         assert not allows("User-agent: *\nDisallow: /", "/anything")
