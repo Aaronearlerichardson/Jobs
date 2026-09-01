@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import threading
+import time
 
 import requests
 
@@ -320,6 +321,29 @@ def _print_cache_stats_at_exit():
         print(format_cache_stats())
 
 
+# Unrecoverable-API-error circuit breaker. Some failures can never succeed on
+# retry within the same run — an exhausted credit balance (400), a bad or
+# revoked API key (401/403). Without a breaker each job's call fails
+# independently: the 2026-08-31 rescore burned 973 consecutive "credit balance
+# is too low" 400s over five minutes before finishing. Once tripped, every
+# later call in the process returns {} immediately without touching the API.
+_FATAL_LOCK = threading.Lock()
+_FATAL_MSG = None
+
+# Transient statuses worth one short retry ladder (529 = overloaded_error).
+_RETRY_STATUSES = (429, 500, 502, 503, 529)
+_RETRY_DELAYS = (2.0, 8.0)
+
+
+def _trip_fatal(msg):
+    global _FATAL_MSG
+    with _FATAL_LOCK:
+        if _FATAL_MSG is None:
+            _FATAL_MSG = msg
+            print(f"  [!] Claude API disabled for the rest of this run "
+                  f"(unrecoverable): {msg}")
+
+
 def call_claude_json(system_prompt, user_content, max_tokens=1000,
                      model=None, thinking=False, cache=True):
     """POST to /v1/messages, return the JSON block from the text response.
@@ -334,22 +358,36 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     if ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
         print("  [!] Set ANTHROPIC_API_KEY env var (or edit config.py).")
         return {}
+    if _FATAL_MSG is not None:
+        _log.debug("claude call skipped (breaker tripped): %s", _FATAL_MSG)
+        return {}
     use_model = model or CLAUDE_MODEL
     payload = build_payload(system_prompt, user_content, max_tokens,
                             use_model, thinking, cache)
     lead = _claim_prefix(use_model, system_prompt) \
         if (cache and _CACHE_ENABLED and system_prompt) else None
     try:
-        r = SESSION.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key":         ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type":      "application/json",
-            },
-            json=payload,
-            timeout=120,
-        )
+        for attempt in range(len(_RETRY_DELAYS) + 1):
+            r = SESSION.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key":         ANTHROPIC_API_KEY,
+                    "anthropic-version": "2023-06-01",
+                    "content-type":      "application/json",
+                },
+                json=payload,
+                timeout=120,
+            )
+            if r.status_code in _RETRY_STATUSES and attempt < len(_RETRY_DELAYS):
+                try:
+                    delay = float(r.headers.get("retry-after", ""))
+                except ValueError:
+                    delay = _RETRY_DELAYS[attempt]
+                _log.debug("claude %s -> retrying in %.0fs (attempt %d)",
+                           r.status_code, delay, attempt + 1)
+                time.sleep(min(delay, 60.0))
+                continue
+            break
         r.raise_for_status()
         data = r.json()
         usage = data.get("usage") or {}
@@ -378,8 +416,13 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         # 2026-08-28 discover-local session. Lenient parsing reads it fine.
         return json.loads(cleaned, strict=False)
     except requests.HTTPError as e:
+        status = getattr(e.response, "status_code", None)
         body = getattr(e.response, "text", "")[:300]
-        print(f"  [!] Claude API error: {e}  body={body!r}")
+        if status in (401, 403) or (status == 400
+                                    and "credit balance" in body.lower()):
+            _trip_fatal(f"HTTP {status}: {body!r}")
+        else:
+            print(f"  [!] Claude API error: {e}  body={body!r}")
         return {}
     except json.JSONDecodeError as e:
         print(f"  [!] Claude returned non-JSON: {e}")

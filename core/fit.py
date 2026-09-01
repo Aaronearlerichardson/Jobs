@@ -375,6 +375,10 @@ boilerplate, and it outranks the marketing copy at the top:
   "management", "program-product", "sales-field", "support-ops".
 - "must_haves": the 3-6 load-bearing requirements as short phrases.
 - "candidate_gaps": the must_haves this candidate plainly lacks.
+A "JOB LOCATION (stored)" line, when present, is the posting's own location
+field. Judge the "geo" gate from it together with any location or remote
+language in the text; a stored onsite location outside the candidate's
+region with no remote option in the text trips the gate.
 
 STEP 2 — with that extraction in mind (a candidate missing the spine of the
 job cannot score well however attractive the employer's domain is):
@@ -487,7 +491,8 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=300) -> Fi
                      reason=str(r.get("reason", "")).strip())
 
 
-def verify_fit(title: str, description: str = "", *, max_tokens=8000) -> FitResult:
+def verify_fit(title: str, description: str = "", *, location: str = "",
+               max_tokens=8000) -> FitResult:
     """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
     but run on the (near-)full posting text with an explicit requirements
     extraction step first — years required, seat type, must-haves, and the
@@ -495,6 +500,13 @@ def verify_fit(title: str, description: str = "", *, max_tokens=8000) -> FitResu
     long JD can't survive on its opening boilerplate. The extraction outranks
     the model's own gate flags: a seat_type of management/program-product
     trips the management gate even if the model forgot to set it.
+
+    `location` is the job's STORED location string (the ATS field, not the
+    JD prose). It rides in the user turn as a JOB LOCATION line so the geo
+    gate has something to fire on: the scorer otherwise sees only title and
+    description, and an onsite Austin/SSF posting whose body never names a
+    city sailed through at 0.81 with no gate (the Neuralink ML Engineer row,
+    2026-09). Empty/None omits the line.
 
     Returns a FitResult whose reason starts with "deep:" — the marker
     verify_top() uses to skip already-verified rows — with years/seat/gaps
@@ -508,7 +520,9 @@ def verify_fit(title: str, description: str = "", *, max_tokens=8000) -> FitResu
     # Finalists get double the normal text budget: this pass exists precisely
     # to read what the screen's clip may have elided.
     desc = clip_desc(desc, max_chars=2 * _cfg("MAX_DESC_CHARS", 12000))
-    user = f"JOB TITLE: {title}\nFULL JOB POSTING:\n{desc}"
+    loc = (location or "").strip()
+    loc_line = f"JOB LOCATION (stored): {loc}\n" if loc else ""
+    user = f"JOB TITLE: {title}\n{loc_line}FULL JOB POSTING:\n{desc}"
     # Finalists get the stronger verify model WITH adaptive thinking left on
     # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
     # cover thinking + the JSON on 5-family models, hence the 3000 default.

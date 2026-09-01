@@ -419,7 +419,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None):
 
         def _one(r):
             text = _live_jd(r)
-            return r, text, verify_fit(r["title"], text)
+            return r, text, verify_fit(r["title"], text,
+                                       location=r.get("location") or "")
 
         n_scored = n_crushed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as ex:

@@ -51,6 +51,25 @@ class TestPrompts:
     def test_verify_refuses_stub_descriptions(self):
         assert fit.verify_fit("T", "too short").score is None
 
+    def test_verify_user_turn_carries_the_stored_location(self, monkeypatch):
+        # The scorer sees only what the user turn carries; an onsite posting
+        # whose body never names a city can't trip the geo gate unless the
+        # STORED location rides along (Neuralink ML Engineer, 0.81, no gate).
+        seen = {}
+
+        def fake(system, user, **kw):
+            seen["user"] = user
+            return {}                       # -> "unverified", score None
+
+        monkeypatch.setattr(fit, "call_claude_json", fake)
+        body = "x" * (fit.MIN_DESC_CHARS + 10)
+        fit.verify_fit("ML Engineer", body, location="Austin, TX")
+        assert "JOB LOCATION (stored): Austin, TX\n" in seen["user"]
+        assert seen["user"].index("JOB LOCATION") < seen["user"].index("FULL JOB POSTING")
+        fit.verify_fit("ML Engineer", body)          # no location -> no line
+        assert "JOB LOCATION" not in seen["user"]
+        assert "JOB LOCATION" in fit.build_verify_prompt()   # rubric names it
+
 
 class TestPromptCache:
     """The cache breakpoint must sit on the STABLE system prompt, never on
