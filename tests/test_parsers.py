@@ -70,6 +70,7 @@ class TestDeadHostCache:
 
         monkeypatch.setattr(sniffer, "SESSION", _S())
         monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
         return calls
 
     def test_refused_host_is_not_retried_on_other_paths(self, monkeypatch):
@@ -97,6 +98,64 @@ class TestDeadHostCache:
         sniffer._DEAD_HOSTS["www.dead.example"] = time.time() - sniffer._DEAD_HOST_TTL - 1
         sniffer._fetch_page("https://www.dead.example/careers")
         assert calls == ["https://www.dead.example/careers"]
+
+
+class TestPageMemo:
+    """_fetch_page answers a repeated URL from its per-run memo: each stage
+    of a name's resolution rebuilds the candidate list, so live hosts were
+    fetched up to seven times per name (sgs.com, intertek.com, a 403ing
+    infosys.com in the 2026-09-01 add-names runs)."""
+
+    def _session(self, monkeypatch, status=200, body="x" * 400):
+        calls = []
+
+        class _R:
+            status_code = status
+            text = body
+            content = body.encode()
+
+        class _S:
+            def get(self, url, **kw):
+                calls.append(url)
+                return _R()
+
+        monkeypatch.setattr(sniffer, "SESSION", _S())
+        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        return calls
+
+    def test_live_page_is_fetched_once_per_run(self, monkeypatch):
+        calls = self._session(monkeypatch)
+        a = sniffer._fetch_page("https://www.sgs.com/")
+        b = sniffer._fetch_page("https://www.sgs.com/")
+        assert a is b and a is not None
+        assert calls == ["https://www.sgs.com/"]
+
+    def test_misses_are_memoized_too(self, monkeypatch):
+        calls = self._session(monkeypatch, status=403)
+        assert sniffer._fetch_page("https://www.infosys.com/") is None
+        assert sniffer._fetch_page("https://www.infosys.com/") is None
+        assert len(calls) == 1
+
+    def test_distinct_urls_still_fetch(self, monkeypatch):
+        calls = self._session(monkeypatch)
+        sniffer._fetch_page("https://www.sgs.com/")
+        sniffer._fetch_page("https://www.sgs.com/careers")
+        assert len(calls) == 2
+
+    def test_oversized_bodies_are_not_hoarded(self, monkeypatch):
+        calls = self._session(monkeypatch, body="x" * (sniffer._PAGE_MEMO_MAX_BYTES + 1))
+        sniffer._fetch_page("https://big.example/")
+        sniffer._fetch_page("https://big.example/")
+        assert len(calls) == 2 and sniffer._PAGE_MEMO == {}
+
+    def test_cap_evicts_the_oldest_entry(self, monkeypatch):
+        calls = self._session(monkeypatch)
+        monkeypatch.setattr(sniffer, "_PAGE_MEMO_CAP", 2)
+        for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
+            sniffer._fetch_page(u)
+        assert "https://a.example/" not in sniffer._PAGE_MEMO
+        assert len(sniffer._PAGE_MEMO) == 2
 
 
 class TestJobPageMeta:
@@ -513,6 +572,60 @@ class TestPastedNameExtractionFallback:
         monkeypatch.setattr("core.store.connect", lambda *a, **k: _Conn())
         local_sourcing.add_names("Chimerix\n2 days ago", use_llm=True)
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
+
+
+class TestPastedNameBoardGuard:
+    """A pasted name the roster spells differently passes the name check,
+    resolves to a board already on file, and used to land as a second row
+    ("SAS" beside "SAS Institute", "Veeva Systems" beside "Veeva", "NVIDIA
+    AI" beside "NVIDIA" on 2026-09-01). The board is checked before the
+    insert now."""
+
+    def _wire(self, monkeypatch, db, hit):
+        import core.store as store
+        import core.claude as claude
+
+        class _NoClose:
+            # add_names closes the connection it opens; the test still
+            # needs to read the fixture DB afterwards.
+            def __getattr__(self, k):
+                return getattr(db, k)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+                            lambda *a, **k: (hit, None))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+        monkeypatch.setattr(local_sourcing, "nc_hq_signal", lambda *a, **k: True)
+
+    def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
+        import core.store as store
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        self._wire(monkeypatch, db, {"name": "SAS", "ats": "icims",
+                                     "slug": "globalcareers-sas",
+                                     "careers_url": "https://www.sas.com/careers",
+                                     "count": 150, "nc": 30, "via": "sniff"})
+        local_sourcing.add_names("SAS", max_workers=1)
+        names = [r[0] for r in db.execute("SELECT name FROM companies")]
+        assert names == ["SAS Institute"]
+        assert "[dup]" in capsys.readouterr().out
+
+    def test_a_new_board_is_still_written(self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        self._wire(monkeypatch, db, {"name": "Veeva", "ats": "lever",
+                                     "slug": "veeva",
+                                     "careers_url": "https://www.veeva.com/careers",
+                                     "count": 40, "nc": 12, "via": "sniff"})
+        local_sourcing.add_names("Veeva", max_workers=1)
+        names = sorted(r[0] for r in db.execute("SELECT name FROM companies"))
+        assert names == ["SAS Institute", "Veeva"]
 
 
 class TestResolutionStallWatchdog:

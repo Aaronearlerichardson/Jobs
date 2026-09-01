@@ -1070,6 +1070,10 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                 "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
                 "last_probed": datetime.now().isoformat(),
             }
+            dup = _board_already_tracked(conn, row)
+            if dup:
+                _report_dup_board(h["name"], dup)
+                continue
             upsert_company(conn, row)
             written.append({**row, "active": active})
             flag = "active" if active else "INACTIVE(other)"
@@ -1131,6 +1135,17 @@ def add_board(name, url):
 
     conn = connect()
     is_wd = ats == "workday"
+    dup = _board_already_tracked(conn, {
+        "name": name, "ats": ats,
+        "slug": None if is_wd else (found.get("slug") or None),
+        "wd_tenant": slug[0] if is_wd else None,
+        "wd_pod":    slug[1] if is_wd else None,
+        "wd_site":   slug[2] if is_wd else None,
+        "careers_url": found.get("careers_url") or url})
+    if dup:
+        _report_dup_board(name, dup)
+        conn.close()
+        return None
     upsert_company(conn, {
         "name": name, "ats": ats,
         "slug": None if is_wd else (found.get("slug") or None),
@@ -1677,6 +1692,10 @@ def resolve_leads(max_workers=8,
                    "mission_reason": reason,
                    "tags": company_tags.LOCAL if hit["nc"] else None,
                    "source": c.get("source") or "resolve_leads", "active": active}
+            dup = _board_already_tracked(conn, row)
+            if dup:
+                _report_dup_board(c["name"], dup)
+                continue
             upsert_company(conn, row)
             resolved.append(row)
             if hit.get("via") == "probe":
@@ -2015,6 +2034,30 @@ def extract_names_llm(blob, limit=60):
     return [n for n in names if 2 < len(n) <= 60][:limit]
 
 
+def _board_already_tracked(conn, row):
+    """The roster company that already owns `row`'s board under ANOTHER
+    name, or None. Every discovery path checks names before resolving, but
+    a name the roster spells differently ("SAS" for "SAS Institute", "Veeva
+    Systems" for "Veeva", "NVIDIA AI" for "NVIDIA" — all re-added on
+    2026-09-01) passes that check and then resolves to a board that is
+    already on file; until the next dedup the crawl fetched the board twice
+    and the ranking showed two companies. Same-name matches are NOT dups —
+    that is the ordinary re-probe/update path — so the caller may upsert."""
+    from core.store import company_by_board
+    existing = company_by_board(conn, row)
+    if not existing:
+        return None
+    if (_NONALNUM_RE.sub("", (existing.get("name") or "").lower())
+            == _NONALNUM_RE.sub("", (row.get("name") or "").lower())):
+        return None
+    return existing
+
+
+def _report_dup_board(name, existing):
+    print(f"    [dup]  {name[:30]:30} same {existing.get('ats') or '?'} board "
+          f"as '{existing.get('name')}' - already tracked, not added")
+
+
 def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
     """Resolve pasted company names to boards and store the ones that verify.
 
@@ -2062,6 +2105,18 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             record_miss(conn, name, reason, source="paste")
             unresolved.append((name, reason))
             return
+        slug = hit.get("slug")
+        is_wd = hit["ats"] == "workday"
+        dup = _board_already_tracked(conn, {
+            "name": hit["name"], "ats": hit["ats"],
+            "slug": None if is_wd else slug,
+            "wd_tenant": slug[0] if is_wd else None,
+            "wd_pod":    slug[1] if is_wd else None,
+            "wd_site":   slug[2] if is_wd else None,
+            "careers_url": hit.get("careers_url")})
+        if dup:
+            _report_dup_board(hit["name"], dup)
+            return
         titles = _sample_titles(hit)
         tier, score, reason = score_company_mission(
             hit["name"], " | ".join(t for t in titles if t))
@@ -2083,8 +2138,6 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             corroborated = nc_hq_signal(hit["name"], hit.get("careers_url"))
             if not corroborated:
                 active = False
-        slug = hit.get("slug")
-        is_wd = hit["ats"] == "workday"
         upsert_company(conn, {
             "name": hit["name"], "ats": hit["ats"],
             "slug": None if is_wd else slug,

@@ -337,6 +337,34 @@ class TestDedupCompaniesRenamesJobs:
         assert ids == {keep}
 
 
+class TestCompanyByBoard:
+    """Discovery asks the roster whether a freshly resolved BOARD is already
+    tracked before inserting the name it resolved from, so "SAS" cannot land
+    beside "SAS Institute" on the same iCIMS slug (three such re-adds on
+    2026-09-01: SAS, Veeva Systems, NVIDIA AI)."""
+
+    def test_finds_the_same_board_under_another_name(self, db):
+        store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
+                                  "slug": "globalcareers-sas"})
+        hit = store.company_by_board(db, {"name": "SAS", "ats": "icims",
+                                          "slug": "globalcareers-sas"})
+        assert hit and hit["name"] == "SAS Institute"
+
+    def test_workday_triple_is_the_key(self, db):
+        store.upsert_company(db, {"name": "NVIDIA", "ats": "workday",
+                                  "wd_tenant": "nvidia", "wd_pod": 5,
+                                  "wd_site": "NVIDIAExternalCareerSite"})
+        same = {"ats": "workday", "wd_tenant": "nvidia", "wd_pod": 5,
+                "wd_site": "NVIDIAExternalCareerSite"}
+        other_site = dict(same, wd_site="Internal")
+        assert store.company_by_board(db, same)["name"] == "NVIDIA"
+        assert store.company_by_board(db, other_site) is None
+
+    def test_no_board_means_no_match(self, db):
+        store.upsert_company(db, {"name": "Stub", "active": 0})
+        assert store.company_by_board(db, {"name": "Stub 2"}) is None
+
+
 class TestDedupJobs:
     """Same company + same URL modulo query string + same title is one
     posting: iCIMS served SAS's postings as `?in_iframe=1` and

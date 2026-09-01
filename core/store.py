@@ -617,6 +617,56 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     return len(dead), n_off
 
 
+def board_key(r):
+    """The identity of a company row's BOARD, independent of its name: the
+    Workday triple, the (ats, slug) pair, or for careers_url-keyed ATSes the
+    URL itself. None when the row has no resolvable board. Shared by
+    dedup_companies (merging after the fact) and company_by_board (refusing
+    the duplicate before it lands).
+
+    careers_url-keyed ATSes: their slug is a shared datacenter host
+    (SuccessFactors "performancemanagerN" serves many tenants) or absent,
+    and the careers_url IS the board identity. Keying these on slug merged
+    Bayer into Sonova (both performancemanager5).
+
+    >>> board_key({"ats": "workday", "wd_tenant": "redhat", "wd_pod": 5, "wd_site": "jobs"})
+    ('workday', 'redhat', 5, 'jobs')
+    >>> board_key({"ats": "icims", "slug": "globalcareers-sas", "wd_tenant": None})
+    ('icims', 'globalcareers-sas')
+    >>> board_key({"ats": "custom", "slug": None, "wd_tenant": None,
+    ...            "careers_url": "https://x.com/careers/"})
+    ('custom', 'https://x.com/careers')
+    >>> board_key({"ats": None, "slug": None, "wd_tenant": None}) is None
+    True
+    """
+    if r.get("ats") == "workday" and r.get("wd_tenant"):
+        return ("workday", r["wd_tenant"], r.get("wd_pod"), r.get("wd_site"))
+    if r.get("ats") in ("successfactors", "peopleadmin", "custom", "wpjson"):
+        u = (r.get("careers_url") or "").rstrip("/").lower()
+        return (r["ats"], u) if u else None
+    if r.get("ats") and r.get("slug"):
+        return (r["ats"], r["slug"])
+    return None
+
+
+def company_by_board(conn, row):
+    """The existing company row whose board matches `row`'s (see board_key),
+    or None. Discovery resolves a pasted or harvested NAME to a board, and a
+    name the roster spells differently ("SAS" vs "SAS Institute", "Veeva
+    Systems" vs "Veeva", "NVIDIA AI" vs "NVIDIA" — all three re-added on
+    2026-09-01) passes the name-keyed already-tracked check and lands as a
+    second row on the same board until the next dedup. Checking the board
+    before the insert stops the churn at the source."""
+    key = board_key(row)
+    if key is None:
+        return None
+    for c in conn.execute("SELECT * FROM companies").fetchall():
+        c = dict(c)
+        if board_key(c) == key:
+            return c
+    return None
+
+
 def dedup_companies(conn):
     """Merge company rows that point at the SAME board (same ats+slug, or the
     same Workday triple) but were created under different name spellings
@@ -624,20 +674,6 @@ def dedup_companies(conn):
     those, so the crawl fetches one board several times. Jobs are re-pointed to
     the kept row and tags merge, so the merge is lossless. Returns rows merged."""
     from collections import defaultdict
-
-    def board_key(r):
-        if r["ats"] == "workday" and r["wd_tenant"]:
-            return ("workday", r["wd_tenant"], r["wd_pod"], r["wd_site"])
-        # careers_url-keyed ATSes: their slug is a shared datacenter host
-        # (SuccessFactors "performancemanagerN" serves many tenants) or
-        # absent, and the careers_url IS the board identity. Keying these on
-        # slug merged Bayer into Sonova (both performancemanager5).
-        if r["ats"] in ("successfactors", "peopleadmin", "custom", "wpjson"):
-            u = (r.get("careers_url") or "").rstrip("/").lower()
-            return (r["ats"], u) if u else None
-        if r["ats"] and r["slug"]:
-            return (r["ats"], r["slug"])
-        return None
 
     rows = [dict(r) for r in conn.execute("SELECT * FROM companies")]
     jobcount = {cid: n for cid, n in conn.execute(

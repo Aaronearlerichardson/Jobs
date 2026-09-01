@@ -381,16 +381,54 @@ def _mark_dead_host(url):
             _DEAD_HOSTS[m.group(1).lower()] = time.time()
 
 
+# Per-URL outcome memo, url -> (time recorded, Response or None). The
+# stages of one name's resolution (careers sniff, root scan, lead sniff,
+# diagnosis) each rebuild the candidate list and fetch it again, so a LIVE
+# host answered the same GET up to seven times per name (sgs.com, intertek.
+# com, and a 403ing infosys.com in the 2026-09-01 add-names runs). Same
+# URL, same run, same answer: hand back the first one. Bounded so a long
+# discovery run can't hoard page bodies.
+_PAGE_MEMO = {}
+_PAGE_MEMO_CAP = 512
+_PAGE_MEMO_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _memo_get(url):
+    with _DEAD_HOSTS_LOCK:
+        hit = _PAGE_MEMO.get(url)
+        if hit is None:
+            return False, None
+        if time.time() - hit[0] >= _DEAD_HOST_TTL:
+            del _PAGE_MEMO[url]
+            return False, None
+        return True, hit[1]
+
+
+def _memo_put(url, resp):
+    if resp is not None and len(resp.content or b"") > _PAGE_MEMO_MAX_BYTES:
+        return
+    with _DEAD_HOSTS_LOCK:
+        if len(_PAGE_MEMO) >= _PAGE_MEMO_CAP:
+            oldest = min(_PAGE_MEMO, key=lambda u: _PAGE_MEMO[u][0])
+            del _PAGE_MEMO[oldest]
+        _PAGE_MEMO[url] = (time.time(), resp)
+
+
 def _fetch_page(url, timeout=6):
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
-    answers fast. Returns the Response on 200 with real content, else None."""
+    answers fast. Returns the Response on 200 with real content, else None.
+    Outcomes are memoized per URL for the run (see _PAGE_MEMO), and a host
+    that refused a connection is skipped outright (see _DEAD_HOSTS)."""
+    known, resp = _memo_get(url)
+    if known:
+        return resp
     if _dead_host(url):
         _log.debug("skip %s: host refused a connection earlier this run", url)
         return None
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
-        return r if r.status_code == 200 and len(r.text) >= 300 else None
+        resp = r if r.status_code == 200 and len(r.text) >= 300 else None
     except requests.exceptions.ConnectionError:
         # requests' ConnectionError covers DNS failure, SSLError and
         # ConnectTimeout; ReadTimeout is a Timeout, not a ConnectionError.
@@ -398,6 +436,8 @@ def _fetch_page(url, timeout=6):
         return None
     except Exception:
         return None
+    _memo_put(url, resp)
+    return resp
 
 
 def _fetch_all(urls):
