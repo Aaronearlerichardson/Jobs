@@ -697,9 +697,24 @@ def add_manual_job(url, title, company, location, description="",
 
     t = _t(t)
     name = (company or "").strip()
+    title = (title or "").strip()
     if not name or not (url or title):
         print("  [!] --add needs --company plus at least --url or --title.")
         return {}
+    if not title:
+        # URL-only add: read the title (and, if none was given, the JD) off
+        # the posting page itself, then fall back to the URL's slug. An
+        # empty title is not a job — it can't be scored (SKIP-SCORE) or
+        # ranked, and nine such rows sat in the 2026-09-01 store.
+        page_title, page_desc = company_fetch.job_page_meta(url)
+        title = page_title or company_fetch.title_from_url_slug(url)
+        if not title:
+            print(f"  [!] no title given and none readable from {url}; "
+                  f"pass --title.")
+            return {}
+        print(f"    title from {'page' if page_title else 'URL slug'}: {title!r}")
+        if page_desc and not (description or "").strip():
+            description = page_desc
 
     # 1) Company: resolve a board if we don't already have one for it, so
     #    the job links to a real company row.

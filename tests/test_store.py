@@ -308,3 +308,95 @@ class TestUpsertJobUrlRekey:
         n = db.execute("SELECT COUNT(*) FROM jobs WHERE url=?",
                        (self._URL,)).fetchone()[0]
         assert n == 2
+
+
+class TestDedupCompaniesRenamesJobs:
+    """jobs.company_name is the grouping/display key, so a company merge
+    has to rename the moved rows too — the 2026-09-01 dedup merged "Red
+    Hat" into "Red Hat (IBM subsidiary, RTP HQ)" and the ranking kept
+    showing both names."""
+
+    def _wd(self, name, **extra):
+        return {"name": name, "ats": "workday", "wd_tenant": "redhat",
+                "wd_pod": 5, "wd_site": "jobs", **extra}
+
+    def test_merged_rows_take_the_kept_company_name(self, db):
+        keep = store.upsert_company(db, self._wd("Red Hat (IBM subsidiary)",
+                                                 mission_tier="other"))
+        dup = store.upsert_company(db, self._wd("Red Hat"))
+        store.upsert_job(db, {"job_id": "wd_redhat_1", "company_id": dup,
+                              "company_name": "Red Hat", "title": "SWE",
+                              "url": "https://r/1"})
+        store.upsert_job(db, {"job_id": "wd_redhat_2", "company_id": keep,
+                              "company_name": "Red Hat (IBM subsidiary, RTP HQ)",
+                              "title": "SRE", "url": "https://r/2"})
+        assert store.dedup_companies(db) == 1
+        names = {r[0] for r in db.execute("SELECT company_name FROM jobs")}
+        assert names == {"Red Hat (IBM subsidiary)"}
+        ids = {r[0] for r in db.execute("SELECT company_id FROM jobs")}
+        assert ids == {keep}
+
+
+class TestDedupJobs:
+    """Same company + same URL modulo query string + same title is one
+    posting: iCIMS served SAS's postings as `?in_iframe=1` and
+    `?hub=9&in_iframe=1` under two id namespaces (12 pairs, 2026-09-01),
+    and upsert_job's exact-URL re-key could not see through the query."""
+
+    _BASE = "https://careers-sas.icims.com/jobs/42453/software-developer/job"
+
+    def _job(self, job_id, query, title="Software Developer", company_id=None):
+        return {"job_id": job_id, "company_id": company_id,
+                "company_name": "SAS", "title": title,
+                "url": f"{self._BASE}?{query}", "location": "Cary, NC",
+                "track": "local-tech"}
+
+    def test_query_variants_collapse_and_keep_the_dispositioned_row(
+            self, db, company):
+        store.upsert_job(db, self._job("icims_careers-sas_42453",
+                                       "in_iframe=1", company_id=company))
+        store.upsert_job(db, self._job("icims_globalcareers-sas_42453",
+                                       "hub=9&in_iframe=1", company_id=company))
+        db.execute("UPDATE jobs SET disposition='applied' "
+                   "WHERE job_id='icims_globalcareers-sas_42453'")
+        assert store.dedup_jobs(db) == 1
+        rows = db.execute("SELECT job_id, disposition FROM jobs").fetchall()
+        assert [(r["job_id"], r["disposition"]) for r in rows] == \
+            [("icims_globalcareers-sas_42453", "applied")]
+
+    def test_earliest_row_wins_among_equals(self, db, company):
+        store.upsert_job(db, self._job("icims_a_42453", "in_iframe=1",
+                                       company_id=company))
+        store.upsert_job(db, self._job("icims_b_42453", "hub=9&in_iframe=1",
+                                       company_id=company))
+        db.execute("UPDATE jobs SET first_seen='2020-01-01T00:00:00' "
+                   "WHERE job_id='icims_b_42453'")
+        assert store.dedup_jobs(db) == 1
+        assert [r[0] for r in db.execute("SELECT job_id FROM jobs")] ==             ["icims_b_42453"]
+
+    def test_distinct_titles_on_one_url_stay_separate(self, db, company):
+        store.upsert_job(db, self._job("a", "x=1", title="Data Engineer",
+                                       company_id=company))
+        store.upsert_job(db, self._job("b", "x=2", title="Research Scientist",
+                                       company_id=company))
+        assert store.dedup_jobs(db) == 0
+
+    def test_distinct_requisitions_on_a_shared_landing_url_stay_separate(
+            self, db, company):
+        # Greenhouse companies whose stored URL is one careers landing page
+        # (…/careers?gh_jid=N): same title under two requisition numbers is
+        # two postings (a second office, a re-opened req), not a duplicate.
+        base = "https://butterflynetwork.com/careers"
+        for jid, q in (("gh_butterflynetwork_76211920", "gh_jid=76211920"),
+                       ("gh_butterflynetwork_76221680", "gh_jid=76221680")):
+            store.upsert_job(db, {"job_id": jid, "company_id": company,
+                                  "company_name": "Butterfly",
+                                  "title": "Staff Engineer, Digital Verification",
+                                  "url": f"{base}?{q}", "track": "local-tech"})
+        assert store.dedup_jobs(db) == 0
+
+    def test_unlinked_rows_are_left_alone(self, db):
+        # No company_id: nothing to scope the merge by, so never touched.
+        store.upsert_job(db, self._job("a", "x=1"))
+        store.upsert_job(db, self._job("b", "x=2"))
+        assert store.dedup_jobs(db) == 0

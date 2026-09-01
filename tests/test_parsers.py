@@ -54,6 +54,95 @@ def _stub_fetch_all(monkeypatch, mapping):
     monkeypatch.setattr(sniffer, "_fetch_all", _fake)
 
 
+class TestDeadHostCache:
+    """_fetch_page skips a host that refused a connection earlier in the
+    run: the candidate list tries several paths per name-guessed host and
+    the miss path rebuilds it a few more times, so one dead host cost seven
+    identical GETs per name in the 2026-09-01 add-names run."""
+
+    def _session(self, monkeypatch, exc):
+        calls = []
+
+        class _S:
+            def get(self, url, **kw):
+                calls.append(url)
+                raise exc
+
+        monkeypatch.setattr(sniffer, "SESSION", _S())
+        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
+        return calls
+
+    def test_refused_host_is_not_retried_on_other_paths(self, monkeypatch):
+        import requests
+        calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
+        assert sniffer._fetch_page("https://www.dead.example/") is None
+        assert sniffer._fetch_page("https://www.dead.example/careers") is None
+        assert sniffer._fetch_page("https://www.other.example/careers") is None
+        assert calls == ["https://www.dead.example/",
+                         "https://www.other.example/careers"]
+
+    def test_read_timeout_is_not_a_dead_host(self, monkeypatch):
+        # A slow host may still answer another path; only refused
+        # connections (DNS, TLS, connect timeout) are remembered.
+        import requests
+        calls = self._session(monkeypatch, requests.exceptions.ReadTimeout("slow"))
+        sniffer._fetch_page("https://www.slow.example/")
+        sniffer._fetch_page("https://www.slow.example/careers")
+        assert len(calls) == 2
+
+    def test_entry_expires(self, monkeypatch):
+        import time
+        import requests
+        calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
+        sniffer._DEAD_HOSTS["www.dead.example"] = time.time() - sniffer._DEAD_HOST_TTL - 1
+        sniffer._fetch_page("https://www.dead.example/careers")
+        assert calls == ["https://www.dead.example/careers"]
+
+
+class TestJobPageMeta:
+    """URL-only manual adds read their title (and JD) off the posting page;
+    nine empty-title rows sat in the 2026-09-01 store because nothing did."""
+
+    def _serve(self, monkeypatch, html):
+        class _R:
+            status_code = 200
+            text = html
+
+        class _S:
+            def get(self, *a, **k):
+                return _R()
+
+        monkeypatch.setattr(company_fetch, "SESSION", _S())
+
+    def test_jsonld_title_and_description(self, monkeypatch):
+        body = " ".join(["word"] * 60)
+        self._serve(monkeypatch,
+                    '<script type="application/ld+json">{"@type": "JobPosting", '
+                    '"title": "Sr Vision Software Engineer", '
+                    '"description": "' + body + '"}</script>')
+        title, desc = company_fetch.job_page_meta("https://x.example/jobs/1")
+        assert title == "Sr Vision Software Engineer"
+        assert desc.startswith("word word")
+
+    def test_title_falls_back_to_og_title_then_html_title(self, monkeypatch):
+        self._serve(monkeypatch,
+                    '<html><head><meta property="og:title" content="Data Engineer II">'
+                    '<title>Data Engineer II | Acme Careers</title></head></html>')
+        assert company_fetch.job_page_meta("https://x.example/j")[0] == "Data Engineer II"
+        self._serve(monkeypatch,
+                    '<html><head><title> Data  Engineer II | Acme Careers</title>'
+                    '</head></html>')
+        assert company_fetch.job_page_meta("https://x.example/j")[0] == "Data Engineer II"
+
+    def test_fetch_failure_is_a_double_miss(self, monkeypatch):
+        class _S:
+            def get(self, *a, **k):
+                raise RuntimeError("down")
+
+        monkeypatch.setattr(company_fetch, "SESSION", _S())
+        assert company_fetch.job_page_meta("https://x.example/j") == ("", "")
+
+
 class TestRootScan:
     """sniff_ats/sniff_careers_ats fall back to the bare homepage when every
     careers-path candidate misses (Task 2: NALA Membranes / Merakris

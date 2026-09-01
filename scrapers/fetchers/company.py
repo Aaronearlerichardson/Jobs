@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import time
+from urllib.parse import unquote
 
 import config
 from bs4 import BeautifulSoup, SoupStrainer
@@ -459,6 +460,61 @@ def _icims_job_meta(url, need_desc=False):
     return loc, desc
 
 
+def _icims_clean_title(text):
+    r"""Strip the screen-reader label iCIMS row anchors put ahead of the
+    title and collapse the whitespace around it. Templates differ: some
+    label the anchor "Requisition Title", others just "Title" on its own
+    line (Alcami, Metabolon, Cook Medical stored 15 rows as
+    "Title \n \nSr. Process Engineer" on 2026-09-01). A bare "Title" is
+    only a label when a line break follows it, so "Title IX Coordinator"
+    survives.
+
+    >>> _icims_clean_title("Requisition Title Data Engineer")
+    'Data Engineer'
+    >>> _icims_clean_title("Title \n \nSr. Process Engineer")
+    'Sr. Process Engineer'
+    >>> _icims_clean_title("Title IX Coordinator")
+    'Title IX Coordinator'
+    >>> _icims_clean_title("  Software   Developer ")
+    'Software Developer'
+    """
+    text = re.sub(r"^\s*Requisition Title\s*", "", text or "")
+    text = re.sub(r"^\s*Title\s*\n\s*", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _icims_canonical_url(url):
+    """One stored URL per iCIMS posting: path only, plus the `in_iframe=1`
+    flag every consumer needs (it selects the server-rendered document).
+    Tenants hand out the same posting under varying query strings
+    (`?hub=9&in_iframe=1` from a portal alias vs `?in_iframe=1` from the
+    sitemap), and upsert_job's re-key matches URLs exactly, so the variants
+    became duplicate rows (SAS, 2026-09-01).
+
+    >>> _icims_canonical_url("https://careers-sas.icims.com/jobs/42453/software-developer/job?hub=9&in_iframe=1")
+    'https://careers-sas.icims.com/jobs/42453/software-developer/job?in_iframe=1'
+    >>> _icims_canonical_url("https://careers-sas.icims.com/jobs/42453/software-developer/job")
+    'https://careers-sas.icims.com/jobs/42453/software-developer/job?in_iframe=1'
+    """
+    base = (url or "").split("#", 1)[0].split("?", 1)[0]
+    return f"{base}?in_iframe=1" if base else ""
+
+
+def _icims_host_tenant(url, default):
+    """The tenant token from a posting URL's own host, which is the stable
+    id namespace: a company can be configured under a portal alias
+    (globalcareers-sas) whose postings still live at careers-sas.icims.com,
+    and keying ids on the alias forked every SAS posting into a second row.
+
+    >>> _icims_host_tenant("https://careers-sas.icims.com/jobs/1/x/job", "globalcareers-sas")
+    'careers-sas'
+    >>> _icims_host_tenant("/jobs/1/x/job", "globalcareers-sas")
+    'globalcareers-sas'
+    """
+    m = re.match(r"https?://([a-z0-9-]+)\.icims\.com", url or "", re.I)
+    return m.group(1).lower() if m else default
+
+
 def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
     """
     Best-effort iCIMS scrape via the public job-search page. iCIMS is often
@@ -485,10 +541,9 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
                         + params, timeout=20, headers=_ICIMS_HEADERS)
         soup = BeautifulSoup(r.text, "html.parser")
         for a in soup.select("a.iCIMS_Anchor, a[href*='/jobs/']"):
-            # Row anchors carry a screen-reader label ("Requisition Title")
-            # ahead of the actual title text.
-            title = re.sub(r"^\s*Requisition Title\s*", "",
-                           a.get_text(" ").strip())
+            # Row anchors carry a screen-reader label ("Requisition Title",
+            # or a bare "Title" line) ahead of the actual title text.
+            title = _icims_clean_title(a.get_text(" "))
             href = a.get("href", "")
             jid = re.search(r"/jobs/(\d+)/", href)
             # A numbered detail URL is what distinguishes a posting row from
@@ -500,9 +555,10 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
             row_text = row.get_text(" ") if row else ""
             lm = _LOC_TEXT_RE.search(row_text)
             loc = (lm.group(0).strip() if lm else (loc_label if located else ""))
-            found.append({"id": f"icims_{tenant}_{jid.group(1)}",
-                          "title": title, "url": href if href.startswith("http")
-                          else f"https://{tenant}.icims.com{href}", "location": loc,
+            url = href if href.startswith("http") else f"https://{tenant}.icims.com{href}"
+            found.append({"id": f"icims_{_icims_host_tenant(url, tenant)}_{jid.group(1)}",
+                          "title": title, "url": _icims_canonical_url(url),
+                          "location": loc,
                           "description": "", "ats": "icims", "_wd": None,
                           "_row_text": row_text})
         return found
@@ -527,8 +583,9 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
                 if not m:
                     continue
                 title = unquote(m.group(2)).replace("---", " - ").replace("-", " ").strip()
-                out.append({"id": f"icims_{tenant}_{m.group(1)}", "title": title,
-                            "url": u, "location": "",
+                out.append({"id": f"icims_{_icims_host_tenant(u, tenant)}_{m.group(1)}",
+                            "title": title, "url": _icims_canonical_url(u),
+                            "location": "",
                             "description": "", "ats": "icims", "_wd": None})
         # De-dup across pages (last page repeats on some tenants).
         seen, uniq = set(), []
@@ -953,10 +1010,20 @@ def hydrate_description(job):
 
 
 def _description_from_job_url(url):
-    """Best-effort JD text from a job's own detail page, vendor-agnostically:
-    schema.org JSON-LD JobPosting first (hundreds of sites), then SuccessFactors
-    Career-Site-Builder markup (data-careersite-propertyid='description' — Duke,
-    Teleflex, and other SAP SF frontends). Returns '' on miss."""
+    """Best-effort JD text from a job's own detail page (see job_page_meta).
+    Returns '' on miss."""
+    return job_page_meta(url)[1]
+
+
+def job_page_meta(url):
+    """(title, description) read off a job's own detail page, vendor-
+    agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
+    then page metadata for the title (og:title, then <title> minus a
+    " | site" suffix) and SuccessFactors Career-Site-Builder markup for the
+    description (data-careersite-propertyid='description' — Duke, Teleflex,
+    and other SAP SF frontends). Either field is '' on a miss. The title
+    half exists for URL-only manual adds, which otherwise stored an empty
+    title that nothing downstream could score or rank."""
     try:
         r = SESSION.get(url, timeout=20, headers=HEADERS,
                         allow_redirects=True)
@@ -969,36 +1036,75 @@ def _description_from_job_url(url):
                                      "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
         html = r.text
     except Exception:
-        return ""
+        return "", ""
+    title = desc = ""
     try:
         from .jsonld import extract_jsonld, is_jobposting, _normalize_description
         for obj in extract_jsonld(html):
             if is_jobposting(obj):
+                title = str(obj.get("title") or obj.get("name") or "").strip()
                 d = _normalize_description(obj).strip()
                 if len(d) >= 120:
-                    return d[:_DESC_MAX]
+                    desc = d[:_DESC_MAX]
+                break
     except Exception:
         pass
+    if title and desc:
+        return title, desc
     try:
         soup = BeautifulSoup(html, "lxml")
-        el = (soup.select_one('[data-careersite-propertyid="description"]')
-              or soup.select_one('[data-careersite-propertyid="jobdescription"]')
-              # Custom boards that name the JD container (science.xyz: "_flow
-              # job-description"). Kept specific — 'job-description'/'jobDescription',
-              # not a bare 'description' — so a short company tagline can't match.
-              or soup.select_one('[class*="job-description"]')
-              or soup.select_one('[class*="jobDescription"]')
-              # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template
-              # wraps the posting in .jobDisplay (Teleflex). Last in the chain:
-              # it carries a little page chrome, so the precise containers win.
-              or soup.select_one('[class*="jobDisplay"]'))
-        if el:
-            d = el.get_text(" ", strip=True)
-            if len(d) >= 120:
-                return d[:_DESC_MAX]
+        if not title:
+            og = soup.find("meta", attrs={"property": "og:title"})
+            raw = (og.get("content") if og else "") or \
+                (soup.title.get_text(" ") if soup.title else "")
+            title = re.sub(r"\s+", " ", raw or "").split(" | ")[0].strip()
+        if not desc:
+            el = (soup.select_one('[data-careersite-propertyid="description"]')
+                  or soup.select_one('[data-careersite-propertyid="jobdescription"]')
+                  # Custom boards that name the JD container (science.xyz: "_flow
+                  # job-description"). Kept specific — 'job-description'/'jobDescription',
+                  # not a bare 'description' — so a short company tagline can't match.
+                  or soup.select_one('[class*="job-description"]')
+                  or soup.select_one('[class*="jobDescription"]')
+                  # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template
+                  # wraps the posting in .jobDisplay (Teleflex). Last in the chain:
+                  # it carries a little page chrome, so the precise containers win.
+                  or soup.select_one('[class*="jobDisplay"]'))
+            if el:
+                d = el.get_text(" ", strip=True)
+                if len(d) >= 120:
+                    desc = d[:_DESC_MAX]
     except Exception:
         pass
-    return ""
+    return title, desc
+
+
+def title_from_url_slug(url):
+    """Last-resort title for a URL-only manual add: the path segment with
+    the most word tokens, digits and separators normalized. Two words
+    minimum, so an id-only path yields '' rather than nonsense.
+
+    >>> title_from_url_slug("https://careers.pipercompanies.com/details/173531/sr_vision_software_engineer#apply")
+    'Sr Vision Software Engineer'
+    >>> title_from_url_slug("https://x.icims.com/jobs/42453/software-developer/job?in_iframe=1")
+    'Software Developer'
+    >>> title_from_url_slug("https://x.com/jobs/1970393556937343")
+    ''
+    """
+    path = re.sub(r"[?#].*$", "", url or "")
+    path = re.sub(r"^https?://[^/]+", "", path)
+    best = []
+    for seg in path.split("/"):
+        seg = unquote(seg)
+        if re.search(r"\.[a-z]{2,5}$", seg, re.I):     # a file, not a slug
+            continue
+        words = [w for w in re.split(r"[-_+\s]+", seg)
+                 if re.search(r"[A-Za-z]", w)]
+        if len(words) > len(best):
+            best = words
+    if len(best) < 2:
+        return ""
+    return " ".join(w[:1].upper() + w[1:] for w in best)
 
 
 # --- open/closed probing --------------------------------------------------- #

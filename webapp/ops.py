@@ -247,6 +247,7 @@ def _op_dedup(p):
     conn = store.connect(_op_track(p)["db_path"])
     try:
         store.dedup_companies(conn)
+        store.dedup_jobs(conn)
     finally:
         conn.close()
 

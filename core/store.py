@@ -663,8 +663,15 @@ def dedup_companies(conn):
         tags = set(t for t in (keep.get("tags") or "").split(",") if t)
         for l in losers:
             tags |= set(t for t in (l.get("tags") or "").split(",") if t)
-            conn.execute("UPDATE jobs SET company_id=? WHERE company_id=?",
-                         (keep["id"], l["id"]))
+            # Re-point the loser's jobs AND rename them: jobs.company_name
+            # is the denormalized display/grouping key (ranked_jobs groups
+            # and the digest prints by it), so a merge that only moved
+            # company_id left "Red Hat" and "Red Hat (IBM subsidiary, RTP
+            # HQ)" as two companies in every ranking after the 2026-09-01
+            # dedup, though both pointed at company 85.
+            conn.execute("UPDATE jobs SET company_id=?, company_name=? "
+                         "WHERE company_id=?",
+                         (keep["id"], keep["name"], l["id"]))
             conn.execute("DELETE FROM companies WHERE id=?", (l["id"],))
         active = 1 if any(m.get("active") for m in members) else (keep.get("active") or 0)
         conn.execute("UPDATE companies SET tags=?, active=? WHERE id=?",
@@ -672,8 +679,79 @@ def dedup_companies(conn):
         merged += len(losers)
         print(f"    {keep['name'][:30]:30} <- merged {len(losers)}: "
               + ", ".join(l["name"][:20] for l in losers))
+    # Realign every linked job with its company's current name — this
+    # catches rows renamed by earlier (name-blind) merges and rows whose
+    # ingest path spelled the company its own way ("BD (Becton Dickinson)"
+    # linked to company "BD").
+    realigned = conn.execute(
+        "UPDATE jobs SET company_name=(SELECT name FROM companies "
+        "WHERE companies.id=jobs.company_id) WHERE company_id IN "
+        "(SELECT id FROM companies) AND company_name IS NOT "
+        "(SELECT name FROM companies WHERE companies.id=jobs.company_id)"
+    ).rowcount
+    if realigned:
+        print(f"    {realigned} job row(s) renamed to their company's name")
     conn.commit()
     return merged
+
+
+def dedup_jobs(conn):
+    """Collapse job rows that are the SAME posting under different ids: same
+    company, same URL modulo scheme/query/fragment (_norm_url), same
+    normalized title. upsert_job's re-key only catches an EXACT URL match,
+    so a fetcher that emitted the same posting with a different query string
+    (iCIMS `?in_iframe=1` vs `?hub=9&in_iframe=1`, 12 SAS pairs in the
+    2026-09-01 store) under a second id namespace slipped past it, and the
+    pair then double-ranked and double-spent deep-verify.
+
+    Two guards keep this from eating distinct postings. Title must match —
+    some custom boards give several DISTINCT postings one landing URL (see
+    upsert_job). And the ids' per-posting tail (the board's own requisition
+    number, "..._42453") must match too: Greenhouse companies whose stored
+    URL is a shared careers landing page (butterflynetwork.com/careers?
+    gh_jid=N) reduce to one URL for every job, and a title reposted under a
+    fresh requisition (a second office, a re-opened req) is a separate
+    posting, not a duplicate — the dry run without this guard would have
+    merged three such Butterfly Network pairs.
+
+    Keeps, per group: a dispositioned row over an undispositioned one, then
+    an open row over a closed one, then the earliest first_seen (the row
+    whose history is longest). Returns the number of rows deleted."""
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for r in conn.execute(
+            "SELECT job_id, company_id, url, title, disposition, status, "
+            "first_seen FROM jobs WHERE company_id IS NOT NULL "
+            "AND url IS NOT NULL AND url != ''"):
+        key = (r["company_id"], _norm_url(r["url"]), _norm_title(r["title"]),
+               r["job_id"].rsplit("_", 1)[-1])
+        if key[1] and key[2]:
+            groups[key].append(dict(r))
+
+    def keep_rank(r):
+        return (r.get("disposition") is not None,
+                (r.get("status") or "open") == "open",
+                # earliest first: ISO strings sort by time, so negate via
+                # tuple ordering by sorting descending on the inverse
+                "" if not r.get("first_seen") else r["first_seen"])
+
+    deleted = 0
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Highest disposition/open rank wins; among equals the EARLIEST
+        # first_seen (min) wins, so sort ascending on first_seen and
+        # descending on the two flags.
+        members.sort(key=lambda r: (not keep_rank(r)[0], not keep_rank(r)[1],
+                                    keep_rank(r)[2]))
+        keep, losers = members[0], members[1:]
+        for l in losers:
+            conn.execute("DELETE FROM jobs WHERE job_id=?", (l["job_id"],))
+        deleted += len(losers)
+        print(f"    {(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
+              f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}")
+    conn.commit()
+    return deleted
 
 
 def export_companies(conn, path):

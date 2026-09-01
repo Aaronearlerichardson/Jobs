@@ -14,8 +14,11 @@ import html
 import logging
 import re
 import sys
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
+import requests
 from bs4 import BeautifulSoup, SoupStrainer
 
 # File-only diagnostics (session log DEBUG channel — never printed).
@@ -346,13 +349,53 @@ def _confirm_coords(ats, slug):
     return count if ok else None
 
 
+# Hosts that refused a connection outright (DNS failure, TLS handshake
+# failure, connect timeout) this run, host -> time recorded. The candidate
+# list tries ~5 paths per name-guessed host, and the miss path re-derives
+# the list up to three more times (root scan, careers sniff, diagnosis), so
+# one dead host cost 7 identical GETs per name in the 2026-09-01 add-names
+# run. A refused connection says nothing path-specific: skip the host for a
+# while. HTTP errors and READ timeouts are not cached — a slow or 404ing
+# host may still answer another path.
+_DEAD_HOSTS = {}
+_DEAD_HOST_TTL = 15 * 60
+_DEAD_HOSTS_LOCK = threading.Lock()
+
+
+def _dead_host(url):
+    """The host of `url` if a connection to it was refused within the TTL."""
+    m = re.match(r"https?://([^/]+)", url or "")
+    host = m.group(1).lower() if m else ""
+    with _DEAD_HOSTS_LOCK:
+        t = _DEAD_HOSTS.get(host)
+        if t is not None and time.time() - t < _DEAD_HOST_TTL:
+            return host
+        _DEAD_HOSTS.pop(host, None)
+    return ""
+
+
+def _mark_dead_host(url):
+    m = re.match(r"https?://([^/]+)", url or "")
+    if m:
+        with _DEAD_HOSTS_LOCK:
+            _DEAD_HOSTS[m.group(1).lower()] = time.time()
+
+
 def _fetch_page(url, timeout=6):
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
     answers fast. Returns the Response on 200 with real content, else None."""
+    if _dead_host(url):
+        _log.debug("skip %s: host refused a connection earlier this run", url)
+        return None
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
         return r if r.status_code == 200 and len(r.text) >= 300 else None
+    except requests.exceptions.ConnectionError:
+        # requests' ConnectionError covers DNS failure, SSLError and
+        # ConnectTimeout; ReadTimeout is a Timeout, not a ConnectionError.
+        _mark_dead_host(url)
+        return None
     except Exception:
         return None
 

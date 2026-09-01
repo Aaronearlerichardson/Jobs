@@ -138,8 +138,10 @@ def main(argv=None):
         from core import store
         conn = store.connect(t["db_path"] if t else None)
         n = store.dedup_companies(conn)
+        n_jobs = store.dedup_jobs(conn)
         conn.close()
-        print(f"\n  merged {n} duplicate company row(s) into their canonical board.")
+        print(f"\n  merged {n} duplicate company row(s) into their canonical board; "
+              f"dropped {n_jobs} duplicate job row(s).")
         return
 
     if args.watch or args.unwatch:
