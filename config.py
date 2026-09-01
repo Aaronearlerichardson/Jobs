@@ -415,6 +415,10 @@ _DEFAULT_TRACKS = {
 #   verify_top          deep-verify the top N after scoring (0 = skip)
 #   cost_guard          max postings scored per run without confirm (0 = off)
 #   email               email the digest after a crawl (CLI --send overrides)
+#   digest_min_fit      minimum resume fit a NEW row needs to make the
+#                       emailed digest (the written digest is unfiltered)
+#   notify              also raise a Windows desktop toast (needs the
+#                       optional `winotify` package; silent no-op without it)
 #   tech_title_regex    the technical-title gate (case-insensitive regex a
 #                       title must match before any API spend)
 #   exclude_gate        apply the [exclude.<id>] role/defense/nonclinical
@@ -447,6 +451,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": True},
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
         "verify_top": 15, "cost_guard": 0, "email": False,
+        "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": True,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
@@ -460,6 +465,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": False},
         "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
         "verify_top": 0, "cost_guard": 300, "email": False,
+        "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": False,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
@@ -513,6 +519,9 @@ def _build_ui_tracks(raw):
             "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
             "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
             "email": bool(t.get("email", eng_defaults["email"])),
+            "digest_min_fit": float(t.get("digest_min_fit",
+                                          eng_defaults["digest_min_fit"])),
+            "notify": bool(t.get("notify", eng_defaults["notify"])),
             "exclude_gate": bool(t.get("exclude_gate",
                                        eng_defaults["exclude_gate"])),
             "tech_title_regex": str(t.get("tech_title_regex")

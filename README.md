@@ -473,15 +473,25 @@ live board.
 
 ```powershell
 $action  = New-ScheduledTaskAction -Execute "python" `
-           -Argument "run_scraper.py --track local" `
+           -Argument "run_scraper.py --track local --send" `
            -WorkingDirectory "C:\path\to\Jobs"
 $trigger = New-ScheduledTaskTrigger -Daily -At "8:00AM"
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 30) -StartWhenAvailable
 Register-ScheduledTask -TaskName "Jobs Crawler" -Action $action -Trigger $trigger -Settings $settings -Force
 ```
 
+`--send` emails the digest for that run whatever the track's `email` flag
+says; set `[tracks.local] email = true` in `profile.toml` and you can drop
+it. Either way the email carries only the postings **first seen that run**
+that clear `digest_min_fit` (default 0.4), plus watched-company hits and any
+pipeline posting that closed — nothing goes out on a quiet day.
+`GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` have to be in the scheduled task's
+environment (set them machine-wide with `setx`; Task Scheduler does not read
+your interactive shell). Add `[tracks.local] notify = true` and
+`pip install winotify` for a desktop toast linking to the digest file.
+
 (Or the Task Scheduler GUI: daily trigger → program `python`, arguments
-`run_scraper.py --track ...`, "Start in" = the repo folder. Tasks still
+`run_scraper.py --track ... --send`, "Start in" = the repo folder. Tasks still
 pointing at `crawler.py` keep working — it's a shim that forwards to
 `run_scraper.py`. Note that `run_scraper.py` with NO flags refreshes EVERY
 configured track.)

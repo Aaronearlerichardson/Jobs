@@ -149,6 +149,12 @@ default = true
 # verify_top = 15              # deep-verify the top N after scoring (0 = skip)
 # cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl
+# digest_min_fit = 0.4         # emailed digest carries only rows first seen
+#                              # this run scoring at least this fit; the
+#                              # written digest stays unfiltered
+# notify = false               # also raise a Windows desktop toast when a
+#                              # digest goes out (needs the optional
+#                              # `winotify` package; no-op without it)
 # exclude_gate = true          # apply the [exclude.<id>] role/defense tables
 # tech_title_regex = "..."     # the technical-title gate (case-insensitive
 #                              # regex a title must match before scoring spend).

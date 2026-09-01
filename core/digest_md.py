@@ -86,6 +86,181 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None):
     return path
 
 
+def new_ranked_rows(ranked, t, new_since=None):
+    """The ranked rows first seen on or after `new_since` (default today)
+    that score at least the track's `digest_min_fit`.
+
+    >>> t = {"digest_min_fit": 0.4}
+    >>> rows = [{"job_id": "a", "first_seen": "2026-09-01",
+    ...          "resume_fit_score": 0.7},
+    ...         {"job_id": "b", "first_seen": "2026-08-30",
+    ...          "resume_fit_score": 0.9},
+    ...         {"job_id": "c", "first_seen": "2026-09-01",
+    ...          "resume_fit_score": 0.2}]
+    >>> [j["job_id"] for j in new_ranked_rows(rows, t, "2026-09-01")]
+    ['a']
+
+    Reaching `new_since` further back widens the window; the fit floor
+    still applies:
+
+    >>> [j["job_id"] for j in new_ranked_rows(rows, t, "2026-08-30")]
+    ['a', 'b']
+
+    A row nobody scored never qualifies, whatever the floor:
+
+    >>> new_ranked_rows([{"first_seen": "2026-09-01",
+    ...                   "resume_fit_score": None}], t, "2026-09-01")
+    []
+
+    Omitting `new_since` means today, so a run's email carries that run's
+    finds:
+
+    >>> from datetime import datetime
+    >>> today = datetime.now().strftime("%Y-%m-%d")
+    >>> fresh = {"job_id": "d", "first_seen": today, "resume_fit_score": 0.9}
+    >>> [j["job_id"] for j in new_ranked_rows([fresh], t)]
+    ['d']
+
+    Notes:
+        The floor is deliberately separate from the UI's `min_fit_default`.
+        The written digest is the whole ranking and is fine to browse; the
+        email is an interruption, so it gets a stricter bar.
+    """
+    since = (new_since or datetime.now().strftime("%Y-%m-%d"))[:10]
+    floor = float(t.get("digest_min_fit") or 0.0)
+    fresh = []
+    for j in ranked or []:
+        if (j.get("first_seen") or "")[:10] < since:
+            continue
+        fit = j.get("resume_fit_score")
+        if not isinstance(fit, (int, float)) or fit < floor:
+            continue
+        fresh.append(j)
+    return fresh
+
+
+def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
+                       new_since=None):
+    """Email a store-crawl track's new ranked rows. True when a message
+    actually went out.
+
+    Renders the markdown shape of `write_ranked_digest` — pipeline
+    closures, watched-company hits, then a fit-ordered table — restricted
+    to `new_ranked_rows`, and sends nothing when there is neither a new row
+    nor a watch hit. Enforced by
+    tests/test_digest.py::TestSendRankedDigest, which monkeypatches
+    `send_gmail` (an SMTP call is not a doctest).
+
+    Notes:
+        Postings close fast, so the location-scoped track needs a push
+        rather than a page to visit. A daily alert that also fires on quiet
+        days stops being read, which is what the silent path is for.
+    """
+    fresh = new_ranked_rows(ranked, t, new_since)
+    hits = list(watch_hits or [])
+    since = (new_since or datetime.now().strftime("%Y-%m-%d"))[:10]
+    closed = [p for p in (pipeline or [])
+              if p.get("status") == "closed"
+              and (p.get("closed_at") or "")[:10] >= since]
+    if not fresh and not hits:
+        print("  No new postings or watch hits - skipping email.")
+        return False
+
+    tag = _tag(t)
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    subject = f"{tag} {len(fresh)} new match(es) - {date_str}"
+
+    md = [f"# {tag} New Postings — {date_str}", ""]
+    html = [f"<h2>{tag} New Postings — {date_str}</h2>"]
+    if closed:
+        md += ["## Pipeline — closed since your last digest", ""]
+        html.append("<h3>Pipeline — closed since your last digest</h3><ul>")
+        for p in closed:
+            md.append(f"- **{p.get('disposition')}** — {p.get('company_name')} "
+                      f"— [{p.get('title')}]({p.get('url')}) — posting CLOSED")
+            html.append(f"<li><strong>{p.get('disposition')}</strong> — "
+                        f"{p.get('company_name')} — "
+                        f"<a href='{p.get('url')}'>{p.get('title')}</a> — "
+                        f"posting CLOSED</li>")
+        md.append("")
+        html.append("</ul>")
+    if hits:
+        md += ["## Watched companies — new postings this run", ""]
+        html.append("<h3>Watched companies — new postings this run</h3><ul>")
+        for c, j, in_pipeline in hits:
+            note = "scored" if in_pipeline else "listed only, outside local scope"
+            md.append(f"- **{c['name']}** — [{j.get('title')}]({j.get('url')}) "
+                      f"— {j.get('location') or '?'} *({note})*")
+            html.append(f"<li><strong>{c['name']}</strong> — "
+                        f"<a href='{j.get('url')}'>{j.get('title')}</a> — "
+                        f"{j.get('location') or '?'} <em>({note})</em></li>")
+        md.append("")
+        html.append("</ul>")
+
+    floor = float(t.get("digest_min_fit") or 0.0)
+    md.append(f"**{len(fresh)} new job(s)** first seen {since}, "
+              f"resume fit >= {floor:.2f}, ranked by fit.")
+    md += ["", "| Fit | Age | Company | Title | Location | Why |",
+           "|----:|----:|---------|-------|----------|-----|"]
+    html.append(f"<p><strong>{len(fresh)} new job(s)</strong> first seen "
+                f"{since}, resume fit &gt;= {floor:.2f}.</p>")
+    html.append('<table border="1" cellpadding="8" cellspacing="0" '
+                'style="border-collapse:collapse;width:100%">'
+                "<tr><th>Fit</th><th>Age</th><th>Company</th><th>Title</th>"
+                "<th>Location</th><th>Why</th></tr>")
+    today = datetime.now().strftime("%Y-%m-%d")
+    for j in fresh:
+        fit = j.get("resume_fit_score")
+        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
+        age = age_tag(j, today)
+        why = j.get("fit_reason", "") or ""
+        md.append(f"| {fs} | {age} | {j.get('company_name')} "
+                  f"| [{j.get('title')}]({j.get('url')}) "
+                  f"| {j.get('location')} | {why} |")
+        html.append(f"<tr><td>{fs}</td><td>{age}</td>"
+                    f"<td>{j.get('company_name')}</td>"
+                    f"<td><a href='{j.get('url')}'>{j.get('title')}</a></td>"
+                    f"<td>{j.get('location')}</td><td>{why}</td></tr>")
+    html.append("</table>")
+
+    plain = "\n".join(md) + "\n"
+    body = ('<html><body style="font-family:sans-serif;max-width:900px">'
+            + "".join(html) + "</body></html>")
+    if send_gmail(subject, plain, body):
+        print(f"  {tag} digest emailed ({len(fresh)} new, {len(hits)} watch).")
+        return True
+    return False
+
+
+def toast(t, count, path):
+    """Raise a Windows desktop toast for a just-sent digest. True only when
+    one was actually shown.
+
+    Off unless the track sets `notify`, off when the run found nothing, and
+    a silent no-op when the optional `winotify` package is missing.
+    Enforced by tests/test_digest.py::TestToast.
+
+    Notes:
+        The email is the contract and the toast is a convenience, so every
+        failure here is swallowed rather than surfaced.
+    """
+    if not t.get("notify") or not count:
+        return False
+    try:
+        from winotify import Notification
+    except Exception:
+        return False
+    try:
+        n = Notification(app_id="Job Crawler",
+                         title=f"{_tag(t)} {count} new posting(s)",
+                         msg="Open today's digest")
+        n.add_actions(label="Open digest", launch=str(path))
+        n.show()
+        return True
+    except Exception:
+        return False
+
+
 def write_matches_digest(matches, report_dir, t):
     """Flat surfaced-postings digest for a sweep track."""
     report_dir.mkdir(exist_ok=True)
