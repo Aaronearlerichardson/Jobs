@@ -111,10 +111,12 @@ function jobFilters(j) {
   if (j.geo_bucket === "remote") {
     // Non-US remotes aren't takeable for a US applicant; always hide.
     if (!j.us_ok) return false;
-    // Precision rule (per track config): remote rows only at watched
-    // companies — unless the user explicitly selected the remote bucket.
+    // Precision rule (per track config): remote rows only where the server
+    // says a remote row is worth showing (remote_ok = watched, or
+    // core-mission at the track's remote_mission_floor) — unless the user
+    // explicitly selected the remote bucket.
     const t = currentTrack();
-    if (t && t.remote_requires_watch && !j.watched && geo !== "remote") return false;
+    if (t && t.remote_requires_watch && !j.remote_ok && geo !== "remote") return false;
   }
   const age = $("#f-age").value;
   if (age === "new" && j.age !== "NEW") return false;
@@ -143,8 +145,8 @@ function renderFilterSummary(shown) {
     if (n) bits.push(`<b>${n}</b> would need relocating (<button data-fix="move">show them</button>)`);
   }
   if (t?.remote_requires_watch && geo !== "remote") {
-    const n = state.jobs.filter(j => j.geo_bucket === "remote" && j.us_ok && !j.watched).length;
-    if (n) bits.push(`<b>${n}</b> remote at companies you don't watch (<button data-fix="remote">show them</button>)`);
+    const n = state.jobs.filter(j => j.geo_bucket === "remote" && j.us_ok && !j.remote_ok).length;
+    if (n) bits.push(`<b>${n}</b> remote at companies you neither watch nor rate core-mission (<button data-fix="remote">show them</button>)`);
   }
   const nonUs = state.jobs.filter(j => j.geo_bucket === "remote" && !j.us_ok).length;
   if (nonUs) bits.push(`<b>${nonUs}</b> remote outside the US`);
@@ -431,6 +433,17 @@ function crawlCell(c) {
      title="crawl this company every run again">wake</button>`;
 }
 
+/* Fit at which the roster suggests watching a company. The watch list is
+   hand-maintained and lags the data — a company that has already produced a
+   job this good is one whose whole board is worth fetching. */
+const SUGGEST_WATCH_FIT = 0.4;
+
+function suggestChip(c) {
+  if (c.watched || !(c.best_fit >= SUGGEST_WATCH_FIT)) return "";
+  return ` <button class="star suggest" data-id="${c.id}"
+    title="best fit here is ${c.best_fit.toFixed(2)} — watch it to fetch the whole board">suggest watch</button>`;
+}
+
 function renderCompanies() {
   const q = $("#c-search").value.trim().toLowerCase();
   const activeOnly = $("#c-activeonly").checked;
@@ -446,7 +459,7 @@ function renderCompanies() {
       <tr>
         <td><button class="star ${c.watched ? "on" : ""}" data-id="${c.id}"
              title="watch: whole board fetched, new technical postings flagged">${c.watched ? "★" : "☆"}</button></td>
-        <td>${esc(c.name)}</td>
+        <td>${esc(c.name)}${suggestChip(c)}</td>
         <td class="loc">${esc(c.ats || "—")}</td>
         <td><span class="chip tier">${esc(c.mission_tier || "?")}</span></td>
         <td class="num">${c.mission_score == null ? "–" : c.mission_score.toFixed(2)}</td>

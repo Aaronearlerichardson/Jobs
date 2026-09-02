@@ -115,7 +115,7 @@ def _geo_tag(r):
     return "relocation"
 
 
-def _job_json(r, today, rank=None):
+def _job_json(r, today, rank=None, remote_floor=None):
     d = {k: r.get(k) for k in _JOB_FIELDS}
     d["rank"] = rank
     d["age"] = digest_md.age_tag(r, today)
@@ -125,6 +125,10 @@ def _job_json(r, today, rank=None):
     d["us_ok"] = remote_filter.us_eligible(r.get("location") or "")
     d["watched"] = "watch" in {t.strip() for t in
                                (r.get("company_tags") or "").split(",")}
+    # Whether a REMOTE row here is worth showing in a location-scoped track.
+    # The same rule ranked_jobs applies server-side, re-run per row because
+    # /api/jobs deliberately ships everything and gates on the client.
+    d["remote_ok"] = store.remote_admitted(r, remote_floor)
     return d
 
 
@@ -144,7 +148,9 @@ def api_jobs():
         include_dispositioned=request.args.get("dispositioned") == "1")
     conn.close()
     today = _today()
-    return jsonify([_job_json(r, today, i + 1) for i, r in enumerate(rows)])
+    floor = t.get("remote_mission_floor")
+    return jsonify([_job_json(r, today, i + 1, remote_floor=floor)
+                    for i, r in enumerate(rows)])
 
 
 @app.get("/api/tracks")
@@ -154,6 +160,7 @@ def api_tracks():
          "min_fit_default": t["min_fit_default"],
          "willing_to_move_default": t["willing_to_move_default"],
          "remote_requires_watch": t["remote_requires_watch"],
+         "remote_mission_floor": t["remote_mission_floor"],
          "default": t["id"] == config.DEFAULT_TRACK,
          "ops": sorted(n for n, o in OPS.items()
                        if o.get("engine") in (None, t["engine"]))}
@@ -195,19 +202,24 @@ def api_pipeline_fields(job_id):
     """
     p = request.get_json(silent=True) or {}
     fields = {k: p[k] for k in store.PIPELINE_FIELDS if k in p}
-    conn = _conn(_track())
+    t = _track()
+    conn = _conn(t)
     row, err = store.update_pipeline_fields(conn, job_id, **fields)
     conn.close()
     if err:
         return jsonify(error=err), 400
-    return jsonify(ok=True, job=_job_json(row, _today()))
+    return jsonify(ok=True, job=_job_json(
+        row, _today(), remote_floor=t.get("remote_mission_floor")))
 
 
 @app.get("/api/pipeline")
 def api_pipeline():
-    conn = _conn(_track())
+    t = _track()
+    conn = _conn(t)
     today = _today()
-    rows = [_job_json(r, today) for r in store.get_pipeline(conn)]
+    floor = t.get("remote_mission_floor")
+    rows = [_job_json(r, today, remote_floor=floor)
+            for r in store.get_pipeline(conn)]
     due = [j["job_id"] for j in store.followups_due(conn, today)]
     conn.close()
     return jsonify(rows=rows, followups_due=due)
@@ -227,20 +239,25 @@ def api_conversion():
 def api_companies():
     conn = _conn(_track())
     comps = store.get_companies(conn, active_only=False)
-    counts = dict(conn.execute(
-        "SELECT company_id, COUNT(*) FROM jobs "
+    # Open-job count AND best résumé fit per company in one pass: the roster
+    # suggests watching a company that has already produced a good-fit job,
+    # which is how a hand-maintained watch list is meant to grow.
+    stats = {r[0]: (r[1], r[2]) for r in conn.execute(
+        "SELECT company_id, COUNT(*), MAX(resume_fit_score) FROM jobs "
         "WHERE COALESCE(status,'open')!='closed' AND company_id IS NOT NULL "
-        "GROUP BY company_id").fetchall())
+        "GROUP BY company_id").fetchall()}
     conn.close()
     out = []
     for c in comps:
         tags = {t for t in (c.get("tags") or "").split(",") if t}
+        n_open, best_fit = stats.get(c["id"], (0, None))
         out.append({
             "id": c["id"], "name": c["name"], "ats": c.get("ats"),
             "mission_tier": c.get("mission_tier"),
             "mission_score": c.get("mission_score"),
             "active": bool(c.get("active")), "tags": sorted(tags),
-            "watched": "watch" in tags, "open_jobs": counts.get(c["id"], 0),
+            "watched": "watch" in tags, "open_jobs": n_open,
+            "best_fit": best_fit,
             # Crawl cadence, so the roster shows WHY a company stopped
             # producing rows instead of looking silently broken.
             "crawl_state": c.get("crawl_state") or "active",

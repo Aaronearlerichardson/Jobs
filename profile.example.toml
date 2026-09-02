@@ -98,8 +98,9 @@ non_us_regions = []
 # `min_mission`), and the UI filter defaults applied when you switch to it
 # (`min_fit_default` for the fit slider, `willing_to_move_default` for the
 # relocate checkbox). `remote_requires_watch = true` hides remote rows unless
-# the company carries the human-set "watch" tag (a precision rule for
-# location-focused tracks). `default = true` marks the track the UI opens on.
+# the company is trusted with an out-of-area exception (a precision rule for
+# location-focused tracks); `remote_mission_floor` says which unwatched
+# companies earn that trust. `default = true` marks the track the UI opens on.
 #
 # The ids, labels, and DBs are yours to rename. Omit the whole [tracks]
 # section for the built-in two-track default (the same two shown here).
@@ -146,6 +147,18 @@ default = true
 #                              # ("local" / "sweep" / "watch"; core/tags.py)
 # require_core_anchor = false  # gate: posting must hit a CORE keyword
 # geo_gate = true              # gate: drop non-local, non-remote postings
+# remote_mission_floor = 0.85  # a company at or above this mission score is
+#                              # treated like a watched one for REMOTE work:
+#                              # its whole board is fetched, its explicitly
+#                              # remote postings survive the geo gate, and
+#                              # they enter the location-scoped ranking. The
+#                              # watch list is hand-maintained and lags the
+#                              # data, so core-mission employers nobody has
+#                              # starred yet still get seen. Multi-division
+#                              # conglomerates ([policy] multi_division) never
+#                              # qualify this way. Costs whole-board fetches:
+#                              # each 0.05 you drop the floor adds boards to
+#                              # every run. `false` turns it off.
 # verify_top = 15              # deep-verify the top N after scoring (0 = skip)
 # cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl

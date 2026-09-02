@@ -60,6 +60,11 @@ class TestApi:
             assert {"id", "label", "engine", "min_fit_default",
                     "willing_to_move_default", "ops"} <= set(t)
 
+    def test_tracks_expose_the_remote_mission_floor(self, client):
+        # The SPA's remote rule needs the same number the server ranks with.
+        tracks = json.loads(client.get("/api/tracks").data)
+        assert all("remote_mission_floor" in t for t in tracks)
+
     def test_unknown_track_falls_back_rather_than_500(self, client):
         # A stale localStorage value must not brick the UI.
         assert client.get("/api/jobs?track=no_such_track").status_code == 200
@@ -222,6 +227,83 @@ class TestPipelineApi:
         assert rep[0]["band"] == "mid" and rep[0]["geo_mode"] == "onsite"
         assert rep[0]["applications"] == 1
         assert rep[0]["interview_rate"] == 0.0
+
+
+class TestRemoteAdmissionFields:
+    """/api/jobs ships every row and lets the client gate them, so the
+    client needs the server's verdict on each: `remote_ok` says a remote row
+    is worth showing (watched, or core-mission at the track's
+    remote_mission_floor). `best_fit` on the roster is what turns an
+    unwatched company that has already produced a good-fit job into a
+    one-click watch suggestion."""
+
+    FIT = 0.94
+
+    def _store(self, tmp_path, monkeypatch, mission, floor=0.85):
+        import config
+        from core import store
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        db_path = tmp_path / "admission.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme",
+                                          "mission_score": mission})
+        store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": cid,
+                                "company_name": "Acme",
+                                "title": "Research Engineer",
+                                "url": "https://acme.io/1",
+                                "location": "Remote - US", "geo_mode": "remote",
+                                "track": t["track"],
+                                "resume_fit_score": self.FIT})
+        conn.commit()
+        conn.close()
+        monkeypatch.setitem(t, "db_path", db_path)
+        monkeypatch.setitem(t, "remote_mission_floor", floor)
+        return cid
+
+    def _job(self, client):
+        return json.loads(client.get("/api/jobs").data)[0]
+
+    def test_core_mission_remote_is_admitted_unwatched(self, client, tmp_path,
+                                                       monkeypatch):
+        self._store(tmp_path, monkeypatch, mission=0.9)
+        job = self._job(client)
+        assert job["watched"] is False and job["remote_ok"] is True
+
+    def test_below_the_floor_is_not(self, client, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch, mission=0.5)
+        assert self._job(client)["remote_ok"] is False
+
+    def test_no_floor_disables_it(self, client, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch, mission=0.9, floor=None)
+        assert self._job(client)["remote_ok"] is False
+
+    def test_watch_admits_a_company_far_below_the_floor(self, client,
+                                                        tmp_path, monkeypatch):
+        # Above the track's min_mission (or the row leaves the ranking for an
+        # unrelated reason), nowhere near the remote floor.
+        cid = self._store(tmp_path, monkeypatch, mission=0.3)
+        assert client.post(f"/api/company/{cid}/watch",
+                           json={"on": True}).status_code == 200
+        assert self._job(client)["remote_ok"] is True
+
+    def test_roster_carries_the_best_fit_so_far(self, client, tmp_path,
+                                                monkeypatch):
+        cid = self._store(tmp_path, monkeypatch, mission=0.9)
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["best_fit"] == self.FIT and row["open_jobs"] == 1
+
+    def test_best_fit_is_none_without_jobs(self, client, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch, mission=0.9)
+        from core import store
+        conn = store.connect(tmp_path / "admission.db")
+        cid = store.upsert_company(conn, {"name": "Quiet", "ats": "lever",
+                                          "slug": "quiet"})
+        conn.close()
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["best_fit"] is None and row["open_jobs"] == 0
 
 
 class TestAssets:

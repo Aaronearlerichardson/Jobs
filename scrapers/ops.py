@@ -40,7 +40,8 @@ def _ranked(conn, t, limit=None):
         conn, track=t["track"],
         location_re=(NC_RE if t["geo_gate"] else None),
         rank_by=t["rank_by"], allow_geo_modes={"remote"},
-        min_mission=t["min_mission"], limit=limit)
+        min_mission=t["min_mission"],
+        remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
 
 
 # --------------------------------------------------------------------------- #
@@ -66,11 +67,64 @@ def _is_watched(company):
     return tags.has(company.get("tags"), tags.WATCH)
 
 
-def _whole_board(company):
-    """Companies whose ENTIRE board is fetched (no location filter):
-    sweep-tagged (cheap to pull whole) and watched (never miss a new
-    posting). Everyone else gets the locality-scoped pull."""
-    return _is_sweep_tagged(company) or _is_watched(company)
+def _mission_trusted(company, floor):
+    """True if a store company row earns watch-grade remote treatment on its
+    mission score alone: `floor` (the track's `remote_mission_floor`,
+    None = off) or better.
+
+    >>> _mission_trusted({"name": "Acme", "mission_score": 0.9}, 0.85)
+    True
+    >>> _mission_trusted({"name": "Acme", "mission_score": 0.5}, 0.85)
+    False
+    >>> _mission_trusted({"name": "Acme", "mission_score": 0.9}, None)
+    False
+    >>> _mission_trusted(None, 0.85)
+    False
+
+    Notes:
+        Defers to store.remote_admitted, the rule the ranking applies, so
+        the fetch side and the ranking side cannot drift into disagreeing
+        about which remote rows should exist. The company row is passed as
+        the job-shaped fields that rule reads; its tags are withheld
+        because callers test the watch half themselves.
+    """
+    if not company:
+        return False
+    return store.remote_admitted(
+        {"company_name": company.get("name"),
+         "mission_score": company.get("mission_score")}, floor)
+
+
+def _whole_board(company, mission_floor=None):
+    """Whether a company's ENTIRE board is fetched, with no location filter.
+
+    Either scope tag qualifies on its own — a sweep board is cheap to pull
+    whole, a watched one must never miss a posting:
+
+    >>> _whole_board({"name": "Acme", "tags": "watch"})
+    True
+    >>> _whole_board({"name": "Acme", "tags": "local"})
+    False
+
+    Given a `mission_floor` (the track's `remote_mission_floor`), a
+    core-mission company qualifies on its score too, so its remote postings
+    — which a locality-scoped fetch would never return — can reach the
+    ranking that now admits them:
+
+    >>> core = {"name": "Acme", "tags": "local", "mission_score": 0.9}
+    >>> _whole_board(core), _whole_board(core, 0.85)
+    (False, True)
+
+    Everyone else gets the locality-scoped pull.
+
+    Notes:
+        Whole-board fetches are the expensive kind: at the shipped floor of
+        0.85 about 112 further boards per run stop being location-scoped,
+        and the count climbs fast as the floor drops. It is a knob to move
+        deliberately.
+    """
+    return (_is_sweep_tagged(company) or _is_watched(company)
+            or _mission_trusted(company, mission_floor))
 
 
 # --------------------------------------------------------------------------- #
@@ -96,18 +150,20 @@ def _keep_job(company, job, t):
             title, job.get("description", ""),
             allow_defense=_is_watched(company), track_id=t["id"]):
         return False
-    if t["geo_gate"] and _whole_board(company):
-        # Sweep-tagged and watched companies are fetched with no location
-        # restriction, which lets their remote and onsite-elsewhere reqs
-        # through the fetch. Gate here:
-        #   watched -> local-onsite or explicitly-remote is scored (the
-        #              watch tag is human-curated, and ranked_jobs admits
-        #              watched remotes into the local list);
+    floor = t.get("remote_mission_floor")
+    if t["geo_gate"] and _whole_board(company, floor):
+        # Whole-board companies are fetched with no location restriction,
+        # which lets their remote and onsite-elsewhere reqs through the
+        # fetch. Gate here:
+        #   watched / core-mission -> local-onsite or explicitly-remote is
+        #              scored (the watch tag is human-curated, the mission
+        #              floor is a judged score, and ranked_jobs admits both
+        #              kinds of remote into the local list);
         #   sweep   -> local-onsite ONLY. That tag is machine-set and proved
         #              untrustworthy for an out-of-area exception (slug
         #              collisions flooded the ranking with remote junk).
         gm = geo_mode(job.get("location", ""), job.get("description", ""))
-        if _is_watched(company):
+        if _is_watched(company) or _mission_trusted(company, floor):
             if gm is None:
                 return False
         elif gm != "onsite":
@@ -136,7 +192,8 @@ def crawl_company(conn, resume, company, max_workers=6, t=None):
     n_new). Used by the manual-add flow to pull a company's other jobs once
     it's in the roster."""
     t = _t(t)
-    loc_re = None if _whole_board(company) else NC_RE
+    loc_re = None if _whole_board(company,
+                                  t.get("remote_mission_floor")) else NC_RE
     try:
         jobs = company_fetch.fetch_company(company, loc_re)
     except Exception as e:
@@ -495,7 +552,8 @@ def sync_status_all(top_n=15, t=None):
     loc = NC_RE if t["sources"]["location_scoped"] else None
     sources = [(c["name"], c["ats"] or "?",
                 (lambda cc=c: company_fetch.fetch_company(
-                    cc, None if (_whole_board(cc) or loc is None) else loc)))
+                    cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
+                                 or loc is None) else loc)))
                for c in companies]
     fetched = fetch_all(sources)
     n_closed = n_reopened = n_boards = 0
@@ -628,14 +686,19 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
         if t["geo_gate"]:
             # Location-scoped track: gate ingested jobs on the same locality
             # filter the live crawl applies inside its fetchers, with one
-            # relaxation — a posting from a WATCHED company still passes
-            # when it's explicitly remote (matching ranked_jobs' watch-
-            # scoped remote admission). Enforced even for curated adds.
+            # relaxation — a posting from a company the ranking trusts with
+            # an out-of-area exception (watched, or core-mission at the
+            # track's remote_mission_floor) still passes when it's
+            # explicitly remote. Enforced even for curated adds.
             loc = j.get("location", "") or ""
             is_local = bool(NC_RE.search(loc))
-            is_remote_watched = (_is_watched(company_row)
-                                 and geo_mode(loc, j.get("description", "")) == "remote")
-            if not (is_local or is_remote_watched):
+            trusted = (_is_watched(company_row)
+                       or _mission_trusted(company_row,
+                                           t.get("remote_mission_floor")))
+            is_remote_trusted = (
+                trusted
+                and geo_mode(loc, j.get("description", "")) == "remote")
+            if not (is_local or is_remote_trusted):
                 n_nonlocal += 1
                 continue
         if not curated:

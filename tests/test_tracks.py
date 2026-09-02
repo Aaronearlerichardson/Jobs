@@ -4,7 +4,9 @@ keyword focus, and source assembly through the one crawl pipeline."""
 from datetime import datetime, timedelta
 
 import core.store as store
+import scrapers.ops as ops
 import scrapers.runner as runner
+from core import tags
 
 
 class TestTrackConfig:
@@ -55,6 +57,62 @@ class TestTrackConfig:
     def test_track_for_engine_resolves_both(self, local_track, sweep_track):
         assert local_track["engine"] == "local"
         assert sweep_track["engine"] == "sweep"
+
+
+class TestRemoteAdmissionGates:
+    """The fetch side of `remote_mission_floor`. A core-mission company that
+    nobody has starred is pulled whole-board and its explicitly-remote rows
+    survive the geo gate — otherwise the ranking would admit rows the crawl
+    never fetched."""
+
+    def _co(self, mission=None, tag=""):
+        return {"id": 1, "name": "Acme", "ats": "greenhouse", "slug": "acme",
+                "mission_score": mission, "tags": tag}
+
+    def _job(self, location, title="Data Engineer"):
+        return {"id": "gh_acme_1", "title": title, "location": location,
+                "url": "https://acme.io/1", "description": ""}
+
+    def _track(self, local_track, floor=0.85):
+        return {**local_track, "remote_mission_floor": floor}
+
+    def test_floor_pulls_the_whole_board(self):
+        assert ops._whole_board(self._co(mission=0.9), 0.85)
+        assert not ops._whole_board(self._co(mission=0.5), 0.85)
+
+    def test_no_floor_keeps_the_scoped_fetch(self):
+        # The knob is opt-in: without it, only the tags qualify.
+        assert not ops._whole_board(self._co(mission=0.99))
+
+    def test_tags_still_qualify_on_their_own(self):
+        assert ops._whole_board(self._co(tag="watch"))
+        assert ops._whole_board(self._co(tag=tags.SWEEP))
+
+    def test_conglomerates_never_qualify_by_score(self, cfg, monkeypatch):
+        monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
+        assert not ops._whole_board(self._co(mission=0.99), 0.85)
+
+    def test_remote_row_survives_the_geo_gate(self, local_track):
+        assert ops._keep_job(self._co(mission=0.9), self._job("Remote - US"),
+                             self._track(local_track))
+
+    def test_onsite_elsewhere_still_drops(self, local_track, elsewhere):
+        assert not ops._keep_job(self._co(mission=0.9), self._job(elsewhere),
+                                 self._track(local_track))
+
+    def test_local_row_is_kept(self, local_track, local_addr):
+        assert ops._keep_job(self._co(mission=0.9), self._job(local_addr),
+                             self._track(local_track))
+
+    def test_sweep_tag_alone_admits_no_remote(self, local_track):
+        # Machine-set tag: whole-board fetch, local-onsite rows ONLY.
+        assert not ops._keep_job(self._co(tag=tags.SWEEP),
+                                 self._job("Remote - US"),
+                                 self._track(local_track))
+
+    def test_watch_tag_admits_remote(self, local_track):
+        assert ops._keep_job(self._co(tag="watch"), self._job("Remote - US"),
+                             self._track(local_track))
 
 
 class TestKeywordFocus:

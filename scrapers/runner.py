@@ -149,12 +149,14 @@ def build_sources(cfg, t, include_websearch=None):
             rows = []
         if src["location_scoped"]:
             # Full per-company board fetch through the locality filter —
-            # whole-board (no filter) for watched/sweep-tagged companies,
+            # whole-board (no filter) for watched/sweep-tagged companies and
+            # for core-mission ones at the track's remote_mission_floor,
             # whose out-of-area rows the geo gate handles downstream.
+            floor = t.get("remote_mission_floor")
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if ops._whole_board(cc)
+                        cc, None if ops._whole_board(cc, floor)
                         else company_fetch.NC_RE)),
                     company=c, key=("store", (c["name"] or "").lower()))
         else:
@@ -506,7 +508,8 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             conn, track=t["track"],
             location_re=(NC_RE if t["geo_gate"] else None),
             rank_by=t["rank_by"], allow_geo_modes={"remote"},
-            min_mission=t["min_mission"])
+            min_mission=t["min_mission"],
+            remote_mission_floor=t.get("remote_mission_floor"))
         pipeline = store.get_pipeline(conn)
         digest_path = digest_md.write_ranked_digest(
             ranked, t, watch_hits=watch_hits, pipeline=pipeline)
