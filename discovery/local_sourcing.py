@@ -1731,32 +1731,6 @@ def resolve_leads(max_workers=8,
     return resolved
 
 
-def format_config_block(confirmed):
-    by = {"greenhouse": [], "lever": [], "ashby": [], "workday": []}
-    for h in confirmed:
-        by[h["ats"]].append(h)
-    lines = ["# --- LOCAL_TECH company targets (discovered) ---", ""]
-    lines.append("LOCAL_TECH_GREENHOUSE = {")
-    for h in by["greenhouse"]:
-        lines.append(f'    "{h["slug"]}": "{h["name"]}",  # {h["nc"]} NC / {h["count"]} total')
-    lines.append("}\n")
-    lines.append("LOCAL_TECH_LEVER = {")
-    for h in by["lever"]:
-        lines.append(f'    "{h["slug"]}": "{h["name"]}",  # {h["nc"]} NC / {h["count"]} total')
-    lines.append("}\n")
-    lines.append("LOCAL_TECH_ASHBY = {")
-    for h in by["ashby"]:
-        lines.append(f'    "{h["slug"]}": "{h["name"]}",  # {h["nc"]} NC / {h["count"]} total')
-    lines.append("}\n")
-    lines.append("# (tenant, wd_pod, site, name)")
-    lines.append("LOCAL_TECH_WORKDAY = [")
-    for h in by["workday"]:
-        t, p, s = h["slug"]
-        lines.append(f'    ("{t}", {p}, "{s}", "{h["name"]}"),  # {h["nc"]} NC / {h["count"]} total')
-    lines.append("]")
-    return "\n".join(lines)
-
-
 # --------------------------------------------------------------------------- #
 #  Paste-a-page ingest                                                         #
 # --------------------------------------------------------------------------- #

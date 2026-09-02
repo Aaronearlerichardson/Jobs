@@ -456,13 +456,24 @@ Re-seeing a job anywhere reopens it.
 ```bash
 python run_scraper.py --prune                     # deactivate dead (404) ATS boards
 python run_scraper.py --prune --prune-offmission  # also drop off-mission companies
-python run_scraper.py --expand "eeg engineer"     # LLM: alt titles/keywords/sectors
-python run_scraper.py --expand-location "NC"      # location synonym expansion
-python run_scraper.py --keyword-report            # bulk-expand your profile keywords
 python run_scraper.py --score "job description…"  # technical-bar score one posting
 python run_scraper.py --db alt.db ...             # isolated store (concurrent runs)
 python run_scraper.py --where                     # print profile + data paths
 ```
+
+Report-only analysis (an LLM suggests, you decide) lives under `tools/`, so a
+crawl entry point never carries it:
+
+```bash
+python tools/expand.py "eeg engineer"             # LLM: alt titles/keywords/sectors
+python tools/expand.py --location "NC"            # location synonym expansion
+python tools/expand.py --keyword-report           # bulk-expand your profile keywords
+python tools/snowball.py                          # mine stored JDs for unlisted employers
+python tools/snowball.py --min-mentions 3 --llm   # stricter, + optional LLM pass
+```
+
+Neither writes to the store or to `profile.toml` — they print candidates for
+you to copy in.
 
 `--prune` probes every active Greenhouse/Lever/Ashby/BambooHR board and
 deactivates the dead ones — run it whenever a crawl starts spamming `HTTP 404`
@@ -686,3 +697,4 @@ identically to a dead one.
 | `scrapers/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
 | `scrapers/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |
+| `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |

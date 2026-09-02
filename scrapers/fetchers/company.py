@@ -1200,38 +1200,6 @@ def probe_job_open(url):
     return None, "no closed signal"
 
 
-def hydrate_from_company_board(job, company):
-    """Backfill an empty description by title-matching this job against its
-    company's own ATS board (a full, ungated FETCHERS pull).
-
-    For jobs that arrived with only a title — manually captured LinkedIn
-    search-card rows (scrapers/page_capture.py), or any other curated
-    ingest — `description` is never populated, so they permanently fail
-    fit.py's MIN_DESC_CHARS gate. When the job is linked to a company with a
-    resolvable board, we can recover the real description by pulling that
-    board and matching on title. No-op if the job already has a description
-    or the company has no fetchable board.
-    """
-    if (job.get("description") or "").strip() or not company or not company.get("ats"):
-        return job
-    title_l = (job.get("title") or "").strip().lower()
-    if not title_l:
-        return job
-    try:
-        board = fetch_company(company, loc_re=None)
-    except Exception as e:
-        print(f"    [!] board-hydrate fetch failed for {company.get('name')}: {e}")
-        return job
-    match = next((b for b in board if (b.get("title") or "").strip().lower() == title_l), None)
-    if match is None:
-        return job
-    hydrate_description(match)
-    if match.get("description"):
-        job["description"] = match["description"]
-        job["url"] = job.get("url") or match.get("url")
-    return job
-
-
 def _adapt(jobs, ats, loc_re):
     """Normalize an existing fetcher's dicts to the company-fetch shape."""
     out = []

@@ -103,12 +103,8 @@ def main(argv=None):
                     help="Ingest NLx feed postings for comma-separated employers")
     ap.add_argument("--db", metavar="PATH",
                     help="Override the store DB path (isolates concurrent runs)")
-    # ── keyword tools ───────────────────────────────────────────────────
-    ap.add_argument("--expand", metavar="TERM",
-                    help="Expand a term into titles/keywords/sectors and exit")
-    ap.add_argument("--expand-location", metavar="TERM")
-    ap.add_argument("--keyword-report", action="store_true",
-                    help="Bulk-expand every configured keyword into a report")
+    # ── scoring ─────────────────────────────────────────────────────────
+    # (keyword/location expansion is report-only: tools/expand.py)
     ap.add_argument("--score", metavar="TEXT",
                     help="Score one title/description on technical bar (0..1)")
     ap.add_argument("--where", action="store_true",
@@ -233,28 +229,6 @@ def main(argv=None):
             if jobs:
                 total += ingest_external_jobs(jobs, source="nlx", t=t)
         print(f"\n  {total} new job(s) ingested from the NLx feed.")
-        return
-
-    # ── keyword expansion tools ─────────────────────────────────────────
-    if args.expand:
-        from core.claude import expand_search
-        from core.expand import print_expansion
-        expanded = expand_search(args.expand)
-        if expanded:
-            print_expansion(args.expand, expanded)
-        return
-
-    if args.expand_location:
-        from core.claude import expand_location
-        from core.expand import print_location_expansion
-        expanded = expand_location(args.expand_location)
-        if expanded:
-            print_location_expansion(args.expand_location, expanded)
-        return
-
-    if args.keyword_report:
-        from core.expand import generate_keyword_report
-        generate_keyword_report()
         return
 
     # ── maintenance ─────────────────────────────────────────────────────

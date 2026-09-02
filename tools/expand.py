@@ -1,17 +1,32 @@
-"""Claude keyword/location expansion utilities (CLI + report).
+#!/usr/bin/env python3
+"""Keyword/location expansion utilities — an LLM suggests, you decide.
+
+    python tools/expand.py "eeg engineer"        # alt titles/keywords/sectors
+    python tools/expand.py --location "NC"       # location synonym expansion
+    python tools/expand.py --keyword-report      # bulk-expand profile keywords
 
 The suggestion side of the old report module: expand a seed term into
 titles/keywords/sectors, expand a location, or bulk-expand every configured
-keyword into a suggestions report. Results are SUGGESTIONS to copy into
-profile.toml (or the Settings tab) — nothing here mutates config.
+keyword into a suggestions report. Report-only and LLM-billed — it informs
+a crawl rather than being part of one — so it lives under tools/ beside the
+other analysis CLIs instead of on the crawl entry point. Results are
+SUGGESTIONS to copy into profile.toml (or the Settings tab); nothing here
+mutates config or the store.
 """
 
+import argparse
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
 
-import config
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from .claude import expand_search
+import config  # noqa: E402
+
+from core.claude import expand_location, expand_search  # noqa: E402
 
 INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
 LOCATION_INCLUDE = config.LOCATION_INCLUDE
@@ -143,3 +158,38 @@ def generate_keyword_report(delay=0.5):
 
     print(f"\n  Report -> {path}\n")
     return path
+
+
+# ─── CLI ────────────────────────────────────────────────────────────────
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(
+        description="Expand a term, a location, or your whole keyword list "
+                    "into suggestions. Reports only — nothing is written to "
+                    "profile.toml or the store.")
+    ap.add_argument("term", nargs="?",
+                    help="Seed term to expand into titles/keywords/sectors")
+    ap.add_argument("--location", metavar="TERM",
+                    help="Expand a location into include/exclude synonyms")
+    ap.add_argument("--keyword-report", action="store_true",
+                    help="Bulk-expand every configured keyword into a report")
+    args = ap.parse_args(argv)
+
+    if args.location:
+        expanded = expand_location(args.location)
+        if expanded:
+            print_location_expansion(args.location, expanded)
+        return
+    if args.keyword_report:
+        generate_keyword_report()
+        return
+    if not args.term:
+        ap.print_help()
+        sys.exit(1)
+    expanded = expand_search(args.term)
+    if expanded:
+        print_expansion(args.term, expanded)
+
+
+if __name__ == "__main__":
+    main()

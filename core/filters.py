@@ -120,23 +120,3 @@ def is_relevant(title, description=""):
     # Head-only scan — see _PAIR_SCAN_CHARS.
     head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
     return _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS)
-
-
-def classify_relevance(title, description=""):
-    """
-    Debug helper - returns which tier caused a match, or None.
-    Not used by the crawler; handy for tuning the lists.
-    """
-    text = scrub_boilerplate((title + " " + description).lower())
-    if _excluded(title, text):
-        return None
-    if _kw_in(text, CORE_KEYWORDS):
-        return "CORE"
-    tiered = {k.lower() for k in CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS}
-    extras = [k for k in INCLUDE_KEYWORDS if k.lower() not in tiered]
-    if extras and _kw_in(text, extras):
-        return "EXTRA"
-    head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
-    if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
-        return "DOMAIN+SKILL"
-    return None
