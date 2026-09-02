@@ -20,6 +20,7 @@ import time
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
@@ -27,7 +28,7 @@ _DETAIL = "https://recruiting.paylocity.com/Recruiting/Jobs/Details/{jid}"
 _PAGEDATA_RE = re.compile(r"pageData\s*=\s*(\{.*?\});", re.S)
 
 
-def parse_board(guid, timeout=20):
+def parse_board(guid, timeout=FETCH_TIMEOUT):
     """Return the raw ``pageData.Jobs`` list for one board GUID."""
     r = SESSION.get(_BOARD.format(guid=guid), timeout=timeout, headers=HEADERS)
     r.raise_for_status()
@@ -49,7 +50,7 @@ def location_str(job):
     return (jl.get("Country") or "Unknown")
 
 
-def fetch_description(job_id, timeout=15):
+def fetch_description(job_id, timeout=FETCH_TIMEOUT):
     """Full JD text for one posting, from its server-rendered detail page."""
     try:
         r = SESSION.get(_DETAIL.format(jid=job_id), timeout=timeout, headers=HEADERS)

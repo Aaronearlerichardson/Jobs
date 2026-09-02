@@ -10,13 +10,50 @@ Results are returned in input order so callers can process priority
 sources first and keep dedupe deterministic regardless of completion
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
+                                as_completed, wait as fut_wait)
 
 from .util import worker_count
 
 # Network-I/O-bound, so this is a concurrency knob, not a CPU one: defaults
 # to n_cpus-1, raise CRAWLER_WORKERS to push more concurrent source fetches.
 DEFAULT_WORKERS = worker_count("CRAWLER_WORKERS")
+
+# Stall watchdog: abandon a pool's remaining work if NOTHING completes for
+# this long. Generous on purpose - a normal resolution chains a handful of
+# bounded fetches; only a genuinely wedged one exceeds this.
+RESOLVE_STALL_S = 300.0
+
+
+def drain_or_abandon(ex, futs, consume, stalled):
+    """Drain `futs` ({future: label}) through consume(future, label); if no
+    future completes within RESOLVE_STALL_S, report each remaining label to
+    stalled(label) instead and shut the executor down WITHOUT joining its
+    threads. The one watchdog every discovery pool runs under.
+
+    Notes:
+        The `with ThreadPoolExecutor(...)` form joins every worker on exit,
+        so one wedged resolution (fetch_company_nc on a sprawling "custom
+        board" is bounded per request, not in total) used to hold the web
+        UI's one-op-at-a-time slot until the app was restarted - 2026-08-28:
+        an add-names run finished 59 of 60 names in 8 minutes, then hung
+        >1h on the last. Behavior is enforced by tests/test_parsers.py::
+        TestResolutionStallWatchdog.
+    """
+    pending = set(futs)
+    while pending:
+        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
+                                 return_when=FIRST_COMPLETED)
+        if not done:
+            for fut in pending:
+                n = futs[fut]
+                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
+                      f"- abandoned")
+                stalled(n)
+            break
+        for fut in done:
+            consume(fut, futs[fut])
+    ex.shutdown(wait=False, cancel_futures=True)
 
 
 def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):

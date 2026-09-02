@@ -114,7 +114,7 @@ def fetch_nlx_company(name, location=None, days=60,
                f"{quote(location, safe='')}/25/0/0/"
                f"{page * page_size}/{page_size}/{days}")
         try:
-            r = SESSION.get(url, timeout=25, headers=hdr,
+            r = SESSION.get(url, timeout=config.FETCH_TIMEOUT, headers=hdr,
                              params={"showFilters": "false",
                                      "enableJobDescriptionSnippet": "true"})
         except Exception as e:

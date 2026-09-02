@@ -72,7 +72,7 @@ def _cxs_tenant_variants(detail_url):
     return urls
 
 
-def _cxs_description(detail_url, timeout=25):
+def _cxs_description(detail_url, timeout=config.FETCH_TIMEOUT):
     """GET a CXS job-detail endpoint; return (plain_text_description, remoteType)."""
     for url in _cxs_tenant_variants(detail_url):
         try:
@@ -113,7 +113,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
         body = {"appliedFacets": {}, "limit": page_size,
                 "offset": page * page_size, "searchText": ""}
         try:
-            r = SESSION.post(api, json=body, timeout=25, headers=wd_headers)
+            r = SESSION.post(api, json=body, timeout=config.FETCH_TIMEOUT, headers=wd_headers)
             r.raise_for_status()
             data = r.json()
         except Exception as e:

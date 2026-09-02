@@ -16,6 +16,7 @@ import time
 
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 BASE = "https://hacker-news.firebaseio.com/v0"
@@ -62,8 +63,10 @@ _URLISH_RE = re.compile(r"https?://|www\.|\.(com|io|ai|org|net|co|health|dev)\b"
 
 def _clean_company(s):
     """Strip trailing URLs / parentheticals and surrounding punctuation."""
-    s = _URL_RE.sub("", s)
-    s = re.sub(r"[\(\[][^)\]]*[\)\]]?", "", s)   # drop "(…)" incl. unbalanced
+    # Imported here: the fetchers package is loaded by scrapers.sources,
+    # which the discovery package imports back at module load.
+    from discovery.names import strip_parentheticals
+    s = strip_parentheticals(_URL_RE.sub("", s))
     return re.sub(r"\s+", " ", s).strip(" -—|·•:,")
 
 
@@ -82,7 +85,7 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
-def _get_json(url, timeout=15):
+def _get_json(url, timeout=FETCH_TIMEOUT):
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()

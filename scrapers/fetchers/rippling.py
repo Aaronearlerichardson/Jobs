@@ -20,13 +20,14 @@ import time
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
 _JSON = {**HEADERS, "Accept": "application/json"}
 
 
-def parse_board(slug, timeout=20):
+def parse_board(slug, timeout=FETCH_TIMEOUT):
     """Return the raw listing (list of job dicts) for one board slug."""
     r = SESSION.get(_API.format(slug=slug), timeout=timeout, headers=_JSON)
     r.raise_for_status()
@@ -44,7 +45,7 @@ def location_str(job):
     return "Unknown"
 
 
-def fetch_description(slug, uuid, timeout=15):
+def fetch_description(slug, uuid, timeout=FETCH_TIMEOUT):
     """Full JD text for one posting. Rippling's description is a
     ``{company, role}`` HTML dict — 'role' is the actual JD (put first);
     'company' is the shared boilerplate."""

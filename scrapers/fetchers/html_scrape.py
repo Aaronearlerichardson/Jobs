@@ -7,6 +7,7 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import stable_id
 from core.locality import location_snippet
@@ -15,7 +16,7 @@ from core.locality import location_snippet
 def fetch_kula(company_name, kula_slug):
     base_url = f"https://careers.kula.ai/{kula_slug}"
     try:
-        r = SESSION.get(base_url, timeout=20, headers=HEADERS)
+        r = SESSION.get(base_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Kula {company_name}: {e}")
@@ -59,7 +60,7 @@ def fetch_kula(company_name, kula_slug):
 
 def fetch_custom(company_name, page_url, css_selector=None):
     try:
-        r = SESSION.get(page_url, timeout=20, headers=HEADERS)
+        r = SESSION.get(page_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Custom {company_name}: {e}")
@@ -98,7 +99,7 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
         startrow = page * step
         url = f"{base_url.rstrip('/')}/search/?startrow={startrow}"
         try:
-            r = SESSION.get(url, timeout=25, headers=sf_headers)
+            r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=sf_headers)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] SuccessFactors {company_name} p{page}: {e}")

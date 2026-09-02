@@ -10,14 +10,10 @@ health / bio / science / tech employers with a Triangle-NC presence:
        - the static entries on the RTP.org directory,
 """
 
-import hashlib
-import json
 import logging
 import re
-import threading
 import time
-from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
-                                as_completed, wait as fut_wait)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime
 
@@ -27,125 +23,11 @@ from core import tags as company_tags
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("discovery")
 
+from scrapers import ddg
+from scrapers.parallel import drain_or_abandon
 from scrapers.http import HEADERS, SESSION
-from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
-                     _DOMAIN_STOPWORDS, _name_domain_tokens)
-
-
-# --------------------------------------------------------------------------- #
-#  Bounded + cached DuckDuckGo text search                                     #
-# --------------------------------------------------------------------------- #
-#
-# DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
-# wall-clock bound, so when DDG rate-limits (frequent), the library's internal
-# retry/backoff blocks for many minutes yielding nothing — profiled at ~1271s
-# of a 1726s --local run. Two guards, capability preserved:
-#   * a disk cache (7-day TTL) so repeat runs — and repeat queries within a
-#     run — return instantly instead of re-hitting DDG;
-#   * a hard per-query wall-clock budget via a worker thread + join(timeout),
-#     so one throttled query abandons after ~budget seconds instead of stalling
-#     the whole crawl. A timed-out/empty result is NOT cached, so it retries
-#     next run (we only cache genuine non-empty hits).
-_DDG_CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
-_DDG_CACHE_TTL = 7 * 24 * 3600      # seconds
-_DDG_WALL_BUDGET = 25.0             # hard per-query wall-clock cap (seconds)
-
-# Resolution watchdog: abandon a pass's remaining names if NO resolution
-# completes for this long. Generous on purpose — a normal resolve chains a
-# handful of 6-15s-bounded fetches; only a genuinely wedged one exceeds this.
-RESOLVE_STALL_S = 300.0
-
-
-def _drain_or_abandon(ex, futs, consume, stalled):
-    """Drain `futs` ({future: name}) through consume(future, name); if no
-    future completes within RESOLVE_STALL_S, report each remaining name to
-    stalled(name) instead and shut the executor down WITHOUT joining its
-    threads.
-
-    Notes:
-        The `with ThreadPoolExecutor(...)` form joins every worker on exit,
-        so one wedged resolution (fetch_company_nc on a sprawling "custom
-        board" is bounded per request, not in total) used to hold the web
-        UI's one-op-at-a-time slot until the app was restarted — 2026-08-28:
-        an add-names run finished 59 of 60 names in 8 minutes, then hung
-        >1h on the last. Behavior is enforced by tests/test_parsers.py::
-        TestResolutionStallWatchdog.
-    """
-    pending = set(futs)
-    while pending:
-        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
-                                 return_when=FIRST_COMPLETED)
-        if not done:
-            for fut in pending:
-                n = futs[fut]
-                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
-                      f"- abandoned")
-                stalled(n)
-            break
-        for fut in done:
-            consume(fut, futs[fut])
-    ex.shutdown(wait=False, cancel_futures=True)
-
-
-def _ddg_cache_path(key):
-    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    return _DDG_CACHE_DIR / f"{h}.json"
-
-
-def _ddg_cache_get(key):
-    p = _ddg_cache_path(key)
-    try:
-        if time.time() - p.stat().st_mtime > _DDG_CACHE_TTL:
-            return None
-        return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return None
-
-
-def _ddg_cache_put(key, value):
-    try:
-        _DDG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _ddg_cache_path(key).write_text(json.dumps(value), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
-    """Bounded, disk-cached DDG text search. Returns a list of result dicts
-    (each with 'href'/'title'/...), or [] on miss/timeout/missing-package —
-    every caller already tolerates an empty list."""
-    key = f"{query}||{max_results}"
-    cached = _ddg_cache_get(key)
-    if cached is not None:
-        _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
-        return cached
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            return []
-    box = {"v": None}
-
-    def _run():
-        try:
-            with DDGS(timeout=min(10, int(budget))) as ddg:
-                box["v"] = list(ddg.text(query, max_results=max_results))
-        except Exception:
-            box["v"] = None
-
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    th.join(budget)
-    out = box["v"] or []
-    if th.is_alive():
-        _log.debug("ddg timed out after %.0fs: %s", budget, query)
-    else:
-        _log.debug("ddg live query, %d result(s): %s", len(out), query)
-    if out:                              # cache only genuine hits
-        _ddg_cache_put(key, out)
-    return out
+from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
+from .names import domain_tokens, name_key, slug_guesses
 
 
 # --------------------------------------------------------------------------- #
@@ -154,13 +36,10 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
 
 # Seed employers + Workday-fallback majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
-# Name -> comparison key: strip everything but [a-z0-9]. Called on every
-# candidate name in several dedup/lookup loops, so compile it once.
-_NONALNUM_RE = re.compile(r"[^a-z0-9]")
 
 SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps notes
 MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
-_MAJORS_KEYS = {_NONALNUM_RE.sub("", m.lower()) for m in MAJORS_WORKDAY}
+_MAJORS_KEYS = {name_key(m) for m in MAJORS_WORKDAY}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
@@ -327,7 +206,7 @@ def _names_from_html(html):
     return {n for n in out if _looks_like_company(n)}
 
 
-def scrape_directory_names(url, timeout=20):
+def scrape_directory_names(url, timeout=config.FETCH_TIMEOUT):
     """Employer names from a directory page's `/company/<slug>/` links — works
     for any site with that shape (RTP.org, Built In, chamber directories).
     Server-rendered only; JS-loaded facets are out of scope."""
@@ -353,7 +232,7 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
                   "getlatka", "tracxn", "f6s.com")
     dir_urls = []
     for q in queries:
-        for r in ddg_text(q, max_results=per_query):
+        for r in ddg.search(q, max_results=per_query):
             u = r.get("href") or r.get("url") or ""
             if u and any(h in u.lower() for h in _DIR_HOSTS):
                 dir_urls.append(u)
@@ -361,7 +240,7 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     names = set()
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
-            html = SESSION.get(u, timeout=12, headers=HEADERS).text
+            html = SESSION.get(u, timeout=config.FETCH_TIMEOUT, headers=HEADERS).text
         except Exception:
             continue
         names |= _names_from_html(html)
@@ -387,7 +266,7 @@ def brainstorm_company_names(n=None):
     region = ", ".join((config.LOCALITY_SUBSTRINGS or [])[:6]) or "the target region"
     domain = ", ".join((config.DOMAIN_KEYWORDS or [])[:10]) or "the target domain"
     key = f"brainstorm||{n}||{region}||{domain}"
-    cached = _ddg_cache_get(key)
+    cached = ddg.cache_get(key)
     if cached is not None:
         return cached
     from core.claude import call_claude_json
@@ -406,7 +285,7 @@ def brainstorm_company_names(n=None):
     names = [str(x).strip() for x in (r.get("companies") or []) if str(x).strip()]
     names = [x for x in names if 2 < len(x) < 60][:n]
     if names:
-        _ddg_cache_put(key, names)
+        ddg.cache_put(key, names)
     return names
 
 
@@ -430,7 +309,7 @@ def gather_names(extra=None):
     names, seen = [], set()
     for src in sources:
         for n in src:
-            k = _NONALNUM_RE.sub("", (n or "").lower())
+            k = name_key(n)
             if k and k not in seen:
                 seen.add(k)
                 names.append(n.strip())
@@ -441,35 +320,13 @@ def gather_names(extra=None):
 #  Slug candidates + probing                                                   #
 # --------------------------------------------------------------------------- #
 
-def _slug_candidates(name):
-    """
-    ATS-slug guesses for a company name, in priority order. Uses joined,
-    hyphenated, and suffix-stripped-joined forms only — deliberately NOT the
-    bare first word ("eli", "novo", "charles"), which collides with unrelated
-    boards and shadows the real employer.
-    """
-    clean = re.sub(r"\s*\([^)]*\)", "", name).lower()
-    words = [w for w in re.split(r"[^a-z0-9]+", clean) if w]
-    if not words:
-        return []
-    joined = "".join(words)                                  # unitedtherapeutics
-    hyphen = "-".join(words)                                 # united-therapeutics
-    stripped = "".join(w for w in words if w not in _DOMAIN_STOPWORDS) or joined
-    out, seen = [], set()
-    for c in (joined, hyphen, stripped):
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
-
-
 from core.locality import is_nc as _has_nc  # single source of truth for NC locality
 
 
 def _nc_count_greenhouse(slug):
     try:
         r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         return sum(1 for j in r.json().get("jobs", [])
                    if _has_nc(j.get("location", {}).get("name", "")))
     except Exception:
@@ -479,7 +336,7 @@ def _nc_count_greenhouse(slug):
 def _nc_count_lever(slug):
     try:
         r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         return sum(1 for j in r.json()
                    if _has_nc(j.get("categories", {}).get("location", "")))
     except Exception:
@@ -489,7 +346,7 @@ def _nc_count_lever(slug):
 def _nc_count_ashby(slug):
     try:
         r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         data = r.json()
         return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
                    if _has_nc(j.get("location", "")))
@@ -503,7 +360,7 @@ def _nc_count_workday(tenant, pod, site):
     try:
         r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
                                      "searchText": _wd_search_text()},
-                          timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
+                          timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
         return int(r.json().get("total", 0) or 0)
     except Exception:
         return 0
@@ -517,7 +374,7 @@ def probe_company(name, try_workday=True):
     Returns a hit dict with an ``nc`` count, or None.
     """
     hit = None
-    for slug in _slug_candidates(name):
+    for slug in slug_guesses(name):
         for ats, fn, nc_fn in (("greenhouse", probe_greenhouse, _nc_count_greenhouse),
                                ("lever", probe_lever, _nc_count_lever),
                                ("ashby", probe_ashby, _nc_count_ashby)):
@@ -571,18 +428,18 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         websearch defaults ON but is capped rather than run over the whole
         gather (~100+ names): DDG rate-limits hard, and an earlier uncapped
         profile blocked ~1271s of a 1726s run in DDG's own retry/backoff
-        (see ddg_text above) — the on-demand resolvers (resolve_or_miss et
+        (see scrapers.ddg) — the on-demand resolvers (resolve_or_miss et
         al.) can afford to run it uncapped only because they work on tens of
         names, not the full candidate gather.
     """
     names = gather_names(extra_names)
-    n_wd = sum(1 for n in names if _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS)
+    n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
           f"({n_wd} with Workday fallback)...")
     hits, sniff_misses = [], []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(probe_company, n,
-                          _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS): n
+                          name_key(n) in _MAJORS_KEYS): n
                 for n in names}
         for fut in as_completed(futs):
             hit = fut.result()
@@ -595,10 +452,10 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     if js_majors:
         # Only an NC>0 board counts as "found" — a junk 0-NC slug collision
         # must not block the JS fallback for the real employer.
-        found = {_NONALNUM_RE.sub("", h["name"].lower())
+        found = {name_key(h["name"])
                  for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
-                  if _NONALNUM_RE.sub("", m.lower()) not in found]
+                  if name_key(m) not in found]
         import importlib.util
         if importlib.util.find_spec("playwright.sync_api") is None:
             if missed:
@@ -653,8 +510,8 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     if sniff:
         from .sniffer import sniff_ats
         from scrapers.fetchers import company as company_fetch
-        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
+        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if name_key(n) not in have]
         print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
         def _sniff_one(n):
@@ -692,7 +549,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                 sniff_misses.append(h)
 
         ex = ThreadPoolExecutor(max_workers=max_workers)
-        _drain_or_abandon(
+        drain_or_abandon(
             ex, {ex.submit(_sniff_one, n): n for n in todo}, _sniff_done,
             lambda n: sniff_misses.append(
                 {"name": n, "reason": "fetch-error:stalled"}))
@@ -704,13 +561,13 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     # ...) — names on gov/acronym/product-named domains the slug-guesser and
     # careers-page sniff can't reach on their own. Capped and skip-recent
     # because DDG rate-limits hard: an earlier uncapped profile blocked
-    # ~1271s of a 1726s run in DDG's own retry/backoff (see ddg_text above).
+    # ~1271s of a 1726s run in DDG's own retry/backoff (see scrapers.ddg).
     if websearch:
         cap = (config.DISCOVERY_WEBSEARCH_CAP if websearch_cap is None
               else websearch_cap)
         cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
-        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
+        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if name_key(n) not in have]
         if todo and cap > 0:
             from core.store import connect as _connect, recent_miss_names
             conn = _connect()
@@ -762,7 +619,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                     sniff_misses.append(h)
 
             ex = ThreadPoolExecutor(max_workers=min(max_workers, len(todo)))
-            _drain_or_abandon(
+            drain_or_abandon(
                 ex, {ex.submit(_websearch_one, n): n for n in todo},
                 _websearch_done,
                 lambda n: sniff_misses.append(
@@ -777,7 +634,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 
     # Drop known bad name→board matches.
     hits = [h for h in hits
-            if _NONALNUM_RE.sub("", h["name"].lower()) not in NAME_BLOCKLIST]
+            if name_key(h["name"]) not in NAME_BLOCKLIST]
 
     # De-dup by resolved board (same slug/triple reached via different names,
     # e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter name.
@@ -854,7 +711,7 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
     False
     """
-    squashed = _NONALNUM_RE.sub("", (name or "").lower())
+    squashed = name_key(name)
     for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
         toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
         place_toks = toks[:-1] or toks          # drop the state suffix token
@@ -880,7 +737,7 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
     urls = []
     if careers_url:
         urls.append(careers_url)
-    for tok in _name_domain_tokens(name):
+    for tok in domain_tokens(name):
         urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
                  f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
                  f"https://www.{tok}.com/company"]
@@ -890,7 +747,8 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
             continue
         seen.add(u)
         try:
-            r = SESSION.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
+            r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
+                            allow_redirects=True)
             if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
                 return True
         except Exception:
@@ -904,15 +762,15 @@ def _sample_titles(hit, n=6):
     try:
         if ats == "greenhouse":
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             return [j.get("title", "") for j in r.json().get("jobs", [])[:n]]
         if ats == "lever":
             r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             return [j.get("text", "") for j in r.json()[:n]]
         if ats == "ashby":
             r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             # Ashby's posting API says "jobs"; only Workday (below) says
             # "jobPostings". Reading the wrong one here handed the mission
             # scorer an empty title list, so every Ashby company was scored
@@ -925,7 +783,7 @@ def _sample_titles(hit, n=6):
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
             r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
                                          "searchText": _wd_search_text()},
-                              timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
+                              timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
     except Exception:
         return []
@@ -981,47 +839,47 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
         return h, score_company_mission(h["name"],
                                         " | ".join(t for t in titles if t))
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed)))) as ex:
-        futs = {ex.submit(_score_one, h): h for h in confirmed}
-        for fut in as_completed(futs):
-            try:
-                h, (tier, score, reason) = fut.result()
-            except Exception as e:
-                print(f"    [!] mission scoring failed for "
-                      f"{futs[fut]['name']!r}: {e}")
-                continue
-            # Shared activation rule (core.claude.is_active_mission):
-            # active tiers, an UNAVAILABLE (None) score, or a multi-division
-            # conglomerate whose subdivisions are filtered at crawl time.
-            active = is_active_mission(tier, h["name"], include_missions)
-            row = {
-                "name": h["name"], "ats": h["ats"],
-                "slug": h["slug"] if h["ats"] != "workday" else None,
-                "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
-                "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
-                "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
-                "careers_url": h.get("careers_url"),
-                "local_job_count": h["nc"], "total_job_count": h["count"],
-                "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-                "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
-                "last_probed": datetime.now().isoformat(),
-            }
-            dup = _board_already_tracked(conn, row)
-            if dup:
-                _report_dup_board(h["name"], dup)
-                continue
-            # Nothing an automated pass finds joins the roster by itself: a
-            # name the store has never confirmed lands in the review queue
-            # (core.store.mark_pending) for a person to accept or reject.
-            pending = not is_confirmed_company(conn, h["name"])
-            if pending:
-                row = mark_pending(row)
-            upsert_company(conn, row)
-            written.append(dict(row))
-            flag = ("PENDING REVIEW" if pending
-                    else "active" if active else "INACTIVE(other)")
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+    def _score_done(fut, name):
+        try:
+            h, (tier, score, reason) = fut.result()
+        except Exception as e:
+            print(f"    [!] mission scoring failed for {name!r}: {e}")
+            return
+        # Shared activation rule (core.claude.is_active_mission):
+        # active tiers, an UNAVAILABLE (None) score, or a multi-division
+        # conglomerate whose subdivisions are filtered at crawl time.
+        active = is_active_mission(tier, h["name"], include_missions)
+        row = {
+            "name": h["name"], "ats": h["ats"],
+            "slug": h["slug"] if h["ats"] != "workday" else None,
+            "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
+            "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
+            "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
+            "careers_url": h.get("careers_url"),
+            "local_job_count": h["nc"], "total_job_count": h["count"],
+            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
+            "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
+            "last_probed": datetime.now().isoformat(),
+        }
+        dup = _board_already_tracked(conn, row)
+        if dup:
+            _report_dup_board(h["name"], dup)
+            return
+        # Nothing an automated pass finds joins the roster by itself: a
+        # name the store has never confirmed lands in the review queue
+        # (core.store.mark_pending) for a person to accept or reject.
+        pending = not is_confirmed_company(conn, h["name"])
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
+        written.append(dict(row))
+        flag = ("PENDING REVIEW" if pending
+                else "active" if active else "INACTIVE(other)")
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+    ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed))))
+    drain_or_abandon(ex, {ex.submit(_score_one, h): h["name"] for h in confirmed},
+                     _score_done, lambda name: None)
     conn.close()
 
     if dork:
@@ -1200,8 +1058,8 @@ def _host_matches_name(url, name):
     (a distinctive name token appears in the host) — the guard that keeps a
     self-hosted 'custom' board from resolving to a third-party jobs site."""
     host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0].replace("www.", "")
-    hostslug = _NONALNUM_RE.sub("", host)
-    joined = _NONALNUM_RE.sub("", name.lower())
+    hostslug = name_key(host)
+    joined = name_key(name)
     tokens = {joined} | {w for w in re.findall(r"[a-z0-9]+", name.lower())
                          if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 4 and t in hostslug for t in tokens)
@@ -1212,10 +1070,10 @@ def _slug_matches_name(slug, name):
     company — guards against the dork surfacing an unrelated board (e.g.
     'Novamed' -> the 'nc' NC-government Workday tenant)."""
     s = slug[0] if isinstance(slug, tuple) else slug   # workday tenant, else slug
-    s = _NONALNUM_RE.sub("", str(s or "").lower())
+    s = name_key(str(s or ""))
     if len(s) < 3:
         return False
-    tokens = {_NONALNUM_RE.sub("", name.lower())}
+    tokens = {name_key(name)}
     tokens |= {w for w in re.findall(r"[a-z0-9]+", name.lower())
                if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
@@ -1240,7 +1098,7 @@ def _websearch_board(name, max_results=8):
 
     def _search(query):
         out = []
-        for r in ddg_text(query, max_results=max_results):
+        for r in ddg.search(query, max_results=max_results):
             u = r.get("href") or r.get("url")
             if u and not _is_aggregator(u):
                 out.append(u)
@@ -1260,7 +1118,8 @@ def _websearch_board(name, max_results=8):
         # an embedded ATS or a self-hosted board with genuine job links.
         for u in urls[:5]:
             try:
-                r = SESSION.get(u, timeout=8, headers=_H, allow_redirects=True)
+                r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=_H,
+                                allow_redirects=True)
                 if r.status_code != 200 or len(r.text) < 300:
                     continue
             except Exception:
@@ -1335,60 +1194,63 @@ def score_missions(max_workers=6, rescore_all=False):
         return c, score_company_mission(c["name"], " | ".join(t for t in titles if t))
 
     n = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_one, c): c for c in cos}):
-            try:
-                c, (tier, score, reason) = fut.result()
-            except Exception as e:
-                print(f"    [!] {e}")
-                continue
-            if tier is None and score is None:
-                continue          # scoring unavailable - leave the row alone
-            # Off-mission companies are deactivated so the crawl skips them,
-            # matching the new-company sourcing path (an `other` tier means
-            # "not health/bio/science" — no reason to keep crawling it).
-            # Watched companies are exempt: the watch tag is the user
-            # deliberately keeping an off-mission employer crawled (Covar).
-            update = {"name": c["name"], "mission_tier": tier,
-                      "mission_score": score, "mission_reason": reason}
-            revived = False
-            if (tier is not None and tier not in ACTIVE_MISSION_TIERS
-                    and not config.is_multi_division(c["name"])
-                    and "watch" not in (c.get("tags") or "").split(",")):
-                update["active"] = 0
-            # NOT core.claude.is_active_mission: this is the REACTIVATION
-            # half, and it deliberately does not revive on `tier is None`.
-            # A None tier with a non-None score means the model answered with
-            # a mission name outside the profile's taxonomy (score_company_
-            # mission nulls the tier but keeps the score), so the `continue`
-            # above did not fire. The helper would call that "unavailable" and
-            # revive the row; here an unrecognised answer must leave an
-            # already-inactive company alone. See tests/test_invariants.py.
-            elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
-                                          or config.is_multi_division(c["name"])):
-                # The recovery half: this row reached an on-mission tier but
-                # is sitting inactive, which for an unscored row means its
-                # original mission call failed rather than judged it. Revive
-                # it. Dead boards are excluded — prune_dead_boards turns those
-                # off because the endpoint 404s, and a good mission score says
-                # nothing about whether the board still resolves. Rows in the
-                # review queue are excluded too: they are inactive because a
-                # person has not confirmed them yet, not because a call
-                # failed, and reviving them here would skip the queue (the
-                # 2026-09-01 re-resolution pass queued 24 unscored rows that
-                # this healer would otherwise have activated wholesale).
-                if (not str(c.get("notes") or "").startswith("deactivated: dead")
-                        and not company_tags.has(c.get("tags"), company_tags.PENDING)):
-                    update["active"] = 1
-                    revived = True
-            upsert_company(conn, update)
-            n += 1
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = ("  -> deactivated (off-mission)"
-                    if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
-                    else "  -> REACTIVATED (was unscored + inactive)" if revived
-                    else "")
-            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+    def _scored(fut, name):
+        nonlocal n
+        try:
+            c, (tier, score, reason) = fut.result()
+        except Exception as e:
+            print(f"    [!] {name}: {e}")
+            return
+        if tier is None and score is None:
+            return            # scoring unavailable - leave the row alone
+        # Off-mission companies are deactivated so the crawl skips them,
+        # matching the new-company sourcing path (an `other` tier means
+        # "not health/bio/science" — no reason to keep crawling it).
+        # Watched companies are exempt: the watch tag is the user
+        # deliberately keeping an off-mission employer crawled (Covar).
+        update = {"name": c["name"], "mission_tier": tier,
+                  "mission_score": score, "mission_reason": reason}
+        revived = False
+        if (tier is not None and tier not in ACTIVE_MISSION_TIERS
+                and not config.is_multi_division(c["name"])
+                and "watch" not in (c.get("tags") or "").split(",")):
+            update["active"] = 0
+        # NOT core.claude.is_active_mission: this is the REACTIVATION
+        # half, and it deliberately does not revive on `tier is None`.
+        # A None tier with a non-None score means the model answered with
+        # a mission name outside the profile's taxonomy (score_company_
+        # mission nulls the tier but keeps the score), so the `return`
+        # above did not fire. The helper would call that "unavailable" and
+        # revive the row; here an unrecognised answer must leave an
+        # already-inactive company alone. See tests/test_invariants.py.
+        elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
+                                      or config.is_multi_division(c["name"])):
+            # The recovery half: this row reached an on-mission tier but
+            # is sitting inactive, which for an unscored row means its
+            # original mission call failed rather than judged it. Revive
+            # it. Dead boards are excluded — prune_dead_boards turns those
+            # off because the endpoint 404s, and a good mission score says
+            # nothing about whether the board still resolves. Rows in the
+            # review queue are excluded too: they are inactive because a
+            # person has not confirmed them yet, not because a call
+            # failed, and reviving them here would skip the queue (the
+            # 2026-09-01 re-resolution pass queued 24 unscored rows that
+            # this healer would otherwise have activated wholesale).
+            if (not str(c.get("notes") or "").startswith("deactivated: dead")
+                    and not company_tags.has(c.get("tags"), company_tags.PENDING)):
+                update["active"] = 1
+                revived = True
+        upsert_company(conn, update)
+        n += 1
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        flag = ("  -> deactivated (off-mission)"
+                if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
+                else "  -> REACTIVATED (was unscored + inactive)" if revived
+                else "")
+        print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    drain_or_abandon(ex, {ex.submit(_one, c): c["name"] for c in cos},
+                     _scored, lambda name: None)
     conn.close()
     print(f"\n  {n} compan(ies) scored.")
     return n
@@ -1633,64 +1495,68 @@ def resolve_leads(max_workers=8,
           f"fallback; every board validated by a live fetch)...")
 
     resolved, probe_only = [], []
-    # Hard cap on the pass: a lead whose domains blackhole must become a
-    # reported miss, not a hung command.
+    by_name = {c["name"]: c for c in leads}
+
+    def _stalled(name):
+        # A lead whose domains blackhole becomes a recorded miss, not a
+        # hung command (scrapers.parallel.drain_or_abandon).
+        record_miss(conn, name, "fetch-error:stalled",
+                    source=by_name[name].get("source"))
+
+    def _consume(fut, name):
+        c = by_name[name]
+        try:
+            hit, reason = fut.result()
+        except Exception as e:
+            print(f"    [!] {name}: {type(e).__name__}: {e}")
+            hit, reason = None, f"fetch-error:{type(e).__name__}"
+        if not hit:
+            # Was printed and forgotten; now the lead row keeps WHY, so
+            # the next run can skip it and the user can see the tally.
+            record_miss(conn, c["name"], reason, source=c.get("source"))
+            print(f"    [miss] {c['name'][:34]:34} {reason}")
+            return
+        titles = _sample_titles(hit)
+        tier, score, reason = score_company_mission(
+            c["name"], " | ".join(t for t in titles if t))
+        active = is_active_mission(tier, c["name"])
+        is_wd = hit["ats"] == "workday"
+        row = {"name": c["name"], "ats": hit["ats"],
+               "slug": None if is_wd else hit["slug"],
+               "wd_tenant": hit["slug"][0] if is_wd else None,
+               "wd_pod":    hit["slug"][1] if is_wd else None,
+               "wd_site":   hit["slug"][2] if is_wd else None,
+               "careers_url": hit.get("careers_url"),
+               "local_job_count": hit["nc"], "total_job_count": hit["count"],
+               "mission_tier": tier, "mission_score": score,
+               "mission_reason": reason,
+               "tags": company_tags.LOCAL if hit["nc"] else None,
+               "source": c.get("source") or "resolve_leads", "active": active}
+        dup = _board_already_tracked(conn, row)
+        if dup:
+            _report_dup_board(c["name"], dup)
+            return
+        # A lead is a name somebody's page mentioned, not an employer
+        # anyone vouched for: resolving it produces a review candidate.
+        pending = not is_confirmed_company(conn, c["name"])
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
+        resolved.append(row)
+        if hit.get("via") == "probe":
+            probe_only.append(c["name"])
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
+        mark = "queue" if pending else ("OK  " if active else "off ")
+        print(f"    [{mark}] {c['name'][:30]:30} "
+              f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
+              f"{str(tier):18} {ss}{flag}")
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""): c
-            for c in leads}
-    try:
-        for fut in as_completed(futs, timeout=300):
-            c, (hit, reason) = futs[fut], fut.result()
-            if not hit:
-                # Was printed and forgotten; now the lead row keeps WHY, so
-                # the next run can skip it and the user can see the tally.
-                record_miss(conn, c["name"], reason, source=c.get("source"))
-                print(f"    [miss] {c['name'][:34]:34} {reason}")
-                continue
-            titles = _sample_titles(hit)
-            tier, score, reason = score_company_mission(
-                c["name"], " | ".join(t for t in titles if t))
-            active = is_active_mission(tier, c["name"])
-            is_wd = hit["ats"] == "workday"
-            row = {"name": c["name"], "ats": hit["ats"],
-                   "slug": None if is_wd else hit["slug"],
-                   "wd_tenant": hit["slug"][0] if is_wd else None,
-                   "wd_pod":    hit["slug"][1] if is_wd else None,
-                   "wd_site":   hit["slug"][2] if is_wd else None,
-                   "careers_url": hit.get("careers_url"),
-                   "local_job_count": hit["nc"], "total_job_count": hit["count"],
-                   "mission_tier": tier, "mission_score": score,
-                   "mission_reason": reason,
-                   "tags": company_tags.LOCAL if hit["nc"] else None,
-                   "source": c.get("source") or "resolve_leads", "active": active}
-            dup = _board_already_tracked(conn, row)
-            if dup:
-                _report_dup_board(c["name"], dup)
-                continue
-            # A lead is a name somebody's page mentioned, not an employer
-            # anyone vouched for: resolving it produces a review candidate.
-            pending = not is_confirmed_company(conn, c["name"])
-            if pending:
-                row = mark_pending(row)
-            upsert_company(conn, row)
-            resolved.append(row)
-            if hit.get("via") == "probe":
-                probe_only.append(c["name"])
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
-            mark = "queue" if pending else ("OK  " if active else "off ")
-            print(f"    [{mark}] {c['name'][:30]:30} "
-                  f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
-                  f"{str(tier):18} {ss}{flag}")
-    except TimeoutError:
-        stuck = [c["name"] for f, c in futs.items() if not f.done()]
-        for n in stuck:
-            record_miss(conn, n, "fetch-error:Timeout")
-        print(f"    [!] timed out on {len(stuck)} lead(s): "
-              f"{', '.join(stuck[:6])}{'...' if len(stuck) > 6 else ''} "
-              f"(rerun --resolve-leads to retry — idempotent)")
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+    drain_or_abandon(
+        ex,
+        {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""):
+         c["name"] for c in leads},
+        _consume, _stalled)
     conn.close()
     queued = sum(1 for r in resolved
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
@@ -1952,7 +1818,7 @@ def parse_company_names(blob, limit=300):
 
     out, seen = [], set()
     for name in candidates:
-        key = _NONALNUM_RE.sub("", name.lower())
+        key = name_key(name)
         if key and key not in seen:
             seen.add(key)
             out.append(name)
@@ -2001,8 +1867,7 @@ def _board_already_tracked(conn, row):
     existing = company_by_board(conn, row)
     if not existing:
         return None
-    if (_NONALNUM_RE.sub("", (existing.get("name") or "").lower())
-            == _NONALNUM_RE.sub("", (row.get("name") or "").lower())):
+    if name_key(existing.get("name")) == name_key(row.get("name")):
         return None
     return existing
 
@@ -2087,16 +1952,16 @@ def preview_names(blob, use_llm=None):
         names = parse_company_names(blob)
     conn = connect()
     try:
-        tracked = {_NONALNUM_RE.sub("", (r["name"] or "").lower())
+        tracked = {name_key(r["name"])
                    for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
         blocked = _blocked_keys(conn)
-        missed = {_NONALNUM_RE.sub("", n.lower())
+        missed = {name_key(n)
                   for n in recent_miss_names(conn)}
     finally:
         conn.close()
     out, seen = [], set()
     for n in names:
-        key = _NONALNUM_RE.sub("", n.lower())
+        key = name_key(n)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -2135,10 +2000,10 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         return []
 
     conn = connect()
-    skip = ({_NONALNUM_RE.sub("", (r["name"] or "").lower())
+    skip = ({name_key(r["name"])
              for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
             | _blocked_keys(conn))
-    fresh = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in skip]
+    fresh = [n for n in names if name_key(n) not in skip]
     skipped = len(names) - len(fresh)
     print(f"  {len(names)} name(s) given"
           + (f", {skipped} already tracked or blocked" if skipped else "")
@@ -2207,7 +2072,7 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
               f"{state}{flag}")
 
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    _drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
+    drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
                       _consume, _stalled)
     conn.commit()
     conn.close()

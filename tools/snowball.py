@@ -43,28 +43,10 @@ import config  # noqa: E402
 
 from core.store import connect, get_companies  # noqa: E402
 
-# --------------------------------------------------------------------------- #
-#  Name normalization (same key everywhere else in discovery/) --------------- #
-# --------------------------------------------------------------------------- #
-
-_NONALNUM_RE = re.compile(r"[^a-z0-9]")
-
-
-def _norm_key(name):
-    """Comparison key: strip everything but [a-z0-9], lowercase.
-
-    Matches the key discovery/local_sourcing.py and config.py's blocklist
-    already use, so a name already tracked under any spelling/punctuation is
-    recognized as the same company.
-
-    >>> _norm_key("Iris Diagnostics, Inc.")
-    'irisdiagnosticsinc'
-    >>> _norm_key(" Foo-Bar!! ") == _norm_key("foobar")
-    True
-    >>> _norm_key(None)
-    ''
-    """
-    return _NONALNUM_RE.sub("", (name or "").lower())
+# The comparison key every other discovery path uses (discovery/names.py),
+# so a name already tracked under any spelling/punctuation is recognized as
+# the same company.
+from discovery.names import name_key as _norm_key  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

@@ -7,13 +7,15 @@ can read directly (e.g. jobs.lever.co/<slug>). We extract the ATS + slug/triple
 from each URL, NC-verify the board, mission-score it, and add it.
 
 Two entry points:
-  * run_ddgs_dorks()  — fully automated via the ddgs package (DuckDuckGo).
+  * run_ddgs_dorks()  — fully automated via scrapers.ddg (DuckDuckGo).
 """
 
 import json
 import time
 
 import config
+
+from scrapers import ddg
 
 from .sniffer import _SIGS
 from .probes import _extract_workday_triple
@@ -251,85 +253,6 @@ def harvest_urls(urls, verbose=True):
     return added, len(boards)
 
 
-# ddgs builds its engine registry by WALKING ITS OWN PACKAGE DIRECTORY
-# (pkgutil.iter_modules in ddgs/engines/__init__.py). A compiled build has no
-# directory to walk, so the registry comes up empty and every search dies on
-# `ENGINES["text"]` — a bare KeyError('text'), raised before ddgs's own backend
-# error handling can run, so the whole sweep silently returns 0 results.
-# Fallback list only — a new ddgs release can add an engine this misses, which
-# costs that one backend rather than the whole sweep.
-_DDGS_ENGINE_MODULES = (
-    "annasarchive", "bing", "bing_images", "bing_news", "brave", "duckduckgo",
-    "duckduckgo_images", "duckduckgo_news", "duckduckgo_videos", "google",
-    "grokipedia", "mojeek", "startpage", "wikipedia", "yahoo", "yahoo_news",
-    "yandex",
-)
-
-
-def _ensure_ddgs_engines():
-    """Re-register ddgs's search engines when its own discovery came up empty.
-    No-op on a normal source run."""
-    import importlib
-    import inspect
-    try:
-        from ddgs.base import BaseSearchEngine
-        from ddgs.engines import ENGINES
-    except Exception:
-        return
-    if ENGINES.get("text"):
-        return
-    for modname in _DDGS_ENGINE_MODULES:
-        try:
-            module = importlib.import_module(f"ddgs.engines.{modname}")
-        except Exception:
-            continue
-        for _, cls in inspect.getmembers(module, inspect.isclass):
-            if (not issubclass(cls, BaseSearchEngine) or cls is BaseSearchEngine
-                    or cls.__name__.startswith("Base")
-                    or getattr(cls, "disabled", True)):
-                continue
-            name, category = getattr(cls, "name", None), getattr(cls, "category", None)
-            if isinstance(name, str) and isinstance(category, str):
-                ENGINES.setdefault(category, {})[name] = cls
-
-
-def _ddg_text(query, max_results, retries=2, pause=2.5, page=1):
-    """One DDG query with retry/backoff. DDG rate-limits aggressively and
-    surfaces it as an exception ("No results found."/"Ratelimit"), so a fresh
-    session + a pause between attempts recovers far more than a single try.
-    `page` (1-based) asks the backend for a later results page — the lever
-    for getting past DDG's default top-`max_results` ceiling — and is passed
-    straight through to ddgs, which forwards unrecognised kwargs to the
-    underlying engine. Returns a list of result URLs (possibly empty)."""
-    try:
-        try:
-            from ddgs import DDGS
-        except ImportError:
-            from duckduckgo_search import DDGS
-    except ImportError:
-        return []
-    _ensure_ddgs_engines()
-    for attempt in range(retries + 1):
-        try:
-            with DDGS() as ddg:
-                return [u for r in ddg.text(query, max_results=max_results, page=page)
-                        if (u := (r.get("href") or r.get("url")))]
-        except Exception as e:
-            if attempt < retries:
-                time.sleep(pause * (attempt + 1))
-                continue
-            # "No results found." is DDG's way of returning an empty page
-            # (and sometimes a disguised throttle — hence the retries above);
-            # once the retries are spent it's an expected empty, and the
-            # "[dork] 0 result(s)" line that follows already reports it.
-            if "no results" in str(e).lower():
-                return []
-            # Type included: a bare KeyError prints as just its key ('text'),
-            # which reads like a parsing quirk rather than a dead registry.
-            print(f"  [!] dork {query[:48]}...: {type(e).__name__}: {e}")
-    return []
-
-
 # Persisted rotation counter, so successive runs advance through the locality
 # vocabulary instead of repeating the same slice (and a re-read reproduces
 # exactly which slice a past run covered) — deterministic, not `random`-based.
@@ -383,7 +306,7 @@ def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
         if not first:
             time.sleep(pause)          # be gentle between queries
         first = False
-        found = _ddg_text(q, max_results, page=1)
+        found = ddg.search_urls(q, max_results)
         print(f"  [dork] {len(found):2} result(s)  page=1  {q[:60]}")
         urls += found
         # A full first page suggests DDG has more to give; an empty or
@@ -392,7 +315,7 @@ def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
         page = 2
         while len(found) >= max_results and page <= pages:
             time.sleep(pause)
-            found = _ddg_text(q, max_results, page=page)
+            found = ddg.search_urls(q, max_results, page=page)
             print(f"  [dork] {len(found):2} result(s)  page={page}  {q[:60]}")
             urls += found
             page += 1

@@ -12,26 +12,8 @@ Pipeline per query:
 
 import time
 
+from .. import ddg
 from .jsonld import fetch_jsonld_page
-
-
-def _ddg_search(query, max_results=15):
-    """Return a list of {title, href, body} dicts. Handles both package names."""
-    try:
-        from ddgs import DDGS              # new name (2024+)
-    except ImportError:
-        try:
-            from duckduckgo_search import DDGS   # legacy name
-        except ImportError:
-            print("    [!] ddgs not installed. Run: pip install ddgs")
-            return []
-
-    try:
-        with DDGS() as ddg:
-            return list(ddg.text(query, max_results=max_results))
-    except Exception as e:
-        print(f"    [!] DuckDuckGo search failed: {e}")
-        return []
 
 
 def fetch_websearch(label, query, max_results=15, per_result_delay=0.5):
@@ -40,7 +22,7 @@ def fetch_websearch(label, query, max_results=15, per_result_delay=0.5):
     `label` is used as the company name when we can't infer one.
     """
     print(f"    -> Query: {query!r}")
-    results = _ddg_search(query, max_results=max_results)
+    results = ddg.search(query, max_results=max_results)
     if not results:
         return []
 

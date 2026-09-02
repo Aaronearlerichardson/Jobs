@@ -655,6 +655,16 @@ ROBOTS_EXEMPT_HOSTS = tuple(
 ROBOTS_CONNECT_TIMEOUT = float(_pol.get("robots_connect_timeout", 3.0))
 ROBOTS_READ_TIMEOUT    = float(_pol.get("robots_read_timeout", 10.0))
 
+# Per-request HTTP timeouts for everything else, as (connect, read), split
+# for the same reason as the robots pair. PROBE_TIMEOUT is for speculative
+# requests (slug probes, name-guessed careers pages, board counts), where a
+# dead host should cost little and most answers are 404s. FETCH_TIMEOUT is
+# for a board or page known to exist, where a slow real server is worth
+# waiting for. Module constants, not profile keys: nothing about a user's
+# field changes how long a socket should wait.
+PROBE_TIMEOUT = (3.0, 10.0)
+FETCH_TIMEOUT = (5.0, 25.0)
+
 # Headless-browser resolution order for the JS probes. "" is Playwright's own
 # pinned build; the rest are `channel=` names for browsers already on the
 # machine. Trying the system browsers means `pip install` alone is enough —

@@ -18,6 +18,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import HEADERS
 
 _JSON = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
@@ -28,7 +29,7 @@ def _api(slug):
     return f"https://recruiting2.ultipro.com/{code}/JobBoard/{guid}/JobBoardView/LoadSearchResults"
 
 
-def parse_board(slug, page_size=100, max_pages=10, timeout=25):
+def parse_board(slug, page_size=100, max_pages=10, timeout=FETCH_TIMEOUT):
     """Return the raw opportunity list for one board slug (``CODE|GUID``)."""
     url = _api(slug)
     out = []

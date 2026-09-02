@@ -16,6 +16,7 @@ import time
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
@@ -35,7 +36,7 @@ def _location_str(req):
     return "; ".join(names) or "Unknown"
 
 
-def _fetch_description(item_id, cid, ccid, timeout=15):
+def _fetch_description(item_id, cid, ccid, timeout=FETCH_TIMEOUT):
     try:
         r = SESSION.get(
             f"{_API}/{item_id}",
@@ -64,7 +65,7 @@ def fetch_adp(cid, ccid, company_name, page_size=50, max_pages=10,
                 _API,
                 params={"cid": cid, "ccId": ccid, "locale": "en_US",
                         "$top": page_size, "$skip": page * page_size},
-                timeout=25, headers=_JSON_HEADERS,
+                timeout=FETCH_TIMEOUT, headers=_JSON_HEADERS,
             )
             r.raise_for_status()
             data = r.json()

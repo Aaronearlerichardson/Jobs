@@ -99,7 +99,7 @@ def launch_chromium(pw, **kwargs):
 def probe_greenhouse(slug):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         return (True, len(r.json().get("jobs", [])))
@@ -110,7 +110,7 @@ def probe_greenhouse(slug):
 def probe_lever(slug):
     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         data = r.json()
@@ -122,7 +122,7 @@ def probe_lever(slug):
 def probe_ashby(slug):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         # Posting API key is "jobs" (not the embed payload's "jobPostings").
@@ -140,7 +140,7 @@ def probe_kula(slug, retries=1):
     url = f"https://careers.kula.ai/{slug}"
     for attempt in range(retries + 1):
         try:
-            r = SESSION.get(url, timeout=10, headers=HEADERS)
+            r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             if r.status_code == 200 and len(r.text) > 1000:
                 return (True, 0)
         except Exception:
@@ -153,7 +153,7 @@ def probe_kula(slug, retries=1):
 def probe_jazzhr(slug):
     url = f"https://{slug}.applytojob.com/"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         n = len(re.findall(r"/apply/[A-Za-z0-9]+/", r.text))
@@ -165,7 +165,7 @@ def probe_jazzhr(slug):
 def probe_bamboohr(slug):
     url = f"https://{slug}.bamboohr.com/careers/list"
     try:
-        r = SESSION.get(url, timeout=10,
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT,
                          headers={**HEADERS, "Accept": "application/json"})
         if r.status_code != 200:
             return (False, 0)
@@ -177,7 +177,7 @@ def probe_bamboohr(slug):
 def probe_smartrecruiters(slug):
     url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         # SmartRecruiters returns 200 / totalFound:0 for ANY slug, even
@@ -310,134 +310,6 @@ def _extract_workday_triple(text: str):
             return tenant.lower(), int(pod), site
     return None
 
-
-_URL_CAP = 12
-
-# Corporate suffixes to strip when building domain-token guesses — the
-# domain rarely includes these (redhat.com, not redhatinc.com). Keep in
-# sync with pipeline._CORP_SUFFIXES.
-_DOMAIN_STOPWORDS = {
-    "inc", "incorporated", "corp", "corporation", "ltd", "llc", "co",
-    "company", "technologies", "systems", "therapeutics", "biosciences",
-    "pharmaceuticals", "pharma", "sciences", "bio", "labs", "group",
-    "health", "holdings",
-}
-
-
-def _name_domain_tokens(name: str) -> list[str]:
-    """
-    Guess the company's likely domain token(s) from its name. Returns
-    a short list in priority order: suffix-free joined form first
-    ("unitedtherapeutics" → yes, "unitherapeuticsinc" → no), then the
-    first word ("united"), then the fully-joined form as a last resort.
-    """
-    if not name:
-        return []
-    # Drop parentheticals and non-letter punctuation first.
-    clean = re.sub(r"\s*\([^)]*\)", "", name).lower()
-    words = [w for w in re.split(r"[^a-z0-9]+", clean) if w]
-    if not words:
-        return []
-    # Full joined form ("unitedtherapeutics")
-    full = "".join(words)
-    # Suffix-stripped ("redhat" from "Red Hat Inc")
-    kept = [w for w in words if w not in _DOMAIN_STOPWORDS]
-    stripped = "".join(kept)
-    # First-word only ("united")
-    first = kept[0] if kept else words[0]
-
-    # Priority: full joined form first ("unitedtherapeutics.com" beats
-    # the ambiguous "united.com"), then suffix-stripped, then first word.
-    out, seen = [], set()
-    for t in (full, stripped, first):
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-# Generic/ambiguous domain tokens that collide with an unrelated company when
-# used as a truncated domain guess ("signal" from "Bio-Signal Technologies"
-# -> some unrelated signal-processing startup's board). Same collision class
-# as pipeline._GENERIC_SLUGS; kept as a separate small set here because
-# probes.py cannot import pipeline.py (pipeline imports probes — see the
-# "keep in sync" note on _DOMAIN_STOPWORDS above).
-_GENERIC_DOMAIN_WORDS = {
-    "signal", "neuro", "neural", "brain", "medical", "health", "data",
-    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
-    "bci", "ai", "research", "digital", "care", "vision", "sense",
-}
-
-
-def _risky_domain_tokens(name: str) -> set:
-    """The tokens from _name_domain_tokens(name) that are a TRUNCATED guess
-    at a multi-word company's domain: the bare first word, or a generic word
-    from _GENERIC_DOMAIN_WORDS. Same collision shape
-    pipeline._flag_for_verification calls out for slugs ("first-word slug -
-    confirm it's the same company") — a domain guess has no post-hoc job
-    count to sanity-check it against, so a hit reached ONLY through one of
-    these needs the fetched page to actually corroborate the company name
-    (see sniffer._corroborates) before it is trusted.
-
-    >>> sorted(_risky_domain_tokens("Galaxy Diagnostics"))
-    ['galaxy']
-    >>> sorted(_risky_domain_tokens("Lindy Biosciences"))
-    ['lindy']
-    >>> sorted(_risky_domain_tokens("United Therapeutics"))
-    ['united']
-
-    A single-word name has no "first word of a multi-word name" to be
-    truncated to — it's not a risky domain guess, just the whole name:
-
-    >>> _risky_domain_tokens("Pfizer")
-    set()
-
-    Notes:
-        "Red Hat Inc" -> stripped "redhat" is NOT flagged: dropping a
-        corporate suffix is precise (the domain really does omit "Inc"),
-        unlike collapsing a multi-word name down to one ambiguous word.
-    """
-    words = [w for w in re.split(r"[^a-z0-9]+", (name or "").lower()) if w]
-    if len(words) < 2:
-        return set()
-    full = "".join(words)
-    return {t for t in _name_domain_tokens(name)
-           if t != full and (t == words[0] or t in _GENERIC_DOMAIN_WORDS)}
-
-
-def _workday_candidate_urls(name: str, careers_url: str) -> list[str]:
-    """
-    Careers-page URLs to scrape, in priority order. Caps at _URL_CAP to
-    keep misses bounded — we stop at the first workday URL we find, so
-    high-priority URLs (hints, common paths) go first.
-    """
-    urls: list[str] = []
-    if careers_url:
-        urls.append(careers_url)
-
-    # Paths in priority order. /en/jobs catches Red Hat; /careers is
-    # the dominant pattern; /jobs catches a few odd ducks.
-    paths = ("/careers", "/en/jobs", "/jobs", "/careers/",
-             "/en/careers", "/company/careers/")
-
-    for token in _name_domain_tokens(name):
-        for path in paths:
-            urls.append(f"https://www.{token}.com{path}")
-        # Bare subdomains
-        urls.append(f"https://careers.{token}.com/")
-        urls.append(f"https://jobs.{token}.com/")
-        urls.append(f"https://www.{token}.com/")
-
-    seen, out = set(), []
-    for u in urls:
-        if u and u not in seen:
-            seen.add(u)
-            out.append(u)
-        if len(out) >= _URL_CAP:
-            break
-    return out
-
-
 def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
     """
     POST the Workday CXS /jobs endpoint to validate the triple and
@@ -451,7 +323,7 @@ def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
         r = SESSION.post(
             api,
             json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
-            timeout=12,
+            timeout=config.PROBE_TIMEOUT,
             headers={
                 **HEADERS,
                 "Accept":       "application/json",
@@ -467,32 +339,37 @@ def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
 
 def probe_workday(name: str, careers_url: str = ""):
     """
-    Discover a Workday tenant/pod/site for `name` by fetching likely
-    careers pages and scanning for a myworkdayjobs.com link. On hit,
-    validates with the CXS API.
+    Discover a Workday tenant/pod/site for `name`: the careers-page sniff
+    (sniffer.candidate_urls, fetched through its per-run memo) filtered to
+    myworkdayjobs.com links, validated with the CXS API on a hit.
 
     Returns dict {tenant, wd_pod, site, count, validated, source_url}
-    or None if no workday URL was found.
+    or None if no workday URL was found. `validated=False` means the URL
+    pattern was found but the CXS API could not confirm it.
 
-    `validated=False` means the URL pattern was found but the CXS API
+    Notes:
+        Used to build and fetch its own candidate list; a hit reached only
+        through a truncated domain token, or belonging to a parent
+        company's shared tenant, went unchecked here while the sniffer
+        rejected it. Same guards on both paths now.
     """
-    # Candidate hosts here are name-guesses too — quiet their robots notices
-    # for the same reason the sniffer does (see scrapers.robots.quiet).
-    from scrapers import robots
-    for url in _workday_candidate_urls(name, careers_url):
-        try:
-            with robots.quiet():
-                r = SESSION.get(
-                    url, timeout=6, headers=HEADERS, allow_redirects=True,
-                )
-        except Exception:
+    from .sniffer import (_corroborates, _fetch_all, _foreign_board,
+                          _risky_token_in_url, candidate_urls)
+    urls = candidate_urls(name, careers_url)
+    if not urls:
+        return None
+    responses = _fetch_all(urls)
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
             continue
-        if r.status_code != 200:
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
             continue
-        # Workday login redirects usually land on the wd host — check
+        # Workday login redirects usually land on the wd host -- check
         # the final URL first, then fall through to HTML body.
         triple = _extract_workday_triple(r.url) or _extract_workday_triple(r.text)
-        if not triple:
+        if not triple or _foreign_board(name, triple):
             continue
         tenant, wd_pod, site = triple
         count = _count_workday_jobs(tenant, wd_pod, site)
@@ -638,10 +515,11 @@ class WorkdayJsProbe:
 
     def _probe_impl(self, name: str, careers_url: str = ""):
         """Runs entirely on the browser-owning thread."""
+        from .sniffer import candidate_urls
         page = self._ensure_page()
         if page is None:
             return None
-        for url in _workday_candidate_urls(name, careers_url):
+        for url in candidate_urls(name, careers_url):
             triple = self._scan(page, url)
             if not triple:
                 continue

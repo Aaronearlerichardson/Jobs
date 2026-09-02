@@ -3,14 +3,15 @@
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import os
 
-from config import REPORT_DIR
+from config import PROBE_TIMEOUT, REPORT_DIR
 from core.claude import DISCOVER_SYSTEM, call_claude_json
+from scrapers.parallel import drain_or_abandon
 from scrapers.util import worker_count
 from .probes import (
     PROBES,
@@ -19,6 +20,8 @@ from .probes import (
     probe_workday,
 )
 from .sniffer import sniff_careers_ats
+from .names import (GENERIC_WORDS, name_words, strip_parentheticals,
+                    strip_suffixes)
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost
@@ -58,58 +61,6 @@ def candidate_from_dict(d):
         careers_url = d.get("careers_url", "").strip(),
         notes       = d.get("notes", "").strip(),
     )
-
-
-# Corporate suffixes to strip before generating slug variants. Stored
-# lowercased; match is word-boundary so "biosciences" doesn't eat "bio".
-_CORP_SUFFIXES = (
-    "incorporated", "technologies", "biosciences", "pharmaceuticals",
-    "therapeutics", "corporation", "systems", "holdings", "sciences",
-    "pharma", "health", "bio", "labs", "group", "inc", "corp", "ltd",
-    "llc", "co", "company",
-)
-_SUFFIX_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(s) for s in _CORP_SUFFIXES) + r")\b\.?",
-    re.IGNORECASE,
-)
-_PAREN_RE = re.compile(r"\s*\([^)]*\)")
-
-
-def _normalize_name(name: str) -> str:
-    """Strip parentheticals and trailing corporate suffixes.
-
-    >>> _normalize_name("Corcept Therapeutics (NC office)")
-    'Corcept'
-    >>> _normalize_name("United Therapeutics, Inc.")
-    'United'
-    >>> _normalize_name("Acme Corp")
-    'Acme'
-
-    Punctuation and runs of whitespace left behind by the stripping are
-    collapsed, so the result is always a clean single-spaced name:
-
-    >>> _normalize_name("  Acme  Corp  ")
-    'Acme'
-
-    A name with nothing to strip is returned as-is, and a missing name is
-    the empty string rather than an error:
-
-    >>> _normalize_name("Wolfspeed")
-    'Wolfspeed'
-    >>> _normalize_name(None)
-    ''
-
-    Notes:
-        "Therapeutics" and "Biosciences" count as suffixes here even though
-        they are part of the legal name. That is deliberate: ATS slugs are
-        far more often the head word than the full name, and slug_variants
-        keeps the unstripped form as a candidate anyway.
-    """
-    s = _PAREN_RE.sub("", name or "")
-    s = _SUFFIX_RE.sub("", s)
-    # Clean up punctuation left behind by suffix stripping.
-    s = re.sub(r"[,\.]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def _variants_for(name: str) -> list[str]:
@@ -193,10 +144,10 @@ def slug_variants(name, first_guess):
 
     for half in halves:
         # Full form first (keeps Inc/Corp suffix in play if ATS expects it).
-        cleaned_full = _PAREN_RE.sub("", half).strip()
+        cleaned_full = strip_parentheticals(half).strip()
         variants.extend(_variants_for(cleaned_full))
         # Then the suffix-stripped form.
-        cleaned_short = _normalize_name(half)
+        cleaned_short = strip_suffixes(half)
         if cleaned_short and cleaned_short.lower() != cleaned_full.lower():
             variants.extend(_variants_for(cleaned_short))
 
@@ -209,16 +160,6 @@ def slug_variants(name, first_guess):
             seen.add(v)
             out.append(v)
     return out[:8]
-
-
-# Generic single-word slugs that collide with unrelated boards when
-# probed from a multi-word company name ("Bio-Signal Technologies" -> the
-# bare slug "signal" hits some unrelated Lever board). Flagged for review.
-_GENERIC_SLUGS = {
-    "signal", "neuro", "neural", "brain", "medical", "health", "data",
-    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
-    "bci", "ai", "research", "digital", "care", "vision", "sense",
-}
 
 
 def _slug_collision_risk(name, slug):
@@ -237,17 +178,17 @@ def _slug_collision_risk(name, slug):
     >>> _slug_collision_risk("Cala Health", "calahealth")
     False
     """
-    name_words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    words = name_words(name)
     single_token = "-" not in slug
-    if len(name_words) >= 2 and slug == name_words[0]:
+    if len(words) >= 2 and slug == words[0]:
         return True
-    if len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
+    if len(words) >= 2 and single_token and slug in GENERIC_WORDS:
         return True
     # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
     # short common token that collides with a large unrelated board
     # ("inter" -> 158 jobs at a fintech).
-    return (len(name_words) == 1 and single_token
-            and (slug in _GENERIC_SLUGS or len(slug) <= 5))
+    return (len(words) == 1 and single_token
+            and (slug in GENERIC_WORDS or len(slug) <= 5))
 
 
 def _board_evidence(ats, slug, n=6):
@@ -259,19 +200,19 @@ def _board_evidence(ats, slug, n=6):
     try:
         if ats == "greenhouse":
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             display = (r.json().get("name") or "").strip()
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}"
-                            f"/jobs?content=false", timeout=10, headers=HEADERS)
+                            f"/jobs?content=false", timeout=PROBE_TIMEOUT, headers=HEADERS)
             return display, [j.get("title", "")
                              for j in r.json().get("jobs", [])[:n]]
         if ats == "lever":
             r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             return "", [j.get("text", "") for j in r.json()[:n]]
         if ats == "ashby":
             r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             data = r.json()
             return "", [j.get("title", "") for j in
                         data.get("jobs", data.get("jobPostings", []))[:n]]
@@ -307,11 +248,11 @@ def _flag_for_verification(c, claimed_ats, slug):
     flags = []
     if claimed_ats in PROBES and c.ats != claimed_ats:
         flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
-    name_words = re.findall(r"[a-z0-9]+", c.name.lower())
+    words = name_words(c.name)
     if _slug_collision_risk(c.name, slug):
-        if len(name_words) >= 2 and slug == name_words[0]:
+        if len(words) >= 2 and slug == words[0]:
             flags.append("first-word slug - confirm it's the same company")
-        elif len(name_words) >= 2:
+        elif len(words) >= 2:
             flags.append(f"generic slug '{slug}' - likely a different company")
         else:
             flags.append(f"single-word name slug '{slug}' - confirm identity")
@@ -452,10 +393,10 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     name. Claude's entry wins when both sources have the same company
     (its ats/slug_guess may be more accurate than the seed's 'unknown').
     """
-    seen = {_normalize_name(c.get("name") or "").lower() for c in claude_raw}
+    seen = {strip_suffixes(c.get("name") or "").lower() for c in claude_raw}
     return list(claude_raw) + [
         s for s in seeds
-        if _normalize_name(s["name"]).lower() not in seen
+        if strip_suffixes(s["name"]).lower() not in seen
     ]
 
 
@@ -535,17 +476,28 @@ def _validate_all(candidate_dicts, use_js=True):
     # use, so concurrent candidates scrape in parallel (up to _JS_BROWSERS)
     # instead of serializing on one. Skipped entirely when use_js is off,
     # so bulk sweeps never pay the browser cost.
+    def _done(fut, _name):
+        idx, cand = fut.result()
+        validated[idx] = cand
+
     js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
     try:
-        with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
-            futures = [pool.submit(_worker, i, rc, js_probe)
-                       for i, rc in enumerate(candidate_dicts)]
-            for fut in as_completed(futures):
-                idx, cand = fut.result()
-                validated[idx] = cand
+        pool = ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS)
+        drain_or_abandon(
+            pool,
+            {pool.submit(_worker, i, rc, js_probe): (rc.get("name") or "").strip()
+             for i, rc in enumerate(candidate_dicts)},
+            _done, lambda _name: None)
     finally:
         if js_probe is not None:
             js_probe.close()
+    # A candidate the watchdog abandoned is reported unconfirmed, not
+    # dropped: the report and --apply walk every slot.
+    for i, rc in enumerate(candidate_dicts):
+        if validated[i] is None:
+            cand = candidate_from_dict(rc)
+            cand.tried_slugs.append("[stalled: abandoned by the watchdog]")
+            validated[i] = cand
     return validated
 
 

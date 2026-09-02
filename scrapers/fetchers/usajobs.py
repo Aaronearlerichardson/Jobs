@@ -339,7 +339,7 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
     jobs, seen, fetched, total = [], set(), 0, None
     for page in range(1, int(max_pages) + 1):
         try:
-            r = SESSION.get(API_URL, timeout=25, headers=headers,
+            r = SESSION.get(API_URL, timeout=config.FETCH_TIMEOUT, headers=headers,
                             params={**params, "Page": page})
             r.raise_for_status()
             data = r.json()

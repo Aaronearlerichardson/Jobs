@@ -19,6 +19,7 @@ from urllib.parse import urljoin, urlparse
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date as _norm_posted
 from ..util import stable_id
@@ -134,7 +135,7 @@ def _job_from_posting(jp, company_name, source_url):
     return job
 
 
-def fetch_jsonld_page(company_name, page_url, timeout=20):
+def fetch_jsonld_page(company_name, page_url, timeout=FETCH_TIMEOUT):
     """Fetch ONE URL; extract JobPosting records from its JSON-LD."""
     try:
         r = SESSION.get(page_url, timeout=timeout, headers=HEADERS)
@@ -159,7 +160,7 @@ def fetch_jsonld_careers(company_name, careers_url, max_job_urls=50):
     `max_job_urls` job-like links from that page and parse each.
     """
     try:
-        r = SESSION.get(careers_url, timeout=20, headers=HEADERS)
+        r = SESSION.get(careers_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] JSON-LD {company_name}: {e}")

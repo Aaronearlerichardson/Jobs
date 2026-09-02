@@ -15,6 +15,7 @@ import time
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
@@ -33,7 +34,7 @@ def _is_remote(job):
     return bool(job.get("isRemote")) or str(job.get("locationType")) == "1"
 
 
-def _fetch_description(base, jid, timeout=15):
+def _fetch_description(base, jid, timeout=FETCH_TIMEOUT):
     try:
         r = SESSION.get(f"{base}/careers/{jid}/detail",
                          timeout=timeout, headers=_JSON_HEADERS)
@@ -48,7 +49,7 @@ def _fetch_description(base, jid, timeout=15):
 def fetch_bamboohr(subdomain, company_name, max_details=40, detail_delay=0.2):
     base = f"https://{subdomain}.bamboohr.com"
     try:
-        r = SESSION.get(f"{base}/careers/list", timeout=20,
+        r = SESSION.get(f"{base}/careers/list", timeout=FETCH_TIMEOUT,
                          headers=_JSON_HEADERS)
         r.raise_for_status()
         entries = r.json().get("result") or []
