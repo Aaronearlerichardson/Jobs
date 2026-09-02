@@ -420,6 +420,15 @@ _DEFAULT_TRACKS = {
 #   require_core_anchor gate: posting must hit a CORE keyword
 #   geo_gate            gate: drop non-local non-remote postings (locality
 #                       from [locality]); False = stamp remote_eligible only
+#   remote_mission_floor
+#                       mission score at which a company that is NOT watched
+#                       still earns watch-grade remote treatment: its whole
+#                       board is fetched, its explicitly-remote postings pass
+#                       the geo gate, and they enter the location-scoped
+#                       ranking. Multi-division conglomerates never qualify
+#                       this way (a conglomerate's corporate mission score
+#                       says nothing about the division that is hiring).
+#                       `false` turns the admission off entirely.
 #   verify_top          deep-verify the top N after scoring (0 = skip)
 #   cost_guard          max postings scored per run without confirm (0 = off)
 #   email               email the digest after a crawl (CLI --send overrides)
@@ -461,6 +470,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "aggregators": False, "websearch": False,
                     "location_scoped": True},
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
+        "remote_mission_floor": 0.85,
         "verify_top": 15, "cost_guard": 0, "email": False,
         "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": True, "dormant_after": 4, "dormant_days": 7,
@@ -475,6 +485,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "aggregators": True, "websearch": True,
                     "location_scoped": False},
         "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
+        "remote_mission_floor": 0.85,
         "verify_top": 0, "cost_guard": 300, "email": False,
         "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": False, "dormant_after": 4, "dormant_days": 7,
@@ -485,6 +496,24 @@ _ENGINE_CRAWL_DEFAULTS = {
 # Retired engine name -> current one, so a profile written against the old
 # names keeps working (see core/tags.py for the same treatment of store tags).
 ENGINE_ALIASES = {"neural": "sweep"}
+
+
+def _mission_floor(v):
+    """A track's `remote_mission_floor` as a float, or None when the track
+    switches the admission off.
+
+    >>> _mission_floor(0.85)
+    0.85
+    >>> _mission_floor(False) is None
+    True
+    >>> _mission_floor(None) is None
+    True
+
+    Notes:
+        TOML has no null, so `false` is how a profile disables the key
+        rather than merely lowering it.
+    """
+    return None if v is None or v is False else float(v)
 
 
 def _build_ui_tracks(raw):
@@ -527,6 +556,9 @@ def _build_ui_tracks(raw):
             "require_core_anchor": bool(t.get("require_core_anchor",
                                               eng_defaults["require_core_anchor"])),
             "geo_gate": bool(t.get("geo_gate", eng_defaults["geo_gate"])),
+            "remote_mission_floor": _mission_floor(
+                t.get("remote_mission_floor",
+                      eng_defaults["remote_mission_floor"])),
             "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
             "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
             "email": bool(t.get("email", eng_defaults["email"])),

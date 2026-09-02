@@ -1511,8 +1511,60 @@ def backfill_axis_columns(conn):
     return n
 
 
+def remote_admitted(row, remote_mission_floor):
+    """Whether an out-of-area REMOTE `row` (a ranked_jobs row) is still
+    worth showing in a location-scoped view.
+
+    A watched company qualifies whatever it scores — watch is the one
+    human-curated tag, "show me everything at this employer":
+
+    >>> remote_admitted({"company_tags": "local,watch",
+    ...                  "mission_score": 0.05}, 0.85)
+    True
+
+    Any other company has to reach `remote_mission_floor` on its own
+    judged mission score:
+
+    >>> remote_admitted({"mission_score": 0.9}, 0.85)
+    True
+    >>> remote_admitted({"mission_score": 0.5}, 0.85)
+    False
+
+    A company nobody has scored is not admitted (unknown is not a verdict
+    in its favour), and a floor of None turns the score arm off entirely,
+    leaving watch as the only way in:
+
+    >>> remote_admitted({"mission_score": None}, 0.85)
+    False
+    >>> remote_admitted({"mission_score": 0.99}, None)
+    False
+
+    A multi-division conglomerate never qualifies on score — see
+    tests/test_store.py::TestRemoteAdmission, which patches the profile
+    policy the check reads.
+
+    Notes:
+        The watch list is hand-maintained and lags the data: 8 starred
+        companies produced a third of all good-fit rows while 20 unstarred
+        ones had produced at least one, and a remote research-engineer
+        posting at fit 0.94 fell out of a location-scoped ranking purely
+        for want of a star. ranked_jobs applies this server-side; the web
+        UI re-applies it per row, because /api/jobs deliberately ships
+        every row and gates on the client.
+    """
+    if tags.has(row.get("company_tags"), tags.WATCH):
+        return True
+    if remote_mission_floor is None:
+        return False
+    if config.is_multi_division(row.get("company_name")):
+        return False
+    mission = row.get("mission_score")
+    return mission is not None and mission >= remote_mission_floor
+
+
 def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
-                allow_geo_modes=None, min_mission=None, include_closed=False,
+                allow_geo_modes=None, min_mission=None,
+                remote_mission_floor=None, include_closed=False,
                 include_dispositioned=False):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
@@ -1530,13 +1582,12 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
 
     `allow_geo_modes` (an iterable of stored `geo_mode` values, e.g.
     {"remote"}) admits rows that fail `location_re` but whose own geo_mode
-    already qualifies them — ONLY at companies carrying the 'watch' tag.
-    Watch is the one human-curated tag ("show me everything at this
-    employer"), so it can be trusted with an out-of-area exception; the
-    machine-set 'neural' tag cannot — auto-probed boards include slug
-    collisions (an EEG company's row that actually points at a global AI
-    board), and an unscoped geo_mode exception let 87 remote-anywhere rows
-    into a 534-row local ranking.
+    already qualifies them — ONLY at companies `remote_admitted` (above)
+    trusts with the exception: the watch list, or a mission score at or
+    above `remote_mission_floor`. The machine-set sweep tag never earns it —
+    auto-probed boards include slug collisions (an EEG company's row that
+    actually points at a global AI board), and an unscoped geo_mode
+    exception let 87 remote-anywhere rows into a 534-row local ranking.
 
     `min_mission` drops jobs at companies we positively know are off-mission
     (effective mission below the floor). Needed when ranking by "fit", which
@@ -1571,15 +1622,11 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     if conds:
         q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
-    def _watched(r):
-        tags = {t.strip() for t in (r.get("company_tags") or "").split(",")}
-        return "watch" in tags
-
     if location_re is not None:
         rows = [r for r in rows
                 if location_re.search(r.get("location") or "")
                 or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes
-                    and _watched(r))]
+                    and remote_admitted(r, remote_mission_floor))]
     def _effective_mission(r):
         # A conglomerate's own mission score is ~0.05 (off-mission overall),
         # but a job here already passed the health keyword filter at crawl

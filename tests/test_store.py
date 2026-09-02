@@ -3,6 +3,8 @@ lifecycle, dispositions, crawl dormancy, and track membership."""
 
 from datetime import datetime, timedelta
 
+import config
+import core.locality as locality
 import core.store as store
 
 
@@ -277,6 +279,64 @@ class TestRanking:
     def test_combined_score_punishes_imbalance(self):
         assert store.combined_score(0.9, 0.2) < store.combined_score(0.5, 0.5)
         assert store.combined_score(0.5, None) is None
+
+
+class TestRemoteAdmission:
+    """A location-scoped ranking rescues out-of-area rows only from
+    companies it trusts. The 'watch' tag is one such signal, but it is
+    hand-set and lags the data — 8 starred companies produced a third of all
+    good-fit rows while 20 unstarred ones had produced at least one, and a
+    remote research-engineer posting at fit 0.94 fell out of the ranking for
+    want of a star. `remote_mission_floor` adds the judged signal.
+    """
+
+    def _seed(self, db, add_job, elsewhere, mission=None, watch=False):
+        store.upsert_company(db, {"name": "Acme", "mission_score": mission})
+        if watch:
+            store.set_company_tag(db, "Acme", "watch")
+        add_job("gh_acme_local", fit=0.5)
+        add_job("gh_acme_remote", fit=0.9, location=elsewhere,
+                geo_mode="remote")
+
+    def _ranked(self, db, floor=0.85):
+        return [r["job_id"] for r in store.ranked_jobs(
+            db, track="local-tech", location_re=locality.NC_RE,
+            allow_geo_modes={"remote"}, remote_mission_floor=floor)]
+
+    def test_core_mission_remote_is_admitted_without_a_star(
+            self, db, company, add_job, elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.9)
+        assert self._ranked(db) == ["gh_acme_remote", "gh_acme_local"]
+
+    def test_below_the_floor_stays_out(self, db, company, add_job, elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.5)
+        assert self._ranked(db) == ["gh_acme_local"]
+
+    def test_unscored_company_stays_out(self, db, company, add_job, elsewhere):
+        # No judgement recorded is not a judgement in the company's favour.
+        self._seed(db, add_job, elsewhere, mission=None)
+        assert self._ranked(db) == ["gh_acme_local"]
+
+    def test_watch_admits_whatever_the_score(self, db, company, add_job,
+                                            elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.05, watch=True)
+        assert "gh_acme_remote" in self._ranked(db)
+
+    def test_no_floor_disables_the_admission(self, db, company, add_job,
+                                             elsewhere):
+        self._seed(db, add_job, elsewhere, mission=0.99)
+        assert self._ranked(db, floor=None) == ["gh_acme_local"]
+
+    def test_conglomerates_qualify_only_by_watch(self, db, company, add_job,
+                                                 elsewhere, monkeypatch):
+        # A conglomerate's corporate mission score describes a parent, not
+        # the division that is hiring, so it can't buy a geo exception.
+        monkeypatch.setattr(config, "is_multi_division",
+                            lambda n: (n or "").strip().lower() == "acme")
+        self._seed(db, add_job, elsewhere, mission=0.99)
+        assert self._ranked(db) == ["gh_acme_local"]
+        store.set_company_tag(db, "Acme", "watch")
+        assert "gh_acme_remote" in self._ranked(db)
 
 
 class TestDispositions:
