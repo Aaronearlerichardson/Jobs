@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from scrapers.fetchers import ats_api, hibob, peopleadmin, usajobs
+from scrapers.fetchers import ats_api, getro, hibob, jobvite, peopleadmin, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -643,3 +643,318 @@ class TestAshbyKeyAcrossCallSites:
         titles = local_sourcing._sample_titles(
             {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
         assert titles == ["Clinical Trial Liaison"]
+
+
+class TestGetro:
+    """A Getro network board, read from its own host only: the sitemap is
+    the listing, each posting is a server-rendered page carrying the
+    record in ``__NEXT_DATA__``. ``api.getro.com`` (which the board's own
+    JavaScript would call) disallows every crawler, so nothing here may
+    ever ask it for anything.
+    """
+
+    BOARD = "https://jobs.example-network.org"
+    IDS = ("91000001", "91000002", "91000003", "91000004")
+
+    @pytest.fixture
+    def board(self, fake_get_text):
+        routes = {"sitemap.xml": load_text("getro_sitemap.xml")}
+        for jid in self.IDS:
+            routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
+        return fake_get_text(routes)
+
+    def test_parses_the_board_newest_first(self, board, match_everything):
+        jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
+        assert [j["id"] for j in jobs] == [
+            "getro_91000002", "getro_91000001", "getro_91000004"]
+
+    def test_the_record_becomes_a_job_dict(self, board, match_everything):
+        j = {x["id"]: x for x in getro.fetch_getro_all(
+            self.BOARD, detail_delay=0)}["getro_91000001"]
+        assert j["company"] == "Acme Analytics"
+        assert j["title"] == "Senior Data Engineer"
+        # The employer's OWN posting, not the board page.
+        assert j["url"] == "https://boards.greenhouse.io/acmeanalytics/jobs/4000001"
+        assert j["location"] == "Durham, NC, USA; Raleigh, NC, USA"
+        assert j["posted_at"] == "2026-08-28"
+        assert "Python pipelines" in j["description"]
+        assert "<" not in j["description"]
+        assert j["via"] == "getro:jobs.example-network.org"
+        assert j["_employer"]["domain"] == "acme-analytics.example"
+        assert j["_employer"]["slug"] == "acme-analytics"
+
+    def test_posted_at_falls_back_to_the_sitemap_lastmod(
+            self, board, match_everything):
+        j = {x["id"]: x for x in getro.fetch_getro_all(
+            self.BOARD, detail_delay=0)}["getro_91000002"]
+        assert j["posted_at"] == "2026-08-30"
+
+    def test_a_closed_posting_the_sitemap_still_lists_is_dropped(
+            self, board, match_everything):
+        ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
+        assert "getro_91000003" not in ids
+
+    def test_titles_are_screened_before_any_page_fetch(
+            self, board, monkeypatch):
+        monkeypatch.setattr(getro, "is_relevant",
+                            lambda title, desc="": "data" in title.lower())
+        jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
+        assert [j["id"] for j in jobs] == ["getro_91000001", "getro_91000004"]
+        pages = [u for u in board if "/jobs/" in u]
+        assert all("91000001" in u or "91000004" in u for u in pages)
+        assert not any("api.getro.com" in u for u in board)
+
+    def test_the_detail_cap_trims_the_oldest(self, board, match_everything):
+        jobs = getro.fetch_getro_all(self.BOARD, max_details=2, detail_delay=0)
+        assert [j["id"] for j in jobs] == ["getro_91000002"]
+        assert not any("91000001" in u or "91000004" in u for u in board)
+
+    def test_a_challenged_board_returns_empty(self, fake_get_text,
+                                              match_everything):
+        # Cloudflare's "Just a moment..." answers the sitemap with a 403.
+        fake_get_text({"sitemap.xml": 403})
+        assert getro.fetch_getro_all(self.BOARD, detail_delay=0) == []
+
+    def test_a_sitemap_index_is_followed(self, fake_get_text, match_everything):
+        index = ('<sitemapindex><sitemap><loc>'
+                 'https://jobs.example-network.org/sitemaps/jobs-1.xml'
+                 '</loc></sitemap></sitemapindex>')
+        routes = {"sitemap.xml": index,
+                  "sitemaps/jobs-1.xml": load_text("getro_sitemap.xml")}
+        for jid in self.IDS:
+            routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
+        fake_get_text(routes)
+        assert len(getro.fetch_getro_all(self.BOARD, detail_delay=0)) == 3
+
+    def test_a_page_without_the_record_is_skipped(self, fake_get_text,
+                                                   match_everything):
+        routes = {"sitemap.xml": load_text("getro_sitemap.xml"),
+                  "/jobs/91000001-": "<html><body>moved</body></html>"}
+        for jid in self.IDS[1:]:
+            routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
+        fake_get_text(routes)
+        ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
+        assert ids == ["getro_91000002", "getro_91000004"]
+
+
+class TestGetroAttribution:
+    """Board-sourced jobs name their employer; the crawl links each to the
+    roster and queues the employers the roster lacks -- never activating
+    one on its own.
+    """
+
+    BOARD = "jobs.example-network.org"
+    GH_URL = "https://boards.greenhouse.io/acmeanalytics/jobs/4000001"
+
+    def _job(self, name, url, jid="1", slug="", domain=""):
+        return {"id": f"getro_{jid}", "company": name, "title": "Data Engineer",
+                "url": url, "location": "Durham, NC, USA", "description": "",
+                "via": f"getro:{self.BOARD}",
+                "_employer": {"name": name, "domain": domain, "slug": slug,
+                              "board": self.BOARD, "page_url": ""}}
+
+    def test_links_to_the_roster_row_owning_the_board(self, db):
+        from core import store
+        cid = store.upsert_company(db, {"name": "Acme Analytics Inc",
+                                        "ats": "greenhouse",
+                                        "slug": "acmeanalytics", "active": 1})
+        job = self._job("Acme Analytics", self.GH_URL)
+        kept = getro.attribute_employers(db, [job])
+        assert kept == [job] and job["company_id"] == cid
+        assert len(store.get_companies(db, active_only=False)) == 1
+
+    def test_a_copy_the_roster_crawl_already_stored_is_dropped(self, db):
+        from core import store
+        cid = store.upsert_company(db, {"name": "Acme Analytics",
+                                        "ats": "greenhouse",
+                                        "slug": "acmeanalytics", "active": 1})
+        store.upsert_job(db, {"job_id": "gh_acmeanalytics_4000001",
+                              "company_id": cid, "company_name": "Acme Analytics",
+                              "title": "Data Engineer", "url": self.GH_URL})
+        assert getro.attribute_employers(
+            db, [self._job("Acme Analytics", self.GH_URL)]) == []
+
+    def test_a_pending_row_does_not_own_a_crawl_yet(self, db):
+        from core import store
+        cid = store.upsert_company(db, store.mark_pending(
+            {"name": "Acme Analytics", "ats": "greenhouse",
+             "slug": "acmeanalytics"}))
+        store.upsert_job(db, {"job_id": "gh_acmeanalytics_4000001",
+                              "company_id": cid, "title": "Data Engineer",
+                              "url": self.GH_URL})
+        job = self._job("Acme Analytics", self.GH_URL)
+        assert getro.attribute_employers(db, [job]) == [job]
+        assert job["company_id"] == cid
+
+    def test_links_by_name_when_the_apply_link_names_no_ats(self, db):
+        from core import store
+        cid = store.upsert_company(db, {"name": "Orbit Health", "ats": "custom",
+                                        "careers_url": "https://orbit.health/jobs",
+                                        "active": 1})
+        job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
+        getro.attribute_employers(db, [job])
+        assert job["company_id"] == cid
+        assert len(store.get_companies(db, active_only=False)) == 1
+
+    def test_an_unknown_employer_is_queued_for_review(self, db):
+        from core import store, tags
+        job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
+                        slug="orbit-health", domain="orbit.health")
+        assert getro.attribute_employers(db, [job]) == [job]
+        (row,) = store.pending_companies(db)
+        assert row["name"] == "Orbit Health"
+        assert row["source"] == f"getro:{self.BOARD}"
+        assert row["careers_url"] == "https://orbit.health"
+        assert tags.has(row["tags"], tags.PENDING)
+        assert job["company_id"] == row["id"]
+        assert store.get_company(db, row["id"])["active"] == 0
+        assert store.crawlable_companies(db) == []
+        assert not store.is_confirmed_company(db, "Orbit Health")
+
+    def test_the_apply_link_supplies_the_candidates_board(self, db):
+        from core import store, tags
+        getro.attribute_employers(
+            db, [self._job("Acme Analytics", self.GH_URL, slug="acme-analytics")])
+        (row,) = store.pending_companies(db)
+        assert (row["ats"], row["slug"]) == ("greenhouse", "acmeanalytics")
+        assert tags.has(row["tags"], tags.SWEEP)
+        assert tags.has(row["tags"], tags.PENDING)
+
+    def test_a_rejected_name_stays_rejected(self, db):
+        from core import store
+        store.block_name(db, "Bolt Logistics", "not a company")
+        kept = getro.attribute_employers(
+            db, [self._job("Bolt Logistics", "https://bolt.example/careers/3")])
+        assert kept == []
+        assert store.get_companies(db, active_only=False) == []
+
+    def test_a_preview_run_writes_nothing(self, db):
+        from core import store
+        job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
+        assert getro.attribute_employers(db, [job], commit=False) == [job]
+        assert "company_id" not in job
+        assert store.get_companies(db, active_only=False) == []
+
+    def test_jobs_without_an_employer_pass_through(self, db):
+        plain = {"id": "usajobs_1", "url": "https://www.usajobs.gov/job/1"}
+        assert getro.attribute_employers(db, [plain]) == [plain]
+
+
+class TestJobvite:
+    """A Jobvite career site: a paged, server-rendered listing and JSON-LD
+    job pages. The listing supplies title and location; a page is fetched
+    only for the description, within a budget, relevant titles first.
+    """
+
+    @pytest.fixture
+    def site(self, monkeypatch):
+        """Route by URL INCLUDING the query string, so the page number a
+        fetcher asked for is observable (fake_get_text drops params)."""
+        def _install(routes):
+            calls = []
+
+            class _Resp:
+                def __init__(self, text, status):
+                    self.text = text
+                    self.status_code = status
+
+                def raise_for_status(self):
+                    if self.status_code >= 400:
+                        raise RuntimeError(f"{self.status_code} Error")
+
+            def _get(url, *a, **k):
+                params = k.get("params") or {}
+                full = url + ("?" + "&".join(f"{kk}={vv}" for kk, vv
+                                             in params.items())
+                              if params else "")
+                calls.append(full)
+                for fragment, body in routes.items():
+                    if fragment in full:
+                        return (_Resp("", body) if isinstance(body, int)
+                                else _Resp(body, 200))
+                return _Resp("", 404)
+
+            monkeypatch.setattr(jobvite.SESSION, "get", _get)
+            return calls
+        return _install
+
+    @pytest.fixture
+    def acme(self, site):
+        return site({"search?p=0": load_text("jobvite_search_p0.html"),
+                     "search?p=1": load_text("jobvite_search_p1.html"),
+                     "search?p=2": load_text("jobvite_search_empty.html"),
+                     "/job/": load_text("jobvite_job.html")})
+
+    def test_parses_every_page(self, acme, match_everything):
+        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
+        assert [j["id"] for j in jobs] == [
+            "jv_acme_oAaa1fwA", "jv_acme_oBbb2fwB",
+            "jv_acme_oCcc3fwC", "jv_acme_oDdd4fwD"]
+        j = jobs[0]
+        assert j["company"] == "Acme Labs"
+        assert j["title"] == "Data Engineer II"
+        assert j["url"] == "https://jobs.jobvite.com/acme/job/oAaa1fwA"
+        assert j["location"] == "Durham, North Carolina"
+
+    def test_stops_at_the_first_empty_page(self, acme, match_everything):
+        jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
+        assert [u for u in acme if "search?p=" in u] == [
+            "https://jobs.jobvite.com/acme/search?p=0",
+            "https://jobs.jobvite.com/acme/search?p=1",
+            "https://jobs.jobvite.com/acme/search?p=2"]
+
+    def test_the_page_supplies_description_and_date(self, acme,
+                                                     match_everything):
+        j = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=4,
+                                  detail_delay=0)[0]
+        assert "Python pipelines" in j["description"]
+        assert "<" not in j["description"]
+        assert j["posted_at"] == "2026-04-27"
+
+    def test_relevant_titles_get_their_page_first(self, acme, monkeypatch):
+        monkeypatch.setattr(jobvite, "is_relevant",
+                            lambda t, d="": "data engineer" in t.lower())
+        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=1,
+                                     detail_delay=0)
+        assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA"]
+        assert [u for u in acme if "/job/" in u] == [
+            "https://jobs.jobvite.com/acme/job/oAaa1fwA"]
+
+    def test_a_generic_title_qualifies_on_its_page(self, acme, monkeypatch):
+        monkeypatch.setattr(jobvite, "is_relevant",
+                            lambda t, d="": "python" in f"{t} {d}".lower())
+        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=4,
+                                     detail_delay=0)
+        assert "Lab Assistant (Temp)" in [j["title"] for j in jobs]
+
+    def test_a_dead_search_falls_back_to_the_jobs_page(self, site,
+                                                        match_everything):
+        site({"search?p=0": 500, "/acme/jobs": load_text("jobvite_search_p0.html")})
+        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
+        assert len(jobs) == 3
+
+    def test_nothing_reachable_returns_empty(self, site, match_everything):
+        site({})
+        assert jobvite.fetch_jobvite("acme", "Acme Labs") == []
+
+    def test_any_page_of_the_site_names_the_tenant(self, acme, match_everything):
+        jobs = jobvite.fetch_jobvite("https://jobs.jobvite.com/acme/search?p=1",
+                                     "Acme Labs", max_details=0)
+        assert len(jobs) == 4
+
+    def test_company_adapter_pays_only_for_in_region_pages(self, acme,
+                                                           match_everything):
+        from scrapers.fetchers import company
+        jobs = company.fetch_jobvite_all("acme", re.compile("Durham"))
+        assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA", "jv_acme_oDdd4fwD"]
+        assert {j["ats"] for j in jobs} == {"jobvite"}
+        assert jobs[0]["posted_at"] == "2026-04-27"
+        assert sorted(u for u in acme if "/job/" in u) == [
+            "https://jobs.jobvite.com/acme/job/oAaa1fwA",
+            "https://jobs.jobvite.com/acme/job/oDdd4fwD"]
+
+    def test_the_registry_and_the_dispatch_table_know_jobvite(self):
+        from scrapers.fetchers import company
+        from scrapers.sources import ATS_REGISTRY, LIGHTWEIGHT
+        assert "jobvite" in ATS_REGISTRY and "jobvite" in LIGHTWEIGHT
+        assert "jobvite" in company.FETCHERS

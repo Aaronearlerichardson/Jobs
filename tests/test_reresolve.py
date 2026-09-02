@@ -270,3 +270,26 @@ class TestPeopleAdminSignature:
         from scrapers.fetchers.peopleadmin import feed_host
         packed = sniffer._pack("peopleadmin", "unc", self.URL)
         assert feed_host(packed["careers_url"]) == "unc.peopleadmin.com"
+
+
+class TestJobviteSignature:
+    """A Jobvite tenant is detectable from any page of its site, so
+    --add-board registers it like any other ATS instead of leaving a
+    detection-only lead."""
+
+    URL = "https://jobs.jobvite.com/acme/job/oAaa1fwA"
+
+    def test_a_tenant_is_detected_as_fetchable(self):
+        assert sniffer._detect("", self.URL) == ("fetchable", "jobvite", "acme")
+
+    def test_the_vendor_site_is_not_a_tenant(self):
+        assert sniffer._detect("", "https://www.jobvite.com/") is None
+
+    def test_the_board_key_is_the_tenant(self):
+        assert store.board_key(sniffer._pack("jobvite", "acme", self.URL)) \
+            == ("jobvite", "acme")
+
+    def test_the_packed_slug_is_what_the_fetcher_reads(self):
+        from scrapers.fetchers.jobvite import tenant_of
+        packed = sniffer._pack("jobvite", "acme", self.URL)
+        assert tenant_of(packed["slug"]) == "acme"

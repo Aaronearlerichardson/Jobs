@@ -99,7 +99,8 @@ def parse_detail(html):
     for obj in extract_jsonld(html or ""):
         if not is_jobposting(obj):
             continue
-        out = {"description": _normalize_description(obj).strip(),
+        out = {"description": re.sub(r"\s+", " ",
+                                     _normalize_description(obj)).strip(),
                "posted_at": norm_posted_date(obj.get("datePosted"))}
         loc = _normalize_location(obj)
         if loc and loc != "Unknown":
