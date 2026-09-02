@@ -118,6 +118,7 @@ ROBOTS_TARGETS = [
     ("workday cxs",      "https://nvidia.wd5.myworkdayjobs.com/wday/cxs/nvidia/NVIDIAExternalCareerSite/jobs"),
     ("smartrecruiters",  "https://api.smartrecruiters.com/v1/companies/example/postings"),
     ("jazzhr",           "https://example.applytojob.com/apply"),
+    ("jobvite",          "https://jobs.jobvite.com/example/search"),
     ("kula",             "https://careers.kula.ai/precision-neuroscience"),
     ("rippling",         "https://ats.rippling.com/blackrockneurotech/jobs"),
     ("paylocity",        "https://recruiting.paylocity.com/recruiting/jobs/All"),

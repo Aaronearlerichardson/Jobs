@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Acme Labs - Search Jobs</title></head>
+<body class="jv-page jv-page-search">
+<header class="jv-page-header"><div class="jv-wrapper"><div class="jv-logo"><a href="/acme">Acme Labs</a></div></div></header>
+<article class="jv-page-body" role="main">
+  <div class="jv-wrapper">
+    <form jv-search-form class="jv-list-search-form" action="/acme/search" method="get">
+      <input id="jv-list-search" class="jv-search-field" type="search" name="q" value="" placeholder="Search" />
+    </form>
+    <ul class="jv-job-list jv-search-list">
+      <li class="job">
+        <a class="jv-job-list-name" href="/acme/job/oAaa1fwA">Data Engineer II</a>
+        <p class="jv-job-list-location">
+          Durham, North Carolina
+        </p>
+      </li>
+      <li class="job">
+        <a class="jv-job-list-name" href="/acme/job/oBbb2fwB">Histology Technician, Nights</a>
+        <p class="jv-job-list-location">
+          Aliso Viejo, California
+        </p>
+      </li>
+      <li class="job">
+        <a class="jv-job-list-name" href="/acme/job/oCcc3fwC">Lab Assistant (Temp)</a>
+        <p class="jv-job-list-location">
+          Fort Myers, Florida
+        </p>
+      </li>
+    </ul>
+    <div class="jv-pagination">
+      <div class="jv-pagination-text">
+        1-3 of 4
+      </div>
+      <a href="/acme/search/?p=1" class="jv-pagination-next">Next</a>
+    </div>
+  </div>
+</article>
+<footer class="jv-footer"><a class="jv-powered-by" href="https://www.jobvite.com/">Powered by Jobvite</a></footer>
+</body>
+</html>

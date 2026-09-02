@@ -28,6 +28,7 @@ from .fetchers import (
     fetch_greenhouse,
     fetch_hibob,
     fetch_jazzhr,
+    fetch_jobvite,
     fetch_kula,
     fetch_lever,
     fetch_paylocity,
@@ -45,6 +46,7 @@ ATS_REGISTRY = {
     "ashby":      (lambda n, s: lambda: fetch_ashby(s, n), tags.SWEEP, 0.5),
     "kula":       (lambda n, s: lambda: fetch_kula(n, s), tags.SWEEP, 0.5),
     "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s), tags.SWEEP, 0.5),
+    "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n), tags.SWEEP, 0.5),
     "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n), tags.SWEEP, 0.5),
     "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n), tags.SWEEP, 0.5),
     "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n), tags.LOCAL, 0.5),
@@ -60,7 +62,7 @@ ATS_REGISTRY = {
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole
 # (lightweight JSON APIs; the heavyweight boards stay location-scoped).
-LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
+LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "jobvite", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
 
 
 def seed_tag_for(ats):

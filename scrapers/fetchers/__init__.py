@@ -9,10 +9,12 @@ from .ats_api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
 from .careeronestop import fetch_nlx_company
 from .discourse import fetch_discourse
+from .getro import fetch_getro_all
 from .hibob import fetch_hibob
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
 from .jazzhr import fetch_jazzhr
+from .jobvite import fetch_jobvite
 from .jsonld import fetch_jsonld_careers, fetch_jsonld_page
 from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
@@ -32,10 +34,12 @@ __all__ = [
     "fetch_bamboohr",
     "fetch_custom",
     "fetch_discourse",
+    "fetch_getro_all",
     "fetch_greenhouse",
     "fetch_hibob",
     "fetch_hnhiring",
     "fetch_jazzhr",
+    "fetch_jobvite",
     "fetch_jsonld_careers",
     "fetch_jsonld_page",
     "fetch_kula",

@@ -2066,6 +2066,7 @@ def mark_seen(conn, job, track=None):
     one on the DB write."""
     upsert_job(conn, {
         "job_id":          job["id"],
+        "company_id":      job.get("company_id"),
         "company_name":    job.get("company"),
         "title":           job.get("title"),
         "url":             job.get("url"),

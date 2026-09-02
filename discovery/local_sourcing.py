@@ -1501,8 +1501,8 @@ def classify_miss(name, careers_url=""):
     MISS_REASONS code explains it.
 
     Re-sniffs the careers page for detections resolve_board_sniff_first
-    discards — an ATS we can RECOGNIZE but not fetch (UKG/UltiPro, Taleo,
-    Jobvite, ...) is a very different problem from a company we could find
+    discards — an ATS we can RECOGNIZE but not fetch (Taleo, Eightfold,
+    Dayforce, ...) is a very different problem from a company we could find
     nothing for, and the two were previously indistinguishable.
 
     A bare "no-board-found" is itself four different problems (nothing
