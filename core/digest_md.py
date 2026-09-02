@@ -11,7 +11,15 @@ from datetime import datetime
 
 import config
 
+from . import locality
 from .digest import send_gmail
+
+# The mid-fit local band, half-open on the high side. The interviews to date
+# came from applications scored in this range at local onsite postings, not
+# from the top of the ranking, so the digest and the Jobs tab both surface
+# it as the place to send application volume.
+APPLY_BAND = (0.40, 0.70)
+APPLY_BAND_LIMIT = 10
 
 
 def age_tag(row, today=None):
@@ -38,11 +46,40 @@ def _tag(t):
     return f"[{t['label'].upper()}]"
 
 
-def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None):
+def apply_band_rows(ranked, limit=APPLY_BAND_LIMIT):
+    """The undecided open local rows scored inside APPLY_BAND, best fit
+    first, at most `limit` of them.
+
+    Local means the location string matches the configured locality
+    (core.locality.NC_RE), the same test the web UI's geo bucket applies at
+    serve time; remote and relocation rows stay out however well they
+    score, and so does anything the user has already decided on (saved
+    included). Enforced by tests/test_digest.py::TestApplyBand.
+    """
+    lo, hi = APPLY_BAND
+    picked = []
+    for j in ranked or []:
+        fit = j.get("resume_fit_score")
+        if not isinstance(fit, (int, float)) or not (lo <= fit < hi):
+            continue
+        if (j.get("status") or "open") == "closed" or j.get("disposition"):
+            continue
+        if not locality.NC_RE.search(j.get("location") or ""):
+            continue
+        picked.append(j)
+    picked.sort(key=lambda j: j["resume_fit_score"], reverse=True)
+    return picked[:limit]
+
+
+def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
+                        followups=None):
     """Fit-ranked markdown digest for a store-crawl track: pipeline section,
-    watched-company section, then the full ranked table."""
+    follow-ups due, apply band, watched-company section, then the full
+    ranked table. `followups` is `store.followups_due` output; omitted, the
+    section is skipped."""
     config.REPORT_DIR.mkdir(exist_ok=True)
     path = config.REPORT_DIR / f"{t['id']}_{datetime.now():%Y-%m-%d}.md"
+    today = datetime.now().strftime("%Y-%m-%d")
     with open(path, "w", encoding="utf-8") as f:
         f.write(f"# {_tag(t)} Job Digest — {datetime.now():%Y-%m-%d}\n\n")
         if pipeline:
@@ -56,6 +93,35 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None):
                 f.write(f"| {p.get('disposition')} | {(p.get('disposition_at') or '')[:10]} "
                         f"| {p.get('company_name')} | [{p.get('title')}]({p.get('url')}) "
                         f"| {state} | {p.get('disposition_note') or ''} |\n")
+            f.write("\n")
+        if followups:
+            f.write("## Follow-ups due\n\n")
+            f.write("Live applications whose follow-up date has arrived "
+                    "(set in the Pipeline tab).\n\n")
+            f.write("| Due | Company | Title | Contact | Disposition |\n")
+            f.write("|---|---|---|---|---|\n")
+            for p in followups:
+                f.write(f"| {(p.get('followup_at') or '')[:10]} "
+                        f"| {p.get('company_name')} "
+                        f"| [{p.get('title')}]({p.get('url')}) "
+                        f"| {p.get('contact') or ''} "
+                        f"| {p.get('disposition')} |\n")
+            f.write("\n")
+        band = apply_band_rows(ranked)
+        if band:
+            lo, hi = APPLY_BAND
+            f.write("## Apply band\n\n")
+            f.write(f"Open local postings scored {lo:.2f} to {hi:.2f} that you "
+                    f"have not decided on, best fit first. Interviews have come "
+                    f"from this band rather than the top of the ranking, so this "
+                    f"is where application volume goes.\n\n")
+            f.write("| Fit | Age | Company | Title | Location |\n")
+            f.write("|----:|----:|---------|-------|----------|\n")
+            for j in band:
+                f.write(f"| {j['resume_fit_score']:.2f} | {age_tag(j, today)} "
+                        f"| {j.get('company_name')} "
+                        f"| [{j.get('title')}]({j.get('url')}) "
+                        f"| {j.get('location')} |\n")
             f.write("\n")
         if watch_hits:
             f.write("## Watched companies — new postings this run\n\n")
@@ -73,7 +139,6 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None):
                 f"(NEW = first seen today, ! = 45d+ stale, ? = date unknown).\n\n")
         f.write("| Fit | Combined | Age | Company | Mission | Title | Location | Why |\n")
         f.write("|----:|---------:|----:|---------|---------|-------|----------|-----|\n")
-        today = datetime.now().strftime("%Y-%m-%d")
         for j in ranked:
             fit = j["resume_fit_score"]
             fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
@@ -140,16 +205,17 @@ def new_ranked_rows(ranked, t, new_since=None):
 
 
 def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
-                       new_since=None):
+                       new_since=None, followups=None):
     """Email a store-crawl track's new ranked rows. True when a message
     actually went out.
 
     Renders the markdown shape of `write_ranked_digest` — pipeline
-    closures, watched-company hits, then a fit-ordered table — restricted
-    to `new_ranked_rows`, and sends nothing when there is neither a new row
-    nor a watch hit. Enforced by
-    tests/test_digest.py::TestSendRankedDigest, which monkeypatches
-    `send_gmail` (an SMTP call is not a doctest).
+    closures, follow-ups due, the apply band, watched-company hits, then a
+    fit-ordered table — restricted to `new_ranked_rows`, and sends nothing
+    when there is neither a new row nor a watch hit (the follow-up and
+    apply-band sections ride along; they do not trigger a send on their
+    own). Enforced by tests/test_digest.py::TestSendRankedDigest, which
+    monkeypatches `send_gmail` (an SMTP call is not a doctest).
 
     Notes:
         Postings close fast, so the location-scoped track needs a push
@@ -182,6 +248,41 @@ def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
                         f"{p.get('company_name')} — "
                         f"<a href='{p.get('url')}'>{p.get('title')}</a> — "
                         f"posting CLOSED</li>")
+        md.append("")
+        html.append("</ul>")
+    if followups:
+        md += ["## Follow-ups due", ""]
+        html.append("<h3>Follow-ups due</h3><ul>")
+        for p in followups:
+            due = (p.get("followup_at") or "")[:10]
+            who = f" ({p.get('contact')})" if p.get("contact") else ""
+            md.append(f"- **{due}** — {p.get('company_name')} — "
+                      f"[{p.get('title')}]({p.get('url')}){who} — "
+                      f"{p.get('disposition')}")
+            html.append(f"<li><strong>{due}</strong> — "
+                        f"{p.get('company_name')} — "
+                        f"<a href='{p.get('url')}'>{p.get('title')}</a>{who} — "
+                        f"{p.get('disposition')}</li>")
+        md.append("")
+        html.append("</ul>")
+    band = apply_band_rows(ranked)
+    if band:
+        lo, hi = APPLY_BAND
+        md += ["## Apply band", "",
+               f"Open local postings scored {lo:.2f} to {hi:.2f} that you have "
+               f"not decided on, best fit first.", ""]
+        html.append(f"<h3>Apply band</h3><p>Open local postings scored "
+                    f"{lo:.2f} to {hi:.2f} that you have not decided on, "
+                    f"best fit first.</p><ul>")
+        for j in band:
+            fs = f"{j['resume_fit_score']:.2f}"
+            md.append(f"- **{fs}** — {j.get('company_name')} — "
+                      f"[{j.get('title')}]({j.get('url')}) — "
+                      f"{j.get('location')}")
+            html.append(f"<li><strong>{fs}</strong> — "
+                        f"{j.get('company_name')} — "
+                        f"<a href='{j.get('url')}'>{j.get('title')}</a> — "
+                        f"{j.get('location')}</li>")
         md.append("")
         html.append("</ul>")
     if hits:
