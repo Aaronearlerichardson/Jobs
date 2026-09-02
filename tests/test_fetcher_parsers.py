@@ -14,6 +14,7 @@ Fixtures are real responses with the prose redacted — the shape is what's
 under test, and nobody's job descriptions need committing.
 """
 
+import copy
 import json
 import re
 from pathlib import Path
