@@ -725,6 +725,19 @@ USAJOBS_SERIES: list[str] | None = ([str(s) for s in (_usajobs.get("series") or 
                                    if "series" in _usajobs else None)
 USAJOBS_RESULTS_PER_PAGE = int(_usajobs.get("results_per_page", 250))
 
+# Getro network boards — profile [sources.getro] ({ enabled, boards,
+# max_details }). A VC portfolio or association board that lists many
+# employers' openings on one host, each posting naming its employer. OFF
+# by default like USAJOBS: a board is a place, so there is no generic
+# default. `boards` are board URLs (any page; only the host is used).
+# `max_details` caps the posting pages fetched per board per crawl (see
+# scrapers/fetchers/getro.py — titles are screened before any page fetch).
+_getro = _src.get("getro", {})
+GETRO_ENABLED = bool(_getro.get("enabled", False))
+GETRO_BOARDS: list[str] = [str(b).strip() for b in (_getro.get("boards") or [])
+                           if str(b).strip()]
+GETRO_MAX_DETAILS = int(_getro.get("max_details", 150))
+
 # Generic RSS/Atom feeds — profile [sources].rss ({ label, url, location }).
 # Defaults to broad remote-job feeds; replace with your field's feeds
 # (a society job board, a company blog's careers RSS, a niche aggregator).

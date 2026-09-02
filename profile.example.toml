@@ -361,6 +361,27 @@ results_per_page = 250       # API max is 500
 # science); set it to [] to search every series.
 # series = ["2210", "1550", "0601", "0401"]
 
+# Getro-powered network boards — a VC's "jobs at our portfolio companies"
+# board, an industry association's members board — aggregate many local
+# employers' openings on one host and name the employer on every posting.
+# The board's own sitemap is the listing; a posting's page is fetched only
+# when its title passes your relevance filter, newest first, up to
+# `max_details` per board per crawl. Employers already on the roster are
+# linked; employers the roster has never seen land in the review queue,
+# never activated on their own.
+#
+# Like USAJOBS this runs on EVERY track once enabled: a board is a place,
+# and the local track's geo gate decides which of its postings are yours.
+# A board fronted by a browser challenge (some answer even robots.txt with
+# a 403) is reported as unreachable and skipped — there is no headless path.
+[sources.getro]
+enabled = false
+boards = [
+    # "https://jobs.dukecapitalpartners.duke.edu",   # Duke Capital Partners portfolio (~1,200 postings)
+    # "https://careers.ncbiotech.org",                # NC Biotechnology Center (Cloudflare-challenged as of 2026-09)
+]
+max_details = 150            # posting pages fetched per board per crawl
+
 # ---------------------------------------------------------------------------
 # Discovery — how the roster of companies to crawl gets built (discover.py).
 # Everything here is a starting pool; each name is probed for a real job board

@@ -108,7 +108,7 @@ def build_sources(cfg, t, include_websearch=None):
     Returns a list of dicts {name, platform, thunk, company}: `company` is
     the store row for location-scoped store boards (their jobs sync/upsert
     against that company) and None for sweep sources (priority companies,
-    lightweight ATS sweep, aggregators, USAJOBS, web search — persisted via
+    lightweight ATS sweep, aggregators, USAJOBS, Getro boards, web search — persisted via
     mark_seen). Priority companies come first so cross-source duplicates
     resolve deterministically."""
     from . import ops
@@ -199,6 +199,21 @@ def build_sources(cfg, t, include_websearch=None):
                 keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
                 radius=cfg.USAJOBS_RADIUS, series=cfg.USAJOBS_SERIES,
                 results_per_page=cfg.USAJOBS_RESULTS_PER_PAGE))
+
+    # 4b) Getro network boards (a VC portfolio, an association). Outside the
+    # `aggregators` gate for the same reason as USAJOBS: a board is a place,
+    # and the local track's geo gate decides which of its postings apply.
+    # Ships OFF. Their employers are attributed after gating (run_track).
+    if getattr(cfg, "GETRO_ENABLED", False):
+        from .fetchers import fetch_getro_all
+        from .fetchers.getro import board_host
+        for board in getattr(cfg, "GETRO_BOARDS", []):
+            host = board_host(board)
+            if not host:
+                continue
+            add(f"Getro {host}", "getro",
+                lambda b=board: fetch_getro_all(
+                    b, max_details=getattr(cfg, "GETRO_MAX_DETAILS", 150)))
 
     # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
@@ -424,6 +439,13 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             funnel.append((label, len(jobs), anchor_here, tech_here,
                            surfaced,
                            "priority" if spec["platform"].endswith("*") else ""))
+
+    # Board-sourced jobs (Getro) name their employer: link each to its
+    # roster row, queue employers the roster lacks for review, and drop the
+    # copies an active roster company's own crawl already stored.
+    if any(j.get("_employer") for j in matches):
+        from .fetchers.getro import attribute_employers
+        matches = attribute_employers(conn, matches, commit=commit)
 
     # ─── Scoring ──────────────────────────────────────────────────────────
     scored = 0

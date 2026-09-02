@@ -1297,6 +1297,24 @@ def fetch_peopleadmin_all(host, loc_re=None):
     return out
 
 
+def fetch_jobvite_all(tenant, loc_re=None):
+    """Full Jobvite site, adapted to the company-fetch shape. Ungated on
+    relevance (the caller's filter chain decides); a posting's page is
+    fetched only for rows inside `loc_re`, so an out-of-area posting costs
+    one listing row and nothing more.
+
+    See tests/test_fetcher_parsers.py::TestJobvite.
+    """
+    from .jobvite import fetch_jobvite_board
+    rows = fetch_jobvite_board(
+        tenant, want=lambda r: _loc_ok(loc_re, r.get("location", "")))
+    out = _adapt(rows, "jobvite", loc_re)
+    by_id = {r["id"]: r for r in rows}
+    for a in out:
+        a["posted_at"] = by_id[a["id"]].get("posted_at")
+    return out
+
+
 # --- custom (self-hosted) careers-board scraping -------------------------- #
 # A job-detail URL is /careers|jobs|positions|openings|roles|job/<slug>. But
 # index/nav pages share that shape ("/careers/open-positions"), so we exclude
@@ -1566,6 +1584,7 @@ FETCHERS = {
     "lever":           lambda c, lr: fetch_lever_all(c["slug"], lr),
     "ashby":           lambda c, lr: fetch_ashby_all(c["slug"], lr),
     "jazzhr":          lambda c, lr: fetch_jazzhr_all(c["slug"], lr),
+    "jobvite":         lambda c, lr: fetch_jobvite_all(c["slug"], lr),
     "bamboohr":        lambda c, lr: fetch_bamboohr_all(c["slug"], lr),
     "adp":             lambda c, lr: fetch_adp_all(c["slug"], lr),
     "kula":            lambda c, lr: fetch_kula_all(c["slug"], lr),

@@ -268,6 +268,40 @@ Some employers can't be crawled directly. Route by type:
   location-scoped by construction. Note that agencies re-announce one vacancy
   under several numbers (internal vs. public, one per grade), so near-duplicate
   titles are normal rather than a bug.
+- **Portfolio / network boards on Getro** (a VC's "jobs at our portfolio
+  companies" board, an industry association's members board) — one host
+  listing many local employers, every posting naming its employer. Turn on
+  `[sources.getro]` and list the board URLs:
+
+  ```toml
+  [sources.getro]
+  enabled = true
+  boards = ["https://jobs.dukecapitalpartners.duke.edu"]
+  ```
+
+  The `getro` fetcher reads the board's own sitemap (the complete listing;
+  the server-rendered `/jobs` page shows twenty) and fetches a posting's
+  server-rendered page only when its title passes your relevance filter,
+  newest first, `max_details` per crawl. It never touches `api.getro.com`,
+  which disallows every crawler. Employers already on the roster are
+  linked (a posting their own crawl already stored is not duplicated);
+  employers the roster lacks are queued for review under
+  `source = "getro:<host>"`, never activated by themselves. Like USAJOBS it
+  runs on every track. A board behind a browser challenge — the NC Biotech
+  Center's `careers.ncbiotech.org` answered even `robots.txt` with a
+  Cloudflare 403 in September 2026 — is reported as unreachable and skipped;
+  there is deliberately no headless-browser path.
+- **Jobvite career sites** (`jobs.jobvite.com/<tenant>`) are an ordinary
+  ATS here — paste any page of the site and the tenant is detected:
+
+  ```bash
+  python discover.py --add-board "NeoGenomics" https://jobs.jobvite.com/neogenomics
+  ```
+
+  The listing is server-rendered HTML (`/search?p=N`, fifty rows a page;
+  `jobs.jobvite.com` publishes no robots.txt), and the `jobvite` fetcher
+  reads a posting's JSON-LD page only for the rows worth it, within a
+  per-crawl budget. Ids are `jv_<tenant>_<id>`.
 - **Multi-division conglomerates** — list them in `[policy].multi_division`
   so their aligned subdivisions surface even though the company's overall
   mission scores low.
@@ -589,7 +623,7 @@ Everything personal lives in `profile.toml` on your machine;
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, `domain_ladder`, `stack_core`/`stack_anti`, `region_terms` |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
 | `[locality]` | what counts as "local" (`core/locality.py`) |
-| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`) |
+| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
 | `[discovery]` | seed companies, Workday majors, directory URLs, web-search name queries, priority companies |
 
 **Relevance model:** a job passes if it hits any `core` term, OR a `domain` +
@@ -747,7 +781,7 @@ identically to a dead one.
 | `scrapers/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `scrapers/ops.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
 | `scrapers/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `scrapers/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS) |
+| `scrapers/fetchers/` | board fetchers (11 ATSes incl. Jobvite + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
 | `scrapers/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
 | `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |

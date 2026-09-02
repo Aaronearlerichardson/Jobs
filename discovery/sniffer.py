@@ -53,6 +53,9 @@ ATS_LINK_PATTERNS = [
     # HiBob: tenant subdomain of careers.hibob.com (public JSON API at
     # <tenant>.careers.hibob.com/api/job-ad — see fetchers/hibob.py).
     ("hibob", re.compile(r"([a-z0-9][a-z0-9-]+)\.careers\.hibob\.com", re.I)),
+    # Jobvite: tenant slug of jobs.jobvite.com/<tenant> (server-rendered
+    # listing + JSON-LD job pages — see fetchers/jobvite.py).
+    ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)", re.I)),
 ]
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
@@ -83,7 +86,6 @@ ATS_LEAD_PATTERNS = [
     ("workable",        re.compile(r"(apply\.workable\.com/[a-z0-9-]+)", re.I)),
     ("recruitee",       re.compile(r"([a-z0-9-]+\.recruitee\.com)", re.I)),
     ("teamtailor",      re.compile(r"([a-z0-9-]+\.teamtailor\.com)", re.I)),
-    ("jobvite",         re.compile(r"(jobs\.jobvite\.com/[a-z0-9-]+)", re.I)),
     ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
     ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
     # NOTE: Paylocity moved up to ATS_LINK_PATTERNS (now fetchable via the
@@ -103,7 +105,7 @@ _BAD_SUBDOMAINS = ("www", "help", "support", "blog", "app", "careers", "jobs", "
 # slug probing upstream).
 _FETCHABLE_HOST_RE = re.compile(
     r"(greenhouse\.io|lever\.co|ashbyhq\.com|kula\.ai|applytojob\.com|bamboohr\.com|"
-    r"careers\.hibob\.com)",
+    r"careers\.hibob\.com|jobs\.jobvite\.com)",
     re.I,
 )
 

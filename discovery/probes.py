@@ -233,6 +233,21 @@ def probe_hibob(tenant):
         return (False, 0)
 
 
+def probe_jobvite(tenant):
+    """Confirm a Jobvite career site by its tenant slug (live row count
+    from the server-rendered search listing). Reuses the fetcher's parser."""
+    from scrapers.fetchers.jobvite import BASE, parse_listing
+    try:
+        r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": 0},
+                        timeout=10, headers=HEADERS)
+        if r.status_code != 200:
+            return (False, 0)
+        n = len(parse_listing(r.text, tenant))
+        return (n > 0, n)
+    except Exception:
+        return (False, 0)
+
+
 PROBES = {
     "greenhouse": probe_greenhouse,
     "lever":      probe_lever,
@@ -245,6 +260,7 @@ PROBES = {
     "rippling":   probe_rippling,
     "ultipro":    probe_ultipro,
     "hibob":      probe_hibob,
+    "jobvite":    probe_jobvite,
 }
 
 
