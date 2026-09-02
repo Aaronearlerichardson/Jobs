@@ -205,6 +205,26 @@ Some employers can't be crawled directly. Route by type:
     careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`). An
     official government API — nothing is scraped.
   - **Manual** — browse the site yourself and add postings with `capture.py`.
+- **University PeopleAdmin boards** (most public universities) — every open
+  posting is in an Atom feed at `<host>/postings/all_jobs.atom`, which the
+  `peopleadmin` fetcher reads. Two things stand in the way:
+  - The tenant's robots.txt blanket-disallows `*` — written for the HTML
+    site, applied to the feed by accident — so nothing is fetched until you
+    put the host in `[policy].robots_exempt_hosts` yourself. `.peopleadmin.com`
+    covers the hosted tenants (`unc.peopleadmin.com`); a university serving
+    the feed from its own domain needs its own entry (NC State is
+    `jobs.ncsu.edu`). Each entry is a call only you can make.
+  - The URL carries no ATS signature, so `--add-board` has nothing to sniff.
+    Name the coordinates instead — `careers_url` is the tenant host:
+
+    ```bash
+    cat > ncstate.json <<'JSON'
+    [{"name": "NC State University", "ats": "peopleadmin",
+      "careers_url": "https://jobs.ncsu.edu", "tags": "nc_local", "active": 1}]
+    JSON
+    python run_scraper.py --import-companies ncstate.json
+    python discover.py --score-missions
+    ```
 - **Multi-division conglomerates** — list them in `[policy].multi_division`
   so their aligned subdivisions surface even though the company's overall
   mission scores low.

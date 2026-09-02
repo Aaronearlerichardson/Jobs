@@ -199,8 +199,15 @@ multi_division_mission_floor = 0.6
 # whose robots.txt blanket-disallows `*` for the HTML site's sake:
 # SmartRecruiters' public postings API (api.smartrecruiters.com publishes
 # `Disallow: /` for everyone but LinkedInBot) and PeopleAdmin's Atom feed
-# (<tenant>.peopleadmin.com/postings/search.atom). Each entry is your call
-# to make about that host, so the list is empty by default.
+# (<tenant>/postings/all_jobs.atom, whose host disallows `*` for the HTML
+# site's sake). Each entry is your call to make about that host, so the
+# list is empty by default.
+#
+# ".peopleadmin.com" covers the hosted university tenants
+# (unc.peopleadmin.com). A university that serves PeopleAdmin from its own
+# domain is a separate decision and needs its own entry — NC State's board
+# is jobs.ncsu.edu. See the PeopleAdmin bullet in README.md for registering
+# one of those boards in the roster.
 # robots_exempt_hosts = ["api.smartrecruiters.com", ".peopleadmin.com"]
 
 # robots.txt fetch timeout, split into (connect, read) seconds.
