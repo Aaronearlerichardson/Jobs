@@ -511,11 +511,14 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
             min_mission=t["min_mission"],
             remote_mission_floor=t.get("remote_mission_floor"))
         pipeline = store.get_pipeline(conn)
+        followups = store.followups_due(conn)
         digest_path = digest_md.write_ranked_digest(
-            ranked, t, watch_hits=watch_hits, pipeline=pipeline)
+            ranked, t, watch_hits=watch_hits, pipeline=pipeline,
+            followups=followups)
         if send:
             if digest_md.send_ranked_digest(ranked, t, watch_hits=watch_hits,
-                                            pipeline=pipeline):
+                                            pipeline=pipeline,
+                                            followups=followups):
                 digest_md.toast(t, len(digest_md.new_ranked_rows(ranked, t)),
                                 digest_path)
         else:

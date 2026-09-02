@@ -68,6 +68,7 @@ function renderTiles() {
   $("#tiles").innerHTML = [
     [s.open, "open jobs"], [s.new_today, "new today"],
     [s.pipeline, "in pipeline"], [s.saved, "saved"],
+    [s.applied_7d ?? 0, "applied this week"],
     [s.closed, "closed"], [dated + "%", "have post date"],
     [s.companies_active, "active companies"], [s.watched, "watched"],
   ].map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
@@ -98,11 +99,24 @@ function geoChip(bucket) {
 const watchedNames = () =>
   new Set(state.companies.filter(c => c.watched).map(c => c.name));
 
+/* The mid-fit local band: fit in [0.40, 0.70), local, open, undecided. The
+   interviews so far came from applications in this range, not from the top
+   of the ranking, so the "apply band" quick filter shows exactly these rows
+   (and ignores the min-fit cutoff, which would otherwise truncate it). */
+const APPLY_BAND = [0.40, 0.70];
+const bandOn = () => $("#f-band").checked;
+function inApplyBand(j) {
+  const f = j.resume_fit_score;
+  return f != null && f >= APPLY_BAND[0] && f < APPLY_BAND[1]
+      && j.geo_bucket === "local" && j.status !== "closed" && !j.disposition;
+}
+
 function jobFilters(j) {
   const q = $("#f-search").value.trim().toLowerCase();
   if (q && !(`${j.title} ${j.company_name}`.toLowerCase().includes(q))) return false;
+  if (bandOn() && !inApplyBand(j)) return false;
   const mf = parseFloat($("#f-fit").value || "0");
-  if (mf > 0 && !(j.resume_fit_score >= mf)) return false;
+  if (mf > 0 && !bandOn() && !(j.resume_fit_score >= mf)) return false;
   const geo = $("#f-geo").value;
   if (geo && j.geo_bucket !== geo) return false;
   // Relocation gate: hidden unless the user is willing to move (or is
@@ -151,9 +165,13 @@ function renderFilterSummary(shown) {
   const nonUs = state.jobs.filter(j => j.geo_bucket === "remote" && !j.us_ok).length;
   if (nonUs) bits.push(`<b>${nonUs}</b> remote outside the US`);
   const mf = parseFloat($("#f-fit").value || "0");
-  if (mf > 0) {
+  if (mf > 0 && !bandOn()) {
     const n = state.jobs.filter(j => !(j.resume_fit_score >= mf)).length;
     if (n) bits.push(`<b>${n}</b> below the ${mf} fit cutoff`);
+  }
+  if (bandOn()) {
+    const n = state.jobs.filter(j => !inApplyBand(j)).length;
+    if (n) bits.push(`<b>${n}</b> outside the apply band`);
   }
   el.innerHTML = bits.length
     ? `${hidden} hidden — ${bits.join(" · ")}`
@@ -167,7 +185,9 @@ function renderFilterSummary(shown) {
 
 function renderJobs() {
   const rows = state.jobs.filter(jobFilters);
-  $("#jobcount").textContent = `${rows.length} of ${state.jobs.length} shown`;
+  $("#jobcount").textContent = `${rows.length} of ${state.jobs.length} shown` +
+    (bandOn() ? ` — apply band (fit ${APPLY_BAND[0].toFixed(2)} to ` +
+                `${APPLY_BAND[1].toFixed(2)}, local, undecided)` : "");
   renderFilterSummary(rows);
   if (!rows.length) { $("#jobs").innerHTML = `<div class="empty">No jobs match.</div>`; return; }
   const body = rows.map(j => {
@@ -1124,7 +1144,8 @@ $("#trackpick").addEventListener("change", async e => {
   await refreshData();
 });
 
-["#f-search", "#f-fit", "#f-geo", "#f-move", "#f-age", "#f-verified", "#f-watched"]
+["#f-search", "#f-fit", "#f-geo", "#f-move", "#f-age", "#f-verified", "#f-watched",
+ "#f-band"]
   .forEach(s => $(s).addEventListener("input", renderJobs));
 ["#f-closed", "#f-disp"].forEach(s => $(s).addEventListener("change",
   async () => { await loadJobs(); renderJobs(); }));

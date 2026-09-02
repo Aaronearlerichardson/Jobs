@@ -545,7 +545,8 @@ def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
     n = verify_top(top_n=top_n, max_workers=max_workers, t=t, force=force)
     conn = store.connect(t["db_path"])
     ranked = _ranked(conn, t)
-    digest_md.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn))
+    digest_md.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
+                                  followups=store.followups_due(conn))
     print(f"\n  {n} job(s) deep-verified; corrected top {min(top_n, len(ranked))}:")
     for j in ranked[:top_n]:
         fit = j["resume_fit_score"]
@@ -586,7 +587,8 @@ def sync_status_all(top_n=15, t=None):
             print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
                   f"{n_cl:2} closed, {n_re:2} reopened")
     ranked = _ranked(conn, t)
-    digest_md.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn))
+    digest_md.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
+                                  followups=store.followups_due(conn))
     print(f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
           f"{n_reopened} reopened; {len(ranked)} open job(s) in ranking.")
     for j in ranked[:top_n]:

@@ -5,7 +5,7 @@ import hashlib
 import io
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import jsonify, make_response, request, send_file
@@ -504,6 +504,14 @@ def api_stats():
         "pipeline": one("SELECT COUNT(*) FROM jobs "
                         "WHERE disposition IN ('applied','interviewing')"),
         "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
+        # Applications that went out in the last 7 days: the volume the
+        # apply band exists to raise. applied_at is stamped once, on the
+        # first 'applied', so a row since moved to interviewing/rejected
+        # still counts toward the week it went out in.
+        "applied_7d": one("SELECT COUNT(*) FROM jobs "
+                          "WHERE substr(applied_at,1,10) >= ?",
+                          ((datetime.now() - timedelta(days=7))
+                           .strftime("%Y-%m-%d"),)),
         # Companies actually crawled every run: a dormant row is still
         # active, but only comes round weekly, so counting it here
         # overstated the roster by roughly 60%.

@@ -5,11 +5,14 @@ Offline by construction — `send_gmail` is monkeypatched in every test, so no
 SMTP socket is ever opened.
 """
 
+import re
 from datetime import datetime, timedelta
 
 import pytest
 
+import config
 import core.digest_md as digest_md
+import core.locality as locality
 
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
@@ -40,6 +43,21 @@ def sent(monkeypatch):
     return out
 
 
+@pytest.fixture
+def hometown(monkeypatch):
+    """A locality nobody's profile configures, so the apply-band tests do
+    not depend on which profile.toml is loaded."""
+    monkeypatch.setattr(locality, "NC_RE", re.compile(r"\bHometown\b", re.I))
+    return "Hometown, ZZ"
+
+
+@pytest.fixture
+def report_dir(tmp_path, monkeypatch):
+    """Written digests land in tmp, never in the real report directory."""
+    monkeypatch.setattr(config, "REPORT_DIR", tmp_path)
+    return tmp_path
+
+
 def row(job_id, fit=0.9, first_seen=TODAY, **over):
     r = {"job_id": job_id, "company_name": "Acme", "title": f"Role {job_id}",
          "url": f"https://acme.io/{job_id}", "location": "Anywhere, XX",
@@ -47,6 +65,77 @@ def row(job_id, fit=0.9, first_seen=TODAY, **over):
          "fit_reason": "reason"}
     r.update(over)
     return r
+
+
+def followup(job_id, due=TODAY, **over):
+    r = {"job_id": job_id, "company_name": "Acme", "title": f"Chase {job_id}",
+         "url": f"https://acme.io/{job_id}", "followup_at": due,
+         "disposition": "applied", "contact": "Recruiter"}
+    r.update(over)
+    return r
+
+
+class TestApplyBand:
+    """The mid-fit local band is where the interviews came from, so it has
+    to survive every gate that would hide it: the fit floor, the geo
+    bucket, and the user's own decisions."""
+
+    def test_keeps_only_local_undecided_open_rows_in_band(self, hometown):
+        ranked = [
+            row("in", fit=0.55, location=hometown),
+            row("edge_low", fit=0.40, location=hometown),
+            row("edge_high", fit=0.70, location=hometown),
+            row("too_good", fit=0.85, location=hometown),
+            row("too_weak", fit=0.39, location=hometown),
+            row("remote", fit=0.55, location="Remote - US"),
+            row("elsewhere", fit=0.55),
+            row("saved", fit=0.55, location=hometown, disposition="saved"),
+            row("closed", fit=0.55, location=hometown, status="closed"),
+            row("unscored", fit=None, location=hometown),
+        ]
+        picked = [j["job_id"] for j in digest_md.apply_band_rows(ranked)]
+        assert picked == ["in", "edge_low"]
+
+    def test_sorted_best_fit_first_and_capped(self, hometown):
+        ranked = [row(f"j{i}", fit=0.40 + i * 0.02, location=hometown)
+                  for i in range(14)]
+        picked = digest_md.apply_band_rows(ranked)
+        assert len(picked) == digest_md.APPLY_BAND_LIMIT
+        fits = [j["resume_fit_score"] for j in picked]
+        assert fits == sorted(fits, reverse=True)
+        assert picked[0]["job_id"] == "j13"
+
+    def test_empty_input_is_fine(self, hometown):
+        assert digest_md.apply_band_rows(None) == []
+        assert digest_md.apply_band_rows([]) == []
+
+
+class TestWriteRankedDigest:
+    def test_apply_band_section_follows_the_pipeline(self, track, hometown,
+                                                     report_dir):
+        pipeline = [{"disposition": "applied", "company_name": "Acme",
+                     "title": "Applied Role", "url": "https://acme.io/p",
+                     "status": "open"}]
+        ranked = [row("top", fit=0.9, location=hometown),
+                  row("band", fit=0.5, location=hometown)]
+        text = digest_md.write_ranked_digest(
+            ranked, track, pipeline=pipeline).read_text(encoding="utf-8")
+        assert text.index("## Your pipeline") < text.index("## Apply band")
+        band = text[text.index("## Apply band"):text.index("**2 open job(s)**")]
+        assert "Role band" in band and "Role top" not in band
+
+    def test_followups_section_lists_what_is_due(self, track, report_dir):
+        text = digest_md.write_ranked_digest(
+            [], track, followups=[followup("f1")]).read_text(encoding="utf-8")
+        assert "## Follow-ups due" in text
+        assert "Chase f1" in text and "Recruiter" in text
+
+    def test_sections_are_skipped_when_empty(self, track, hometown, report_dir):
+        text = digest_md.write_ranked_digest(
+            [row("top", fit=0.9, location=hometown)], track
+        ).read_text(encoding="utf-8")
+        assert "## Apply band" not in text
+        assert "## Follow-ups due" not in text
 
 
 class TestNewRankedRows:
@@ -114,6 +203,28 @@ class TestSendRankedDigest:
         assert "Closed Today" in plain
         assert "Closed Before" not in plain
         assert "Still Open" not in plain
+
+    def test_apply_band_rides_along_with_new_rows(self, track, sent, hometown):
+        ranked = [row("fresh", fit=0.9, location=hometown),
+                  row("band", fit=0.5, first_seen=YESTERDAY, location=hometown)]
+        assert digest_md.send_ranked_digest(ranked, track) is True
+        _, plain, html = sent[0]
+        assert "## Apply band" in plain and "Apply band" in html
+        assert "Role band" in plain and "Role band" in html
+        # The band row is not new, so it stays out of the new-match table.
+        assert "1 new match(es)" in sent[0][0]
+
+    def test_followups_ride_along_with_new_rows(self, track, sent):
+        assert digest_md.send_ranked_digest(
+            [row("fresh")], track, followups=[followup("f1")]) is True
+        _, plain, html = sent[0]
+        assert "## Follow-ups due" in plain and "Chase f1" in plain
+        assert "Chase f1" in html
+
+    def test_followups_alone_do_not_trigger_a_send(self, track, sent):
+        assert digest_md.send_ranked_digest(
+            [], track, followups=[followup("f1")]) is False
+        assert sent == []
 
     def test_reports_failure_when_the_send_fails(self, track, monkeypatch):
         monkeypatch.setattr(digest_md, "send_gmail",

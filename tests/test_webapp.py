@@ -198,6 +198,28 @@ class TestPipelineApi:
         row = self._row(client)
         assert row["contact"] == "Dana R" and row["referral"] == 1
 
+    def test_stats_count_applications_sent_this_week(self, client, tmp_path,
+                                                     monkeypatch):
+        """The 'applied this week' tile: an application from a month ago is
+        not this week's volume, and one since moved on to interviewing
+        still counts for the week it went out in."""
+        from datetime import datetime, timedelta
+        from core import store
+        db_path = self._pipeline_store(tmp_path, monkeypatch)
+        conn = store.connect(db_path)
+        store.upsert_job(conn, {
+            "job_id": "p2", "company_name": "Acme", "title": "Old One",
+            "url": "https://acme.io/p2", "location": "Anywhere",
+            "resume_fit_score": 0.5})
+        store.set_disposition(conn, "p2", "applied")
+        conn.execute("UPDATE jobs SET applied_at=? WHERE job_id='p2'",
+                     ((datetime.now() - timedelta(days=30)).isoformat(),))
+        conn.commit()
+        store.set_disposition(conn, "p1", "interviewing")
+        conn.close()
+        stats = json.loads(client.get("/api/stats").data)
+        assert stats["applied_7d"] == 1
+
     def test_a_field_outside_the_whitelist_is_ignored(self, client, tmp_path,
                                                       monkeypatch):
         self._pipeline_store(tmp_path, monkeypatch)
@@ -238,6 +260,35 @@ class TestPipelineApi:
         assert rep[0]["band"] == "mid" and rep[0]["geo_mode"] == "onsite"
         assert rep[0]["applications"] == 1
         assert rep[0]["interview_rate"] == 0.0
+
+
+class TestApplyBandFields:
+    """The Jobs tab's 'apply band' quick filter is client-side; the contract
+    it depends on is that every /api/jobs row carries the four fields it
+    reads, with the geo bucket derived live from the location."""
+
+    def test_jobs_expose_what_the_band_filter_reads(self, client, tmp_path,
+                                                    monkeypatch, local_addr):
+        import config
+        from core import store
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        db_path = tmp_path / "band.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        store.upsert_job(conn, {
+            "job_id": "b1", "company_id": cid, "company_name": "Acme",
+            "title": "Imaging Scientist", "url": "https://acme.io/b1",
+            "location": local_addr, "track": t["track"],
+            "resume_fit_score": 0.54})
+        conn.close()
+        monkeypatch.setitem(t, "db_path", db_path)
+        rows = json.loads(client.get("/api/jobs").data)
+        row = next(r for r in rows if r["job_id"] == "b1")
+        assert row["resume_fit_score"] == 0.54
+        assert row["geo_bucket"] == "local"
+        assert row["status"] in (None, "open")
+        assert row["disposition"] is None
 
 
 class TestRemoteAdmissionFields:
