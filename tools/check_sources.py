@@ -301,7 +301,7 @@ def probe_feeds():
 #
 # The flakiest source by a wide margin, and the one the crawl spends the most
 # wall-clock on. Three layers can each fail independently, so probe each:
-#   the DDG endpoints directly | the bounded/cached ddg_text() wrapper |
+#   the DDG endpoints directly | the bounded/cached scrapers.ddg.search() |
 #   the full fetch_websearch() (search -> visit results -> parse JSON-LD)
 
 SEARCH_QUERIES = [
@@ -312,7 +312,7 @@ SEARCH_QUERIES = [
 
 
 def probe_search(deep=False):
-    from discovery.local_sourcing import ddg_text
+    from scrapers.ddg import search as ddg_text
 
     out = []
 

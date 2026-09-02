@@ -10,11 +10,8 @@ health / bio / science / tech employers with a Triangle-NC presence:
        - the static entries on the RTP.org directory,
 """
 
-import hashlib
-import json
 import logging
 import re
-import threading
 import time
 from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
                                 as_completed, wait as fut_wait)
@@ -27,28 +24,11 @@ from core import tags as company_tags
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("discovery")
 
+from scrapers import ddg
 from scrapers.http import HEADERS, SESSION
 from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
 from .names import domain_tokens, name_key, slug_guesses
 
-
-# --------------------------------------------------------------------------- #
-#  Bounded + cached DuckDuckGo text search                                     #
-# --------------------------------------------------------------------------- #
-#
-# DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
-# wall-clock bound, so when DDG rate-limits (frequent), the library's internal
-# retry/backoff blocks for many minutes yielding nothing — profiled at ~1271s
-# of a 1726s --local run. Two guards, capability preserved:
-#   * a disk cache (7-day TTL) so repeat runs — and repeat queries within a
-#     run — return instantly instead of re-hitting DDG;
-#   * a hard per-query wall-clock budget via a worker thread + join(timeout),
-#     so one throttled query abandons after ~budget seconds instead of stalling
-#     the whole crawl. A timed-out/empty result is NOT cached, so it retries
-#     next run (we only cache genuine non-empty hits).
-_DDG_CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
-_DDG_CACHE_TTL = 7 * 24 * 3600      # seconds
-_DDG_WALL_BUDGET = 25.0             # hard per-query wall-clock cap (seconds)
 
 # Resolution watchdog: abandon a pass's remaining names if NO resolution
 # completes for this long. Generous on purpose — a normal resolve chains a
@@ -85,67 +65,6 @@ def _drain_or_abandon(ex, futs, consume, stalled):
         for fut in done:
             consume(fut, futs[fut])
     ex.shutdown(wait=False, cancel_futures=True)
-
-
-def _ddg_cache_path(key):
-    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    return _DDG_CACHE_DIR / f"{h}.json"
-
-
-def _ddg_cache_get(key):
-    p = _ddg_cache_path(key)
-    try:
-        if time.time() - p.stat().st_mtime > _DDG_CACHE_TTL:
-            return None
-        return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return None
-
-
-def _ddg_cache_put(key, value):
-    try:
-        _DDG_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _ddg_cache_path(key).write_text(json.dumps(value), encoding="utf-8")
-    except Exception:
-        pass
-
-
-def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
-    """Bounded, disk-cached DDG text search. Returns a list of result dicts
-    (each with 'href'/'title'/...), or [] on miss/timeout/missing-package —
-    every caller already tolerates an empty list."""
-    key = f"{query}||{max_results}"
-    cached = _ddg_cache_get(key)
-    if cached is not None:
-        _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
-        return cached
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        try:
-            from duckduckgo_search import DDGS
-        except ImportError:
-            return []
-    box = {"v": None}
-
-    def _run():
-        try:
-            with DDGS(timeout=min(10, int(budget))) as ddg:
-                box["v"] = list(ddg.text(query, max_results=max_results))
-        except Exception:
-            box["v"] = None
-
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    th.join(budget)
-    out = box["v"] or []
-    if th.is_alive():
-        _log.debug("ddg timed out after %.0fs: %s", budget, query)
-    else:
-        _log.debug("ddg live query, %d result(s): %s", len(out), query)
-    if out:                              # cache only genuine hits
-        _ddg_cache_put(key, out)
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -350,7 +269,7 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
                   "getlatka", "tracxn", "f6s.com")
     dir_urls = []
     for q in queries:
-        for r in ddg_text(q, max_results=per_query):
+        for r in ddg.search(q, max_results=per_query):
             u = r.get("href") or r.get("url") or ""
             if u and any(h in u.lower() for h in _DIR_HOSTS):
                 dir_urls.append(u)
@@ -384,7 +303,7 @@ def brainstorm_company_names(n=None):
     region = ", ".join((config.LOCALITY_SUBSTRINGS or [])[:6]) or "the target region"
     domain = ", ".join((config.DOMAIN_KEYWORDS or [])[:10]) or "the target domain"
     key = f"brainstorm||{n}||{region}||{domain}"
-    cached = _ddg_cache_get(key)
+    cached = ddg.cache_get(key)
     if cached is not None:
         return cached
     from core.claude import call_claude_json
@@ -403,7 +322,7 @@ def brainstorm_company_names(n=None):
     names = [str(x).strip() for x in (r.get("companies") or []) if str(x).strip()]
     names = [x for x in names if 2 < len(x) < 60][:n]
     if names:
-        _ddg_cache_put(key, names)
+        ddg.cache_put(key, names)
     return names
 
 
@@ -546,7 +465,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         websearch defaults ON but is capped rather than run over the whole
         gather (~100+ names): DDG rate-limits hard, and an earlier uncapped
         profile blocked ~1271s of a 1726s run in DDG's own retry/backoff
-        (see ddg_text above) — the on-demand resolvers (resolve_or_miss et
+        (see scrapers.ddg) — the on-demand resolvers (resolve_or_miss et
         al.) can afford to run it uncapped only because they work on tens of
         names, not the full candidate gather.
     """
@@ -679,7 +598,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     # ...) — names on gov/acronym/product-named domains the slug-guesser and
     # careers-page sniff can't reach on their own. Capped and skip-recent
     # because DDG rate-limits hard: an earlier uncapped profile blocked
-    # ~1271s of a 1726s run in DDG's own retry/backoff (see ddg_text above).
+    # ~1271s of a 1726s run in DDG's own retry/backoff (see scrapers.ddg).
     if websearch:
         cap = (config.DISCOVERY_WEBSEARCH_CAP if websearch_cap is None
               else websearch_cap)
@@ -1188,7 +1107,7 @@ def _websearch_board(name, max_results=8):
 
     def _search(query):
         out = []
-        for r in ddg_text(query, max_results=max_results):
+        for r in ddg.search(query, max_results=max_results):
             u = r.get("href") or r.get("url")
             if u and not _is_aggregator(u):
                 out.append(u)

@@ -121,63 +121,114 @@ def _looks_like_custom_board(html_text):
 
 # ─── Candidate careers-page URLs ─────────────────────────────────────────
 #
-# (tld, path) combos in priority order — breadth-first so every name token's
-# high-value URLs (incl. non-.com TLDs like .xyz, common for neurotech /
-# deep-tech startups) are tried before the cap.
-_COMBOS = [
-    ("com", "/careers"), ("com", "/careers/open-positions"),
-    ("xyz", "/careers/open-positions"), ("xyz", "/careers"),
-    ("ai", "/careers"), ("io", "/careers"), ("bio", "/careers"),
-    ("com", "/jobs"), ("com", "/"), ("health", "/careers"), ("co", "/careers"),
-    ("com", "/careers/"), ("com", "/company/careers"),
-    ("com", "/join"), ("com", "/open-positions"),
+# (host, path) patterns in priority order, applied breadth-first over the
+# name's domain tokens (names.domain_tokens) so every token's best guess is
+# tried before any token's worst -- including the non-.com TLDs common for
+# neurotech / deep-tech startups. The root ("/") sits second: a company
+# whose ATS badge is on the homepage has no dedicated /careers page, and a
+# Workday-hosted careers site redirects straight from it.
+_URL_PATTERNS = [
+    ("www.{tok}.com", "/careers"),
+    ("www.{tok}.com", "/"),
+    ("www.{tok}.com", "/jobs"),
+    ("careers.{tok}.com", "/"),
+    ("www.{tok}.com", "/en/jobs"),
+    ("{tok}.io", "/careers"),
+    ("{tok}.ai", "/careers"),
+    ("{tok}.bio", "/careers"),
+    ("{tok}.xyz", "/careers"),
+    ("{tok}.health", "/careers"),
+    ("{tok}.co", "/careers"),
+    ("jobs.{tok}.com", "/"),
 ]
+ROOT_PATTERNS = [p for p in _URL_PATTERNS if p == ("www.{tok}.com", "/")]
 
-_SNIFF_URL_CAP = 26
+# Cap on speculative GETs per name. A miss pays every one of them.
+_URL_CAP = 12
 
 
-def _root_urls(name, careers_url=""):
-    """Bare-domain URLs to scan when every careers-page candidate misses.
+def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
+    """Careers-page URLs to fetch for `name`, best first, `cap` at most.
 
-    A domain token can be crowded out of _candidate_urls by the cap before
-    its root ("com", "/") combo is ever tried (multi-token names burn the
-    cap on earlier careers-path combos first) -- so a company whose ATS
-    badge sits on the homepage itself (no dedicated /careers page) never
-    gets looked at. This is a small, separate list scanned only on the
-    failure path, not folded into the capped candidate list.
+    >>> for u in candidate_urls("Merakris Therapeutics")[:4]:
+    ...     print(u)
+    https://www.merakristherapeutics.com/careers
+    https://www.merakris.com/careers
+    https://www.merakristherapeutics.com/
+    https://www.merakris.com/
 
-    >>> _root_urls("Merakris Therapeutics")
+    A recorded careers_url (e.g. capture.py's JSON-LD hint) is a far better
+    base than a name-guess, so it goes first and its host's other paths
+    come next -- oxb.com / united-imaging.com resolve even though the name
+    never would:
+
+    >>> for u in candidate_urls("Acme", "https://acme.io/careers")[:5]:
+    ...     print(u)
+    https://acme.io/careers
+    https://acme.io/
+    https://acme.io/jobs
+    https://acme.io/en/jobs
+    https://www.acme.com/careers
+
+    ...unless it is itself a dead slug-guess against a JSON ATS, already
+    covered by the slug probes upstream:
+
+    >>> candidate_urls("Acme", "https://boards.greenhouse.io/acme")[0]
+    'https://www.acme.com/careers'
+
+    `patterns` narrows the list; ROOT_PATTERNS is the bare-homepage subset
+    the failure path scans (see _scan_root):
+
+    >>> candidate_urls("Merakris Therapeutics", patterns=ROOT_PATTERNS)
     ['https://www.merakristherapeutics.com/', 'https://www.merakris.com/']
-
-    A recorded careers_url's own host goes first -- it is a better-known
-    base than any name guess:
-
-    >>> _root_urls("Acme", "https://acme.io/careers")[0]
+    >>> candidate_urls("Acme", "https://acme.io/careers", patterns=ROOT_PATTERNS)[0]
     'https://acme.io/'
+
+    The list is deduped and capped, and a name with no domain tokens and
+    no hint has nothing to try:
+
+    >>> len(candidate_urls("A Very Long Multi Word Company Name Ltd")) <= 12
+    True
+    >>> candidate_urls("")
+    []
     """
     urls = []
-    if careers_url:
+    if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
+        if patterns is _URL_PATTERNS:
+            urls.append(careers_url)
         base_m = re.match(r"(https?://[^/]+)", careers_url)
         if base_m:
-            urls.append(base_m.group(1) + "/")
-    for tok in domain_tokens(name):
-        u = f"https://www.{tok}.com/"
-        if u not in urls:
-            urls.append(u)
-    return urls
+            for path in dict.fromkeys(p for _, p in patterns):
+                urls.append(base_m.group(1) + path)
+    toks = domain_tokens(name)
+    for host, path in patterns:
+        for tok in toks:
+            urls.append(f"https://{host.format(tok=tok)}{path}")
+    seen, out = set(), []
+    for u in urls:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+        if cap and len(out) >= cap:
+            break
+    return out
 
 
 def _scan_root(name, careers_url=""):
-    """Fetch _root_urls(name, careers_url) and return the first fetchable/
-    semi-fetchable ATS hit (packed like sniff_ats), else None.
+    """Fetch the bare homepage(s) (candidate_urls with ROOT_PATTERNS) and
+    return the first fetchable/semi-fetchable ATS hit (packed like
+    sniff_ats), else None.
 
-    A hit reached only through a risky (truncated/generic) domain token
-    must still corroborate the company name on the page -- the same rule
-    _candidate_urls hits are held to -- so scanning the root doesn't hand
-    the galaxy.com collision a second way in (network path, so covered by
+    The root is a regular candidate too, but a multi-token name or a
+    careers_url hint can push it past the cap, so the failure path scans it
+    separately (the per-run memo makes an already-fetched root free). A hit
+    reached only through a risky (truncated/generic) domain token must still
+    corroborate the company name on the page -- the same rule candidate hits
+    are held to -- so scanning the root doesn't hand the galaxy.com
+    collision a second way in (network path, so covered by
     tests/test_parsers.py::TestRootScan rather than a doctest here).
     """
-    urls = _root_urls(name, careers_url)
+    urls = candidate_urls(name, careers_url, patterns=ROOT_PATTERNS, cap=None)
     if not urls:
         return None
     responses = _fetch_all(urls)
@@ -196,40 +247,9 @@ def _scan_root(name, careers_url=""):
     return None
 
 
-def _candidate_urls(name, careers_url=""):
-    urls = []
-    if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
-        urls.append(careers_url)
-        # A recorded company domain (e.g. capture.py's JSON-LD hint) is a far
-        # better base than a name-guess — derive its careers subpages first, so
-        # oxb.com / united-imaging.com resolve even though the name never would.
-        base_m = re.match(r"(https?://[^/]+)", careers_url)
-        if base_m:
-            base = base_m.group(1)
-            for _tld, path in _COMBOS:
-                u = f"{base}{path}"
-                if u not in urls:
-                    urls.append(u)
-    toks = domain_tokens(name)
-    for tld, path in _COMBOS:
-        for tok in toks:
-            host = f"www.{tok}.com" if tld == "com" else f"{tok}.{tld}"
-            urls.append(f"https://{host}{path}")
-    for tok in toks:
-        urls += [f"https://careers.{tok}.com/", f"https://jobs.{tok}.com/"]
-    seen, out = set(), []
-    for u in urls:
-        if u and u not in seen:
-            seen.add(u)
-            out.append(u)
-        if len(out) >= _SNIFF_URL_CAP:
-            break
-    return out
-
-
 # ─── Truncated-domain corroboration ───────────────────────────────────────
 #
-# _candidate_urls tries every domain TOKEN (full, suffix-stripped, bare
+# candidate_urls tries every domain TOKEN (full, suffix-stripped, bare
 # first word) across every path/TLD combo, all fetched concurrently, and
 # takes the first hit in priority order. If the precise (full) token's
 # domain times out while an ambiguous truncated token's domain answers —
@@ -457,7 +477,7 @@ def _fetch_page(url, timeout=6):
 
 
 def _fetch_all(urls):
-    """Fetch candidates concurrently (a miss otherwise pays ~26 sequential
+    """Fetch candidates concurrently (a miss otherwise pays ~12 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
     evaluated in priority order regardless of completion order.
 
@@ -611,7 +631,7 @@ def sniff_ats(name, careers_url="", timeout=6):
     """Raw detection: first fetchable/semi-fetchable ATS found, else a
     custom self-hosted board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}."""
-    urls = _candidate_urls(name, careers_url)
+    urls = candidate_urls(name, careers_url)
     if not urls:
         return None
     responses = _fetch_all(urls)
@@ -645,7 +665,7 @@ def sniff_ats(name, careers_url="", timeout=6):
             if listing:
                 custom = {"ats": "custom", "careers_url": listing}
     # Every careers-path candidate missed: a company whose ATS badge sits on
-    # the homepage itself (no dedicated /careers page -- see _root_urls)
+    # the homepage itself (no dedicated /careers page -- see _scan_root)
     # still has one more place to look before this is a miss.
     root_hit = _scan_root(name, careers_url)
     if root_hit:
@@ -656,7 +676,7 @@ def sniff_ats(name, careers_url="", timeout=6):
 def sniff_careers_ats(name, careers_url=""):
     """Pipeline style: prefer coordinates we can CONFIRM with a live count;
     otherwise surface the highest-priority detection as a lead."""
-    urls = _candidate_urls(name, careers_url)
+    urls = candidate_urls(name, careers_url)
     if not urls:
         return None
     responses = _fetch_all(urls)
@@ -686,7 +706,7 @@ def sniff_careers_ats(name, careers_url=""):
     if lead:
         return lead
     # No candidate careers-path yielded even an unconfirmable lead -- try the
-    # bare homepage (see sniff_ats's matching fallback / _root_urls).
+    # bare homepage (see sniff_ats's matching fallback / _scan_root).
     root_hit = _scan_root(name, careers_url)
     if root_hit:
         ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
@@ -748,7 +768,8 @@ def diagnose_no_board(name, careers_url=""):
         established failure path in classify_miss, never per candidate in
         a bulk pass.
     """
-    urls = _candidate_urls(name, careers_url) + _root_urls(name, careers_url)
+    urls = (candidate_urls(name, careers_url)
+            + candidate_urls(name, careers_url, patterns=ROOT_PATTERNS, cap=None))
     if not urls:
         return "domain-unreachable"
     responses = _fetch_all(urls)
@@ -807,7 +828,7 @@ class JsSniffer:
         page = self._ensure()
         if not page:
             return None
-        for url in _candidate_urls(name, careers_url):
+        for url in candidate_urls(name, careers_url):
             risky_tok = _risky_token_in_url(url, name)
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)

@@ -8,7 +8,6 @@ import time
 import config
 
 from scrapers.http import HEADERS, SESSION
-from .names import domain_tokens
 
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
@@ -295,42 +294,6 @@ def _extract_workday_triple(text: str):
             return tenant.lower(), int(pod), site
     return None
 
-
-_URL_CAP = 12
-
-def _workday_candidate_urls(name: str, careers_url: str) -> list[str]:
-    """
-    Careers-page URLs to scrape, in priority order. Caps at _URL_CAP to
-    keep misses bounded — we stop at the first workday URL we find, so
-    high-priority URLs (hints, common paths) go first.
-    """
-    urls: list[str] = []
-    if careers_url:
-        urls.append(careers_url)
-
-    # Paths in priority order. /en/jobs catches Red Hat; /careers is
-    # the dominant pattern; /jobs catches a few odd ducks.
-    paths = ("/careers", "/en/jobs", "/jobs", "/careers/",
-             "/en/careers", "/company/careers/")
-
-    for token in domain_tokens(name):
-        for path in paths:
-            urls.append(f"https://www.{token}.com{path}")
-        # Bare subdomains
-        urls.append(f"https://careers.{token}.com/")
-        urls.append(f"https://jobs.{token}.com/")
-        urls.append(f"https://www.{token}.com/")
-
-    seen, out = set(), []
-    for u in urls:
-        if u and u not in seen:
-            seen.add(u)
-            out.append(u)
-        if len(out) >= _URL_CAP:
-            break
-    return out
-
-
 def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
     """
     POST the Workday CXS /jobs endpoint to validate the triple and
@@ -360,32 +323,37 @@ def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
 
 def probe_workday(name: str, careers_url: str = ""):
     """
-    Discover a Workday tenant/pod/site for `name` by fetching likely
-    careers pages and scanning for a myworkdayjobs.com link. On hit,
-    validates with the CXS API.
+    Discover a Workday tenant/pod/site for `name`: the careers-page sniff
+    (sniffer.candidate_urls, fetched through its per-run memo) filtered to
+    myworkdayjobs.com links, validated with the CXS API on a hit.
 
     Returns dict {tenant, wd_pod, site, count, validated, source_url}
-    or None if no workday URL was found.
+    or None if no workday URL was found. `validated=False` means the URL
+    pattern was found but the CXS API could not confirm it.
 
-    `validated=False` means the URL pattern was found but the CXS API
+    Notes:
+        Used to build and fetch its own candidate list; a hit reached only
+        through a truncated domain token, or belonging to a parent
+        company's shared tenant, went unchecked here while the sniffer
+        rejected it. Same guards on both paths now.
     """
-    # Candidate hosts here are name-guesses too — quiet their robots notices
-    # for the same reason the sniffer does (see scrapers.robots.quiet).
-    from scrapers import robots
-    for url in _workday_candidate_urls(name, careers_url):
-        try:
-            with robots.quiet():
-                r = SESSION.get(
-                    url, timeout=6, headers=HEADERS, allow_redirects=True,
-                )
-        except Exception:
+    from .sniffer import (_corroborates, _fetch_all, _foreign_board,
+                          _risky_token_in_url, candidate_urls)
+    urls = candidate_urls(name, careers_url)
+    if not urls:
+        return None
+    responses = _fetch_all(urls)
+    for url in urls:
+        r = responses.get(url)
+        if r is None:
             continue
-        if r.status_code != 200:
+        risky_tok = _risky_token_in_url(url, name)
+        if risky_tok and not _corroborates(r.text, name, risky_tok):
             continue
-        # Workday login redirects usually land on the wd host — check
+        # Workday login redirects usually land on the wd host -- check
         # the final URL first, then fall through to HTML body.
         triple = _extract_workday_triple(r.url) or _extract_workday_triple(r.text)
-        if not triple:
+        if not triple or _foreign_board(name, triple):
             continue
         tenant, wd_pod, site = triple
         count = _count_workday_jobs(tenant, wd_pod, site)
@@ -531,10 +499,11 @@ class WorkdayJsProbe:
 
     def _probe_impl(self, name: str, careers_url: str = ""):
         """Runs entirely on the browser-owning thread."""
+        from .sniffer import candidate_urls
         page = self._ensure_page()
         if page is None:
             return None
-        for url in _workday_candidate_urls(name, careers_url):
+        for url in candidate_urls(name, careers_url):
             triple = self._scan(page, url)
             if not triple:
                 continue
