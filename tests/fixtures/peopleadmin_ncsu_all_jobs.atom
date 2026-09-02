@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xml:lang="en-US" xmlns="http://www.w3.org/2005/Atom" xmlns:pa="jobs.ncsu.edu">
+  <id>tag:jobs.ncsu.edu,2005:/postings/all_jobs</id>
+  <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu"/>
+  <link rel="self" type="application/atom+xml" href="https://jobs.ncsu.edu/postings/all_jobs.atom"/>
+  <title>North Carolina State University: All Jobs</title>
+  <updated>2026-05-27T09:48:31-04:00</updated>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/230936</id>
+    <published>2026-05-27T09:48:31-04:00</published>
+    <updated>2026-05-27T09:48:31-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/230936"/>
+    <title>Temporary Graduate Student Intern</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>111401 - Agricultural and Human Sciences </name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/234488</id>
+    <published>2026-09-01T15:32:25-04:00</published>
+    <updated>2026-09-01T15:32:25-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/234488"/>
+    <title>Temporary Transformational Scholars Supervisor for Eastern/Central NC</title>
+    <content>&lt;div&gt;[posting text redacted] Position type: Temporary.&lt;/div&gt;</content>
+    <author>
+      <name>130801 - Student Success and Engagement</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/232812</id>
+    <published>2026-07-16T13:25:23-04:00</published>
+    <updated>2026-07-16T13:25:24-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/232812"/>
+    <title>Surgery Staff Supervisor</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>192001 - CVM Teaching Hospital</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/233778</id>
+    <published>2026-08-12T14:20:40-04:00</published>
+    <updated>2026-08-12T14:20:41-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/233778"/>
+    <title>Research Technician - Horticultural Science</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>111501 - Horticultural Science</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/225888</id>
+    <published>2025-12-17T11:18:37-05:00</published>
+    <updated>2025-12-17T11:18:38-05:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/225888"/>
+    <title>Theriogenology Intern</title>
+    <content>&lt;div&gt;[posting text redacted] Location: Raleigh, NC.&lt;/div&gt;</content>
+    <author>
+      <name>195001 - Department of Clinical Sciences</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/229518</id>
+    <published>2026-04-14T15:18:03-04:00</published>
+    <updated>2026-04-14T15:18:04-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/229518"/>
+    <title>Open Rank Lecturer or Teaching Assistant Professor - History</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>160301 - History</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/232856</id>
+    <published>2026-07-17T08:31:38-04:00</published>
+    <updated>2026-07-17T08:31:39-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/232856"/>
+    <title>Catering Event Coordinator</title>
+    <content>&lt;div&gt;[posting text redacted] Position type: EHRA.&lt;/div&gt;</content>
+    <author>
+      <name>471501 - Dining Administration</name>
+    </author>
+  </entry>
+  <entry>
+    <id>https://jobs.ncsu.edu/postings/223243</id>
+    <published>2025-09-25T10:56:02-04:00</published>
+    <updated>2025-09-25T10:56:02-04:00</updated>
+    <link rel="alternate" type="text/html" href="https://jobs.ncsu.edu/postings/223243"/>
+    <title>UTS - Temporary Electronics Specialist at UNC Chapel Hill (2nd Shift)</title>
+    <content>&lt;div&gt;[posting text redacted]&lt;/div&gt;</content>
+    <author>
+      <name>480502 - UHR UTS/UNC Partnership</name>
+    </author>
+  </entry>
+</feed>

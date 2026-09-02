@@ -1276,8 +1276,25 @@ def fetch_successfactors_all(base_url, loc_re=None, step=25, max_pages=80):
 
 
 def fetch_peopleadmin_all(host, loc_re=None):
+    """Full PeopleAdmin board, adapted to the company-fetch shape.
+
+    `loc_re` is applied only to the postings whose text named a place. A
+    tenant's Atom entries carry no location field (see fetchers.peopleadmin),
+    so most postings have nothing for a location filter to match and gating
+    them would drop the whole campus — which a university board never
+    deserves, being local by construction.
+
+    See tests/test_fetcher_parsers.py::TestPeopleAdmin.
+    """
     from . import fetch_peopleadmin
-    return _adapt(fetch_peopleadmin(host, ""), "peopleadmin", loc_re)
+    out = []
+    for j in fetch_peopleadmin(host, ""):
+        adapted = _adapt([j], "peopleadmin",
+                         loc_re if j.get("location") else None)
+        for a in adapted:
+            a["posted_at"] = j.get("posted_at")
+        out += adapted
+    return out
 
 
 # --- custom (self-hosted) careers-board scraping -------------------------- #
