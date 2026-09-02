@@ -265,7 +265,7 @@ def parse_metacareers(soup, page_url=""):
     return jobs
 
 
-# ─── Generic (JSON-LD + job-link sweep) ──────────────────────────────────
+# ─── Generic (JSON-LD + job-link sweep + job-card sweep) ─────────────────
 
 def parse_jsonld(soup, page_url=""):
     jobs = []
@@ -306,16 +306,105 @@ def parse_jsonld(soup, page_url=""):
     return jobs
 
 
+# The "any careers site" sweep, in two passes. find_job_links (the custom
+# board fetcher's own detector) takes anchors whose PATH says job —
+# /jobs/<id>-<slug>, /job/<slug>, /careers/<slug> — which covers what a
+# browser save of a JS-rendered board carries once the cards are in the DOM:
+# a Workday-fed WordPress table, an iCIMS Attract (Jibe) results list, a
+# /jobs/<id>-<slug> results page. Hosted boards that key a posting on a bare
+# id under the tenant (jobs.polymer.co/<tenant>/<id>,
+# apply.workable.com/<tenant>/j/<id>/) say nothing job-shaped in the path,
+# so the second pass takes an anchor on a job-board host whose LAST path
+# segment is id-shaped and that carries its own heading — the shape every
+# job card shares, whatever renders it.
+_ID_TAIL_RE = re.compile(r"/(?:j/)?([0-9]{4,}|[A-Z0-9]{6,})/?$")
+# /jobs/<id>/<slug>/job (iCIMS Attract) ends in a nav-looking "job" segment
+# that find_job_links refuses; an id straight after /jobs/ is a posting.
+_JOB_ID_PATH_RE = re.compile(r"/jobs?/[0-9]{3,}(?:/|$)", re.I)
+_BOARD_HOST_RE = re.compile(r"^(jobs|careers|apply|boards|talent|recruiting)\.", re.I)
+# "City, ST" | "Remote" (optionally qualified) | "Multiple Locations". At most
+# four words before the comma: enough for "Research Triangle Park, NC",
+# too few to swallow a title that precedes the place in one run of text.
+_LOC_RE = re.compile(
+    r"([A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3},\s*[A-Z]{2}\b"
+    r"|\bRemote\b(?:\s*[-–,(]\s*[A-Za-z .]+\)?)?|Multiple Locations)")
+_SHIFT_PREFIX_RE = re.compile(r"^(?:Full|Part)[- ]time\s+", re.I)
+
+
+def _card_scopes(a):
+    """The elements a job card's fields can live in: the anchor, its parent,
+    and the grandparent only while that is still ONE card -- every link in it
+    points where this one does (a table row that links the same posting from
+    each cell). A whole results list would lend a neighbour's location to a
+    card that has none."""
+    yield a
+    if a.parent is not None:
+        yield a.parent
+        gp = a.parent.parent
+        if gp is not None and len({x["href"] for x in gp.find_all("a", href=True)}) == 1:
+            yield gp
+
+
+def _card_title(a):
+    te = a.find(["h1", "h2", "h3", "h4", "h5"]) or a.select_one(
+        "[data-ui*='title'], [class*='title']")
+    return _txt(te) if te else ""
+
+
+def _card_location(a, title=""):
+    """Location for a job card: the smallest element inside the card whose
+    whole text is a place ("Cambridge, MA", "Remote"), else the first place
+    named in the card's text once the title is taken out of it."""
+    for scope in _card_scopes(a):
+        for el in scope.find_all(["li", "span", "td", "div", "p", "small"]):
+            t = _txt(el)
+            if not t or len(t) > 60 or (title and title in t):
+                continue
+            if _LOC_RE.fullmatch(t):
+                return t
+    for scope in _card_scopes(a):
+        text = scope.get_text(" ", strip=True)
+        if title:
+            text = text.replace(title, " ", 1)
+        m = _LOC_RE.search(text)
+        if m:
+            return _SHIFT_PREFIX_RE.sub("", m.group(1))
+    return ""
+
+
 def parse_generic(soup, page_url=""):
     from .fetchers.company import find_job_links
-    root_m = re.match(r"https?://[^/]+", page_url or "")
+    root_m = re.match(r"https?://([^/]+)", page_url or "")
     root = root_m.group(0) if root_m else ""
-    jobs = []
-    for a, href, title in find_job_links(soup):
+    page_host = root_m.group(1) if root_m else ""
+    jobs, seen = [], set()
+
+    def _emit(a, href, title):
         url = href if href.startswith("http") else root + href
-        j = _job(f"cap_{stable_id(url)}", title, "", url, "")
+        key = url.split("?")[0].rstrip("/")
+        if key in seen:
+            return
+        seen.add(key)
+        j = _job(f"cap_{stable_id(url)}", title, "", url,
+                 _card_location(a, title))
         if j:
             jobs.append(j)
+
+    for a, href, title in find_job_links(soup):
+        _emit(a, href, title)
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"].split("?")[0]
+        hm = re.match(r"https?://([^/]+)", href)
+        host = hm.group(1) if hm else page_host
+        if _JOB_ID_PATH_RE.search(href):
+            pass
+        elif not _ID_TAIL_RE.search(href) or (
+                "/j/" not in href and not _BOARD_HOST_RE.match(host)):
+            continue
+        title = _card_title(a) or _txt(a)
+        if len(title) >= 4 and not _NONTITLE_RE.match(title):
+            _emit(a, a["href"], title)
     return jobs
 
 
@@ -325,6 +414,24 @@ def _canonical_url(soup):
     el = soup.select_one("link[rel='canonical'][href]") \
         or soup.select_one("meta[property='og:url'][content]")
     return (el.get("href") or el.get("content") or "") if el else ""
+
+
+def page_url(html, url=""):
+    """The URL a captured page came from: `url` when the caller knows it
+    (userscript POST, Chrome's "saved from url" comment), else the page's own
+    canonical / og:url tag. What capture.py hands to store.company_by_host.
+
+    >>> page_url("<html><head><link rel='canonical' href='https://jobs.x.org/a'>",
+    ...          "")
+    'https://jobs.x.org/a'
+    >>> page_url("<html>", "https://y.org/")
+    'https://y.org/'
+    >>> page_url("<html>")
+    ''
+    """
+    if url:
+        return url
+    return _canonical_url(BeautifulSoup(html, "html.parser"))
 
 
 def parse_page(url, html):

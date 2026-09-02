@@ -729,6 +729,57 @@ class TestCompanyByBoard:
         assert store.company_by_board(db, {"name": "Stub 2"}) is None
 
 
+class TestCompanyByHost:
+    """The manual capture path files a saved page under the roster row whose
+    careers_url owns the page's host, so a bot-challenged or JS-only board
+    feeds an EXISTING company instead of minting one from the page text."""
+
+    def test_exact_host_beats_a_sibling_domain(self, db):
+        store.upsert_company(db, {"name": "Acme Corp", "active": 0,
+                                  "careers_url": "https://www.acme.org/"})
+        store.upsert_company(db, {"name": "Acme Health", "active": 0,
+                                  "careers_url": "https://jobs.acme.org/"})
+        assert store.company_by_host(db, "https://jobs.acme.org/jobs/1")["name"] == \
+            "Acme Health"
+        assert store.company_by_host(db, "https://careers.acme.org/")["name"] == \
+            "Acme Corp"
+
+    def test_url_shaped_slug_counts_as_a_host(self, db):
+        store.upsert_company(db, {"name": "Widget Co", "ats": "phenom",
+                                  "slug": "widgets.example.com"})
+        assert store.company_by_host(db, "https://widgets.example.com/job/1")["name"] == \
+            "Widget Co"
+
+    def test_shared_ats_host_needs_the_tenant_path(self, db):
+        store.upsert_company(db, {"name": "Beta", "careers_url":
+                                  "https://apply.workable.com/beta/"})
+        assert store.company_by_host(db, "https://apply.workable.com/beta/j/ABC123/")["name"] == "Beta"
+        assert store.company_by_host(db, "https://apply.workable.com/gamma/") is None
+        # A sibling-domain match on a shared host would claim every tenant.
+        assert store.company_by_host(db, "https://jobs.workable.com/") is None
+
+    def test_www_prefix_and_case_do_not_matter(self, db):
+        store.upsert_company(db, {"name": "Acme", "careers_url": "https://WWW.Acme.org/careers"})
+        assert store.company_by_host(db, "https://acme.org/x")["name"] == "Acme"
+
+    def test_capture_only_rows_have_a_board_identity(self, db):
+        row = {"name": "Saved", "ats": store.CAPTURE_ATS,
+               "careers_url": "https://jobs.saved.org/"}
+        store.upsert_company(db, row)
+        assert store.board_key(row) == (store.CAPTURE_ATS, "https://jobs.saved.org")
+        dup = store.company_by_board(db, dict(row, name="Saved Inc"))
+        assert dup and dup["name"] == "Saved"
+
+    def test_capture_only_rows_are_never_crawled_or_dormant(self, db, company):
+        cid = store.upsert_company(db, {"name": "Saved", "ats": store.CAPTURE_ATS,
+                                        "careers_url": "https://jobs.saved.org/"})
+        assert [c["id"] for c in store.crawlable_companies(db)] == [company]
+        # Nothing records an outcome for it, so the streak never starts.
+        row = db.execute("SELECT crawl_state, empty_streak FROM companies "
+                         "WHERE id=?", (cid,)).fetchone()
+        assert (row["crawl_state"], row["empty_streak"]) == (None, None)
+
+
 class TestDedupJobs:
     """Same company + same URL modulo query string + same title is one
     posting: iCIMS served SAS's postings as `?in_iframe=1` and

@@ -36,8 +36,8 @@ try:
 except Exception:
     pass
 
-from core import store
-from scrapers.page_capture import parse_page
+from core import store, tags
+from scrapers.page_capture import page_url, parse_page
 from scrapers.ops import ingest_external_jobs
 
 PORT_DEFAULT = 8877
@@ -132,10 +132,42 @@ def _record_companies(names, source_site, sites=None):
     return fresh
 
 
+def attribute_company(conn, url, jobs):
+    """The roster company that owns a captured page, or None -- and the jobs
+    rewritten to carry its name, so the ingest links them to that row.
+
+    A page saved from an employer's own careers host (or a hosted board the
+    roster already knows by careers_url, or a posting whose JSON-LD names the
+    employer's site) belongs to that employer; without this the parsed jobs
+    would land under whatever the page text says and the roster would grow
+    a second, unreviewed row for a company it already tracks. A matched row
+    with no board of its own is marked capture-only (ats = "capture",
+    active): a real roster member whose pages the person saves by hand, and
+    one no crawl path will ever try to fetch. A row waiting in the review
+    queue, or one that already has a board, is left as it is."""
+    hints = [url] + [j.get("company_url") for j in jobs if j.get("company_url")]
+    row = next((r for r in (store.company_by_host(conn, h) for h in hints if h)
+                if r), None)
+    if row is None:
+        return None
+    for j in jobs:
+        j["company"] = row["name"]
+    if not row.get("ats") and not tags.has(row.get("tags"), tags.PENDING):
+        store.upsert_company(conn, {
+            "name": row["name"], "ats": store.CAPTURE_ATS, "active": 1,
+            "notes": "capture-only board: browse it yourself and save pages "
+                     "with capture.py --watch"})
+        row = store.get_company(conn, row["id"]) or row
+    return row
+
+
 def ingest_html(url, html, label=""):
     """Parse one page and feed the standard ingest pipeline. Returns a
     summary dict."""
     jobs, source = parse_page(url, html)
+    conn = store.connect()
+    owner = attribute_company(conn, page_url(html, url), jobs)
+    conn.close()
     ingested = ingest_external_jobs(jobs, source=source) if jobs else 0
     # Company name -> its own website, when the page exposed it (JSON-LD).
     sites = {j["company"]: j["company_url"] for j in jobs
@@ -143,9 +175,11 @@ def ingest_html(url, html, label=""):
     new_cos = _record_companies((j.get("company") for j in jobs), source, sites)
     tag = label or url or source
     print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
+          + (f" under {owner['name']} ({owner.get('ats') or '?'})" if owner else "")
           + (f", {len(new_cos)} new compan(ies): {', '.join(new_cos[:6])}"
              + ("..." if len(new_cos) > 6 else "") if new_cos else ""))
-    return {"parsed": len(jobs), "ingested": ingested, "companies": new_cos}
+    return {"parsed": len(jobs), "ingested": ingested, "companies": new_cos,
+            "company": owner["name"] if owner else None}
 
 
 class _Handler(BaseHTTPRequestHandler):

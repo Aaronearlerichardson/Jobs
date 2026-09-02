@@ -59,6 +59,11 @@ def main():
                     help="Register a known board directly: company name + its ATS "
                          "board URL (or careers page). No guessing; "
                          "locality-verifies, mission-scores, activates.")
+    ap.add_argument("--capture", action="store_true",
+                    help="With --add-board: register the URL as a capture-only "
+                         "company (ats 'capture'). Nothing is sniffed or fetched; "
+                         "you browse the board yourself and save pages with "
+                         "capture.py --watch, which files them under this row.")
     ap.add_argument("--score-missions", action="store_true",
                     help="Backfill mission scores for active companies that "
                          "have a board but no mission tier (seeds import "
@@ -128,7 +133,7 @@ def main():
 
     if args.add_board:
         from discovery.local_sourcing import add_board
-        add_board(*args.add_board)
+        add_board(*args.add_board, capture=args.capture)
         return
 
     if args.score_missions or args.rescore_missions:

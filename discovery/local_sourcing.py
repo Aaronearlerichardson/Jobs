@@ -1036,7 +1036,7 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     return written
 
 
-def add_board(name, url):
+def add_board(name, url, capture=False):
     """Register a board the user already knows — no guessing. `url` may be
     the ATS board itself (myworkdayjobs / greenhouse / lever / ...) or the
     company's careers page; coordinates are detected, the board NC-counted,
@@ -1044,6 +1044,16 @@ def add_board(name, url):
     coordinates under it were still sniffed).
 
         python discover.py --add-board "NC DHHS" https://nc.wd108.myworkdayjobs.com/NC_Careers
+
+    `capture=True` registers a CAPTURE-ONLY company instead: nothing is
+    sniffed or fetched, the row goes straight onto the roster (the URL is the
+    user's own statement of where the board lives) with ats = "capture", and
+    the crawl leaves it alone -- its pages are saved by hand with capture.py,
+    which attributes them to this row by host. For boards that answer plain
+    requests with a bot challenge or render their postings in JavaScript on a
+    site with no ATS signature:
+
+        python discover.py --add-board "Some Health System" https://jobs.example.org/ --capture
 
     Notes:
         A hosted PeopleAdmin tenant works here too — the university board
@@ -1061,9 +1071,26 @@ def add_board(name, url):
     """
     from core.claude import score_company_mission
     from scrapers.fetchers import company as company_fetch
-    from core.store import (connect, is_confirmed_company, mark_pending,
-                            upsert_company)
+    from core.store import (CAPTURE_ATS, connect, is_confirmed_company,
+                            mark_pending, upsert_company)
     from .sniffer import _detect, _pack, sniff_ats
+
+    if capture:
+        conn = connect()
+        row = {"name": name, "ats": CAPTURE_ATS, "careers_url": url,
+               "source": "manual", "active": 1,
+               "notes": "capture-only board: browse it yourself and save "
+                        "pages with capture.py --watch"}
+        dup = _board_already_tracked(conn, row)
+        if dup:
+            _report_dup_board(name, dup)
+            conn.close()
+            return None
+        upsert_company(conn, row)
+        conn.close()
+        print(f"  [OK] {name}: capture-only, {url}  -- save its pages with "
+              f"capture.py --watch")
+        return {"ats": CAPTURE_ATS, "careers_url": url}
 
     hit = _detect("", url)
     if hit and hit[0] in ("fetchable", "semi"):

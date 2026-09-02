@@ -11,6 +11,12 @@ Seed tags (core/tags.py): the lightweight JSON-API boards
 they seed as "sweep". The heavyweight enterprise boards
 (workday/successfactors/peopleadmin) are expensive to pull whole and are
 queried per-region instead, so they seed as "local".
+
+Deliberately absent: ``core.store.CAPTURE_ATS`` ("capture"). A capture-only
+company has no fetchable board -- its pages are saved by hand through
+capture.py -- and store.crawlable_companies never hands such a row to any
+crawl path, so it neither needs a thunk here nor counts as "unsupported":
+an ATS name this table lacks is simply skipped by iter_store_sources.
 """
 
 from core import tags

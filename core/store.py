@@ -676,6 +676,116 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     return len(dead), n_off
 
 
+# --------------------------------------------------------------------------- #
+#  Capture-only companies                                                      #
+# --------------------------------------------------------------------------- #
+#
+# Some of the best employers cannot be fetched at all: the careers host
+# answers a plain request with a bot challenge, or the board is rendered by
+# JavaScript on a site with no ATS signature, so discovery left them inactive
+# as "no-board-found". For those the person drives the browser (capture.py)
+# and the crawler parses only what they saved. Such a company carries
+# ``ats = CAPTURE_ATS``: a real roster row, but one no crawl path may fetch.
+# crawlable_companies leaves it out, so it never earns an empty streak or a
+# fetch error for a board nobody asked.
+CAPTURE_ATS = "capture"
+
+# Multi-tenant hosts. A page there says which BOARD it is, not which company
+# owns it, so company_by_host trusts a domain-level match against a roster
+# row's careers_url only on company-owned hosts; on these it insists on the
+# board's own path.
+_SHARED_HOST_RE = re.compile(
+    r"myworkdayjobs|greenhouse\.io|lever\.co|ashbyhq|smartrecruiters|icims|"
+    r"taleo|bamboohr|jazzhr|applytojob|paylocity|workable|polymer\.co|"
+    r"gusto\.com|rippling|breezy|recruitee|teamtailor|jobvite|ultipro|"
+    r"successfactors|peopleadmin|linkedin|indeed|glassdoor|ziprecruiter", re.I)
+
+
+def _split_url(url):
+    """(host, path) of an http(s) URL, host lower-cased without a leading
+    ``www.``; ('', '') for anything else.
+
+    >>> _split_url("https://WWW.Acme.org/careers/jobs?x=1")
+    ('acme.org', '/careers/jobs')
+    >>> _split_url("jobs.acme.org")
+    ('', '')
+    """
+    m = re.match(r"https?://([^/?#]+)([^?#]*)", (url or "").strip(), re.I)
+    if not m:
+        return "", ""
+    host = re.sub(r"^www\.", "", m.group(1).lower())
+    return host, (m.group(2) or "/")
+
+
+def _board_prefix(path):
+    """The first path segment of a careers URL, the piece that names a tenant
+    on a shared host ('/axoft/40863' -> '/axoft'); '' for a bare origin."""
+    seg = path.strip("/").split("/")[0] if path else ""
+    return f"/{seg}" if seg else ""
+
+
+def company_by_host(conn, url):
+    """The roster company whose careers_url (or URL-shaped slug) claims the
+    host of `url`, or None. The manual capture path asks this so a page the
+    person saved from an employer's own careers site lands under that
+    employer's EXISTING row -- id, name, mission score and all -- instead of
+    minting a new company from whatever name the page text yields.
+
+    An exact host match wins, and a sibling host on the same company-owned
+    domain is accepted too (careers sites live on jobs./careers. subdomains
+    while the roster usually holds the www. site):
+
+    >>> conn = connect(":memory:")
+    >>> _ = record_miss(conn, "Acme Health", "no-board-found",
+    ...                 careers_url="https://www.acmehealth.org/careers/")
+    >>> company_by_host(conn, "https://www.acmehealth.org/careers/jobs")["name"]
+    'Acme Health'
+    >>> company_by_host(conn, "https://jobs.acmehealth.org/search/jobs")["name"]
+    'Acme Health'
+    >>> company_by_host(conn, "https://jobs.otherhealth.org/") is None
+    True
+
+    On a multi-tenant host the domain proves nothing, so the page must sit
+    under the board's own first path segment:
+
+    >>> _ = upsert_company(conn, {"name": "Beta Labs",
+    ...                           "careers_url": "https://jobs.polymer.co/beta"})
+    >>> company_by_host(conn, "https://jobs.polymer.co/beta/40863")["name"]
+    'Beta Labs'
+    >>> company_by_host(conn, "https://jobs.polymer.co/gamma") is None
+    True
+
+    Anything that is not an http(s) URL matches nothing:
+
+    >>> company_by_host(conn, "") is None
+    True
+    """
+    host, path = _split_url(url)
+    if not host:
+        return None
+    domain = ".".join(host.split(".")[-2:])
+    shared = bool(_SHARED_HOST_RE.search(host))
+    sibling = None
+    for c in conn.execute("SELECT * FROM companies ORDER BY id").fetchall():
+        c = dict(c)
+        for cand in (c.get("careers_url"), c.get("slug")):
+            if not cand or "." not in str(cand):
+                continue
+            if not re.match(r"https?://", str(cand), re.I):
+                cand = f"https://{cand}"
+            chost, cpath = _split_url(cand)
+            if not chost:
+                continue
+            if chost == host:
+                prefix = _board_prefix(cpath) if shared else ""
+                if not prefix or path.lower().startswith(prefix.lower()):
+                    return c
+            elif (not shared and sibling is None
+                  and ".".join(chost.split(".")[-2:]) == domain):
+                sibling = c
+    return sibling
+
+
 def board_key(r):
     """The identity of a company row's BOARD, independent of its name: the
     Workday triple, the (ats, slug) pair, or for careers_url-keyed ATSes the
@@ -700,7 +810,8 @@ def board_key(r):
     """
     if r.get("ats") == "workday" and r.get("wd_tenant"):
         return ("workday", r["wd_tenant"], r.get("wd_pod"), r.get("wd_site"))
-    if r.get("ats") in ("successfactors", "peopleadmin", "custom", "wpjson"):
+    if r.get("ats") in ("successfactors", "peopleadmin", "custom", "wpjson",
+                        CAPTURE_ATS):
         u = (r.get("careers_url") or "").rstrip("/").lower()
         return (r["ats"], u) if u else None
     if r.get("ats") and r.get("slug"):
@@ -1302,10 +1413,19 @@ def crawlable_companies(conn, tag=None):
     ...     {"name": "Guess", "ats": "lever", "slug": "guess"}))
     >>> crawlable_companies(conn)
     []
+
+    A capture-only company (ats = CAPTURE_ATS) is active and on the roster,
+    but there is no board to fetch -- the person saves its pages by hand --
+    so it is never handed to a fetcher, and never earns an empty streak:
+
+    >>> _ = upsert_company(conn, {"name": "Saved By Hand", "ats": CAPTURE_ATS,
+    ...                           "careers_url": "https://jobs.x.org/"})
+    >>> crawlable_companies(conn)
+    []
     """
     now = datetime.now().isoformat()
     return [c for c in get_companies(conn, active_only=True, tag=tag)
-            if _is_crawlable(c, now)]
+            if c.get("ats") != CAPTURE_ATS and _is_crawlable(c, now)]
 
 
 def reactivate_company(conn, company_id):
