@@ -314,6 +314,32 @@ websearch = [
     # { label = "My field on WeWorkRemotely", max_results = 12, query = '("term a" OR "term b") ("engineer" OR "scientist") site:weworkremotely.com' },
 ]
 
+# USAJOBS — every federal opening, which nothing else here can see: an agency
+# lab or field office runs no ATS to put in your roster and files nothing with
+# the state job bank. Worth turning on if any federal campus is near you.
+#
+# Needs a free key. Register at https://developer.usajobs.gov/apirequest/,
+# then set BOTH env vars (the email must be the address you registered — the
+# API takes it as the User-Agent and rejects a key sent with any other):
+#     [Environment]::SetEnvironmentVariable("USAJOBS_API_KEY", "...", "User")
+#     [Environment]::SetEnvironmentVariable("USAJOBS_EMAIL", "you@example.com", "User")
+#
+# Applies to EVERY track, not only ones with `sources.aggregators` on: the
+# search is location-scoped by construction, which is what a local track
+# wants. Off until you set `enabled = true`.
+[sources.usajobs]
+enabled = false
+keyword = ""                 # free text; "" = rely on `series` alone
+location = ""                # "Research Triangle Park, North Carolina"
+radius = 50                  # miles around `location`
+results_per_page = 250       # API max is 500
+# Occupational series codes — the real filter, and worth getting right. Browse
+# them at https://www.opm.gov/policy-data-oversight/classification-qualifications/
+# OMIT this key for the built-in technical set (2210 IT management, 1550
+# computer science, 0601 general health science, 0401 general biological
+# science); set it to [] to search every series.
+# series = ["2210", "1550", "0601", "0401"]
+
 # ---------------------------------------------------------------------------
 # Discovery — how the roster of companies to crawl gets built (discover.py).
 # Everything here is a starting pool; each name is probed for a real job board

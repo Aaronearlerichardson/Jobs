@@ -14,12 +14,13 @@ Fixtures are real responses with the prose redacted — the shape is what's
 under test, and nobody's job descriptions need committing.
 """
 
+import copy
 import json
 from pathlib import Path
 
 import pytest
 
-from scrapers.fetchers import ats_api, hibob
+from scrapers.fetchers import ats_api, hibob, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -58,6 +59,49 @@ def fake_get(monkeypatch):
                 return json.dumps(payload)
         monkeypatch.setattr(ats_api.SESSION, "get",
                             lambda *a, **k: _Resp())
+    return _install
+
+
+@pytest.fixture
+def usajobs_creds(monkeypatch):
+    """Credentials the USAJOBS fetcher will accept. Nothing real: the
+    session is stubbed, so these never leave the process."""
+    monkeypatch.setattr(usajobs.config, "USAJOBS_API_KEY", "test-key")
+    monkeypatch.setattr(usajobs.config, "USAJOBS_EMAIL", "someone@example.org")
+
+
+@pytest.fixture
+def usajobs_pages(monkeypatch):
+    """Serve a SEQUENCE of fixture pages and record each request.
+
+    Returns the (initially empty) call log, so a test can both drive
+    pagination and assert on the params and headers that were sent. Pages
+    past the end of the list repeat the last one — a test that asserts a
+    stop condition should fail by hanging on its own page cap, not by
+    raising IndexError from the stub.
+    """
+    def _install(payloads, status=200):
+        calls = []
+
+        class _Resp:
+            def __init__(self, payload):
+                self._payload = payload
+                self.status_code = status
+
+            def raise_for_status(self):
+                if status >= 400:
+                    raise RuntimeError(f"{status} Client Error")
+
+            def json(self):
+                return self._payload
+
+        def _get(url, **kwargs):
+            calls.append({"url": url, "params": kwargs.get("params") or {},
+                          "headers": kwargs.get("headers") or {}})
+            return _Resp(payloads[min(len(calls) - 1, len(payloads) - 1)])
+
+        monkeypatch.setattr(usajobs.SESSION, "get", _get)
+        return calls
     return _install
 
 
@@ -179,6 +223,152 @@ class TestHibob:
     def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
         fake_get(["not", "a", "dict"])
         assert hibob.fetch_hibob("x", "X") == []
+
+
+class TestUsajobs:
+    """The federal board. Credentialed, paginated, and — unlike every other
+    fetcher here — allowed to be switched off by a missing env var, so the
+    no-credentials path is as much a contract as the parsing is."""
+
+    def test_parses_postings(self, usajobs_creds, usajobs_pages,
+                             match_everything):
+        usajobs_pages([load("usajobs_search.json")])
+        jobs = usajobs.fetch_usajobs(location="Research Triangle Park, "
+                                              "North Carolina", radius=25)
+        assert len(jobs) == 2
+        j = jobs[0]
+        assert j["id"] == "usajobs_830216800"
+        assert j["title"] == "IT Specialist (Data Management)"
+        assert j["url"] == "https://www.usajobs.gov/job/830216800"
+
+    def test_company_is_the_organization_not_the_department(
+            self, usajobs_creds, usajobs_pages, match_everything):
+        """`OrganizationName` is the lab a reader recognizes; the cabinet
+        department it reports to is not. The department stays in the body
+        so it remains searchable."""
+        usajobs_pages([load("usajobs_search.json")])
+        j = usajobs.fetch_usajobs()[1]
+        assert j["company"] == ("National Institute of Environmental "
+                                "Health Sciences")
+        assert j["description"].startswith(
+            "Department of Health and Human Services.")
+
+    def test_every_duty_station_is_kept(self, usajobs_creds, usajobs_pages,
+                                        match_everything):
+        """One vacancy open at two campuses must not lose the local one."""
+        usajobs_pages([load("usajobs_search.json")])
+        assert usajobs.fetch_usajobs()[1]["location"] == (
+            "Research Triangle Park, North Carolina; Bethesda, Maryland")
+
+    def test_description_carries_summary_duties_quals_and_pay(
+            self, usajobs_creds, usajobs_pages, match_everything):
+        usajobs_pages([load("usajobs_search.json")])
+        desc = usajobs.fetch_usajobs()[0]["description"]
+        assert "Job summary redacted" in desc
+        assert "First major duty redacted" in desc
+        assert "Second major duty redacted" in desc
+        assert "Qualification summary redacted" in desc
+        assert "Salary: $99,908 - $129,878 Per Year" in desc
+
+    def test_posted_at_is_normalized(self, usajobs_creds, usajobs_pages,
+                                     match_everything):
+        usajobs_pages([load("usajobs_search.json")])
+        assert [j["posted_at"] for j in usajobs.fetch_usajobs()] == [
+            "2026-08-03", "2026-08-10"]
+
+    def test_url_falls_back_to_apply_uri(self, usajobs_creds, usajobs_pages,
+                                         match_everything):
+        usajobs_pages([load("usajobs_search.json")])
+        assert usajobs.fetch_usajobs()[1]["url"] == (
+            "https://www.usajobs.gov/job/830216801/apply")
+
+    def test_remote_hint_only_on_remote_announcements(
+            self, usajobs_creds, usajobs_pages, match_everything):
+        """`remote_signal_for` treats ANY hint as decisive, so stamping a
+        non-remote posting would advertise it as remote-eligible."""
+        usajobs_pages([load("usajobs_search.json")])
+        jobs = usajobs.fetch_usajobs()
+        assert "remote_hint" not in jobs[0]
+        assert jobs[1]["remote_hint"] == "usajobs:RemoteIndicator"
+
+    def test_pages_until_the_reported_total(self, usajobs_creds,
+                                            usajobs_pages, match_everything):
+        """SearchResultCountAll is 3 with 2 per page, so a single-page read
+        would silently drop the last announcement."""
+        page2 = load("usajobs_search.json")
+        item = copy.deepcopy(page2["SearchResult"]["SearchResultItems"][0])
+        item["MatchedObjectId"] = "830216802"
+        page2["SearchResult"]["SearchResultItems"] = [item]
+        page2["SearchResult"]["SearchResultCount"] = 1
+        calls = usajobs_pages([load("usajobs_search.json"), page2])
+
+        jobs = usajobs.fetch_usajobs()
+        assert [j["id"] for j in jobs] == [
+            "usajobs_830216800", "usajobs_830216801", "usajobs_830216802"]
+        assert [c["params"]["Page"] for c in calls] == [1, 2]
+
+    def test_stops_on_an_empty_page(self, usajobs_creds, usajobs_pages,
+                                    match_everything):
+        """A total that overstates what the API returns must not spin."""
+        empty = {"SearchResult": {"SearchResultCountAll": 99,
+                                  "SearchResultItems": []}}
+        calls = usajobs_pages([load("usajobs_search.json"), empty])
+        assert len(usajobs.fetch_usajobs()) == 2
+        assert len(calls) == 2
+
+    def test_series_and_location_become_query_params(
+            self, usajobs_creds, usajobs_pages, match_everything):
+        calls = usajobs_pages([load("usajobs_search.json")])
+        usajobs.fetch_usajobs(keyword="data", location="Durham, NC",
+                              radius=25, series=["2210", "1550"])
+        params = calls[0]["params"]
+        assert params["JobCategoryCode"] == "2210;1550"
+        assert params["LocationName"] == "Durham, NC"
+        assert params["Radius"] == 25
+        assert params["Keyword"] == "data"
+
+    def test_credentials_travel_in_the_documented_headers(
+            self, usajobs_creds, usajobs_pages, match_everything):
+        """The API keys off `Authorization-Key` plus the REGISTERED address
+        as User-Agent; the shared session's browser UA would be rejected."""
+        calls = usajobs_pages([load("usajobs_search.json")])
+        usajobs.fetch_usajobs()
+        headers = calls[0]["headers"]
+        assert headers["Authorization-Key"] == "test-key"
+        assert headers["User-Agent"] == "someone@example.org"
+        assert headers["Host"] == "data.usajobs.gov"
+
+    def test_no_credentials_returns_empty_without_fetching(
+            self, monkeypatch, usajobs_pages, match_everything):
+        monkeypatch.setattr(usajobs.config, "USAJOBS_API_KEY", "")
+        monkeypatch.setattr(usajobs.config, "USAJOBS_EMAIL", "")
+        calls = usajobs_pages([load("usajobs_search.json")])
+        assert usajobs.fetch_usajobs() == []
+        assert calls == []
+
+    def test_email_alone_is_not_enough(self, monkeypatch, usajobs_pages,
+                                       match_everything):
+        monkeypatch.setattr(usajobs.config, "USAJOBS_API_KEY", "")
+        monkeypatch.setattr(usajobs.config, "USAJOBS_EMAIL", "a@b.org")
+        usajobs_pages([load("usajobs_search.json")])
+        assert usajobs.fetch_usajobs() == []
+
+    def test_http_error_returns_empty(self, usajobs_creds, usajobs_pages,
+                                      match_everything):
+        usajobs_pages([load("usajobs_search.json")], status=401)
+        assert usajobs.fetch_usajobs() == []
+
+    def test_request_exception_returns_empty(self, usajobs_creds,
+                                             monkeypatch, match_everything):
+        def _boom(*a, **k):
+            raise RuntimeError("connection reset")
+        monkeypatch.setattr(usajobs.SESSION, "get", _boom)
+        assert usajobs.fetch_usajobs() == []
+
+    def test_unexpected_shape_returns_empty(self, usajobs_creds,
+                                            usajobs_pages, match_everything):
+        usajobs_pages([["not", "a", "dict"]])
+        assert usajobs.fetch_usajobs() == []
 
 
 class TestRelevanceGate:
