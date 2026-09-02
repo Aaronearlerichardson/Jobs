@@ -829,7 +829,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 from core.locality import NC_HQ_RE as _NC_HQ_RE  # "<Triangle city>, NC" HQ/office signal
 
 
-def _hq_match_beyond_brand(text, name):
+def _hq_match_beyond_brand(text, name, hq_re=None):
     """True if `text` carries a "<place>, ST" match whose place is NOT just
     the company's own name.
 
@@ -837,19 +837,25 @@ def _hq_match_beyond_brand(text, name):
     locality town — so every page of garnerhealth.com address-matched and
     the 2026-08-28 discover run activated it as NC-local with zero NC jobs.
     A match whose place tokens all appear in the company name is brand
-    text; a match on any OTHER configured place still counts:
+    text; a match on any OTHER configured place still counts.
 
-    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health")
+    `hq_re` defaults to the profile-derived locality pattern; the examples
+    pass their own so they hold on any profile (the suite must pass on
+    profile.example.toml, whose [locality] lists no Garner — a worktree
+    without a personal profile failed this doctest on 2026-09-01):
+
+    >>> pat = re.compile(r"\b(?:Garner|Durham),\s*NC\b")
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health", pat)
     False
-    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio")
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio", pat)
     True
-    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health")
+    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health", pat)
     True
-    >>> _hq_match_beyond_brand("no address here", "Acme Bio")
+    >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
     False
     """
     squashed = _NONALNUM_RE.sub("", (name or "").lower())
-    for m in _NC_HQ_RE.finditer(text or ""):
+    for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
         toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
         place_toks = toks[:-1] or toks          # drop the state suffix token
         if all(t in squashed for t in place_toks):
