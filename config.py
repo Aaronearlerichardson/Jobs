@@ -634,6 +634,14 @@ RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
 ROBOTS_EXEMPT_HOSTS = tuple(
     s.strip().lower() for s in _pol.get("robots_exempt_hosts", []) if s.strip())
 
+# Public resolvers the web-search client (scrapers/ddg.py) switches to when
+# the search library's own resolver is refused. Seen with a VPN up alongside
+# a second connected adapter: the OS resolver works, the library's does not.
+# An empty list disables the fallback; the run then skips web search.
+SEARCH_DNS_FALLBACK = tuple(
+    s.strip() for s in _pol.get("search_dns_fallback", ["1.1.1.1", "8.8.8.8"])
+    if s.strip())
+
 # robots.txt fetch timeouts, as (connect, read).
 #
 # Split because the two phases fail for different reasons. Discovery probes a

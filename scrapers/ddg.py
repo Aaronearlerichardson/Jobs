@@ -40,6 +40,18 @@ WALL_BUDGET = 25.0              # hard per-query wall-clock cap (seconds)
 RETRIES = 2
 RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 
+# ddgs (via primp) resolves hostnames with its OWN resolver rather than the
+# OS one, and on a multi-adapter machine (VPN up, Wi-Fi also up) it can pick
+# a server that answers REFUSED for every name while the OS resolver works
+# fine. First sighting switches ddgs's client to config.SEARCH_DNS_FALLBACK
+# (primp accepts a `dns_resolver` list that ddgs does not expose) and retries;
+# if that is refused too, or no fallback is configured, the breaker trips
+# and every later query in the process returns [] at once instead of
+# burning RETRIES x RETRY_PAUSE per name. `reset_resolver()` re-arms both.
+_RESOLVER_DOWN = False
+_RESOLVER_OVERRIDE = None       # (module, original Client) while installed
+_RESOLVER_MARKERS = ("dns error", "query refused")
+
 
 # ─── Disk cache ──────────────────────────────────────────────────────────
 
@@ -138,6 +150,75 @@ def _ensure_ddgs_engines():
 
 # ─── Search ──────────────────────────────────────────────────────────────
 
+def _resolver_failure(exc):
+    """True when `exc` is the library's own resolver failing, as opposed
+    to a throttle or an engine error.
+
+    >>> _resolver_failure(Exception("ConnectError: dns error > DNS error: "
+    ...                             "error response: Query Refused"))
+    True
+    >>> _resolver_failure(Exception("No results found."))
+    False
+    """
+    msg = str(exc).lower()
+    return any(m in msg for m in _RESOLVER_MARKERS)
+
+
+def _http_client_module():
+    """ddgs's HTTP-client module, where `primp.Client` is looked up each
+    time a client is built (None when ddgs is not installed)."""
+    try:
+        import ddgs.http_client as hc
+        return hc
+    except Exception:
+        return None
+
+
+def _install_resolver(query):
+    """Route ddgs's name resolution through config.SEARCH_DNS_FALLBACK by
+    wrapping the `primp.Client` factory it builds its client from. Returns
+    True when the override was installed just now (the caller retries),
+    False when there is nothing to fall back to or it is already in place."""
+    global _RESOLVER_OVERRIDE
+    servers = [s for s in getattr(config, "SEARCH_DNS_FALLBACK", ()) if s]
+    hc = _http_client_module()
+    if _RESOLVER_OVERRIDE is not None or not servers or hc is None:
+        return False
+    orig = hc.primp.Client
+
+    def client(*a, **kw):
+        kw.setdefault("dns_resolver", list(servers))
+        return orig(*a, **kw)
+
+    hc.primp.Client = client
+    _RESOLVER_OVERRIDE = (hc, orig)
+    print(f"  [!] web search: the search library's resolver was refused on "
+          f"{query[:40]!r}; retrying through {', '.join(servers)} for the "
+          f"rest of this run (a VPN plus a second connected adapter is the "
+          f"usual cause).")
+    return True
+
+
+def _trip_resolver(query, exc):
+    global _RESOLVER_DOWN
+    if not _RESOLVER_DOWN:
+        _RESOLVER_DOWN = True
+        print(f"  [!] web search unreachable: the search library's resolver "
+              f"was refused ({type(exc).__name__} on {query[:40]!r}). "
+              f"Skipping web search for the rest of this run.")
+
+
+def reset_resolver():
+    """Re-arm the resolver breaker and drop the DNS override (tests, or a
+    long-lived process after the network changed)."""
+    global _RESOLVER_DOWN, _RESOLVER_OVERRIDE
+    _RESOLVER_DOWN = False
+    if _RESOLVER_OVERRIDE is not None:
+        hc, orig = _RESOLVER_OVERRIDE
+        hc.primp.Client = orig
+        _RESOLVER_OVERRIDE = None
+
+
 def _query(DDGS, query, max_results, page, budget, retries):
     """One query with retry/backoff. Runs on the worker thread; the caller
     may have stopped waiting for it by the time it returns."""
@@ -151,6 +232,12 @@ def _query(DDGS, query, max_results, page, budget, retries):
             with DDGS(timeout=min(10, int(budget))) as ddg:
                 return list(ddg.text(query, **kwargs))
         except Exception as e:
+            if _resolver_failure(e):
+                if _install_resolver(query):
+                    return _query(DDGS, query, max_results, page, budget,
+                                  retries)
+                _trip_resolver(query, e)
+                return []
             if attempt < retries:
                 time.sleep(RETRY_PAUSE * (attempt + 1))
                 continue
@@ -174,6 +261,9 @@ def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
     if cached is not None:
         _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
         return cached
+    if _RESOLVER_DOWN:
+        _log.debug("ddg skipped, resolver breaker tripped: %s", query)
+        return []
     DDGS = _ddgs_class()
     if DDGS is None:
         return []

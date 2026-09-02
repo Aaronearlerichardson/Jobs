@@ -224,6 +224,12 @@ multi_division_mission_floor = 0.6
 # See the PeopleAdmin bullet in README.md for both.
 # robots_exempt_hosts = ["api.smartrecruiters.com", ".peopleadmin.com"]
 
+# Public DNS servers the web-search client switches to when the search
+# library's own resolver answers "refused" (seen with a VPN up alongside a
+# second connected adapter; the crawler's other requests are unaffected).
+# Set to [] to disable the fallback.
+# search_dns_fallback = ["1.1.1.1", "8.8.8.8"]
+
 # robots.txt fetch timeout, split into (connect, read) seconds.
 #
 # Discovery probes speculative `careers.<name>.com` hosts. The ones whose
