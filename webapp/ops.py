@@ -215,13 +215,12 @@ def _op_nlx(p):
     print(f"  {total} new job(s) ingested from the NLx feed.")
 
 
-# The bulk-discovery ops (discover-local, dork, discover-term) are CLI-only
-# now: `python discover.py --local / --dork / "<term>"`. A 29-minute
-# discover-local run found 4 new boards, an ATS-dork sweep names companies
-# after a de-hyphenated slug, and 84 pasted companies produced one good job
-# ever — none of that is worth a button that ties up the single op slot for
-# half an hour. What the UI keeps is the targeted paths (add-names,
-# add-board, add-job) plus the Review queue every one of them feeds.
+# The bulk-discovery ops (discover-local, dork, discover-term) are slow (a
+# discover-local pass can hold the single op slot for half an hour) and
+# low-yield now that the roster is saturated, but they stay available here
+# as well as on the CLI (`python discover.py --local / --dork / "<term>"`).
+# Every path, bulk or targeted, writes candidates to the Review queue;
+# nothing goes live until a person confirms it.
 
 
 def _op_add_names(p):
@@ -313,6 +312,26 @@ OPS = {
         "label": "Add companies from pasted text",
         "engine": "local",
         "fn": lambda p: _op_add_names(p),
+    },
+    "discover-local": {
+        "label": "Discover local companies",
+        "engine": "local",
+        "fn": lambda p: __import__(
+            "discovery.local_sourcing",
+            fromlist=["populate_companies"]
+        ).populate_companies(dork=not p.get("no_dork")),
+    },
+    "dork": {
+        "label": "ATS dork sweep",
+        "engine": "local",
+        "fn": lambda p: __import__(
+            "discovery.ats_dork", fromlist=["run_ddgs_dorks"]
+        ).run_ddgs_dorks(),
+    },
+    "discover-term": {
+        "label": "Discover companies by term",
+        "engine": "local",
+        "fn": lambda p: _op_discover(p),
     },
     "score-missions": {
         "label": "Score missions",

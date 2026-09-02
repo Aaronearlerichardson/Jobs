@@ -42,13 +42,13 @@ class TestOps:
     def test_every_op_has_a_callable(self):
         assert all(callable(o["fn"]) for o in webapp.OPS.values())
 
-    def test_the_bulk_discovery_ops_left_the_ui(self):
-        """A 29-minute discover-local run found 4 new boards, and a dork
-        sweep names a company after a de-hyphenated slug. Neither is worth a
-        button that holds the single op slot for half an hour -- they run
-        from discover.py now."""
-        assert not ({"discover-local", "dork", "discover-term"}
-                    & set(webapp.OPS))
+    def test_the_bulk_discovery_ops_are_available_in_the_ui(self):
+        """Slow and low-yield, but the person running the crawler decides
+        when that trade is worth it: the sweeps are buttons as well as
+        discover.py flags. All of them feed the Review queue."""
+        assert {"discover-local", "dork", "discover-term", "reresolve"} <= set(webapp.OPS)
+        assert all(webapp.OPS[n]["engine"] == "local"
+                   for n in ("discover-local", "dork", "discover-term"))
 
     def test_the_targeted_add_paths_stay(self):
         assert {"add-names", "add-board", "add-job"} <= set(webapp.OPS)
