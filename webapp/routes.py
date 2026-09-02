@@ -94,6 +94,8 @@ _JOB_FIELDS = (
     "fit_reason", "fit_gates", "fit_domain", "fit_function", "fit_stack",
     "fit_seniority", "posted_at", "first_seen", "last_seen", "status",
     "disposition", "disposition_note", "disposition_at",
+    # Application-pipeline tracking (store.PIPELINE_FIELDS + the stamp).
+    "applied_at", "followup_at", "contact", "referral", "outcome_reason",
 )
 
 
@@ -183,13 +185,42 @@ def api_disposition(job_id):
     return jsonify(ok=True, job_id=row["job_id"])
 
 
+@app.post("/api/job/<job_id>/pipeline")
+def api_pipeline_fields(job_id):
+    """Edit one application's tracking fields (store.PIPELINE_FIELDS).
+
+    Only the keys actually present in the body are written, so the SPA's
+    save-on-change editor can send one field at a time without blanking the
+    others. The whitelist lives in the store, not here.
+    """
+    p = request.get_json(silent=True) or {}
+    fields = {k: p[k] for k in store.PIPELINE_FIELDS if k in p}
+    conn = _conn(_track())
+    row, err = store.update_pipeline_fields(conn, job_id, **fields)
+    conn.close()
+    if err:
+        return jsonify(error=err), 400
+    return jsonify(ok=True, job=_job_json(row, _today()))
+
+
 @app.get("/api/pipeline")
 def api_pipeline():
     conn = _conn(_track())
-    rows = store.get_pipeline(conn)
-    conn.close()
     today = _today()
-    return jsonify([_job_json(r, today) for r in rows])
+    rows = [_job_json(r, today) for r in store.get_pipeline(conn)]
+    due = [j["job_id"] for j in store.followups_due(conn, today)]
+    conn.close()
+    return jsonify(rows=rows, followups_due=due)
+
+
+@app.get("/api/report/conversion")
+def api_conversion():
+    """Applications per fit band x geo_mode, with the interview rate — the
+    Pipeline tab's answer to "which kind of job is actually converting?"."""
+    conn = _conn(_track())
+    report = store.conversion_report(conn)
+    conn.close()
+    return jsonify(report)
 
 
 @app.get("/api/companies")

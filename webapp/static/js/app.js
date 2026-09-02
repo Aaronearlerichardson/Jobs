@@ -3,7 +3,8 @@ const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
-const state = { jobs: [], pipeline: [], companies: [], stats: {},
+const state = { jobs: [], pipeline: [], pipelineDue: [], conversion: [],
+                companies: [], stats: {},
                 tracks: [], track: null, config: null,
                 expanded: null, logTotal: 0, wasRunning: false };
 
@@ -266,21 +267,14 @@ async function mark(id, disp) {
 }
 
 /* ---------------- pipeline ---------------- */
-function renderPipeline() {
-  const groups = ["applied", "interviewing", "saved", "rejected", "dismissed"];
-  const byDisp = Object.fromEntries(groups.map(g => [g, []]));
-  state.pipeline.forEach(j => (byDisp[j.disposition] || []).push(j));
-  const total = state.pipeline.length;
-  if (!total) {
-    $("#pipeline").innerHTML =
-      `<div class="empty">Nothing decided yet — use the buttons on the Jobs tab.
-       Applied/interviewing land here; dismissals teach the scorer.</div>`;
-    return;
-  }
-  $("#pipeline").innerHTML = groups.filter(g => byDisp[g].length).map(g => `
-    <div class="pgroup"><h3>${g} (${byDisp[g].length})</h3>
-    <table><tbody>${byDisp[g].map(j => `
-      <tr>
+/* Must match store.OUTCOME_REASONS: the API validates against that tuple,
+   so a value invented here is refused rather than written. */
+const OUTCOME_REASONS = ["no-response", "rejected-screen", "rejected-interview",
+                         "withdrew", "closed", "other"];
+
+function pipeRow(j, g) {
+  return `
+      <tr data-job="${esc(j.job_id)}">
         <td style="width:110px">${esc((j.disposition_at || "").slice(0,10))}</td>
         <td class="title-cell">
           <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
@@ -295,13 +289,127 @@ function renderPipeline() {
           ${g !== "rejected" ? `<button data-d="rejected">rejected</button>` : ""}
           <button data-d="clear">clear</button>
         </div></td>
-      </tr>`).join("")}</tbody></table></div>`).join("");
-  document.querySelectorAll("#pipeline button[data-d]").forEach(b => {
-    const tr = b.closest("tr");
-    const url = tr.querySelector("a").href;
-    const job = state.pipeline.find(j => j.url === url);
-    b.onclick = () => job && mark(job.job_id, b.dataset.d);
-  });
+      </tr>`;
+}
+
+/* The tracking editor under one pipeline row. Every control saves on its
+   own `change`, so there is no save button to forget — and no half-filled
+   row that never reached the store. */
+function pipeEditor(j) {
+  return `
+      <tr class="pedit" data-job="${esc(j.job_id)}"><td colspan="5">
+        <label>follow-up <input type="date" data-f="followup_at"
+          value="${esc((j.followup_at || "").slice(0, 10))}"></label>
+        <label>contact <input type="text" data-f="contact"
+          placeholder="recruiter / referrer" value="${esc(j.contact || "")}"></label>
+        <label><input type="checkbox" data-f="referral"
+          ${j.referral ? "checked" : ""}> referral</label>
+        <label>outcome <select data-f="outcome_reason">
+          <option value="">—</option>
+          ${OUTCOME_REASONS.map(o =>
+            `<option ${j.outcome_reason === o ? "selected" : ""}>${o}</option>`).join("")}
+        </select></label>
+        ${j.applied_at
+           ? `<span class="chip tier">applied ${esc(j.applied_at.slice(0, 10))}</span>`
+           : ""}
+      </td></tr>`;
+}
+
+/* Follow-ups whose date has arrived, straight from the server's list (it
+   owns "today" and the still-live rule). Rendered into its own container so
+   an edit can refresh it without tearing down the editors. */
+function renderDue() {
+  const el = $("#pipe-due");
+  if (!el) return;
+  const due = new Set(state.pipelineDue || []);
+  const rows = state.pipeline.filter(j => due.has(j.job_id));
+  el.innerHTML = !rows.length ? "" : `
+    <div class="pgroup"><h3>follow-ups due (${rows.length})</h3>
+    <table><tbody>${rows.map(j => `
+      <tr>
+        <td style="width:110px">${esc((j.followup_at || "").slice(0,10))}</td>
+        <td class="title-cell">
+          <a href="${esc(j.url)}" target="_blank" rel="noopener">${esc(j.title)}</a>
+          <div class="co">${esc(j.company_name)}</div></td>
+        <td><span class="chip disp">${esc(j.disposition)}</span></td>
+        <td class="note">${esc(j.contact || "")}</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+/* Which KIND of application converts, not which job scored best: the
+   interview rate per fit band x geo is the one number the ranking cannot
+   tell you. */
+function renderConv() {
+  const el = $("#pipe-conv");
+  if (!el) return;
+  const rows = state.conversion || [];
+  el.innerHTML = !rows.length ? "" : `
+    <div class="pgroup"><h3>conversion — fit band × geo</h3>
+    <table><thead><tr>
+      <th>fit</th><th>geo</th><th class="num">apps</th><th class="num">live</th>
+      <th class="num">rejected</th><th class="num">interviews</th>
+      <th class="num">rate</th></tr></thead>
+    <tbody>${rows.map(r => `
+      <tr>
+        <td>${esc(r.band)}</td><td>${esc(r.geo_mode)}</td>
+        <td class="num">${r.applications}</td>
+        <td class="num">${r.applied + r.interviewing}</td>
+        <td class="num">${r.rejected}</td>
+        <td class="num">${r.interviews}</td>
+        <td class="num">${Math.round(r.interview_rate * 100)}%</td>
+      </tr>`).join("")}</tbody></table></div>`;
+}
+
+function renderPipeline() {
+  const groups = ["applied", "interviewing", "saved", "rejected", "dismissed"];
+  const byDisp = Object.fromEntries(groups.map(g => [g, []]));
+  state.pipeline.forEach(j => (byDisp[j.disposition] || []).push(j));
+  const total = state.pipeline.length;
+  if (!total) {
+    $("#pipeline").innerHTML =
+      `<div class="empty">Nothing decided yet — use the buttons on the Jobs tab.
+       Applied/interviewing land here; dismissals teach the scorer.</div>`;
+    return;
+  }
+  $("#pipeline").innerHTML =
+    `<div id="pipe-due"></div><div id="pipe-groups"></div><div id="pipe-conv"></div>`;
+  $("#pipe-groups").innerHTML = groups.filter(g => byDisp[g].length).map(g => `
+    <div class="pgroup"><h3>${g} (${byDisp[g].length})</h3>
+    <table><tbody>${byDisp[g].map(j => pipeRow(j, g) + pipeEditor(j)).join("")}
+    </tbody></table></div>`).join("");
+  renderDue();
+  renderConv();
+  document.querySelectorAll("#pipe-groups button[data-d]").forEach(b =>
+    b.onclick = () => mark(b.closest("tr").dataset.job, b.dataset.d));
+  document.querySelectorAll("#pipe-groups [data-f]").forEach(el =>
+    el.onchange = () => savePipelineField(el));
+}
+
+async function savePipelineField(el) {
+  const id = el.closest("[data-job]").dataset.job;
+  const f = el.dataset.f;
+  const v = el.type === "checkbox" ? (el.checked ? 1 : 0) : el.value;
+  try {
+    await post(withTrack(`/api/job/${encodeURIComponent(id)}/pipeline`), { [f]: v });
+    toast(`saved ${f.replace(/_/g, " ")}`);
+    await refreshPipelineDerived();
+  } catch (e) { toast("save failed: " + e.message); }
+}
+
+/* Refresh ONLY the two views derived from the tracking fields. A full
+   renderPipeline() here would rebuild the editor the user just tabbed out
+   of — and pull its replacement out from under whatever they clicked
+   next. */
+async function refreshPipelineDerived() {
+  try {
+    const [p, c] = await Promise.all([api(withTrack("/api/pipeline")),
+                                      api(withTrack("/api/report/conversion"))]);
+    state.pipeline = p.rows;
+    state.pipelineDue = p.followups_due;
+    state.conversion = c;
+    renderDue();
+    renderConv();
+  } catch (e) { toast("pipeline refresh failed: " + e.message); }
 }
 
 /* ---------------- companies ---------------- */
@@ -813,11 +921,14 @@ async function loadJobs() {
   state.jobs = await api(withTrack(`/api/jobs?closed=${closed}&dispositioned=${disp}`));
 }
 async function refreshData() {
-  const [stats, , pipeline, companies] =
+  const [stats, , pipeline, companies, conversion] =
     await Promise.all([api(withTrack("/api/stats")), loadJobs(),
                        api(withTrack("/api/pipeline")),
-                       api(withTrack("/api/companies"))]);
-  state.stats = stats; state.pipeline = pipeline; state.companies = companies;
+                       api(withTrack("/api/companies")),
+                       api(withTrack("/api/report/conversion"))]);
+  state.stats = stats; state.companies = companies;
+  state.pipeline = pipeline.rows; state.pipelineDue = pipeline.followups_due;
+  state.conversion = conversion;
   renderTiles(); renderJobs(); renderPipeline(); renderCompanies();
 }
 

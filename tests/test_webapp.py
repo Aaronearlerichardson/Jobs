@@ -126,6 +126,104 @@ class TestCompanyCrawlState:
         assert client.post("/api/company/9999/reactivate").status_code == 404
 
 
+class TestPipelineApi:
+    """The Pipeline tab past 'applied': the tracking fields it edits, the
+    follow-up list it groups by, and the conversion table it renders."""
+
+    def _pipeline_store(self, tmp_path, monkeypatch):
+        """Point the default track at a throwaway DB holding one live
+        application. These tests write, and the suite may never touch the
+        real store."""
+        import config
+        from core import store
+        db_path = tmp_path / "pipeline.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        store.upsert_job(conn, {
+            "job_id": "p1", "company_id": cid, "company_name": "Acme",
+            "title": "Imaging Scientist", "url": "https://acme.io/p1",
+            "location": "Anywhere", "geo_mode": "onsite",
+            "resume_fit_score": 0.54})
+        store.set_disposition(conn, "p1", "applied")
+        conn.close()
+        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
+                            "db_path", db_path)
+        return db_path
+
+    def _row(self, client):
+        return json.loads(client.get("/api/pipeline").data)["rows"][0]
+
+    def test_pipeline_exposes_the_tracking_columns(self, client, tmp_path,
+                                                   monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        assert {"applied_at", "followup_at", "contact", "referral",
+                "outcome_reason"} <= set(self._row(client))
+
+    def test_tracking_fields_round_trip(self, client, tmp_path, monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        resp = client.post("/api/job/p1/pipeline",
+                           json={"followup_at": "2026-09-08",
+                                 "contact": "Dana R", "referral": 1,
+                                 "outcome_reason": "rejected-interview"})
+        assert resp.status_code == 200
+        row = self._row(client)
+        assert row["followup_at"] == "2026-09-08"
+        assert row["contact"] == "Dana R"
+        assert row["referral"] == 1
+        assert row["outcome_reason"] == "rejected-interview"
+
+    def test_one_field_at_a_time_leaves_the_others_alone(self, client,
+                                                         tmp_path, monkeypatch):
+        # The SPA's editor saves on each control's own `change`.
+        self._pipeline_store(tmp_path, monkeypatch)
+        client.post("/api/job/p1/pipeline", json={"contact": "Dana R"})
+        client.post("/api/job/p1/pipeline", json={"referral": 1})
+        row = self._row(client)
+        assert row["contact"] == "Dana R" and row["referral"] == 1
+
+    def test_a_field_outside_the_whitelist_is_ignored(self, client, tmp_path,
+                                                      monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        assert client.post("/api/job/p1/pipeline",
+                           json={"resume_fit_score": 0}).status_code == 200
+        assert self._row(client)["resume_fit_score"] == 0.54
+
+    def test_an_outcome_outside_the_vocabulary_400s(self, client, tmp_path,
+                                                    monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        assert client.post("/api/job/p1/pipeline",
+                           json={"outcome_reason": "ghosted"}).status_code == 400
+
+    def test_unknown_job_400s(self, client, tmp_path, monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        assert client.post("/api/job/nope/pipeline",
+                           json={"contact": "X"}).status_code == 400
+
+    def test_followups_due_appears_once_the_date_has_arrived(self, client,
+                                                             tmp_path,
+                                                             monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
+        client.post("/api/job/p1/pipeline", json={"followup_at": "2000-01-01"})
+        assert json.loads(
+            client.get("/api/pipeline").data)["followups_due"] == ["p1"]
+
+    def test_a_future_followup_is_not_due(self, client, tmp_path, monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        client.post("/api/job/p1/pipeline", json={"followup_at": "2099-01-01"})
+        assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
+
+    def test_conversion_report_bands_the_application(self, client, tmp_path,
+                                                     monkeypatch):
+        self._pipeline_store(tmp_path, monkeypatch)
+        rep = json.loads(client.get("/api/report/conversion").data)
+        assert len(rep) == 1
+        assert rep[0]["band"] == "mid" and rep[0]["geo_mode"] == "onsite"
+        assert rep[0]["applications"] == 1
+        assert rep[0]["interview_rate"] == 0.0
+
+
 class TestAssets:
     def test_index_cache_busts_its_assets(self, client):
         html = client.get("/").data.decode()
