@@ -62,11 +62,6 @@ def seed_tag_for(ats):
     return entry[1] if entry else None
 
 
-def pause_for(ats):
-    entry = ATS_REGISTRY.get(ats)
-    return entry[2] if entry else 1.0
-
-
 def store_slug(company):
     """The registry-normalized slug for a store company row."""
     if company.get("ats") == "workday":

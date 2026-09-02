@@ -167,11 +167,6 @@ def remote_signal(location, description=""):
     return None
 
 
-def is_remote_eligible(location, description=""):
-    """True iff the posting advertises remote-eligible work."""
-    return remote_signal(location, description) is not None
-
-
 def remote_signal_for(job):
     """Job-dict-aware remote signal.
 

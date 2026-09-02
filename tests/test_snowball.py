@@ -1,5 +1,5 @@
 """Snowball extraction: mining third-party company names out of already-
-stored job descriptions (discovery/snowball.py).
+stored job descriptions (tools/snowball.py).
 
 Fixture postings below are written in realistic biotech/health-tech
 job-posting prose -- partnership/investor/acquisition language plus the
@@ -10,7 +10,7 @@ path, whose permissive parser let "Home"/"My Network"/"Create cover letter"
 through), not toy strings.
 """
 
-import discovery.snowball as sb
+import tools.snowball as sb
 from core.store import connect, upsert_company, upsert_job
 
 # --------------------------------------------------------------------------- #

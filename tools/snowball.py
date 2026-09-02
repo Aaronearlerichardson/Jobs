@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Snowball sourcing: mine ALREADY-STORED job descriptions for the names of
 OTHER organizations -- partners, parents, acquirers, investors, clients,
 collaborating institutions -- that never appear in any directory or search
@@ -32,9 +33,15 @@ import argparse
 import re
 import sys
 from collections import defaultdict
+from pathlib import Path
 
-import config
-from core.store import connect, get_companies
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+import config  # noqa: E402
+
+from core.store import connect, get_companies  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 #  Name normalization (same key everywhere else in discovery/) --------------- #

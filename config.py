@@ -240,11 +240,10 @@ EXCLUDE_BOILERPLATE_PHRASES = list(_exc.get("boilerplate_phrases", []))
 KEYWORDS_BY_TRACK = {k: v for k, v in _kw.items() if isinstance(v, dict)}
 EXCLUDE_BY_TRACK   = {k: v for k, v in _exc.items() if isinstance(v, dict)}
 
-LOCATION_ONSITE_INCLUDE = list(_loc.get("onsite", []))
-LOCATION_REMOTE_INCLUDE = list(_loc.get("remote", []))
 ACCEPT_REMOTE           = bool(_loc.get("accept_remote", False))
 LOCATION_EXCLUDE        = list(_loc.get("exclude", []))
-LOCATION_INCLUDE        = LOCATION_ONSITE_INCLUDE + LOCATION_REMOTE_INCLUDE
+# [location] onsite + remote, flattened - nothing reads the two halves apart.
+LOCATION_INCLUDE        = list(_loc.get("onsite", [])) + list(_loc.get("remote", []))
 
 # --- Remote-eligibility detection (core/remote_filter.py) ---------------
 REMOTE_LOC_TOKENS     = list(_loc.get("remote_tokens", []))
