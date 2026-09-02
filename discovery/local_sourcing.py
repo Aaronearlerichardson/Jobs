@@ -13,8 +13,7 @@ health / bio / science / tech employers with a Triangle-NC presence:
 import logging
 import re
 import time
-from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
-                                as_completed, wait as fut_wait)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime
 
@@ -25,46 +24,10 @@ from core import tags as company_tags
 _log = logging.getLogger("discovery")
 
 from scrapers import ddg
+from scrapers.parallel import drain_or_abandon
 from scrapers.http import HEADERS, SESSION
 from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
 from .names import domain_tokens, name_key, slug_guesses
-
-
-# Resolution watchdog: abandon a pass's remaining names if NO resolution
-# completes for this long. Generous on purpose — a normal resolve chains a
-# handful of 6-15s-bounded fetches; only a genuinely wedged one exceeds this.
-RESOLVE_STALL_S = 300.0
-
-
-def _drain_or_abandon(ex, futs, consume, stalled):
-    """Drain `futs` ({future: name}) through consume(future, name); if no
-    future completes within RESOLVE_STALL_S, report each remaining name to
-    stalled(name) instead and shut the executor down WITHOUT joining its
-    threads.
-
-    Notes:
-        The `with ThreadPoolExecutor(...)` form joins every worker on exit,
-        so one wedged resolution (fetch_company_nc on a sprawling "custom
-        board" is bounded per request, not in total) used to hold the web
-        UI's one-op-at-a-time slot until the app was restarted — 2026-08-28:
-        an add-names run finished 59 of 60 names in 8 minutes, then hung
-        >1h on the last. Behavior is enforced by tests/test_parsers.py::
-        TestResolutionStallWatchdog.
-    """
-    pending = set(futs)
-    while pending:
-        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
-                                 return_when=FIRST_COMPLETED)
-        if not done:
-            for fut in pending:
-                n = futs[fut]
-                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
-                      f"- abandoned")
-                stalled(n)
-            break
-        for fut in done:
-            consume(fut, futs[fut])
-    ex.shutdown(wait=False, cancel_futures=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -243,7 +206,7 @@ def _names_from_html(html):
     return {n for n in out if _looks_like_company(n)}
 
 
-def scrape_directory_names(url, timeout=20):
+def scrape_directory_names(url, timeout=config.FETCH_TIMEOUT):
     """Employer names from a directory page's `/company/<slug>/` links — works
     for any site with that shape (RTP.org, Built In, chamber directories).
     Server-rendered only; JS-loaded facets are out of scope."""
@@ -277,7 +240,7 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     names = set()
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
-            html = SESSION.get(u, timeout=12, headers=HEADERS).text
+            html = SESSION.get(u, timeout=config.FETCH_TIMEOUT, headers=HEADERS).text
         except Exception:
             continue
         names |= _names_from_html(html)
@@ -363,7 +326,7 @@ from core.locality import is_nc as _has_nc  # single source of truth for NC loca
 def _nc_count_greenhouse(slug):
     try:
         r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         return sum(1 for j in r.json().get("jobs", [])
                    if _has_nc(j.get("location", {}).get("name", "")))
     except Exception:
@@ -373,7 +336,7 @@ def _nc_count_greenhouse(slug):
 def _nc_count_lever(slug):
     try:
         r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         return sum(1 for j in r.json()
                    if _has_nc(j.get("categories", {}).get("location", "")))
     except Exception:
@@ -383,7 +346,7 @@ def _nc_count_lever(slug):
 def _nc_count_ashby(slug):
     try:
         r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                         timeout=15, headers=HEADERS)
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         data = r.json()
         return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
                    if _has_nc(j.get("location", "")))
@@ -397,7 +360,7 @@ def _nc_count_workday(tenant, pod, site):
     try:
         r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
                                      "searchText": _wd_search_text()},
-                          timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
+                          timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
         return int(r.json().get("total", 0) or 0)
     except Exception:
         return 0
@@ -586,7 +549,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                 sniff_misses.append(h)
 
         ex = ThreadPoolExecutor(max_workers=max_workers)
-        _drain_or_abandon(
+        drain_or_abandon(
             ex, {ex.submit(_sniff_one, n): n for n in todo}, _sniff_done,
             lambda n: sniff_misses.append(
                 {"name": n, "reason": "fetch-error:stalled"}))
@@ -656,7 +619,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                     sniff_misses.append(h)
 
             ex = ThreadPoolExecutor(max_workers=min(max_workers, len(todo)))
-            _drain_or_abandon(
+            drain_or_abandon(
                 ex, {ex.submit(_websearch_one, n): n for n in todo},
                 _websearch_done,
                 lambda n: sniff_misses.append(
@@ -784,7 +747,8 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
             continue
         seen.add(u)
         try:
-            r = SESSION.get(u, timeout=12, headers=HEADERS, allow_redirects=True)
+            r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
+                            allow_redirects=True)
             if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
                 return True
         except Exception:
@@ -798,15 +762,15 @@ def _sample_titles(hit, n=6):
     try:
         if ats == "greenhouse":
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             return [j.get("title", "") for j in r.json().get("jobs", [])[:n]]
         if ats == "lever":
             r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             return [j.get("text", "") for j in r.json()[:n]]
         if ats == "ashby":
             r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                             timeout=15, headers=HEADERS)
+                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             # Ashby's posting API says "jobs"; only Workday (below) says
             # "jobPostings". Reading the wrong one here handed the mission
             # scorer an empty title list, so every Ashby company was scored
@@ -819,7 +783,7 @@ def _sample_titles(hit, n=6):
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
             r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
                                          "searchText": _wd_search_text()},
-                              timeout=15, headers={**HEADERS, "Content-Type": "application/json"})
+                              timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
     except Exception:
         return []
@@ -875,47 +839,47 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
         return h, score_company_mission(h["name"],
                                         " | ".join(t for t in titles if t))
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed)))) as ex:
-        futs = {ex.submit(_score_one, h): h for h in confirmed}
-        for fut in as_completed(futs):
-            try:
-                h, (tier, score, reason) = fut.result()
-            except Exception as e:
-                print(f"    [!] mission scoring failed for "
-                      f"{futs[fut]['name']!r}: {e}")
-                continue
-            # Shared activation rule (core.claude.is_active_mission):
-            # active tiers, an UNAVAILABLE (None) score, or a multi-division
-            # conglomerate whose subdivisions are filtered at crawl time.
-            active = is_active_mission(tier, h["name"], include_missions)
-            row = {
-                "name": h["name"], "ats": h["ats"],
-                "slug": h["slug"] if h["ats"] != "workday" else None,
-                "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
-                "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
-                "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
-                "careers_url": h.get("careers_url"),
-                "local_job_count": h["nc"], "total_job_count": h["count"],
-                "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-                "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
-                "last_probed": datetime.now().isoformat(),
-            }
-            dup = _board_already_tracked(conn, row)
-            if dup:
-                _report_dup_board(h["name"], dup)
-                continue
-            # Nothing an automated pass finds joins the roster by itself: a
-            # name the store has never confirmed lands in the review queue
-            # (core.store.mark_pending) for a person to accept or reject.
-            pending = not is_confirmed_company(conn, h["name"])
-            if pending:
-                row = mark_pending(row)
-            upsert_company(conn, row)
-            written.append(dict(row))
-            flag = ("PENDING REVIEW" if pending
-                    else "active" if active else "INACTIVE(other)")
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+    def _score_done(fut, name):
+        try:
+            h, (tier, score, reason) = fut.result()
+        except Exception as e:
+            print(f"    [!] mission scoring failed for {name!r}: {e}")
+            return
+        # Shared activation rule (core.claude.is_active_mission):
+        # active tiers, an UNAVAILABLE (None) score, or a multi-division
+        # conglomerate whose subdivisions are filtered at crawl time.
+        active = is_active_mission(tier, h["name"], include_missions)
+        row = {
+            "name": h["name"], "ats": h["ats"],
+            "slug": h["slug"] if h["ats"] != "workday" else None,
+            "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
+            "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
+            "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
+            "careers_url": h.get("careers_url"),
+            "local_job_count": h["nc"], "total_job_count": h["count"],
+            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
+            "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
+            "last_probed": datetime.now().isoformat(),
+        }
+        dup = _board_already_tracked(conn, row)
+        if dup:
+            _report_dup_board(h["name"], dup)
+            return
+        # Nothing an automated pass finds joins the roster by itself: a
+        # name the store has never confirmed lands in the review queue
+        # (core.store.mark_pending) for a person to accept or reject.
+        pending = not is_confirmed_company(conn, h["name"])
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
+        written.append(dict(row))
+        flag = ("PENDING REVIEW" if pending
+                else "active" if active else "INACTIVE(other)")
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+    ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed))))
+    drain_or_abandon(ex, {ex.submit(_score_one, h): h["name"] for h in confirmed},
+                     _score_done, lambda name: None)
     conn.close()
 
     if dork:
@@ -1127,7 +1091,8 @@ def _websearch_board(name, max_results=8):
         # an embedded ATS or a self-hosted board with genuine job links.
         for u in urls[:5]:
             try:
-                r = SESSION.get(u, timeout=8, headers=_H, allow_redirects=True)
+                r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=_H,
+                                allow_redirects=True)
                 if r.status_code != 200 or len(r.text) < 300:
                     continue
             except Exception:
@@ -1202,60 +1167,63 @@ def score_missions(max_workers=6, rescore_all=False):
         return c, score_company_mission(c["name"], " | ".join(t for t in titles if t))
 
     n = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_one, c): c for c in cos}):
-            try:
-                c, (tier, score, reason) = fut.result()
-            except Exception as e:
-                print(f"    [!] {e}")
-                continue
-            if tier is None and score is None:
-                continue          # scoring unavailable - leave the row alone
-            # Off-mission companies are deactivated so the crawl skips them,
-            # matching the new-company sourcing path (an `other` tier means
-            # "not health/bio/science" — no reason to keep crawling it).
-            # Watched companies are exempt: the watch tag is the user
-            # deliberately keeping an off-mission employer crawled (Covar).
-            update = {"name": c["name"], "mission_tier": tier,
-                      "mission_score": score, "mission_reason": reason}
-            revived = False
-            if (tier is not None and tier not in ACTIVE_MISSION_TIERS
-                    and not config.is_multi_division(c["name"])
-                    and "watch" not in (c.get("tags") or "").split(",")):
-                update["active"] = 0
-            # NOT core.claude.is_active_mission: this is the REACTIVATION
-            # half, and it deliberately does not revive on `tier is None`.
-            # A None tier with a non-None score means the model answered with
-            # a mission name outside the profile's taxonomy (score_company_
-            # mission nulls the tier but keeps the score), so the `continue`
-            # above did not fire. The helper would call that "unavailable" and
-            # revive the row; here an unrecognised answer must leave an
-            # already-inactive company alone. See tests/test_invariants.py.
-            elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
-                                          or config.is_multi_division(c["name"])):
-                # The recovery half: this row reached an on-mission tier but
-                # is sitting inactive, which for an unscored row means its
-                # original mission call failed rather than judged it. Revive
-                # it. Dead boards are excluded — prune_dead_boards turns those
-                # off because the endpoint 404s, and a good mission score says
-                # nothing about whether the board still resolves. Rows in the
-                # review queue are excluded too: they are inactive because a
-                # person has not confirmed them yet, not because a call
-                # failed, and reviving them here would skip the queue (the
-                # 2026-09-01 re-resolution pass queued 24 unscored rows that
-                # this healer would otherwise have activated wholesale).
-                if (not str(c.get("notes") or "").startswith("deactivated: dead")
-                        and not company_tags.has(c.get("tags"), company_tags.PENDING)):
-                    update["active"] = 1
-                    revived = True
-            upsert_company(conn, update)
-            n += 1
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = ("  -> deactivated (off-mission)"
-                    if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
-                    else "  -> REACTIVATED (was unscored + inactive)" if revived
-                    else "")
-            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+    def _scored(fut, name):
+        nonlocal n
+        try:
+            c, (tier, score, reason) = fut.result()
+        except Exception as e:
+            print(f"    [!] {name}: {e}")
+            return
+        if tier is None and score is None:
+            return            # scoring unavailable - leave the row alone
+        # Off-mission companies are deactivated so the crawl skips them,
+        # matching the new-company sourcing path (an `other` tier means
+        # "not health/bio/science" — no reason to keep crawling it).
+        # Watched companies are exempt: the watch tag is the user
+        # deliberately keeping an off-mission employer crawled (Covar).
+        update = {"name": c["name"], "mission_tier": tier,
+                  "mission_score": score, "mission_reason": reason}
+        revived = False
+        if (tier is not None and tier not in ACTIVE_MISSION_TIERS
+                and not config.is_multi_division(c["name"])
+                and "watch" not in (c.get("tags") or "").split(",")):
+            update["active"] = 0
+        # NOT core.claude.is_active_mission: this is the REACTIVATION
+        # half, and it deliberately does not revive on `tier is None`.
+        # A None tier with a non-None score means the model answered with
+        # a mission name outside the profile's taxonomy (score_company_
+        # mission nulls the tier but keeps the score), so the `return`
+        # above did not fire. The helper would call that "unavailable" and
+        # revive the row; here an unrecognised answer must leave an
+        # already-inactive company alone. See tests/test_invariants.py.
+        elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
+                                      or config.is_multi_division(c["name"])):
+            # The recovery half: this row reached an on-mission tier but
+            # is sitting inactive, which for an unscored row means its
+            # original mission call failed rather than judged it. Revive
+            # it. Dead boards are excluded — prune_dead_boards turns those
+            # off because the endpoint 404s, and a good mission score says
+            # nothing about whether the board still resolves. Rows in the
+            # review queue are excluded too: they are inactive because a
+            # person has not confirmed them yet, not because a call
+            # failed, and reviving them here would skip the queue (the
+            # 2026-09-01 re-resolution pass queued 24 unscored rows that
+            # this healer would otherwise have activated wholesale).
+            if (not str(c.get("notes") or "").startswith("deactivated: dead")
+                    and not company_tags.has(c.get("tags"), company_tags.PENDING)):
+                update["active"] = 1
+                revived = True
+        upsert_company(conn, update)
+        n += 1
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        flag = ("  -> deactivated (off-mission)"
+                if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
+                else "  -> REACTIVATED (was unscored + inactive)" if revived
+                else "")
+        print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+    ex = ThreadPoolExecutor(max_workers=max_workers)
+    drain_or_abandon(ex, {ex.submit(_one, c): c["name"] for c in cos},
+                     _scored, lambda name: None)
     conn.close()
     print(f"\n  {n} compan(ies) scored.")
     return n
@@ -1500,64 +1468,68 @@ def resolve_leads(max_workers=8,
           f"fallback; every board validated by a live fetch)...")
 
     resolved, probe_only = [], []
-    # Hard cap on the pass: a lead whose domains blackhole must become a
-    # reported miss, not a hung command.
+    by_name = {c["name"]: c for c in leads}
+
+    def _stalled(name):
+        # A lead whose domains blackhole becomes a recorded miss, not a
+        # hung command (scrapers.parallel.drain_or_abandon).
+        record_miss(conn, name, "fetch-error:stalled",
+                    source=by_name[name].get("source"))
+
+    def _consume(fut, name):
+        c = by_name[name]
+        try:
+            hit, reason = fut.result()
+        except Exception as e:
+            print(f"    [!] {name}: {type(e).__name__}: {e}")
+            hit, reason = None, f"fetch-error:{type(e).__name__}"
+        if not hit:
+            # Was printed and forgotten; now the lead row keeps WHY, so
+            # the next run can skip it and the user can see the tally.
+            record_miss(conn, c["name"], reason, source=c.get("source"))
+            print(f"    [miss] {c['name'][:34]:34} {reason}")
+            return
+        titles = _sample_titles(hit)
+        tier, score, reason = score_company_mission(
+            c["name"], " | ".join(t for t in titles if t))
+        active = is_active_mission(tier, c["name"])
+        is_wd = hit["ats"] == "workday"
+        row = {"name": c["name"], "ats": hit["ats"],
+               "slug": None if is_wd else hit["slug"],
+               "wd_tenant": hit["slug"][0] if is_wd else None,
+               "wd_pod":    hit["slug"][1] if is_wd else None,
+               "wd_site":   hit["slug"][2] if is_wd else None,
+               "careers_url": hit.get("careers_url"),
+               "local_job_count": hit["nc"], "total_job_count": hit["count"],
+               "mission_tier": tier, "mission_score": score,
+               "mission_reason": reason,
+               "tags": company_tags.LOCAL if hit["nc"] else None,
+               "source": c.get("source") or "resolve_leads", "active": active}
+        dup = _board_already_tracked(conn, row)
+        if dup:
+            _report_dup_board(c["name"], dup)
+            return
+        # A lead is a name somebody's page mentioned, not an employer
+        # anyone vouched for: resolving it produces a review candidate.
+        pending = not is_confirmed_company(conn, c["name"])
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
+        resolved.append(row)
+        if hit.get("via") == "probe":
+            probe_only.append(c["name"])
+        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+        flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
+        mark = "queue" if pending else ("OK  " if active else "off ")
+        print(f"    [{mark}] {c['name'][:30]:30} "
+              f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
+              f"{str(tier):18} {ss}{flag}")
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    futs = {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""): c
-            for c in leads}
-    try:
-        for fut in as_completed(futs, timeout=300):
-            c, (hit, reason) = futs[fut], fut.result()
-            if not hit:
-                # Was printed and forgotten; now the lead row keeps WHY, so
-                # the next run can skip it and the user can see the tally.
-                record_miss(conn, c["name"], reason, source=c.get("source"))
-                print(f"    [miss] {c['name'][:34]:34} {reason}")
-                continue
-            titles = _sample_titles(hit)
-            tier, score, reason = score_company_mission(
-                c["name"], " | ".join(t for t in titles if t))
-            active = is_active_mission(tier, c["name"])
-            is_wd = hit["ats"] == "workday"
-            row = {"name": c["name"], "ats": hit["ats"],
-                   "slug": None if is_wd else hit["slug"],
-                   "wd_tenant": hit["slug"][0] if is_wd else None,
-                   "wd_pod":    hit["slug"][1] if is_wd else None,
-                   "wd_site":   hit["slug"][2] if is_wd else None,
-                   "careers_url": hit.get("careers_url"),
-                   "local_job_count": hit["nc"], "total_job_count": hit["count"],
-                   "mission_tier": tier, "mission_score": score,
-                   "mission_reason": reason,
-                   "tags": company_tags.LOCAL if hit["nc"] else None,
-                   "source": c.get("source") or "resolve_leads", "active": active}
-            dup = _board_already_tracked(conn, row)
-            if dup:
-                _report_dup_board(c["name"], dup)
-                continue
-            # A lead is a name somebody's page mentioned, not an employer
-            # anyone vouched for: resolving it produces a review candidate.
-            pending = not is_confirmed_company(conn, c["name"])
-            if pending:
-                row = mark_pending(row)
-            upsert_company(conn, row)
-            resolved.append(row)
-            if hit.get("via") == "probe":
-                probe_only.append(c["name"])
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
-            mark = "queue" if pending else ("OK  " if active else "off ")
-            print(f"    [{mark}] {c['name'][:30]:30} "
-                  f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
-                  f"{str(tier):18} {ss}{flag}")
-    except TimeoutError:
-        stuck = [c["name"] for f, c in futs.items() if not f.done()]
-        for n in stuck:
-            record_miss(conn, n, "fetch-error:Timeout")
-        print(f"    [!] timed out on {len(stuck)} lead(s): "
-              f"{', '.join(stuck[:6])}{'...' if len(stuck) > 6 else ''} "
-              f"(rerun --resolve-leads to retry — idempotent)")
-    finally:
-        ex.shutdown(wait=False, cancel_futures=True)
+    drain_or_abandon(
+        ex,
+        {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""):
+         c["name"] for c in leads},
+        _consume, _stalled)
     conn.close()
     queued = sum(1 for r in resolved
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
@@ -2073,7 +2045,7 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
               f"{state}{flag}")
 
     ex = ThreadPoolExecutor(max_workers=max_workers)
-    _drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
+    drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
                       _consume, _stalled)
     conn.commit()
     conn.close()

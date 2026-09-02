@@ -27,6 +27,7 @@ from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
 from core.locality import location_snippet
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date, stable_id
 
@@ -144,7 +145,7 @@ def fetch_peopleadmin(host, company_name):
     label = company_name or host
     for path in FEED_PATHS:
         try:
-            r = SESSION.get(f"https://{host}{path}", timeout=25,
+            r = SESSION.get(f"https://{host}{path}", timeout=FETCH_TIMEOUT,
                             headers={**HEADERS, "Accept": "application/atom+xml"})
             r.raise_for_status()
         except Exception as e:

@@ -24,12 +24,13 @@ other detectable ATS signature on the page itself).
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = "https://{tenant}.careers.hibob.com/api/job-ad"
 
 
-def parse_board(tenant, timeout=20):
+def parse_board(tenant, timeout=FETCH_TIMEOUT):
     """Return the raw ``jobAdDetails`` list for one tenant subdomain."""
     root = f"https://{tenant}.careers.hibob.com/"
     r = SESSION.get(_API.format(tenant=tenant), timeout=timeout,

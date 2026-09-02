@@ -99,7 +99,7 @@ def launch_chromium(pw, **kwargs):
 def probe_greenhouse(slug):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         return (True, len(r.json().get("jobs", [])))
@@ -110,7 +110,7 @@ def probe_greenhouse(slug):
 def probe_lever(slug):
     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         data = r.json()
@@ -122,7 +122,7 @@ def probe_lever(slug):
 def probe_ashby(slug):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         # Posting API key is "jobs" (not the embed payload's "jobPostings").
@@ -140,7 +140,7 @@ def probe_kula(slug, retries=1):
     url = f"https://careers.kula.ai/{slug}"
     for attempt in range(retries + 1):
         try:
-            r = SESSION.get(url, timeout=10, headers=HEADERS)
+            r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
             if r.status_code == 200 and len(r.text) > 1000:
                 return (True, 0)
         except Exception:
@@ -153,7 +153,7 @@ def probe_kula(slug, retries=1):
 def probe_jazzhr(slug):
     url = f"https://{slug}.applytojob.com/"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         n = len(re.findall(r"/apply/[A-Za-z0-9]+/", r.text))
@@ -165,7 +165,7 @@ def probe_jazzhr(slug):
 def probe_bamboohr(slug):
     url = f"https://{slug}.bamboohr.com/careers/list"
     try:
-        r = SESSION.get(url, timeout=10,
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT,
                          headers={**HEADERS, "Accept": "application/json"})
         if r.status_code != 200:
             return (False, 0)
@@ -177,7 +177,7 @@ def probe_bamboohr(slug):
 def probe_smartrecruiters(slug):
     url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
     try:
-        r = SESSION.get(url, timeout=10, headers=HEADERS)
+        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
         if r.status_code != 200:
             return (False, 0)
         # SmartRecruiters returns 200 / totalFound:0 for ANY slug, even
@@ -307,7 +307,7 @@ def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
         r = SESSION.post(
             api,
             json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
-            timeout=12,
+            timeout=config.PROBE_TIMEOUT,
             headers={
                 **HEADERS,
                 "Accept":       "application/json",

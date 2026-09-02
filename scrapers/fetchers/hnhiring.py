@@ -16,6 +16,7 @@ import time
 
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 BASE = "https://hacker-news.firebaseio.com/v0"
@@ -84,7 +85,7 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
-def _get_json(url, timeout=15):
+def _get_json(url, timeout=FETCH_TIMEOUT):
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()

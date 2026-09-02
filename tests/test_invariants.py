@@ -154,16 +154,17 @@ class TestActivationRule:
 #:
 #: `core.claude.is_active_mission` is the rule.
 #:
-#: `local_sourcing.score_missions` is the REACTIVATION half and is
+#: `local_sourcing.score_missions` (its per-row consumer, `_scored`) is
+#: the REACTIVATION half and is
 #: deliberately NOT the helper: it must not revive a row on `tier is None`.
 #: A None tier with a non-None score means the model answered with a mission
 #: name outside the profile's taxonomy — score_company_mission nulls the tier
-#: but keeps the score, so the "scoring unavailable" `continue` above does
+#: but keeps the score, so the "scoring unavailable" `return` above does
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
 RULE_SITES_ALLOWED = {
     ("core/claude.py", "is_active_mission"),
-    ("discovery/local_sourcing.py", "score_missions"),
+    ("discovery/local_sourcing.py", "_scored"),
 }
 
 #: Names that, compared against with `in`, mean "this is the activation rule".

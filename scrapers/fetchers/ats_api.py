@@ -3,13 +3,14 @@
 from bs4 import BeautifulSoup
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 
 def fetch_greenhouse(slug, company_name):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
     try:
-        r = SESSION.get(url, timeout=20, headers=HEADERS)
+        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -40,7 +41,7 @@ def fetch_greenhouse(slug, company_name):
 def fetch_lever(slug, company_name):
     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
     try:
-        r = SESSION.get(url, timeout=20, headers=HEADERS)
+        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -69,7 +70,7 @@ def fetch_lever(slug, company_name):
 def fetch_ashby(slug, company_name):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     try:
-        r = SESSION.get(url, timeout=20, headers=HEADERS)
+        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:

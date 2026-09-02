@@ -3,14 +3,15 @@
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import os
 
-from config import REPORT_DIR
+from config import PROBE_TIMEOUT, REPORT_DIR
 from core.claude import DISCOVER_SYSTEM, call_claude_json
+from scrapers.parallel import drain_or_abandon
 from scrapers.util import worker_count
 from .probes import (
     PROBES,
@@ -199,19 +200,19 @@ def _board_evidence(ats, slug, n=6):
     try:
         if ats == "greenhouse":
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             display = (r.json().get("name") or "").strip()
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}"
-                            f"/jobs?content=false", timeout=10, headers=HEADERS)
+                            f"/jobs?content=false", timeout=PROBE_TIMEOUT, headers=HEADERS)
             return display, [j.get("title", "")
                              for j in r.json().get("jobs", [])[:n]]
         if ats == "lever":
             r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             return "", [j.get("text", "") for j in r.json()[:n]]
         if ats == "ashby":
             r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                            timeout=10, headers=HEADERS)
+                            timeout=PROBE_TIMEOUT, headers=HEADERS)
             data = r.json()
             return "", [j.get("title", "") for j in
                         data.get("jobs", data.get("jobPostings", []))[:n]]
@@ -475,17 +476,28 @@ def _validate_all(candidate_dicts, use_js=True):
     # use, so concurrent candidates scrape in parallel (up to _JS_BROWSERS)
     # instead of serializing on one. Skipped entirely when use_js is off,
     # so bulk sweeps never pay the browser cost.
+    def _done(fut, _name):
+        idx, cand = fut.result()
+        validated[idx] = cand
+
     js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
     try:
-        with ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS) as pool:
-            futures = [pool.submit(_worker, i, rc, js_probe)
-                       for i, rc in enumerate(candidate_dicts)]
-            for fut in as_completed(futures):
-                idx, cand = fut.result()
-                validated[idx] = cand
+        pool = ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS)
+        drain_or_abandon(
+            pool,
+            {pool.submit(_worker, i, rc, js_probe): (rc.get("name") or "").strip()
+             for i, rc in enumerate(candidate_dicts)},
+            _done, lambda _name: None)
     finally:
         if js_probe is not None:
             js_probe.close()
+    # A candidate the watchdog abandoned is reported unconfirmed, not
+    # dropped: the report and --apply walk every slot.
+    for i, rc in enumerate(candidate_dicts):
+        if validated[i] is None:
+            cand = candidate_from_dict(rc)
+            cand.tried_slugs.append("[stalled: abandoned by the watchdog]")
+            validated[i] = cand
     return validated
 
 

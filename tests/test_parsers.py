@@ -633,20 +633,22 @@ class TestResolutionStallWatchdog:
     UI's one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
     finished in 8 minutes; the 60th hung for over an hour and wedged the op
     slot until the app was restarted. The shared helper behind add_names and
-    discover_local's sniff/websearch passes is _drain_or_abandon."""
+    discover_local's sniff/websearch passes is
+    scrapers.parallel.drain_or_abandon."""
 
     def test_drain_or_abandon_abandons_only_the_stuck_future(self, monkeypatch):
         import threading
         from concurrent.futures import ThreadPoolExecutor
+        from scrapers import parallel
 
-        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
+        monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
         release = threading.Event()
         consumed, stalled = [], []
         ex = ThreadPoolExecutor(max_workers=2)
         futs = {ex.submit(lambda: "ok"): "fast",
                 ex.submit(release.wait, 10): "slow"}
         try:
-            local_sourcing._drain_or_abandon(
+            parallel.drain_or_abandon(
                 ex, futs,
                 lambda fut, n: consumed.append((n, fut.result())),
                 stalled.append)
@@ -680,8 +682,9 @@ class TestResolutionStallWatchdog:
                 release.wait(10)      # far past the patched stall window
             return None, "no-board-found"
 
+        from scrapers import parallel
         monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
+        monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
         misses = []
         monkeypatch.setattr(
             "core.store.record_miss",

@@ -15,6 +15,7 @@ import re
 
 
 from core.filters import is_relevant
+from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 API_URL = "https://remotive.com/api/remote-jobs"
@@ -38,7 +39,7 @@ def fetch_remotive(category=None, max_jobs=None):
         url = f"{API_URL}?category={category}"
 
     try:
-        r = SESSION.get(url, timeout=25, headers=HEADERS)
+        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:

@@ -11,6 +11,7 @@ run them through validate_candidate (slug probe + careers-page ATS sniff)
 """
 
 
+from config import FETCH_TIMEOUT
 from scrapers.http import SESSION, HEADERS
 
 API_URL = "https://bciwiki.org/api.php"
@@ -30,7 +31,7 @@ _SKIP_SUBSTRINGS = (
 )
 
 
-def _category_members(category, max_items=2000, timeout=25):
+def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
     """Return all page titles in a BCIWiki category, following cmcontinue."""
     titles, cont = [], {}
     while len(titles) < max_items:

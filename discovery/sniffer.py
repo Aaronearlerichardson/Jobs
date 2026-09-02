@@ -26,6 +26,7 @@ _log = logging.getLogger("discovery.sniffer")
 
 _ANCHORS_ONLY = SoupStrainer("a")
 
+from config import PROBE_TIMEOUT
 from scrapers.http import HEADERS, SESSION
 from .probes import PROBES, _extract_workday_triple
 from .names import domain_tokens, risky_domain_tokens
@@ -371,7 +372,8 @@ def _confirm_coords(ats, slug):
                 "https://workforcenow.adp.com/mascsr/default/careercenter"
                 "/public/events/staffing/v1/job-requisitions",
                 params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
-                timeout=12, headers={**HEADERS, "Accept": "application/json"},
+                timeout=PROBE_TIMEOUT,
+                headers={**HEADERS, "Accept": "application/json"},
             )
             if r.status_code != 200:
                 return None
@@ -450,7 +452,7 @@ def _memo_put(url, resp):
         _PAGE_MEMO[url] = (time.time(), resp)
 
 
-def _fetch_page(url, timeout=6):
+def _fetch_page(url, timeout=PROBE_TIMEOUT):
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
     answers fast. Returns the Response on 200 with real content, else None.
@@ -627,7 +629,7 @@ def _foreign_board(name, triple):
 
 # ─── Public API ──────────────────────────────────────────────────────────
 
-def sniff_ats(name, careers_url="", timeout=6):
+def sniff_ats(name, careers_url=""):
     """Raw detection: first fetchable/semi-fetchable ATS found, else a
     custom self-hosted board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}."""

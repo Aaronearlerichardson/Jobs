@@ -21,7 +21,7 @@ from core.claude import score_resume_fit
 from .fetchers import company as company_fetch
 from core.filters import is_relevant
 from core.locality import NC_RE, geo_mode
-from .parallel import fetch_all
+from .parallel import drain_or_abandon, fetch_all
 from core.resume import resume_text
 
 
@@ -975,13 +975,12 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         substitute for that look.
 
         Resolution runs through the same stall watchdog every other bulk
-        resolution path uses (discovery.local_sourcing._drain_or_abandon):
+        resolution path uses (scrapers.parallel.drain_or_abandon):
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """
     from core.claude import score_company_mission
     from discovery.local_sourcing import (_board_already_tracked,
-                                          _drain_or_abandon,
                                           _report_dup_board, _sample_titles,
                                           resolve_or_miss)
 
@@ -1055,7 +1054,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
                   f"{str(tier):18} {ss}  (was {was[name]})")
 
         ex = ThreadPoolExecutor(max_workers=max_workers)
-        _drain_or_abandon(
+        drain_or_abandon(
             ex,
             {ex.submit(resolve_or_miss, r["name"], r.get("careers_url") or ""):
              r["name"] for r in rows},
