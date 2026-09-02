@@ -193,9 +193,14 @@ def _existing_boards(conn):
 def harvest_urls(urls, verbose=True):
     """
     Extract boards from `urls`, NC-verify + mission-score the new ones, and
-    upsert active health/bio/science ones. Returns (added, checked).
+    queue them for review. Returns (added, checked).
     Company name is provisionally the slug (real name can be refined later);
     mission scoring uses the board's live job titles for domain context.
+
+    A dorked board is the weakest-sourced candidate in the codebase -- a
+    search engine indexed a URL and the company NAME is a de-hyphenated slug
+    -- so every row lands in the review queue (core.store.mark_pending)
+    rather than on the roster.
     """
     boards = extract_boards_from_urls(urls)
     conn = store.connect()
@@ -225,18 +230,24 @@ def harvest_urls(urls, verbose=True):
         # unrecoverable here: harvest_urls skips boards already in the store,
         # so the company is never re-probed.
         active = is_active_mission(tier, name)
-        store.upsert_company(conn, dict(
+        row = dict(
             name=name, ats=ats, slug=slug if ats != "workday" else None,
             wd_tenant=slug[0] if ats == "workday" else None,
             wd_pod=slug[1] if ats == "workday" else None,
             wd_site=slug[2] if ats == "workday" else None,
             local_job_count=nc, total_job_count=nc, mission_tier=tier,
             mission_score=score, mission_reason=reason, tags=company_tags.LOCAL,
-            source="ats_dork", active=active))
+            source="ats_dork", active=active)
+        pending = not store.is_confirmed_company(conn, name)
+        if pending:
+            row = store.mark_pending(row)
+        store.upsert_company(conn, row)
         added += 1
         if verbose:
+            state = ("PENDING" if pending
+                     else "ACTIVE" if active else "inactive")
             print(f"  {name[:26]:26} {ats:12} nc={nc:2} {str(tier):19} "
-                  f"{score if score else 0:.2f} {'ACTIVE' if active else 'inactive'}")
+                  f"{score if score else 0:.2f} {state}")
     return added, len(boards)
 
 

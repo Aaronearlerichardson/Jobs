@@ -792,3 +792,73 @@ class TestDedupJobs:
         store.upsert_job(db, self._job("a", "x=1"))
         store.upsert_job(db, self._job("b", "x=2"))
         assert store.dedup_jobs(db) == 0
+
+
+
+class TestReviewQueue:
+    """Nothing an automated path discovers joins the roster by itself. One
+    pasted page produced 15 names that were never employers ("Oncology",
+    "Job Location", "Who You Are"); the resolver spent about a thousand HTTP
+    requests on them and turned four into ACTIVE roster rows with real
+    boards. They land here instead, uncrawled, until a person rules."""
+
+    def _queue(self, db, name="Guess", **over):
+        row = {"name": name, "ats": "greenhouse", "slug": name.lower(),
+               "source": "paste"}
+        row.update(over)
+        return store.upsert_company(db, store.mark_pending(row))
+
+    def test_candidates_are_listed_newest_first(self, db):
+        self._queue(db, "Older")
+        self._queue(db, "Newer")
+        assert [c["name"] for c in store.pending_companies(db)] == \
+            ["Newer", "Older"]
+
+    def test_candidates_are_never_crawled(self, db):
+        self._queue(db)
+        assert store.crawlable_companies(db) == []
+        assert store.get_companies(db, active_only=True) == []
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Guess"]
+
+    def test_a_miss_row_is_not_a_candidate(self, db):
+        # Misses are inactive too, but nobody is being asked about them.
+        store.record_miss(db, "Nope", "no-board-found")
+        assert store.pending_companies(db) == []
+
+    def test_confirm_drops_the_tag_and_starts_the_crawl(self, db):
+        cid = self._queue(db, "Real Co", tags="local")
+        row = store.confirm_company(db, cid)
+        assert (row["tags"], row["active"]) == ("local", 1)
+        assert [c["name"] for c in store.crawlable_companies(db)] == ["Real Co"]
+        assert store.pending_companies(db) == []
+
+    def test_confirm_parks_an_off_mission_candidate(self, db):
+        # Confirming says "this IS the employer", not "crawl it whatever its
+        # mission" -- core.claude.is_active_mission still decides that.
+        cid = self._queue(db, "Off Mission",
+                          mission_tier="not-a-configured-tier")
+        assert store.confirm_company(db, cid)["active"] == 0
+        assert store.pending_companies(db) == []
+
+    def test_reject_deletes_the_row_its_jobs_and_blocks_the_name(self, db):
+        cid = self._queue(db, "Job Location")
+        store.upsert_job(db, {"job_id": "jl1", "company_id": cid,
+                              "company_name": "Job Location", "title": "T"})
+        assert store.reject_company(db, cid, "a JD section heading") \
+            == "Job Location"
+        assert store.get_companies(db, active_only=False) == []
+        assert not store.job_exists(db, "jl1")
+        assert store.blocked_name_keys(db) == {"joblocation"}
+
+    def test_the_blocklist_is_keyed_by_the_normalized_name(self, db):
+        store.block_name(db, "Who You Are", "JD section header")
+        store.block_name(db, "who-you-are!", "seen again")
+        assert store.blocked_name_keys(db) == {"whoyouare"}
+
+    def test_only_a_reviewed_row_reads_as_a_confirmed_company(self, db):
+        cid = self._queue(db, "Real Co")
+        assert store.is_confirmed_company(db, "Real Co") is False
+        store.confirm_company(db, cid)
+        assert store.is_confirmed_company(db, "real co") is True
+        assert store.is_confirmed_company(db, "Never Seen") is False

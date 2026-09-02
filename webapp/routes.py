@@ -12,6 +12,7 @@ from flask import jsonify, make_response, request, send_file
 
 import config
 from core import digest_md, locality, profile_edit, remote_filter, store
+from core import tags as company_tags
 
 from . import BOOT_ID, STATE, app
 from .ops import _LOG_LOCK, OPS, TASK, _int, _run_op, _running
@@ -305,6 +306,81 @@ def api_active(cid):
     return jsonify(ok=True, active=bool(on))
 
 
+# --------------------------------------------------------------------------- #
+#  Roster review queue                                                         #
+# --------------------------------------------------------------------------- #
+#
+# Nothing an automated path discovers joins the roster by itself: it lands as
+# an inactive, pending-review company row (core/store.py) and waits here.
+
+
+@app.get("/api/pending")
+def api_pending():
+    conn = _conn(_track())
+    rows = store.pending_companies(conn)
+    conn.close()
+    return jsonify(rows)
+
+
+@app.post("/api/company/<int:cid>/confirm")
+def api_confirm(cid):
+    """Accept a review candidate: the pending tag comes off and the shared
+    mission rule decides whether it is crawled."""
+    conn = _conn(_track())
+    row = store.confirm_company(conn, cid)
+    conn.close()
+    if not row:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
+
+
+@app.post("/api/company/<int:cid>/reject")
+def api_reject(cid):
+    """Throw a review candidate away: the row and its jobs go, and the name
+    is blocklisted so discovery stops re-finding it."""
+    reason = ((request.get_json(silent=True) or {}).get("reason") or "").strip()
+    conn = _conn(_track())
+    name = store.reject_company(conn, cid, reason or "rejected in review")
+    conn.close()
+    if not name:
+        return jsonify(error="not found"), 404
+    return jsonify(ok=True, name=name)
+
+
+@app.post("/api/names/preview")
+def api_names_preview():
+    """Parse a pasted page into review rows WITHOUT resolving anything.
+
+    Step one of the paste flow: resolving is what costs the requests, so the
+    names are shown first and only the ticked ones are sent to the op."""
+    if _running():
+        return jsonify(error=f"'{TASK['name']}' is already running"), 409
+    from discovery.local_sourcing import preview_names
+    p = request.get_json(silent=True) or {}
+    raw = p.get("use_llm")
+    try:
+        names = preview_names(p.get("text") or "",
+                              use_llm=None if raw is None else bool(raw))
+    except Exception as e:
+        return jsonify(error=f"could not parse that text: {e}"), 400
+    return jsonify(names)
+
+
+@app.post("/api/names/block")
+def api_names_block():
+    """Blocklist the names a person marked 'not a company', so no discovery
+    path spends requests on them again."""
+    if _running():
+        return jsonify(error=f"'{TASK['name']}' is already running"), 409
+    p = request.get_json(silent=True) or {}
+    reason = (p.get("reason") or "").strip() or "not a company (review)"
+    conn = _conn(_track())
+    keys = {k for k in (store.block_name(conn, n, reason)
+                        for n in (p.get("names") or [])) if k}
+    conn.close()
+    return jsonify(ok=True, blocked=len(keys), keys=sorted(keys))
+
+
 @app.post("/api/import/companies")
 def api_import():
     """Upsert companies from an exported roster JSON (idempotent — tags
@@ -442,6 +518,10 @@ def api_stats():
         "company_misses": dict(store.miss_counts(conn)),
         "watched": one("SELECT COUNT(*) FROM companies WHERE "
                        "(','||COALESCE(tags,'')||',') LIKE '%,watch,%'"),
+        # Roster candidates waiting on a human — the Review tab's badge.
+        "pending_review": one("SELECT COUNT(*) FROM companies WHERE "
+                              "(','||COALESCE(tags,'')||',') LIKE ?",
+                              (f"%,{company_tags.PENDING},%",)),
         "api_key": config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE",
         "screen_model": config.CLAUDE_MODEL,
         "verify_model": config.CLAUDE_VERIFY_MODEL,

@@ -960,3 +960,167 @@ class TestDiscoverLocalWebsearchPass:
             websearch=True, websearch_cap=10)
 
         assert calls == ["Beta"]
+
+
+class TestPastedNamePreview:
+    """Step one of the two-step paste flow: the names are shown, with what
+    the store already knows about each, BEFORE anything is resolved.
+    Resolving is the expensive half -- one page's 15 junk names cost about a
+    thousand HTTP requests."""
+
+    def _wire(self, monkeypatch, db):
+        import core.store as store
+
+        class _NoClose:
+            # preview_names closes the connection it opens; the test still
+            # needs to read the fixture DB afterwards.
+            def __getattr__(self, k):
+                return getattr(db, k)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+
+    def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "IQVIA", "ats": "workday",
+                                  "wd_tenant": "iqvia"})
+        store.block_name(db, "Oncology", "not a company")
+        store.record_miss(db, "Fennec Pharmaceuticals", "no-board-found")
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health", "IQVIA",
+                                             "Oncology",
+                                             "Fennec Pharmaceuticals"])
+        rows = local_sourcing.preview_names("<pasted page>", use_llm=False)
+        assert {r["name"]: r["state"] for r in rows} == {
+            "Alpaca Health": "new", "IQVIA": "tracked",
+            "Oncology": "blocked", "Fennec Pharmaceuticals": "missed"}
+        assert [r["key"] for r in rows][0] == "alpacahealth"
+
+    def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing, "NAME_BLOCKLIST", {"biotech"})
+        monkeypatch.setattr(local_sourcing, "parse_company_names",
+                            lambda *a, **k: ["Biotech"])
+        assert [r["state"] for r in
+                local_sourcing.preview_names("x", use_llm=False)] == ["blocked"]
+
+    def test_preview_resolves_nothing(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+                            lambda *a, **k: tried.append(a) or (None, "x"))
+        monkeypatch.setattr(local_sourcing, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        assert [r["name"] for r in
+                local_sourcing.preview_names("x", use_llm=False)] \
+            == ["Alpaca Health"]
+        assert tried == [], "the preview step resolved a name"
+
+    def test_the_model_reads_the_paste_when_a_key_is_configured(
+            self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing.config, "ANTHROPIC_API_KEY",
+                            "sk-ant-test")
+        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+                            lambda *a, **k: ["Model Named Co"])
+        assert [r["name"] for r in local_sourcing.preview_names("x")] \
+            == ["Model Named Co"]
+
+    def test_no_key_means_the_regex_parser(self, monkeypatch, db):
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing.config, "ANTHROPIC_API_KEY",
+                            "YOUR_ANTHROPIC_API_KEY_HERE")
+        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("called with no API key")))
+        monkeypatch.setattr(local_sourcing, "parse_company_names",
+                            lambda *a, **k: ["Parsed Co"])
+        assert [r["name"] for r in local_sourcing.preview_names("x")] \
+            == ["Parsed Co"]
+
+
+class TestAddNamesQueue:
+    """Step two: add_names takes the CONFIRMED list, and everything it
+    resolves lands in the review queue rather than on the roster."""
+
+    _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
+            "careers_url": "https://alpaca.example/careers",
+            "count": 8, "nc": 3, "via": "sniff"}
+
+    def _wire(self, monkeypatch, db, hit=None):
+        import core.claude as claude
+        import core.store as store
+
+        class _NoClose:
+            def __getattr__(self, k):
+                return getattr(db, k)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+                            lambda *a, **k: (hit or self._HIT, None))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+
+    def test_a_resolved_name_lands_in_the_queue_not_the_roster(
+            self, monkeypatch, db):
+        import core.store as store
+        self._wire(monkeypatch, db)
+        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.crawlable_companies(db) == []
+
+    def test_a_blocklisted_name_is_never_resolved(self, monkeypatch, db):
+        import core.store as store
+        store.block_name(db, "Oncology", "not a company")
+        self._wire(monkeypatch, db, {**self._HIT, "name": "Oncology"})
+        tried = []
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+                            lambda n, *a, **k: tried.append(n) or (None, "x"))
+        local_sourcing.add_names(["Oncology"], max_workers=1)
+        assert tried == []
+        assert store.get_companies(db, active_only=False) == []
+
+    def test_a_name_already_on_the_roster_is_not_re_resolved(
+            self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
+                                  "slug": "alpaca"})
+        self._wire(monkeypatch, db)
+        tried = []
+        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+                            lambda n, *a, **k: tried.append(n) or (None, "x"))
+        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        assert tried == []
+
+    def test_a_raw_blob_still_works(self, monkeypatch, db):
+        # The thin single-step path the CLI (and an older client) still use.
+        import core.store as store
+        self._wire(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        local_sourcing.add_names("Alpaca Health\n2 days ago", max_workers=1)
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+
+    def test_a_websearch_only_hit_is_queued_instead_of_corroborated(
+            self, monkeypatch, db):
+        """add_names used to spend extra fetches proving a websearch hit had
+        a local HQ, and wrote it inactive when it could not. The queue is
+        that judgement now, and it costs nothing."""
+        import core.store as store
+        probed = []
+        monkeypatch.setattr(local_sourcing, "nc_hq_signal",
+                            lambda *a, **k: probed.append(a) or False)
+        self._wire(monkeypatch, db, {**self._HIT, "nc": 0, "via": "websearch"})
+        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert probed == [], "the corroboration probe still runs"

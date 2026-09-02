@@ -7,7 +7,9 @@ candidates upsert straight into the companies table, deduped by name (upsert)
 and by ats+slug (a second name for the same board is skipped).
 
 Mission fields are left NULL — `python discover.py --score-missions` owns
-those. Rows land active; the mission pass deactivates off-mission companies.
+those. New rows land in the REVIEW QUEUE (core.store.mark_pending): a
+candidate the model suggested and a slug guess confirmed is exactly the kind
+of name that used to reach the roster without ever having been an employer.
 """
 
 from datetime import datetime
@@ -71,19 +73,24 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
                            f"already registered under another name")
             skipped += 1
             continue
+        pending = not store.is_confirmed_company(conn, c.name)
+        if pending:
+            row = store.mark_pending(row)
         if not dry_run:
             store.upsert_company(conn, row)
         have_names.add((c.name or "").lower())
         have_boards.add(key)
         added += 1
         summary.append(f"    + {c.name:32} {ats:12} "
-                       f"{'(refresh)' if not is_new_name else ''}")
+                       f"{'[review]' if pending else '(refresh)'}")
 
     conn.close()
-    verb = "would add/refresh" if dry_run else "added/refreshed"
+    verb = "would queue/refresh" if dry_run else "queued/refreshed"
     summary.insert(0, f"  {'[DRY-RUN] ' if dry_run else ''}{verb} {added} "
                       f"compan(ies) in the store, {skipped} skipped")
     if added and not dry_run:
+        summary.append("  Confirm the [review] rows in the web UI's Review "
+                       "section before they are crawled")
         summary.append("  Mission scores pending -> python discover.py --score-missions")
     return summary
 

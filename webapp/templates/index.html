@@ -22,7 +22,7 @@
 <nav>
   <button data-tab="jobs" class="on">Jobs</button>
   <button data-tab="pipeline">Pipeline</button>
-  <button data-tab="companies">Companies</button>
+  <button data-tab="companies">Companies <span class="tabcount" id="pendingbadge" hidden></span></button>
   <button data-tab="ops">Operations</button>
   <button data-tab="settings">Settings</button>
 </nav>
@@ -59,6 +59,7 @@
   <section id="tab-pipeline" hidden><div id="pipeline"></div></section>
 
   <section id="tab-companies" hidden>
+    <div id="review"></div>
     <div class="filters">
       <input type="text" id="c-search" placeholder="search companies…" size="26">
       <label><input type="checkbox" id="c-activeonly" checked> active only</label>
