@@ -1124,3 +1124,45 @@ class TestAddNamesQueue:
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert probed == [], "the corroboration probe still runs"
+
+
+class TestScoreMissionsHonoursTheReviewQueue:
+    """score_missions revives an inactive, unscored row that scores to an
+    on-mission tier (its original mission call is assumed to have failed).
+    A row in the review queue is inactive for a different reason: nobody
+    has confirmed it yet. The 2026-09-01 re-resolution pass queued 24
+    unscored rows that this healer would otherwise have activated wholesale,
+    skipping the queue."""
+
+    def _wire(self, monkeypatch, db):
+        import core.claude as claude
+        import core.store as store
+
+        class _NoClose:
+            def __getattr__(self, k):
+                return getattr(db, k)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+
+    def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
+        import core.store as store
+        from core import tags
+        self._wire(monkeypatch, db)
+        store.upsert_company(db, {"name": "Queued Co", "ats": "lever",
+                                  "slug": "queued", "active": 0,
+                                  "tags": tags.PENDING})
+        store.upsert_company(db, {"name": "Failed Call Co", "ats": "lever",
+                                  "slug": "failed", "active": 0})
+        local_sourcing.score_missions(max_workers=1)
+        rows = {r["name"]: dict(r) for r in
+                db.execute("SELECT name, active, tags, mission_tier FROM companies")}
+        assert rows["Queued Co"]["active"] == 0
+        assert tags.has(rows["Queued Co"]["tags"], tags.PENDING)
+        assert rows["Queued Co"]["mission_tier"] == "adjacent"
+        assert rows["Failed Call Co"]["active"] == 1

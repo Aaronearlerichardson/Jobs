@@ -1344,8 +1344,14 @@ def score_missions(max_workers=6, rescore_all=False):
                 # original mission call failed rather than judged it. Revive
                 # it. Dead boards are excluded — prune_dead_boards turns those
                 # off because the endpoint 404s, and a good mission score says
-                # nothing about whether the board still resolves.
-                if not str(c.get("notes") or "").startswith("deactivated: dead"):
+                # nothing about whether the board still resolves. Rows in the
+                # review queue are excluded too: they are inactive because a
+                # person has not confirmed them yet, not because a call
+                # failed, and reviving them here would skip the queue (the
+                # 2026-09-01 re-resolution pass queued 24 unscored rows that
+                # this healer would otherwise have activated wholesale).
+                if (not str(c.get("notes") or "").startswith("deactivated: dead")
+                        and not company_tags.has(c.get("tags"), company_tags.PENDING)):
                     update["active"] = 1
                     revived = True
             upsert_company(conn, update)
