@@ -830,7 +830,7 @@ from core.locality import NC_HQ_RE as _NC_HQ_RE  # "<Triangle city>, NC" HQ/offi
 
 
 def _hq_match_beyond_brand(text, name, hq_re=None):
-    """True if `text` carries a "<place>, ST" match whose place is NOT just
+    r"""True if `text` carries a "<place>, ST" match whose place is NOT just
     the company's own name.
 
     Garner Health is a New York company, but "Garner" is also a configured
