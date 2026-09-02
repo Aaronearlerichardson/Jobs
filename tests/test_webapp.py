@@ -78,6 +78,54 @@ class TestApi:
         assert client.post("/api/run/no_such_op").status_code == 404
 
 
+class TestCompanyCrawlState:
+    """The roster tab has to show WHY a company stopped producing rows --
+    dormant is not deactivated -- and offer the one-click way back."""
+
+    def _sleepy_store(self, tmp_path, monkeypatch):
+        """Point the default track at a throwaway DB: these tests write, and
+        the suite may never touch the real store."""
+        import config
+        from core import store
+        db_path = tmp_path / "roster.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
+                                          "slug": "sleepy"})
+        conn.execute("UPDATE companies SET crawl_state='dormant', "
+                     "empty_streak=6, next_crawl_at='2099-01-01T00:00:00' "
+                     "WHERE id=?", (cid,))
+        conn.commit()
+        conn.close()
+        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
+                            "db_path", db_path)
+        return cid
+
+    def test_companies_expose_crawl_state(self, client, tmp_path, monkeypatch):
+        cid = self._sleepy_store(tmp_path, monkeypatch)
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["crawl_state"] == "dormant"
+        assert row["empty_streak"] == 6
+        assert row["next_crawl_at"].startswith("2099")
+
+    def test_dormant_rows_leave_the_active_count(self, client, tmp_path,
+                                                 monkeypatch):
+        self._sleepy_store(tmp_path, monkeypatch)
+        assert json.loads(client.get("/api/stats").data)["companies_active"] == 0
+
+    def test_reactivate_clears_the_schedule(self, client, tmp_path, monkeypatch):
+        cid = self._sleepy_store(tmp_path, monkeypatch)
+        assert client.post(f"/api/company/{cid}/reactivate").status_code == 200
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["crawl_state"] == "active"
+        assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
+
+    def test_unknown_company_404s(self, client, tmp_path, monkeypatch):
+        self._sleepy_store(tmp_path, monkeypatch)
+        assert client.post("/api/company/9999/reactivate").status_code == 404
+
+
 class TestAssets:
     def test_index_cache_busts_its_assets(self, client):
         html = client.get("/").data.decode()

@@ -490,8 +490,7 @@ def sync_status_all(top_n=15, t=None):
     for when statuses have drifted without paying for a full crawl."""
     t = _t(t)
     conn = store.connect(t["db_path"])
-    companies = store.get_companies(conn, active_only=True,
-                                    tag=t["store_tag"])
+    companies = store.crawlable_companies(conn, tag=t["store_tag"])
     print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
     loc = NC_RE if t["sources"]["location_scoped"] else None
     sources = [(c["name"], c["ats"] or "?",

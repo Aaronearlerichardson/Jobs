@@ -139,8 +139,10 @@ def build_sources(cfg, t, include_websearch=None):
     if src["store"]:
         try:
             conn = store.connect(t["db_path"])
-            rows = store.get_companies(conn, active_only=True,
-                                       tag=t["store_tag"])
+            # Not every active row: dormant companies (never-productive,
+            # or high-volume off-mission boards) only come round again on
+            # their weekly slot — see store.record_crawl_outcome.
+            rows = store.crawlable_companies(conn, tag=t["store_tag"])
             conn.close()
         except Exception as e:
             print(f"  [!] company store unavailable ({e})")
@@ -303,6 +305,13 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     for spec, (jobs, err) in zip(specs, fetched):
         c = spec["company"]
         label = f"{spec['name']} ({spec['platform']})"
+        if c is not None and c.get("id") and commit:
+            # Judged on what the BOARD returned, before any of our gating:
+            # a company that keeps serving jobs is alive even when none of
+            # them survive the filters.
+            store.record_crawl_outcome(conn, c["id"], len(jobs or []), err,
+                                       dormant_after=t["dormant_after"],
+                                       dormant_days=t["dormant_days"])
         if err is not None:
             funnel.append((label, 0, 0, 0, 0, "ERR"))
             continue

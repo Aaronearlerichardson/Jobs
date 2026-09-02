@@ -305,6 +305,24 @@ function renderPipeline() {
 }
 
 /* ---------------- companies ---------------- */
+
+/* Crawl cadence cell. A dormant company is NOT broken and NOT switched
+   off — it produced nothing for days (or floods the run with off-mission
+   rows), so it is fetched weekly instead of every run. Without this the
+   roster gave no clue why a board had gone quiet. */
+function crawlCell(c) {
+  const st = c.crawl_state || "active";
+  if (st === "active") {
+    return c.empty_streak
+      ? `<span class="chip tier" title="consecutive empty days">empty ${c.empty_streak}</span>`
+      : "";
+  }
+  const when = (c.next_crawl_at || "").slice(0, 10);
+  return `<span class="chip age-stale" title="skipped until ${esc(when || "?")}">${esc(st)}</span>
+    <button class="reactivate" data-react="${c.id}"
+     title="crawl this company every run again">wake</button>`;
+}
+
 function renderCompanies() {
   const q = $("#c-search").value.trim().toLowerCase();
   const activeOnly = $("#c-activeonly").checked;
@@ -314,7 +332,8 @@ function renderCompanies() {
                       || ((b.mission_score || 0) - (a.mission_score || 0)));
   $("#companies").innerHTML = `<table>
     <thead><tr><th></th><th>Company</th><th>ATS</th><th>Mission</th>
-    <th class="num">Score</th><th class="num">Open jobs</th><th>Tags</th><th>Active</th></tr></thead>
+    <th class="num">Score</th><th class="num">Open jobs</th><th>Tags</th>
+    <th>Crawl</th><th>Active</th></tr></thead>
     <tbody>${rows.map(c => `
       <tr>
         <td><button class="star ${c.watched ? "on" : ""}" data-id="${c.id}"
@@ -325,6 +344,7 @@ function renderCompanies() {
         <td class="num">${c.mission_score == null ? "–" : c.mission_score.toFixed(2)}</td>
         <td class="num">${c.open_jobs}</td>
         <td class="loc">${esc((c.tags || []).filter(t => t !== "watch").join(", "))}</td>
+        <td>${crawlCell(c)}</td>
         <td><input type="checkbox" data-active="${c.id}" ${c.active ? "checked" : ""}></td>
       </tr>`).join("")}</tbody></table>`;
   document.querySelectorAll(".star").forEach(b => b.onclick = async () => {
@@ -333,6 +353,13 @@ function renderCompanies() {
       toast(b.classList.contains("on") ? "unwatched" : "watching");
       await refreshData();
     } catch (e) { toast("failed: " + e.message); }
+  });
+  document.querySelectorAll("button[data-react]").forEach(b => b.onclick = async () => {
+    try {
+      await post(withTrack(`/api/company/${b.dataset.react}/reactivate`), {});
+      toast("crawled every run again");
+    } catch (e) { toast("failed: " + e.message); }
+    await refreshData();
   });
   document.querySelectorAll("input[data-active]").forEach(cb => cb.onchange = async () => {
     try { await post(withTrack(`/api/company/${cb.dataset.active}/active`), { on: cb.checked }); }

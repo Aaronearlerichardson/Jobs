@@ -210,6 +210,11 @@ def api_companies():
             "mission_score": c.get("mission_score"),
             "active": bool(c.get("active")), "tags": sorted(tags),
             "watched": "watch" in tags, "open_jobs": counts.get(c["id"], 0),
+            # Crawl cadence, so the roster shows WHY a company stopped
+            # producing rows instead of looking silently broken.
+            "crawl_state": c.get("crawl_state") or "active",
+            "empty_streak": c.get("empty_streak") or 0,
+            "next_crawl_at": c.get("next_crawl_at"),
         })
     return jsonify(out)
 
@@ -225,6 +230,21 @@ def api_watch(cid):
     store.set_company_tag(conn, row["name"], "watch", add=on)
     conn.close()
     return jsonify(ok=True, watched=on)
+
+
+@app.post("/api/company/<int:cid>/reactivate")
+def api_reactivate(cid):
+    """Undormant a company: crawl it every run again. The manual override
+    for a board the dormancy rules retired too eagerly (a slug that was
+    briefly broken, a team that has only just started hiring)."""
+    conn = _conn(_track())
+    row = conn.execute("SELECT id FROM companies WHERE id=?", (cid,)).fetchone()
+    if not row:
+        conn.close()
+        return jsonify(error="not found"), 404
+    store.reactivate_company(conn, cid)
+    conn.close()
+    return jsonify(ok=True, crawl_state="active")
 
 
 @app.post("/api/company/<int:cid>/active")
@@ -360,7 +380,12 @@ def api_stats():
         "pipeline": one("SELECT COUNT(*) FROM jobs "
                         "WHERE disposition IN ('applied','interviewing')"),
         "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
-        "companies_active": one("SELECT COUNT(*) FROM companies WHERE active=1"),
+        # Companies actually crawled every run: a dormant row is still
+        # active, but only comes round weekly, so counting it here
+        # overstated the roster by roughly 60%.
+        "companies_active": one("SELECT COUNT(*) FROM companies WHERE "
+                                "active=1 AND "
+                                "COALESCE(crawl_state,'active')='active'"),
         # Roster GROWTH, from companies.created_at. last_probed cannot answer
         # this: a bulk mission re-score rewrites it on every row.
         "companies_new_7d": store.roster_growth(conn, days=7),
