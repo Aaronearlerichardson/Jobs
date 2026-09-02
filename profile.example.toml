@@ -384,7 +384,12 @@ name_search_queries = [
     "tech companies in <your city>",
     "<your industry> startups <your region>",
 ]
-name_blocklist = []          # normalized names to drop (bad slug collisions)
+# Normalized names no discovery path may add (bad slug collisions, sector
+# labels a paste keeps producing). Rejecting a candidate in the web UI's
+# Review queue adds to a SECOND, store-side blocklist; the two are unioned,
+# so this list is for names you want blocked on every machine that shares
+# the profile.
+name_blocklist = []
 # How many names discover_local's bulk pass will websearch-resolve per run,
 # after probe+sniff leave them unboarded (DDG rate-limits, so this is capped
 # rather than run over the whole gather). Omit for the built-in default (20).

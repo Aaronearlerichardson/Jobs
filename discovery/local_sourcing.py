@@ -932,75 +932,15 @@ def _sample_titles(hit, n=6):
     return []
 
 
-def _would_regress_producing_company(conn, name, ats, slug, nc):
-    """True if writing this hit would repoint an ALREADY-ACTIVE, job-
-    producing company at a DIFFERENT board that yields FEWER local jobs
-    than the one already on file.
-
-    >>> from core.store import connect, upsert_company
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "custom",
-    ...                           "careers_url": "https://acme.example/careers",
-    ...                           "local_job_count": 3, "active": 1})
-
-    A different board with FEWER local jobs is a regression:
-
-    >>> _would_regress_producing_company(conn, "Acme", "workday",
-    ...                                  ("acme", 1, "Careers"), 0)
-    True
-
-    A different board with MORE (or equal) local jobs is not:
-
-    >>> _would_regress_producing_company(conn, "Acme", "workday",
-    ...                                  ("acme", 1, "Careers"), 5)
-    False
-
-    The SAME board never counts as a regression -- there is nothing to
-    repoint, whatever the live count says today:
-
-    >>> _would_regress_producing_company(conn, "Acme", "custom", None, 0)
-    False
-
-    A company with no ACTIVE row on file (new, or already inactive) has
-    nothing to protect:
-
-    >>> _would_regress_producing_company(conn, "Nobody", "workday",
-    ...                                  ("x", 1, "y"), 0)
-    False
-
-    Notes:
-        Guards discover_local's bulk pass (via populate_companies), which
-        upserts every confirmed hit unconditionally. A company whose
-        board changes stops matching its old job rows' board-native ids
-        (job_id is namespaced by ats+slug), and sync_job_statuses closes
-        those rows after external_grace_days once the crawler starts
-        fetching only the new board -- a wrong re-resolution silently
-        drops real, still-open postings from the roster.
-
-        Not needed on the resolve_leads/add_names paths: both already
-        filter to boardless/inactive rows before ever calling
-        resolve_board_sniff_first, so an active producing company never
-        reaches it there.
-    """
-    row = conn.execute(
-        "SELECT ats, slug, wd_tenant, wd_pod, wd_site, local_job_count "
-        "FROM companies WHERE name=? AND active=1", (name,)).fetchone()
-    if not row:
-        return False
-    old_nc = row["local_job_count"] or 0
-    if old_nc <= nc:
-        return False
-    old_slug = ((row["wd_tenant"], row["wd_pod"], row["wd_site"])
-               if row["ats"] == "workday" else row["slug"])
-    return (row["ats"], old_slug) != (ats, slug)
-
-
 def populate_companies(extra_names=None, include_missions=None, dork=True):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
-    Companies whose mission is `other` are stored but marked inactive (so
-    they aren't crawled) unless include_missions says otherwise.
+    Every company new to the store lands in the REVIEW QUEUE — inactive,
+    tagged pending-review (core.store.mark_pending) — so a bulk pass cannot
+    put a name nobody vetted on the roster. Mission scoring still runs, so
+    the reviewer sees the tier; `include_missions` only decides what
+    confirming such a row activates.
 
     Finishes with the ATS-dork sweep (search-indexed board URLs) unless
     `dork=False` — run LAST on purpose: it consults the store and skips
@@ -1014,7 +954,8 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
 
     Returns the list of company dicts written by the name-based pass.
     """
-    from core.store import connect, upsert_company, record_miss, miss_counts
+    from core.store import (connect, is_confirmed_company, mark_pending,
+                            miss_counts, record_miss, upsert_company)
     from core.claude import score_company_mission, is_active_mission
 
     confirmed, _, misses = discover_local(extra_names)
@@ -1049,17 +990,6 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                 print(f"    [!] mission scoring failed for "
                       f"{futs[fut]['name']!r}: {e}")
                 continue
-            # Don't let a re-discovered name silently repoint an already-
-            # producing company at a worse board (see
-            # _would_regress_producing_company): the old board's job rows
-            # stop matching once the crawler starts fetching only the new
-            # one, and sync_job_statuses quietly closes them.
-            if _would_regress_producing_company(conn, h["name"], h["ats"],
-                                                h["slug"], h["nc"]):
-                print(f"    [!] {h['name']:30} kept existing board -- new "
-                      f"hit ({h['ats']} nc={h['nc']}) has fewer local jobs "
-                      f"than the one already on file; not overwritten")
-                continue
             # Shared activation rule (core.claude.is_active_mission):
             # active tiers, an UNAVAILABLE (None) score, or a multi-division
             # conglomerate whose subdivisions are filtered at crawl time.
@@ -1080,9 +1010,16 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
             if dup:
                 _report_dup_board(h["name"], dup)
                 continue
+            # Nothing an automated pass finds joins the roster by itself: a
+            # name the store has never confirmed lands in the review queue
+            # (core.store.mark_pending) for a person to accept or reject.
+            pending = not is_confirmed_company(conn, h["name"])
+            if pending:
+                row = mark_pending(row)
             upsert_company(conn, row)
-            written.append({**row, "active": active})
-            flag = "active" if active else "INACTIVE(other)"
+            written.append(dict(row))
+            flag = ("PENDING REVIEW" if pending
+                    else "active" if active else "INACTIVE(other)")
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
     conn.close()
@@ -1103,7 +1040,8 @@ def add_board(name, url):
     """Register a board the user already knows — no guessing. `url` may be
     the ATS board itself (myworkdayjobs / greenhouse / lever / ...) or the
     company's careers page; coordinates are detected, the board NC-counted,
-    mission-scored, and activated.
+    mission-scored, and queued for review (the URL is the user's, but the
+    coordinates under it were still sniffed).
 
         python discover.py --add-board "NC DHHS" https://nc.wd108.myworkdayjobs.com/NC_Careers
 
@@ -1123,7 +1061,8 @@ def add_board(name, url):
     """
     from core.claude import score_company_mission
     from scrapers.fetchers import company as company_fetch
-    from core.store import connect, upsert_company
+    from core.store import (connect, is_confirmed_company, mark_pending,
+                            upsert_company)
     from .sniffer import _detect, _pack, sniff_ats
 
     hit = _detect("", url)
@@ -1166,7 +1105,7 @@ def add_board(name, url):
         _report_dup_board(name, dup)
         conn.close()
         return None
-    upsert_company(conn, {
+    row = {
         "name": name, "ats": ats,
         "slug": None if is_wd else (found.get("slug") or None),
         "wd_tenant": slug[0] if is_wd else None,
@@ -1176,10 +1115,18 @@ def add_board(name, url):
         "local_job_count": nc, "mission_tier": tier, "mission_score": score,
         "mission_reason": reason, "tags": company_tags.LOCAL if nc else None,
         "source": "manual", "active": 1,
-    })
+    }
+    # The URL is the user's, but the ATS coordinates under it were sniffed:
+    # a careers page that links a shared/parent tenant resolves to somebody
+    # else's board. One confirmation click covers both.
+    pending = not is_confirmed_company(conn, name)
+    if pending:
+        row = mark_pending(row)
+    upsert_company(conn, row)
     conn.close()
     ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-    print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  ACTIVE")
+    print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  "
+          f"{'PENDING REVIEW' if pending else 'ACTIVE'}")
     return found
 
 
@@ -1612,11 +1559,11 @@ def resolve_leads(max_workers=8,
                   sources=("page_capture", "linkedin_search", "linkedin_company_search"),
                   all_leads=False, limit=None, retry_days=14):
     """Resolve boardless company leads (banked by capture.py from browsed
-    LinkedIn/Indeed pages, or by manual adds) into crawlable boards and
-    activate the hits. Careers-page SNIFF first (collision-safe), slug-probe
+    LinkedIn/Indeed pages, or by manual adds) into crawlable boards and queue
+    the hits for review. Careers-page SNIFF first (collision-safe), slug-probe
     fallback, every board VALIDATED by a live fetch, then mission-scored.
-    The capture -> resolve-leads -> crawl loop is how manually browsed postings
-    grow the roster.
+    The capture -> resolve-leads -> review -> crawl loop is how manually
+    browsed postings grow the roster.
 
     sources: resolve only leads carrying one of these ``source`` values
     (default: capture.py's 'page_capture'). all_leads=True ignores the source
@@ -1624,7 +1571,8 @@ def resolve_leads(max_workers=8,
     retries only the still-unresolved leads."""
     from core.claude import score_company_mission, is_active_mission
     from core.store import (connect, get_companies as _store_companies,
-                            record_miss, recent_miss_names, upsert_company)
+                            is_confirmed_company, mark_pending, record_miss,
+                            recent_miss_names, upsert_company)
 
     conn = connect()
     leads = [c for c in _store_companies(conn, active_only=False)
@@ -1686,13 +1634,19 @@ def resolve_leads(max_workers=8,
             if dup:
                 _report_dup_board(c["name"], dup)
                 continue
+            # A lead is a name somebody's page mentioned, not an employer
+            # anyone vouched for: resolving it produces a review candidate.
+            pending = not is_confirmed_company(conn, c["name"])
+            if pending:
+                row = mark_pending(row)
             upsert_company(conn, row)
             resolved.append(row)
             if hit.get("via") == "probe":
                 probe_only.append(c["name"])
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
-            print(f"    [{'OK  ' if active else 'off '}] {c['name'][:30]:30} "
+            mark = "queue" if pending else ("OK  " if active else "off ")
+            print(f"    [{mark}] {c['name'][:30]:30} "
                   f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
                   f"{str(tier):18} {ss}{flag}")
     except TimeoutError:
@@ -1705,7 +1659,10 @@ def resolve_leads(max_workers=8,
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
     conn.close()
+    queued = sum(1 for r in resolved
+                 if company_tags.has(r.get("tags"), company_tags.PENDING))
     print(f"\n  {len(resolved)} board(s) resolved, "
+          f"{queued} awaiting review, "
           f"{sum(r['active'] for r in resolved)} activated, "
           f"{len(leads) - len(resolved)} miss(es).")
     if probe_only:
@@ -2022,32 +1979,136 @@ def _report_dup_board(name, existing):
           f"as '{existing.get('name')}' - already tracked, not added")
 
 
-def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
-    """Resolve pasted company names to boards and store the ones that verify.
+# A name the store already has a BOARD for is not worth resolving again.
+# Miss rows are excluded on purpose: they carry an `ats` when the board was
+# found but rejected (no local jobs, dead board), and a re-paste of such a
+# name should be allowed to try again.
+_TRACKED_NAMES_SQL = ("SELECT name FROM companies "
+                      "WHERE ats IS NOT NULL AND miss_reason IS NULL")
+
+
+def _blocked_keys(conn):
+    """Normalized name keys no path may add: the store's rejection blocklist
+    (core.store.blocked_name_keys) union the profile's [discovery]
+    name_blocklist."""
+    from core.store import blocked_name_keys
+    return blocked_name_keys(conn) | set(NAME_BLOCKLIST)
+
+
+def _name_state(key, tracked, blocked, missed):
+    """Which review bucket a parsed name falls in, given the three key sets
+    the store answers with.
+
+    A name nothing on file knows about is the one worth spending requests on:
+
+    >>> _name_state("acmebio", set(), set(), set())
+    'new'
+
+    Anything already answered for is not:
+
+    >>> _name_state("acmebio", {"acmebio"}, set(), set())
+    'tracked'
+    >>> _name_state("oncology", set(), {"oncology"}, set())
+    'blocked'
+    >>> _name_state("acmebio", set(), set(), {"acmebio"})
+    'missed'
+
+    Blocked beats tracked beats missed, so a rejected name still reads as
+    rejected when a stale row or miss stamp mentions it too:
+
+    >>> _name_state("x", {"x"}, {"x"}, {"x"})
+    'blocked'
+    >>> _name_state("x", {"x"}, set(), {"x"})
+    'tracked'
+    """
+    if key in blocked:
+        return "blocked"
+    if key in tracked:
+        return "tracked"
+    if key in missed:
+        return "missed"
+    return "new"
+
+
+def preview_names(blob, use_llm=None):
+    """A pasted page -> the list a person ticks through before anything is
+    resolved: ``[{"name", "key", "state"}]``, one entry per distinct name, in
+    the order they appear, with `state` from `_name_state`.
+
+    Notes:
+        Step one of the two-step paste flow, and the reason it exists: one
+        pasted page produced 15 names that were never employers, and
+        resolving them cost about a thousand HTTP requests before four of
+        them landed on the roster with real boards. Nothing here resolves
+        and nothing here writes -- add_names() takes the confirmed list.
+
+        `use_llm=None` (the default) runs extract_names_llm whenever an API
+        key is configured and falls back to parse_company_names when it
+        returns nothing; True forces the model, False the regex parser.
+    """
+    from core.store import connect, recent_miss_names
+    if use_llm is None:
+        use_llm = config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"
+    names = extract_names_llm(blob) if use_llm else []
+    if not names:
+        names = parse_company_names(blob)
+    conn = connect()
+    try:
+        tracked = {_NONALNUM_RE.sub("", (r["name"] or "").lower())
+                   for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
+        blocked = _blocked_keys(conn)
+        missed = {_NONALNUM_RE.sub("", n.lower())
+                  for n in recent_miss_names(conn)}
+    finally:
+        conn.close()
+    out, seen = [], set()
+    for n in names:
+        key = _NONALNUM_RE.sub("", n.lower())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": n, "key": key,
+                    "state": _name_state(key, tracked, blocked, missed)})
+    return out
+
+
+def add_names(names, use_llm=False, max_workers=6, include_missions=None):
+    """Resolve company names to boards and queue the ones that verify.
+
+    `names` is the list of names a person confirmed in the review step. A raw
+    blob is still accepted -- preview_names() parses it and the `new` names go
+    forward -- so the CLI and any single-step caller keep working.
 
     Uses resolve_board_sniff_first(), not the slug-probe-first resolver: a name
     a person pasted is exactly where a slug collision does the most damage
     (guessing 'sas' lands on an unrelated 5-job board while the real SAS
     Institute sits on iCIMS). Sniffing the company's own careers page cannot
     collide that way; a probe-only hit is reported for a human glance.
+
+    Everything written lands in the review queue (core.store.mark_pending),
+    never straight onto the roster.
     """
     from core.claude import score_company_mission, is_active_mission
-    from core.store import connect, record_miss, upsert_company
+    from core.store import (connect, is_confirmed_company, mark_pending,
+                            record_miss, upsert_company)
 
-    names = extract_names_llm(blob) if use_llm else []
+    if isinstance(names, (str, bytes)):
+        names = [n["name"] for n in preview_names(names, use_llm=use_llm)
+                 if n["state"] == "new"]
+    else:
+        names = [str(n).strip() for n in (names or []) if str(n).strip()]
     if not names:
-        names = parse_company_names(blob)
-    if not names:
-        print("  no company names found in that text.")
+        print("  no company names to resolve.")
         return []
 
     conn = connect()
-    existing = {_NONALNUM_RE.sub("", (r["name"] or "").lower())
-                for r in conn.execute("SELECT name FROM companies").fetchall()}
-    fresh = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in existing]
+    skip = ({_NONALNUM_RE.sub("", (r["name"] or "").lower())
+             for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
+            | _blocked_keys(conn))
+    fresh = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in skip]
     skipped = len(names) - len(fresh)
-    print(f"  {len(names)} name(s) parsed"
-          + (f", {skipped} already tracked" if skipped else "")
+    print(f"  {len(names)} name(s) given"
+          + (f", {skipped} already tracked or blocked" if skipped else "")
           + f" -> resolving {len(fresh)}...")
 
     written, unresolved = [], []
@@ -2071,13 +2132,13 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
             return
         slug = hit.get("slug")
         is_wd = hit["ats"] == "workday"
-        dup = _board_already_tracked(conn, {
-            "name": hit["name"], "ats": hit["ats"],
-            "slug": None if is_wd else slug,
-            "wd_tenant": slug[0] if is_wd else None,
-            "wd_pod":    slug[1] if is_wd else None,
-            "wd_site":   slug[2] if is_wd else None,
-            "careers_url": hit.get("careers_url")})
+        row = {"name": hit["name"], "ats": hit["ats"],
+               "slug": None if is_wd else slug,
+               "wd_tenant": slug[0] if is_wd else None,
+               "wd_pod":    slug[1] if is_wd else None,
+               "wd_site":   slug[2] if is_wd else None,
+               "careers_url": hit.get("careers_url")}
+        dup = _board_already_tracked(conn, row)
         if dup:
             _report_dup_board(hit["name"], dup)
             return
@@ -2085,53 +2146,32 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
         tier, score, reason = score_company_mission(
             hit["name"], " | ".join(t for t in titles if t))
         active = is_active_mission(tier, hit["name"], include_missions)
-        # A pasted name is the weakest-sourced input this module accepts
-        # (no directory/seed curation behind it), and resolve_board_sniff_
-        # first's `via` marks HOW the board was found. 'websearch' is the
-        # weakest of the three: unlike 'sniff' (read off the company's own
-        # careers page) or 'probe' (a slug-guess, at least deterministic
-        # from the name), a websearch hit only means a search result's URL
-        # or an unrelated page happened to match. An NC-local job already
-        # on the board is one independent signal; absent that, require a
-        # second one — an NC HQ/office mention on the company's own site —
-        # before trusting it enough to write as an ACTIVE company. Make the
-        # weaker path visible either way rather than silently equal to a
-        # sniff/probe hit.
-        corroborated = True
-        if hit.get("via") == "websearch" and hit["nc"] == 0:
-            corroborated = nc_hq_signal(hit["name"], hit.get("careers_url"))
-            if not corroborated:
-                active = False
-        upsert_company(conn, {
-            "name": hit["name"], "ats": hit["ats"],
-            "slug": None if is_wd else slug,
-            "wd_tenant": slug[0] if is_wd else None,
-            "wd_pod":    slug[1] if is_wd else None,
-            "wd_site":   slug[2] if is_wd else None,
-            "careers_url": hit.get("careers_url"),
+        row.update({
             "local_job_count": hit["nc"], "total_job_count": hit["count"],
             "mission_tier": tier, "mission_score": score,
             "mission_reason": reason,
-            "tags": company_tags.LOCAL if (hit["nc"] or corroborated) else None,
+            "tags": company_tags.LOCAL if hit["nc"] else None,
             "source": "paste", "active": active,
             "last_probed": datetime.now().isoformat(),
         })
+        pending = not is_confirmed_company(conn, hit["name"])
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
         written.append(hit)
-        # via='probe' means the board came from a name-guess rather than
-        # the company's own careers page — worth a human glance. via=
-        # 'websearch' with no corroboration is weaker still — it was
-        # written inactive above and is flagged, not silently dropped.
-        if hit.get("via") == "probe":
-            flag = "  [verify: slug-guess]"
-        elif hit.get("via") == "websearch" and not corroborated:
-            flag = "  [UNVERIFIED: websearch-only, no NC signal - inactive]"
-        elif hit.get("via") == "websearch":
-            flag = "  [verify: websearch match]"
-        else:
-            flag = ""
-        print(f"    [OK]  {hit['name'][:30]:30} {hit['ats']:12} "
-              f"{hit['nc']}/{hit['count']:<5} {str(tier):20} "
-              f"{'active' if active else 'inactive'}{flag}")
+        # resolve_board_sniff_first's `via` says HOW the board was found:
+        # 'sniff' read it off the company's own careers page, 'probe' guessed
+        # a slug from the name, 'websearch' only means some result URL
+        # matched. The weakest two used to be corroborated (or written
+        # inactive) here; the review queue is that check now, and it shows
+        # the reviewer which one they are looking at.
+        flag = {"probe": "  [slug-guess]",
+                "websearch": "  [websearch match]"}.get(hit.get("via"), "")
+        state = ("pending review" if pending
+                 else "active" if active else "inactive")
+        print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
+              f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
+              f"{state}{flag}")
 
     ex = ThreadPoolExecutor(max_workers=max_workers)
     _drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
@@ -2143,5 +2183,5 @@ def add_names(blob, use_llm=False, max_workers=6, include_missions=None):
               f"(kept as misses — see the companies table's miss_reason):")
         print("    " + ", ".join(f"{n} [{r}]" for n, r in unresolved[:25])
               + (" ..." if len(unresolved) > 25 else ""))
-    print(f"\n  {len(written)} compan(ies) added.")
+    print(f"\n  {len(written)} compan(ies) queued for review.")
     return written

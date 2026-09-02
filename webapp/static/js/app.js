@@ -4,8 +4,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
 const state = { jobs: [], pipeline: [], pipelineDue: [], conversion: [],
-                companies: [], stats: {},
-                tracks: [], track: null, config: null,
+                companies: [], pending: [], stats: {},
+                tracks: [], track: null, config: null, names: null,
                 expanded: null, logTotal: 0, wasRunning: false };
 
 const currentTrack = () => state.tracks.find(t => t.id === state.track);
@@ -414,6 +414,68 @@ async function refreshPipelineDerived() {
   } catch (e) { toast("pipeline refresh failed: " + e.message); }
 }
 
+/* ---------------- review queue ---------------- */
+/* Nothing an automated path finds joins the roster by itself. Proving a board
+   exists at a guessed domain proves a board exists — never that the NAME was
+   an employer: one pasted page yielded 15 names that were not companies
+   ("Oncology", "Job Location", "Who You Are") and four of them landed on the
+   roster with real boards. Candidates wait here instead, uncrawled. */
+function reviewBoard(c) {
+  if (c.ats === "workday") return esc(`${c.wd_tenant || "?"} / ${c.wd_site || "?"}`);
+  return esc(c.slug || c.careers_url || "—");
+}
+
+function renderReview() {
+  const rows = state.pending || [];
+  const badge = $("#pendingbadge");
+  if (badge) { badge.textContent = rows.length; badge.hidden = !rows.length; }
+  const box = $("#review");
+  if (!box) return;
+  if (!rows.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<div class="reviewbox">
+    <h3>Review queue <span class="pill">${rows.length} waiting</span></h3>
+    <p class="fieldhelp">Boards discovery resolved but nobody has confirmed yet.
+       They are never crawled while they sit here. <b>Confirm</b> puts the company
+       on the roster; <b>reject</b> deletes it and blocklists the name so discovery
+       stops spending requests on it.</p>
+    <table>
+      <thead><tr><th>Company</th><th>ATS</th><th>Board</th>
+        <th class="num">local</th><th class="num">total</th><th>Mission</th>
+        <th>Found by</th><th></th></tr></thead>
+      <tbody>${rows.map(c => `
+        <tr>
+          <td>${esc(c.name)}</td>
+          <td class="loc">${esc(c.ats || "—")}</td>
+          <td class="loc">${reviewBoard(c)}</td>
+          <td class="num">${c.local_job_count ?? 0}</td>
+          <td class="num">${c.total_job_count ?? 0}</td>
+          <td><span class="chip tier">${esc(c.mission_tier || "?")}</span>
+              ${c.mission_score == null ? "" : c.mission_score.toFixed(2)}</td>
+          <td class="loc">${esc(c.source || "?")}</td>
+          <td><div class="acts">
+            <button data-ok="${c.id}">confirm</button>
+            <button data-no="${c.id}">reject</button>
+          </div></td>
+        </tr>`).join("")}</tbody></table></div>`;
+  box.querySelectorAll("button[data-ok]").forEach(b => b.onclick = async () => {
+    try {
+      const d = await post(withTrack(`/api/company/${b.dataset.ok}/confirm`), {});
+      toast(d.active ? `${d.name} added to the roster`
+                     : `${d.name} confirmed but off-mission — not crawled`);
+    } catch (e) { toast("failed: " + e.message); }
+    await refreshData();
+  });
+  box.querySelectorAll("button[data-no]").forEach(b => b.onclick = async () => {
+    const reason = prompt("Reject and blocklist this name. Why?", "not a company");
+    if (reason === null) return;
+    try {
+      const d = await post(withTrack(`/api/company/${b.dataset.no}/reject`), { reason });
+      toast(`${d.name} rejected and blocklisted`);
+    } catch (e) { toast("failed: " + e.message); }
+    await refreshData();
+  });
+}
+
 /* ---------------- companies ---------------- */
 
 /* Crawl cadence cell. A dormant company is NOT broken and NOT switched
@@ -496,7 +558,7 @@ const OP_GROUPS = [
   ["routine",   "Everyday",            "What you run to get fresh jobs.", true],
   ["scoring",   "Re-score",            "Redo the fit judgement after changing your résumé, rubric, or keywords.", false],
   ["repair",    "Fill gaps & verify",  "Fix rows with missing text or a stale open/closed state.", false],
-  ["roster",    "Find more employers", "Grow the company list the crawl walks.", false],
+  ["roster",    "Find more employers", "Grow the company list the crawl walks. Bulk sweeps run from the command line: python discover.py --local / --dork / \"<sector>\".", false],
   ["cleanup",   "Roster cleanup",      "Prune and de-duplicate the company list.", false],
 ];
 
@@ -524,17 +586,6 @@ const OPS = [
   ["check-closed", "Probe stale postings", "Opens the URL of anything no board has confirmed lately and closes what's provably gone.",
    [["stale_days", "stale days", 2], ["limit", "limit", ""]],
    "repair", "When you suspect dead links are still ranking."],
-  ["discover-local", "Find new companies", "Full sourcing pass — directories, web search, an LLM brainstorm, and a board-URL sweep — adding employers it can verify.",
-   [["no_dork", "skip dork sweep", false, "check"]],
-   "roster", "Occasionally, to widen the search. Slow (many minutes) and uses the API."],
-  ["dork", "Find boards by posting", "Searches for job-board URLs in your area instead of guessing company names.",
-   [],
-   "roster", "A faster, cheaper alternative to the full pass."],
-  ["discover-term", "Discover by sector", "Asks the model for likely employers matching a free-text sector/niche, probes them against ATS platforms, and adds the confirmed ones to the roster.",
-   [["term", "sector or term, e.g. 'medical device companies'", "", "wide"],
-    ["dry_run", "preview only, don't write", false, "check"],
-    ["no_report", "skip markdown report", false, "check"]],
-   "roster", "When you have a specific niche in mind rather than a full sourcing pass. Uses the Claude API."],
   ["score-missions", "Score company missions", "Asks the model how well each company matches the mission tiers you defined, which feeds ranking.",
    [["rescore", "re-score all", false, "check"]],
    "roster", "After adding companies, so they can be ranked."],
@@ -583,13 +634,14 @@ function renderOps() {
         <button class="run" data-op="add-job" ${allowed.has("add-job") ? "" : "disabled"}>Add</button>
       </div></div>
     <div class="op ${allowed.has("add-names") ? "" : "dim"}"><h3>Add companies from a page</h3>
-      <p>Paste text from anywhere — a LinkedIn search, a Built In list, a conference exhibitor list. It pulls the company names out, finds each employer's <i>own</i> job board, counts local openings, and scores its mission. Names that aren't real employers just fail to resolve and are dropped.</p>
-      <p class="fieldhelp"><b>When:</b> you're browsing somewhere the crawler can't reach. Select the results, copy, paste here — noise like "2 days ago" and "Easy Apply" is filtered out.</p>
-      <textarea class="wide" data-a="names" rows="6" placeholder="Paste the page text here - job titles, dates and locations are ignored"></textarea>
+      <p>Paste text from anywhere — a LinkedIn search, a Built In list, a conference exhibitor list. <b>Parse</b> pulls the candidate names out; you tick the real employers and only those are resolved to a job board.</p>
+      <p class="fieldhelp"><b>When:</b> you're browsing somewhere the crawler can't reach. Nothing is fetched or written until you press Resolve — one bad paste used to cost about a thousand requests and put four non-companies on the roster.</p>
+      <textarea class="wide" id="n-text" rows="6" placeholder="Paste the page text here - job titles, dates and locations are ignored"></textarea>
       <div class="row">
-        <label title="Uses the Claude API to read a messy paste. The free text parser runs first; turn this on only if it missed companies."><input type="checkbox" data-p="use_llm"> messy paste (uses the API)</label>
-        <button class="run" data-op="add-names" ${allowed.has("add-names") ? "" : "disabled"}>Add</button>
+        <label title="Skip the model and use the free text parser only. Left off, the model reads the paste whenever an API key is configured."><input type="checkbox" id="n-nollm"> text parser only</label>
+        <button class="run runx" id="n-parse" ${allowed.has("add-names") ? "" : "disabled"}>Parse</button>
       </div>
+      <div id="n-list"></div>
     </div>
     <div class="op ${allowed.has("add-board") ? "" : "dim"}"><h3>Add one company</h3>
       <p>Give a careers-page URL: it works out which job board the company uses, counts local openings, and scores its mission.</p>
@@ -616,6 +668,9 @@ function renderOps() {
       <p>Greyed-out cards don't apply to this track — switch tracks in the header.
          Anything that scores jobs uses the Claude API and costs money; the rest is free.</p>
     </div>${groups}`;
+  const parseBtn = $("#n-parse");
+  if (parseBtn) parseBtn.onclick = parseNames;
+  renderNames();
   document.querySelectorAll("button[data-op]").forEach(b => b.onclick = async () => {
     const card = b.closest(".op");
     const params = {};
@@ -642,6 +697,91 @@ function renderOps() {
   });
 }
 
+/* Step one of the paste flow. Resolving is the expensive half, so the parsed
+   names are shown first: `state` says what the store already knows about each
+   one, and a per-row "not a company" toggle blocklists the junk on the way
+   past. */
+const NAME_CHIPS = {
+  tracked: `<span class="chip tier">already tracked</span>`,
+  blocked: `<span class="chip gate">blocked</span>`,
+  missed:  `<span class="chip age-stale">missed recently</span>`,
+};
+const nameLocked = r => !!r.reject || r.state === "tracked" || r.state === "blocked";
+
+function renderNames() {
+  const box = $("#n-list");
+  if (!box) return;
+  const rows = state.names;
+  if (!rows) { box.innerHTML = ""; return; }
+  if (!rows.length) {
+    box.innerHTML = `<p class="fieldhelp">No company names found in that text.</p>`;
+    return;
+  }
+  const picked = rows.filter(r => r.pick && !nameLocked(r)).length;
+  const rejected = rows.filter(r => r.reject).length;
+  box.innerHTML = `<div class="namepick">${rows.map((r, i) => `
+    <div class="namerow ${nameLocked(r) ? "off" : ""}">
+      <label><input type="checkbox" data-n="${i}"
+        ${r.pick && !nameLocked(r) ? "checked" : ""}
+        ${nameLocked(r) ? "disabled" : ""}> <span class="nm">${esc(r.name)}</span></label>
+      ${r.reject ? `<span class="chip gate">not a company</span>`
+                 : (NAME_CHIPS[r.state] || "")}
+      <button class="notco ${r.reject ? "on" : ""}" data-x="${i}"
+        ${r.state === "blocked" ? "disabled" : ""}
+        title="blocklist this name so no discovery pass spends requests on it again"
+        >not a company</button>
+    </div>`).join("")}</div>
+    <div class="row">
+      <button class="run" id="n-run" ${picked ? "" : "disabled"}>Resolve ${picked}</button>
+      ${rejected ? `<span class="fieldhelp">${rejected} to blocklist</span>` : ""}
+    </div>`;
+  box.querySelectorAll("input[data-n]").forEach(cb => cb.onchange = () => {
+    state.names[+cb.dataset.n].pick = cb.checked;
+    renderNames();
+  });
+  box.querySelectorAll("button[data-x]").forEach(b => b.onclick = () => {
+    const r = state.names[+b.dataset.x];
+    r.reject = !r.reject;
+    if (r.reject) r.pick = false;
+    renderNames();
+  });
+  const run = $("#n-run");
+  if (run) run.onclick = resolveNames;
+}
+
+async function parseNames() {
+  const text = $("#n-text").value;
+  if (!text.trim()) { toast("paste some page text first"); return; }
+  const btn = $("#n-parse");
+  btn.disabled = true;
+  try {
+    const body = { text };
+    if ($("#n-nollm").checked) body.use_llm = false;   // omitted = auto
+    const rows = await post(withTrack("/api/names/preview"), body);
+    state.names = rows.map(r => ({ ...r, pick: r.state === "new", reject: false }));
+    renderNames();
+    toast(`${rows.length} name(s) found — tick the real employers`);
+  } catch (e) { toast("parse failed: " + e.message); }
+  btn.disabled = false;
+}
+
+async function resolveNames() {
+  const rows = state.names || [];
+  const names = rows.filter(r => r.pick && !nameLocked(r)).map(r => r.name);
+  const reject = rows.filter(r => r.reject).map(r => r.name);
+  if (!names.length) { toast("tick at least one company"); return; }
+  try {
+    // Blocklist first: if the run is refused because another op holds the
+    // slot, the junk names are still recorded and never come back.
+    if (reject.length) await post(withTrack("/api/names/block"), { names: reject });
+    await post(withTrack("/api/run/add-names"), { names });
+    toast(`started: resolving ${names.length} name(s)`);
+    state.logTotal = 0; $("#oplog").textContent = "";
+    state.names = null;
+    renderNames();
+  } catch (e) { toast(e.message); }
+}
+
 async function pollOps() {
   try {
     const s = await api(`/api/run/status?since=${state.logTotal}`);
@@ -658,6 +798,10 @@ async function pollOps() {
     const allowed = new Set(currentTrack()?.ops || []);
     document.querySelectorAll("button.run[data-op]").forEach(b =>
       b.disabled = s.running || !allowed.has(b.dataset.op));
+    // The paste card drives itself (parse -> pick -> resolve), so it has no
+    // data-op. Only ever DISABLE here: re-enabling would fight renderNames.
+    if (s.running || !allowed.has("add-names"))
+      document.querySelectorAll("button.runx, #n-run").forEach(b => b.disabled = true);
     document.querySelectorAll("#setcards button.run").forEach(b => b.disabled = s.running);
     if (s.lines.length) {
       const log = $("#oplog");
@@ -934,15 +1078,17 @@ async function loadJobs() {
   state.jobs = await api(withTrack(`/api/jobs?closed=${closed}&dispositioned=${disp}`));
 }
 async function refreshData() {
-  const [stats, , pipeline, companies, conversion] =
+  const [stats, , pipeline, companies, conversion, pending] =
     await Promise.all([api(withTrack("/api/stats")), loadJobs(),
                        api(withTrack("/api/pipeline")),
                        api(withTrack("/api/companies")),
-                       api(withTrack("/api/report/conversion"))]);
+                       api(withTrack("/api/report/conversion")),
+                       api(withTrack("/api/pending"))]);
   state.stats = stats; state.companies = companies;
   state.pipeline = pipeline.rows; state.pipelineDue = pipeline.followups_due;
   state.conversion = conversion;
-  renderTiles(); renderJobs(); renderPipeline(); renderCompanies();
+  state.pending = pending;
+  renderTiles(); renderJobs(); renderPipeline(); renderCompanies(); renderReview();
 }
 
 /* ---------------- tracks ---------------- */

@@ -42,6 +42,17 @@ class TestOps:
     def test_every_op_has_a_callable(self):
         assert all(callable(o["fn"]) for o in webapp.OPS.values())
 
+    def test_the_bulk_discovery_ops_left_the_ui(self):
+        """A 29-minute discover-local run found 4 new boards, and a dork
+        sweep names a company after a de-hyphenated slug. Neither is worth a
+        button that holds the single op slot for half an hour -- they run
+        from discover.py now."""
+        assert not ({"discover-local", "dork", "discover-term"}
+                    & set(webapp.OPS))
+
+    def test_the_targeted_add_paths_stay(self):
+        assert {"add-names", "add-board", "add-job"} <= set(webapp.OPS)
+
 
 class TestApi:
     ENDPOINTS = ("/api/stats", "/api/jobs", "/api/pipeline", "/api/companies",
@@ -304,6 +315,101 @@ class TestRemoteAdmissionFields:
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
         assert row["best_fit"] is None and row["open_jobs"] == 0
+
+
+class TestReviewQueue:
+    """Every automated roster write waits for a person now, and the queue is
+    the API surface that person works through."""
+
+    def _queued_store(self, tmp_path, monkeypatch, name="Guess"):
+        """A throwaway DB holding one review candidate, pointed at by BOTH
+        the track config (the routes) and config.STORE_DB_PATH (discovery's
+        own store.connect()). The suite may never touch the real store."""
+        import config
+        from core import store
+        db_path = tmp_path / "review.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, store.mark_pending(
+            {"name": name, "ats": "greenhouse", "slug": "guess",
+             "source": "paste", "local_job_count": 2, "total_job_count": 9}))
+        conn.close()
+        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
+                            "db_path", db_path)
+        monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
+        return cid
+
+    @staticmethod
+    def _store(monkeypatch=None):
+        import config
+        from core import store
+        return store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
+
+    def test_pending_lists_the_queue(self, client, tmp_path, monkeypatch):
+        cid = self._queued_store(tmp_path, monkeypatch)
+        rows = json.loads(client.get("/api/pending").data)
+        assert [r["id"] for r in rows] == [cid]
+        assert rows[0]["source"] == "paste"
+        assert rows[0]["local_job_count"] == 2
+
+    def test_a_candidate_is_counted_but_not_crawled(self, client, tmp_path,
+                                                    monkeypatch):
+        self._queued_store(tmp_path, monkeypatch)
+        stats = json.loads(client.get("/api/stats").data)
+        assert stats["companies_active"] == 0
+        assert stats["pending_review"] == 1
+
+    def test_confirm_puts_it_on_the_roster(self, client, tmp_path, monkeypatch):
+        cid = self._queued_store(tmp_path, monkeypatch)
+        assert client.post(f"/api/company/{cid}/confirm").status_code == 200
+        assert json.loads(client.get("/api/pending").data) == []
+        assert json.loads(client.get("/api/stats").data)["companies_active"] == 1
+
+    def test_reject_removes_it_and_blocks_the_name(self, client, tmp_path,
+                                                   monkeypatch):
+        from core import store
+        cid = self._queued_store(tmp_path, monkeypatch)
+        resp = client.post(f"/api/company/{cid}/reject",
+                           json={"reason": "not a company"})
+        assert resp.status_code == 200
+        conn = self._store()
+        try:
+            assert store.get_companies(conn, active_only=False) == []
+            assert store.blocked_name_keys(conn) == {"guess"}
+        finally:
+            conn.close()
+
+    def test_unknown_company_404s(self, client, tmp_path, monkeypatch):
+        self._queued_store(tmp_path, monkeypatch)
+        assert client.post("/api/company/9999/confirm").status_code == 404
+        assert client.post("/api/company/9999/reject").status_code == 404
+
+    def test_block_records_the_names_the_reviewer_rejected(
+            self, client, tmp_path, monkeypatch):
+        from core import store
+        self._queued_store(tmp_path, monkeypatch)
+        resp = client.post("/api/names/block",
+                           json={"names": ["Who You Are", "Job Location"]})
+        assert json.loads(resp.data)["blocked"] == 2
+        conn = self._store()
+        try:
+            assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
+        finally:
+            conn.close()
+
+    def test_preview_parses_without_resolving_anything(self, client, tmp_path,
+                                                       monkeypatch):
+        import discovery.local_sourcing as ls
+        self._queued_store(tmp_path, monkeypatch)
+        monkeypatch.setattr(ls, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        tried = []
+        monkeypatch.setattr(ls, "resolve_or_miss",
+                            lambda *a, **k: tried.append(a) or (None, "x"))
+        rows = json.loads(client.post(
+            "/api/names/preview", json={"text": "x", "use_llm": False}).data)
+        assert rows == [{"name": "Alpaca Health", "key": "alpacahealth",
+                         "state": "new"}]
+        assert tried == []
 
 
 class TestAssets:

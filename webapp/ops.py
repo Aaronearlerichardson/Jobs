@@ -215,23 +215,23 @@ def _op_nlx(p):
     print(f"  {total} new job(s) ingested from the NLx feed.")
 
 
-def _op_discover(p):
-    """Free-text sector discovery — the discover.py flagship path, reachable
-    from the UI. Asks Claude for likely employers matching a sector/term,
-    probes each against the ATS registry, and (matching the CLI's
-    apply-by-default) upserts the confirmed ones into the roster unless the
-    caller asked for a dry run."""
-    from discovery import apply_to_store, discover, print_summary, write_discovery_report
-    term = (p.get("term") or "").strip()
-    if not term:
-        print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
-        return
-    result = discover(term)
-    print_summary(result)
-    if not p.get("no_report"):
-        write_discovery_report(result)
-    for line in apply_to_store(result, dry_run=bool(p.get("dry_run"))):
-        print(line)
+# The bulk-discovery ops (discover-local, dork, discover-term) are CLI-only
+# now: `python discover.py --local / --dork / "<term>"`. A 29-minute
+# discover-local run found 4 new boards, an ATS-dork sweep names companies
+# after a de-hyphenated slug, and 84 pasted companies produced one good job
+# ever — none of that is worth a button that ties up the single op slot for
+# half an hour. What the UI keeps is the targeted paths (add-names,
+# add-board, add-job) plus the Review queue every one of them feeds.
+
+
+def _op_add_names(p):
+    """Resolve the names a person ticked in the Review step.
+
+    `params["names"]` is the confirmed LIST from /api/names/preview; a raw
+    string is still accepted (add_names parses it) so an older client, or a
+    scripted POST, keeps working."""
+    from discovery.local_sourcing import add_names
+    add_names(p.get("names") or [], use_llm=bool(p.get("use_llm")))
 
 
 def _op_prune(p):
@@ -308,32 +308,10 @@ OPS = {
         "engine": "local",
         "fn": lambda p: _op_nlx(p),
     },
-    "discover-local": {
-        "label": "Discover local companies",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.local_sourcing",
-            fromlist=["populate_companies"]
-        ).populate_companies(dork=not p.get("no_dork")),
-    },
     "add-names": {
         "label": "Add companies from pasted text",
         "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.local_sourcing", fromlist=["add_names"]
-        ).add_names(p.get("names") or "", use_llm=bool(p.get("use_llm"))),
-    },
-    "dork": {
-        "label": "ATS dork sweep",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.ats_dork", fromlist=["run_ddgs_dorks"]
-        ).run_ddgs_dorks(),
-    },
-    "discover-term": {
-        "label": "Discover companies by term",
-        "engine": "local",
-        "fn": lambda p: _op_discover(p),
+        "fn": lambda p: _op_add_names(p),
     },
     "score-missions": {
         "label": "Score missions",

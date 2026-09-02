@@ -174,9 +174,23 @@ The store's `companies` table **is** the roster. Ways to add to it:
 | `python discover.py --local` | Local sourcing: profile seeds + directory scrapes + **web-search name harvesting** → probe → locality-verify → mission-score into the store. |
 | `python discover.py --dork` | Mine search-indexed board URLs (`site:jobs.lever.co "<your city>"`) built from your locality + keywords. |
 | `python discover.py --resolve-leads` | Resolve company leads left by page capture: slug probe → careers sniff → Workday probe → web-search fallback. Idempotent. |
-| `python discover.py --add-board "NVIDIA" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted, locality-verified, activated. |
+| `python discover.py --add-board "NVIDIA" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted, locality-verified, queued for review. |
 | `python discover.py --score-missions` | Tier any active company with a board but no mission yet (run after `--apply`/`--local`). `--rescore-missions` re-scores everything. |
 | `python discover.py --from-bciwiki` | Bulk-import a public industry directory (bciwiki.org's ~700 brain-computer-interface companies). A worked example of the pattern; only useful if that's your field. |
+
+Every one of those paths writes **review candidates**, not roster members:
+an inactive `companies` row tagged `pending-review`, which no crawl fetches.
+The web UI's Companies tab lists them — Confirm puts a company on the roster,
+Reject deletes it and blocklists the name. Proving a board answers at a
+guessed domain proves a board exists; it never proved the NAME was an
+employer, and one pasted page's 15 non-companies ("Oncology", "Job Location",
+"Who You Are") cost about a thousand HTTP requests and put four of them on
+the roster with real boards.
+
+The bulk sweeps (`--local`, `--dork`, free-text `discover.py "<sector>"`) are
+command-line only — they run for many minutes for a handful of boards, which
+is not worth holding the web UI's single operation slot. The UI keeps the
+targeted paths: paste a page, add one board, add one job.
 
 After `--apply` or `--local`, run `--score-missions` — the apply step
 deliberately leaves mission NULL so scoring happens in one pass.
