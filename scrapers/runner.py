@@ -108,7 +108,7 @@ def build_sources(cfg, t, include_websearch=None):
     Returns a list of dicts {name, platform, thunk, company}: `company` is
     the store row for location-scoped store boards (their jobs sync/upsert
     against that company) and None for sweep sources (priority companies,
-    lightweight ATS sweep, aggregators, web search — persisted via
+    lightweight ATS sweep, aggregators, USAJOBS, web search — persisted via
     mark_seen). Priority companies come first so cross-source duplicates
     resolve deterministically."""
     from . import ops
@@ -184,7 +184,21 @@ def build_sources(cfg, t, include_websearch=None):
                 lambda l=label, u=url, d=default_loc, rb=is_remote_board:
                     fetch_rss(l, u, default_location=d, remote_board=rb))
 
-    # 4) Web searches (DDG -> JSON-LD).
+    # 4) USAJOBS (federal openings). Deliberately NOT under `aggregators`:
+    # that family is remote-native boards and is off for location-scoped
+    # tracks, whereas this source is location-scoped by construction (its
+    # profile table names a place and a radius) and is exactly what a local
+    # track wants — a federal campus has no ATS to put in the roster. Safe
+    # to leave outside the gate because it ships OFF and needs credentials.
+    if getattr(cfg, "USAJOBS_ENABLED", False):
+        from .fetchers import fetch_usajobs
+        add("USAJOBS", "usajobs",
+            lambda: fetch_usajobs(
+                keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
+                radius=cfg.USAJOBS_RADIUS, series=cfg.USAJOBS_SERIES,
+                results_per_page=cfg.USAJOBS_RESULTS_PER_PAGE))
+
+    # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
         from .fetchers import fetch_websearch
         for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):

@@ -55,6 +55,15 @@ CLAUDE_VERIFY_MODEL = env("CLAUDE_VERIFY_MODEL", "claude-opus-5")
 CAREERONESTOP_USER_ID = env("CAREERONESTOP_USER_ID")
 CAREERONESTOP_TOKEN   = env("CAREERONESTOP_TOKEN")
 
+# USAJOBS Search API — free key covers every federal opening, which no other
+# source here can see (an agency lab runs no ATS and files nothing with the
+# state job bank). Register at https://developer.usajobs.gov/apirequest/;
+# OPM emails a key tied to the address you registered. USAJOBS_EMAIL must be
+# that same address — the API takes it as the User-Agent and rejects a key
+# sent with anything else. Search scope lives in profile [sources.usajobs].
+USAJOBS_API_KEY = env("USAJOBS_API_KEY")
+USAJOBS_EMAIL   = env("USAJOBS_EMAIL")
+
 # =========================================================================
 #  PATHS
 # =========================================================================
@@ -666,6 +675,23 @@ REMOTIVE_CATEGORY: str | None = _src.get("remotive_category") or None
 # max_threads=2 covers the current + previous month's threads.
 HNHIRING_ENABLED     = bool(_src.get("hnhiring", True))
 HNHIRING_MAX_THREADS = int(_src.get("hnhiring_max_threads", 2))
+
+# USAJOBS — profile [sources.usajobs] ({ enabled, keyword, location, radius,
+# series, results_per_page }). OFF by default, unlike the feeds above: it is
+# the one source needing credentials (USAJOBS_API_KEY / USAJOBS_EMAIL), and
+# its scope is a place rather than a topic, so there is no useful default
+# search. `series` is the real filter — occupational series codes; omit the
+# key for the technical set (see scrapers/fetchers/usajobs.DEFAULT_SERIES).
+_usajobs = _src.get("usajobs", {})
+USAJOBS_ENABLED  = bool(_usajobs.get("enabled", False))
+USAJOBS_KEYWORD: str | None = _usajobs.get("keyword") or None
+USAJOBS_LOCATION: str | None = _usajobs.get("location") or None
+USAJOBS_RADIUS   = int(_usajobs.get("radius", 50))
+# Presence of the key, not truthiness — `series = []` deliberately means
+# "every series", which is different from "I didn't configure any".
+USAJOBS_SERIES: list[str] | None = ([str(s) for s in (_usajobs.get("series") or [])]
+                                   if "series" in _usajobs else None)
+USAJOBS_RESULTS_PER_PAGE = int(_usajobs.get("results_per_page", 250))
 
 # Generic RSS/Atom feeds — profile [sources].rss ({ label, url, location }).
 # Defaults to broad remote-job feeds; replace with your field's feeds

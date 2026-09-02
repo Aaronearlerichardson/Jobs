@@ -22,6 +22,7 @@ from .rippling import fetch_rippling
 from .rssfeed import fetch_rss
 from .sitemap import fetch_sitemap
 from .ultipro import fetch_ultipro
+from .usajobs import fetch_usajobs
 from .websearch import fetch_websearch
 from .workday import fetch_workday
 
@@ -49,6 +50,7 @@ __all__ = [
     "fetch_rss",
     "fetch_sitemap",
     "fetch_successfactors",
+    "fetch_usajobs",
     "fetch_websearch",
     "fetch_workday",
 ]

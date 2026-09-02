@@ -98,6 +98,10 @@ That directory holds `jobs.db`, your `profile.toml`, your résumé,
   "App passwords" → Mail). Emailing is off until both are set.
 - **CAREERONESTOP_USER_ID / _TOKEN** (optional) unlock the NLx feed for
   employers with no public board — see [Gated employers](#gated--big-company-employers).
+- **USAJOBS_API_KEY / USAJOBS_EMAIL** (optional) unlock federal postings —
+  see [Gated employers](#gated--big-company-employers). `USAJOBS_EMAIL` must be
+  the address the key was registered to; the API reads it as the User-Agent
+  and rejects a key sent with any other.
 
 **Prompt caching is on by default.** Every scorer sends the same stable system
 prompt (rubric + profile) with a per-posting user turn, so `core/claude.py`
@@ -225,6 +229,23 @@ Some employers can't be crawled directly. Route by type:
     python run_scraper.py --import-companies ncstate.json
     python discover.py --score-missions
     ```
+- **Federal agencies** (an NIH institute, an EPA or USGS campus, a VA medical
+  center) — they run no ATS, so nothing else in this crawler can see them.
+  Turn on **USAJOBS** in `[sources.usajobs]`:
+
+  1. Register at [developer.usajobs.gov/apirequest](https://developer.usajobs.gov/apirequest/)
+     — free, and the key arrives by email.
+  2. Set `USAJOBS_API_KEY` and `USAJOBS_EMAIL` (the address you registered).
+  3. In `profile.toml`, set `enabled = true` and a `location` + `radius`, and
+     pick your occupational `series` codes (these do the real filtering —
+     `2210` IT, `1550` computer science, `0601` health science, `0401`
+     biological science by default).
+
+  Another official government API — nothing is scraped. Unlike the other
+  non-company feeds, it runs on *every* track, because its search is
+  location-scoped by construction. Note that agencies re-announce one vacancy
+  under several numbers (internal vs. public, one per grade), so near-duplicate
+  titles are normal rather than a bug.
 - **Multi-division conglomerates** — list them in `[policy].multi_division`
   so their aligned subdivisions surface even though the company's overall
   mission scores low.
@@ -545,7 +566,7 @@ Everything personal lives in `profile.toml` on your machine;
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, `domain_ladder`, `stack_core`/`stack_anti`, `region_terms` |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
 | `[locality]` | what counts as "local" (`core/locality.py`) |
-| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries |
+| `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`) |
 | `[discovery]` | seed companies, Workday majors, directory URLs, web-search name queries, priority companies |
 
 **Relevance model:** a job passes if it hits any `core` term, OR a `domain` +
@@ -703,7 +724,7 @@ identically to a dead one.
 | `scrapers/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `scrapers/ops.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
 | `scrapers/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `scrapers/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx) |
+| `scrapers/fetchers/` | board fetchers (10 ATSes + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS) |
 | `scrapers/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
 | `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
