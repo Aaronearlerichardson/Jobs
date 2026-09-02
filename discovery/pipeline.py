@@ -19,6 +19,8 @@ from .probes import (
     probe_workday,
 )
 from .sniffer import sniff_careers_ats
+from .names import (GENERIC_WORDS, name_words, strip_parentheticals,
+                    strip_suffixes)
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost
@@ -58,58 +60,6 @@ def candidate_from_dict(d):
         careers_url = d.get("careers_url", "").strip(),
         notes       = d.get("notes", "").strip(),
     )
-
-
-# Corporate suffixes to strip before generating slug variants. Stored
-# lowercased; match is word-boundary so "biosciences" doesn't eat "bio".
-_CORP_SUFFIXES = (
-    "incorporated", "technologies", "biosciences", "pharmaceuticals",
-    "therapeutics", "corporation", "systems", "holdings", "sciences",
-    "pharma", "health", "bio", "labs", "group", "inc", "corp", "ltd",
-    "llc", "co", "company",
-)
-_SUFFIX_RE = re.compile(
-    r"\b(?:" + "|".join(re.escape(s) for s in _CORP_SUFFIXES) + r")\b\.?",
-    re.IGNORECASE,
-)
-_PAREN_RE = re.compile(r"\s*\([^)]*\)")
-
-
-def _normalize_name(name: str) -> str:
-    """Strip parentheticals and trailing corporate suffixes.
-
-    >>> _normalize_name("Corcept Therapeutics (NC office)")
-    'Corcept'
-    >>> _normalize_name("United Therapeutics, Inc.")
-    'United'
-    >>> _normalize_name("Acme Corp")
-    'Acme'
-
-    Punctuation and runs of whitespace left behind by the stripping are
-    collapsed, so the result is always a clean single-spaced name:
-
-    >>> _normalize_name("  Acme  Corp  ")
-    'Acme'
-
-    A name with nothing to strip is returned as-is, and a missing name is
-    the empty string rather than an error:
-
-    >>> _normalize_name("Wolfspeed")
-    'Wolfspeed'
-    >>> _normalize_name(None)
-    ''
-
-    Notes:
-        "Therapeutics" and "Biosciences" count as suffixes here even though
-        they are part of the legal name. That is deliberate: ATS slugs are
-        far more often the head word than the full name, and slug_variants
-        keeps the unstripped form as a candidate anyway.
-    """
-    s = _PAREN_RE.sub("", name or "")
-    s = _SUFFIX_RE.sub("", s)
-    # Clean up punctuation left behind by suffix stripping.
-    s = re.sub(r"[,\.]+", " ", s)
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def _variants_for(name: str) -> list[str]:
@@ -193,10 +143,10 @@ def slug_variants(name, first_guess):
 
     for half in halves:
         # Full form first (keeps Inc/Corp suffix in play if ATS expects it).
-        cleaned_full = _PAREN_RE.sub("", half).strip()
+        cleaned_full = strip_parentheticals(half).strip()
         variants.extend(_variants_for(cleaned_full))
         # Then the suffix-stripped form.
-        cleaned_short = _normalize_name(half)
+        cleaned_short = strip_suffixes(half)
         if cleaned_short and cleaned_short.lower() != cleaned_full.lower():
             variants.extend(_variants_for(cleaned_short))
 
@@ -209,16 +159,6 @@ def slug_variants(name, first_guess):
             seen.add(v)
             out.append(v)
     return out[:8]
-
-
-# Generic single-word slugs that collide with unrelated boards when
-# probed from a multi-word company name ("Bio-Signal Technologies" -> the
-# bare slug "signal" hits some unrelated Lever board). Flagged for review.
-_GENERIC_SLUGS = {
-    "signal", "neuro", "neural", "brain", "medical", "health", "data",
-    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
-    "bci", "ai", "research", "digital", "care", "vision", "sense",
-}
 
 
 def _slug_collision_risk(name, slug):
@@ -237,17 +177,17 @@ def _slug_collision_risk(name, slug):
     >>> _slug_collision_risk("Cala Health", "calahealth")
     False
     """
-    name_words = re.findall(r"[a-z0-9]+", (name or "").lower())
+    words = name_words(name)
     single_token = "-" not in slug
-    if len(name_words) >= 2 and slug == name_words[0]:
+    if len(words) >= 2 and slug == words[0]:
         return True
-    if len(name_words) >= 2 and single_token and slug in _GENERIC_SLUGS:
+    if len(words) >= 2 and single_token and slug in GENERIC_WORDS:
         return True
     # A one-word company name ("Inter", "Spark", "TCT") slugifies to a
     # short common token that collides with a large unrelated board
     # ("inter" -> 158 jobs at a fintech).
-    return (len(name_words) == 1 and single_token
-            and (slug in _GENERIC_SLUGS or len(slug) <= 5))
+    return (len(words) == 1 and single_token
+            and (slug in GENERIC_WORDS or len(slug) <= 5))
 
 
 def _board_evidence(ats, slug, n=6):
@@ -307,11 +247,11 @@ def _flag_for_verification(c, claimed_ats, slug):
     flags = []
     if claimed_ats in PROBES and c.ats != claimed_ats:
         flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
-    name_words = re.findall(r"[a-z0-9]+", c.name.lower())
+    words = name_words(c.name)
     if _slug_collision_risk(c.name, slug):
-        if len(name_words) >= 2 and slug == name_words[0]:
+        if len(words) >= 2 and slug == words[0]:
             flags.append("first-word slug - confirm it's the same company")
-        elif len(name_words) >= 2:
+        elif len(words) >= 2:
             flags.append(f"generic slug '{slug}' - likely a different company")
         else:
             flags.append(f"single-word name slug '{slug}' - confirm identity")
@@ -452,10 +392,10 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     name. Claude's entry wins when both sources have the same company
     (its ats/slug_guess may be more accurate than the seed's 'unknown').
     """
-    seen = {_normalize_name(c.get("name") or "").lower() for c in claude_raw}
+    seen = {strip_suffixes(c.get("name") or "").lower() for c in claude_raw}
     return list(claude_raw) + [
         s for s in seeds
-        if _normalize_name(s["name"]).lower() not in seen
+        if strip_suffixes(s["name"]).lower() not in seen
     ]
 
 

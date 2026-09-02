@@ -27,7 +27,8 @@ _log = logging.getLogger("discovery.sniffer")
 _ANCHORS_ONLY = SoupStrainer("a")
 
 from scrapers.http import HEADERS, SESSION
-from .probes import PROBES, _extract_workday_triple, _name_domain_tokens
+from .probes import PROBES, _extract_workday_triple
+from .names import domain_tokens, risky_domain_tokens
 
 # ─── Platform signatures ─────────────────────────────────────────────────
 #
@@ -159,7 +160,7 @@ def _root_urls(name, careers_url=""):
         base_m = re.match(r"(https?://[^/]+)", careers_url)
         if base_m:
             urls.append(base_m.group(1) + "/")
-    for tok in _name_domain_tokens(name):
+    for tok in domain_tokens(name):
         u = f"https://www.{tok}.com/"
         if u not in urls:
             urls.append(u)
@@ -209,7 +210,7 @@ def _candidate_urls(name, careers_url=""):
                 u = f"{base}{path}"
                 if u not in urls:
                     urls.append(u)
-    toks = _name_domain_tokens(name)
+    toks = domain_tokens(name)
     for tld, path in _COMBOS:
         for tok in toks:
             host = f"www.{tok}.com" if tld == "com" else f"{tok}.{tld}"
@@ -236,11 +237,11 @@ def _candidate_urls(name, careers_url=""):
 # company's board wins outright ("Galaxy Diagnostics" -> a 57-job board at
 # the fintech Galaxy.com, zero of them local, misreported as a live
 # no-local-jobs board instead of the wrong company it actually is). A hit
-# reached only through a risky token (probes._risky_domain_tokens) must
+# reached only through a risky token (names.risky_domain_tokens) must
 # corroborate against the page content before it's trusted.
 
 def _risky_token_in_url(url, name):
-    """The risky domain token (probes._risky_domain_tokens) `url`'s host
+    """The risky domain token (names.risky_domain_tokens) `url`'s host
     was built from, or "" if the host isn't one of those — including when
     it's ALSO reachable via a safe (full/suffix-stripped) token, since the
     full token containing the risky one as a substring
@@ -253,12 +254,11 @@ def _risky_token_in_url(url, name):
     >>> _risky_token_in_url("https://www.unitedtherapeutics.com/careers", "United Therapeutics")
     ''
     """
-    from .probes import _name_domain_tokens, _risky_domain_tokens
-    risky = _risky_domain_tokens(name)
+    risky = risky_domain_tokens(name)
     if not risky:
         return ""
     host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0]
-    safe = [t for t in _name_domain_tokens(name) if t not in risky]
+    safe = [t for t in domain_tokens(name) if t not in risky]
     if any(s and s in host for s in safe):
         return ""
     for t in risky:
@@ -714,7 +714,7 @@ def diagnose_no_board(name, careers_url=""):
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
       timeout on every guess) -- likely defunct or acquired.
     - "wrong-domain": every page that DID answer was reached only through a
-      truncated/generic domain token (see probes._risky_domain_tokens) and
+      truncated/generic domain token (see names.risky_domain_tokens) and
       none corroborated the company name -- the precise domain never
       answered, so all we have is someone else's page (the galaxy.com
       shape: "galaxydiagnostics.com" dead, "galaxy.com" live).

@@ -28,8 +28,8 @@ from core import tags as company_tags
 _log = logging.getLogger("discovery")
 
 from scrapers.http import HEADERS, SESSION
-from .probes import (probe_greenhouse, probe_lever, probe_ashby, probe_workday,
-                     _DOMAIN_STOPWORDS, _name_domain_tokens)
+from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
+from .names import domain_tokens, name_key, slug_guesses
 
 
 # --------------------------------------------------------------------------- #
@@ -154,13 +154,10 @@ def ddg_text(query, max_results=10, budget=_DDG_WALL_BUDGET):
 
 # Seed employers + Workday-fallback majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
-# Name -> comparison key: strip everything but [a-z0-9]. Called on every
-# candidate name in several dedup/lookup loops, so compile it once.
-_NONALNUM_RE = re.compile(r"[^a-z0-9]")
 
 SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps notes
 MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
-_MAJORS_KEYS = {_NONALNUM_RE.sub("", m.lower()) for m in MAJORS_WORKDAY}
+_MAJORS_KEYS = {name_key(m) for m in MAJORS_WORKDAY}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
@@ -430,7 +427,7 @@ def gather_names(extra=None):
     names, seen = [], set()
     for src in sources:
         for n in src:
-            k = _NONALNUM_RE.sub("", (n or "").lower())
+            k = name_key(n)
             if k and k not in seen:
                 seen.add(k)
                 names.append(n.strip())
@@ -440,28 +437,6 @@ def gather_names(extra=None):
 # --------------------------------------------------------------------------- #
 #  Slug candidates + probing                                                   #
 # --------------------------------------------------------------------------- #
-
-def _slug_candidates(name):
-    """
-    ATS-slug guesses for a company name, in priority order. Uses joined,
-    hyphenated, and suffix-stripped-joined forms only — deliberately NOT the
-    bare first word ("eli", "novo", "charles"), which collides with unrelated
-    boards and shadows the real employer.
-    """
-    clean = re.sub(r"\s*\([^)]*\)", "", name).lower()
-    words = [w for w in re.split(r"[^a-z0-9]+", clean) if w]
-    if not words:
-        return []
-    joined = "".join(words)                                  # unitedtherapeutics
-    hyphen = "-".join(words)                                 # united-therapeutics
-    stripped = "".join(w for w in words if w not in _DOMAIN_STOPWORDS) or joined
-    out, seen = [], set()
-    for c in (joined, hyphen, stripped):
-        if c and c not in seen:
-            seen.add(c)
-            out.append(c)
-    return out
-
 
 from core.locality import is_nc as _has_nc  # single source of truth for NC locality
 
@@ -517,7 +492,7 @@ def probe_company(name, try_workday=True):
     Returns a hit dict with an ``nc`` count, or None.
     """
     hit = None
-    for slug in _slug_candidates(name):
+    for slug in slug_guesses(name):
         for ats, fn, nc_fn in (("greenhouse", probe_greenhouse, _nc_count_greenhouse),
                                ("lever", probe_lever, _nc_count_lever),
                                ("ashby", probe_ashby, _nc_count_ashby)):
@@ -576,13 +551,13 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         names, not the full candidate gather.
     """
     names = gather_names(extra_names)
-    n_wd = sum(1 for n in names if _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS)
+    n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
           f"({n_wd} with Workday fallback)...")
     hits, sniff_misses = [], []
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         futs = {ex.submit(probe_company, n,
-                          _NONALNUM_RE.sub("", n.lower()) in _MAJORS_KEYS): n
+                          name_key(n) in _MAJORS_KEYS): n
                 for n in names}
         for fut in as_completed(futs):
             hit = fut.result()
@@ -595,10 +570,10 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     if js_majors:
         # Only an NC>0 board counts as "found" — a junk 0-NC slug collision
         # must not block the JS fallback for the real employer.
-        found = {_NONALNUM_RE.sub("", h["name"].lower())
+        found = {name_key(h["name"])
                  for h in hits if h["nc"] > 0}
         missed = [m for m in MAJORS_WORKDAY
-                  if _NONALNUM_RE.sub("", m.lower()) not in found]
+                  if name_key(m) not in found]
         import importlib.util
         if importlib.util.find_spec("playwright.sync_api") is None:
             if missed:
@@ -653,8 +628,8 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     if sniff:
         from .sniffer import sniff_ats
         from scrapers.fetchers import company as company_fetch
-        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
+        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if name_key(n) not in have]
         print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
         def _sniff_one(n):
@@ -709,8 +684,8 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         cap = (config.DISCOVERY_WEBSEARCH_CAP if websearch_cap is None
               else websearch_cap)
         cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
-        have = {_NONALNUM_RE.sub("", h["name"].lower()) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in have]
+        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+        todo = [n for n in names if name_key(n) not in have]
         if todo and cap > 0:
             from core.store import connect as _connect, recent_miss_names
             conn = _connect()
@@ -777,7 +752,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 
     # Drop known bad name→board matches.
     hits = [h for h in hits
-            if _NONALNUM_RE.sub("", h["name"].lower()) not in NAME_BLOCKLIST]
+            if name_key(h["name"]) not in NAME_BLOCKLIST]
 
     # De-dup by resolved board (same slug/triple reached via different names,
     # e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter name.
@@ -854,7 +829,7 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
     False
     """
-    squashed = _NONALNUM_RE.sub("", (name or "").lower())
+    squashed = name_key(name)
     for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
         toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
         place_toks = toks[:-1] or toks          # drop the state suffix token
@@ -880,7 +855,7 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
     urls = []
     if careers_url:
         urls.append(careers_url)
-    for tok in _name_domain_tokens(name):
+    for tok in domain_tokens(name):
         urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
                  f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
                  f"https://www.{tok}.com/company"]
@@ -1173,8 +1148,8 @@ def _host_matches_name(url, name):
     (a distinctive name token appears in the host) — the guard that keeps a
     self-hosted 'custom' board from resolving to a third-party jobs site."""
     host = re.sub(r"^https?://", "", url.lower()).split("/", 1)[0].replace("www.", "")
-    hostslug = _NONALNUM_RE.sub("", host)
-    joined = _NONALNUM_RE.sub("", name.lower())
+    hostslug = name_key(host)
+    joined = name_key(name)
     tokens = {joined} | {w for w in re.findall(r"[a-z0-9]+", name.lower())
                          if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 4 and t in hostslug for t in tokens)
@@ -1185,10 +1160,10 @@ def _slug_matches_name(slug, name):
     company — guards against the dork surfacing an unrelated board (e.g.
     'Novamed' -> the 'nc' NC-government Workday tenant)."""
     s = slug[0] if isinstance(slug, tuple) else slug   # workday tenant, else slug
-    s = _NONALNUM_RE.sub("", str(s or "").lower())
+    s = name_key(str(s or ""))
     if len(s) < 3:
         return False
-    tokens = {_NONALNUM_RE.sub("", name.lower())}
+    tokens = {name_key(name)}
     tokens |= {w for w in re.findall(r"[a-z0-9]+", name.lower())
                if len(w) >= 4 and w not in _GENERIC_NAME_WORDS}
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
@@ -1925,7 +1900,7 @@ def parse_company_names(blob, limit=300):
 
     out, seen = [], set()
     for name in candidates:
-        key = _NONALNUM_RE.sub("", name.lower())
+        key = name_key(name)
         if key and key not in seen:
             seen.add(key)
             out.append(name)
@@ -1974,8 +1949,7 @@ def _board_already_tracked(conn, row):
     existing = company_by_board(conn, row)
     if not existing:
         return None
-    if (_NONALNUM_RE.sub("", (existing.get("name") or "").lower())
-            == _NONALNUM_RE.sub("", (row.get("name") or "").lower())):
+    if name_key(existing.get("name")) == name_key(row.get("name")):
         return None
     return existing
 
@@ -2060,16 +2034,16 @@ def preview_names(blob, use_llm=None):
         names = parse_company_names(blob)
     conn = connect()
     try:
-        tracked = {_NONALNUM_RE.sub("", (r["name"] or "").lower())
+        tracked = {name_key(r["name"])
                    for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
         blocked = _blocked_keys(conn)
-        missed = {_NONALNUM_RE.sub("", n.lower())
+        missed = {name_key(n)
                   for n in recent_miss_names(conn)}
     finally:
         conn.close()
     out, seen = [], set()
     for n in names:
-        key = _NONALNUM_RE.sub("", n.lower())
+        key = name_key(n)
         if not key or key in seen:
             continue
         seen.add(key)
@@ -2108,10 +2082,10 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         return []
 
     conn = connect()
-    skip = ({_NONALNUM_RE.sub("", (r["name"] or "").lower())
+    skip = ({name_key(r["name"])
              for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
             | _blocked_keys(conn))
-    fresh = [n for n in names if _NONALNUM_RE.sub("", n.lower()) not in skip]
+    fresh = [n for n in names if name_key(n) not in skip]
     skipped = len(names) - len(fresh)
     print(f"  {len(names)} name(s) given"
           + (f", {skipped} already tracked or blocked" if skipped else "")

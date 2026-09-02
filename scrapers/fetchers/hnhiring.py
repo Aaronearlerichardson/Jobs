@@ -62,8 +62,10 @@ _URLISH_RE = re.compile(r"https?://|www\.|\.(com|io|ai|org|net|co|health|dev)\b"
 
 def _clean_company(s):
     """Strip trailing URLs / parentheticals and surrounding punctuation."""
-    s = _URL_RE.sub("", s)
-    s = re.sub(r"[\(\[][^)\]]*[\)\]]?", "", s)   # drop "(…)" incl. unbalanced
+    # Imported here: the fetchers package is loaded by scrapers.sources,
+    # which the discovery package imports back at module load.
+    from discovery.names import strip_parentheticals
+    s = strip_parentheticals(_URL_RE.sub("", s))
     return re.sub(r"\s+", " ", s).strip(" -—|·•:,")
 
 

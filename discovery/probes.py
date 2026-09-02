@@ -8,6 +8,7 @@ import time
 import config
 
 from scrapers.http import HEADERS, SESSION
+from .names import domain_tokens
 
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
@@ -297,98 +298,6 @@ def _extract_workday_triple(text: str):
 
 _URL_CAP = 12
 
-# Corporate suffixes to strip when building domain-token guesses — the
-# domain rarely includes these (redhat.com, not redhatinc.com). Keep in
-# sync with pipeline._CORP_SUFFIXES.
-_DOMAIN_STOPWORDS = {
-    "inc", "incorporated", "corp", "corporation", "ltd", "llc", "co",
-    "company", "technologies", "systems", "therapeutics", "biosciences",
-    "pharmaceuticals", "pharma", "sciences", "bio", "labs", "group",
-    "health", "holdings",
-}
-
-
-def _name_domain_tokens(name: str) -> list[str]:
-    """
-    Guess the company's likely domain token(s) from its name. Returns
-    a short list in priority order: suffix-free joined form first
-    ("unitedtherapeutics" → yes, "unitherapeuticsinc" → no), then the
-    first word ("united"), then the fully-joined form as a last resort.
-    """
-    if not name:
-        return []
-    # Drop parentheticals and non-letter punctuation first.
-    clean = re.sub(r"\s*\([^)]*\)", "", name).lower()
-    words = [w for w in re.split(r"[^a-z0-9]+", clean) if w]
-    if not words:
-        return []
-    # Full joined form ("unitedtherapeutics")
-    full = "".join(words)
-    # Suffix-stripped ("redhat" from "Red Hat Inc")
-    kept = [w for w in words if w not in _DOMAIN_STOPWORDS]
-    stripped = "".join(kept)
-    # First-word only ("united")
-    first = kept[0] if kept else words[0]
-
-    # Priority: full joined form first ("unitedtherapeutics.com" beats
-    # the ambiguous "united.com"), then suffix-stripped, then first word.
-    out, seen = [], set()
-    for t in (full, stripped, first):
-        if t and t not in seen:
-            seen.add(t)
-            out.append(t)
-    return out
-
-
-# Generic/ambiguous domain tokens that collide with an unrelated company when
-# used as a truncated domain guess ("signal" from "Bio-Signal Technologies"
-# -> some unrelated signal-processing startup's board). Same collision class
-# as pipeline._GENERIC_SLUGS; kept as a separate small set here because
-# probes.py cannot import pipeline.py (pipeline imports probes — see the
-# "keep in sync" note on _DOMAIN_STOPWORDS above).
-_GENERIC_DOMAIN_WORDS = {
-    "signal", "neuro", "neural", "brain", "medical", "health", "data",
-    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
-    "bci", "ai", "research", "digital", "care", "vision", "sense",
-}
-
-
-def _risky_domain_tokens(name: str) -> set:
-    """The tokens from _name_domain_tokens(name) that are a TRUNCATED guess
-    at a multi-word company's domain: the bare first word, or a generic word
-    from _GENERIC_DOMAIN_WORDS. Same collision shape
-    pipeline._flag_for_verification calls out for slugs ("first-word slug -
-    confirm it's the same company") — a domain guess has no post-hoc job
-    count to sanity-check it against, so a hit reached ONLY through one of
-    these needs the fetched page to actually corroborate the company name
-    (see sniffer._corroborates) before it is trusted.
-
-    >>> sorted(_risky_domain_tokens("Galaxy Diagnostics"))
-    ['galaxy']
-    >>> sorted(_risky_domain_tokens("Lindy Biosciences"))
-    ['lindy']
-    >>> sorted(_risky_domain_tokens("United Therapeutics"))
-    ['united']
-
-    A single-word name has no "first word of a multi-word name" to be
-    truncated to — it's not a risky domain guess, just the whole name:
-
-    >>> _risky_domain_tokens("Pfizer")
-    set()
-
-    Notes:
-        "Red Hat Inc" -> stripped "redhat" is NOT flagged: dropping a
-        corporate suffix is precise (the domain really does omit "Inc"),
-        unlike collapsing a multi-word name down to one ambiguous word.
-    """
-    words = [w for w in re.split(r"[^a-z0-9]+", (name or "").lower()) if w]
-    if len(words) < 2:
-        return set()
-    full = "".join(words)
-    return {t for t in _name_domain_tokens(name)
-           if t != full and (t == words[0] or t in _GENERIC_DOMAIN_WORDS)}
-
-
 def _workday_candidate_urls(name: str, careers_url: str) -> list[str]:
     """
     Careers-page URLs to scrape, in priority order. Caps at _URL_CAP to
@@ -404,7 +313,7 @@ def _workday_candidate_urls(name: str, careers_url: str) -> list[str]:
     paths = ("/careers", "/en/jobs", "/jobs", "/careers/",
              "/en/careers", "/company/careers/")
 
-    for token in _name_domain_tokens(name):
+    for token in domain_tokens(name):
         for path in paths:
             urls.append(f"https://www.{token}.com{path}")
         # Bare subdomains
