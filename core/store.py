@@ -150,6 +150,17 @@ _MIGRATIONS = {
         # See MISS_REASONS; rows carrying these are always active=0.
         "miss_reason": "TEXT",
         "miss_at":     "TEXT",
+        # Crawl scheduling (record_crawl_outcome / crawlable_companies).
+        # 181 of 300 active companies had never produced a single job yet
+        # were fetched on every crawl, and a handful of huge off-mission
+        # boards (a state health agency: 663 local rows, best fit 0.15)
+        # burned most of the run. `crawl_state` NULL reads as 'active', so
+        # existing rows need no backfill.
+        "crawl_state":      "TEXT",      # active|dormant|off (NULL=active)
+        "empty_streak":     "INTEGER",   # consecutive empty DAYS
+        "last_crawled_at":  "TEXT",
+        "last_nonempty_at": "TEXT",
+        "next_crawl_at":    "TEXT",      # dormant rows wake at/after this
     },
     "jobs": {
         "track":           "TEXT",
@@ -873,6 +884,137 @@ def get_companies(conn, active_only=True, missions=None, tag=None):
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY mission_score DESC, local_job_count DESC"
     return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+# --------------------------------------------------------------------------- #
+#  Crawl scheduling (dormancy)                                                 #
+# --------------------------------------------------------------------------- #
+#
+# A crawl of the local roster spent most of its wall clock on boards that
+# never pay: 181 of 300 active companies had produced zero jobs ever, and
+# three high-volume boards produced hundreds of rows nobody would apply to
+# (a state health agency: 663 local jobs, best fit 0.15; a games studio;
+# a health startup: 30 jobs, best fit 0.03). Deactivating them by hand is
+# wrong -- a silent board can start hiring -- so they go DORMANT instead:
+# still crawled, just weekly rather than every run.
+#
+# Two ways in, both reversible by the board itself:
+#   * empty streak -- `dormant_after` consecutive DAYS returning nothing;
+#   * off-mission volume -- >= 30 jobs stored and a best fit under 0.20.
+# Watched companies are exempt from both: the watch tag means "tell me the
+# moment anything opens here", which a weekly cadence would break.
+
+# Off-mission volume rule. A board this big that has never scored above
+# this is not a scoring accident, it is the wrong employer for the profile.
+_OFFMISSION_MIN_JOBS = 30
+_OFFMISSION_MAX_FIT = 0.20
+
+
+def _offmission_volume(conn, company_id):
+    """True when this company has stored >= 30 jobs and its BEST resume fit
+    is still under 0.20 -- the high-volume off-mission board pattern. A NULL
+    max (nothing scored yet) is missing data, not a verdict, so it fails."""
+    row = conn.execute(
+        "SELECT COUNT(*) AS n, MAX(resume_fit_score) AS best FROM jobs "
+        "WHERE company_id = ?", (company_id,)).fetchone()
+    return bool(row and row["n"] >= _OFFMISSION_MIN_JOBS
+                and row["best"] is not None
+                and row["best"] < _OFFMISSION_MAX_FIT)
+
+
+def record_crawl_outcome(conn, company_id, n_jobs, err=None,
+                         dormant_after=4, dormant_days=7):
+    """Stamp one company's crawl result and re-decide its crawl_state.
+
+    `n_jobs` is what the board returned for this track (already location
+    filtered), `err` the fetch exception if any. Returns the row's new
+    crawl_state.
+
+    Rules, in order:
+      * a fetch ERROR is neutral -- a 503 or a timeout is our problem, not
+        evidence the board is dead, and counting it would retire companies
+        during a network wobble;
+      * `n_jobs == 0` grows empty_streak, but only ONCE PER CALENDAR DAY:
+        several tracks (and a re-run after a crash) hit the same board on
+        the same day, and three runs in one afternoon must not read as
+        three empty days;
+      * `n_jobs > 0` resets the streak and wakes a dormant row;
+      * either dormancy rule (streak, off-mission volume) parks the row at
+        now + `dormant_days`.
+
+    Watched companies, and rows the user switched 'off', are left alone.
+    """
+    row = conn.execute(
+        "SELECT id, tags, crawl_state, empty_streak, last_crawled_at "
+        "FROM companies WHERE id = ?", (company_id,)).fetchone()
+    if not row:
+        return None
+    state = row["crawl_state"] or "active"
+    if err is not None:
+        return state
+
+    now = datetime.now()
+    stamp = now.isoformat()
+    streak = row["empty_streak"] or 0
+    sets = {"last_crawled_at": stamp}
+
+    if n_jobs:
+        streak = 0
+        sets["empty_streak"] = 0
+        sets["last_nonempty_at"] = stamp
+        if state == "dormant":                     # the board woke up
+            state = "active"
+            sets["next_crawl_at"] = None
+    else:
+        same_day = (row["last_crawled_at"] or "")[:10] == stamp[:10]
+        if not same_day:
+            streak += 1
+            sets["empty_streak"] = streak
+
+    watched = "watch" in {t for t in (row["tags"] or "").split(",") if t}
+    if state != "off" and not watched:
+        if streak >= dormant_after or _offmission_volume(conn, company_id):
+            state = "dormant"
+            sets["next_crawl_at"] = (now + timedelta(days=dormant_days)
+                                     ).isoformat()
+
+    sets["crawl_state"] = state
+    conn.execute(
+        f"UPDATE companies SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
+        [*sets.values(), company_id])
+    conn.commit()
+    return state
+
+
+def _is_crawlable(company, now=None):
+    """Does this company row come up for a crawl right now? A NULL
+    crawl_state reads as 'active' (rows that predate the column), a dormant
+    row only once its next_crawl_at has passed, an 'off' row never."""
+    state = company.get("crawl_state") or "active"
+    if state == "active":
+        return True
+    if state == "dormant":
+        return (company.get("next_crawl_at") or "") <= (
+            now or datetime.now().isoformat())
+    return False
+
+
+def crawlable_companies(conn, tag=None):
+    """The active companies due for a crawl: everything except the dormant
+    rows whose weekly slot has not come round yet. What build_sources and
+    sync_status_all fetch, in place of every active row."""
+    now = datetime.now().isoformat()
+    return [c for c in get_companies(conn, active_only=True, tag=tag)
+            if _is_crawlable(c, now)]
+
+
+def reactivate_company(conn, company_id):
+    """Undormant one company: back to 'active', streak cleared, no parked
+    wake time. The escape hatch for a board the rules retired too eagerly."""
+    conn.execute(
+        "UPDATE companies SET crawl_state='active', empty_streak=0, "
+        "next_crawl_at=NULL WHERE id=?", (company_id,))
+    conn.commit()
 
 
 # --------------------------------------------------------------------------- #

@@ -419,6 +419,9 @@ _DEFAULT_TRACKS = {
 #                       title must match before any API spend)
 #   exclude_gate        apply the [exclude.<id>] role/defense/nonclinical
 #                       tables to postings (False = skip entirely)
+#   dormant_after       consecutive empty DAYS before a company goes dormant
+#   dormant_days        how long a dormant company is skipped before its next
+#                       (weekly) retry -- see store.record_crawl_outcome
 
 # The default technical-title gate: a posting whose TITLE doesn't match this
 # never costs an API call. Deliberately broad and field-neutral — it is a
@@ -447,7 +450,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": True},
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
         "verify_top": 15, "cost_guard": 0, "email": False,
-        "exclude_gate": True,
+        "exclude_gate": True, "dormant_after": 4, "dormant_days": 7,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
     # "sweep" — a location-AGNOSTIC sweep: whole boards, plus aggregator feeds
@@ -460,7 +463,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": False},
         "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
         "verify_top": 0, "cost_guard": 300, "email": False,
-        "exclude_gate": False,
+        "exclude_gate": False, "dormant_after": 4, "dormant_days": 7,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
     },
 }
@@ -515,6 +518,10 @@ def _build_ui_tracks(raw):
             "email": bool(t.get("email", eng_defaults["email"])),
             "exclude_gate": bool(t.get("exclude_gate",
                                        eng_defaults["exclude_gate"])),
+            "dormant_after": int(t.get("dormant_after",
+                                       eng_defaults["dormant_after"])),
+            "dormant_days": int(t.get("dormant_days",
+                                      eng_defaults["dormant_days"])),
             "tech_title_regex": str(t.get("tech_title_regex")
                                     or eng_defaults["tech_title_regex"]),
         }

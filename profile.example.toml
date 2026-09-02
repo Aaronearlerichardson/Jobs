@@ -150,6 +150,14 @@ default = true
 # cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl
 # exclude_gate = true          # apply the [exclude.<id>] role/defense tables
+# dormant_after = 4            # after this many consecutive EMPTY DAYS a
+#                              # company goes dormant: still crawled, but
+#                              # weekly instead of every run (a roster of 300
+#                              # had 181 companies that had never produced a
+#                              # single job). One non-empty fetch wakes it,
+#                              # and "watch"-tagged companies never sleep.
+# dormant_days = 7             # how long a dormant company is skipped before
+#                              # its next retry
 # tech_title_regex = "..."     # the technical-title gate (case-insensitive
 #                              # regex a title must match before scoring spend).
 #                              # The default is broad and field-neutral; set

@@ -1,5 +1,7 @@
 """The SQLite store: schema, company/job upserts, the open/closed
-lifecycle, dispositions, and track membership."""
+lifecycle, dispositions, crawl dormancy, and track membership."""
+
+from datetime import datetime, timedelta
 
 import core.store as store
 
@@ -34,6 +36,141 @@ class TestCompanies:
         assert ops._is_watched(row) and ops._whole_board(row)
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
         assert store.set_company_tag(db, "Nope", "watch") is None
+
+
+class TestDormancy:
+    """181 of 300 active companies had never produced a single job yet were
+    fetched on every crawl, and three off-mission boards produced hundreds
+    of rows nobody would apply to. Dormancy demotes both to a weekly
+    cadence instead of asking the user to deactivate boards by hand."""
+
+    def _state(self, db, company):
+        return db.execute(
+            "SELECT crawl_state, empty_streak, next_crawl_at, last_nonempty_at "
+            "FROM companies WHERE id=?", (company,)).fetchone()
+
+    def _backdate(self, db, company, days=1):
+        """Pretend the last crawl was `days` ago -- the streak only grows once
+        per calendar day, so nothing else can fake consecutive empty days."""
+        db.execute("UPDATE companies SET last_crawled_at=? WHERE id=?",
+                   ((datetime.now() - timedelta(days=days)).isoformat(),
+                    company))
+        db.commit()
+
+    def _empty_days(self, db, company, n, **kw):
+        state = None
+        for _ in range(n):
+            state = store.record_crawl_outcome(db, company, 0, **kw)
+            self._backdate(db, company)
+        return state
+
+    def test_streak_grows_once_per_day(self, db, company):
+        assert self._empty_days(db, company, 3) == "active"
+        assert self._state(db, company)["empty_streak"] == 3
+
+    def test_dormant_after_the_configured_run_of_empty_days(self, db, company):
+        assert self._empty_days(db, company, 4) == "dormant"
+        assert self._state(db, company)["next_crawl_at"] > datetime.now().isoformat()
+
+    def test_same_day_repeats_count_once(self, db, company):
+        # Several tracks (and a re-run after a crash) hit the same board the
+        # same afternoon; that is one empty day, not three.
+        for _ in range(3):
+            store.record_crawl_outcome(db, company, 0)
+        assert self._state(db, company)["empty_streak"] == 1
+
+    def test_fetch_error_is_neutral(self, db, company):
+        self._empty_days(db, company, 3)
+        assert store.record_crawl_outcome(
+            db, company, 0, err=RuntimeError("503")) == "active"
+        assert self._state(db, company)["empty_streak"] == 3
+
+    def test_a_short_dormant_after_still_needs_distinct_days(self, db, company):
+        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "active"
+        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "active"
+        self._backdate(db, company)
+        assert store.record_crawl_outcome(db, company, 0, dormant_after=2) == "dormant"
+
+    def test_jobs_reset_the_streak_and_wake_a_dormant_row(self, db, company):
+        self._empty_days(db, company, 4)
+        assert store.record_crawl_outcome(db, company, 7) == "active"
+        row = self._state(db, company)
+        assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
+        assert row["last_nonempty_at"] is not None
+
+    def test_watched_company_never_sleeps(self, db, company):
+        store.set_company_tag(db, "Acme", "watch")
+        assert self._empty_days(db, company, 6) == "active"
+
+    def test_offmission_volume_sleeps_a_busy_board(self, db, company, add_job):
+        # The 663-jobs-best-fit-0.15 pattern: productive every run, and
+        # productive of nothing worth reading.
+        for i in range(store._OFFMISSION_MIN_JOBS):
+            add_job(f"gh_acme_{i}", fit=0.03)
+        assert store.record_crawl_outcome(db, company, 663) == "dormant"
+
+    def test_one_good_fit_keeps_a_busy_board_awake(self, db, company, add_job):
+        for i in range(store._OFFMISSION_MIN_JOBS):
+            add_job(f"gh_acme_{i}", fit=0.03)
+        add_job("gh_acme_star", fit=0.71)
+        assert store.record_crawl_outcome(db, company, 663) == "active"
+
+    def test_unscored_jobs_are_not_evidence(self, db, company, add_job):
+        # A board nobody has scored yet has a NULL best fit; that is missing
+        # data, not a verdict.
+        for i in range(store._OFFMISSION_MIN_JOBS):
+            add_job(f"gh_acme_{i}")
+        assert store.record_crawl_outcome(db, company, 40) == "active"
+
+    def test_watched_company_survives_the_volume_rule(self, db, company, add_job):
+        store.set_company_tag(db, "Acme", "watch")
+        for i in range(store._OFFMISSION_MIN_JOBS):
+            add_job(f"gh_acme_{i}", fit=0.03)
+        assert store.record_crawl_outcome(db, company, 663) == "active"
+
+
+class TestCrawlableSelection:
+    def _sleeping(self, db, name, wake):
+        cid = store.upsert_company(db, {"name": name, "ats": "greenhouse",
+                                        "slug": name.lower()})
+        db.execute("UPDATE companies SET crawl_state='dormant', "
+                   "next_crawl_at=? WHERE id=?", (wake, cid))
+        db.commit()
+        return cid
+
+    def test_null_state_reads_as_active(self, db, company):
+        assert [c["id"] for c in store.crawlable_companies(db)] == [company]
+
+    def test_dormant_row_waits_for_its_slot(self, db, company):
+        self._sleeping(db, "Sleepy",
+                       (datetime.now() + timedelta(days=6)).isoformat())
+        assert {c["name"] for c in store.crawlable_companies(db)} == {"Acme"}
+
+    def test_dormant_row_returns_when_due(self, db, company):
+        self._sleeping(db, "Sleepy",
+                       (datetime.now() - timedelta(minutes=1)).isoformat())
+        assert {c["name"] for c in store.crawlable_companies(db)} == {"Acme",
+                                                                      "Sleepy"}
+
+    def test_off_never_comes_back_on_its_own(self, db, company):
+        db.execute("UPDATE companies SET crawl_state='off' WHERE id=?", (company,))
+        db.commit()
+        assert store.crawlable_companies(db) == []
+
+    def test_inactive_row_stays_out(self, db, company):
+        db.execute("UPDATE companies SET active=0 WHERE id=?", (company,))
+        db.commit()
+        assert store.crawlable_companies(db) == []
+
+    def test_reactivation_wakes_it_now(self, db, company):
+        cid = self._sleeping(db, "Sleepy",
+                             (datetime.now() + timedelta(days=6)).isoformat())
+        store.reactivate_company(db, cid)
+        row = db.execute("SELECT crawl_state, empty_streak, next_crawl_at "
+                         "FROM companies WHERE id=?", (cid,)).fetchone()
+        assert (row["crawl_state"], row["empty_streak"],
+                row["next_crawl_at"]) == ("active", 0, None)
+        assert len(store.crawlable_companies(db)) == 2
 
 
 class TestDedupe:

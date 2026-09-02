@@ -1,6 +1,9 @@
 """Tracks are configuration, not code: [tracks.*] parsing, engine defaults,
 keyword focus, and source assembly through the one crawl pipeline."""
 
+from datetime import datetime, timedelta
+
+import core.store as store
 import scrapers.runner as runner
 
 
@@ -34,7 +37,13 @@ class TestTrackConfig:
         assert all(k in local_track for k in
                    ("keyword_mode", "sources", "store_tag", "require_core_anchor",
                     "geo_gate", "verify_top", "cost_guard", "email",
-                    "exclude_gate", "tech_title_regex"))
+                    "exclude_gate", "tech_title_regex",
+                    "dormant_after", "dormant_days"))
+
+    def test_dormancy_knobs_are_whole_numbers(self, cfg):
+        for t in cfg.UI_TRACKS.values():
+            assert isinstance(t["dormant_after"], int) and t["dormant_after"] >= 1
+            assert isinstance(t["dormant_days"], int) and t["dormant_days"] >= 1
 
     def test_engine_defaults_differ(self, local_track, sweep_track):
         assert local_track["keyword_mode"] == "extend"
@@ -97,6 +106,33 @@ class TestSourceAssembly:
             return                                  # none configured: nothing to order
         specs = runner.build_sources(cfg, sweep_track)
         assert [s for s in specs[:len(prio)] if s["platform"].endswith("*")]
+
+    def test_dormant_companies_drop_out_of_the_source_list(self, cfg,
+                                                           local_track,
+                                                           tmp_path):
+        """The point of dormancy: build_sources must read the crawlable rows,
+        not every active one, or the 181 never-productive companies keep
+        costing a fetch each run."""
+        db_path = tmp_path / "sources.db"
+        conn = store.connect(db_path)
+        store.upsert_company(conn, {"name": "Awake", "ats": "greenhouse",
+                                    "slug": "awake"})
+        cid = store.upsert_company(conn, {"name": "Asleep", "ats": "greenhouse",
+                                          "slug": "asleep"})
+        conn.execute("UPDATE companies SET crawl_state='dormant', "
+                     "next_crawl_at=? WHERE id=?",
+                     ((datetime.now() + timedelta(days=7)).isoformat(), cid))
+        conn.commit()
+        conn.close()
+        t = {**local_track, "db_path": db_path, "store_tag": None}
+        names = {s["name"] for s in runner.build_sources(cfg, t)}
+        assert "Awake" in names and "Asleep" not in names
+
+        conn = store.connect(db_path)
+        store.reactivate_company(conn, cid)
+        conn.close()
+        names = {s["name"] for s in runner.build_sources(cfg, t)}
+        assert "Asleep" in names
 
     def test_websearch_toggle_removes_sources(self, cfg, sweep_track):
         with_ws = runner.build_sources(cfg, sweep_track)
