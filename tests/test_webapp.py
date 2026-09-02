@@ -124,6 +124,22 @@ class TestCompanyCrawlState:
         assert row["empty_streak"] == 6
         assert row["next_crawl_at"].startswith("2099")
 
+    def test_capture_only_rows_show_the_marker(self, client, tmp_path,
+                                               monkeypatch):
+        # The roster shows WHY a company is never fetched: its ats reads
+        # "capture", and it stays an active, never-dormant row.
+        import config
+        from core import store
+        self._sleepy_store(tmp_path, monkeypatch)
+        conn = store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
+        cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
+                                          "careers_url": "https://jobs.saved.org/"})
+        conn.close()
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["ats"] == "capture" and row["active"]
+        assert row["crawl_state"] == "active" and row["empty_streak"] == 0
+
     def test_dormant_rows_leave_the_active_count(self, client, tmp_path,
                                                  monkeypatch):
         self._sleepy_store(tmp_path, monkeypatch)

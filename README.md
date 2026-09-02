@@ -223,6 +223,10 @@ Some employers can't be crawled directly. Route by type:
     careeronestop.org/Developers, set `CAREERONESTOP_USER_ID`/`_TOKEN`). An
     official government API — nothing is scraped.
   - **Manual** — browse the site yourself and add postings with `capture.py`.
+- **Bot-challenged or JS-only careers sites** (UNC Health, Emmes, Dendi...) —
+  the **capture-only** route: `--add-board NAME URL --capture` registers the
+  row without fetching, then `capture.py --watch` files the pages you save
+  under it. See *Capture-only employers* below.
 - **University PeopleAdmin boards** (most public universities) — every open
   posting is in an Atom feed at `<host>/postings/all_jobs.atom`, which the
   `peopleadmin` fetcher reads. Getting one into the roster:
@@ -300,8 +304,52 @@ python capture.py --add --url URL --title "..." --company "Meta" --location "Dur
   company, and pulls its other local jobs if the board resolves.
 
 Captured pages are parsed in layers (LinkedIn markup generations, Indeed
-cards, metacareers job cards, JSON-LD, generic job links), gated, fit-scored,
-stored. Company names seen become **leads** → `discover.py --resolve-leads`.
+cards, metacareers job cards, JSON-LD, generic job links, id-keyed job
+cards), gated, fit-scored, stored. Company names seen become **leads** →
+`discover.py --resolve-leads`.
+
+### Capture-only employers (boards nothing can fetch)
+
+Some of the best local employers cannot be crawled at all: the careers host
+answers a plain request with a bot challenge, or the board is rendered by
+JavaScript on a site with no ATS signature, so discovery leaves them inactive
+as `no-board-found`. Capture is the supported route for these. The page your
+own browser rendered has the job cards in its DOM, and a saved copy is filed
+**under the existing roster row** for that employer — matched by the page's
+host against the row's `careers_url` (`store.company_by_host`), or by the
+employer site a posting's JSON-LD names — never as a new company minted from
+the page text. The row is marked `ats = capture`: a real roster member the
+crawl loop **skips** (no fetch errors, no empty streaks, never dormant), shown
+with a `capture` chip on the Companies tab.
+
+Steps:
+
+1. `python capture.py --watch` (watches `data/captures/`; pass a folder to
+   use another one).
+2. Browse the employer's board yourself — search results, a filtered list,
+   or a single posting.
+3. Ctrl+S → **"Web Page, complete"** into the watched folder. Each save is
+   ingested within ~2 s and the console says which roster row it landed
+   under (`... 12 job(s) parsed, 4 ingested under UNC Health (capture)`).
+
+If discovery never made a row for the employer, register one first — nothing
+is sniffed or fetched, the URL is yours:
+
+```bash
+python discover.py --add-board "UNC Health" https://jobs.unchealthcare.org/ --capture
+```
+
+Employers this is for, and what their saved pages carry (checked 2026-09-02):
+
+| Employer | Careers page | What a saved page carries |
+|---|---|---|
+| UNC Health | `jobs.unchealthcare.org` | HTTP 403 (Cloudflare "Just a moment") to any plain fetch; vendor unconfirmed. Postings are `/jobs/<8-digit id>-<slug>`, search at `/search/jobs` and `/search/jobs/in/<city>` — path shapes the generic job-link sweep matches. Save a results page; the results markup itself has not been inspected. |
+| Guardant Health | `guardanthealth.com/careers/jobs/` | WordPress page; the table is filled in the browser by a theme script that proxies the company's **Workday** tenant. Saved, it is a `srJobListTable` with one row per posting linking the Workday job URL. Once you see the `*.myworkdayjobs.com` URL in a saved page, `--add-board` that instead and the Workday fetcher takes over. |
+| Emmes | `careers.emmes.com/uscareers/jobs` | **iCIMS Attract (Jibe)**: a plain fetch gets the search shell, the browser fills the list from the site's JSON API. Postings link `/uscareers/jobs/<id>/<slug>/job`; the sibling host matches the roster's `emmes.com` row by domain. |
+| Clinipace | `clinipace.com` → `caidya.com/careers/` | The domain now redirects to Caidya, whose careers page links a **Taleo Business Edition** board (`phe.tbe.taleo.net/.../jobSearch?org=CLINIPACE`). Update the row's `careers_url` to the Taleo board before saving pages from it (a shared ATS host is matched on its tenant path). |
+| Forest Neurotech | `forestneurotech.org/jobs` | Squarespace page. As of the check it lists no openings ("check back soon"); nothing to capture until it does. |
+| Axoft | `axoft.us/about#careers` → `jobs.polymer.co/axoft` | **Polymer** hosted board, server-rendered: one card per posting keyed on a bare id, and each posting page carries JSON-LD whose `hiringOrganization` names `axoft.us`, so a saved posting files itself under the Axoft row. Openings were Cambridge, MA. |
+| Dendi | `dendisoftware.com` (no careers link) → `apply.workable.com/dendi/` | **Workable** board behind a bot challenge (an empty Gusto board also exists). Saved from a browser, the list is one card per posting linking `/dendi/j/<shortcode>/`. Set the row's `careers_url` to the Workable board so the tenant path matches. |
 
 ---
 

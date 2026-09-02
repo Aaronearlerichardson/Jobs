@@ -1,0 +1,45 @@
+<!-- A Workable-hosted board (apply.workable.com/<tenant>/). A plain fetch
+     gets an empty <div id="app"> behind a bot challenge; in the browser the
+     list renders with one card per posting linking /<tenant>/j/<SHORTCODE>/
+     (no /jobs/ in the path, relative href). RECONSTRUCTED from Workable's
+     public card layout (data-ui hooks for title / location / workplace);
+     not a verbatim save. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Acme LIS - Current Openings</title>
+<link rel="canonical" href="https://apply.workable.com/acmelis/">
+</head>
+<body style="min-width: 320px">
+<div id="app">
+<header><h1 data-ui="company-name">Acme LIS</h1><a href="https://www.acmelis.com/">Company website</a></header>
+<section data-ui="jobs-list">
+<h2>Current openings</h2>
+<ul>
+<li data-ui="job">
+<a href="/acmelis/j/8A1B2C3D4E/" data-ui="job-link">
+<h3 data-ui="job-title">Software Engineer, Integrations</h3>
+<div class="job-meta">
+<span data-ui="job-workplace">Hybrid</span>
+<span data-ui="job-location">Durham, NC</span>
+<span data-ui="job-department">Engineering</span>
+</div>
+</a>
+</li>
+<li data-ui="job">
+<a href="/acmelis/j/F0E9D8C7B6/" data-ui="job-link">
+<h3 data-ui="job-title">Implementation Specialist</h3>
+<div class="job-meta">
+<span data-ui="job-workplace">Remote</span>
+<span data-ui="job-location">United States</span>
+<span data-ui="job-department">Customer Success</span>
+</div>
+</a>
+</li>
+</ul>
+</section>
+<footer><a href="https://www.workable.com/">Powered by Workable</a></footer>
+</div>
+</body>
+</html>

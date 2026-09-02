@@ -503,6 +503,12 @@ function renderReview() {
    rows), so it is fetched weekly instead of every run. Without this the
    roster gave no clue why a board had gone quiet. */
 function crawlCell(c) {
+  // Capture-only: a board no fetcher can reach (bot challenge, JS-only
+  // page). Never crawled, never dormant — the person saves its pages by
+  // hand with capture.py and the jobs land here under this row.
+  if (c.ats === "capture") {
+    return `<span class="chip tier" title="not crawled: browse the board yourself and save pages into ./captures (python capture.py --watch)">capture</span>`;
+  }
   const st = c.crawl_state || "active";
   if (st === "active") {
     return c.empty_streak
