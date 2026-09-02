@@ -204,10 +204,11 @@ multi_division_mission_floor = 0.6
 # list is empty by default.
 #
 # ".peopleadmin.com" covers the hosted university tenants
-# (unc.peopleadmin.com). A university that serves PeopleAdmin from its own
-# domain is a separate decision and needs its own entry — NC State's board
-# is jobs.ncsu.edu. See the PeopleAdmin bullet in README.md for registering
-# one of those boards in the roster.
+# (unc.peopleadmin.com), which discover.py --add-board can register from the
+# board URL. A university that serves PeopleAdmin from its own domain is a
+# separate decision and needs its own entry — NC State's board is
+# jobs.ncsu.edu, has no ATS signature to detect, and is registered by hand.
+# See the PeopleAdmin bullet in README.md for both.
 # robots_exempt_hosts = ["api.smartrecruiters.com", ".peopleadmin.com"]
 
 # robots.txt fetch timeout, split into (connect, read) seconds.
