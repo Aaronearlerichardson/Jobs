@@ -337,6 +337,173 @@ class TestDispositions:
         assert "wrong archetype" in block
 
 
+class TestPipelineTracking:
+    """Everything an application needs AFTER 'applied': when to chase it,
+    who to chase, whether a referral carried it, why it ended, and which
+    kind of application actually converts."""
+
+    def _applied(self, db, add_job, job_id="p1", **kw):
+        add_job(job_id, **kw)
+        store.set_disposition(db, job_id, "applied")
+        return job_id
+
+    def _col(self, db, job_id, col):
+        return db.execute(f"SELECT {col} FROM jobs WHERE job_id=?",
+                          (job_id,)).fetchone()[col]
+
+    # --- applied_at ---------------------------------------------------- #
+
+    def test_applying_stamps_the_apply_date(self, db, add_job):
+        self._applied(db, add_job)
+        assert self._col(db, "p1", "applied_at")
+
+    def test_a_decision_that_is_not_an_application_stamps_nothing(self, db,
+                                                                  add_job):
+        add_job("p1")
+        store.set_disposition(db, "p1", "saved")
+        assert self._col(db, "p1", "applied_at") is None
+
+    def test_later_dispositions_keep_the_first_apply_date(self, db, add_job):
+        # The whole point of a separate column: disposition_at moves with
+        # every re-mark, so it cannot answer "how long has this been out?".
+        self._applied(db, add_job)
+        first = self._col(db, "p1", "applied_at")
+        store.set_disposition(db, "p1", "interviewing")
+        store.set_disposition(db, "p1", "rejected")
+        store.set_disposition(db, "p1", "applied")
+        assert self._col(db, "p1", "applied_at") == first
+        assert self._col(db, "p1", "disposition_at") != first
+
+    # --- update_pipeline_fields ---------------------------------------- #
+
+    def test_tracking_fields_persist(self, db, add_job):
+        self._applied(db, add_job)
+        row, err = store.update_pipeline_fields(
+            db, "p1", followup_at="2026-09-08", contact="Dana R",
+            referral=True, outcome_reason="no-response")
+        assert err is None
+        assert row["followup_at"] == "2026-09-08"
+        assert row["contact"] == "Dana R"
+        assert row["referral"] == 1
+        assert row["outcome_reason"] == "no-response"
+
+    def test_a_blank_clears_rather_than_storing_an_empty_string(self, db,
+                                                                add_job):
+        self._applied(db, add_job)
+        store.update_pipeline_fields(db, "p1", contact="Dana R")
+        row, _ = store.update_pipeline_fields(db, "p1", contact="   ")
+        assert row["contact"] is None
+
+    def test_an_unlisted_column_is_refused_not_written(self, db, add_job):
+        self._applied(db, add_job, fit=0.9)
+        row, err = store.update_pipeline_fields(db, "p1", resume_fit_score=0.0)
+        assert row is None and "resume_fit_score" in err
+        assert self._col(db, "p1", "resume_fit_score") == 0.9
+
+    def test_disposition_cannot_be_written_through_this_path(self, db, add_job):
+        self._applied(db, add_job)
+        _, err = store.update_pipeline_fields(db, "p1", disposition="dismissed")
+        assert err and self._col(db, "p1", "disposition") == "applied"
+
+    def test_an_outcome_outside_the_vocabulary_is_refused(self, db, add_job):
+        self._applied(db, add_job)
+        _, err = store.update_pipeline_fields(db, "p1", outcome_reason="ghosted")
+        assert err and "outcome_reason" in err
+        assert self._col(db, "p1", "outcome_reason") is None
+
+    def test_unknown_job_errors(self, db):
+        row, err = store.update_pipeline_fields(db, "nope", contact="Dana R")
+        assert row is None and err
+
+    # --- conversion_report --------------------------------------------- #
+
+    def _applications(self, db, add_job):
+        """Two mid-band onsite applications, one still interviewing and one
+        rejected AFTER an interview; one high-band remote application that
+        was never answered."""
+        for jid, fit, geo in (("mid1", 0.41, "onsite"), ("mid2", 0.54, "onsite"),
+                              ("hi1", 0.82, "remote")):
+            add_job(jid, fit=fit, geo_mode=geo)
+        store.set_disposition(db, "mid1", "interviewing")
+        store.set_disposition(db, "mid2", "rejected")
+        store.update_pipeline_fields(db, "mid2",
+                                     outcome_reason="rejected-interview")
+        store.set_disposition(db, "hi1", "rejected")
+        store.update_pipeline_fields(db, "hi1", outcome_reason="no-response")
+
+    def _report(self, db):
+        return {(r["band"], r["geo_mode"]): r
+                for r in store.conversion_report(db)}
+
+    def test_report_slices_by_fit_band_and_geo(self, db, add_job):
+        self._applications(db, add_job)
+        rep = self._report(db)
+        # Ordered low band to high, so the table reads as a ladder.
+        assert list(rep) == [("mid", "onsite"), ("high", "remote")]
+        assert rep[("mid", "onsite")]["applications"] == 2
+        assert rep[("high", "remote")]["applications"] == 1
+
+    def test_an_interview_still_counts_after_the_rejection(self, db, add_job):
+        # Without this, every conversion number would decay to zero as
+        # applications resolve — which is exactly the number that shows a
+        # mid-fit onsite role converting better than a top-scored remote one.
+        self._applications(db, add_job)
+        rep = self._report(db)
+        assert rep[("mid", "onsite")]["interviews"] == 2
+        assert rep[("mid", "onsite")]["interview_rate"] == 1.0
+        assert rep[("high", "remote")]["interviews"] == 0
+        assert rep[("high", "remote")]["interview_rate"] == 0.0
+
+    def test_only_applications_reach_the_report(self, db, add_job):
+        add_job("s1", fit=0.9)
+        add_job("d1", fit=0.9)
+        store.set_disposition(db, "s1", "saved")
+        store.set_disposition(db, "d1", "dismissed")
+        assert store.conversion_report(db) == []
+
+    def test_an_unscored_application_is_banded_separately(self, db, add_job):
+        add_job("u1", geo_mode="onsite")           # no resume_fit_score
+        store.set_disposition(db, "u1", "applied")
+        assert list(self._report(db)) == [("unscored", "onsite")]
+
+    # --- followups_due -------------------------------------------------- #
+
+    def test_only_arrived_dates_on_live_applications_come_due(self, db,
+                                                              add_job):
+        for jid in ("due", "future", "dead"):
+            self._applied(db, add_job, jid)
+        store.update_pipeline_fields(db, "due", followup_at="2026-01-01")
+        store.update_pipeline_fields(db, "future", followup_at="2099-01-01")
+        store.update_pipeline_fields(db, "dead", followup_at="2026-01-01")
+        store.set_disposition(db, "dead", "rejected")
+        assert [r["job_id"] for r in
+                store.followups_due(db, "2026-06-01")] == ["due"]
+
+    def test_an_application_with_no_date_is_never_due(self, db, add_job):
+        self._applied(db, add_job)
+        assert store.followups_due(db, "2099-01-01") == []
+
+    def test_interviewing_rows_are_still_chased(self, db, add_job):
+        self._applied(db, add_job)
+        store.set_disposition(db, "p1", "interviewing")
+        store.update_pipeline_fields(db, "p1", followup_at="2026-01-01")
+        assert len(store.followups_due(db, "2026-06-01")) == 1
+
+    # --- the scorer's few-shot block ------------------------------------ #
+
+    def test_outcome_reason_rides_along_to_the_few_shot_block(self, db,
+                                                              add_job):
+        add_job("p1", "Imaging Scientist")
+        store.set_disposition(db, "p1", "rejected", note="no headcount")
+        store.update_pipeline_fields(db, "p1",
+                                     outcome_reason="rejected-interview")
+        from core.fit import disposition_examples_block
+        block = disposition_examples_block(db, 3)
+        assert "Imaging Scientist" in block
+        assert "rejected-interview" in block
+        assert "no headcount" in block
+
+
 class TestTrackMembership:
     """jobs.track is a comma-separated SET: one store, many tracks."""
 

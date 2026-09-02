@@ -250,10 +250,14 @@ def _profile_block():
 def disposition_examples_block(conn, limit=3):
     """Few-shot calibration from the candidate's OWN recorded decisions
     (crawler.py --mark): up to `limit` applied/interviewing postings as
-    positive examples and `limit` dismissed ones as negatives, newest
-    first. Returns '' when there are none. A --why note rides along
-    verbatim, which is exactly how 'wrong archetype — TPM seat' style
-    lessons reach the scorer."""
+    positive examples, `limit` dismissed ones as negatives, and `limit`
+    rejected ones — pursued, but the employer said no — newest first.
+    Returns '' when there are none. A --why note rides along verbatim,
+    which is exactly how 'wrong archetype — TPM seat' style lessons reach
+    the scorer; on a rejected row the recorded outcome_reason
+    (store.OUTCOME_REASONS) rides along with it, so the block distinguishes
+    a role that never answered from one that interviewed and declined.
+    See tests/test_store.py::TestPipelineTracking."""
     pos = conn.execute(
         "SELECT title, company_name FROM jobs "
         "WHERE disposition IN ('applied','interviewing') "
@@ -262,7 +266,11 @@ def disposition_examples_block(conn, limit=3):
         "SELECT title, company_name, disposition_note FROM jobs "
         "WHERE disposition = 'dismissed' "
         "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
-    if not pos and not neg:
+    rej = conn.execute(
+        "SELECT title, company_name, disposition_note, outcome_reason "
+        "FROM jobs WHERE disposition = 'rejected' "
+        "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
+    if not pos and not neg and not rej:
         return ""
     lines = ["", "CALIBRATION — this candidate's own recorded decisions on real postings:"]
     for r in pos:
@@ -271,6 +279,13 @@ def disposition_examples_block(conn, limit=3):
         note = (r["disposition_note"] or "").strip()
         tail = f' — their reason: "{note[:90]}"' if note else ""
         lines.append(f'- DISMISSED: "{(r["title"] or "")[:70]}" at {r["company_name"]}{tail}')
+    for r in rej:
+        why = " / ".join(x for x in ((r["outcome_reason"] or "").strip(),
+                                     (r["disposition_note"] or "").strip()[:90])
+                         if x)
+        lines.append(f'- PURSUED, then turned down by the employer'
+                     f'{" (" + why + ")" if why else ""}: '
+                     f'"{(r["title"] or "")[:70]}" at {r["company_name"]}')
     lines.append("Treat these as ground truth about what this candidate wants; "
                  "score similar roles consistently with them.")
     return "\n".join(lines)
