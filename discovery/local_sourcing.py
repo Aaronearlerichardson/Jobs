@@ -1106,6 +1106,20 @@ def add_board(name, url):
     mission-scored, and activated.
 
         python discover.py --add-board "NC DHHS" https://nc.wd108.myworkdayjobs.com/NC_Careers
+
+    Notes:
+        A hosted PeopleAdmin tenant works here too — the university board
+        URL carries the signature, and the row is keyed on the tenant
+        origin whichever page of it you paste:
+
+            python discover.py --add-board "UNC" https://unc.peopleadmin.com/postings/search
+
+        A university serving PeopleAdmin from its OWN hostname
+        (jobs.ncsu.edu) has no signature to detect, so there is nothing for
+        this path to sniff; name the coordinates by hand and load them with
+        --import-companies (see the PeopleAdmin bullet in README.md). Either
+        way, nothing is fetched until the host is listed in the profile's
+        [policy] robots_exempt_hosts.
     """
     from core.claude import score_company_mission
     from scrapers.fetchers import company as company_fetch
@@ -1400,37 +1414,6 @@ def score_missions(max_workers=6, rescore_all=False):
     return n
 
 
-def resolve_company_board(name):
-    """Resolve a company NAME to a crawlable board: slug-probe (Greenhouse/
-    Lever/Ashby/Workday) -> careers-page sniff -> web search. Returns a hit
-    dict {name, ats, slug, count, nc, careers_url} with an NC job count, or
-    None. Shared by --resolve-leads and the manual --add flow."""
-    from scrapers.fetchers import company as company_fetch
-    from .sniffer import sniff_ats
-    # Workday fallback ON: enterprise employers (Analog Devices, Cadence, ...)
-    # overwhelmingly live on Workday, worth the careers-page scrape.
-    hit = probe_company(name, try_workday=True)
-    if hit:
-        return hit
-    s = sniff_ats(name) or _websearch_board(name)
-    if not s:
-        return None
-    ats = s["ats"]
-    if ats == "workday":
-        t, p, site = s["triple"]
-        comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
-        slug = (t, p, site)
-    else:
-        comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
-        slug = s.get("slug") or s.get("careers_url")
-    try:
-        nc = len(company_fetch.fetch_company_nc(comp))
-    except Exception:
-        nc = 0
-    return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-            "careers_url": s.get("careers_url")}
-
-
 def _validate_board(comp):
     """Fetch a resolved board and return (total, nc) live job counts. A board
     that returns zero jobs is treated as dead/wrong by the caller — this is
@@ -1454,12 +1437,13 @@ def resolve_board_sniff_first(name, careers_url=""):
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
 
-    The collision-hardened counterpart to resolve_company_board(): that one
-    probes name-guessed slugs first, which false-positives onto same-named but
-    unrelated boards ('Oxford Biomedica' -> a different Oxford Workday tenant;
-    'Raya Health' -> the Raya dating app on Lever). Sniffing the company's OWN
-    careers page can't collide that way, so it goes first; a probe-only hit is
-    tagged ``via='probe'`` so the caller can flag it for a human sanity-check.
+    The only resolver the interactive paths use. It replaced a probe-first
+    one that guessed slugs from the name before looking at the company's own
+    site, which false-positived onto same-named but unrelated boards ('Oxford
+    Biomedica' -> a different Oxford Workday tenant; 'Raya Health' -> the Raya
+    dating app on Lever). Sniffing the company's OWN careers page can't
+    collide that way, so it goes first; a probe-only hit is tagged
+    ``via='probe'`` so the caller can flag it for a human sanity-check.
 
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
     a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for

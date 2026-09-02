@@ -350,6 +350,13 @@ OPS = {
             "discovery.local_sourcing", fromlist=["add_board"]
         ).add_board((p.get("name") or "").strip(), (p.get("url") or "").strip()),
     },
+    "reresolve": {
+        "label": "Retry unresolved companies",
+        "engine": None,   # any track
+        "fn": lambda p: maint.reresolve_misses(
+            limit=_int(p, "limit", 50), days=_int(p, "days"),
+            t=_op_track(p)),
+    },
     "prune": {
         "label": "Prune dead boards",
         "engine": None,   # any track

@@ -65,6 +65,15 @@ SEMI_FETCHABLE_PATTERNS = [
     ("successfactors",  re.compile(r"([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
 ]
 
+# PeopleAdmin (most public universities). Handled in _detect beside ADP and
+# UKG rather than listed above, for the same reason those two are: its store
+# identity is not the captured slug. core.store.board_key keys a peopleadmin
+# row on careers_url — the tenant serves one campus and the Atom feed hangs
+# off the host — so _pack rebuilds the origin from the capture, and a
+# consumer of the pattern tables that only reads (ats, slug) would mint a
+# row with no board identity at all.
+_PEOPLEADMIN_RE = re.compile(r"([a-z0-9-]+)\.peopleadmin\.com", re.I)
+
 # Detection-only platforms: real ATSes we can recognize but not reliably
 # auto-fetch (bot-protected APIs or JS-only boards). Each regex captures a
 # short identifying host/path for the lead note.
@@ -311,6 +320,13 @@ def _detect(text, final_url=""):
     ukg = re.search(r"recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a-fA-F\-]{36})", blob, re.I)
     if ukg:
         return "fetchable", "ultipro", f"{ukg.group(1)}|{ukg.group(2)}"
+    # PeopleAdmin: only the HOSTED tenants carry a signature. A university
+    # serving the same software from its own hostname (jobs.ncsu.edu) is
+    # indistinguishable from any other careers page here and still has to be
+    # registered by hand — see local_sourcing.add_board.
+    pa = _PEOPLEADMIN_RE.search(blob)
+    if pa and pa.group(1).lower() not in _BAD_SUBDOMAINS:
+        return "semi", "peopleadmin", pa.group(1)
     for kind, patterns in (("fetchable", ATS_LINK_PATTERNS),
                            ("semi", SEMI_FETCHABLE_PATTERNS),
                            ("lead", ATS_LEAD_PATTERNS)):
@@ -456,6 +472,34 @@ def _fetch_all(urls):
 
 
 def _pack(ats, slug, careers_url):
+    """A detection -> the coordinate dict every resolver consumes.
+
+    Workday's coordinates are a (tenant, pod, site) triple, so they travel
+    under `triple`; every other platform has one slug:
+
+    >>> _pack("greenhouse", "acme", "https://acme.com/careers")["slug"]
+    'acme'
+    >>> _pack("workday", ("acme", 5, "External"), "")["triple"]
+    ('acme', 5, 'External')
+
+    PeopleAdmin rows are keyed on `careers_url` rather than on the slug
+    (core.store.board_key), so a hosted tenant's URL is reduced to its
+    origin — whichever page of the tenant carried the signature, the board
+    comes out the same:
+
+    >>> _pack("peopleadmin", "unc",
+    ...       "https://unc.peopleadmin.com/postings/search?x=1")["careers_url"]
+    'https://unc.peopleadmin.com'
+
+    Nothing else is rewritten, including a PeopleAdmin tenant on its own
+    hostname, which never matches the signature and reaches the store by
+    hand instead:
+
+    >>> _pack("custom", None, "https://jobs.ncsu.edu/")["careers_url"]
+    'https://jobs.ncsu.edu/'
+    """
+    if ats == "peopleadmin" and slug:
+        careers_url = f"https://{slug}.peopleadmin.com"
     out = {"ats": ats, "careers_url": careers_url}
     if ats == "workday":
         out["triple"] = slug

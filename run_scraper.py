@@ -82,6 +82,16 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap rows processed (backfills / probes)")
     # ── roster / dispositions / store ───────────────────────────────────
+    ap.add_argument("--reresolve-misses", type=int, nargs="?", const=50,
+                    metavar="N",
+                    help="Retry the N oldest roster rows that never resolved "
+                         "to a board (miss_reason no-board-found/board-dead); "
+                         "hits are queued for review, not activated. "
+                         "--miss-days D retries only misses at least D days "
+                         "old")
+    ap.add_argument("--miss-days", type=int, default=None, metavar="D",
+                    help="With --reresolve-misses: skip misses newer than D "
+                         "days")
     ap.add_argument("--dedup", action="store_true",
                     help="Merge duplicate company rows pointing at one board")
     ap.add_argument("--watch", metavar="COMPANY",
@@ -232,6 +242,11 @@ def main(argv=None):
         return
 
     # ── maintenance ─────────────────────────────────────────────────────
+    if args.reresolve_misses is not None:
+        from scrapers.ops import reresolve_misses
+        reresolve_misses(limit=args.reresolve_misses, max_workers=args.workers,
+                         days=args.miss_days, t=t)
+        return
     if args.verify_top is not None:
         from scrapers.ops import verify_top_cli
         verify_top_cli(top_n=args.verify_top, max_workers=args.workers, t=t)

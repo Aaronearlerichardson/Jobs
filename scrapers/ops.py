@@ -690,9 +690,19 @@ def add_manual_job(url, title, company, location, description="",
     The single job is curated (exclude/technical gates skipped, you chose
     it) but still geo-gated on location-scoped tracks. For bot-gated giants
     the board won't resolve, so only the one job lands and the company is
-    recorded for a later retry. Returns a summary dict."""
+    recorded as a MISS carrying the reason, which reresolve_misses retries
+    later. Returns a summary dict.
+
+    Notes:
+        Resolution goes through discovery.local_sourcing.resolve_or_miss —
+        the same careers-page-sniff-first resolver every other interactive
+        add path uses. It replaced a probe-first resolver that guessed a
+        slug from the name before looking at the company's own site, which
+        is exactly the collision this path is most exposed to: a hand-typed
+        employer name lands on a same-named stranger's board.
+    """
     from core.claude import is_active_mission, score_company_mission
-    from discovery.local_sourcing import _sample_titles, resolve_company_board
+    from discovery.local_sourcing import _sample_titles, resolve_or_miss
 
     t = _t(t)
     name = (company or "").strip()
@@ -720,10 +730,13 @@ def add_manual_job(url, title, company, location, description="",
     conn = store.connect(t["db_path"])
     existing = next((c for c in store.get_companies(conn, active_only=False)
                      if (c["name"] or "").lower() == name.lower()), None)
-    board = None
+    board, miss = None, None
     if not existing or not existing.get("ats"):
         print(f"  resolving board for {name!r}...")
-        board = resolve_company_board(name)
+        # A hit carrying a reason ("no-local-jobs") is a live, readable
+        # board with nothing open here today — worth registering, exactly
+        # as the probe-first resolver's nc=0 hit was.
+        board, miss = resolve_or_miss(name)
     if board:
         is_wd = board["ats"] == "workday"
         slug = board["slug"]
@@ -745,10 +758,13 @@ def add_manual_job(url, title, company, location, description="",
         })
         print(f"    board resolved: {board['ats']} nc={board['nc']} "
               f"mission={tier} ({score if score is not None else 'n/a'})")
-    elif not existing:
-        store.upsert_company(conn, {"name": name, "active": 0, "source": "manual_add",
-                                    "notes": f"manual add from {url}"})
-        print("    company recorded (board unresolved — gated / unknown ATS)")
+    elif miss:
+        # Resolution was attempted and failed. Keep WHY on the row rather
+        # than a prose note: that is what reresolve_misses selects on.
+        store.record_miss(conn, name, miss, source="manual_add",
+                          notes=None if existing else f"manual add from {url}")
+        print(f"    company recorded as a miss [{miss}] — board unresolved "
+              f"(gated / unknown ATS)")
     else:
         print(f"    company already in roster (ats={existing.get('ats')})")
     conn.close()
@@ -776,3 +792,202 @@ def add_manual_job(url, title, company, location, description="",
     print(f"\n  DONE: +{n_job} job, +{n_other} from board; company '{name}' - {status}.")
     return {"job_added": n_job, "other_jobs": n_other,
             "board": has_board, "company": name}
+
+
+# --------------------------------------------------------------------------- #
+#  Re-resolution of rows that died at resolution                               #
+# --------------------------------------------------------------------------- #
+#
+# A name that never resolved to a board is kept as an inactive row carrying a
+# miss_reason (core.store.record_miss), and the two families below are the
+# ones worth another attempt: nothing was found at all ("no-board-found"), or
+# coordinates were found and the live fetch came back empty ("board-dead").
+# Neither is a permanent verdict — a resolver improves, a company migrates
+# ATS, a careers page comes back — and that bucket is where the roster's
+# best-known local employers sit. The other families are not retried here:
+# "no-local-jobs" already IS a live board, "ats-unsupported" needs a fetcher
+# rather than a retry, and "fetch-error" is a transient every pass re-attempts
+# anyway.
+RERESOLVE_FAMILIES = ("no-board-found", "board-dead")
+
+
+def _reresolve_candidates(conn, days=None, names=None, limit=50):
+    """The inactive rows a re-resolution pass should retry, oldest miss first.
+
+    Only the two retryable miss families are selected, and only rows the
+    crawl is not already using:
+
+    >>> from core.store import connect, record_miss, upsert_company
+    >>> conn = connect(":memory:")
+    >>> for n, r in [("Emmes", "no-board-found:wrong-domain"),
+    ...              ("Advarra", "board-dead:icims"),
+    ...              ("Chiesi", "no-local-jobs"),
+    ...              ("Locus", "ats-unsupported:ukg")]:
+    ...     _ = record_miss(conn, n, r)
+    >>> _ = upsert_company(conn, {"name": "Guardant", "ats": "lever",
+    ...                           "active": 1})
+    >>> _ = conn.execute("UPDATE companies SET miss_at='2026-01-01' "
+    ...                  "WHERE name='Advarra'")
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
+
+    `limit` bounds the pass, and the oldest miss goes first — a hit clears
+    the row's miss and a repeated miss re-stamps `miss_at`, so successive
+    bounded runs work through the backlog instead of re-probing the same
+    head of it:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, limit=1)]
+    ['Advarra']
+
+    `days` keeps only rows whose miss is at least that old, so a nightly
+    run does not re-probe what this morning already failed:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, days=30)]
+    ['Advarra']
+
+    `names` restricts the pass to specific companies, matched
+    case-insensitively; it narrows the same selection rather than widening
+    it, so a name that is not a retryable miss is still not selected:
+
+    >>> [c["name"] for c in _reresolve_candidates(conn, names=["emmes"])]
+    ['Emmes']
+    >>> _reresolve_candidates(conn, names=["Chiesi", "Guardant"])
+    []
+    """
+    wanted = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
+    cutoff = ((datetime.now() - timedelta(days=int(days))).isoformat()
+              if days else None)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM companies WHERE COALESCE(active, 0) = 0 "
+        "AND miss_reason IS NOT NULL "
+        "ORDER BY COALESCE(miss_at, '') ASC, name ASC").fetchall()]
+    out = []
+    for r in rows:
+        if store.miss_family(r["miss_reason"]) not in RERESOLVE_FAMILIES:
+            continue
+        if wanted and (r["name"] or "").strip().lower() not in wanted:
+            continue
+        # A NULL miss_at predates the column: unknown age, so old enough.
+        if cutoff and (r.get("miss_at") or "") > cutoff:
+            continue
+        out.append(r)
+    return out[:int(limit)] if limit else out
+
+
+def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
+                     names=None, t=None):
+    """Retry the roster rows that died at resolution; queue every hit for
+    human review. Returns the rows written.
+
+    A hit is written onto the EXISTING row (same name): its board
+    coordinates, its mission score, `active=0`, and the `pending-review`
+    scope tag merged into whatever tags the row already carried. Writing
+    the board clears the row's miss (core.store.upsert_company). A repeated
+    miss just re-stamps miss_reason/miss_at, which moves the row to the back
+    of the queue `_reresolve_candidates` orders by.
+
+    Notes:
+        Deliberately writes nothing else on the row — the roster review
+        queue reads exactly `active=0` plus that tag, and confirming a row
+        there is what makes it crawlable. Rows are never activated here: a
+        re-resolved board is a claim about a company nobody has looked at
+        in months, and the resolver's own collision guards are not a
+        substitute for that look.
+
+        Resolution runs through the same stall watchdog every other bulk
+        resolution path uses (discovery.local_sourcing._drain_or_abandon):
+        one wedged careers-page fetch must not hold the web UI's
+        one-op-at-a-time slot.
+    """
+    from core.claude import score_company_mission
+    from discovery.local_sourcing import (_board_already_tracked,
+                                          _drain_or_abandon,
+                                          _report_dup_board, _sample_titles,
+                                          resolve_or_miss)
+
+    t = _t(t)
+    own_conn = conn is None
+    if own_conn:
+        conn = store.connect(t["db_path"])
+    try:
+        rows = _reresolve_candidates(conn, days=days, names=names, limit=limit)
+        if not rows:
+            print("  no re-resolvable misses "
+                  f"(families: {', '.join(RERESOLVE_FAMILIES)}).")
+            return []
+        print(f"  re-resolving {len(rows)} miss(es) "
+              f"(careers-page sniff -> slug-probe -> web search; every board "
+              f"validated by a live fetch)...")
+        was = {r["name"]: r["miss_reason"] for r in rows}
+        written, still, dups = [], [], []
+
+        def _stalled(name):
+            store.record_miss(conn, name, "fetch-error:stalled")
+            still.append((name, "fetch-error:stalled"))
+
+        def _consume(fut, name):
+            try:
+                hit, reason = fut.result()
+            except Exception as e:
+                hit, reason = None, f"fetch-error:{type(e).__name__}"
+            if not hit:
+                store.record_miss(conn, name, reason)
+                still.append((name, reason))
+                print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
+                return
+            slug = hit.get("slug")
+            is_wd = hit["ats"] == "workday"
+            coords = {"name": name, "ats": hit["ats"],
+                      "slug": None if is_wd else slug,
+                      "wd_tenant": slug[0] if is_wd else None,
+                      "wd_pod": slug[1] if is_wd else None,
+                      "wd_site": slug[2] if is_wd else None,
+                      "careers_url": hit.get("careers_url")}
+            dup = _board_already_tracked(conn, coords)
+            if dup:
+                # Someone else already holds this board. Leave the row as
+                # the miss it was, but re-stamp it so a bounded rerun moves
+                # past it instead of paying for the same fetch every night.
+                _report_dup_board(name, dup)
+                store.record_miss(conn, name, was[name])
+                dups.append(name)
+                return
+            titles = _sample_titles(hit)
+            tier, score, reason = score_company_mission(
+                name, " | ".join(x for x in titles if x))
+            # upsert_company drops None values so it can never erase a
+            # stored one — which would leave the dead board's slug beside
+            # the new Workday triple. Clear the coordinate columns first.
+            conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, "
+                         "wd_pod=NULL, wd_site=NULL WHERE name=?", (name,))
+            store.upsert_company(conn, {
+                **coords,
+                "local_job_count": hit["nc"], "total_job_count": hit["count"],
+                "mission_tier": tier, "mission_score": score,
+                "mission_reason": reason,
+                "tags": tags.PENDING, "active": 0,
+                "last_probed": datetime.now().isoformat(),
+            })
+            written.append(coords)
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            print(f"    [pending] {name[:30]:30} {hit['ats']:12} "
+                  f"nc={hit['nc']:<3} tot={hit['count']:<4} "
+                  f"{str(tier):18} {ss}  (was {was[name]})")
+
+        ex = ThreadPoolExecutor(max_workers=max_workers)
+        _drain_or_abandon(
+            ex,
+            {ex.submit(resolve_or_miss, r["name"], r.get("careers_url") or ""):
+             r["name"] for r in rows},
+            _consume, _stalled)
+        conn.commit()
+        print(f"\n  {len(written)} board(s) re-resolved and queued for review "
+              f"(active=0, tagged {tags.PENDING})"
+              + (f", {len(dups)} already tracked under another name" if dups else "")
+              + f", {len(still)} still missing, of {len(rows)} tried.")
+        if written:
+            print("  confirm or reject them in the roster review queue.")
+        return written
+    finally:
+        if own_conn:
+            conn.close()
