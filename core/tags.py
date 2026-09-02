@@ -24,6 +24,11 @@ all depend on it.
 LOCAL = "local"
 SWEEP = "sweep"
 WATCH = "watch"
+# Roster review queue (2026-09): a company an automated discovery path
+# resolved but a person has not confirmed. Written active=0 with this
+# tag; confirming drops the tag and applies the mission rule; rejecting
+# removes the row and blocklists the name. Never crawled while pending.
+PENDING = "pending-review"
 
 # Retired name -> current name. Read-side only: nothing writes these.
 ALIASES = {
