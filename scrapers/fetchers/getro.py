@@ -39,6 +39,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
+from config import FETCH_TIMEOUT
 from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
@@ -221,7 +222,7 @@ def _fetch_sitemap(origin, label):
         url = queue.pop(0)
         fetched += 1
         try:
-            r = SESSION.get(url, timeout=25,
+            r = SESSION.get(url, timeout=FETCH_TIMEOUT,
                             headers={**HEADERS, "Accept": "application/xml"})
             r.raise_for_status()
         except Exception as e:
@@ -265,7 +266,7 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
                   f"older postings wait for the next crawl")
             break
         try:
-            r = SESSION.get(e["url"], timeout=25, headers=HEADERS)
+            r = SESSION.get(e["url"], timeout=FETCH_TIMEOUT, headers=HEADERS)
             r.raise_for_status()
         except Exception as ex:
             print(f"    [!] Getro {label} {e['url']}: {ex}")

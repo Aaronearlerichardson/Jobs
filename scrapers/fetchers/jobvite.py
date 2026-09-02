@@ -26,6 +26,7 @@ import time
 
 from bs4 import BeautifulSoup
 
+from config import FETCH_TIMEOUT
 from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
@@ -117,7 +118,7 @@ def _listing(tenant, label):
     for page in range(MAX_PAGES):
         try:
             r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": page},
-                            timeout=20, headers=HEADERS)
+                            timeout=FETCH_TIMEOUT, headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] Jobvite {label} search p={page}: {e}")
@@ -131,7 +132,7 @@ def _listing(tenant, label):
     if rows:
         return rows
     try:
-        r = SESSION.get(f"{BASE}/{tenant}/jobs", timeout=20, headers=HEADERS)
+        r = SESSION.get(f"{BASE}/{tenant}/jobs", timeout=FETCH_TIMEOUT, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Jobvite {label} jobs: {e}")
@@ -147,7 +148,7 @@ def _hydrate(rows, label, max_details, detail_delay):
             break
         n += 1
         try:
-            r = SESSION.get(row["url"], timeout=15, headers=HEADERS)
+            r = SESSION.get(row["url"], timeout=FETCH_TIMEOUT, headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] Jobvite {label} {row['url']}: {e}")
