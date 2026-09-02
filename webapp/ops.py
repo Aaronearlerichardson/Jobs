@@ -273,7 +273,8 @@ OPS = {
         "label": "Deep-verify top N",
         "engine": None,
         "fn": lambda p: maint.verify_top_cli(top_n=_int(p, "top", 15),
-                                             max_workers=4, t=_op_track(p)),
+                                             max_workers=4, t=_op_track(p),
+                                             force=bool(p.get("force"))),
     },
     "check-closed": {
         "label": "Probe stale URLs",

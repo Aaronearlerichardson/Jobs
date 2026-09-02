@@ -183,6 +183,10 @@ _MIGRATIONS = {
         "fit_stack":       "REAL",
         "fit_seniority":   "REAL",
         "fit_gates":       "TEXT",   # comma-joined tripped gate names, or NULL
+        # Model id that wrote the current score (NULL before this column
+        # existed). verify_top re-verifies a finalist unless fit_model is
+        # the CURRENT verify model, so a model change re-reads the top N once.
+        "fit_model":       "TEXT",
         # When status flipped to 'closed' (NULL while open). Set by
         # sync_job_statuses / set_job_status, cleared on reopen.
         "closed_at":       "TEXT",
@@ -1367,8 +1371,8 @@ def upsert_job(conn, j):
              geo_mode, remote_eligible, remote_signal, anchor_signal,
              description, resume_fit_score, fit_reason,
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
-             posted_at, first_seen, last_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             fit_model, posted_at, first_seen, last_seen, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url, location=excluded.location,
              track=COALESCE(excluded.track, track),
@@ -1384,6 +1388,7 @@ def upsert_job(conn, j):
              fit_stack=COALESCE(excluded.fit_stack, fit_stack),
              fit_seniority=COALESCE(excluded.fit_seniority, fit_seniority),
              fit_gates=COALESCE(excluded.fit_gates, fit_gates),
+             fit_model=COALESCE(excluded.fit_model, fit_model),
              posted_at=COALESCE(posted_at, excluded.posted_at),
              last_seen=excluded.last_seen,
              status=excluded.status,
@@ -1395,7 +1400,7 @@ def upsert_job(conn, j):
          j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
-         j.get("fit_seniority"), j.get("fit_gates"),
+         j.get("fit_seniority"), j.get("fit_gates"), j.get("fit_model"),
          j.get("posted_at"), now, now, j.get("status", "open")),
     )
     conn.commit()
@@ -1723,7 +1728,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
 
 
 # Fit columns written together by the rescore path (see update_job_scores).
-_SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates",
+_SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates", "fit_model",
                "fit_domain", "fit_function", "fit_stack", "fit_seniority")
 
 
@@ -1958,4 +1963,5 @@ def mark_seen(conn, job, track=None):
         "fit_function":    job.get("fit_function"),
         "fit_stack":       job.get("fit_stack"),
         "fit_seniority":   job.get("fit_seniority"),
+        "fit_model":       job.get("fit_model"),
     })

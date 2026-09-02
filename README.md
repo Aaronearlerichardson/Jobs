@@ -368,7 +368,8 @@ hasn't seen.
 ```bash
 python run_scraper.py --track local                # crawl deep-verifies the top N before the digest
 python run_scraper.py --track local --no-verify    # skip the second pass
-python run_scraper.py --track local --verify-top 15 # re-verify the current top 15 (no crawl)
+python run_scraper.py --track local --verify-top 15 # verify the current top 15 (no crawl); skips rows the current verify model already checked
+python run_scraper.py --track local --verify-top 15 --verify-all  # ...and redo those too
 python run_scraper.py --watch "Ceribell"           # never miss a new technical posting there
 python run_scraper.py --unwatch "Ceribell"
 ```

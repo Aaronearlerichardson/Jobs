@@ -66,6 +66,9 @@ def main(argv=None):
     ap.add_argument("--verify-top", type=int, nargs="?", const=15,
                     default=None, metavar="N",
                     help="Deep-verify the current top N stored jobs, no crawl")
+    ap.add_argument("--verify-all", action="store_true",
+                    help="With --verify-top: re-verify rows the current "
+                         "verify model already checked")
     ap.add_argument("--check-closed", action="store_true",
                     help="Probe stale job URLs and close the provably dead")
     ap.add_argument("--stale-days", type=int, default=2)
@@ -249,7 +252,8 @@ def main(argv=None):
         return
     if args.verify_top is not None:
         from scrapers.ops import verify_top_cli
-        verify_top_cli(top_n=args.verify_top, max_workers=args.workers, t=t)
+        verify_top_cli(top_n=args.verify_top, max_workers=args.workers, t=t,
+                       force=args.verify_all)
         return
     if args.sync_status:
         from scrapers.ops import sync_status_all

@@ -448,10 +448,12 @@ def _live_jd(row):
     return text if len(text) > len(stored) else stored
 
 
-def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None):
+def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
+               force=False):
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
-    each of the current top `top_n` jobs not already verified (fit_reason
-    carrying the 'deep:' marker), re-fetch the freshest full posting text
+    each of the current top `top_n` jobs not already verified BY THE CURRENT
+    verify model (fit_reason carrying the 'deep:' marker and fit_model
+    naming fit.verify_model()), re-fetch the freshest full posting text
     (_live_jd), run fit.verify_fit — which extracts hard requirements before
     re-scoring all axes and gates — and write the verified scores back.
     Demotions can pull new unverified rows into the top, so the pass
@@ -459,20 +461,33 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None):
 
     Unverifiable rows (dead URL and no stored body, API down) keep their
     first-pass score untouched. Costs at most top_n x rounds API calls per
-    run, and only for rows that changed since their last verification."""
-    from core.fit import verify_fit
+    run, and only for rows that changed since their last verification or
+    were verified by an older model (fit_model NULL counts as older).
+    `force=True` re-verifies every finalist regardless."""
+    from core.fit import verify_fit, verify_model
     t = _t(t)
+    current = verify_model()
+    done_ids = set()   # verified THIS run: never stale again, even under force
+
+    def _stale(r):
+        if r["job_id"] in done_ids:
+            return False
+        if force or "deep:" not in (r.get("fit_reason") or ""):
+            return True
+        return (r.get("fit_model") or "") != current
+
     own_conn = conn is None
     if own_conn:
         conn = store.connect(t["db_path"])
     n_done = 0
     for rnd in range(rounds):
         ranked = _ranked(conn, t, limit=top_n)
-        todo = [r for r in ranked if "deep:" not in (r.get("fit_reason") or "")]
+        todo = [r for r in ranked if _stale(r)]
         if not todo:
             break
         print(f"  deep-verifying {len(todo)} of the top {len(ranked)} "
-              f"(round {rnd + 1}/{rounds})...")
+              f"with {current} (round {rnd + 1}/{rounds}"
+              f"{', forced' if force else ''})...")
 
         def _one(r):
             text = _live_jd(r)
@@ -491,6 +506,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None):
                     print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
                     continue
                 store.update_job_scores(conn, r["job_id"], res.as_columns())
+                done_ids.add(r["job_id"])
                 if text and len(text) > len(r.get("description") or ""):
                     conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
                                  (text[:config.MAX_DESC_CHARS], r["job_id"]))
@@ -521,11 +537,12 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None):
     return n_done
 
 
-def verify_top_cli(top_n=15, max_workers=4, t=None):
+def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
     """Standalone verify: deep-verify the current top N in the store (no
-    crawl), then rewrite the digest and print the corrected top."""
+    crawl), then rewrite the digest and print the corrected top. `force`
+    re-verifies rows the current verify model already checked."""
     t = _t(t)
-    n = verify_top(top_n=top_n, max_workers=max_workers, t=t)
+    n = verify_top(top_n=top_n, max_workers=max_workers, t=t, force=force)
     conn = store.connect(t["db_path"])
     ranked = _ranked(conn, t)
     digest_md.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn))

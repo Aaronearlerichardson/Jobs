@@ -181,6 +181,7 @@ class FitResult:
     axes: dict = field(default_factory=dict)
     gates: list = field(default_factory=list)   # names of FAILED gates
     reason: str = ""
+    model: str = ""     # model id that produced the score ("" = unknown)
 
     def summary(self) -> str:
         """Compact one-liner that carries the vector into fit_reason/reports.
@@ -197,12 +198,14 @@ class FitResult:
         return self.score, self.summary()
 
     def as_columns(self) -> dict:
-        """DB-ready fields: the scalar, the reason tag, the tripped gates, and
-        one column per axis. Keys match the jobs-table columns added in
-        store.py. Axes are None on an unscored result, so those columns clear."""
+        """DB-ready fields: the scalar, the reason tag, the tripped gates, the
+        scoring model, and one column per axis. Keys match the jobs-table
+        columns added in store.py. Axes are None on an unscored result, so
+        those columns clear."""
         cols = {"resume_fit_score": self.score,
                 "fit_reason": self.summary(),
-                "fit_gates": ",".join(self.gates) or None}
+                "fit_gates": ",".join(self.gates) or None,
+                "fit_model": self.model or None}
         cols.update({f"fit_{a}": self.axes.get(a) for a in AXES})
         return cols
 
@@ -503,7 +506,8 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=300) -> Fi
     weights = getattr(config, "FIT_WEIGHTS", None)
     score = combine(axes, gates, weights, _effective_penalties())
     return FitResult(score=score, axes=axes, gates=gates,
-                     reason=str(r.get("reason", "")).strip())
+                     reason=str(r.get("reason", "")).strip(),
+                     model=_cfg("CLAUDE_MODEL", ""))
 
 
 def verify_fit(title: str, description: str = "", *, location: str = "",
@@ -523,9 +527,10 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     city sailed through at 0.81 with no gate (the Neuralink ML Engineer row,
     2026-09). Empty/None omits the line.
 
-    Returns a FitResult whose reason starts with "deep:" — the marker
-    verify_top() uses to skip already-verified rows — with years/seat/gaps
-    folded into the reason for the digest. A None score means unverifiable
+    Returns a FitResult whose reason starts with "deep:" and whose `model`
+    names the verify model — together the mark verify_top() uses to skip
+    rows the CURRENT verify model has already checked — with years/seat/
+    gaps folded into the reason for the digest. A None score means unverifiable
     (no API, no text): callers must keep the first-pass score."""
     if call_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
@@ -541,8 +546,9 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     # Finalists get the stronger verify model WITH adaptive thinking left on
     # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
     # cover thinking + the JSON on 5-family models, hence the 3000 default.
+    vmodel = verify_model()
     r = call_claude_json(build_verify_prompt(), user, max_tokens=max_tokens,
-                         model=_cfg("CLAUDE_VERIFY_MODEL", None), thinking=True)
+                         model=vmodel, thinking=True)
     if not r or "function" not in r:
         return FitResult(score=None, reason="unverified")
     axes = {a: _clamp(r.get(a)) for a in AXES}
@@ -566,7 +572,16 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     reason = "deep: " + str(r.get("reason", "")).strip()
     if bits:
         reason += f" [{' | '.join(bits)}]"
-    return FitResult(score=score, axes=axes, gates=gates, reason=reason)
+    return FitResult(score=score, axes=axes, gates=gates, reason=reason,
+                     model=vmodel)
+
+
+def verify_model() -> str:
+    """The model id the deep pass scores with: config.CLAUDE_VERIFY_MODEL,
+    else the screen model. Stored in jobs.fit_model by verify_fit so a
+    later run can tell rows verified by THIS model from rows verified by
+    an older one (or by nobody: fit_model is NULL on pre-column rows)."""
+    return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
 
 
 def _clamp(x):
