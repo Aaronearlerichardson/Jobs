@@ -32,6 +32,7 @@ from datetime import datetime
 from src import config
 from src import tags as company_tags
 
+from src.ats import coords
 from src.match.locality import NC_HQ_RE as _NC_HQ_RE, is_nc as _has_nc
 from src.match.names import domain_tokens, name_key, slug_guesses
 from src.net.http import HEADERS, SESSION
@@ -589,14 +590,7 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     from src.store import is_confirmed_company, mark_pending, upsert_company
 
     name = hit["name"]
-    is_wd = hit["ats"] == "workday"
-    slug = hit.get("slug")
-    row = {"name": name, "ats": hit["ats"],
-           "slug": None if is_wd else slug,
-           "wd_tenant": slug[0] if is_wd else None,
-           "wd_pod":    slug[1] if is_wd else None,
-           "wd_site":   slug[2] if is_wd else None,
-           "careers_url": hit.get("careers_url")}
+    row = coords.from_hit(hit, name=name)
     dup = _board_already_tracked(conn, row)
     if dup:
         _report_dup_board(name, dup)
@@ -789,25 +783,19 @@ def add_board(name, url, capture=False):
     tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
 
     conn = connect()
-    is_wd = ats == "workday"
-    dup = _board_already_tracked(conn, {
-        "name": name, "ats": ats,
-        "slug": None if is_wd else (found.get("slug") or None),
-        "wd_tenant": slug[0] if is_wd else None,
-        "wd_pod":    slug[1] if is_wd else None,
-        "wd_site":   slug[2] if is_wd else None,
-        "careers_url": found.get("careers_url") or url})
+    # `slug` above is the Workday triple, or the URL as a fallback label for
+    # the mission sample; the COORDINATE for every other platform is the
+    # sniffed one.
+    board = coords.columns(
+        ats, slug if ats == "workday" else found.get("slug"),
+        found.get("careers_url") or url, name=name)
+    dup = _board_already_tracked(conn, board)
     if dup:
         _report_dup_board(name, dup)
         conn.close()
         return None
     row = {
-        "name": name, "ats": ats,
-        "slug": None if is_wd else (found.get("slug") or None),
-        "wd_tenant": slug[0] if is_wd else None,
-        "wd_pod":    slug[1] if is_wd else None,
-        "wd_site":   slug[2] if is_wd else None,
-        "careers_url": found.get("careers_url") or url,
+        **board,
         "local_job_count": nc, "mission_tier": tier, "mission_score": score,
         "mission_reason": reason, "tags": company_tags.LOCAL if nc else None,
         "source": "manual", "active": 1,
@@ -961,14 +949,7 @@ def resolve_board_sniff_first(name, careers_url=""):
     from .sniffer import sniff_ats
 
     def _mk(ats, slug, curl, via):
-        if ats == "workday":
-            comp = {"ats": "workday", "wd_tenant": slug[0],
-                    "wd_pod": slug[1], "wd_site": slug[2]}
-        elif ats == "custom":
-            comp = {"ats": "custom", "careers_url": curl}
-        else:
-            comp = {"ats": ats, "slug": slug, "careers_url": curl}
-        total, nc = _validate_board(comp)
+        total, nc = _validate_board(coords.columns(ats, slug, curl))
         if total <= 0:
             return None
         return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,

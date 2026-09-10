@@ -89,20 +89,13 @@ class _Tee(io.TextIOBase):
 # track's crawl would poison the next one's keyword filter. Restored in
 # place (slice assignment) so modules that bound the list objects at import
 # time (src/match/filters.py) see the reset.
-_BASELINE_KW = (list(config.CORE_KEYWORDS), list(config.DOMAIN_KEYWORDS),
-                list(config.SKILL_KEYWORDS), list(config.INCLUDE_KEYWORDS),
-                bool(getattr(config, "ACCEPT_REMOTE", False)))
+_BASELINE_KW = config.keyword_snapshot()
 
 
 def _restore_keywords():
     """Reset config's shared keyword lists (in place, so modules holding
     references see it) to their import-time state."""
-    core, dom, skill, inc, accept = _BASELINE_KW
-    config.CORE_KEYWORDS[:] = core
-    config.DOMAIN_KEYWORDS[:] = dom
-    config.SKILL_KEYWORDS[:] = skill
-    config.INCLUDE_KEYWORDS[:] = inc
-    config.ACCEPT_REMOTE = accept
+    config.restore_keywords(_BASELINE_KW)
 
 
 def _run_op(name, fn):

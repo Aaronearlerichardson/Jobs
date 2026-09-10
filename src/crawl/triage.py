@@ -130,22 +130,14 @@ def _track_applies(t, company):
 
 @contextmanager
 def _keyword_focus(t):
-    """apply_keyword_focus for the duration of a block, then restore the
-    shared lists in place (the same discipline as tests' pristine_keywords
-    and the web UI's _restore_keywords)."""
-    saved = (list(config.CORE_KEYWORDS), list(config.DOMAIN_KEYWORDS),
-             list(config.SKILL_KEYWORDS), list(config.INCLUDE_KEYWORDS),
-             getattr(config, "ACCEPT_REMOTE", False))
+    """apply_keyword_focus for the duration of a block, then put the shared
+    lists back (config.keyword_snapshot / restore_keywords)."""
+    saved = config.keyword_snapshot()
     apply_keyword_focus(config, t)
     try:
         yield
     finally:
-        core, dom, skill, inc, accept = saved
-        config.CORE_KEYWORDS[:] = core
-        config.DOMAIN_KEYWORDS[:] = dom
-        config.SKILL_KEYWORDS[:] = skill
-        config.INCLUDE_KEYWORDS[:] = inc
-        config.ACCEPT_REMOTE = accept
+        config.restore_keywords(saved)
 
 
 # --------------------------------------------------------------------------- #

@@ -102,6 +102,43 @@ SKILL_KEYWORDS  = list(_kw.get("skill", []))
 # when a track swaps its keyword focus, so hold the list, not a copy.
 INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
+#: The lists a track's keyword focus mutates, in the order the snapshot
+#: helpers below carry them. Named once so a new tier cannot be added to
+#: one restorer and forgotten in the others.
+_FOCUSED_LISTS = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
+                  "INCLUDE_KEYWORDS")
+
+
+def keyword_snapshot(cfg=None):
+    """The shared keyword lists and ACCEPT_REMOTE as they stand now.
+
+    `src.crawl.runner.apply_keyword_focus` rewrites all five IN PLACE --
+    that is the contract src/match/filters.py depends on, having bound the
+    list objects at import -- so anything that applies a track's focus has
+    to put them back. Four places did, each with its own copy of the same
+    five-line save and five-line restore: the crawl's triage pass, the web
+    UI's operation runner, and the test suite's keyword fixture.
+    """
+    cfg = _self() if cfg is None else cfg
+    return (*(list(getattr(cfg, n)) for n in _FOCUSED_LISTS),
+            bool(getattr(cfg, "ACCEPT_REMOTE", False)))
+
+
+def restore_keywords(snapshot, cfg=None):
+    """Put a `keyword_snapshot` back, in place."""
+    cfg = _self() if cfg is None else cfg
+    for name, saved in zip(_FOCUSED_LISTS, snapshot):
+        getattr(cfg, name)[:] = saved
+    cfg.ACCEPT_REMOTE = snapshot[-1]
+
+
+def _self():
+    """The config PACKAGE, which is what every caller mutates -- its
+    attributes are these module's objects, re-exported."""
+    import src.config as _cfg
+    return _cfg
+
+
 EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
 EXCLUDE_TITLE_PHRASES = list(_exc.get("title_phrases", []))
 # Regex fragments (ORed together in src/match/filters.scrub_boilerplate) for

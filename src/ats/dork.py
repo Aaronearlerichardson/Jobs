@@ -17,6 +17,7 @@ from src import config
 
 from src.net import ddg
 
+from src.ats import coords
 from src.ats.signatures import detect
 from src import tags as company_tags
 from src import store
@@ -205,8 +206,7 @@ def harvest_urls(urls, verbose=True):
         key = ("workday", str(slug)) if ats == "workday" else (ats, slug)
         if key in have:
             continue
-        comp = ({"ats": "workday", "wd_tenant": slug[0], "wd_pod": slug[1], "wd_site": slug[2]}
-                if ats == "workday" else {"ats": ats, "slug": slug})
+        comp = coords.columns(ats, slug)
         try:
             jobs = company_fetch.fetch_company_nc(comp)
         except Exception:

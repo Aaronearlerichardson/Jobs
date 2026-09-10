@@ -12,6 +12,7 @@ UI and run_scraper.py can run any op against any configured track.
 
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 
 from src import config
@@ -21,6 +22,7 @@ from src import store
 from src import digest
 from src.match import gates
 from src.claude.api import score_resume_fit
+from src.ats import coords
 from src.ats.fetchers import company as company_fetch
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
@@ -37,6 +39,76 @@ def _t(t):
     return t if t is not None else _default_track()
 
 
+@contextmanager
+def track_store(t=None):
+    """The track's store, closed on the way out however the block ends.
+
+    Every op here opens the same connection the same way, and each one
+    used to spell out its own `conn = store.connect(...)` / `conn.close()`
+    pair -- ten of them, none inside a `try`. A raised exception therefore
+    leaked the connection, and a leaked connection holds its read snapshot
+    open, which is what stops SQLite folding the WAL back into the store.
+
+    `t=None` means the default track (`_t`), not the default DB FILE. The
+    two are the same until a profile gives a track its own `db`, and the
+    roster ops resolved None the other way, so the same op run from the
+    web UI and from discover.py could reach different stores.
+    """
+    conn = store.connect(_t(t)["db_path"])
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def group_by_company(rows, key="company_id"):
+    """`rows` bucketed by their company id, in first-seen order.
+
+    >>> group_by_company([{"company_id": 1, "t": "a"}, {"company_id": 2},
+    ...                   {"company_id": 1, "t": "b"}])
+    {1: [{'company_id': 1, 't': 'a'}, {'company_id': 1, 't': 'b'}], 2: [{'company_id': 2}]}
+
+    Both backfill paths need this: a board with several stale rows must be
+    fetched once, not once per row.
+    """
+    out = {}
+    for r in rows:
+        out.setdefault(r[key], []).append(r)
+    return out
+
+
+def board_index(company):
+    """One company's whole board, indexed by normalised title.
+
+    Empty when the board cannot be pulled -- which is the same outcome as a
+    board that lists nothing matching, so callers fall through to their
+    per-URL path either way.
+    """
+    try:
+        board = company_fetch.fetch_company(company, loc_re=None)
+    except Exception as e:                      # noqa: BLE001 - reported
+        print(f"    [!] {company['name']}: board fetch failed: {e}")
+        return {}
+    return {(b.get("title") or "").strip().lower(): b for b in board}
+
+
+def board_match(index, title):
+    """The board row for `title`, hydrated, or None when the board does not
+    cover it (or covers it with no body).
+
+    The pair above plus this is the whole of "get a stored row's text back
+    from its company's own board", which the description backfill and the
+    external-ingest hydrator each used to spell out in full -- with
+    different error text and, until this, no shared notion of what counts
+    as a title match.
+    """
+    match = index.get((title or "").strip().lower())
+    if match is None:
+        return None
+    company_fetch.hydrate_description(match)
+    return match if match.get("description") else None
+
+
 def _ranked(conn, t, limit=None):
     """The track's ranked view — same knobs the crawl digest uses."""
     return store.ranked_jobs(
@@ -45,6 +117,27 @@ def _ranked(conn, t, limit=None):
         rank_by=t["rank_by"], allow_geo_modes={"remote"},
         min_mission=t["min_mission"],
         remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
+
+
+def rewrite_digest(conn, t, top_n=15, heading=""):
+    """Rewrite the track's ranked digest from the store as it stands now,
+    and print the top `top_n` of it. Returns the ranked list.
+
+    The tail of every op that changes what the ranking contains -- the
+    status sync and the standalone deep verify both ended with their own
+    copy, and the copies had already drifted apart in what they printed.
+    """
+    ranked = _ranked(conn, t)
+    digest.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
+                               followups=store.followups_due(conn))
+    if heading:
+        print(heading)
+    for j in ranked[:top_n]:
+        fit = j["resume_fit_score"]
+        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
+        print(f"  fit={fs} [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}"
+              f"  -  {j['company_name']}")
+    return ranked
 
 
 # --------------------------------------------------------------------------- #
@@ -274,75 +367,62 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     don't re-fetch every board to fail on the same vanished postings
     (retry_days=0 retries everything)."""
     t = _t(t)
-    conn = store.connect(t["db_path"])
-    cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
-              if retry_days else "9999")
-    rows = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, url, company_id, desc_checked_at FROM jobs "
-        "WHERE company_id IS NOT NULL "
-        "AND COALESCE(status,'open') != 'closed' "
-        "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
-    recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
-    rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
-    if limit:
-        rows = rows[:int(limit)]
-    print(f"  backfilling {len(rows)} description(s) via company board(s)..."
-          + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
-             if recent else ""))
+    with track_store(t) as conn:
+        cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
+                  if retry_days else "9999")
+        rows = [dict(r) for r in conn.execute(
+            "SELECT job_id, title, url, company_id, desc_checked_at FROM jobs "
+            "WHERE company_id IS NOT NULL "
+            "AND COALESCE(status,'open') != 'closed' "
+            "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
+        recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
+        rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
+        if limit:
+            rows = rows[:int(limit)]
+        print(f"  backfilling {len(rows)} description(s) via company board(s)..."
+              + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
+                 if recent else ""))
 
-    by_company = {}
-    for r in rows:
-        by_company.setdefault(r["company_id"], []).append(r)
-
-    n = 0
-    for cid, rs in by_company.items():
-        company = store.get_company(conn, cid)
-        if not company or not company.get("ats"):
-            # No board to fetch IS a failed attempt — stamp these rows too,
-            # or they are re-selected (and silently re-counted) every run
-            # while never even printing a company line.
-            for r in rs:
-                conn.execute("UPDATE jobs SET desc_checked_at=? "
-                             "WHERE job_id=?",
-                             (datetime.now().isoformat(), r["job_id"]))
-            conn.commit()
-            continue
-        # Batched board pull for the common case (one fetch per company);
-        # boards we can't pull simply yield no title matches, and each row
-        # falls through to per-job-URL hydration below.
-        try:
-            board = company_fetch.fetch_company(company, loc_re=None)
-        except Exception as e:
-            print(f"    [!] {company['name']}: {e}")
-            board = []
-        by_title = {(b.get("title") or "").strip().lower(): b for b in board}
-        n_matched = 0
-        for r in rs:
-            desc = None
-            match = by_title.get((r["title"] or "").strip().lower())
-            if match is not None:
-                company_fetch.hydrate_description(match)
-                desc = match.get("description")
-            if not desc and r.get("url"):
-                # Board didn't cover this row — hydrate from the job's own
-                # detail page (JSON-LD / career-site markup).
-                stub = {"title": r["title"], "url": r["url"],
-                        "ats": company.get("ats"), "description": ""}
-                company_fetch.hydrate_description(stub)
-                desc = stub.get("description")
-            if not desc:
-                conn.execute("UPDATE jobs SET desc_checked_at=? "
-                             "WHERE job_id=?",
-                             (datetime.now().isoformat(), r["job_id"]))
+        n = 0
+        for cid, rs in group_by_company(rows).items():
+            company = store.get_company(conn, cid)
+            if not company or not company.get("ats"):
+                # No board to fetch IS a failed attempt — stamp these rows too,
+                # or they are re-selected (and silently re-counted) every run
+                # while never even printing a company line.
+                for r in rs:
+                    conn.execute("UPDATE jobs SET desc_checked_at=? "
+                                 "WHERE job_id=?",
+                                 (datetime.now().isoformat(), r["job_id"]))
                 conn.commit()
                 continue
-            conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                         (desc[:config.MAX_DESC_CHARS], r["job_id"]))
-            conn.commit()
-            n += 1
-            n_matched += 1
-        print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
-    conn.close()
+            # Batched board pull for the common case (one fetch per company);
+            # boards we can't pull simply yield no title matches, and each row
+            # falls through to per-job-URL hydration below.
+            index = board_index(company)
+            n_matched = 0
+            for r in rs:
+                match = board_match(index, r["title"])
+                desc = match.get("description") if match else None
+                if not desc and r.get("url"):
+                    # Board didn't cover this row — hydrate from the job's own
+                    # detail page (JSON-LD / career-site markup).
+                    stub = {"title": r["title"], "url": r["url"],
+                            "ats": company.get("ats"), "description": ""}
+                    company_fetch.hydrate_description(stub)
+                    desc = stub.get("description")
+                if not desc:
+                    conn.execute("UPDATE jobs SET desc_checked_at=? "
+                                 "WHERE job_id=?",
+                                 (datetime.now().isoformat(), r["job_id"]))
+                    conn.commit()
+                    continue
+                conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
+                             (desc[:config.MAX_DESC_CHARS], r["job_id"]))
+                conn.commit()
+                n += 1
+                n_matched += 1
+            print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
     print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n
 
@@ -365,47 +445,46 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     if not resume:
         print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
         return 0
-    conn = store.connect(t["db_path"])
-    ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
-    conds = ["COALESCE(status,'open') != 'closed'",
-             f"(disposition IS NULL OR disposition NOT IN ({ph}))"]
-    args = list(store.RANKING_EXCLUDED_DISPOSITIONS)
-    if track:
-        conds.append("(',' || COALESCE(track,'') || ',') LIKE ?")
-        args.append(f"%,{track},%")
-    if described_only:
-        conds.append("length(COALESCE(description,'')) >= ?")
-        args.append(MIN_DESC_CHARS)
-    q = "SELECT job_id, title, description FROM jobs"
-    if conds:
-        q += " WHERE " + " AND ".join(conds)
-    rows = [dict(r) for r in conn.execute(q, args).fetchall()]
-    print(f"  rescoring {len(rows)} job(s) against the current resume...")
+    with track_store(t) as conn:
+        ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
+        conds = ["COALESCE(status,'open') != 'closed'",
+                 f"(disposition IS NULL OR disposition NOT IN ({ph}))"]
+        args = list(store.RANKING_EXCLUDED_DISPOSITIONS)
+        if track:
+            conds.append("(',' || COALESCE(track,'') || ',') LIKE ?")
+            args.append(f"%,{track},%")
+        if described_only:
+            conds.append("length(COALESCE(description,'')) >= ?")
+            args.append(MIN_DESC_CHARS)
+        q = "SELECT job_id, title, description FROM jobs"
+        if conds:
+            q += " WHERE " + " AND ".join(conds)
+        rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+        print(f"  rescoring {len(rows)} job(s) against the current resume...")
 
-    def _one(r):
-        res = score_resume_fit(resume, r["title"], r.get("description", ""))
-        return r["job_id"], res, r.get("description", "")
+        def _one(r):
+            res = score_resume_fit(resume, r["title"], r.get("description", ""))
+            return r["job_id"], res, r.get("description", "")
 
-    n = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_one, r): r for r in rows}):
-            try:
-                jid, res, desc = fut.result()
-            except Exception as e:
-                print(f"    [!] rescore error: {e}")
-                continue
-            if res.score is None:
-                # Unscorable (no real body): clear the stale score so it
-                # drops from ranking. A described row that merely failed to
-                # parse keeps its score.
-                if len((desc or "").strip()) < MIN_DESC_CHARS:
-                    store.update_job_scores(
-                        conn, jid, {"fit_reason": "no description; unscored"})
-                    n += 1
-                continue
-            store.update_job_scores(conn, jid, res.as_columns())
-            n += 1
-    conn.close()
+        n = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for fut in as_completed({ex.submit(_one, r): r for r in rows}):
+                try:
+                    jid, res, desc = fut.result()
+                except Exception as e:
+                    print(f"    [!] rescore error: {e}")
+                    continue
+                if res.score is None:
+                    # Unscorable (no real body): clear the stale score so it
+                    # drops from ranking. A described row that merely failed to
+                    # parse keeps its score.
+                    if len((desc or "").strip()) < MIN_DESC_CHARS:
+                        store.update_job_scores(
+                            conn, jid, {"fit_reason": "no description; unscored"})
+                        n += 1
+                    continue
+                store.update_job_scores(conn, jid, res.as_columns())
+                n += 1
     print(f"  {n} job(s) rescored.")
     return n
 
@@ -483,91 +562,89 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
             return True
         return (r.get("fit_model") or "") != current
 
-    own_conn = conn is None
-    if own_conn:
-        conn = store.connect(t["db_path"])
-    n_done = 0
-    for rnd in range(rounds):
-        down = api_disabled()
-        if down:
-            # Tripped before this round (the crawl's screen pass, or an
-            # earlier round here): nothing below can score, so say so once
-            # instead of fetching every finalist's live JD to print
-            # '[?] kept' per row.
-            print(f"  [!] deep verify skipped: Claude API disabled for this "
-                  f"run ({down})")
-            break
-        ranked = _ranked(conn, t, limit=top_n)
-        todo = [r for r in ranked if _stale(r)]
-        if not todo:
-            break
-        print(f"  deep-verifying {len(todo)} of the top {len(ranked)} "
-              f"with {current} (round {rnd + 1}/{rounds}"
-              f"{', forced' if force else ''})...")
+    with ExitStack() as stack:
+        if conn is None:
+            conn = stack.enter_context(track_store(t))
+        n_done = 0
+        for rnd in range(rounds):
+            down = api_disabled()
+            if down:
+                # Tripped before this round (the crawl's screen pass, or an
+                # earlier round here): nothing below can score, so say so once
+                # instead of fetching every finalist's live JD to print
+                # '[?] kept' per row.
+                print(f"  [!] deep verify skipped: Claude API disabled for this "
+                      f"run ({down})")
+                break
+            ranked = _ranked(conn, t, limit=top_n)
+            todo = [r for r in ranked if _stale(r)]
+            if not todo:
+                break
+            print(f"  deep-verifying {len(todo)} of the top {len(ranked)} "
+                  f"with {current} (round {rnd + 1}/{rounds}"
+                  f"{', forced' if force else ''})...")
 
-        def _one(r):
-            # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
-            # verify call hit an exhausted credit balance). A row the API
-            # can no longer score doesn't need its live JD fetched.
-            if api_disabled():
-                return r, None, FitResult(score=None, reason="api disabled")
-            text = _live_jd(r)
-            return r, text, verify_fit(r["title"], text,
-                                       location=r.get("location") or "")
+            def _one(r):
+                # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
+                # verify call hit an exhausted credit balance). A row the API
+                # can no longer score doesn't need its live JD fetched.
+                if api_disabled():
+                    return r, None, FitResult(score=None, reason="api disabled")
+                text = _live_jd(r)
+                return r, text, verify_fit(r["title"], text,
+                                           location=r.get("location") or "")
 
-        n_scored = n_crushed = 0
-        halted = None
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for fut in as_completed({ex.submit(_one, r): r for r in todo}):
-                try:
-                    r, text, res = fut.result()
-                except Exception as e:
-                    print(f"    [!] verify error: {e}")
-                    continue
-                if res.score is None:
-                    halted = api_disabled()
-                    if halted:
-                        # One line for the round, not one '[?] kept' per
-                        # finalist; rows still queued never start.
-                        ex.shutdown(wait=False, cancel_futures=True)
-                        break
-                    print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
-                    continue
-                store.update_job_scores(conn, r["job_id"], res.as_columns())
-                done_ids.add(r["job_id"])
-                if text and len(text) > len(r.get("description") or ""):
-                    conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                                 (text[:config.MAX_DESC_CHARS], r["job_id"]))
-                    conn.commit()
-                old = r.get("resume_fit_score")
-                move = (f"{old:.2f} -> {res.score:.2f}"
-                        if isinstance(old, float) else f"?    -> {res.score:.2f}")
-                flag = "  [DEMOTED]" if isinstance(old, float) and \
-                    res.score < old - 0.15 else ""
-                print(f"    {move}  {r['title'][:44]} ({r['company_name']})"
-                      f"{flag}")
-                n_done += 1
-                n_scored += 1
-                if isinstance(old, float) and res.score < old - 0.25:
-                    n_crushed += 1
-        if halted:
-            print(f"  [!] deep verify halted: Claude API disabled for this run "
-                  f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
-                  f"first-pass score")
-            break
-        # Tripwire: the two passes disagreeing WHOLESALE is a calibration or
-        # parsing defect, not information. Stop instead of compounding.
-        if n_scored >= 5 and n_crushed / n_scored >= 0.8:
-            print(f"\n  [!] TRIPWIRE: {n_crushed}/{n_scored} verified rows "
-                  f"dropped by >0.25 this round. The deep pass is disagreeing "
-                  f"with the screen wholesale — that pattern means a prompt/"
-                  f"parsing defect, not 30 bad jobs. Halting further rounds; "
-                  f"inspect fit_gates on the demoted rows before trusting "
-                  f"this ranking.")
-            break
-    if own_conn:
-        conn.close()
-    return n_done
+            n_scored = n_crushed = 0
+            halted = None
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                for fut in as_completed({ex.submit(_one, r): r for r in todo}):
+                    try:
+                        r, text, res = fut.result()
+                    except Exception as e:
+                        print(f"    [!] verify error: {e}")
+                        continue
+                    if res.score is None:
+                        halted = api_disabled()
+                        if halted:
+                            # One line for the round, not one '[?] kept' per
+                            # finalist; rows still queued never start.
+                            ex.shutdown(wait=False, cancel_futures=True)
+                            break
+                        print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
+                        continue
+                    store.update_job_scores(conn, r["job_id"], res.as_columns())
+                    done_ids.add(r["job_id"])
+                    if text and len(text) > len(r.get("description") or ""):
+                        conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
+                                     (text[:config.MAX_DESC_CHARS], r["job_id"]))
+                        conn.commit()
+                    old = r.get("resume_fit_score")
+                    move = (f"{old:.2f} -> {res.score:.2f}"
+                            if isinstance(old, float) else f"?    -> {res.score:.2f}")
+                    flag = "  [DEMOTED]" if isinstance(old, float) and \
+                        res.score < old - 0.15 else ""
+                    print(f"    {move}  {r['title'][:44]} ({r['company_name']})"
+                          f"{flag}")
+                    n_done += 1
+                    n_scored += 1
+                    if isinstance(old, float) and res.score < old - 0.25:
+                        n_crushed += 1
+            if halted:
+                print(f"  [!] deep verify halted: Claude API disabled for this run "
+                      f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
+                      f"first-pass score")
+                break
+            # Tripwire: the two passes disagreeing WHOLESALE is a calibration or
+            # parsing defect, not information. Stop instead of compounding.
+            if n_scored >= 5 and n_crushed / n_scored >= 0.8:
+                print(f"\n  [!] TRIPWIRE: {n_crushed}/{n_scored} verified rows "
+                      f"dropped by >0.25 this round. The deep pass is disagreeing "
+                      f"with the screen wholesale — that pattern means a prompt/"
+                      f"parsing defect, not 30 bad jobs. Halting further rounds; "
+                      f"inspect fit_gates on the demoted rows before trusting "
+                      f"this ranking.")
+                break
+        return n_done
 
 
 def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
@@ -576,17 +653,11 @@ def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
     re-verifies rows the current verify model already checked."""
     t = _t(t)
     n = verify_top(top_n=top_n, max_workers=max_workers, t=t, force=force)
-    conn = store.connect(t["db_path"])
-    ranked = _ranked(conn, t)
-    digest.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
-                                  followups=store.followups_due(conn))
-    print(f"\n  {n} job(s) deep-verified; corrected top {min(top_n, len(ranked))}:")
-    for j in ranked[:top_n]:
-        fit = j["resume_fit_score"]
-        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-        print(f"  fit={fs} [{j.get('geo_mode','?')}] {(j['title'] or '')[:50]}"
-              f"  -  {j['company_name']}")
-    conn.close()
+    with track_store(t) as conn:
+        n_open = len(_ranked(conn, t))
+        rewrite_digest(conn, t, top_n,
+                       f"\n  {n} job(s) deep-verified; corrected top "
+                       f"{min(top_n, n_open)}:")
     return n
 
 
@@ -597,40 +668,33 @@ def sync_status_all(top_n=15, t=None):
     corrected ranking. NO scoring, no Claude API — the cheap recovery pass
     for when statuses have drifted without paying for a full crawl."""
     t = _t(t)
-    conn = store.connect(t["db_path"])
-    companies = store.crawlable_companies(conn, tag=t["store_tag"])
-    print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
-    loc = NC_RE if t["sources"]["location_scoped"] else None
-    sources = [(c["name"], c["ats"] or "?",
-                (lambda cc=c: company_fetch.fetch_company(
-                    cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
-                                 or loc is None) else loc)))
-               for c in companies]
-    fetched = fetch_all(sources)
-    n_closed = n_reopened = n_boards = 0
-    for c, (jobs, err) in zip(companies, fetched):
-        if err is not None or not jobs or not c.get("id"):
-            continue
-        n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs,
-                                             track=t["track"])
-        n_boards += 1
-        n_closed += n_cl
-        n_reopened += n_re
-        if n_cl or n_re:
-            print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
-                  f"{n_cl:2} closed, {n_re:2} reopened")
-    ranked = _ranked(conn, t)
-    digest.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
-                                  followups=store.followups_due(conn))
-    print(f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
-          f"{n_reopened} reopened; {len(ranked)} open job(s) in ranking.")
-    for j in ranked[:top_n]:
-        fit = j["resume_fit_score"]
-        fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-        print(f"  fit={fs} [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}"
-              f"  -  {j['company_name']}")
-    conn.close()
-    return (n_closed, n_reopened)
+    with track_store(t) as conn:
+        companies = store.crawlable_companies(conn, tag=t["store_tag"])
+        print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
+        loc = NC_RE if t["sources"]["location_scoped"] else None
+        sources = [(c["name"], c["ats"] or "?",
+                    (lambda cc=c: company_fetch.fetch_company(
+                        cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
+                                     or loc is None) else loc)))
+                   for c in companies]
+        fetched = fetch_all(sources)
+        n_closed = n_reopened = n_boards = 0
+        for c, (jobs, err) in zip(companies, fetched):
+            if err is not None or not jobs or not c.get("id"):
+                continue
+            n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs,
+                                                 track=t["track"])
+            n_boards += 1
+            n_closed += n_cl
+            n_reopened += n_re
+            if n_cl or n_re:
+                print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
+                      f"{n_cl:2} closed, {n_re:2} reopened")
+        n_open = len(_ranked(conn, t))
+        rewrite_digest(conn, t, top_n,
+                       f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
+                       f"{n_reopened} reopened; {n_open} open job(s) in ranking.")
+        return (n_closed, n_reopened)
 
 
 def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None):
@@ -640,38 +704,37 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None):
     validThrough, a Workday CXS miss). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched."""
     t = _t(t)
-    conn = store.connect(t["db_path"])
-    cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
-    rows = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, company_name, url FROM jobs "
-        "WHERE COALESCE(status,'open') != 'closed' "
-        "AND COALESCE(last_seen, first_seen, '') < ? "
-        "ORDER BY company_name", (cutoff,)).fetchall()]
-    if limit:
-        rows = rows[:int(limit)]
-    print(f"  probing {len(rows)} open job(s) not board-verified in "
-          f"{stale_days}+ day(s)...")
+    with track_store(t) as conn:
+        cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
+        rows = [dict(r) for r in conn.execute(
+            "SELECT job_id, title, company_name, url FROM jobs "
+            "WHERE COALESCE(status,'open') != 'closed' "
+            "AND COALESCE(last_seen, first_seen, '') < ? "
+            "ORDER BY company_name", (cutoff,)).fetchall()]
+        if limit:
+            rows = rows[:int(limit)]
+        print(f"  probing {len(rows)} open job(s) not board-verified in "
+              f"{stale_days}+ day(s)...")
 
-    n_closed = n_live = n_unknown = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(company_fetch.probe_job_open, r["url"]): r
-                for r in rows}
-        for fut in as_completed(futs):
-            r = futs[fut]
-            try:
-                is_open, reason = fut.result()
-            except Exception as e:
-                is_open, reason = None, f"probe error: {e}"
-            label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
-            if is_open is False:
-                store.set_job_status(conn, r["job_id"], "closed")
-                n_closed += 1
-                print(f"    [closed] {label} {reason}")
-            elif is_open:
-                n_live += 1
-            else:
-                n_unknown += 1
-    conn.close()
+        n_closed = n_live = n_unknown = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futs = {ex.submit(company_fetch.probe_job_open, r["url"]): r
+                    for r in rows}
+            for fut in as_completed(futs):
+                r = futs[fut]
+                try:
+                    is_open, reason = fut.result()
+                except Exception as e:
+                    is_open, reason = None, f"probe error: {e}"
+                label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
+                if is_open is False:
+                    store.set_job_status(conn, r["job_id"], "closed")
+                    n_closed += 1
+                    print(f"    [closed] {label} {reason}")
+                elif is_open:
+                    n_live += 1
+                else:
+                    n_unknown += 1
     print(f"  {n_closed} closed, {n_live} confirmed live, "
           f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
     return n_closed
@@ -684,26 +747,15 @@ def _hydrate_missing_descriptions(conn, jobs):
     need = [j for j in jobs if j.get("_company_id") and not (j.get("description") or "").strip()]
     if not need:
         return
-    by_company = {}
-    for j in need:
-        by_company.setdefault(j["_company_id"], []).append(j)
-    for cid, js in by_company.items():
+    for cid, js in group_by_company(need, "_company_id").items():
         company = store.get_company(conn, cid)
         if not company or not company.get("ats"):
             continue
-        try:
-            board = company_fetch.fetch_company(company, loc_re=None)
-        except Exception as e:
-            print(f"    [!] board hydrate fetch failed for {company['name']}: {e}")
-            continue
-        by_title = {(b.get("title") or "").strip().lower(): b for b in board}
+        index = board_index(company)
         n_hydrated = 0
         for j in js:
-            match = by_title.get((j.get("title") or "").strip().lower())
-            if match is None:
-                continue
-            company_fetch.hydrate_description(match)
-            if match.get("description"):
+            match = board_match(index, j.get("title"))
+            if match is not None:
                 j["description"] = match["description"]
                 j["url"] = j.get("url") or match.get("url")
                 n_hydrated += 1
@@ -727,74 +779,74 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
     import hashlib
     t = _t(t)
     resume = resume_text()
-    conn = store.connect(t["db_path"])
-    kept, n_nonlocal = [], 0
-    for j in jobs:
-        if not j.get("id"):
-            key = (j.get("url") or "") + (j.get("title") or "") + (j.get("company") or "")
-            j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
-        company_id = store.company_id_by_name(conn, j.get("company"))
-        company_row = store.get_company(conn, company_id) if company_id else None
-        if t["geo_gate"]:
-            # Location-scoped track: gate ingested jobs on the same locality
-            # filter the live crawl applies inside its fetchers, with one
-            # relaxation — a posting from a company the ranking trusts with
-            # an out-of-area exception (watched, or core-mission at the
-            # track's remote_mission_floor) still passes when it's
-            # explicitly remote. Enforced even for curated adds.
-            loc = j.get("location", "") or ""
-            is_local = bool(NC_RE.search(loc))
-            trusted = (_is_watched(company_row)
-                       or _mission_trusted(company_row,
-                                           t.get("remote_mission_floor")))
-            is_remote_trusted = (
-                trusted
-                and geo_mode(loc, j.get("description", "")) == "remote")
-            if not (is_local or is_remote_trusted):
-                n_nonlocal += 1
-                continue
-        if not curated:
-            if t["exclude_gate"] and gates.exclude_reason(
-                    j.get("title", ""), j.get("description", ""),
-                    track_id=t["id"]):
-                continue
-            if not gates.is_technical_role(j.get("title", ""), t):
-                continue
-        if store.job_exists(conn, j["id"]):
-            # Already stored — but the source just showed it live, so reopen
-            # a closed row and reset its grace clock (no re-score).
-            store.touch_job(conn, j["id"])
-        else:
-            # Resolve the company link on the MAIN thread — SQLite
-            # connections can't cross into the scoring pool below.
-            j["_company_id"] = company_id
-            kept.append(j)
+    with track_store(t) as conn:
+        kept, n_nonlocal = [], 0
+        for j in jobs:
+            if not j.get("id"):
+                key = (j.get("url") or "") + (j.get("title") or "") + (j.get("company") or "")
+                j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
+            company_id = store.company_id_by_name(conn, j.get("company"))
+            company_row = store.get_company(conn, company_id) if company_id else None
+            if t["geo_gate"]:
+                # Location-scoped track: gate ingested jobs on the same locality
+                # filter the live crawl applies inside its fetchers, with one
+                # relaxation — a posting from a company the ranking trusts with
+                # an out-of-area exception (watched, or core-mission at the
+                # track's remote_mission_floor) still passes when it's
+                # explicitly remote. Enforced even for curated adds.
+                loc = j.get("location", "") or ""
+                is_local = bool(NC_RE.search(loc))
+                trusted = (_is_watched(company_row)
+                           or _mission_trusted(company_row,
+                                               t.get("remote_mission_floor")))
+                is_remote_trusted = (
+                    trusted
+                    and geo_mode(loc, j.get("description", "")) == "remote")
+                if not (is_local or is_remote_trusted):
+                    n_nonlocal += 1
+                    continue
+            if not curated:
+                if t["exclude_gate"] and gates.exclude_reason(
+                        j.get("title", ""), j.get("description", ""),
+                        track_id=t["id"]):
+                    continue
+                if not gates.is_technical_role(j.get("title", ""), t):
+                    continue
+            if store.job_exists(conn, j["id"]):
+                # Already stored — but the source just showed it live, so reopen
+                # a closed row and reset its grace clock (no re-score).
+                store.touch_job(conn, j["id"])
+            else:
+                # Resolve the company link on the MAIN thread — SQLite
+                # connections can't cross into the scoring pool below.
+                j["_company_id"] = company_id
+                kept.append(j)
 
-    _hydrate_missing_descriptions(conn, kept)
+        _hydrate_missing_descriptions(conn, kept)
 
-    def _score(j):
-        res = score_resume_fit(resume, j["title"], j.get("description", ""))
-        return {"job_id": j["id"], "company_id": j.get("_company_id"),
-                "company_name": j.get("company"),
-                "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),
-                "track": t["track"],
-                "geo_mode": geo_mode(j.get("location", ""), j.get("description", "")) or "onsite",
-                "description": (j.get("description", "") or "")[:config.MAX_DESC_CHARS],
-                "posted_at": j.get("posted_at"),
-                "status": "open",
-                **res.as_columns()}
+        def _score(j):
+            res = score_resume_fit(resume, j["title"], j.get("description", ""))
+            return {"job_id": j["id"], "company_id": j.get("_company_id"),
+                    "company_name": j.get("company"),
+                    "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),
+                    "track": t["track"],
+                    "geo_mode": geo_mode(j.get("location", ""), j.get("description", "")) or "onsite",
+                    "description": (j.get("description", "") or "")[:config.MAX_DESC_CHARS],
+                    "posted_at": j.get("posted_at"),
+                    "status": "open",
+                    **res.as_columns()}
 
-    scored = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_score, j): j for j in kept}):
-            try:
-                store.upsert_job(conn, fut.result())
-                scored += 1
-            except Exception as e:
-                print(f"    [!] ingest error: {e}")
-    print(f"  ingested {scored} new {source} job(s) ({len(kept)} kept, "
-          f"{n_nonlocal} out-of-area dropped, {len(jobs)} raw)")
-    return scored
+        scored = 0
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            for fut in as_completed({ex.submit(_score, j): j for j in kept}):
+                try:
+                    store.upsert_job(conn, fut.result())
+                    scored += 1
+                except Exception as e:
+                    print(f"    [!] ingest error: {e}")
+        print(f"  ingested {scored} new {source} job(s) ({len(kept)} kept, "
+              f"{n_nonlocal} out-of-area dropped, {len(jobs)} raw)")
+        return scored
 
 
 def add_manual_job(url, title, company, location, description="",
@@ -842,47 +894,38 @@ def add_manual_job(url, title, company, location, description="",
 
     # 1) Company: resolve a board if we don't already have one for it, so
     #    the job links to a real company row.
-    conn = store.connect(t["db_path"])
-    existing = next((c for c in store.get_companies(conn, active_only=False)
-                     if (c["name"] or "").lower() == name.lower()), None)
-    board, miss = None, None
-    if not existing or not existing.get("ats"):
-        print(f"  resolving board for {name!r}...")
-        # A hit carrying a reason ("no-local-jobs") is a live, readable
-        # board with nothing open here today — worth registering, exactly
-        # as the probe-first resolver's nc=0 hit was.
-        board, miss = resolve_or_miss(name)
-    if board:
-        is_wd = board["ats"] == "workday"
-        slug = board["slug"]
-        titles = _sample_titles(board)
-        tier, score, reason = score_company_mission(
-            name, " | ".join(x for x in titles if x))
-        active = is_active_mission(tier, name)
-        store.upsert_company(conn, {
-            "name": name, "ats": board["ats"],
-            "slug": None if is_wd else slug,
-            "wd_tenant": slug[0] if is_wd else None,
-            "wd_pod": slug[1] if is_wd else None,
-            "wd_site": slug[2] if is_wd else None,
-            "careers_url": board.get("careers_url"),
-            "local_job_count": board["nc"], "total_job_count": board["count"],
-            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-            "tags": tags.LOCAL if board["nc"] else None,
-            "source": "manual_add", "active": active,
-        })
-        print(f"    board resolved: {board['ats']} nc={board['nc']} "
-              f"mission={tier} ({score if score is not None else 'n/a'})")
-    elif miss:
-        # Resolution was attempted and failed. Keep WHY on the row rather
-        # than a prose note: that is what reresolve_misses selects on.
-        store.record_miss(conn, name, miss, source="manual_add",
-                          notes=None if existing else f"manual add from {url}")
-        print(f"    company recorded as a miss [{miss}] — board unresolved "
-              f"(gated / unknown ATS)")
-    else:
-        print(f"    company already in roster (ats={existing.get('ats')})")
-    conn.close()
+    with track_store(t) as conn:
+        existing = next((c for c in store.get_companies(conn, active_only=False)
+                         if (c["name"] or "").lower() == name.lower()), None)
+        board, miss = None, None
+        if not existing or not existing.get("ats"):
+            print(f"  resolving board for {name!r}...")
+            # A hit carrying a reason ("no-local-jobs") is a live, readable
+            # board with nothing open here today — worth registering, exactly
+            # as the probe-first resolver's nc=0 hit was.
+            board, miss = resolve_or_miss(name)
+        if board:
+            titles = _sample_titles(board)
+            tier, score, reason = score_company_mission(
+                name, " | ".join(x for x in titles if x))
+            active = is_active_mission(tier, name)
+            store.upsert_company(conn, coords.from_hit(
+                board, name=name,
+                local_job_count=board["nc"], total_job_count=board["count"],
+                mission_tier=tier, mission_score=score, mission_reason=reason,
+                tags=tags.LOCAL if board["nc"] else None,
+                source="manual_add", active=active))
+            print(f"    board resolved: {board['ats']} nc={board['nc']} "
+                  f"mission={tier} ({score if score is not None else 'n/a'})")
+        elif miss:
+            # Resolution was attempted and failed. Keep WHY on the row rather
+            # than a prose note: that is what reresolve_misses selects on.
+            store.record_miss(conn, name, miss, source="manual_add",
+                              notes=None if existing else f"manual add from {url}")
+            print(f"    company recorded as a miss [{miss}] — board unresolved "
+                  f"(gated / unknown ATS)")
+        else:
+            print(f"    company already in roster (ats={existing.get('ats')})")
 
     # 2) The single job — curated (skip exclude/technical), geo gate still on.
     print(f"  adding job: {title!r} @ {name} [{location}]")
@@ -894,14 +937,13 @@ def add_manual_job(url, title, company, location, description="",
     # 3) The company's OTHER jobs — crawl its board whenever it has one
     #    (freshly resolved OR already in the roster), unless --no-board.
     n_other = 0
-    conn = store.connect(t["db_path"])
-    row = next((c for c in store.get_companies(conn, active_only=False)
-                if (c["name"] or "").lower() == name.lower()), None)
-    has_board = bool(row and row.get("ats"))
-    if pull_board and has_board:
-        _, _, n_other = crawl_company(conn, resume_text(), row, max_workers, t=t)
-        print(f"    pulled {n_other} other in-scope job(s) from {name}'s board")
-    conn.close()
+    with track_store(t) as conn:
+        row = next((c for c in store.get_companies(conn, active_only=False)
+                    if (c["name"] or "").lower() == name.lower()), None)
+        has_board = bool(row and row.get("ats"))
+        if pull_board and has_board:
+            _, _, n_other = crawl_company(conn, resume_text(), row, max_workers, t=t)
+            print(f"    pulled {n_other} other in-scope job(s) from {name}'s board")
 
     status = "active board" if has_board else "recorded (board unresolved)"
     print(f"\n  DONE: +{n_job} job, +{n_other} from board; company '{name}' - {status}.")
@@ -1087,10 +1129,9 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from src.match.names import junk_name_reason
 
     t = _t(t)
-    own_conn = conn is None
-    if own_conn:
-        conn = store.connect(t["db_path"])
-    try:
+    with ExitStack() as stack:
+        if conn is None:
+            conn = stack.enter_context(track_store(t))
         rows = _reresolve_candidates(conn, days=days, names=names, limit=limit)
         # Misses recorded before the paste screen existed include section
         # headings and category nouns ("Required Qualifications",
@@ -1128,15 +1169,8 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
                 still.append((name, reason))
                 print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
                 return
-            slug = hit.get("slug")
-            is_wd = hit["ats"] == "workday"
-            coords = {"name": name, "ats": hit["ats"],
-                      "slug": None if is_wd else slug,
-                      "wd_tenant": slug[0] if is_wd else None,
-                      "wd_pod": slug[1] if is_wd else None,
-                      "wd_site": slug[2] if is_wd else None,
-                      "careers_url": hit.get("careers_url")}
-            dup = _board_already_tracked(conn, coords)
+            board = coords.from_hit(hit, name=name)
+            dup = _board_already_tracked(conn, board)
             if dup:
                 # Someone else already holds this board. Leave the row as
                 # the miss it was, but re-stamp it so a bounded rerun moves
@@ -1154,14 +1188,14 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
             conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, "
                          "wd_pod=NULL, wd_site=NULL WHERE name=?", (name,))
             store.upsert_company(conn, {
-                **coords,
+                **board,
                 "local_job_count": hit["nc"], "total_job_count": hit["count"],
                 "mission_tier": tier, "mission_score": score,
                 "mission_reason": reason,
                 "tags": tags.PENDING, "active": 0,
                 "last_probed": datetime.now().isoformat(),
             })
-            written.append(coords)
+            written.append(board)
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             print(f"    [pending] {name[:30]:30} {hit['ats']:12} "
                   f"nc={hit['nc']:<3} tot={hit['count']:<4} "
@@ -1181,6 +1215,3 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         if written:
             print("  confirm or reject them in the roster review queue.")
         return written
-    finally:
-        if own_conn:
-            conn.close()

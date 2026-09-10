@@ -6,24 +6,23 @@ report) and re-spelled slightly differently in another. Anything that is
 a single existing function is targeted directly by the registry; only
 multi-step operations live here. Imports are lazy so that importing the
 registry stays cheap.
+
+The store is opened through maintenance.track_store, the same helper the
+maintenance ops use. These three used to open it themselves, and resolved
+`t=None` to the default DB FILE where maintenance resolves it to the
+default TRACK -- so under a profile that gives a track its own `db`, one
+op reached a different store depending on which front end asked for it.
 """
-
-
-def _connect(t):
-    from src import store
-    return store.connect(t["db_path"] if t else None)
 
 
 def dedup(t=None):
     """Merge duplicate company rows pointing at one board, then duplicate
     job rows. Returns (companies merged, jobs dropped)."""
     from src import store
-    conn = _connect(t)
-    try:
+    from src.ops.maintenance import track_store
+    with track_store(t) as conn:
         n = store.dedup_companies(conn)
         n_jobs = store.dedup_jobs(conn)
-    finally:
-        conn.close()
     print(f"\n  merged {n} duplicate company row(s) into their canonical board; "
           f"dropped {n_jobs} duplicate job row(s).")
     return n, n_jobs
@@ -32,12 +31,10 @@ def dedup(t=None):
 def prune(offmission=False, t=None):
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
-    from src.ops.maintenance import prune_dead_boards
-    conn = _connect(t)
-    try:
-        n_dead, n_off = prune_dead_boards(conn, deactivate_offmission=bool(offmission))
-    finally:
-        conn.close()
+    from src.ops.maintenance import prune_dead_boards, track_store
+    with track_store(t) as conn:
+        n_dead, n_off = prune_dead_boards(
+            conn, deactivate_offmission=bool(offmission))
     print(f"\n  deactivated {n_dead} dead-board compan(ies)"
           + (f" + {n_off} off-mission" if offmission else "") + ".")
     return n_dead, n_off
@@ -46,11 +43,9 @@ def prune(offmission=False, t=None):
 def backfill_axes(t=None):
     """Populate the per-axis fit columns from fit_reason (offline)."""
     from src import store
-    conn = _connect(t)
-    try:
+    from src.ops.maintenance import track_store
+    with track_store(t) as conn:
         return store.backfill_axis_columns(conn)
-    finally:
-        conn.close()
 
 
 def ingest_nlx(companies, t=None):

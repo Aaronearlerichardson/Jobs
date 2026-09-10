@@ -82,16 +82,9 @@ def pristine_keywords(cfg):
     filters.py depends on), so any test that applies a track's focus would
     leak into the next one without this.
     """
-    saved = (list(cfg.CORE_KEYWORDS), list(cfg.DOMAIN_KEYWORDS),
-             list(cfg.SKILL_KEYWORDS), list(cfg.INCLUDE_KEYWORDS),
-             cfg.ACCEPT_REMOTE)
+    saved = cfg.keyword_snapshot(cfg)
     yield
-    core, dom, skill, inc, accept = saved
-    cfg.CORE_KEYWORDS[:] = core
-    cfg.DOMAIN_KEYWORDS[:] = dom
-    cfg.SKILL_KEYWORDS[:] = skill
-    cfg.INCLUDE_KEYWORDS[:] = inc
-    cfg.ACCEPT_REMOTE = accept
+    cfg.restore_keywords(saved, cfg)
 
 
 # --------------------------------------------------------------------------- #
