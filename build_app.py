@@ -10,7 +10,7 @@ harvester is `JobHarvester.exe` / `job-harvester`) —
 self-contained (bundled CPython + Flask + the crawler packages + lxml),
 copy it anywhere and run; no Python or pip needed on the target.
 
-Data resolution at RUNTIME (config.py): JOBS_DATA_DIR if set; else a `data`
+Data resolution at RUNTIME (config/paths.py): JOBS_DATA_DIR if set; else a `data`
 folder beside the binary, or beside its parent when the dist folder still
 sits inside the checkout (so a build never spawns a second empty store next
 to the project's real one); else the legacy flat layout; else the per-user

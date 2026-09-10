@@ -4,7 +4,7 @@ Pure functions over the profile file: read, validate, apply structured
 updates (comment-preserving via tomlkit), and back-up-then-write atomically.
 webapp.py wires these to /api/config* routes; nothing here touches Flask or
 the live `config` module — edits take effect when the server restarts
-(config.py snapshots the profile at import time, as do most consumers).
+(the config package snapshots the profile at import time, as do most consumers).
 """
 
 import os

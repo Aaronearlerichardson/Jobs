@@ -50,7 +50,7 @@ def api(monkeypatch):
             return responses.pop(0) if len(responses) > 1 else responses[0]
 
     monkeypatch.setattr(claude, "SESSION", _Session)
-    monkeypatch.setattr(claude, "ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("config.ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude, "_FATAL_MSG", None)
     monkeypatch.setattr(claude.time, "sleep", lambda s: None)
     return responses, calls

@@ -22,7 +22,7 @@ Failure semantics follow RFC 9309 §2.3.1:
                       nothing will be crawled.
 
 The fetch timeout is split into (connect, read) — see ROBOTS_CONNECT_TIMEOUT
-in config.py. Connect is short because dead name-guesses hang there; read is
+in config/policy.py. Connect is short because dead name-guesses hang there; read is
 generous because a slow-but-real server is the case worth waiting for.
 
 Path matching is implemented here rather than taken from

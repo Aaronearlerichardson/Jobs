@@ -17,7 +17,7 @@ never region- or field-specific in behaviour, so they now carry names that
 say what they do. `canonical()` keeps existing stores and hand-written
 profiles working, and `migrate_sql_expr` rewrites the stored tokens in place.
 
-This module lives at the top level beside config.py and imports nothing:
+This module lives at the top level beside the config package and imports nothing:
 config, the store, and the scrapers all depend on it, so it must stay a
 leaf (it used to be core.tags, which made config depend on core).
 """

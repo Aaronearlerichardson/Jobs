@@ -20,7 +20,7 @@ store.combined_score() already uses -- times the worst gate multiplier.
 Wired into:
   - claude.py:  `score_resume_fit(resume, title, desc)` delegates here and
     returns the FitResult (resume is ignored; the rubric scores the profile).
-  - config.py:  loads the optional `[fit]` profile block (weights / gate
+  - config/profile.py:  loads the optional `[fit]` profile block (weights / gate
     penalties / domain ladder / stack / region); omit it and the defaults
     below apply.
   - store.py :  jobs table carries one column per axis (fit_domain/function/

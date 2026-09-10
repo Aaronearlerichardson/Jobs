@@ -11,7 +11,6 @@ import time
 import requests
 
 import config
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
 
 # A plain pooled session. The crawler's PoliteSession (scrapers.http) was
 # used here before, which made core depend on scrapers and consulted
@@ -239,7 +238,7 @@ _CACHE_MIN_TOKENS = {
 
 def min_cacheable_tokens(model=None):
     """Smallest prefix the given model will cache; 1024 if unknown."""
-    name = model or CLAUDE_MODEL
+    name = model or config.CLAUDE_MODEL
     for prefix, floor in _CACHE_MIN_TOKENS.items():
         if name.startswith(prefix):
             return floor
@@ -262,7 +261,7 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
                   model=None, thinking=False, cache=True):
     """The /v1/messages request body. Split out from the POST so the payload
     shape (cache breakpoint placement, thinking guard) is testable offline."""
-    use_model = model or CLAUDE_MODEL
+    use_model = model or config.CLAUDE_MODEL
     payload = {
         "model":      use_model,
         "max_tokens": max_tokens,
@@ -382,13 +381,13 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     pins thinking off so small structured calls can't be truncated by it.
     `cache=False` opts this call out of the system-prompt cache breakpoint
     (see the prompt-caching block above); the default is on everywhere."""
-    if ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
-        print("  [!] Set ANTHROPIC_API_KEY env var (or edit config.py).")
+    if config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
+        print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return {}
     if _FATAL_MSG is not None:
         _log.debug("claude call skipped (breaker tripped): %s", _FATAL_MSG)
         return {}
-    use_model = model or CLAUDE_MODEL
+    use_model = model or config.CLAUDE_MODEL
     payload = build_payload(system_prompt, user_content, max_tokens,
                             use_model, thinking, cache)
     lead = _claim_prefix(use_model, system_prompt) \
@@ -398,7 +397,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
             r = SESSION.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={
-                    "x-api-key":         ANTHROPIC_API_KEY,
+                    "x-api-key":         config.ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
                     "content-type":      "application/json",
                 },

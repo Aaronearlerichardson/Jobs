@@ -168,12 +168,12 @@ class TestCliDispatch:
 
     def test_every_registry_backed_flag_names_a_registered_op(self, calls):
         for dest, handler in run_scraper._COMMANDS:
+            if handler.__name__.startswith("_cmd_"):
+                continue          # store-backed commands, not registry ops
             calls.clear()
-            try:
-                handler(_args(**{dest: True, "verify_top": 15,
-                                 "reresolve_misses": 50, "nlx": "A,B"}), None)
-            except Exception:
-                continue          # the non-registry commands touch the store
+            handler(_args(**{dest: True, "verify_top": 15,
+                             "reresolve_misses": 50, "nlx": "A,B"}), None)
+            assert calls, dest
             for name, _params, _t in calls:
                 assert name in ops_registry.REGISTRY, (dest, name)
 
