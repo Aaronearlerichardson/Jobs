@@ -326,11 +326,17 @@ def api_pending():
 def api_confirm(cid):
     """Accept a review candidate: the pending tag comes off and the shared
     mission rule decides whether it is crawled."""
+    from core.claude import is_active_mission
     conn = _conn(_track())
-    row = store.confirm_company(conn, cid)
-    conn.close()
-    if not row:
+    pending = store.get_company(conn, cid)
+    if not pending:
+        conn.close()
         return jsonify(error="not found"), 404
+    # The activation verdict is decided here and handed to the store, so
+    # the persistence layer never has to reach into the Claude module.
+    active = is_active_mission(pending.get("mission_tier"), pending["name"])
+    row = store.confirm_company(conn, cid, active=active)
+    conn.close()
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
 
