@@ -233,7 +233,7 @@ def _op_add_names(p):
     `params["names"]` is the confirmed LIST from /api/names/preview; a raw
     string is still accepted (add_names parses it) so an older client, or a
     scripted POST, keeps working."""
-    from discovery.local_sourcing import add_names
+    from discovery.paste_ingest import add_names
     add_names(p.get("names") or [], use_llm=bool(p.get("use_llm")))
 
 

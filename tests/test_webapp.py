@@ -465,7 +465,7 @@ class TestReviewQueue:
 
     def test_preview_parses_without_resolving_anything(self, client, tmp_path,
                                                        monkeypatch):
-        import discovery.local_sourcing as ls
+        import discovery.paste_ingest as ls
         self._queued_store(tmp_path, monkeypatch)
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])

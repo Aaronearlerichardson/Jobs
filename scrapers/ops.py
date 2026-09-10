@@ -1082,7 +1082,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from discovery.local_sourcing import (_board_already_tracked,
                                           _report_dup_board, _sample_titles,
                                           resolve_or_miss)
-    from discovery.names import junk_name_reason
+    from core.names import junk_name_reason
 
     t = _t(t)
     own_conn = conn is None

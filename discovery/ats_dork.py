@@ -17,13 +17,11 @@ import config
 
 from scrapers import ddg
 
-from .sniffer import _SIGS
-from .probes import _extract_workday_triple
+from core.ats_signatures import detect
 import tags as company_tags
 from core import store
 from scrapers.fetchers import company as company_fetch
-from core.claude import is_active_mission, score_company_mission
-from .local_sourcing import _sample_titles, nc_hq_signal
+from .local_sourcing import nc_hq_signal, score_and_upsert
 
 
 def _or_group(terms, n=8):
@@ -121,12 +119,6 @@ def build_dork_queries(rotation=0):
 # added, so existing callers that just want "the dork queries" keep working.
 DORK_QUERIES = build_dork_queries(0)
 
-# Non-slug path fragments the greenhouse/embed URL forms expose — never a real
-# board (boards.greenhouse.io/embed/job_board?for=<realslug>).
-_SLUG_STOP = {"embed", "job_board", "jobs", "js", "boards", "job-boards",
-              "www", "careers", "search", "api"}
-
-
 def extract_boards_from_urls(urls):
     """From a list of URLs, return de-duped [(ats, slug|triple)] board handles.
 
@@ -157,28 +149,28 @@ def extract_boards_from_urls(urls):
     []
     >>> extract_boards_from_urls([])
     []
+
+    Nor is a vendor's own site or an embed/asset path of a board URL form
+    (core.ats_signatures.BAD_SLUGS):
+
+    >>> extract_boards_from_urls(["https://www.bamboohr.com/",
+    ...                           "https://boards.greenhouse.io/embed/job_board/js?for=x"])
+    []
     """
     out, seen = [], set()
     for u in urls:
-        triple = _extract_workday_triple(u)
-        if triple:
-            key = ("workday", str(triple))
-            if key not in seen:
-                seen.add(key)
-                out.append(("workday", triple))
+        hit = detect("", u)
+        # A lead (Taleo, Eightfold, ...) has no fetchable coordinates, and a
+        # hosted PeopleAdmin tenant is keyed on its careers_url rather than
+        # its slug (core.store.board_key): an (ats, slug) handle for one
+        # would mint a row with no board identity.
+        if not hit or hit[0] == "lead" or hit[1] == "peopleadmin":
             continue
-        for ats, rx in _SIGS:
-            m = rx.search(u)
-            if not m:
-                continue
-            slug = m.group(1)
-            if slug.lower() in _SLUG_STOP:   # embed/job_board/js/... not a board
-                continue
-            key = (ats, slug)
-            if key not in seen and len(slug) >= 2:
-                seen.add(key)
-                out.append((ats, slug))
-            break
+        _, ats, slug = hit
+        key = (ats, str(slug))
+        if key not in seen:
+            seen.add(key)
+            out.append((ats, slug))
     return out
 
 
@@ -226,31 +218,25 @@ def harvest_urls(urls, verbose=True):
         # else non-NC companies that merely mention NC would pollute the roster.
         if nc == 0 and not nc_hq_signal(name):
             continue
-        titles = _sample_titles({"ats": ats, "slug": slug})
-        tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
-        # Shared activation rule (core.claude.is_active_mission) — the same
-        # call every other add path makes. An inactive row is near-
-        # unrecoverable here: harvest_urls skips boards already in the store,
-        # so the company is never re-probed.
-        active = is_active_mission(tier, name)
-        row = dict(
-            name=name, ats=ats, slug=slug if ats != "workday" else None,
-            wd_tenant=slug[0] if ats == "workday" else None,
-            wd_pod=slug[1] if ats == "workday" else None,
-            wd_site=slug[2] if ats == "workday" else None,
-            local_job_count=nc, total_job_count=nc, mission_tier=tier,
-            mission_score=score, mission_reason=reason, tags=company_tags.LOCAL,
-            source="ats_dork", active=active)
-        pending = not store.is_confirmed_company(conn, name)
-        if pending:
-            row = store.mark_pending(row)
-        store.upsert_company(conn, row)
+        # Scoring, activation and the review queue are the shared write
+        # path (local_sourcing.score_and_upsert). The row is tagged local
+        # even at nc == 0: the HQ signal above is what admitted it. An
+        # inactive row is near-unrecoverable here -- harvest_urls skips
+        # boards already in the store, so the company is never re-probed --
+        # which is why the activation rule must be the shared one.
+        result = score_and_upsert(
+            conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
+            source="ats_dork", tags=company_tags.LOCAL)
+        if not result:
+            continue
+        row, active, pending = result
         added += 1
         if verbose:
             state = ("PENDING" if pending
                      else "ACTIVE" if active else "inactive")
-            print(f"  {name[:26]:26} {ats:12} nc={nc:2} {str(tier):19} "
-                  f"{score if score else 0:.2f} {state}")
+            print(f"  {name[:26]:26} {ats:12} nc={nc:2} "
+                  f"{str(row['mission_tier']):19} "
+                  f"{row['mission_score'] or 0:.2f} {state}")
     return added, len(boards)
 
 

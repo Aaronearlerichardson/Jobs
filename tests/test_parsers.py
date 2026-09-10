@@ -10,7 +10,12 @@ from bs4 import BeautifulSoup
 import core.digest_md as digest_md
 import discovery.ats_dork as dork
 import discovery.local_sourcing as local_sourcing
+import discovery.name_sources as name_sources
+import discovery.paste_ingest as paste_ingest
+import discovery.fetchpool as fetchpool
+import discovery.probes as probes
 import discovery.sniffer as sniffer
+from core import ats_signatures
 import scrapers.fetchers.company as company_fetch
 from scrapers.util import norm_posted_date
 
@@ -28,10 +33,10 @@ class TestSniffer:
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
                "&ccid=19000101_000003")
-        assert sniffer._detect(url)[1] == "adp"
+        assert ats_signatures.detect(url)[1] == "adp"
 
     def test_detects_lead_platform(self):
-        assert sniffer._detect("via acme.eightfold.ai portal")[0] == "lead"
+        assert ats_signatures.detect("via acme.eightfold.ai portal")[0] == "lead"
 
     def test_probes_cover_sniffable_atses(self):
         from discovery.probes import PROBES
@@ -46,12 +51,15 @@ class _FakeResp:
 
 
 def _stub_fetch_all(monkeypatch, mapping):
-    """Replace sniffer._fetch_all with a lookup into `mapping` (url -> html),
-    so no network call happens; any URL not in `mapping` fetches as None."""
+    """Replace fetchpool._fetch_all with a lookup into `mapping` (url -> html),
+    so no network call happens; any URL not in `mapping` fetches as None.
+    The sniffer and the Workday probes bind the name at import, so their
+    copies are replaced too."""
     def _fake(urls):
         return {u: (_FakeResp(mapping[u], u) if u in mapping else None)
                 for u in urls}
-    monkeypatch.setattr(sniffer, "_fetch_all", _fake)
+    for mod in (fetchpool, sniffer, probes):
+        monkeypatch.setattr(mod, "_fetch_all", _fake)
 
 
 class TestDeadHostCache:
@@ -68,17 +76,17 @@ class TestDeadHostCache:
                 calls.append(url)
                 raise exc
 
-        monkeypatch.setattr(sniffer, "SESSION", _S())
-        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        monkeypatch.setattr(fetchpool, "SESSION", _S())
+        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
         return calls
 
     def test_refused_host_is_not_retried_on_other_paths(self, monkeypatch):
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
-        assert sniffer._fetch_page("https://www.dead.example/") is None
-        assert sniffer._fetch_page("https://www.dead.example/careers") is None
-        assert sniffer._fetch_page("https://www.other.example/careers") is None
+        assert fetchpool._fetch_page("https://www.dead.example/") is None
+        assert fetchpool._fetch_page("https://www.dead.example/careers") is None
+        assert fetchpool._fetch_page("https://www.other.example/careers") is None
         assert calls == ["https://www.dead.example/",
                          "https://www.other.example/careers"]
 
@@ -87,16 +95,16 @@ class TestDeadHostCache:
         # connections (DNS, TLS, connect timeout) are remembered.
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ReadTimeout("slow"))
-        sniffer._fetch_page("https://www.slow.example/")
-        sniffer._fetch_page("https://www.slow.example/careers")
+        fetchpool._fetch_page("https://www.slow.example/")
+        fetchpool._fetch_page("https://www.slow.example/careers")
         assert len(calls) == 2
 
     def test_entry_expires(self, monkeypatch):
         import time
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
-        sniffer._DEAD_HOSTS["www.dead.example"] = time.time() - sniffer._DEAD_HOST_TTL - 1
-        sniffer._fetch_page("https://www.dead.example/careers")
+        fetchpool._DEAD_HOSTS["www.dead.example"] = time.time() - fetchpool._DEAD_HOST_TTL - 1
+        fetchpool._fetch_page("https://www.dead.example/careers")
         assert calls == ["https://www.dead.example/careers"]
 
 
@@ -119,43 +127,43 @@ class TestPageMemo:
                 calls.append(url)
                 return _R()
 
-        monkeypatch.setattr(sniffer, "SESSION", _S())
-        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        monkeypatch.setattr(fetchpool, "SESSION", _S())
+        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
         return calls
 
     def test_live_page_is_fetched_once_per_run(self, monkeypatch):
         calls = self._session(monkeypatch)
-        a = sniffer._fetch_page("https://www.sgs.com/")
-        b = sniffer._fetch_page("https://www.sgs.com/")
+        a = fetchpool._fetch_page("https://www.sgs.com/")
+        b = fetchpool._fetch_page("https://www.sgs.com/")
         assert a is b and a is not None
         assert calls == ["https://www.sgs.com/"]
 
     def test_misses_are_memoized_too(self, monkeypatch):
         calls = self._session(monkeypatch, status=403)
-        assert sniffer._fetch_page("https://www.infosys.com/") is None
-        assert sniffer._fetch_page("https://www.infosys.com/") is None
+        assert fetchpool._fetch_page("https://www.infosys.com/") is None
+        assert fetchpool._fetch_page("https://www.infosys.com/") is None
         assert len(calls) == 1
 
     def test_distinct_urls_still_fetch(self, monkeypatch):
         calls = self._session(monkeypatch)
-        sniffer._fetch_page("https://www.sgs.com/")
-        sniffer._fetch_page("https://www.sgs.com/careers")
+        fetchpool._fetch_page("https://www.sgs.com/")
+        fetchpool._fetch_page("https://www.sgs.com/careers")
         assert len(calls) == 2
 
     def test_oversized_bodies_are_not_hoarded(self, monkeypatch):
-        calls = self._session(monkeypatch, body="x" * (sniffer._PAGE_MEMO_MAX_BYTES + 1))
-        sniffer._fetch_page("https://big.example/")
-        sniffer._fetch_page("https://big.example/")
-        assert len(calls) == 2 and sniffer._PAGE_MEMO == {}
+        calls = self._session(monkeypatch, body="x" * (fetchpool._PAGE_MEMO_MAX_BYTES + 1))
+        fetchpool._fetch_page("https://big.example/")
+        fetchpool._fetch_page("https://big.example/")
+        assert len(calls) == 2 and fetchpool._PAGE_MEMO == {}
 
     def test_cap_evicts_the_oldest_entry(self, monkeypatch):
         calls = self._session(monkeypatch)
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO_CAP", 2)
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO_CAP", 2)
         for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
-            sniffer._fetch_page(u)
-        assert "https://a.example/" not in sniffer._PAGE_MEMO
-        assert len(sniffer._PAGE_MEMO) == 2
+            fetchpool._fetch_page(u)
+        assert "https://a.example/" not in fetchpool._PAGE_MEMO
+        assert len(fetchpool._PAGE_MEMO) == 2
 
 
 class TestJobPageMeta:
@@ -413,8 +421,7 @@ class TestClosedProbeGuards:
 
 class TestDiscoveryWiring:
     def test_brainstorm_disabled_touches_no_api(self):
-        import discovery.local_sourcing as ls
-        assert ls.brainstorm_company_names(n=0) == []
+        assert name_sources.brainstorm_company_names(n=0) == []
 
     def test_populate_companies_has_dork_switch(self):
         import discovery.local_sourcing as ls
@@ -469,14 +476,14 @@ See all jobs
 Page 1 of 4"""
 
     def test_finds_every_employer(self):
-        names = local_sourcing.parse_company_names(self.RESULTS)
+        names = paste_ingest.parse_company_names(self.RESULTS)
         assert set(names) == {
             "Fennec Pharmaceuticals", "Locus Biosciences", "Precision BioSciences",
             "Chimerix", "G1 Therapeutics",
         }
 
     def test_keeps_the_order_they_appeared_in(self):
-        names = local_sourcing.parse_company_names(self.RESULTS)
+        names = paste_ingest.parse_company_names(self.RESULTS)
         assert names[0] == "Fennec Pharmaceuticals"
         assert names[-1] == "G1 Therapeutics"
 
@@ -487,7 +494,7 @@ Page 1 of 4"""
         "Durham, NC", "Durham, NC (Hybrid)", "Raleigh-Durham-Chapel Hill Area",
     ])
     def test_page_furniture_is_dropped(self, line):
-        assert local_sourcing.parse_company_names(line) == []
+        assert paste_ingest.parse_company_names(line) == []
 
     @pytest.mark.parametrize("line", [
         "Senior Data Engineer", "Clinical Research Scientist",
@@ -497,50 +504,50 @@ Page 1 of 4"""
     def test_job_titles_are_dropped(self, line):
         """Results pages interleave titles with employers; a title resolves to
         nothing, so dropping it saves a pointless probe."""
-        assert local_sourcing.parse_company_names(line) == []
+        assert paste_ingest.parse_company_names(line) == []
 
     def test_a_digit_prefixed_stat_is_not_mistaken_for_a_list_item(self):
         """Stripping list markers before the noise check turned '2 days ago'
         into 'days ago' and '1K followers' into 'K followers', both of which
         then looked like company names."""
-        assert local_sourcing.parse_company_names("2 days ago\n1K followers") == []
+        assert paste_ingest.parse_company_names("2 days ago\n1K followers") == []
 
     def test_numbered_lists_still_have_their_markers_stripped(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "1. Fennec Pharmaceuticals\n2) Chimerix\n- G1 Therapeutics") == [
             "Fennec Pharmaceuticals", "Chimerix", "G1 Therapeutics"]
 
     def test_separator_suffixes_are_trimmed(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "Precision BioSciences · Durham, NC\nChimerix • 1K followers") == [
             "Precision BioSciences", "Chimerix"]
 
     def test_duplicates_collapse_case_insensitively(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "Chimerix\nCHIMERIX\nchimerix") == ["Chimerix"]
 
     def test_accepts_a_list_as_well_as_a_blob(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             ["Chimerix", "2 days ago"]) == ["Chimerix"]
 
     def test_empty_input_is_not_an_error(self):
         for empty in ("", None, [], "   \n\n  "):
-            assert local_sourcing.parse_company_names(empty) == []
+            assert paste_ingest.parse_company_names(empty) == []
 
     def test_urls_are_not_company_names(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "https://linkedin.com/jobs/view/123\nwww.example.com\nChimerix") == ["Chimerix"]
 
     def test_limit_is_honoured(self):
         blob = "\n".join(f"Company {i} Bio" for i in range(50))
-        assert len(local_sourcing.parse_company_names(blob, limit=10)) == 10
+        assert len(paste_ingest.parse_company_names(blob, limit=10)) == 10
 
 
 class TestPastedNameExtractionFallback:
     def test_llm_extraction_falls_back_to_the_parser(self, monkeypatch):
         """No API key (or a failed call) must not lose the paste — the regex
         parser still runs, so the card works for free."""
-        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+        monkeypatch.setattr(paste_ingest, "extract_names_llm",
                             lambda *a, **k: [])
         captured = {}
 
@@ -551,7 +558,7 @@ class TestPastedNameExtractionFallback:
             captured[n] = None
             return None, "no-board-found"
 
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss", _resolve)
 
         class _Conn:
             def execute(self, *a):
@@ -570,7 +577,7 @@ class TestPastedNameExtractionFallback:
                 pass
 
         monkeypatch.setattr("core.store.connect", lambda *a, **k: _Conn())
-        local_sourcing.add_names("Chimerix\n2 days ago", use_llm=True)
+        paste_ingest.add_names("Chimerix\n2 days ago", use_llm=True)
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
 
 
@@ -595,7 +602,7 @@ class TestPastedNameBoardGuard:
                 pass
 
         monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit, None))
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
@@ -610,7 +617,7 @@ class TestPastedNameBoardGuard:
                                      "slug": "globalcareers-sas",
                                      "careers_url": "https://www.sas.com/careers",
                                      "count": 150, "nc": 30, "via": "sniff"})
-        local_sourcing.add_names("SAS", max_workers=1)
+        paste_ingest.add_names("SAS", max_workers=1)
         names = [r[0] for r in db.execute("SELECT name FROM companies")]
         assert names == ["SAS Institute"]
         assert "[dup]" in capsys.readouterr().out
@@ -623,7 +630,7 @@ class TestPastedNameBoardGuard:
                                      "slug": "veeva",
                                      "careers_url": "https://www.veeva.com/careers",
                                      "count": 40, "nc": 12, "via": "sniff"})
-        local_sourcing.add_names("Veeva", max_workers=1)
+        paste_ingest.add_names("Veeva", max_workers=1)
         names = sorted(r[0] for r in db.execute("SELECT name FROM companies"))
         assert names == ["SAS Institute", "Veeva"]
 
@@ -683,7 +690,7 @@ class TestResolutionStallWatchdog:
             return None, "no-board-found"
 
         from scrapers import parallel
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss", _resolve)
         monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
         misses = []
         monkeypatch.setattr(
@@ -692,7 +699,7 @@ class TestResolutionStallWatchdog:
         monkeypatch.setattr("core.store.connect",
                             lambda *a, **k: self._Conn())
         try:
-            out = local_sourcing.add_names("Chimerix\nHangs Forever Inc")
+            out = paste_ingest.add_names("Chimerix\nHangs Forever Inc")
         finally:
             release.set()             # unblock the abandoned worker thread
         assert out == []
@@ -740,17 +747,17 @@ Durham, NC (Hybrid)
 [Help Center](https://www.linkedin.com/help/linkedin/)"""
 
     def test_pulls_exactly_the_employers(self):
-        assert local_sourcing.parse_company_names(self.PAGE) == [
+        assert paste_ingest.parse_company_names(self.PAGE) == [
             "CoVar", "Pedestal Health", "Duke University", "Headwater Science"]
 
     def test_page_chrome_is_never_considered(self):
-        got = local_sourcing.parse_company_names(self.PAGE)
+        got = paste_ingest.parse_company_names(self.PAGE)
         for chrome in ("73 results", "How promoted jobs are ranked",
                        "Durham, NC (50 mi)", "Viewed", "Easy Apply"):
             assert chrome not in got
 
     def test_markdown_nav_links_are_dropped(self):
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "[Help Center](https://www.linkedin.com/help/linkedin/)") == []
 
     def test_employer_names_containing_title_words_survive(self):
@@ -759,13 +766,13 @@ Durham, NC (Hybrid)
         'Vadum Inc.' would otherwise be collateral."""
         page = ("Data EngineerData Engineer\nHeadwater Science\n"
                 "Machine Learning EngineerMachine Learning Engineer\nVadum Inc.")
-        assert local_sourcing.parse_company_names(page) == [
+        assert paste_ingest.parse_company_names(page) == [
             "Headwater Science", "Vadum Inc."]
 
     def test_a_doubled_date_is_not_a_doubled_title(self):
         """'Posted 2 weeks ago2 weeks ago' repeats a SUFFIX, not the whole
         line, so it must not mark the next line as a company."""
-        assert local_sourcing._DOUBLED_TITLE_RE.match(
+        assert paste_ingest._DOUBLED_TITLE_RE.match(
             "Posted 2 weeks ago2 weeks ago") is None
 
     @pytest.mark.parametrize("line", [
@@ -774,12 +781,12 @@ Durham, NC (Hybrid)
         "Postdoctoral AssociatePostdoctoral Associate",
     ])
     def test_marker_matches_both_badged_and_bare_doubles(self, line):
-        assert local_sourcing._DOUBLED_TITLE_RE.match(line)
+        assert paste_ingest._DOUBLED_TITLE_RE.match(line)
 
     def test_falls_back_when_the_page_has_no_marker(self):
         """A source that doesn't repeat titles (a directory, an article) still
         goes through the permissive line filter."""
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "Chimerix\n2 days ago\nG1 Therapeutics") == ["Chimerix", "G1 Therapeutics"]
 
     def test_one_stray_double_does_not_hijack_a_plain_list(self):
@@ -788,7 +795,7 @@ Durham, NC (Hybrid)
         would return nothing but the line after the stray double; every real
         name surviving proves line mode ran. "bla bla" itself is multi-word
         lowercase prose, which the line filter now drops on sight.)"""
-        assert local_sourcing.parse_company_names(
+        assert paste_ingest.parse_company_names(
             "Chimerix\nbla bla\nG1 Therapeutics\nBiogen") == [
             "Chimerix", "G1 Therapeutics", "Biogen"]
 
@@ -992,11 +999,11 @@ class TestPastedNamePreview:
         store.block_name(db, "Oncology", "not a company")
         store.record_miss(db, "Fennec Pharmaceuticals", "no-board-found")
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health", "IQVIA",
                                              "Oncology",
                                              "Fennec Pharmaceuticals"])
-        rows = local_sourcing.preview_names("<pasted page>", use_llm=False)
+        rows = paste_ingest.preview_names("<pasted page>", use_llm=False)
         assert {r["name"]: r["state"] for r in rows} == {
             "Alpaca Health": "new", "IQVIA": "tracked",
             "Oncology": "blocked", "Fennec Pharmaceuticals": "missed"}
@@ -1004,44 +1011,44 @@ class TestPastedNamePreview:
 
     def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "NAME_BLOCKLIST", {"biotech"})
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "NAME_BLOCKLIST", {"biotech"})
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Biotech"])
         assert [r["state"] for r in
-                local_sourcing.preview_names("x", use_llm=False)] == ["blocked"]
+                paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
 
     def test_preview_resolves_nothing(self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: tried.append(a) or (None, "x"))
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         assert [r["name"] for r in
-                local_sourcing.preview_names("x", use_llm=False)] \
+                paste_ingest.preview_names("x", use_llm=False)] \
             == ["Alpaca Health"]
         assert tried == [], "the preview step resolved a name"
 
     def test_the_model_reads_the_paste_when_a_key_is_configured(
             self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing.config, "ANTHROPIC_API_KEY",
+        monkeypatch.setattr(paste_ingest.config, "ANTHROPIC_API_KEY",
                             "sk-ant-test")
-        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+        monkeypatch.setattr(paste_ingest, "extract_names_llm",
                             lambda *a, **k: ["Model Named Co"])
-        assert [r["name"] for r in local_sourcing.preview_names("x")] \
+        assert [r["name"] for r in paste_ingest.preview_names("x")] \
             == ["Model Named Co"]
 
     def test_no_key_means_the_regex_parser(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing.config, "ANTHROPIC_API_KEY",
+        monkeypatch.setattr(paste_ingest.config, "ANTHROPIC_API_KEY",
                             "YOUR_ANTHROPIC_API_KEY_HERE")
-        monkeypatch.setattr(local_sourcing, "extract_names_llm",
+        monkeypatch.setattr(paste_ingest, "extract_names_llm",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 AssertionError("called with no API key")))
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Parsed Co"])
-        assert [r["name"] for r in local_sourcing.preview_names("x")] \
+        assert [r["name"] for r in paste_ingest.preview_names("x")] \
             == ["Parsed Co"]
 
 
@@ -1065,7 +1072,7 @@ class TestAddNamesQueue:
                 pass
 
         monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit or self._HIT, None))
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
@@ -1075,7 +1082,7 @@ class TestAddNamesQueue:
             self, monkeypatch, db):
         import core.store as store
         self._wire(monkeypatch, db)
-        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert store.crawlable_companies(db) == []
@@ -1085,9 +1092,9 @@ class TestAddNamesQueue:
         store.block_name(db, "Oncology", "not a company")
         self._wire(monkeypatch, db, {**self._HIT, "name": "Oncology"})
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda n, *a, **k: tried.append(n) or (None, "x"))
-        local_sourcing.add_names(["Oncology"], max_workers=1)
+        paste_ingest.add_names(["Oncology"], max_workers=1)
         assert tried == []
         assert store.get_companies(db, active_only=False) == []
 
@@ -1098,18 +1105,18 @@ class TestAddNamesQueue:
                                   "slug": "alpaca"})
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda n, *a, **k: tried.append(n) or (None, "x"))
-        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert tried == []
 
     def test_a_raw_blob_still_works(self, monkeypatch, db):
         # The thin single-step path the CLI (and an older client) still use.
         import core.store as store
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
-        local_sourcing.add_names("Alpaca Health\n2 days ago", max_workers=1)
+        paste_ingest.add_names("Alpaca Health\n2 days ago", max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
 
@@ -1123,10 +1130,120 @@ class TestAddNamesQueue:
         monkeypatch.setattr(local_sourcing, "nc_hq_signal",
                             lambda *a, **k: probed.append(a) or False)
         self._wire(monkeypatch, db, {**self._HIT, "nc": 0, "via": "websearch"})
-        local_sourcing.add_names(["Alpaca Health"], max_workers=1)
+        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert probed == [], "the corroboration probe still runs"
+
+
+class TestScoreAndUpsert:
+    """local_sourcing.score_and_upsert is the one write path behind every
+    automated add surface (populate_companies, resolve_leads, add_names,
+    harvest_urls): duplicate check first, mission score second, and any name
+    the store has not confirmed lands in the review queue."""
+
+    _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
+            "careers_url": "https://alpaca.example/careers",
+            "count": 8, "nc": 3, "via": "sniff"}
+
+    def _wire(self, monkeypatch, scored=("adjacent", 0.5, "stub")):
+        """Stub the network (titles) and the LLM; returns the list of names
+        the scorer was asked about."""
+        import core.claude as claude
+        asked = []
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda name, *a, **k: asked.append(name) or scored)
+        return asked
+
+    def test_an_unconfirmed_name_is_queued_not_activated(
+            self, monkeypatch, db):
+        import core.store as store
+        import tags
+        asked = self._wire(monkeypatch)
+        row, active, pending = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=("adjacent",))
+        assert asked == ["Alpaca Health"]
+        # The verdict says a reviewer's confirmation WOULD activate it ...
+        assert (active, pending) == (1, True)
+        # ... but the row itself sits in the queue, off the crawl.
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.crawlable_companies(db) == []
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["active"] == 0
+        assert {tags.LOCAL, tags.PENDING} <= set(stored["tags"].split(","))
+        assert (stored["local_job_count"], stored["total_job_count"]) == (3, 8)
+        assert stored["source"] == "paste"
+        assert stored["careers_url"] == self._HIT["careers_url"]
+        assert (row["mission_tier"], row["mission_score"]) == ("adjacent", 0.5)
+
+    def test_a_confirmed_name_is_refreshed_in_place(self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
+                                  "slug": "alpaca", "active": 1})
+        self._wire(monkeypatch)
+        _, active, pending = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=("adjacent",))
+        assert (active, pending) == (1, False)
+        assert [c["name"] for c in store.crawlable_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.pending_companies(db) == []
+        # The activation rule is core.claude.is_active_mission, and it is
+        # what a confirmed row's `active` follows.
+        _, active, _ = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=())
+        assert active == 0
+        assert store.crawlable_companies(db) == []
+
+    def test_a_board_tracked_under_another_name_costs_no_score(
+            self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "Alpaca", "ats": "lever",
+                                  "slug": "alpaca"})
+        asked = self._wire(monkeypatch)
+        assert local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste") is None
+        assert asked == [], "the duplicate check must run before the LLM call"
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Alpaca"]
+
+    def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
+        asked = self._wire(monkeypatch)
+        row, _, _ = local_sourcing.score_and_upsert(
+            db, self._HIT, source="local_sourcing",
+            scored=("core", 0.9, "pooled"))
+        assert asked == []
+        assert (row["mission_tier"], row["mission_score"]) == ("core", 0.9)
+
+    def test_local_tag_follows_the_local_count_unless_given(
+            self, monkeypatch, db):
+        import core.store as store
+        import tags
+        self._wire(monkeypatch)
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "nc": 0}, source="paste")
+        assert store.get_companies(db, active_only=False)[0]["tags"] \
+            == tags.PENDING
+        # ats_dork admits an nc == 0 board on its HQ signal and says so
+        # by passing the tag explicitly.
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0},
+            source="ats_dork", tags=tags.LOCAL)
+        beta = next(c for c in store.get_companies(db, active_only=False)
+                    if c["name"] == "Beta Bio")
+        assert {tags.LOCAL, tags.PENDING} <= set(beta["tags"].split(","))
+
+    def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
+        import core.store as store
+        self._wire(monkeypatch)
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "ats": "workday",
+                 "slug": ("acme", 5, "External")}, source="ats_dork")
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["slug"] is None
+        assert (stored["wd_tenant"], stored["wd_pod"], stored["wd_site"]) \
+            == ("acme", 5, "External")
 
 
 class TestScoreMissionsHonoursTheReviewQueue:

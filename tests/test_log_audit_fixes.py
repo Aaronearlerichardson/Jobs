@@ -16,8 +16,8 @@ Four defects the logs showed, each pinned here offline:
 import requests
 
 import core.store as store
-from discovery import local_sourcing, sniffer
-from discovery.names import junk_name_reason
+from discovery import fetchpool, local_sourcing, paste_ingest
+from core.names import junk_name_reason
 from scrapers import ops
 from scrapers.fetchers import company as cf
 
@@ -179,10 +179,10 @@ class TestJunkNamesInThePasteFlow:
 
     def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health",
                                              "Required Qualifications"])
-        rows = local_sourcing.preview_names("x", use_llm=False)
+        rows = paste_ingest.preview_names("x", use_llm=False)
         assert [(r["name"], r["state"]) for r in rows] == [
             ("Alpaca Health", "new"), ("Required Qualifications", "junk")]
         assert rows[1]["why"] == "section-heading"
@@ -190,18 +190,18 @@ class TestJunkNamesInThePasteFlow:
     def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
         store.block_name(db, "Oncology", "not a company")
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Oncology"])
         assert [r["state"] for r in
-                local_sourcing.preview_names("x", use_llm=False)] == ["blocked"]
+                paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
 
     def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
             self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda n, *a, **k: tried.append(n) or (None, "x"))
-        local_sourcing.add_names(["Proficiency in SQL.", "Alpaca Health"],
+        paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
                                  max_workers=1)
         assert tried == ["Alpaca Health"]
         row = db.execute("SELECT miss_reason, active FROM companies "
@@ -234,9 +234,9 @@ class TestJunkNamesInReresolve:
 
 class TestSnifferResolvesHostsOnce:
     def _reset(self, monkeypatch):
-        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(sniffer, "_DNS_CACHE", {})
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(fetchpool, "_DNS_CACHE", {})
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
 
     def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
         self._reset(monkeypatch)
@@ -247,19 +247,19 @@ class TestSnifferResolvesHostsOnce:
             if host.startswith("dead"):
                 raise OSError("no such host")
             return [("addr",)]
-        monkeypatch.setattr(sniffer.socket, "getaddrinfo", _gai)
-        monkeypatch.setattr(sniffer, "_fetch_page",
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        monkeypatch.setattr(fetchpool, "_fetch_page",
                             lambda u, **k: fetched.append(u) or None)
         urls = ["https://dead.example/careers", "https://dead.example/",
                 "https://dead.example/jobs", "https://live.example/careers"]
-        out = sniffer._fetch_all(urls)
+        out = fetchpool._fetch_all(urls)
         assert sorted(looked_up) == ["dead.example", "live.example"], \
             "each host resolved once, not once per path"
         assert fetched == ["https://live.example/careers"]
         assert set(out) == set(urls) and out["https://dead.example/"] is None
         # a later stage rebuilding the list asks the resolver nothing
         looked_up.clear()
-        sniffer._fetch_all(["https://dead.example/en/jobs",
+        fetchpool._fetch_all(["https://dead.example/en/jobs",
                             "https://live.example/"])
         assert looked_up == []
 
@@ -271,10 +271,10 @@ class TestSnifferResolvesHostsOnce:
         def _gai(host, *a, **k):
             gate.wait(2)
             return [("addr",)]
-        monkeypatch.setattr(sniffer.socket, "getaddrinfo", _gai)
-        kept = sniffer._drop_unresolvable(["https://slow.example/"], timeout=0.05)
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
+        kept = fetchpool._drop_unresolvable(["https://slow.example/"], timeout=0.05)
         assert kept == []
-        assert sniffer._dead_host("https://slow.example/") == "", \
+        assert fetchpool._dead_host("https://slow.example/") == "", \
             "a slow resolver is not a missing name"
         gate.set()
 
@@ -284,8 +284,8 @@ class TestSnifferResolvesHostsOnce:
         class _S:
             def get(self, url, **kw):
                 raise requests.exceptions.ConnectionError("refused")
-        monkeypatch.setattr(sniffer, "SESSION", _S())
-        monkeypatch.setattr(sniffer.socket, "getaddrinfo",
+        monkeypatch.setattr(fetchpool, "SESSION", _S())
+        monkeypatch.setattr(fetchpool.socket, "getaddrinfo",
                             lambda *a, **k: [("addr",)])
-        assert sniffer._fetch_page("https://x.example/") is None
-        assert sniffer._drop_unresolvable(["https://x.example/careers"]) == []
+        assert fetchpool._fetch_page("https://x.example/") is None
+        assert fetchpool._drop_unresolvable(["https://x.example/careers"]) == []
