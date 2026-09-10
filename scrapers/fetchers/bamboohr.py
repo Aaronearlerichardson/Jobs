@@ -8,15 +8,16 @@ and expose two unauthenticated JSON endpoints:
                                location{city,state}, isRemote,
                                locationType}, ...]}
     /careers/<id>/detail   -> {"result": {"jobOpening": {description,
-"""
+                               ...}}}
 
-import time
+The listing carries no description, so each kept row costs one detail
+call (see fetchers/board.py for the order of filters and the budget).
+"""
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
+from .board import board_jobs
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 
@@ -34,7 +35,7 @@ def _is_remote(job):
     return bool(job.get("isRemote")) or str(job.get("locationType")) == "1"
 
 
-def _fetch_description(base, jid, timeout=FETCH_TIMEOUT):
+def _fetch_description(base, jid, timeout=None):
     try:
         r = SESSION.get(f"{base}/careers/{jid}/detail",
                          timeout=timeout, headers=_JSON_HEADERS)
@@ -46,48 +47,32 @@ def _fetch_description(base, jid, timeout=FETCH_TIMEOUT):
         return ""
 
 
-def fetch_bamboohr(subdomain, company_name, max_details=40, detail_delay=0.2):
+def _row(base, subdomain, entry):
+    jid = str(entry.get("id") or "")
+    title = entry.get("jobOpeningName") or ""
+    if not jid or not title:
+        return None
+    row = {"id": f"bamboo_{subdomain}_{jid}", "title": title,
+           "url": f"{base}/careers/{jid}", "location": _location_str(entry),
+           "description": "",
+           "head": f"{title} {entry.get('departmentLabel') or ''}",
+           "_jid": jid}
+    if _is_remote(entry):
+        row["remote_hint"] = "bamboohr:locationType"
+    return row
+
+
+def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
+                   max_details=40, detail_delay=0.2):
     base = f"https://{subdomain}.bamboohr.com"
     try:
-        r = SESSION.get(f"{base}/careers/list", timeout=FETCH_TIMEOUT,
-                         headers=_JSON_HEADERS)
+        r = SESSION.get(f"{base}/careers/list", headers=_JSON_HEADERS)
         r.raise_for_status()
         entries = r.json().get("result") or []
     except Exception as e:
-        print(f"    [!] BambooHR {company_name}: {e}")
+        print(f"    [!] BambooHR {company_name or subdomain}: {e}")
         return []
-
-    jobs, details_fetched = [], 0
-    for entry in entries:
-        jid   = str(entry.get("id") or "")
-        title = entry.get("jobOpeningName") or ""
-        if not jid or not title:
-            continue
-        dept = entry.get("departmentLabel") or ""
-
-        # Title/department screen first; fetch the description only when
-        # the cheap fields didn't already decide relevance.
-        desc = ""
-        if not is_relevant(f"{title} {dept}") and details_fetched < max_details:
-            desc = _fetch_description(base, jid)
-            details_fetched += 1
-            time.sleep(detail_delay)
-        if not is_relevant(f"{title} {dept}", desc):
-            continue
-        if not desc and details_fetched < max_details:
-            desc = _fetch_description(base, jid)
-            details_fetched += 1
-            time.sleep(detail_delay)
-
-        job = {
-            "id":          f"bamboo_{subdomain}_{jid}",
-            "company":     company_name,
-            "title":       title,
-            "url":         f"{base}/careers/{jid}",
-            "location":    _location_str(entry),
-            "description": desc,
-        }
-        if _is_remote(entry):
-            job["remote_hint"] = "bamboohr:locationType"
-        jobs.append(job)
-    return jobs
+    return board_jobs((_row(base, subdomain, e) for e in entries), company_name,
+                      gate=gate, loc_re=loc_re,
+                      fetch_description=lambda row: _fetch_description(base, row["_jid"]),
+                      max_details=max_details, detail_delay=detail_delay)

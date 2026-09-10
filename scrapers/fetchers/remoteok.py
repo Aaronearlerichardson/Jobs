@@ -13,9 +13,6 @@ Schema (per job):
 import html
 import re
 
-
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 API_URL = "https://remoteok.com/api"
@@ -27,13 +24,13 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
-def fetch_remoteok(max_jobs=500):
+def fetch_remoteok(max_jobs=500, gate=None):
     """
     Pull every active listing from RemoteOK, filter to the relevant ones.
     Returns a list of job dicts in the standard crawler shape.
     """
     try:
-        r = SESSION.get(API_URL, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(API_URL, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -58,7 +55,7 @@ def fetch_remoteok(max_jobs=500):
         tags = entry.get("tags") or []
         tag_text = " ".join(str(t) for t in tags if t)
 
-        if not is_relevant(title, desc + " " + tag_text):
+        if gate is not None and not gate(title, desc + " " + tag_text):
             continue
 
         jobs.append({

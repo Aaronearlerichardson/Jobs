@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from core.filters import is_relevant
 from scrapers.fetchers import ats_api, getro, hibob, jobvite, peopleadmin, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -40,6 +41,9 @@ def match_everything(cfg, pristine_keywords):
     """Widen the relevance filter so these tests measure PARSING only.
 
     Mutated in place — filters.py bound the list objects at import time.
+    The fetchers are ungated unless a `gate` is passed, so this only
+    matters for the tests that pass `gate=is_relevant` to mirror the
+    registry, and for the callers outside this file that do.
     """
     cfg.CORE_KEYWORDS[:] = [""]
     cfg.DOMAIN_KEYWORDS[:] = []
@@ -158,8 +162,18 @@ class TestGreenhouse:
     def test_location_falls_back_when_absent(self, fake_get, match_everything):
         payload = load("greenhouse_board.json")
         payload["jobs"][0]["location"] = {}
+        payload["jobs"][0]["offices"] = []
         fake_get(payload)
         assert ats_api.fetch_greenhouse("x", "X")[0]["location"] == "Unknown"
+
+    def test_offices_join_the_location(self, fake_get, match_everything):
+        """A multi-location posting shows one city (or "Remote") up front
+        and the rest under offices; the location regex must see them all."""
+        payload = load("greenhouse_board.json")
+        payload["jobs"][0]["location"] = {"name": "Remote"}
+        payload["jobs"][0]["offices"] = [{"name": "Durham, NC"}, {"name": "Remote"}]
+        fake_get(payload)
+        assert ats_api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
 
     def test_http_error_returns_empty_not_raises(self, fake_get, match_everything):
         fake_get({}, status=500)
@@ -547,17 +561,50 @@ class TestUsajobs:
 
 
 class TestRelevanceGate:
-    """The filter is applied INSIDE the fetchers — which is why the canary
-    widens it before judging a board's health."""
+    """The keyword filter is a `gate` PARAMETER of every fetcher, injected
+    by the ATS registry (and the runner's feed thunks) rather than
+    imported by the fetcher modules. A fetcher called with no gate keeps
+    every posting; the registry's thunk keeps only the relevant ones —
+    which is why the canary widens the filter before judging a board's
+    health."""
 
-    def test_irrelevant_postings_are_dropped(self, cfg, fake_get,
-                                             pristine_keywords):
+    @pytest.fixture
+    def nothing_matches(self, cfg, pristine_keywords):
         cfg.CORE_KEYWORDS[:] = ["quantum basket weaving"]
         cfg.DOMAIN_KEYWORDS[:] = []
         cfg.SKILL_KEYWORDS[:] = []
         cfg.INCLUDE_KEYWORDS[:] = ["quantum basket weaving"]
+
+    def test_irrelevant_postings_are_dropped_by_the_gate(
+            self, fake_get, nothing_matches):
         fake_get(load("greenhouse_board.json"))
-        assert ats_api.fetch_greenhouse("databricks", "Databricks") == []
+        assert ats_api.fetch_greenhouse("databricks", "Databricks",
+                                        gate=is_relevant) == []
+
+    def test_no_gate_keeps_everything(self, fake_get, nothing_matches):
+        fake_get(load("greenhouse_board.json"))
+        assert ats_api.fetch_greenhouse("databricks", "Databricks")
+
+    def test_the_registry_thunk_is_gated(self, fake_get, nothing_matches):
+        from scrapers.sources import ATS_REGISTRY
+        fake_get(load("greenhouse_board.json"))
+        thunk = ATS_REGISTRY["greenhouse"][0]("Databricks", "databricks")
+        assert thunk() == []
+
+    def test_no_fetcher_module_imports_the_filter_or_config_timeouts(self):
+        """The point of the parameter: a fetcher module is reusable with
+        any gate and any session, so none of them may bind the keyword
+        filter or the timeout constant at import. The few that read
+        `config` need something else from it (credentials, locality,
+        the data dir)."""
+        import re
+        from pathlib import Path
+        pkg = Path(ats_api.__file__).parent
+        for src in pkg.glob("*.py"):
+            text = src.read_text(encoding="utf-8")
+            assert not re.search(r"^from core\.filters import", text, re.M), src.name
+            assert not re.search(r"^from config import", text, re.M), src.name
+            assert "FETCH_TIMEOUT" not in text, src.name
 
 
 class TestAshbyKeyAcrossCallSites:
@@ -593,15 +640,15 @@ class TestAshbyKeyAcrossCallSites:
             status_code = 200
             text = json.dumps(TestAshbyKeyAcrossCallSites.BOARD)
 
+            def raise_for_status(self):
+                pass
+
             def json(self):
                 return TestAshbyKeyAcrossCallSites.BOARD
 
-        from discovery import local_sourcing, probes
-        from scrapers.fetchers import company
-        for mod in (probes, local_sourcing):
-            monkeypatch.setattr(mod.SESSION, "get", lambda *a, **k: _Resp())
-        monkeypatch.setattr(company, "_get_json",
-                            lambda *a, **k: TestAshbyKeyAcrossCallSites.BOARD)
+        # One shared session object behind every module (scrapers.http.SESSION).
+        from discovery import probes
+        monkeypatch.setattr(probes.SESSION, "get", lambda *a, **k: _Resp())
 
     def test_probe_reports_the_real_total(self, ashby_board):
         from discovery.probes import probe_ashby
@@ -623,10 +670,11 @@ class TestAshbyKeyAcrossCallSites:
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
     def test_company_fetcher_returns_postings(self, ashby_board):
-        from scrapers.fetchers.company import fetch_ashby_all
-        jobs = fetch_ashby_all("susteon")
+        from scrapers.fetchers.company import fetch_company
+        jobs = fetch_company({"ats": "ashby", "slug": "susteon"})
         assert [j["title"] for j in jobs] == ["Catalysis Scientist", "Lab Technician"]
         assert jobs[0]["location"] == "Morrisville, North Carolina"
+        assert jobs[0]["ats"] == "ashby" and jobs[0]["posted_at"] == "2026-05-28"
 
     def test_workday_branch_still_reads_job_postings(self, monkeypatch):
         """Workday really does return `jobPostings`. The two branches sit in
@@ -694,11 +742,10 @@ class TestGetro:
         ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert "getro_91000003" not in ids
 
-    def test_titles_are_screened_before_any_page_fetch(
-            self, board, monkeypatch):
-        monkeypatch.setattr(getro, "is_relevant",
-                            lambda title, desc="": "data" in title.lower())
-        jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
+    def test_titles_are_screened_before_any_page_fetch(self, board):
+        jobs = getro.fetch_getro_all(
+            self.BOARD, detail_delay=0,
+            gate=lambda title, desc="": "data" in title.lower())
         assert [j["id"] for j in jobs] == ["getro_91000001", "getro_91000004"]
         pages = [u for u in board if "/jobs/" in u]
         assert all("91000001" in u or "91000004" in u for u in pages)
@@ -913,20 +960,18 @@ class TestJobvite:
         assert "<" not in j["description"]
         assert j["posted_at"] == "2026-04-27"
 
-    def test_relevant_titles_get_their_page_first(self, acme, monkeypatch):
-        monkeypatch.setattr(jobvite, "is_relevant",
-                            lambda t, d="": "data engineer" in t.lower())
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=1,
-                                     detail_delay=0)
+    def test_relevant_titles_get_their_page_first(self, acme):
+        jobs = jobvite.fetch_jobvite(
+            "acme", "Acme Labs", max_details=1, detail_delay=0,
+            gate=lambda t, d="": "data engineer" in t.lower())
         assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA"]
         assert [u for u in acme if "/job/" in u] == [
             "https://jobs.jobvite.com/acme/job/oAaa1fwA"]
 
-    def test_a_generic_title_qualifies_on_its_page(self, acme, monkeypatch):
-        monkeypatch.setattr(jobvite, "is_relevant",
-                            lambda t, d="": "python" in f"{t} {d}".lower())
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=4,
-                                     detail_delay=0)
+    def test_a_generic_title_qualifies_on_its_page(self, acme):
+        jobs = jobvite.fetch_jobvite(
+            "acme", "Acme Labs", max_details=4, detail_delay=0,
+            gate=lambda t, d="": "python" in f"{t} {d}".lower())
         assert "Lab Assistant (Temp)" in [j["title"] for j in jobs]
 
     def test_a_dead_search_falls_back_to_the_jobs_page(self, site,
@@ -944,10 +989,11 @@ class TestJobvite:
                                      "Acme Labs", max_details=0)
         assert len(jobs) == 4
 
-    def test_company_adapter_pays_only_for_in_region_pages(self, acme,
-                                                           match_everything):
+    def test_company_fetch_pays_only_for_in_region_pages(self, acme,
+                                                         match_everything):
         from scrapers.fetchers import company
-        jobs = company.fetch_jobvite_all("acme", re.compile("Durham"))
+        jobs = company.fetch_company({"ats": "jobvite", "slug": "acme"},
+                                     re.compile("Durham"))
         assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA", "jv_acme_oDdd4fwD"]
         assert {j["ats"] for j in jobs} == {"jobvite"}
         assert jobs[0]["posted_at"] == "2026-04-27"
@@ -960,3 +1006,42 @@ class TestJobvite:
         from scrapers.sources import ATS_REGISTRY, LIGHTWEIGHT
         assert "jobvite" in ATS_REGISTRY and "jobvite" in LIGHTWEIGHT
         assert "jobvite" in company.FETCHERS
+
+
+class TestOneFetcherPerAts:
+    """The sweep's registry and the company-vetted dispatch table drive the
+    SAME fetcher module per ATS: the registry adds the keyword gate, the
+    dispatch table a location regex, and neither keeps a copy of the
+    parser. Two copies of the Ashby reader once drifted (see
+    TestAshbyKeyAcrossCallSites); one implementation cannot.
+    """
+
+    def test_every_registered_ats_has_a_company_dispatch(self):
+        from scrapers.fetchers import company
+        from scrapers.sources import ATS_REGISTRY
+        assert set(ATS_REGISTRY) <= set(company.FETCHERS)
+
+    def test_the_seed_tag_follows_lightweight(self):
+        import tags
+        from scrapers.sources import ATS_REGISTRY, LIGHTWEIGHT
+        for ats, (_mk, tag, _pause) in ATS_REGISTRY.items():
+            assert tag == (tags.SWEEP if ats in LIGHTWEIGHT else tags.LOCAL), ats
+
+    def test_the_dispatch_table_adapts_the_module_fetcher(self, fake_get,
+                                                          match_everything):
+        from scrapers.fetchers import company
+        fake_get(load("greenhouse_board.json"))
+        module = ats_api.fetch_greenhouse("databricks", "Databricks")
+        vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
+        assert [j["id"] for j in vetted] == [j["id"] for j in module]
+        assert all(j["ats"] == "greenhouse" and j["_wd"] is None
+                   and "company" not in j for j in vetted)
+
+    def test_the_location_regex_filters_the_listing(self, fake_get,
+                                                    match_everything):
+        from scrapers.fetchers import company
+        fake_get(load("greenhouse_board.json"))
+        everything = company.fetch_company({"ats": "greenhouse", "slug": "x"})
+        nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
+                                        re.compile("nowhere-at-all"))
+        assert everything and nowhere == []

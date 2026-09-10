@@ -16,7 +16,8 @@ from .. import ddg
 from .jsonld import fetch_jsonld_page
 
 
-def fetch_websearch(label, query, max_results=15, per_result_delay=0.5):
+def fetch_websearch(label, query, max_results=15, per_result_delay=0.5,
+                    gate=None):
     """
     Run one DDG query; for each result URL, scan for JSON-LD JobPosting.
     `label` is used as the company name when we can't infer one.
@@ -32,6 +33,6 @@ def fetch_websearch(label, query, max_results=15, per_result_delay=0.5):
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        jobs.extend(fetch_jsonld_page(label, url))
+        jobs.extend(fetch_jsonld_page(label, url, gate=gate))
         time.sleep(per_result_delay)
     return jobs

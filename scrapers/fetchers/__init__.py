@@ -2,6 +2,14 @@
 
 Each fetcher returns a list of job dicts with the shape:
     {"id", "company", "title", "url", "location", "description"}
+plus `posted_at` / `remote_hint` where the source supplies them.
+
+The board-shaped ATS fetchers take `gate=None` (a relevance predicate
+`gate(title[, description])`; None keeps every posting) and `loc_re=None`
+(a location regex applied to the listed location before any detail call);
+see board.py for the order of filters. The registry in scrapers/sources.py
+passes the profile's keyword gate for the unvetted-board sweep; the
+company-vetted path (company.py) passes a location regex instead.
 """
 
 from .adp_wfn import fetch_adp
@@ -13,6 +21,7 @@ from .getro import fetch_getro_all
 from .hibob import fetch_hibob
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_kula, fetch_successfactors
+from .icims import fetch_icims
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .jsonld import fetch_jsonld_page
@@ -36,6 +45,7 @@ __all__ = [
     "fetch_greenhouse",
     "fetch_hibob",
     "fetch_hnhiring",
+    "fetch_icims",
     "fetch_jazzhr",
     "fetch_jobvite",
     "fetch_jsonld_page",

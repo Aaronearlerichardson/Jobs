@@ -15,9 +15,7 @@ import re
 import time
 
 
-from core.filters import is_relevant
 from core.names import strip_parentheticals
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 BASE = "https://hacker-news.firebaseio.com/v0"
@@ -83,7 +81,7 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
-def _get_json(url, timeout=FETCH_TIMEOUT):
+def _get_json(url, timeout=None):
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
@@ -167,10 +165,10 @@ def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
     return found
 
 
-def fetch_hnhiring(max_threads=2, max_comments_per_thread=400):
+def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
-    job comments whose text matches our relevance filter.
+    job comments (those passing `gate(role, text)` when a gate is given).
     """
     user = _get_json(f"{BASE}/user/whoishiring.json")
     if not user:
@@ -199,7 +197,7 @@ def fetch_hnhiring(max_threads=2, max_comments_per_thread=400):
                 continue
 
             company, role, location, post_url = _parse_post(text)
-            if not is_relevant(role, text):
+            if gate is not None and not gate(role, text):
                 continue
 
             hn_url = f"https://news.ycombinator.com/item?id={cid}"
