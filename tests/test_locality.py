@@ -1,8 +1,8 @@
-"""Locality + geo classification (core/locality.py) — the single source of
+"""Locality + geo classification (src/match/locality.py) — the single source of
 truth for "is this job where I live?". Fixtures come from the active
 profile, so these pass for any configured region."""
 
-import core.digest.locality as locality
+import src.match.locality as locality
 
 
 def test_configured_place_is_local(local_addr):

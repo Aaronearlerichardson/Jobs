@@ -16,7 +16,7 @@ import types
 
 import pytest
 
-from scrapers import ddg
+from src.net import ddg
 
 REFUSED = Exception(
     "ConnectError: error sending request for url (https://html.duckduckgo.com/"

@@ -36,10 +36,10 @@ try:
 except Exception:
     pass
 
-import tags
-from core import store
-from scrapers.page_capture import page_url, parse_page
-from scrapers.ops import ingest_external_jobs
+from src import tags
+from src import store
+from src.crawl.page_capture import page_url, parse_page
+from src.ops.maintenance import ingest_external_jobs
 
 PORT_DEFAULT = 8877
 
@@ -297,7 +297,7 @@ def main():
     args = ap.parse_args()
 
     if args.add:
-        from scrapers.ops import add_manual_job
+        from src.ops.maintenance import add_manual_job
         add_manual_job(url=args.url, title=args.title, company=args.company,
                        location=args.location, description=args.desc,
                        pull_board=not args.no_board)
@@ -310,7 +310,7 @@ def main():
             ingest_html(args.url or _url_from_saved(html), html, label=p.name)
         return
     if args.watch is not None:
-        import config
+        from src import config
         watch(args.watch or str(config.DATA_DIR / "captures"))
         return
     serve(args.port)

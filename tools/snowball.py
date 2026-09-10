@@ -15,7 +15,7 @@ Acme Diagnostics", "backed by Foo Ventures", "a subsidiary of Bar Health").
 Mining descriptions already in the `jobs` table costs zero new HTTP requests.
 
 Precision over recall by design: the existing paste-ingestion path
-(discovery/local_sourcing.py add_names) can afford to be permissive because
+(src/discovery/local_sourcing.py add_names) can afford to be permissive because
 every name is verified by a live board probe before it's stored -- a junk
 guess just fails to resolve. This pass has no such backstop (it only
 REPORTS candidates; nothing here is upserted into `companies`), and the
@@ -39,14 +39,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import config  # noqa: E402
+from src import config  # noqa: E402
 
-from core.store import connect, get_companies  # noqa: E402
+from src.store import connect, get_companies  # noqa: E402
 
 # The comparison key every other discovery path uses (discovery/names.py),
 # so a name already tracked under any spelling/punctuation is recognized as
 # the same company.
-from core.digest.names import name_key as _norm_key  # noqa: E402
+from src.match.names import name_key as _norm_key  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -648,7 +648,7 @@ def harvest_from_store(conn, min_mentions=2, min_score=None, use_llm=False,
     phrasing is the likeliest false positive; two independent postings
     naming the same organization is real corroboration). `min_score`
     additionally floors the evidence-weighted score. `use_llm` runs the
-    optional core.claude refinement pass over the surviving heuristic
+    optional src.claude refinement pass over the surviving heuristic
     candidates -- see `_llm_refine`; off by default, and this function never
     reaches the network unless it is explicitly set.
     """
@@ -731,7 +731,7 @@ def _llm_refine(candidates):
         error or empty response returns `candidates` unchanged rather than
         `[]`.
     """
-    from core.claude.api import call_claude_json
+    from src.claude.api import call_claude_json
     system = (
         "You are cleaning a list of candidate organization names auto-extracted "
         "from job-posting text via regex. Some entries are real distinct "

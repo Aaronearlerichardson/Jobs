@@ -16,7 +16,7 @@ import time
 
 import pytest
 
-from scrapers.robots import _match_group, _pattern_to_re, parse_groups
+from src.net.robots import _match_group, _pattern_to_re, parse_groups
 
 UA = "Mozilla/5.0 (Windows NT 10.0) Chrome/124.0.0.0 Safari/537.36"
 
@@ -82,8 +82,8 @@ class TestExemptHosts:
 
     @pytest.fixture
     def cache(self, monkeypatch):
-        import config
-        from scrapers.robots import RobotsCache, _HostRules
+        from src import config
+        from src.net.robots import RobotsCache, _HostRules
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
         monkeypatch.setattr(config, "ROBOTS_EXEMPT_HOSTS",
                             ("api.smartrecruiters.com", ".peopleadmin.com"),
@@ -166,7 +166,7 @@ class TestFetchDeduplication:
         """A RobotsCache whose network fetch is replaced by a call recorder."""
         import threading
 
-        from scrapers import robots
+        from src.net import robots
 
         calls, lock = [], threading.Lock()
 
@@ -228,7 +228,7 @@ class TestUnreachableHostReporting:
     def _fetch_raising(exc, capsys):
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         cache = robots.RobotsCache()
         original = requests.get
@@ -267,7 +267,7 @@ class TestDnsFailureDetection:
     def test_walks_the_wrapped_cause_chain(self):
         import socket
 
-        from scrapers.robots import _is_dns_failure
+        from src.net.robots import _is_dns_failure
 
         inner = socket.gaierror(11001, "getaddrinfo failed")
         middle = OSError("Max retries exceeded")
@@ -277,13 +277,13 @@ class TestDnsFailureDetection:
         assert _is_dns_failure(outer)
 
     def test_unrelated_errors_are_not_dns_failures(self):
-        from scrapers.robots import _is_dns_failure
+        from src.net.robots import _is_dns_failure
 
         assert not _is_dns_failure(TimeoutError("timed out"))
         assert not _is_dns_failure(None)
 
     def test_survives_a_cyclic_exception_chain(self):
-        from scrapers.robots import _is_dns_failure
+        from src.net.robots import _is_dns_failure
 
         a, b = Exception("a"), Exception("b")
         a.__cause__, b.__cause__ = b, a
@@ -306,7 +306,7 @@ class TestFetchTimeout:
     def _capture_timeout(monkeypatch):
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         seen = {}
 
@@ -326,7 +326,7 @@ class TestFetchTimeout:
         assert connect < read, "a short read timeout would abandon slow real servers"
 
     def test_values_come_from_config(self, monkeypatch):
-        import config
+        from src import config
         monkeypatch.setattr(config, "ROBOTS_CONNECT_TIMEOUT", 1.5, raising=False)
         monkeypatch.setattr(config, "ROBOTS_READ_TIMEOUT", 9.0, raising=False)
         assert self._capture_timeout(monkeypatch) == (1.5, 9.0)
@@ -335,7 +335,7 @@ class TestFetchTimeout:
         """Giving up faster must not turn into giving up differently."""
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         monkeypatch.setattr(requests, "get", lambda url, **kw: (_ for _ in ()).throw(
             requests.exceptions.ConnectTimeout("nope")))
@@ -365,13 +365,13 @@ class TestJsProbeDisabledReporting:
 
     @pytest.fixture(autouse=True)
     def _rearm(self):
-        from discovery import probes
+        from src.discovery import probes
         probes._clear_js_disabled()
         yield
         probes._clear_js_disabled()
 
     def test_only_the_first_caller_reports(self, capsys):
-        from discovery import probes
+        from src.discovery import probes
         assert probes._report_js_disabled("first") is True
         assert probes._report_js_disabled("second") is False
         assert probes._report_js_disabled("third") is False
@@ -382,7 +382,7 @@ class TestJsProbeDisabledReporting:
     def test_concurrent_callers_report_once(self, capsys):
         import threading
 
-        from discovery import probes
+        from src.discovery import probes
         results, lock = [], threading.Lock()
 
         def go():
@@ -399,21 +399,21 @@ class TestJsProbeDisabledReporting:
         assert capsys.readouterr().out.count("JS workday probe disabled") == 1
 
     def test_missing_browser_hint_is_actionable_and_one_line(self):
-        from discovery.probes import _js_launch_hint
+        from src.discovery.probes import _js_launch_hint
         hint = _js_launch_hint(Exception(self.LAUNCH_ERR))
         assert "playwright install chromium" in hint
         assert "\n" not in hint, "the ASCII banner leaked into the log line"
         assert "+---" not in hint
 
     def test_unrelated_failures_keep_their_own_message(self):
-        from discovery.probes import _js_launch_hint
+        from src.discovery.probes import _js_launch_hint
         assert _js_launch_hint(
             Exception("Timeout 30000ms exceeded\nat stack line")) == "Timeout 30000ms exceeded"
 
     def test_a_successful_launch_rearms_the_notice(self, capsys):
         """Otherwise a web-UI process that recovers, then breaks again, goes
         quiet about the second failure for the rest of its life."""
-        from discovery import probes
+        from src.discovery import probes
         assert probes._report_js_disabled("failure one") is True
         probes._clear_js_disabled()               # what a successful launch does
         assert probes._report_js_disabled("failure two") is True
@@ -451,13 +451,13 @@ class TestChromiumChannelFallback:
 
     @pytest.fixture(autouse=True)
     def _quiet(self):
-        from discovery import probes
+        from src.discovery import probes
         probes._JS_NOTICES.clear()
         yield
         probes._JS_NOTICES.clear()
 
     def test_bundled_build_is_preferred(self, capsys):
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         pw = self.FakePlaywright({None, "chrome"})
         browser, channel = launch_chromium(pw)
         assert (browser, channel) == ("browser:None", None)
@@ -465,7 +465,7 @@ class TestChromiumChannelFallback:
         assert capsys.readouterr().out == "", "no notice when nothing fell back"
 
     def test_falls_back_to_system_chrome(self, capsys):
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         pw = self.FakePlaywright({"chrome", "msedge"})
         browser, channel = launch_chromium(pw)
         assert (browser, channel) == ("browser:chrome", "chrome")
@@ -473,7 +473,7 @@ class TestChromiumChannelFallback:
         assert "system chrome" in capsys.readouterr().out
 
     def test_falls_through_to_edge(self):
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         pw = self.FakePlaywright({"msedge"})
         assert launch_chromium(pw)[1] == "msedge"
         assert pw.tried == [None, "chrome", "msedge"]
@@ -481,14 +481,14 @@ class TestChromiumChannelFallback:
     def test_every_channel_missing_reraises_the_bundled_error(self):
         """The bundled failure names the missing build and the install command,
         which is the actionable one — not 'msedge not found'."""
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         pw = self.FakePlaywright(set())
         with pytest.raises(RuntimeError) as excinfo:
             launch_chromium(pw)
         assert "chromium_headless_shell" in str(excinfo.value)
 
     def test_launch_kwargs_are_passed_through(self):
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         captured = {}
 
         class Recorder(self.FakePlaywright):
@@ -500,14 +500,14 @@ class TestChromiumChannelFallback:
         assert captured["headless"] is True
 
     def test_the_fallback_notice_is_printed_once(self, capsys):
-        from discovery.probes import launch_chromium
+        from src.discovery.probes import launch_chromium
         for _ in range(4):                      # the pass runs k probes
             launch_chromium(self.FakePlaywright({"chrome"}))
         assert capsys.readouterr().out.count("system chrome") == 1
 
     def test_channel_order_is_configurable(self, monkeypatch):
-        import config
-        from discovery.probes import launch_chromium
+        from src import config
+        from src.discovery.probes import launch_chromium
         monkeypatch.setattr(config, "BROWSER_CHANNELS", ["msedge", "chrome"])
         pw = self.FakePlaywright({"chrome", "msedge"})
         assert launch_chromium(pw)[1] == "msedge"
@@ -530,7 +530,7 @@ class TestQuietSpeculativeProbes:
     def _fetch_with(exc, capsys):
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         original = requests.get
         requests.get = lambda *a, **k: (_ for _ in ()).throw(exc)
@@ -543,7 +543,7 @@ class TestQuietSpeculativeProbes:
     def test_speculative_failures_are_silent(self, capsys):
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         original = requests.get
         requests.get = lambda *a, **k: (_ for _ in ()).throw(
@@ -558,7 +558,7 @@ class TestQuietSpeculativeProbes:
     def test_real_targets_still_report(self, capsys):
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         original = requests.get
         requests.get = lambda *a, **k: (_ for _ in ()).throw(
@@ -570,20 +570,20 @@ class TestQuietSpeculativeProbes:
         assert "proceeding without restrictions" in capsys.readouterr().out
 
     def test_quiet_does_not_leak_past_its_block(self):
-        from scrapers import robots
+        from src.net import robots
         with robots.quiet():
             pass
         assert robots._quiet_depth == 0
 
     def test_quiet_restores_on_exception(self):
-        from scrapers import robots
+        from src.net import robots
         with pytest.raises(ValueError):
             with robots.quiet():
                 raise ValueError("boom")
         assert robots._quiet_depth == 0, "a raising probe must not mute the crawl"
 
     def test_quiet_nests(self):
-        from scrapers import robots
+        from src.net import robots
         with robots.quiet():
             with robots.quiet():
                 assert robots._quiet_depth == 2
@@ -594,7 +594,7 @@ class TestQuietSpeculativeProbes:
         """Silence is a logging decision, not a politeness one."""
         import requests
 
-        from scrapers import robots
+        from src.net import robots
 
         original = requests.get
         requests.get = lambda *a, **k: (_ for _ in ()).throw(

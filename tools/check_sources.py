@@ -53,9 +53,9 @@ try:  # Windows consoles default to cp1252; the status glyphs are not in it.
 except Exception:
     pass
 
-import config                                       # noqa: E402
-from scrapers.http import SESSION, HEADERS          # noqa: E402
-from scrapers.robots import CACHE as ROBOTS         # noqa: E402
+from src import config                                       # noqa: E402
+from src.net.http import SESSION, HEADERS          # noqa: E402
+from src.net.robots import CACHE as ROBOTS         # noqa: E402
 
 OK, BLOCKED, BROKEN, ROBOTS_OFF, SKIPPED = (
     "ok", "blocked", "broken", "robots", "skipped")
@@ -272,7 +272,7 @@ def _run_fetcher(fn, *a, **kw):
 
 
 def probe_feeds():
-    from scrapers.fetchers import (fetch_hnhiring, fetch_remoteok,
+    from src.ats.fetchers import (fetch_hnhiring, fetch_remoteok,
                                    fetch_remotive, fetch_rss)
 
     out = []
@@ -302,7 +302,7 @@ def probe_feeds():
 #
 # The flakiest source by a wide margin, and the one the crawl spends the most
 # wall-clock on. Three layers can each fail independently, so probe each:
-#   the DDG endpoints directly | the bounded/cached scrapers.ddg.search() |
+#   the DDG endpoints directly | the bounded/cached src.net.ddg.search() |
 #   the full fetch_websearch() (search -> visit results -> parse JSON-LD)
 
 SEARCH_QUERIES = [
@@ -313,7 +313,7 @@ SEARCH_QUERIES = [
 
 
 def probe_search(deep=False):
-    from scrapers.ddg import search as ddg_text
+    from src.net.ddg import search as ddg_text
 
     out = []
 
@@ -364,7 +364,7 @@ def probe_search(deep=False):
 
     # -- layer 3: the whole pipeline --------------------------------------
     if deep:
-        from scrapers.fetchers.websearch import fetch_websearch
+        from src.ats.fetchers.websearch import fetch_websearch
         for label, q in SEARCH_QUERIES[1:]:
             started = time.monotonic()
             rows, note, exc = _run_fetcher(
@@ -390,7 +390,7 @@ def probe_search(deep=False):
 # --------------------------------------------------------------------------- #
 
 def probe_forums():
-    from scrapers.fetchers.discourse import fetch_discourse
+    from src.ats.fetchers.discourse import fetch_discourse
     out = []
     if not config.DISCOURSE_BOARDS:
         return [{"section": "forums", "name": "(none configured)",
@@ -424,7 +424,7 @@ def probe_api():
                               "register free at careeronestop.org/Developers",
                     "seconds": 0.0})
         return out
-    from scrapers.fetchers.careeronestop import fetch_nlx_company
+    from src.ats.fetchers.careeronestop import fetch_nlx_company
     rows, note, exc = _run_fetcher(fetch_nlx_company, "Google", max_pages=1)
     status = verdict(f"{note} {exc}", bool(rows))
     detail = (f"{len(rows)} postings" if rows
@@ -447,7 +447,7 @@ def probe_gated():
     automatically, and capture.py is the intended route (you browse them
     yourself, signed in as you, and the parser reads the page your browser
     already loaded)."""
-    from scrapers.fetchers.company import _GATED_HOST_RE
+    from src.ats.fetchers.company import _GATED_HOST_RE
     hosts = _GATED_HOST_RE.pattern.replace("\\.", ".").split("|")
     return [{"section": "gated", "name": h.strip(), "status": SKIPPED,
              "detail": "never fetched by policy — use capture.py",
@@ -464,8 +464,8 @@ def probe_roster(limit=None, workers=8):
     discovery imports leave stale slugs behind, companies get acquired, and
     boards move — all of which show up here as broken."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from core import store
-    from scrapers.sources import ATS_REGISTRY, store_slug
+    from src import store
+    from src.ats.registry import ATS_REGISTRY, store_slug
 
     conn = store.connect()
     rows = [dict(r) for r in conn.execute(

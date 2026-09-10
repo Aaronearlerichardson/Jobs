@@ -45,8 +45,8 @@ try:  # Windows consoles default to cp1252; the status glyphs are not in it.
 except Exception:
     pass
 
-import config                                     # noqa: E402
-from scrapers.sources import ATS_REGISTRY         # noqa: E402
+from src import config                                     # noqa: E402
+from src.ats.registry import ATS_REGISTRY         # noqa: E402
 
 SAMPLES = Path(__file__).parent / "board_samples.toml"
 

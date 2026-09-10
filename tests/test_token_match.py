@@ -1,4 +1,4 @@
-"""One term matcher (core/filters.token_pattern / token_in) sits behind every
+"""One term matcher (src/match/filters.token_pattern / token_in) sits behind every
 vocabulary gate; each gate keeps its own short/long threshold. These pin the
 rule and, per caller, the behaviour the threshold was chosen for."""
 
@@ -6,10 +6,10 @@ import re
 
 import pytest
 
-import core.digest.filters as filters
-import core.digest.gates as gates
-import core.digest.locality as locality
-import core.digest.remote_filter as remote_filter
+import src.match.filters as filters
+import src.match.gates as gates
+import src.match.locality as locality
+import src.match.remote_filter as remote_filter
 
 
 class TestRule:

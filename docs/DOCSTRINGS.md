@@ -13,7 +13,7 @@ mechanically.
 ### Why
 
 Several docstrings in this repo described behaviour the code did not have.
-One of them — the comment above `discovery/ats_dork.py`'s activation line,
+One of them — the comment above `src/ats/dork.py`'s activation line,
 which claimed the "same activation rule as every other add path" while the
 code beneath it hard-coded two tier names — sent a real investigation down
 the wrong path for hours. Prose rots because nothing checks it. Executable
@@ -63,7 +63,7 @@ Rules for the skeleton:
 
 ## Good example (from this codebase)
 
-`core/store.py:combined_score` — every sentence above `Notes:` is backed by
+`src/store/:combined_score` — every sentence above `Notes:` is backed by
 the example under it, including the two edge cases that used to be
 undocumented (`None` inputs, negative inputs):
 
@@ -118,7 +118,7 @@ Three failures at once:
    reader.
 
 The fix was not to correct the comment. It was to delete the comment, extract
-the rule into `core.claude.is_active_mission` with a doctest per arm, and add
+the rule into `src.claude.is_active_mission` with a doctest per arm, and add
 `tests/test_invariants.py::test_activation_rule_is_not_re_implemented` so the
 cross-module claim is enforced by an AST scan instead of asserted by prose.
 
@@ -136,7 +136,7 @@ Work down this list and stop at the first match.
 Two sharper cuts:
 
 - **"Pure" means** no `requests`/`SESSION`, no `sqlite3`, no thread pool, no
-  `open()`, no `core.claude` API call, and no dependence on wall-clock time or
+  `open()`, no `src.claude` API call, and no dependence on wall-clock time or
   randomness. Roughly 207 of the 534 functions here qualify. If you need a
   fixture, it is not a doctest.
 - **If a doctest would need a mock, it is the wrong tool.** Move it to
@@ -241,7 +241,7 @@ someone who just broke it and does not know why.
 
 ```bash
 pytest                                    # everything: tests/ + all doctests
-pytest --doctest-modules tags.py          # doctests in one module
+pytest --doctest-modules src/tags.py          # doctests in one module
 pytest tests/test_invariants.py           # the cross-module claims
 pytest --doctest-modules core -v          # see each doctest by name
 

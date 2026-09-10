@@ -11,11 +11,11 @@ Offline: the resolver, the mission scorer and the board fetch are all
 stubbed, exactly as the pasted-name tests stub them.
 """
 
-import core.store as store
-import tags
-from core.digest import ats_signatures
-from discovery import local_sourcing
-from scrapers import ops
+import src.store as store
+from src import tags
+from src.ats import signatures as ats_signatures
+from src.discovery import local_sourcing
+from src.ops import maintenance as ops
 
 
 def _miss(db, name, reason, **fields):
@@ -81,7 +81,7 @@ class TestReresolveWrites:
         monkeypatch.setattr(local_sourcing, "resolve_or_miss",
                             lambda *a, **k: result)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("core.claude.api.score_company_mission",
+        monkeypatch.setattr("src.claude.api.score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
 
     def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
@@ -182,9 +182,9 @@ class TestManualAddUsesTheSharedResolver:
 
         monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("core.claude.api.score_company_mission",
+        monkeypatch.setattr("src.claude.api.score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
-        monkeypatch.setattr("core.claude.api.is_active_mission",
+        monkeypatch.setattr("src.claude.api.is_active_mission",
                             lambda *a, **k: True)
         # No crawl, no ingest, no résumé read — this test is about the
         # resolver call, and all three would reach the disk or the network.
@@ -268,7 +268,7 @@ class TestPeopleAdminSignature:
         assert keys == {("peopleadmin", "https://unc.peopleadmin.com")}
 
     def test_the_packed_host_is_what_the_fetcher_reads(self):
-        from scrapers.fetchers.peopleadmin import feed_host
+        from src.ats.fetchers.peopleadmin import feed_host
         packed = ats_signatures.pack("peopleadmin", "unc", self.URL)
         assert feed_host(packed["careers_url"]) == "unc.peopleadmin.com"
 
@@ -291,6 +291,6 @@ class TestJobviteSignature:
             == ("jobvite", "acme")
 
     def test_the_packed_slug_is_what_the_fetcher_reads(self):
-        from scrapers.fetchers.jobvite import tenant_of
+        from src.ats.fetchers.jobvite import tenant_of
         packed = ats_signatures.pack("jobvite", "acme", self.URL)
         assert tenant_of(packed["slug"]) == "acme"

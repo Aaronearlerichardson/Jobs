@@ -3,9 +3,9 @@ lifecycle, dispositions, crawl dormancy, and track membership."""
 
 from datetime import datetime, timedelta
 
-import config
-import core.digest.locality as locality
-import core.store as store
+from src import config
+import src.match.locality as locality
+import src.store as store
 
 
 class TestSchema:
@@ -53,7 +53,7 @@ class TestCompanies:
         store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
         assert store.set_company_tag(db, "w", "watch") == "watch"   # case-insensitive
         row = store.get_companies(db, active_only=False)[0]
-        import scrapers.ops as ops
+        import src.ops.maintenance as ops
         assert ops._is_watched(row) and ops._whole_board(row)
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
         assert store.set_company_tag(db, "Nope", "watch") is None
@@ -422,7 +422,7 @@ class TestDispositions:
         self._seed(add_job)
         store.set_disposition(db, "gh_acme_200", "dismissed", note="wrong archetype")
         store.set_disposition(db, "gh_acme_300", "applied")
-        from core.claude.fit import disposition_examples_block
+        from src.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert 'PURSUED: "Data Engineer"' in block
         assert "wrong archetype" in block
@@ -588,7 +588,7 @@ class TestPipelineTracking:
         store.set_disposition(db, "p1", "rejected", note="no headcount")
         store.update_pipeline_fields(db, "p1",
                                      outcome_reason="rejected-interview")
-        from core.claude.fit import disposition_examples_block
+        from src.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert "Imaging Scientist" in block
         assert "rejected-interview" in block
@@ -917,7 +917,7 @@ class TestReviewQueue:
 
     def test_confirm_parks_an_off_mission_candidate(self, db):
         # Confirming says "this IS the employer", not "crawl it whatever its
-        # mission" -- core.claude.is_active_mission still decides that.
+        # mission" -- src.claude.is_active_mission still decides that.
         cid = self._queue(db, "Off Mission",
                           mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid)["active"] == 0
@@ -926,9 +926,9 @@ class TestReviewQueue:
     def test_an_explicit_verdict_is_written_without_consulting_the_rule(
             self, db, monkeypatch):
         # The store writes the caller's decision; it only falls back to
-        # core.claude.is_active_mission when no verdict was passed.
-        import core.claude.api
-        monkeypatch.setattr(core.claude.api, "is_active_mission",
+        # src.claude.is_active_mission when no verdict was passed.
+        import src.claude.api
+        monkeypatch.setattr(src.claude.api, "is_active_mission",
                             lambda *a, **k: 1 / 0)
         cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid, active=1)["active"] == 1

@@ -104,7 +104,7 @@ That directory holds `jobs.db`, your `profile.toml`, your résumé,
   and rejects a key sent with any other.
 
 **Prompt caching is on by default.** Every scorer sends the same stable system
-prompt (rubric + profile) with a per-posting user turn, so `core/claude/api.py`
+prompt (rubric + profile) with a per-posting user turn, so `src/claude/api.py`
 puts a cache breakpoint at the end of `system`: the first call in a run writes
 the prefix (1.25x) and the rest read it (0.1x), roughly a 5-10x cut on input
 cost for a several-hundred-job crawl. Each run prints a
@@ -132,7 +132,7 @@ The shipped profile sets up the classic pair:
 | **remote** | the subject matter, your technical bar | location → remote | `python run_scraper.py --track remote` |
 
 A track is **pure configuration** — engine, database, sources, gates, scoring
-budget, digest email — run through ONE pipeline (`scrapers/runner.py`). Rename
+budget, digest email — run through ONE pipeline (`src/crawl/runner.py`). Rename
 them, delete one, add five. `python run_scraper.py` with no flags refreshes
 every configured track: the daily-refresh entry point.
 
@@ -318,7 +318,7 @@ Sites that require a login (LinkedIn, Indeed, metacareers) are **never fetched
 by this tool**. Instead, *you* browse them yourself, signed in as yourself,
 and the crawler parses the page your own browser already loaded. No automation
 touches those sites or your account — and their hosts are on an explicit skip
-list (`_GATED_HOST_RE` in `scrapers/fetchers/company.py`), so even a stale link
+list (`_GATED_HOST_RE` in `src/ats/fetchers/company.py`), so even a stale link
 there is reported "unverifiable" rather than fetched.
 
 ```bash
@@ -390,7 +390,7 @@ Employers this is for, and what their saved pages carry (checked 2026-09-02):
 ## Résumé-fit scoring
 
 Each job gets a résumé-fit score in [0, 1] from a **multi-axis rubric**
-(`core/claude/fit.py`), not a single opaque number. The LLM scores four orthogonal
+(`src/claude/fit.py`), not a single opaque number. The LLM scores four orthogonal
 axes and flags disqualifying gates; Python combines them (a weighted geometric
 mean times the worst gate penalty), so the math is transparent and tunable:
 
@@ -411,7 +411,7 @@ Engineer" stops scoring like your actual work.
 
 Everything is profile-driven: weights, gate penalties, the domain ladder, your
 stack vocabulary, and region terms live in `[fit]` (omit it for built-in
-defaults). Run `python -m core.fit` to print the predicted-vs-hand calibration
+defaults). Run `python -m src.claude.fit` to print the predicted-vs-hand calibration
 table after retuning weights.
 
 **Stored columns.** `resume_fit_score` is the combined scalar; the breakdown
@@ -508,7 +508,7 @@ python webapp.py        ->  http://127.0.0.1:5533
 ```
 
 Everything above in one local page (Flask + a single self-contained
-[webapp/](webapp/), light/dark, no build step):
+[src/web/](src/web/), light/dark, no build step):
 
 * **Tracks** — a header dropdown switches between the searches defined in
   `[tracks.*]`. Every tab, stat, and operation re-scopes to the selected track.
@@ -665,7 +665,7 @@ skipped), whole and unfiltered, and stores every listing **unscored and
 bodiless**. A full snapshot is the best evidence of what a board lists, so
 the harvester closes stored rows that have vanished and reopens returners.
 
-Each pass then ends with **triage** (`scrapers/triage.py`), which is where
+Each pass then ends with **triage** (`src/crawl/triage.py`), which is where
 the spend is decided. Every stored row no crawl has adopted is run through
 the crawl's own gates, cheapest first, for every track that reads the
 roster: the company's cached mission tier (one Claude call per never-scored
@@ -697,7 +697,7 @@ progress for 15 minutes is abandoned. Bodies already in the store are never
 fetched twice, so each pass advances the roster. Workday closes the
 connection after roughly 150 detail requests per tenant, so triage fetches
 at most 100 bodiless Workday rows per board per pass (`HYDRATE_CAP` in
-`scrapers/harvest.py`) and leaves the rest for the next one.
+`src/crawl/harvest.py`) and leaves the rest for the next one.
 
 By default the process stays up and runs a pass every 12 hours (`--every`;
 `--once` for a single pass). Between passes it parks on a timed wait, which
@@ -736,7 +736,7 @@ Everything personal lives in `profile.toml` on your machine;
 | `[candidate]` | who you are — injected verbatim into every scoring/discovery prompt; also your `resume` path |
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, `domain_ladder`, `stack_core`/`stack_anti`, `region_terms` |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
-| `[locality]` | what counts as "local" (`core/digest/locality.py`) |
+| `[locality]` | what counts as "local" (`src/match/locality.py`) |
 | `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
 | `[discovery]` | seed companies, Workday majors, directory URLs, web-search name queries, priority companies |
 
@@ -756,7 +756,7 @@ discovery sourcing all follow. No code edits.
 ## Data model & files
 
 One SQLite store for everything — `jobs.db` in your data directory
-(`core/store/__init__.py`). A track can get its own file via `[tracks.*].db`, but by
+(`src/store/__init__.py`). A track can get its own file via `[tracks.*].db`, but by
 default they share:
 
 - **companies** — name, ats, slug / Workday triple / careers_url,
@@ -771,7 +771,7 @@ default they share:
   name rather than stealing the row (`store.track_set`).
 
 Company `tags` are **scope** tokens describing how to crawl a company, not
-what it does (`tags.py`): `local` (query its board per-region — the
+what it does (`src/tags.py`): `local` (query its board per-region — the
 expensive enterprise boards), `sweep` (pull the whole board — the cheap JSON
 APIs), `watch` (human-set: fetch every crawl, flag anything new).
 
@@ -891,22 +891,23 @@ identically to a dead one.
 | `run_scraper.py` / `webapp.py` | entry points: daily refresh + maintenance CLI, web UI launcher (`crawler.py` = deprecation shim) |
 | `discover.py` / `capture.py` | entry points: roster growth, manual page capture |
 | `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
-| `core/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
-| `scrapers/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
-| `scrapers/ops.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
-| `scrapers/sources.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `scrapers/fetchers/` | board fetchers (11 ATSes incl. Jobvite + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
-| `scrapers/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
-| `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
-| `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
-| `core/store/__init__.py` | unified companies + jobs store (+ export/import, prune, migrations) |
-| `tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
-| `core/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m core.fit` |
-| `core/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
-| `core/digest/gates.py` / `core/digest/digest_md.py` | config-driven title/exclude gates; ranked + matches digest renderers |
-| `core/digest/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all profile-driven |
-| `webapp/` | Flask package: `routes.py`, `ops.py` (op registry), `server.py`, `templates/` + `static/` |
-| `scrapers/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
-| `scrapers/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
+| `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
+| `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
+| `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
+| `src/ats/registry.py` | declarative ATS registry: store rows ↔ fetch thunks |
+| `src/ats/fetchers/` | board fetchers (11 ATSes incl. Jobvite + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
+| `src/ats/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
+| `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
+| `src/discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
+| `src/store/__init__.py` | unified companies + jobs store (+ export/import, prune, migrations) |
+| `src/tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
+| `src/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m src.claude.fit` |
+| `src/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
+| `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; ranked + matches digest renderers |
+| `src/match/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all profile-driven |
+| `src/web/` | Flask package: `routes.py`, `server.py`, `templates/` + `static/` |
+| `src/ops/` | every operation a front end can run: `registry.py` (the one table), `maintenance.py`, `roster.py`, `background.py` (the web UI's runner) |
+| `src/net/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
+| `src/net/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |
 | `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |

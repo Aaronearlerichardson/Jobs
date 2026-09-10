@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-import config
-import core.digest.digest_md as digest_md
-import core.digest.locality as locality
+from src import config
+import src.digest.render as digest
+import src.match.locality as locality
 
 
 TODAY = datetime.now().strftime("%Y-%m-%d")
@@ -41,7 +41,7 @@ def sent(monkeypatch):
         out.append((subject, plain, html))
         return True
 
-    monkeypatch.setattr(digest_md, "_send_gmail", _fake)
+    monkeypatch.setattr(digest, "_send_gmail", _fake)
     return out
 
 
@@ -95,21 +95,21 @@ class TestApplyBand:
             row("closed", fit=0.55, location=hometown, status="closed"),
             row("unscored", fit=None, location=hometown),
         ]
-        picked = [j["job_id"] for j in digest_md.apply_band_rows(ranked)]
+        picked = [j["job_id"] for j in digest.apply_band_rows(ranked)]
         assert picked == ["in", "edge_low"]
 
     def test_sorted_best_fit_first_and_capped(self, hometown):
         ranked = [row(f"j{i}", fit=0.40 + i * 0.02, location=hometown)
                   for i in range(14)]
-        picked = digest_md.apply_band_rows(ranked)
-        assert len(picked) == digest_md.APPLY_BAND_LIMIT
+        picked = digest.apply_band_rows(ranked)
+        assert len(picked) == digest.APPLY_BAND_LIMIT
         fits = [j["resume_fit_score"] for j in picked]
         assert fits == sorted(fits, reverse=True)
         assert picked[0]["job_id"] == "j13"
 
     def test_empty_input_is_fine(self, hometown):
-        assert digest_md.apply_band_rows(None) == []
-        assert digest_md.apply_band_rows([]) == []
+        assert digest.apply_band_rows(None) == []
+        assert digest.apply_band_rows([]) == []
 
 
 class TestWriteRankedDigest:
@@ -120,20 +120,20 @@ class TestWriteRankedDigest:
                      "status": "open"}]
         ranked = [row("top", fit=0.9, location=hometown),
                   row("band", fit=0.5, location=hometown)]
-        text = digest_md.write_ranked_digest(
+        text = digest.write_ranked_digest(
             ranked, track, pipeline=pipeline).read_text(encoding="utf-8")
         assert text.index("## Your pipeline") < text.index("## Apply band")
         band = text[text.index("## Apply band"):text.index("**2 open job(s)**")]
         assert "Role band" in band and "Role top" not in band
 
     def test_followups_section_lists_what_is_due(self, track, report_dir):
-        text = digest_md.write_ranked_digest(
+        text = digest.write_ranked_digest(
             [], track, followups=[followup("f1")]).read_text(encoding="utf-8")
         assert "## Follow-ups due" in text
         assert "Chase f1" in text and "Recruiter" in text
 
     def test_sections_are_skipped_when_empty(self, track, hometown, report_dir):
-        text = digest_md.write_ranked_digest(
+        text = digest.write_ranked_digest(
             [row("top", fit=0.9, location=hometown)], track
         ).read_text(encoding="utf-8")
         assert "## Apply band" not in text
@@ -143,29 +143,29 @@ class TestWriteRankedDigest:
 class TestNewRankedRows:
     def test_keeps_only_rows_first_seen_since(self, track):
         ranked = [row("fresh"), row("stale", first_seen=YESTERDAY)]
-        picked = [j["job_id"] for j in digest_md.new_ranked_rows(ranked, track)]
+        picked = [j["job_id"] for j in digest.new_ranked_rows(ranked, track)]
         assert picked == ["fresh"]
 
     def test_new_since_can_reach_back(self, track):
         ranked = [row("fresh"), row("stale", first_seen=YESTERDAY)]
         picked = [j["job_id"] for j in
-                  digest_md.new_ranked_rows(ranked, track, new_since=YESTERDAY)]
+                  digest.new_ranked_rows(ranked, track, new_since=YESTERDAY)]
         assert picked == ["fresh", "stale"]
 
     def test_drops_rows_under_the_floor(self, track):
         ranked = [row("good", fit=0.41), row("weak", fit=0.39)]
-        picked = [j["job_id"] for j in digest_md.new_ranked_rows(ranked, track)]
+        picked = [j["job_id"] for j in digest.new_ranked_rows(ranked, track)]
         assert picked == ["good"]
 
     def test_unscored_rows_never_qualify(self, track):
-        assert digest_md.new_ranked_rows([row("null", fit=None)], track) == []
+        assert digest.new_ranked_rows([row("null", fit=None)], track) == []
 
 
 class TestSendRankedDigest:
     def test_sends_only_the_new_rows(self, track, sent):
         ranked = [row("fresh"), row("stale", first_seen=YESTERDAY),
                   row("weak", fit=0.1)]
-        assert digest_md.send_ranked_digest(ranked, track) is True
+        assert digest.send_ranked_digest(ranked, track) is True
         subject, plain, html = sent[0]
         assert "1 new match(es)" in subject
         assert track["label"].upper() in subject
@@ -174,7 +174,7 @@ class TestSendRankedDigest:
         assert "Role weak" not in plain
 
     def test_silent_when_nothing_is_new(self, track, sent, capsys):
-        assert digest_md.send_ranked_digest(
+        assert digest.send_ranked_digest(
             [row("stale", first_seen=YESTERDAY)], track) is False
         assert sent == []
         assert "skipping email" in capsys.readouterr().out
@@ -183,7 +183,7 @@ class TestSendRankedDigest:
         hits = [({"name": "Watched Co"},
                  {"title": "Any Role", "url": "https://w.co/1",
                   "location": "Anywhere"}, False)]
-        assert digest_md.send_ranked_digest([], track, watch_hits=hits) is True
+        assert digest.send_ranked_digest([], track, watch_hits=hits) is True
         _, plain, _ = sent[0]
         assert "Watched Co" in plain
         assert "0 new job(s)" in plain
@@ -200,7 +200,7 @@ class TestSendRankedDigest:
              "title": "Still Open", "url": "https://acme.io/c",
              "status": "open", "closed_at": None},
         ]
-        digest_md.send_ranked_digest([row("fresh")], track, pipeline=pipeline)
+        digest.send_ranked_digest([row("fresh")], track, pipeline=pipeline)
         _, plain, _ = sent[0]
         assert "Closed Today" in plain
         assert "Closed Before" not in plain
@@ -209,7 +209,7 @@ class TestSendRankedDigest:
     def test_apply_band_rides_along_with_new_rows(self, track, sent, hometown):
         ranked = [row("fresh", fit=0.9, location=hometown),
                   row("band", fit=0.5, first_seen=YESTERDAY, location=hometown)]
-        assert digest_md.send_ranked_digest(ranked, track) is True
+        assert digest.send_ranked_digest(ranked, track) is True
         _, plain, html = sent[0]
         assert "## Apply band" in plain and "Apply band" in html
         assert "Role band" in plain and "Role band" in html
@@ -217,29 +217,29 @@ class TestSendRankedDigest:
         assert "1 new match(es)" in sent[0][0]
 
     def test_followups_ride_along_with_new_rows(self, track, sent):
-        assert digest_md.send_ranked_digest(
+        assert digest.send_ranked_digest(
             [row("fresh")], track, followups=[followup("f1")]) is True
         _, plain, html = sent[0]
         assert "## Follow-ups due" in plain and "Chase f1" in plain
         assert "Chase f1" in html
 
     def test_followups_alone_do_not_trigger_a_send(self, track, sent):
-        assert digest_md.send_ranked_digest(
+        assert digest.send_ranked_digest(
             [], track, followups=[followup("f1")]) is False
         assert sent == []
 
     def test_reports_failure_when_the_send_fails(self, track, monkeypatch):
-        monkeypatch.setattr(digest_md, "_send_gmail",
+        monkeypatch.setattr(digest, "_send_gmail",
                             lambda *a, **k: False)
-        assert digest_md.send_ranked_digest([row("fresh")], track) is False
+        assert digest.send_ranked_digest([row("fresh")], track) is False
 
 
 class TestToast:
     def test_off_by_default(self, track):
-        assert digest_md.toast(track, 3, "x.md") is False
+        assert digest.toast(track, 3, "x.md") is False
 
     def test_no_toast_without_new_rows(self, track):
-        assert digest_md.toast({**track, "notify": True}, 0, "x.md") is False
+        assert digest.toast({**track, "notify": True}, 0, "x.md") is False
 
     def test_missing_package_degrades_silently(self, track, monkeypatch):
         import builtins
@@ -251,7 +251,7 @@ class TestToast:
             return real_import(name, *a, **k)
 
         monkeypatch.setattr(builtins, "__import__", _blocked)
-        assert digest_md.toast({**track, "notify": True}, 3, "x.md") is False
+        assert digest.toast({**track, "notify": True}, 3, "x.md") is False
 
 
 class TestTrackKeys:
@@ -294,7 +294,7 @@ class _FrozenClock(datetime):
 
 @pytest.fixture
 def golden_clock(monkeypatch):
-    monkeypatch.setattr(digest_md, "datetime", _FrozenClock)
+    monkeypatch.setattr(digest, "datetime", _FrozenClock)
     return GOLDEN_TODAY
 
 
@@ -367,7 +367,7 @@ class TestGolden:
     def test_written_ranked_digest(self, golden_track, hometown, report_dir,
                                    golden_clock):
         ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
-        path = digest_md.write_ranked_digest(
+        path = digest.write_ranked_digest(
             ranked, golden_track, watch_hits=hits, pipeline=pipeline,
             followups=followups)
         assert path == report_dir / f"golden_{golden_clock}.md"
@@ -375,12 +375,12 @@ class TestGolden:
 
     def test_written_ranked_digest_bare(self, golden_track, hometown,
                                         report_dir, golden_clock):
-        path = digest_md.write_ranked_digest([], golden_track)
+        path = digest.write_ranked_digest([], golden_track)
         _check_golden("ranked_bare.md", path.read_text(encoding="utf-8"))
 
     def test_ranked_email(self, golden_track, hometown, sent, golden_clock):
         ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
-        assert digest_md.send_ranked_digest(
+        assert digest.send_ranked_digest(
             ranked, golden_track, watch_hits=hits, pipeline=pipeline,
             followups=followups) is True
         subject, plain, html = sent[0]
@@ -391,7 +391,7 @@ class TestGolden:
     def test_written_matches_digest(self, golden_track, hometown, report_dir,
                                     golden_clock):
         *_, matches = golden_inputs(hometown)
-        path = digest_md.write_matches_digest(matches, report_dir,
+        path = digest.write_matches_digest(matches, report_dir,
                                               golden_track)
         assert path == report_dir / f"golden_matches_{golden_clock}.md"
         _check_golden("matches.md", path.read_text(encoding="utf-8"))
@@ -401,18 +401,18 @@ class TestGolden:
         *_, matches = golden_inputs(hometown)
         unscored = [{k: v for k, v in m.items() if k != "resume_fit_score"}
                     for m in matches]
-        path = digest_md.write_matches_digest(unscored, report_dir,
+        path = digest.write_matches_digest(unscored, report_dir,
                                               golden_track)
         _check_golden("matches_nofit.md", path.read_text(encoding="utf-8"))
 
     def test_written_matches_digest_empty(self, golden_track, report_dir,
                                           golden_clock):
-        path = digest_md.write_matches_digest([], report_dir, golden_track)
+        path = digest.write_matches_digest([], report_dir, golden_track)
         _check_golden("matches_empty.md", path.read_text(encoding="utf-8"))
 
     def test_matches_email(self, golden_track, hometown, sent, golden_clock):
         *_, matches = golden_inputs(hometown)
-        digest_md.send_matches_digest(matches, golden_track, config)
+        digest.send_matches_digest(matches, golden_track, config)
         subject, plain, html = sent[0]
         assert subject == f"[GOLDEN] 2 posting(s) - {golden_clock}"
         _check_golden("matches_email.md", plain)

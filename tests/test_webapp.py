@@ -6,7 +6,7 @@ browser copy once defeated."""
 import json
 import re
 
-import webapp
+from src import web
 
 
 class TestGeoBucket:
@@ -14,44 +14,44 @@ class TestGeoBucket:
     secondary hint because it's stale-by-construction."""
 
     def test_local(self, local_addr):
-        assert webapp._geo_tag({"location": local_addr}) == "local"
+        assert web._geo_tag({"location": local_addr}) == "local"
 
     def test_remote(self):
-        assert webapp._geo_tag({"location": "Remote - US"}) == "remote"
+        assert web._geo_tag({"location": "Remote - US"}) == "remote"
 
     def test_relocation(self, elsewhere):
-        assert webapp._geo_tag({"location": elsewhere}) == "relocation"
+        assert web._geo_tag({"location": elsewhere}) == "relocation"
 
     def test_stored_remote_eligible_wins_on_empty_location(self):
-        assert webapp._geo_tag({"location": "", "remote_eligible": 1}) == "remote"
+        assert web._geo_tag({"location": "", "remote_eligible": 1}) == "remote"
 
     def test_stored_geo_mode_remote_wins(self):
-        assert webapp._geo_tag({"location": "Austin, TX",
+        assert web._geo_tag({"location": "Austin, TX",
                                 "geo_mode": "remote"}) == "remote"
 
 
 class TestOps:
     def test_ops_are_keyed_by_engine_not_track_id(self):
         # A user-chosen track id must never appear in code.
-        assert all("tracks" not in o for o in webapp.OPS.values())
+        assert all("tracks" not in o for o in web.OPS.values())
 
     def test_every_op_names_a_real_engine_or_is_agnostic(self):
         assert all(o.get("engine") in (None, "local", "sweep")
-                   for o in webapp.OPS.values())
+                   for o in web.OPS.values())
 
     def test_every_op_has_a_callable(self):
-        assert all(callable(o["fn"]) for o in webapp.OPS.values())
+        assert all(callable(o["fn"]) for o in web.OPS.values())
 
     def test_the_bulk_discovery_ops_are_available_in_the_ui(self):
         """Slow and low-yield, but the person running the crawler decides
         when that trade is worth it: the sweeps are buttons as well as
         discover.py flags. All of them feed the Review queue."""
-        assert {"discover-local", "dork", "discover-term", "reresolve"} <= set(webapp.OPS)
-        assert all(webapp.OPS[n]["engine"] == "local"
+        assert {"discover-local", "dork", "discover-term", "reresolve"} <= set(web.OPS)
+        assert all(web.OPS[n]["engine"] == "local"
                    for n in ("discover-local", "dork", "discover-term"))
 
     def test_the_targeted_add_paths_stay(self):
-        assert {"add-names", "add-board", "add-job"} <= set(webapp.OPS)
+        assert {"add-names", "add-board", "add-job"} <= set(web.OPS)
 
 
 class TestApi:
@@ -101,8 +101,8 @@ class TestCompanyCrawlState:
     def _sleepy_store(self, tmp_path, monkeypatch):
         """Point the default track at a throwaway DB: these tests write, and
         the suite may never touch the real store."""
-        import config
-        from core import store
+        from src import config
+        from src import store
         db_path = tmp_path / "roster.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
@@ -128,8 +128,8 @@ class TestCompanyCrawlState:
                                                monkeypatch):
         # The roster shows WHY a company is never fetched: its ats reads
         # "capture", and it stays an active, never-dormant row.
-        import config
-        from core import store
+        from src import config
+        from src import store
         self._sleepy_store(tmp_path, monkeypatch)
         conn = store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
         cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
@@ -166,8 +166,8 @@ class TestPipelineApi:
         """Point the default track at a throwaway DB holding one live
         application. These tests write, and the suite may never touch the
         real store."""
-        import config
-        from core import store
+        from src import config
+        from src import store
         db_path = tmp_path / "pipeline.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
@@ -220,7 +220,7 @@ class TestPipelineApi:
         not this week's volume, and one since moved on to interviewing
         still counts for the week it went out in."""
         from datetime import datetime, timedelta
-        from core import store
+        from src import store
         db_path = self._pipeline_store(tmp_path, monkeypatch)
         conn = store.connect(db_path)
         store.upsert_job(conn, {
@@ -285,8 +285,8 @@ class TestApplyBandFields:
 
     def test_jobs_expose_what_the_band_filter_reads(self, client, tmp_path,
                                                     monkeypatch, local_addr):
-        import config
-        from core import store
+        from src import config
+        from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
         db_path = tmp_path / "band.db"
         conn = store.connect(db_path)
@@ -318,8 +318,8 @@ class TestRemoteAdmissionFields:
     FIT = 0.94
 
     def _store(self, tmp_path, monkeypatch, mission, floor=0.85):
-        import config
-        from core import store
+        from src import config
+        from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
         db_path = tmp_path / "admission.db"
         conn = store.connect(db_path)
@@ -374,7 +374,7 @@ class TestRemoteAdmissionFields:
 
     def test_best_fit_is_none_without_jobs(self, client, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch, mission=0.9)
-        from core import store
+        from src import store
         conn = store.connect(tmp_path / "admission.db")
         cid = store.upsert_company(conn, {"name": "Quiet", "ats": "lever",
                                           "slug": "quiet"})
@@ -392,8 +392,8 @@ class TestReviewQueue:
         """A throwaway DB holding one review candidate, pointed at by BOTH
         the track config (the routes) and config.STORE_DB_PATH (discovery's
         own store.connect()). The suite may never touch the real store."""
-        import config
-        from core import store
+        from src import config
+        from src import store
         db_path = tmp_path / "review.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, store.mark_pending(
@@ -407,8 +407,8 @@ class TestReviewQueue:
 
     @staticmethod
     def _store(monkeypatch=None):
-        import config
-        from core import store
+        from src import config
+        from src import store
         return store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
 
     def test_pending_lists_the_queue(self, client, tmp_path, monkeypatch):
@@ -433,7 +433,7 @@ class TestReviewQueue:
 
     def test_reject_removes_it_and_blocks_the_name(self, client, tmp_path,
                                                    monkeypatch):
-        from core import store
+        from src import store
         cid = self._queued_store(tmp_path, monkeypatch)
         resp = client.post(f"/api/company/{cid}/reject",
                            json={"reason": "not a company"})
@@ -452,7 +452,7 @@ class TestReviewQueue:
 
     def test_block_records_the_names_the_reviewer_rejected(
             self, client, tmp_path, monkeypatch):
-        from core import store
+        from src import store
         self._queued_store(tmp_path, monkeypatch)
         resp = client.post("/api/names/block",
                            json={"names": ["Who You Are", "Job Location"]})
@@ -465,7 +465,7 @@ class TestReviewQueue:
 
     def test_preview_parses_without_resolving_anything(self, client, tmp_path,
                                                        monkeypatch):
-        import discovery.paste_ingest as ls
+        import src.discovery.paste_ingest as ls
         self._queued_store(tmp_path, monkeypatch)
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
@@ -494,7 +494,7 @@ class TestAssets:
         assert resp.headers.get("Cache-Control") == "no-store"
 
     def test_asset_version_tracks_content(self, monkeypatch):
-        from webapp import routes
+        from src.web import routes
         v1 = routes._asset_version()
         assert v1 == routes._asset_version()        # stable
         assert len(v1) == 10
@@ -526,13 +526,13 @@ class TestOpConcurrency:
     def _drain():
         import time
 
-        from webapp import ops
+        from src.ops import background as ops
         while ops._running():
             time.sleep(0.02)
         time.sleep(0.15)          # let the worker's finally block land
 
     def test_second_op_is_refused_while_the_first_runs(self):
-        from webapp import ops
+        from src.ops import background as ops
         assert ops._run_op("first", self._noisy("a")) is True
         assert ops._run_op("second", self._noisy("b")) is False
         self._drain()
@@ -553,7 +553,7 @@ class TestOpConcurrency:
         startup jitter."""
         import threading
 
-        from webapp import ops
+        from src.ops import background as ops
         results, lock = [], threading.Lock()
         barrier = threading.Barrier(12)
 
@@ -573,7 +573,7 @@ class TestOpConcurrency:
         self._drain()
 
     def test_log_records_each_line_once(self):
-        from webapp import ops
+        from src.ops import background as ops
         ops._run_op("solo", self._noisy("line"))
         self._drain()
         recorded = [l for l in ops.TASK["log"] if l.startswith("line-")]
@@ -582,7 +582,7 @@ class TestOpConcurrency:
     def test_stdout_is_restored_when_the_op_ends(self):
         import sys
 
-        from webapp import ops
+        from src.ops import background as ops
         before = sys.stdout
         ops._run_op("solo", self._noisy("z", lines=1))
         self._drain()
@@ -591,7 +591,7 @@ class TestOpConcurrency:
     def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
         import sys
 
-        from webapp import ops
+        from src.ops import background as ops
 
         def boom():
             raise RuntimeError("op exploded")
@@ -606,7 +606,7 @@ class TestOpConcurrency:
         self._drain()
 
     def test_prints_outside_an_operation_do_not_reach_the_log(self):
-        from webapp import ops
+        from src.ops import background as ops
         ops._run_op("solo", self._noisy("q", lines=1))
         self._drain()
         n = len(ops.TASK["log"])
@@ -615,15 +615,15 @@ class TestOpConcurrency:
 
 
 class TestOpRearmsTheClaudeBreaker:
-    """core.claude's breaker is process-lifetime; the server process outlives
+    """src.claude's breaker is process-lifetime; the server process outlives
     many operations. 2026-09-09: a crawl tripped it at 18:22, and the verify
     runs at 18:29 and 19:24 skipped every Claude call without saying why."""
 
     def test_run_op_resets_a_tripped_breaker(self, monkeypatch):
         import time
 
-        from core.claude import api
-        from webapp import ops
+        from src.claude import api
+        from src.ops import background as ops
         monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         seen = {}
 

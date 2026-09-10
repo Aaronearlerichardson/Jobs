@@ -24,9 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import config  # noqa: E402
+from src import config  # noqa: E402
 
-from core.claude.api import expand_location, expand_search  # noqa: E402
+from src.claude.api import expand_location, expand_search  # noqa: E402
 
 INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
 LOCATION_INCLUDE = config.LOCATION_INCLUDE

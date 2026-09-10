@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from core.digest.filters import is_relevant
-from scrapers.fetchers import ats_api, getro, hibob, jobvite, peopleadmin, usajobs
+from src.match.filters import is_relevant
+from src.ats.fetchers import api, getro, hibob, jobvite, peopleadmin, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -67,7 +67,7 @@ def fake_get(monkeypatch):
             @property
             def text(self):
                 return json.dumps(payload)
-        monkeypatch.setattr(ats_api.SESSION, "get",
+        monkeypatch.setattr(api.SESSION, "get",
                             lambda *a, **k: _Resp())
     return _install
 
@@ -152,7 +152,7 @@ def usajobs_pages(monkeypatch):
 class TestGreenhouse:
     def test_parses_postings(self, fake_get, match_everything):
         fake_get(load("greenhouse_board.json"))
-        jobs = ats_api.fetch_greenhouse("databricks", "Databricks")
+        jobs = api.fetch_greenhouse("databricks", "Databricks")
         assert jobs
         j = jobs[0]
         assert j["id"].startswith("gh_databricks_")
@@ -164,7 +164,7 @@ class TestGreenhouse:
         payload["jobs"][0]["location"] = {}
         payload["jobs"][0]["offices"] = []
         fake_get(payload)
-        assert ats_api.fetch_greenhouse("x", "X")[0]["location"] == "Unknown"
+        assert api.fetch_greenhouse("x", "X")[0]["location"] == "Unknown"
 
     def test_offices_join_the_location(self, fake_get, match_everything):
         """A multi-location posting shows one city (or "Remote") up front
@@ -173,21 +173,21 @@ class TestGreenhouse:
         payload["jobs"][0]["location"] = {"name": "Remote"}
         payload["jobs"][0]["offices"] = [{"name": "Durham, NC"}, {"name": "Remote"}]
         fake_get(payload)
-        assert ats_api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
+        assert api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
 
     def test_http_error_returns_empty_not_raises(self, fake_get, match_everything):
         fake_get({}, status=500)
-        assert ats_api.fetch_greenhouse("x", "X") == []
+        assert api.fetch_greenhouse("x", "X") == []
 
     def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
         fake_get(["not", "a", "dict"])
-        assert ats_api.fetch_greenhouse("x", "X") == []
+        assert api.fetch_greenhouse("x", "X") == []
 
 
 class TestLever:
     def test_parses_postings(self, fake_get, match_everything):
         fake_get(load("lever_board.json"))
-        jobs = ats_api.fetch_lever("veeva", "Veeva")
+        jobs = api.fetch_lever("veeva", "Veeva")
         assert jobs
         j = jobs[0]
         # Prefixes are the store's dedup namespace: gh_ / lv_ / ashby_.
@@ -196,7 +196,7 @@ class TestLever:
 
     def test_http_error_returns_empty(self, fake_get, match_everything):
         fake_get({}, status=404)
-        assert ats_api.fetch_lever("x", "X") == []
+        assert api.fetch_lever("x", "X") == []
 
 
 class TestAshby:
@@ -209,12 +209,12 @@ class TestAshby:
         payload = load("ashby_board.json")
         assert "jobs" in payload and "jobPostings" not in payload
         fake_get(payload)
-        jobs = ats_api.fetch_ashby("vanta", "Vanta")
+        jobs = api.fetch_ashby("vanta", "Vanta")
         assert jobs, "Ashby parsed zero postings from a non-empty board"
 
     def test_parses_postings(self, fake_get, match_everything):
         fake_get(load("ashby_board.json"))
-        j = ats_api.fetch_ashby("vanta", "Vanta")[0]
+        j = api.fetch_ashby("vanta", "Vanta")[0]
         assert j["id"].startswith("ashby_vanta_")
         assert j["title"] and j["url"].startswith("http")
         assert j["location"]
@@ -231,16 +231,16 @@ class TestAshby:
         payload["jobs"][0]["isRemote"] = False
         payload["jobs"][0]["workplaceType"] = "Remote"
         fake_get(payload)
-        assert ats_api.fetch_ashby("v", "V")[0].get("remote_hint") == "ashby:isRemote"
+        assert api.fetch_ashby("v", "V")[0].get("remote_hint") == "ashby:isRemote"
 
     def test_posted_at_is_captured(self, fake_get, match_everything):
         fake_get(load("ashby_board.json"))
-        jobs = ats_api.fetch_ashby("vanta", "Vanta")
+        jobs = api.fetch_ashby("vanta", "Vanta")
         assert any(j.get("posted_at") for j in jobs)
 
     def test_http_error_returns_empty(self, fake_get, match_everything):
         fake_get({}, status=403)
-        assert ats_api.fetch_ashby("x", "X") == []
+        assert api.fetch_ashby("x", "X") == []
 
 
 class TestHibob:
@@ -392,7 +392,7 @@ class TestPeopleAdmin:
     def test_unlocated_postings_survive_a_location_filter(
             self, fake_get_text, match_everything, unlocated):
         """The whole board, through a filter that matches none of it."""
-        from scrapers.fetchers import company
+        from src.ats.fetchers import company
         fake_get_text({"all_jobs.atom": load_text(self.UNC)})
         jobs = company.fetch_peopleadmin_all("unc.peopleadmin.com",
                                              re.compile("nowhere-at-all"))
@@ -404,7 +404,7 @@ class TestPeopleAdmin:
                                                  match_everything, monkeypatch):
         """Skipping the gate is about MISSING locations, not about opting
         PeopleAdmin out of location filtering."""
-        from scrapers.fetchers import company
+        from src.ats.fetchers import company
         monkeypatch.setattr(peopleadmin, "location_snippet",
                             lambda text, default="See posting": "Chapel Hill, NC")
         fake_get_text({"all_jobs.atom": load_text(self.UNC)})
@@ -578,15 +578,15 @@ class TestRelevanceGate:
     def test_irrelevant_postings_are_dropped_by_the_gate(
             self, fake_get, nothing_matches):
         fake_get(load("greenhouse_board.json"))
-        assert ats_api.fetch_greenhouse("databricks", "Databricks",
+        assert api.fetch_greenhouse("databricks", "Databricks",
                                         gate=is_relevant) == []
 
     def test_no_gate_keeps_everything(self, fake_get, nothing_matches):
         fake_get(load("greenhouse_board.json"))
-        assert ats_api.fetch_greenhouse("databricks", "Databricks")
+        assert api.fetch_greenhouse("databricks", "Databricks")
 
     def test_the_registry_thunk_is_gated(self, fake_get, nothing_matches):
-        from scrapers.sources import ATS_REGISTRY
+        from src.ats.registry import ATS_REGISTRY
         fake_get(load("greenhouse_board.json"))
         thunk = ATS_REGISTRY["greenhouse"][0]("Databricks", "databricks")
         assert thunk() == []
@@ -599,7 +599,7 @@ class TestRelevanceGate:
         the data dir)."""
         import re
         from pathlib import Path
-        pkg = Path(ats_api.__file__).parent
+        pkg = Path(api.__file__).parent
         for src in pkg.glob("*.py"):
             text = src.read_text(encoding="utf-8")
             assert not re.search(r"^from core\.filters import", text, re.M), src.name
@@ -611,7 +611,7 @@ class TestAshbyKeyAcrossCallSites:
     """Every Ashby reader, not just the one that was patched.
 
     The `jobs` vs `jobPostings` mix-up was found and fixed in
-    `ats_api.fetch_ashby`, but the same line had been copied into the
+    `api.fetch_ashby`, but the same line had been copied into the
     discovery probe, the NC counter, the mission-scoring title sampler and
     the company fetcher. All four kept reading `jobPostings`, so Ashby
     boards probed live-but-empty, never counted a local job, and were
@@ -646,17 +646,17 @@ class TestAshbyKeyAcrossCallSites:
             def json(self):
                 return TestAshbyKeyAcrossCallSites.BOARD
 
-        # One shared session object behind every module (scrapers.http.SESSION).
-        from discovery import probes
+        # One shared session object behind every module (src.net.http.SESSION).
+        from src.discovery import probes
         monkeypatch.setattr(probes.SESSION, "get", lambda *a, **k: _Resp())
 
     def test_probe_reports_the_real_total(self, ashby_board):
-        from discovery.probes import probe_ashby
+        from src.discovery.probes import probe_ashby
         assert probe_ashby("susteon") == (True, 2)
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):
-        from core.digest.locality import is_nc
-        from discovery.local_sourcing import _nc_count_ashby
+        from src.match.locality import is_nc
+        from src.discovery.local_sourcing import _nc_count_ashby
         # The fixture board has two jobs in NC. Skip the test if the active
         # profile's locality doesn't include NC — the test would correctly
         # return 0, so there's nothing to test.
@@ -665,12 +665,12 @@ class TestAshbyKeyAcrossCallSites:
         assert _nc_count_ashby("susteon") == 2
 
     def test_mission_scorer_gets_titles(self, ashby_board):
-        from discovery.local_sourcing import _sample_titles
+        from src.discovery.local_sourcing import _sample_titles
         titles = _sample_titles({"ats": "ashby", "slug": "susteon"})
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
     def test_company_fetcher_returns_postings(self, ashby_board):
-        from scrapers.fetchers.company import fetch_company
+        from src.ats.fetchers.company import fetch_company
         jobs = fetch_company({"ats": "ashby", "slug": "susteon"})
         assert [j["title"] for j in jobs] == ["Catalysis Scientist", "Lab Technician"]
         assert jobs[0]["location"] == "Morrisville, North Carolina"
@@ -686,7 +686,7 @@ class TestAshbyKeyAcrossCallSites:
             def json(self):
                 return {"jobPostings": [{"title": "Clinical Trial Liaison"}]}
 
-        from discovery import local_sourcing
+        from src.discovery import local_sourcing
         monkeypatch.setattr(local_sourcing.SESSION, "post", lambda *a, **k: _Resp())
         titles = local_sourcing._sample_titles(
             {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
@@ -801,7 +801,7 @@ class TestGetroAttribution:
                               "board": self.BOARD, "page_url": ""}}
 
     def test_links_to_the_roster_row_owning_the_board(self, db):
-        from core import store
+        from src import store
         cid = store.upsert_company(db, {"name": "Acme Analytics Inc",
                                         "ats": "greenhouse",
                                         "slug": "acmeanalytics", "active": 1})
@@ -811,7 +811,7 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_a_copy_the_roster_crawl_already_stored_is_dropped(self, db):
-        from core import store
+        from src import store
         cid = store.upsert_company(db, {"name": "Acme Analytics",
                                         "ats": "greenhouse",
                                         "slug": "acmeanalytics", "active": 1})
@@ -822,7 +822,7 @@ class TestGetroAttribution:
             db, [self._job("Acme Analytics", self.GH_URL)]) == []
 
     def test_a_pending_row_does_not_own_a_crawl_yet(self, db):
-        from core import store
+        from src import store
         cid = store.upsert_company(db, store.mark_pending(
             {"name": "Acme Analytics", "ats": "greenhouse",
              "slug": "acmeanalytics"}))
@@ -834,7 +834,7 @@ class TestGetroAttribution:
         assert job["company_id"] == cid
 
     def test_links_by_name_when_the_apply_link_names_no_ats(self, db):
-        from core import store
+        from src import store
         cid = store.upsert_company(db, {"name": "Orbit Health", "ats": "custom",
                                         "careers_url": "https://orbit.health/jobs",
                                         "active": 1})
@@ -844,8 +844,8 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_an_unknown_employer_is_queued_for_review(self, db):
-        import tags
-        from core import store
+        from src import tags
+        from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
                         slug="orbit-health", domain="orbit.health")
         assert getro.attribute_employers(db, [job]) == [job]
@@ -860,8 +860,8 @@ class TestGetroAttribution:
         assert not store.is_confirmed_company(db, "Orbit Health")
 
     def test_the_apply_link_supplies_the_candidates_board(self, db):
-        import tags
-        from core import store
+        from src import tags
+        from src import store
         getro.attribute_employers(
             db, [self._job("Acme Analytics", self.GH_URL, slug="acme-analytics")])
         (row,) = store.pending_companies(db)
@@ -870,7 +870,7 @@ class TestGetroAttribution:
         assert tags.has(row["tags"], tags.PENDING)
 
     def test_a_rejected_name_stays_rejected(self, db):
-        from core import store
+        from src import store
         store.block_name(db, "Bolt Logistics", "not a company")
         kept = getro.attribute_employers(
             db, [self._job("Bolt Logistics", "https://bolt.example/careers/3")])
@@ -878,7 +878,7 @@ class TestGetroAttribution:
         assert store.get_companies(db, active_only=False) == []
 
     def test_a_preview_run_writes_nothing(self, db):
-        from core import store
+        from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
         assert getro.attribute_employers(db, [job], commit=False) == [job]
         assert "company_id" not in job
@@ -991,7 +991,7 @@ class TestJobvite:
 
     def test_company_fetch_pays_only_for_in_region_pages(self, acme,
                                                          match_everything):
-        from scrapers.fetchers import company
+        from src.ats.fetchers import company
         jobs = company.fetch_company({"ats": "jobvite", "slug": "acme"},
                                      re.compile("Durham"))
         assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA", "jv_acme_oDdd4fwD"]
@@ -1002,8 +1002,8 @@ class TestJobvite:
             "https://jobs.jobvite.com/acme/job/oDdd4fwD"]
 
     def test_the_registry_and_the_dispatch_table_know_jobvite(self):
-        from scrapers.fetchers import company
-        from scrapers.sources import ATS_REGISTRY, LIGHTWEIGHT
+        from src.ats.fetchers import company
+        from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
         assert "jobvite" in ATS_REGISTRY and "jobvite" in LIGHTWEIGHT
         assert "jobvite" in company.FETCHERS
 
@@ -1017,21 +1017,21 @@ class TestOneFetcherPerAts:
     """
 
     def test_every_registered_ats_has_a_company_dispatch(self):
-        from scrapers.fetchers import company
-        from scrapers.sources import ATS_REGISTRY
+        from src.ats.fetchers import company
+        from src.ats.registry import ATS_REGISTRY
         assert set(ATS_REGISTRY) <= set(company.FETCHERS)
 
     def test_the_seed_tag_follows_lightweight(self):
-        import tags
-        from scrapers.sources import ATS_REGISTRY, LIGHTWEIGHT
+        from src import tags
+        from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
         for ats, (_mk, tag, _pause) in ATS_REGISTRY.items():
             assert tag == (tags.SWEEP if ats in LIGHTWEIGHT else tags.LOCAL), ats
 
     def test_the_dispatch_table_adapts_the_module_fetcher(self, fake_get,
                                                           match_everything):
-        from scrapers.fetchers import company
+        from src.ats.fetchers import company
         fake_get(load("greenhouse_board.json"))
-        module = ats_api.fetch_greenhouse("databricks", "Databricks")
+        module = api.fetch_greenhouse("databricks", "Databricks")
         vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
         assert [j["id"] for j in vetted] == [j["id"] for j in module]
         assert all(j["ats"] == "greenhouse" and j["_wd"] is None
@@ -1039,7 +1039,7 @@ class TestOneFetcherPerAts:
 
     def test_the_location_regex_filters_the_listing(self, fake_get,
                                                     match_everything):
-        from scrapers.fetchers import company
+        from src.ats.fetchers import company
         fake_get(load("greenhouse_board.json"))
         everything = company.fetch_company({"ats": "greenhouse", "slug": "x"})
         nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},

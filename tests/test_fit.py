@@ -1,8 +1,8 @@
 """Résumé-fit rubric and the Claude payload shape. No API calls: every
 assertion is about prompt construction, clipping, and arithmetic."""
 
-import core.claude.api as claude
-import core.claude.fit as fit
+import src.claude.api as claude
+import src.claude.fit as fit
 
 
 class TestClipping:

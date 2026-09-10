@@ -10,7 +10,7 @@ after the first.
 import pytest
 import requests
 
-import core.claude.api as claude
+import src.claude.api as claude
 
 
 class _Resp:
@@ -50,7 +50,7 @@ def api(monkeypatch):
             return responses.pop(0) if len(responses) > 1 else responses[0]
 
     monkeypatch.setattr(claude, "SESSION", _Session)
-    monkeypatch.setattr("config.ANTHROPIC_API_KEY", "test-key")
+    monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude, "_FATAL_MSG", None)
     monkeypatch.setattr(claude.time, "sleep", lambda s: None)
     return responses, calls
@@ -101,7 +101,7 @@ def test_persistent_500_gives_up_without_tripping(api):
 
 
 def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
-    """The web UI runs many operations in one process (webapp/ops._run_op).
+    """The web UI runs many operations in one process (src/ops/background._run_op).
     On 2026-09-09 a crawl tripped the breaker on an exhausted balance and the
     next two verify runs skipped every call silently — the banner prints once
     per trip. Re-arming per operation makes a topped-up balance take effect

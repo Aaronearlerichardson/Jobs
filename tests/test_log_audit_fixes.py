@@ -17,18 +17,18 @@ import re
 
 import requests
 
-import core.store as store
-from discovery import fetchpool, local_sourcing, paste_ingest
-from core.digest.names import junk_name_reason
-from scrapers import ops
-from scrapers.fetchers import workday as wd
+import src.store as store
+from src.discovery import fetchpool, local_sourcing, paste_ingest
+from src.match.names import junk_name_reason
+from src.ops import maintenance as ops
+from src.ats.fetchers import workday as wd
 
 
 # ─── Workday scope guard ─────────────────────────────────────────────────
 
 # The fixtures are North Carolina boards; the suite runs on whatever
 # profile is loaded, so the scope regex is spelled out rather than taken
-# from core.locality.
+# from src.match.locality.
 NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)
 
 

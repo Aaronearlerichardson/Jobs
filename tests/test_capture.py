@@ -9,12 +9,12 @@ from pathlib import Path
 import pytest
 
 import capture
-import config
-import core.claude.fit as fit
-import core.store as store
-import tags
-import scrapers.ops as ops
-from scrapers.page_capture import parse_page
+from src import config
+import src.claude.fit as fit
+import src.store as store
+from src import tags
+import src.ops.maintenance as ops
+from src.crawl.page_capture import parse_page
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -209,7 +209,7 @@ class TestAttribution:
         assert _row(roster, "Acme Neuro")["ats"] == store.CAPTURE_ATS
 
     def test_capture_only_registration_by_hand(self, roster):
-        from discovery.local_sourcing import add_board
+        from src.discovery.local_sourcing import add_board
         assert add_board("Acme Health", "https://jobs.acmehealth.org/", capture=True)
         row = _row(roster, "Acme Health")
         assert row["ats"] == store.CAPTURE_ATS and row["active"] == 1

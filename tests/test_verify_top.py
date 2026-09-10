@@ -10,9 +10,9 @@ the whole top N (the "re-verify all" tick box in the web UI).
 Offline: the verifier and the live-JD fetch are stubbed.
 """
 
-from core import store
-from core.claude import fit
-from scrapers import ops
+from src import store
+from src.claude import fit
+from src.ops import maintenance as ops
 
 
 def _use_model(monkeypatch, name):
@@ -130,11 +130,11 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
 class TestWebOpPassesTheTickBox:
     def test_verify_op_forwards_force(self, monkeypatch):
-        from webapp import ops as web_ops
+        from src.ops import background as web_ops
         seen = {}
-        # The registry resolves "scrapers.ops:verify_top_cli" at call time,
+        # The registry resolves "src.ops.maintenance:verify_top_cli" at call time,
         # so patching the target module is enough.
-        monkeypatch.setattr("scrapers.ops.verify_top_cli",
+        monkeypatch.setattr("src.ops.maintenance.verify_top_cli",
                             lambda **kw: seen.update(kw))
         web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
         assert seen["force"] is True and seen["top_n"] == 5
@@ -143,7 +143,7 @@ class TestWebOpPassesTheTickBox:
 
 
 class TestVerifyTopStopsWhenTheApiIsDisabled:
-    """A tripped breaker (core.claude) used to leak through as 121 '[?] kept
+    """A tripped breaker (src.claude) used to leak through as 121 '[?] kept
     ... unverified' lines per round, two rounds, every row's live JD fetched
     for nothing (2026-09-09, twice). Now: one line, no fetches, no round 2."""
 
@@ -158,7 +158,7 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     def test_tripped_before_the_pass_skips_it_in_one_line(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from core.claude import api
+        from src.claude import api
         t = self._track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
@@ -177,7 +177,7 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     def test_tripping_mid_round_halts_without_fetching_the_rest(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from core.claude import api
+        from src.claude import api
         t = self._track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")

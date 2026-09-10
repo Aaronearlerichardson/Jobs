@@ -19,22 +19,20 @@ from pathlib import Path
 
 import pytest
 
-import config
-from core.claude.api import ACTIVE_MISSION_TIERS, is_active_mission
+from src import config
+from src.claude.api import ACTIVE_MISSION_TIERS, is_active_mission
 
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Directories scanned by the source-level guards, plus root-level modules.
-SOURCE_DIRS = ("config", "core", "scrapers", "discovery", "webapp", "tools")
+SOURCE_DIRS = ("src", "tools")
 
 #: Root-level modules pytest cannot doctest-collect, with the reason. Kept
 #: here so `test_pytest_ini_covers_every_source_module` stays honest instead
 #: of quietly shrinking its own scope.
-UNCOLLECTABLE_ROOT_MODULES = {
-    # `webapp/` (the package) owns the name `webapp`, so pytest raises an
-    # import-file-mismatch on the launcher. It is a launcher, not logic.
-    "webapp.py",
-}
+#: Empty since the package tree moved under src/: nothing at the root
+#: shadows a package name any more, so every launcher is collectable.
+UNCOLLECTABLE_ROOT_MODULES = set()
 
 
 def source_files():
@@ -123,21 +121,21 @@ class TestActivationRule:
         """
         name = multi_division if multi else "Nowhere Robotics"
         old_rules = [
-            # discovery/ats_dork.py:138 (harvest_urls), post-fix
+            # src/ats/dork.py:138 (harvest_urls), post-fix
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
                                or config.is_multi_division(n)) else 0,
-            # discovery/local_sourcing.py:640 (populate_companies), with
+            # src/discovery/local_sourcing.py:640 (populate_companies), with
             # include_missions defaulted to ACTIVE_MISSION_TIERS by the caller
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
                                or config.is_multi_division(n)) else 0,
-            # discovery/local_sourcing.py:1114 (resolve_leads)
+            # src/discovery/local_sourcing.py:1114 (resolve_leads)
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS
                                or config.is_multi_division(n)
                                or t is None) else 0,
-            # discovery/local_sourcing.py:1387 (add_names)
+            # src/discovery/local_sourcing.py:1387 (add_names)
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
                                or config.is_multi_division(n)) else 0,
-            # scrapers/ops.py:697 (add_manual_job)
+            # src/ops/maintenance.py:697 (add_manual_job)
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS
                                or config.is_multi_division(n) or t is None) else 0,
         ]
@@ -152,7 +150,7 @@ class TestActivationRule:
 
 #: (module, function) pairs allowed to spell the activation rule out.
 #:
-#: `core.claude.is_active_mission` is the rule.
+#: `src.claude.is_active_mission` is the rule.
 #:
 #: `local_sourcing.score_missions` (its per-row consumer, `_scored`) is
 #: the REACTIVATION half and is
@@ -163,8 +161,8 @@ class TestActivationRule:
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
 RULE_SITES_ALLOWED = {
-    ("core/claude/api.py", "is_active_mission"),
-    ("discovery/local_sourcing.py", "_scored"),
+    ("src/claude/api.py", "is_active_mission"),
+    ("src/discovery/local_sourcing.py", "_scored"),
 }
 
 #: Names that, compared against with `in`, mean "this is the activation rule".
@@ -232,7 +230,7 @@ def test_activation_rule_is_not_re_implemented():
     unexpected = found - RULE_SITES_ALLOWED
     assert not unexpected, (
         "the company-activation rule is spelled out inline at "
-        f"{sorted(unexpected)}. Call core.claude.is_active_mission instead, "
+        f"{sorted(unexpected)}. Call src.claude.is_active_mission instead, "
         "or add the site to RULE_SITES_ALLOWED with a written reason.")
 
 

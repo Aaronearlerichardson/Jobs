@@ -18,10 +18,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:                      # importable as `pytest tests`
     sys.path.insert(0, str(ROOT))
 
-import config as _config                           # noqa: E402
-import core.session_log as _session_log            # noqa: E402
-import core.store as _store                        # noqa: E402
-import scrapers.runner as _runner                  # noqa: E402
+from src import config as _config                           # noqa: E402
+import src.session_log as _session_log            # noqa: E402
+import src.store as _store                        # noqa: E402
+import src.crawl.runner as _runner                  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -66,7 +66,7 @@ def local_addr(cfg):
 @pytest.fixture(scope="session")
 def elsewhere():
     """Somewhere no sane profile calls local — verified, not assumed."""
-    import core.digest.locality as locality
+    import src.match.locality as locality
     for place in ("Ulaanbaatar, Mongolia", "Reykjavik, Iceland",
                   "Hobart, Tasmania"):
         if not locality.is_nc(place):
@@ -145,6 +145,6 @@ def status_of(db):
 @pytest.fixture(scope="session")
 def client():
     """Flask test client — exercises the real routes with no socket."""
-    import webapp
-    webapp.app.config["TESTING"] = True
-    return webapp.app.test_client()
+    from src import web
+    web.app.config["TESTING"] = True
+    return web.app.test_client()

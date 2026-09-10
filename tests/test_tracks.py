@@ -3,10 +3,10 @@ keyword focus, and source assembly through the one crawl pipeline."""
 
 from datetime import datetime, timedelta
 
-import core.store as store
-import scrapers.ops as ops
-import scrapers.runner as runner
-import tags
+import src.store as store
+import src.ops.maintenance as ops
+import src.crawl.runner as runner
+from src import tags
 
 
 class TestTrackConfig:

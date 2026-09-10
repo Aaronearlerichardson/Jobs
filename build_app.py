@@ -10,7 +10,7 @@ harvester is `JobHarvester.exe` / `job-harvester`) —
 self-contained (bundled CPython + Flask + the crawler packages + lxml),
 copy it anywhere and run; no Python or pip needed on the target.
 
-Data resolution at RUNTIME (config/paths.py): JOBS_DATA_DIR if set; else a `data`
+Data resolution at RUNTIME (src/config/paths.py): JOBS_DATA_DIR if set; else a `data`
 folder beside the binary, or beside its parent when the dist folder still
 sits inside the checkout (so a build never spawns a second empty store next
 to the project's real one); else the legacy flat layout; else the per-user
@@ -84,16 +84,15 @@ OUTPUT_NAME = output_name()
 
 # Data files the app reads at runtime but Nuitka can't infer from imports.
 DATA_FILES = [
-    ("webapp/templates/index.html", "webapp/templates/index.html"),
+    ("src/web/templates/index.html", "src/web/templates/index.html"),
     ("profile.example.toml", "profile.example.toml"),
 ]
-DATA_DIRS = [("webapp/static", "webapp/static")]
+DATA_DIRS = [("src/web/static", "src/web/static")]
 # `ddgs` is listed explicitly even though it is only imported inside a function:
 # it loads its search-engine backends by walking its own package directory at
 # runtime, so following the import alone leaves the compiled build with the
 # package but none of the engines, and every dork query dies on KeyError('text').
-PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright",
-            "fake_useragent"]
+PACKAGES = ["src", "ddgs", "playwright", "fake_useragent"]
 
 # Packages whose non-Python files must ship too. playwright/driver/ holds the
 # node runtime and cli.js that sync_playwright() execs; playwright locates it
@@ -110,13 +109,13 @@ PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright",
 DATA_PACKAGES = ["playwright", "fake_useragent"]
 
 # The harvester never serves the UI, runs a dork sweep, or probes a JS-only
-# board: it imports core + scrapers and nothing else at module level, and
-# the only paths that reach playwright/ddgs are lazy, guarded imports in
-# discovery that a whole-board pull does not take. Not following these at
+# board: it imports src.store, src.crawl and src.ats and nothing else at
+# module level, and the only paths that reach playwright/ddgs are lazy,
+# guarded imports in src/discovery that a whole-board pull does not take. Not following these at
 # all is what makes the difference -- Nuitka would otherwise compile every
 # module it can see through those lazy imports and ship the ~100 MB driver.
 # Roughly a third of the C files and three quarters of the payload.
-HARVEST_SKIP = ["webapp", "flask", "werkzeug", "jinja2", "playwright",
+HARVEST_SKIP = ["src.web", "flask", "werkzeug", "jinja2", "playwright",
                 "ddgs", "fake_useragent", "primp"]
 
 
@@ -134,10 +133,10 @@ def build_command(name=None):
         # session log either way.
         cmd.append("--windows-console-mode=attach")
     if name == "harvest":
-        cmd += ["--include-package=core", "--include-package=scrapers"]
+        cmd += ["--include-package=src"]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_SKIP]
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
-                if not src.startswith("webapp/")]
+                if not src.startswith("src/web/")]
     else:
         cmd += [f"--include-package={p}" for p in PACKAGES]
         cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]

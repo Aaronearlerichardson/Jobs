@@ -13,11 +13,11 @@ from types import SimpleNamespace
 
 import pytest
 
-import config
+from src import config
 import discover
 import run_scraper
-from core.ops import registry
-from core.ops.registry import OMIT, Param, build_kwargs
+from src.ops import registry
+from src.ops.registry import OMIT, Param, build_kwargs
 
 
 class TestTable:
@@ -67,7 +67,7 @@ class TestTable:
 class TestInvoke:
     def test_resolves_the_track_from_params_or_the_default(self, monkeypatch):
         seen = {}
-        monkeypatch.setattr("scrapers.ops.sync_status_all",
+        monkeypatch.setattr("src.ops.maintenance.sync_status_all",
                             lambda **kw: seen.update(kw))
         registry.invoke("sync", {"top": "7"})
         assert seen == {"top_n": 7, "t": config.UI_TRACKS[config.DEFAULT_TRACK]}
@@ -78,7 +78,7 @@ class TestInvoke:
         """Targets are looked up when invoked, not captured at import, so
         tests (and reloads) see the current function."""
         calls = []
-        monkeypatch.setattr("core.ops.targets.dedup", lambda **kw: calls.append(kw))
+        monkeypatch.setattr("src.ops.roster.dedup", lambda **kw: calls.append(kw))
         registry.invoke("dedup", {}, track=None)
         assert calls == [{"t": None}]
 
@@ -107,18 +107,18 @@ class TestParamCoercion:
 
 class TestWebView:
     def test_ops_is_the_ui_subset_with_the_legacy_shape(self):
-        import webapp
-        assert set(webapp.OPS) == set(registry.ui_ops())
-        for name, o in webapp.OPS.items():
+        from src import web
+        assert set(web.OPS) == set(registry.ui_ops())
+        for name, o in web.OPS.items():
             assert set(o) == {"label", "engine", "fn"}, name
             assert o["label"] == registry.REGISTRY[name]["label"]
 
     def test_fn_runs_the_registry_with_the_posted_params(self, monkeypatch):
-        import webapp
+        from src import web
         seen = {}
-        monkeypatch.setattr("scrapers.ops.check_closed_jobs",
+        monkeypatch.setattr("src.ops.maintenance.check_closed_jobs",
                             lambda **kw: seen.update(kw))
-        webapp.OPS["check-closed"]["fn"]({"stale_days": "3", "limit": "",
+        web.OPS["check-closed"]["fn"]({"stale_days": "3", "limit": "",
                                           "track": config.DEFAULT_TRACK})
         assert seen["stale_days"] == 3 and seen["limit"] is None
         assert seen["t"]["id"] == config.DEFAULT_TRACK

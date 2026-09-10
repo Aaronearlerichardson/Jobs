@@ -3,15 +3,13 @@
 
     python webapp.py            ->  http://127.0.0.1:5533
 
-The application lives in the webapp/ package (routes.py, ops.py, server.py,
-templates/, static/); this file only starts it. When both this module and
-the package share the name, `import webapp` resolves to the package — this
-script runs as __main__, so there is no collision.
+The application lives in src/web/ (routes.py, server.py, templates/,
+static/) and its operations in src/ops/; this file only starts it.
 """
 
 import sys
 
-from webapp.server import main
+from src.web.server import main
 
 if __name__ == "__main__":
     try:

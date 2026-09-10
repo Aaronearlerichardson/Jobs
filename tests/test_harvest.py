@@ -4,9 +4,9 @@ file with the crawl and the web UI."""
 import sqlite3
 import threading
 
-from core import store
-from core.digest import gates
-from scrapers import harvest
+from src import store
+from src.match import gates
+from src.crawl import harvest
 
 
 def _company(conn, name, ats="greenhouse", **extra):
@@ -314,8 +314,9 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     """The end-to-end contract: a harvested row (no track) is scored by the
     next crawl, and the crawl reuses the stored description instead of
     re-hydrating."""
-    import config
-    from scrapers import ops, runner
+    from src import config
+    from src.crawl import runner
+    from src.ops import maintenance as ops
     monkeypatch.setattr(config, "REPORT_DIR", tmp_path)
     db = tmp_path / "s.db"
     conn = store.connect(db)

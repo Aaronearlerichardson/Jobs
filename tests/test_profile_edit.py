@@ -1,4 +1,4 @@
-"""profile.toml editing (core/profile_edit.py) — validation, comment-
+"""profile.toml editing (src/config/profile_edit.py) — validation, comment-
 preserving updates, and the backup-then-atomic-write the Settings tab
 relies on. Writes are redirected to tmp_path; the real profile is never
 touched."""
@@ -7,7 +7,7 @@ import tomllib
 
 import pytest
 
-from core import profile_edit
+from src.config import profile_edit
 
 
 @pytest.fixture
@@ -19,7 +19,7 @@ def raw():
 @pytest.fixture
 def sandbox(tmp_path, monkeypatch, raw):
     """A throwaway copy of the profile that write tests may clobber."""
-    import config
+    from src import config
     target = tmp_path / "profile.toml"
     target.write_text(raw, encoding="utf-8")
     monkeypatch.setattr(config, "PROFILE_PATH", target)

@@ -1,9 +1,9 @@
-"""Posting gates (core/gates.py): the exclude tables and the technical-title
+"""Posting gates (src/match/gates.py): the exclude tables and the technical-title
 regex, both resolved per track from configuration rather than code."""
 
 import pytest
 
-import core.digest.gates as gates
+import src.match.gates as gates
 
 
 @pytest.fixture

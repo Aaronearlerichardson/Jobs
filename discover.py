@@ -14,14 +14,14 @@ Usage:
     python discover.py --local          # employers in your [locality]
 
 Every flag except --from-bciwiki is the CLI spelling of an operation in
-core/ops/registry.py, the same table the web UI's roster buttons run from.
+src/ops/registry.py, the same table the web UI's roster buttons run from.
 """
 
 import argparse
 import sys
 
-import config
-from core.ops import registry
+from src import config
+from src.ops import registry
 
 
 def _op(name, params):
@@ -42,7 +42,7 @@ def _cmd_from_bciwiki(args):
     """A worked example of bulk-importing a public industry directory: the
     BCIWiki company list, resolved to crawlable boards. Not a registry op —
     it is directory-specific and only useful if that is your field."""
-    from discovery import (apply_to_store, bciwiki_seed_candidates,
+    from src.discovery import (apply_to_store, bciwiki_seed_candidates,
                            discover_companies, print_summary,
                            write_discovery_report)
     cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
@@ -145,7 +145,7 @@ def main():
 
     args = ap.parse_args()
 
-    from core import bootstrap
+    from src.config import bootstrap
     bootstrap.ensure_profile()
 
     for dest, handler in _COMMANDS:

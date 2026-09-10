@@ -12,7 +12,7 @@ Tracks come from your profile's [tracks.*] tables — the ids are whatever you
 named them, and a track's jobs.track value works too. The old crawler.py
 forwards here, so scheduled tasks keep working.
 
-Most flags are the CLI spelling of an operation in core/registry.py —
+Most flags are the CLI spelling of an operation in src/ops/registry.py —
 the same table the web UI's buttons run from — so a flag and a button pass
 the same parameters to the same function. The few commands below that are
 not registry ops (watch, mark, pipeline, export/import, score) are store
@@ -22,8 +22,8 @@ queries and edits with their own positional arguments.
 import argparse
 import sys
 
-import config
-from core.ops import registry
+from src import config
+from src.ops import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -53,12 +53,12 @@ def _op(name, params):
 
 
 def _store(t):
-    from core import store
+    from src import store
     return store.connect(t["db_path"] if t else None)
 
 
 def _cmd_watch(args, t):
-    from core import store
+    from src import store
     name = args.watch or args.unwatch
     conn = _store(t)
     tags = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
@@ -72,7 +72,7 @@ def _cmd_watch(args, t):
 
 
 def _cmd_mark(args, t):
-    from core import store
+    from src import store
     disp, ref = args.mark
     conn = _store(t)
     row, err = store.set_disposition(conn, ref, disp, note=args.why)
@@ -89,7 +89,7 @@ def _cmd_mark(args, t):
 
 
 def _cmd_pipeline(args, t):
-    from core import store
+    from src import store
     conn = _store(t)
     rows = store.get_pipeline(conn)
     conn.close()
@@ -105,7 +105,7 @@ def _cmd_pipeline(args, t):
 
 
 def _cmd_companies_io(args, t):
-    from core import store
+    from src import store
     conn = _store(t)
     if args.export_companies:
         n = store.export_companies(conn, args.export_companies)
@@ -117,7 +117,7 @@ def _cmd_companies_io(args, t):
 
 
 def _cmd_score(args, t):
-    from core.claude import score_technical_bar
+    from src.claude import score_technical_bar
     score, reason, mission = score_technical_bar(args.score)
     if score is None:
         print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
@@ -202,7 +202,7 @@ def main(argv=None):
     ap.add_argument("--stale-days", type=int, default=2)
     ap.add_argument("--triage", action="store_true",
                     help="Gate, hydrate and score the harvester's pending "
-                         "rows (scrapers/triage.py); --limit caps rows, "
+                         "rows (src/crawl/triage.py); --limit caps rows, "
                          "--score-cap caps fit calls")
     ap.add_argument("--score-cap", type=int, default=None, metavar="N",
                     help="With --triage: Claude fit calls this pass")
@@ -259,10 +259,10 @@ def main(argv=None):
                          "data, then exit")
     args = ap.parse_args(argv)
 
-    from core import session_log
+    from src import session_log
     session_log.start(list(argv) if argv is not None else sys.argv[1:])
 
-    from core import bootstrap
+    from src.config import bootstrap
     bootstrap.ensure_profile()
     if args.where:
         for line in bootstrap.status_lines():

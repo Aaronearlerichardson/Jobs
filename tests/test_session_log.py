@@ -1,7 +1,7 @@
 """Session logs: timestamped, levelled records of everything a run prints,
 plus a file-only DEBUG channel for detail that is logged but never printed.
 
-The conftest autouse fixture points core.session_log._log_dir at
+The conftest autouse fixture points src.session_log._log_dir at
 tmp_path/"session-logs" for every test, so nothing here (or anywhere in the
 suite) writes into the real data dir.
 """
@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import datetime
 
-import core.session_log as session_log
+import src.session_log as session_log
 
 # One mirrored console record: "2026-08-28 09:30:00 LEVEL    console | msg"
 _STAMP = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}"
@@ -102,7 +102,7 @@ class TestStartFinish:
             "reuse idle connection")
         logging.getLogger("h2.codec.framed_write").debug("send frame=Headers")
         logging.getLogger("hyper_util.anything").info("third-party info line")
-        logging.getLogger("scrapers.fetchers.workday").debug("app debug line")
+        logging.getLogger("src.ats.fetchers.workday").debug("app debug line")
         session_log.finish()
         text = path.read_text(encoding="utf-8")
         assert "reuse idle connection" not in text
@@ -179,7 +179,7 @@ class TestRetention:
 
 class TestWebappOps:
     def test_ui_op_output_lands_as_levelled_records(self, tmp_path):
-        from webapp import ops
+        from src.ops import background as ops
 
         def _op():
             print("probe-line")

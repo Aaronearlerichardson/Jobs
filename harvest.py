@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Background whole-board harvester (see scrapers/harvest.py).
+"""Background whole-board harvester (see src/crawl/harvest.py).
 
     python harvest.py                       # a pass now, then one every 12 h
     python harvest.py --every 8             # ... every 8 h instead
@@ -19,7 +19,7 @@ its deadline -- and the deadline is wall-clock, so a laptop that slept
 through it runs the pass as soon as it wakes. Each pass pulls every board
 with a fetchable ATS that has not been harvested in the last
 --min-age-hours and stores every posting unscored, then runs the triage
-pass (scrapers/triage.py): the crawl's gates cheapest-first, bodies only
+pass (src/crawl/triage.py): the crawl's gates cheapest-first, bodies only
 for survivors, one Claude fit call only for each hydrated survivor, capped
 per pass. A second copy started while one is running exits at once (lock
 file in the data directory). Each pass gets its own session log
@@ -34,7 +34,7 @@ import time
 import traceback
 from datetime import datetime
 
-import config
+from src import config
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -148,12 +148,12 @@ def main(argv=None):
                          "(run it later with run_scraper.py --triage)")
     ap.add_argument("--score-cap", type=int, default=None, metavar="N",
                     help="Claude fit calls per pass (default 300, "
-                         "scrapers.triage.SCORE_CAP)")
+                         "src.crawl.triage.SCORE_CAP)")
     ap.add_argument("--db", help="Store path (default: the data dir's jobs.db)")
     args = ap.parse_args(argv)
 
-    from core import session_log
-    from scrapers import harvest
+    from src import session_log
+    from src.crawl import harvest
 
     only = ({s.strip() for s in args.only.split(",") if s.strip()}
             if args.only else None)
@@ -161,7 +161,7 @@ def main(argv=None):
                else args.min_age_hours)
 
     if args.list:
-        from core import store
+        from src import store
         conn = store.connect(args.db)
         boards = harvest.plan(conn, only=only, names=args.names,
                               min_age_hours=min_age, limit=args.limit)

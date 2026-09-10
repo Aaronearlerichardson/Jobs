@@ -1,14 +1,14 @@
-"""Harvest triage (scrapers/triage.py): the harvester's unscored rows go
+"""Harvest triage (src/crawl/triage.py): the harvester's unscored rows go
 through the crawl's gates cheapest-first, and only survivors pay for a
 body fetch or a fit score. Offline: the mission scorer, the hydrator and
 the fit scorer are all stubbed."""
 
 import pytest
 
-import tags
-from core import store
-from core.claude.fit import FitResult
-from scrapers import harvest, triage
+from src import tags
+from src import store
+from src.claude.fit import FitResult
+from src.crawl import harvest, triage
 
 LOCAL = "local-tech"
 SWEEP = "remote-neural"
@@ -183,7 +183,7 @@ def test_mission_gate_scores_a_company_once_and_caches_it(tmp_path, tracks,
 
 def test_multi_division_company_waits_for_the_body(tmp_path, tracks, stubs,
                                                    local_addr, monkeypatch):
-    import config
+    from src import config
     monkeypatch.setattr(config, "is_multi_division",
                         lambda name: (name or "").lower() == "megacorp")
     monkeypatch.setattr(triage, "is_relevant",

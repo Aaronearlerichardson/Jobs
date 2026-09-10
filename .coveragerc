@@ -1,5 +1,5 @@
 [run]
-source = config, core, scrapers, discovery, webapp
+source = src
 branch = True
 omit =
     */__pycache__/*

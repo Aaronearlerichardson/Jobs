@@ -1,4 +1,4 @@
-"""Environment handling in config/secrets.py (reached as `config.env`).
+"""Environment handling in src/config/secrets.py (reached as `config.env`).
 
 A variable that EXISTS but is blank must read as unset. `os.environ.get`
 doesn't do that — it returns "" — which made an exported-but-empty
@@ -7,7 +7,7 @@ configured key: every `!= "YOUR_ANTHROPIC_API_KEY_HERE"` check flipped
 true, so the scorers authenticated with nothing instead of falling back.
 """
 
-import config
+from src import config
 
 
 class TestEnvHelper:

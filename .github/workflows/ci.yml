@@ -77,7 +77,7 @@ jobs:
       - name: Validate the example profile
         run: |
           python -c "
-          from core import profile_edit
+          from src.config import profile_edit
           raw, src = profile_edit.read_raw()
           errs = profile_edit.validate(raw)
           print('validating', src)
@@ -98,13 +98,11 @@ jobs:
         # docs/DOCSTRINGS.md for the rule these enforce.
         #
         # Paths are given explicitly (they override testpaths) so tests/ is
-        # excluded and the number printed is doctests only. Root webapp.py is
-        # omitted: the webapp/ package owns that module name, so collecting
-        # both is an import-file-mismatch error.
+        # excluded and the number printed is doctests only.
         run: |
-          SRC="core scrapers discovery webapp tools"
-          MODS="build_app.py capture.py config.py crawler.py discover.py"
-          MODS="$MODS run_scraper.py smoke_test.py"
+          SRC="src tools"
+          MODS="build_app.py capture.py crawler.py discover.py harvest.py"
+          MODS="$MODS run_scraper.py smoke_test.py webapp.py"
           # -o addopts=-q replaces pytest.ini's addopts rather than adding
           # to it: a second -q would make pytest -qq and swallow the very
           # "N passed" line this step greps for.

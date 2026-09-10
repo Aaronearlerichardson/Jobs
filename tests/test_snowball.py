@@ -5,13 +5,13 @@ Fixture postings below are written in realistic biotech/health-tech
 job-posting prose -- partnership/investor/acquisition language plus the
 standard EEO/benefits/aggregator boilerplate every real posting carries --
 so the precision assertions pin against the actual failure modes this
-module exists to avoid (see discovery/paste_ingest.py, whose permissive
+module exists to avoid (see src/discovery/paste_ingest.py, whose permissive
 parser let "Home"/"My Network"/"Create cover letter"
 through), not toy strings.
 """
 
 import tools.snowball as sb
-from core.store import connect, upsert_company, upsert_job
+from src.store import connect, upsert_company, upsert_job
 
 # --------------------------------------------------------------------------- #
 #  Realistic fixture descriptions                                             #
@@ -289,7 +289,7 @@ def test_cli_main_runs_against_fixture_db(tmp_path, monkeypatch, capsys):
     _seed_store(conn, [DESC_IRIS, DESC_MERGER], "Acme Health Analytics")
     conn.close()
 
-    import config
+    from src import config
     monkeypatch.setattr(config, "STORE_DB_PATH", str(db_path))
     monkeypatch.setattr("sys.argv", ["snowball.py", "--min-mentions", "1"])
     sb.main()
