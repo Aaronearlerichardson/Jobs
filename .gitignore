@@ -21,6 +21,10 @@ webapp.build/
 webapp.dist/
 webapp.onefile-build/
 JobCrawlerUI.exe
+harvest.build/
+harvest.dist/
+harvest.onefile-build/
+JobHarvester.exe
 job-crawler-ui
 job-crawler-linux
 job-crawler-macos

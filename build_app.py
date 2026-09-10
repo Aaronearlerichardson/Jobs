@@ -39,6 +39,14 @@ a machine with neither degrades gracefully, as before.
 
 The first build downloads a C compiler if none is found and can take
 10-30 minutes; rebuilds are much faster.
+
+Run it with the conda environment ACTIVATED (build_exe.bat does this; from
+a bare shell use `conda activate jobs` first, not just the env's python.exe
+by path). Nuitka finds the DLLs the extension modules need by walking PATH,
+and conda keeps them in <env>/Library/bin: built without that on PATH the
+binary compiles cleanly and then dies on `import sqlite3` with
+"LoadLibraryExW '_sqlite3.pyd' failed" because sqlite3.dll (and libssl,
+libcrypto, ...) never made it in (JobHarvester.exe, 2026-09-10).
 """
 
 import subprocess
