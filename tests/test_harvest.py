@@ -4,7 +4,6 @@ file with the crawl and the web UI."""
 import sqlite3
 import threading
 
-
 from core import store
 from core.digest import gates
 from scrapers import harvest
@@ -168,9 +167,31 @@ def test_harvest_board_fetch_error_leaves_store_alone(tmp_path, monkeypatch):
         raise RuntimeError("503")
     monkeypatch.setattr(harvest, "fetch_whole_board", boom)
     stats = harvest.harvest_board(c, db, delay=0)
-    assert stats["err"] == "RuntimeError: 503" and stats["fetched"] == 0
+    assert stats["err"] == "fetch: RuntimeError: 503" and stats["fetched"] == 0
     assert conn.execute("SELECT status FROM jobs").fetchone()[0] == "open"
     assert store.get_company(conn, c["id"])["last_harvested_at"] is None
+
+
+def test_harvest_board_store_error_is_not_reported_as_a_fetch_error(
+        tmp_path, monkeypatch):
+    """A write that fails -- "database is locked" is the one that happens --
+    must say so. Reported as a fetch error (the 2026-09-10 logs), a store
+    that could not take the write lock reads as 200 unreachable boards, and
+    the real cause (an unindexed full scan inside the write transaction)
+    stays invisible."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    monkeypatch.setattr(harvest, "fetch_whole_board",
+                        lambda comp: [{"id": "gh_acme_1", "title": "T",
+                                       "url": "u", "location": "Durham, NC"}])
+
+    def locked(_path):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(harvest.store, "connect", locked)
+    stats = harvest.harvest_board(c, db, delay=0)
+    assert stats["err"] == "store: OperationalError: database is locked"
+    assert stats["fetched"] == 1, "the board WAS fetched; only the write failed"
 
 
 def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(

@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS name_blocklist (
 _INDEXES = """
 CREATE INDEX IF NOT EXISTS ix_jobs_company ON jobs(company_id);
 CREATE INDEX IF NOT EXISTS ix_jobs_track   ON jobs(track);
+-- upsert_job probes `url` for every NEW row (the re-key path that catches a
+-- posting arriving under a changed id scheme). Unindexed, that probe was a
+-- full scan of a table whose rows carry whole job descriptions: 0.23s each
+-- on a 240 MB store, INSIDE the batch transaction. A 183-job board therefore
+-- held the single write lock for ~40s, and every other writer -- the other
+-- harvest threads, and the web UI's own edits -- timed out against
+-- BUSY_TIMEOUT_S with "database is locked" (2026-09-10 harvest logs).
+CREATE INDEX IF NOT EXISTS ix_jobs_url     ON jobs(url);
+-- triage_pending selects the harvester's unjudged rows on this column.
+CREATE INDEX IF NOT EXISTS ix_jobs_triage  ON jobs(triage_status);
 """
 
 # Columns added after a table's first release: additive, idempotent

@@ -22,6 +22,25 @@ class TestSchema:
         # A second connect() over the same schema must not raise.
         store._ensure_columns(db)
 
+    def test_url_lookup_is_indexed(self, db):
+        """upsert_job probes `url` for every NEW row. Unindexed, that probe
+        is a full scan of a table whose rows carry whole job descriptions
+        (0.23s each on the 240 MB live store), and it runs INSIDE the batch
+        transaction -- so one 183-job board held the single write lock for
+        ~40s and every other writer, the web UI included, died against
+        BUSY_TIMEOUT_S with "database is locked" (2026-09-10 harvest logs).
+        """
+        plan = " ".join(str(r[3]) for r in db.execute(
+            "EXPLAIN QUERY PLAN SELECT job_id, title FROM jobs WHERE url=?",
+            ("x",)))
+        assert "SCAN" not in plan, f"unindexed url probe: {plan}"
+        assert "ix_jobs_url" in plan, plan
+
+    def test_triage_pending_is_indexed(self, db):
+        """The harvester's unjudged rows are selected on triage_status."""
+        names = {r[1] for r in db.execute("PRAGMA index_list(jobs)")}
+        assert "ix_jobs_triage" in names
+
 
 class TestCompanies:
     def test_tags_merge_on_upsert(self, db):

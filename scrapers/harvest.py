@@ -218,12 +218,30 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     try:
         jobs = fetch_whole_board(company) or []
     except Exception as e:                      # noqa: BLE001 - reported
-        stats["err"] = f"{type(e).__name__}: {e}"
+        stats["err"] = f"fetch: {type(e).__name__}: {e}"
         stats["secs"] = time.monotonic() - t0
         return stats
     progress()
     stats["fetched"] = len(jobs)
 
+    try:
+        _store_board(db_path, jobs, company, stats, progress,
+                     hydrate, delay, backoff_s, now)
+    except Exception as e:                      # noqa: BLE001 - reported
+        # A store failure is NOT a fetch error, and calling it one hid this
+        # bug for a day: every "database is locked" reads as an unreachable
+        # board in the 2026-09-10 logs. The board's postings are simply not
+        # written; the next pass re-fetches them.
+        stats["err"] = f"store: {type(e).__name__}: {e}"
+    stats["secs"] = time.monotonic() - t0
+    return stats
+
+
+def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
+                 backoff_s, now):
+    """Hydrate (optionally) and write one board's snapshot. The write itself
+    is ONE transaction (store.batch), which is the whole point: a board is
+    one lock acquisition, not one per posting."""
     conn = store.connect(db_path)
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are
@@ -253,8 +271,6 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
                 store.mark_harvested(conn, company["id"], len(jobs))
     finally:
         conn.close()
-    stats["secs"] = time.monotonic() - t0
-    return stats
 
 
 def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
@@ -357,7 +373,7 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     def _report(c, s):
         done_n[0] += 1
         if s["err"]:
-            status = f"fetch error: {s['err']}"
+            status = s["err"]
         else:
             status = (f"{s['fetched']} job(s), {s['new']} new, "
                       f"{s['hydrated']} hydrated"
@@ -419,7 +435,7 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     skipped = summary["boards"] - summary["ok"] - summary["err"] \
         - summary["stalled"]
     print(f"\n{bar}\n  HARVEST SUMMARY")
-    print(f"  boards: {summary['ok']} ok, {summary['err']} fetch errors, "
+    print(f"  boards: {summary['ok']} ok, {summary['err']} failed, "
           f"{summary['stalled']} abandoned"
           + (f", {skipped} not started" if skipped > 0 else ""))
     print(f"  jobs:   {summary['fetched']} fetched, {summary['new']} new, "
