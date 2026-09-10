@@ -127,6 +127,17 @@ def build_command(name=None):
     cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
     cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]
     cmd += [f"--include-data-dir={src}={dst}" for src, dst in DATA_DIRS]
+    # Any other --flag on our command line is Nuitka's (e.g.
+    # --force-dll-dependency-cache-update after a build that ran without
+    # the env on PATH cached "no DLL dependencies" for the extension
+    # modules, and every later build inherited the gap).
+    skip = {"--check"}
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a in skip or a == "--target" or a.startswith("--target=")                 or (i and argv[i - 1] == "--target"):
+            continue
+        if a.startswith("--"):
+            cmd.append(a)
     return cmd
 
 
