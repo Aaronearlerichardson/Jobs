@@ -16,7 +16,7 @@ The stages, and where each lives:
      classify_miss).
   3. Verify the board has jobs in your [locality], or the company an office
      there (nc_hq_signal); mission-score it; write it to the store as a
-     review candidate (core.store.mark_pending), or record the miss.
+     review candidate (score_and_upsert), or record the miss.
 
 Entry points: populate_companies (the bulk pass), add_board (a URL the user
 already knows), resolve_leads (leads banked by capture.py), score_missions
@@ -542,6 +542,88 @@ def _report_dup_board(name, existing):
           f"as '{existing.get('name')}' - already tracked, not added")
 
 
+def _score_hit(hit):
+    """(tier, score, reason) for a resolved board: a few live job titles
+    (_sample_titles) as domain context for core.claude.score_company_mission.
+    Pure network I/O, safe to run off the main thread."""
+    from core.claude import score_company_mission
+    titles = _sample_titles(hit)
+    return score_company_mission(hit["name"], " | ".join(t for t in titles if t))
+
+
+def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
+                     scored=None):
+    """Mission-score a resolved board and write it to the store as a review
+    candidate -- the one write path behind every automated add surface.
+
+    `hit` is a resolver result: {name, ats, slug, nc, count} plus an optional
+    careers_url, `slug` being the (tenant, pod, site) triple for Workday and
+    None for a custom board. Returns (row, active, pending) -- the row as
+    written, whether a reviewer's confirmation would activate it
+    (core.claude.is_active_mission), and whether it went to the review queue
+    -- or None when the board is already on the roster under ANOTHER name
+    (_board_already_tracked). The dedup runs before the mission call, so a
+    duplicate costs no LLM request; a caller that scored in a worker pool
+    first (populate_companies) passes the result as `scored`.
+
+    The row is inactive and tagged pending-review unless the store has
+    already confirmed the name (core.store.is_confirmed_company). `tags`
+    defaults to the local scope tag when the board has local jobs; a caller
+    with another reason to call the company local (ats_dork's HQ signal)
+    passes it explicitly.
+
+    Notes:
+        This sequence was spelled out at four sites (populate_companies,
+        resolve_leads, paste_ingest.add_names, ats_dork.harvest_urls), each
+        with small drift: two checked duplicates only after paying for the
+        score, one never checked, two stamped last_probed and two left it to
+        the store (which stamps it on insert anyway). add_board is not a
+        fifth: a board the user registered by URL is written active
+        regardless of mission tier, and carries no total count. The two
+        copies in scrapers/ops.py (add_job's manual add, which writes
+        straight to the roster, and reresolve_misses, which clears the old
+        board coordinates first) still differ in ways this helper does not
+        cover.
+    """
+    from core.claude import is_active_mission
+    from core.store import is_confirmed_company, mark_pending, upsert_company
+
+    name = hit["name"]
+    is_wd = hit["ats"] == "workday"
+    slug = hit.get("slug")
+    row = {"name": name, "ats": hit["ats"],
+           "slug": None if is_wd else slug,
+           "wd_tenant": slug[0] if is_wd else None,
+           "wd_pod":    slug[1] if is_wd else None,
+           "wd_site":   slug[2] if is_wd else None,
+           "careers_url": hit.get("careers_url")}
+    dup = _board_already_tracked(conn, row)
+    if dup:
+        _report_dup_board(name, dup)
+        return None
+    tier, score, reason = scored if scored is not None else _score_hit(hit)
+    # Shared activation rule (core.claude.is_active_mission): active tiers,
+    # an UNAVAILABLE (None) score, or a multi-division conglomerate whose
+    # subdivisions are filtered at crawl time.
+    active = is_active_mission(tier, name, include_missions)
+    nc = hit.get("nc") or 0
+    row.update({
+        "local_job_count": nc, "total_job_count": hit.get("count"),
+        "mission_tier": tier, "mission_score": score, "mission_reason": reason,
+        "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
+        "source": source, "active": active,
+        "last_probed": datetime.now().isoformat(),
+    })
+    # Nothing an automated pass finds joins the roster by itself: a name
+    # the store has never confirmed lands in the review queue
+    # (core.store.mark_pending) for a person to accept or reject.
+    pending = not is_confirmed_company(conn, name)
+    if pending:
+        row = mark_pending(row)
+    upsert_company(conn, row)
+    return row, active, pending
+
+
 def populate_companies(extra_names=None, include_missions=None, dork=True):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
@@ -564,9 +646,7 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
 
     Returns the list of company dicts written by the name-based pass.
     """
-    from core.store import (connect, is_confirmed_company, mark_pending,
-                            miss_counts, record_miss, upsert_company)
-    from core.claude import score_company_mission, is_active_mission
+    from core.store import connect, miss_counts, record_miss
 
     confirmed, _, misses = discover_local(extra_names)
     conn = connect()
@@ -587,44 +667,22 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     # a pool; SQLite upserts stay on this thread (connections don't cross
     # threads). Output is completion-ordered.
     def _score_one(h):
-        titles = _sample_titles(h)
-        return h, score_company_mission(h["name"],
-                                        " | ".join(t for t in titles if t))
+        return h, _score_hit(h)
 
     def _score_done(fut, name):
         try:
-            h, (tier, score, reason) = fut.result()
+            h, scored = fut.result()
         except Exception as e:
             print(f"    [!] mission scoring failed for {name!r}: {e}")
             return
-        # Shared activation rule (core.claude.is_active_mission):
-        # active tiers, an UNAVAILABLE (None) score, or a multi-division
-        # conglomerate whose subdivisions are filtered at crawl time.
-        active = is_active_mission(tier, h["name"], include_missions)
-        row = {
-            "name": h["name"], "ats": h["ats"],
-            "slug": h["slug"] if h["ats"] != "workday" else None,
-            "wd_tenant": h["slug"][0] if h["ats"] == "workday" else None,
-            "wd_pod":    h["slug"][1] if h["ats"] == "workday" else None,
-            "wd_site":   h["slug"][2] if h["ats"] == "workday" else None,
-            "careers_url": h.get("careers_url"),
-            "local_job_count": h["nc"], "total_job_count": h["count"],
-            "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-            "tags": company_tags.LOCAL, "source": "local_sourcing", "active": active,
-            "last_probed": datetime.now().isoformat(),
-        }
-        dup = _board_already_tracked(conn, row)
-        if dup:
-            _report_dup_board(h["name"], dup)
+        result = score_and_upsert(conn, h, source="local_sourcing",
+                                  include_missions=include_missions,
+                                  scored=scored)
+        if not result:
             return
-        # Nothing an automated pass finds joins the roster by itself: a
-        # name the store has never confirmed lands in the review queue
-        # (core.store.mark_pending) for a person to accept or reject.
-        pending = not is_confirmed_company(conn, h["name"])
-        if pending:
-            row = mark_pending(row)
-        upsert_company(conn, row)
+        row, active, pending = result
         written.append(dict(row))
+        tier, score, reason = scored
         flag = ("PENDING REVIEW" if pending
                 else "active" if active else "INACTIVE(other)")
         ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
@@ -1075,10 +1133,8 @@ def resolve_leads(max_workers=8,
     (default: capture.py's 'page_capture'). all_leads=True ignores the source
     filter and takes every inactive boardless lead. Idempotent — rerunning
     retries only the still-unresolved leads."""
-    from core.claude import score_company_mission, is_active_mission
     from core.store import (connect, get_companies as _store_companies,
-                            is_confirmed_company, mark_pending, record_miss,
-                            recent_miss_names, upsert_company)
+                            record_miss, recent_miss_names)
 
     conn = connect()
     leads = [c for c in _store_companies(conn, active_only=False)
@@ -1127,35 +1183,18 @@ def resolve_leads(max_workers=8,
             record_miss(conn, c["name"], reason, source=c.get("source"))
             print(f"    [miss] {c['name'][:34]:34} {reason}")
             return
-        titles = _sample_titles(hit)
-        tier, score, reason = score_company_mission(
-            c["name"], " | ".join(t for t in titles if t))
-        active = is_active_mission(tier, c["name"])
-        is_wd = hit["ats"] == "workday"
-        row = {"name": c["name"], "ats": hit["ats"],
-               "slug": None if is_wd else hit["slug"],
-               "wd_tenant": hit["slug"][0] if is_wd else None,
-               "wd_pod":    hit["slug"][1] if is_wd else None,
-               "wd_site":   hit["slug"][2] if is_wd else None,
-               "careers_url": hit.get("careers_url"),
-               "local_job_count": hit["nc"], "total_job_count": hit["count"],
-               "mission_tier": tier, "mission_score": score,
-               "mission_reason": reason,
-               "tags": company_tags.LOCAL if hit["nc"] else None,
-               "source": c.get("source") or "resolve_leads", "active": active}
-        dup = _board_already_tracked(conn, row)
-        if dup:
-            _report_dup_board(c["name"], dup)
-            return
         # A lead is a name somebody's page mentioned, not an employer
-        # anyone vouched for: resolving it produces a review candidate.
-        pending = not is_confirmed_company(conn, c["name"])
-        if pending:
-            row = mark_pending(row)
-        upsert_company(conn, row)
+        # anyone vouched for: resolving it produces a review candidate,
+        # written under the lead's own name.
+        result = score_and_upsert(conn, {**hit, "name": c["name"]},
+                                  source=c.get("source") or "resolve_leads")
+        if not result:
+            return
+        row, active, pending = result
         resolved.append(row)
         if hit.get("via") == "probe":
             probe_only.append(c["name"])
+        tier, score = row["mission_tier"], row["mission_score"]
         ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
         flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
         mark = "queue" if pending else ("OK  " if active else "off ")

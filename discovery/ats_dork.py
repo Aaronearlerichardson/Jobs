@@ -21,8 +21,7 @@ from core.ats_signatures import detect
 import tags as company_tags
 from core import store
 from scrapers.fetchers import company as company_fetch
-from core.claude import is_active_mission, score_company_mission
-from .local_sourcing import _sample_titles, nc_hq_signal
+from .local_sourcing import nc_hq_signal, score_and_upsert
 
 
 def _or_group(terms, n=8):
@@ -219,31 +218,25 @@ def harvest_urls(urls, verbose=True):
         # else non-NC companies that merely mention NC would pollute the roster.
         if nc == 0 and not nc_hq_signal(name):
             continue
-        titles = _sample_titles({"ats": ats, "slug": slug})
-        tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
-        # Shared activation rule (core.claude.is_active_mission) — the same
-        # call every other add path makes. An inactive row is near-
-        # unrecoverable here: harvest_urls skips boards already in the store,
-        # so the company is never re-probed.
-        active = is_active_mission(tier, name)
-        row = dict(
-            name=name, ats=ats, slug=slug if ats != "workday" else None,
-            wd_tenant=slug[0] if ats == "workday" else None,
-            wd_pod=slug[1] if ats == "workday" else None,
-            wd_site=slug[2] if ats == "workday" else None,
-            local_job_count=nc, total_job_count=nc, mission_tier=tier,
-            mission_score=score, mission_reason=reason, tags=company_tags.LOCAL,
-            source="ats_dork", active=active)
-        pending = not store.is_confirmed_company(conn, name)
-        if pending:
-            row = store.mark_pending(row)
-        store.upsert_company(conn, row)
+        # Scoring, activation and the review queue are the shared write
+        # path (local_sourcing.score_and_upsert). The row is tagged local
+        # even at nc == 0: the HQ signal above is what admitted it. An
+        # inactive row is near-unrecoverable here -- harvest_urls skips
+        # boards already in the store, so the company is never re-probed --
+        # which is why the activation rule must be the shared one.
+        result = score_and_upsert(
+            conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
+            source="ats_dork", tags=company_tags.LOCAL)
+        if not result:
+            continue
+        row, active, pending = result
         added += 1
         if verbose:
             state = ("PENDING" if pending
                      else "ACTIVE" if active else "inactive")
-            print(f"  {name[:26]:26} {ats:12} nc={nc:2} {str(tier):19} "
-                  f"{score if score else 0:.2f} {state}")
+            print(f"  {name[:26]:26} {ats:12} nc={nc:2} "
+                  f"{str(row['mission_tier']):19} "
+                  f"{row['mission_score'] or 0:.2f} {state}")
     return added, len(boards)
 
 

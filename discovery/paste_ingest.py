@@ -17,15 +17,12 @@ local_sourcing.resolve_or_miss, score, queue for review).
 
 import re
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
 import config
-import tags as company_tags
 
 from core.names import junk_name_reason, name_key
 from scrapers.parallel import drain_or_abandon
-from .local_sourcing import (_board_already_tracked, _report_dup_board,
-                             _sample_titles, resolve_or_miss)
+from .local_sourcing import resolve_or_miss, score_and_upsert
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
 
 
@@ -434,9 +431,7 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
     Everything written lands in the review queue (core.store.mark_pending),
     never straight onto the roster.
     """
-    from core.claude import score_company_mission, is_active_mission
-    from core.store import (connect, is_confirmed_company, mark_pending,
-                            record_miss, upsert_company)
+    from core.store import connect, record_miss
 
     if isinstance(names, (str, bytes)):
         names = [n["name"] for n in preview_names(names, use_llm=use_llm)
@@ -484,35 +479,13 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
             record_miss(conn, name, reason, source="paste")
             unresolved.append((name, reason))
             return
-        slug = hit.get("slug")
-        is_wd = hit["ats"] == "workday"
-        row = {"name": hit["name"], "ats": hit["ats"],
-               "slug": None if is_wd else slug,
-               "wd_tenant": slug[0] if is_wd else None,
-               "wd_pod":    slug[1] if is_wd else None,
-               "wd_site":   slug[2] if is_wd else None,
-               "careers_url": hit.get("careers_url")}
-        dup = _board_already_tracked(conn, row)
-        if dup:
-            _report_dup_board(hit["name"], dup)
+        result = score_and_upsert(conn, hit, source="paste",
+                                  include_missions=include_missions)
+        if not result:
             return
-        titles = _sample_titles(hit)
-        tier, score, reason = score_company_mission(
-            hit["name"], " | ".join(t for t in titles if t))
-        active = is_active_mission(tier, hit["name"], include_missions)
-        row.update({
-            "local_job_count": hit["nc"], "total_job_count": hit["count"],
-            "mission_tier": tier, "mission_score": score,
-            "mission_reason": reason,
-            "tags": company_tags.LOCAL if hit["nc"] else None,
-            "source": "paste", "active": active,
-            "last_probed": datetime.now().isoformat(),
-        })
-        pending = not is_confirmed_company(conn, hit["name"])
-        if pending:
-            row = mark_pending(row)
-        upsert_company(conn, row)
+        row, active, pending = result
         written.append(hit)
+        tier = row["mission_tier"]
         # resolve_board_sniff_first's `via` says HOW the board was found:
         # 'sniff' read it off the company's own careers page, 'probe' guessed
         # a slug from the name, 'websearch' only means some result URL

@@ -604,7 +604,7 @@ class TestPastedNameBoardGuard:
         monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
         monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit, None))
-        monkeypatch.setattr(paste_ingest, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
         monkeypatch.setattr(local_sourcing, "nc_hq_signal", lambda *a, **k: True)
@@ -1074,7 +1074,7 @@ class TestAddNamesQueue:
         monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
         monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit or self._HIT, None))
-        monkeypatch.setattr(paste_ingest, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
 
@@ -1134,6 +1134,116 @@ class TestAddNamesQueue:
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert probed == [], "the corroboration probe still runs"
+
+
+class TestScoreAndUpsert:
+    """local_sourcing.score_and_upsert is the one write path behind every
+    automated add surface (populate_companies, resolve_leads, add_names,
+    harvest_urls): duplicate check first, mission score second, and any name
+    the store has not confirmed lands in the review queue."""
+
+    _HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
+            "careers_url": "https://alpaca.example/careers",
+            "count": 8, "nc": 3, "via": "sniff"}
+
+    def _wire(self, monkeypatch, scored=("adjacent", 0.5, "stub")):
+        """Stub the network (titles) and the LLM; returns the list of names
+        the scorer was asked about."""
+        import core.claude as claude
+        asked = []
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda name, *a, **k: asked.append(name) or scored)
+        return asked
+
+    def test_an_unconfirmed_name_is_queued_not_activated(
+            self, monkeypatch, db):
+        import core.store as store
+        import tags
+        asked = self._wire(monkeypatch)
+        row, active, pending = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=("adjacent",))
+        assert asked == ["Alpaca Health"]
+        # The verdict says a reviewer's confirmation WOULD activate it ...
+        assert (active, pending) == (1, True)
+        # ... but the row itself sits in the queue, off the crawl.
+        assert [c["name"] for c in store.pending_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.crawlable_companies(db) == []
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["active"] == 0
+        assert {tags.LOCAL, tags.PENDING} <= set(stored["tags"].split(","))
+        assert (stored["local_job_count"], stored["total_job_count"]) == (3, 8)
+        assert stored["source"] == "paste"
+        assert stored["careers_url"] == self._HIT["careers_url"]
+        assert (row["mission_tier"], row["mission_score"]) == ("adjacent", 0.5)
+
+    def test_a_confirmed_name_is_refreshed_in_place(self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
+                                  "slug": "alpaca", "active": 1})
+        self._wire(monkeypatch)
+        _, active, pending = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=("adjacent",))
+        assert (active, pending) == (1, False)
+        assert [c["name"] for c in store.crawlable_companies(db)] \
+            == ["Alpaca Health"]
+        assert store.pending_companies(db) == []
+        # The activation rule is core.claude.is_active_mission, and it is
+        # what a confirmed row's `active` follows.
+        _, active, _ = local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste", include_missions=())
+        assert active == 0
+        assert store.crawlable_companies(db) == []
+
+    def test_a_board_tracked_under_another_name_costs_no_score(
+            self, monkeypatch, db):
+        import core.store as store
+        store.upsert_company(db, {"name": "Alpaca", "ats": "lever",
+                                  "slug": "alpaca"})
+        asked = self._wire(monkeypatch)
+        assert local_sourcing.score_and_upsert(
+            db, self._HIT, source="paste") is None
+        assert asked == [], "the duplicate check must run before the LLM call"
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Alpaca"]
+
+    def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
+        asked = self._wire(monkeypatch)
+        row, _, _ = local_sourcing.score_and_upsert(
+            db, self._HIT, source="local_sourcing",
+            scored=("core", 0.9, "pooled"))
+        assert asked == []
+        assert (row["mission_tier"], row["mission_score"]) == ("core", 0.9)
+
+    def test_local_tag_follows_the_local_count_unless_given(
+            self, monkeypatch, db):
+        import core.store as store
+        import tags
+        self._wire(monkeypatch)
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "nc": 0}, source="paste")
+        assert store.get_companies(db, active_only=False)[0]["tags"] \
+            == tags.PENDING
+        # ats_dork admits an nc == 0 board on its HQ signal and says so
+        # by passing the tag explicitly.
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0},
+            source="ats_dork", tags=tags.LOCAL)
+        beta = next(c for c in store.get_companies(db, active_only=False)
+                    if c["name"] == "Beta Bio")
+        assert {tags.LOCAL, tags.PENDING} <= set(beta["tags"].split(","))
+
+    def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
+        import core.store as store
+        self._wire(monkeypatch)
+        local_sourcing.score_and_upsert(
+            db, {**self._HIT, "ats": "workday",
+                 "slug": ("acme", 5, "External")}, source="ats_dork")
+        stored = store.get_companies(db, active_only=False)[0]
+        assert stored["slug"] is None
+        assert (stored["wd_tenant"], stored["wd_pod"], stored["wd_site"]) \
+            == ("acme", 5, "External")
 
 
 class TestScoreMissionsHonoursTheReviewQueue:
