@@ -6,13 +6,15 @@ serial orchestrator. Every crawl path iterates STORE company rows — the
 companies table is the single roster (config.py seed lists retired 2026-07;
 manage the roster with discover.py, --add-board, or --import-companies).
 
-Two independent axes per ATS. The seed TAG (tags.py) is the scope a newly
-added company gets: "sweep" for the cheap JSON-API boards, "local" for the
-enterprise boards that are queried per region (workday/successfactors/
-peopleadmin) -- and also for paylocity and ultipro, which were added as
-region-scoped boards. LIGHTWEIGHT is which boards the sweep pulls whole
-regardless of tag; paylocity and ultipro are in it, so they are swept
-whole even though they seed "local".
+The seed TAG (tags.py) is the scope a newly added company gets, and it
+follows one rule: SWEEP for every ATS in LIGHTWEIGHT (a cheap JSON or
+single-page board the sweep pulls whole), LOCAL for the enterprise boards
+that are only worth querying per region (workday, successfactors,
+peopleadmin). Paylocity and UltiPro seeded LOCAL until 2026-09 because the
+first boards found on them belonged to one user's local search; the tag
+has meant crawl mechanics since the names were generalized, and both
+boards are pulled whole in one or two requests like the rest of
+LIGHTWEIGHT. tests/test_fetcher_parsers.py pins the rule.
 
 Deliberately absent: ``core.store.CAPTURE_ATS`` ("capture"). A capture-only
 company has no fetchable board -- its pages are saved by hand through
@@ -58,9 +60,9 @@ ATS_REGISTRY = {
     "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n, gate=is_relevant), tags.SWEEP, 0.5),
-    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n, gate=is_relevant), tags.LOCAL, 0.5),
+    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "rippling":   (lambda n, s: lambda: fetch_rippling(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n, gate=is_relevant), tags.LOCAL, 0.5),
+    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "hibob":      (lambda n, s: lambda: fetch_hibob(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
                                         st=s.split("|")[2]:
@@ -69,8 +71,9 @@ ATS_REGISTRY = {
     "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
 
-# ATSes whose store rows a location-agnostic ("sweep") track pulls whole
-# (lightweight JSON APIs; the heavyweight boards stay location-scoped).
+# ATSes whose store rows a location-agnostic ("sweep") track pulls whole,
+# and that seed the SWEEP tag: lightweight JSON APIs or single-page boards.
+# The heavyweight boards stay location-scoped and seed LOCAL.
 LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "jobvite", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
 
 
