@@ -103,10 +103,18 @@ DATA_PACKAGES = ["playwright", "fake_useragent"]
 
 
 def build_command(name=None):
-    entry = TARGETS[name or target()][0]
+    name = name or target()
+    entry = TARGETS[name][0]
     cmd = [sys.executable, "-m", "nuitka", entry,
            "--onefile", f"--output-filename={output_name(name)}",
            "--assume-yes-for-downloads"]
+    if name == "harvest" and sys.platform == "win32":
+        # The harvester lives in the Startup folder and loops for the whole
+        # session: launched from Explorer it must not park a console window
+        # on the desktop, launched from a terminal it should still print.
+        # "attach" does exactly that split; output always reaches the
+        # session log either way.
+        cmd.append("--windows-console-mode=attach")
     cmd += [f"--include-package={p}" for p in PACKAGES]
     cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
     cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]

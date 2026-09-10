@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
 """Background whole-board harvester (see scrapers/harvest.py).
 
-    python harvest.py                       # every board due, then exit
+    python harvest.py                       # a pass now, then one every 12 h
+    python harvest.py --every 8             # ... every 8 h instead
+    python harvest.py --once                # one pass, then exit
     python harvest.py --list                # print the plan, fetch nothing
-    python harvest.py --only greenhouse,lever --limit 5
-    python harvest.py --names "NVIDIA" "IQVIA"   # named boards, even if fresh
-    python harvest.py --max-hours 6         # stop submitting after 6 hours
+    python harvest.py --only greenhouse,lever --limit 5 --once
+    python harvest.py --names "NVIDIA" "IQVIA" --once   # named boards, even if fresh
+    python harvest.py --max-hours 6         # abandon a pass still running after 6 h
 
-Meant to run from Task Scheduler at log-on and every few hours after
-(tools/register_harvest_task.ps1): each run pulls every board with a
-fetchable board that has not been harvested in the last --min-age-hours,
-stores every posting unscored, and exits. A second copy started while one
-is running exits at once (lock file in the data directory). Nothing here
-calls Claude or reads the resume; the daily crawl scores what this stores.
+Meant to sit in the background for the whole session: put a shortcut to
+JobHarvester.exe in the Startup folder (Win+R, `shell:startup`) and it
+starts at log-on, runs a pass, and parks on a timed wait until the next
+one. Parked, it costs no CPU at all -- the thread is not scheduled until
+its deadline -- and the deadline is wall-clock, so a laptop that slept
+through it runs the pass as soon as it wakes. Each pass pulls every board
+with a fetchable ATS that has not been harvested in the last
+--min-age-hours and stores every posting unscored; nothing here calls
+Claude or reads the resume. A second copy started while one is running
+exits at once (lock file in the data directory). Each pass gets its own
+session log (data/logs/session-*-harvest.log).
 """
 
 import argparse
 import os
 import sys
+import threading
+import time
+from datetime import datetime
 
 import config
 
@@ -27,6 +37,11 @@ except Exception:
     pass
 
 LOCK_PATH = config.DATA_DIR / "harvest.lock"
+DEFAULT_EVERY_HOURS = 12.0
+# Longest single wait between deadline checks. Short enough that a machine
+# waking from a long sleep notices an overdue pass within minutes; a timed
+# wait costs nothing while it lasts, so the chunking is free.
+WAIT_CHUNK_S = 300.0
 
 
 def acquire_lock(path=LOCK_PATH):
@@ -53,12 +68,59 @@ def acquire_lock(path=LOCK_PATH):
     return fh
 
 
+def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
+                chunk_s=WAIT_CHUNK_S):
+    """Run `pass_fn` now and then once every `every_hours`, measured from
+    the START of the previous pass (a pass that takes three hours does not
+    push the schedule back). Never returns unless `wait` asks it to.
+
+    `wait(seconds)` parks the thread; it returns True to stop the loop
+    (threading.Event.wait semantics -- the default Event is never set, so
+    the default wait only ever times out). `clock` and `chunk_s` exist for
+    tests.
+
+    >>> ticks, log = [0.0], []
+    >>> def clock():
+    ...     return ticks[0]
+    >>> def wait(s):
+    ...     ticks[0] += s
+    ...     return False
+    >>> def one_pass():
+    ...     log.append(clock())
+    ...     ticks[0] += 3600          # the pass itself takes an hour
+    ...     if len(log) == 3:
+    ...         raise KeyboardInterrupt
+    >>> try:
+    ...     run_forever(one_pass, 12, wait=wait, clock=clock)
+    ... except KeyboardInterrupt:
+    ...     pass
+    >>> [t / 3600 for t in log]
+    [0.0, 12.0, 24.0]
+    """
+    wait = wait or threading.Event().wait
+    while True:
+        started = clock()
+        pass_fn()
+        while True:
+            remaining = started + every_hours * 3600 - clock()
+            if remaining <= 0:
+                break
+            if wait(min(remaining, chunk_s)):
+                return
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(
-        description="Pull every board whole and store it unscored")
+        description="Pull every board whole and store it unscored, on a "
+                    "timer")
+    ap.add_argument("--every", type=float, default=DEFAULT_EVERY_HOURS,
+                    metavar="HOURS",
+                    help=f"Hours between passes (default {DEFAULT_EVERY_HOURS:g})")
+    ap.add_argument("--once", action="store_true",
+                    help="One pass, then exit (no timer)")
     ap.add_argument("--list", action="store_true",
-                    help="Print the boards this run would pull, then exit")
+                    help="Print the boards a pass would pull, then exit")
     ap.add_argument("--only", metavar="ATS[,ATS]",
                     help="Only these ATS families (e.g. greenhouse,lever)")
     ap.add_argument("--names", nargs="+", metavar="NAME",
@@ -103,18 +165,36 @@ def main(argv=None):
         print("  [!] another harvester holds the lock; exiting")
         return 0
 
-    session_log.start(["--harvest", *argv])
+    stalled = [0]
+
+    def one_pass():
+        # A fresh session log per pass, so each shows up in data/logs on
+        # its own and retention pruning treats it like any other run.
+        session_log.start(["--harvest", *argv])
+        try:
+            summary = harvest.run(
+                db_path=args.db, only=only, names=args.names,
+                min_age_hours=min_age, limit=args.limit,
+                max_workers=args.workers or harvest.DEFAULT_WORKERS,
+                hydrate=not args.no_hydrate, max_hours=args.max_hours)
+            stalled[0] += summary["stalled"]
+            if not args.once:
+                nxt = datetime.fromtimestamp(time.time() + args.every * 3600)
+                print(f"  next pass at {nxt:%Y-%m-%d %H:%M} "
+                      f"(every {args.every:g} h; Ctrl+C to stop)")
+        finally:
+            session_log.finish()
+
     try:
-        summary = harvest.run(
-            db_path=args.db, only=only, names=args.names,
-            min_age_hours=min_age, limit=args.limit,
-            max_workers=args.workers or harvest.DEFAULT_WORKERS,
-            hydrate=not args.no_hydrate, max_hours=args.max_hours)
-    finally:
-        session_log.finish()
-    if summary["stalled"]:
+        if args.once:
+            one_pass()
+        else:
+            run_forever(one_pass, args.every)
+    except KeyboardInterrupt:
+        print("\n  stopped")
+    if stalled[0]:
         # Abandoned boards still own a thread; a normal exit would wait on
-        # them. Everything is committed and the log is closed, so leave.
+        # them. Everything is committed and the logs are closed, so leave.
         sys.stdout.flush()
         os._exit(0)
     return 0

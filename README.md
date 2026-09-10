@@ -677,22 +677,26 @@ python harvest.py                         # everything not harvested in 6 h
 Whole-roster hydration is on the order of 20,000 detail requests, so a full
 pass takes hours; boards run concurrently (`--workers`, `HARVEST_WORKERS`),
 cheapest ATSes first, and a board with no progress for 15 minutes is
-abandoned. Bodies already in the store are never fetched twice, so each run
+abandoned. Bodies already in the store are never fetched twice, so each pass
 advances the roster. Workday closes the connection after roughly 150 detail
 requests per tenant, so the harvester takes at most 100 bodiless Workday rows
-per board per run (`HYDRATE_CAP` in `scrapers/harvest.py`) and leaves the
-rest for the next run. Each run exits when done; the loop is Task Scheduler:
+per board per pass (`HYDRATE_CAP` in `scrapers/harvest.py`) and leaves the
+rest for the next one.
 
-```powershell
-python build_app.py --target harvest      # optional: JobHarvester.exe
-powershell -ExecutionPolicy Bypass -File tools
-egister_harvest_task.ps1 -Every 12
+By default the process stays up and runs a pass every 12 hours (`--every`;
+`--once` for a single pass). Between passes it parks on a timed wait, which
+costs no CPU; the deadline is wall-clock, so a laptop that slept through it
+runs the pass on wake. To have it start with Windows, build the binary and
+drop a shortcut to it in the Startup folder (Win+R, `shell:startup`):
+
+```bash
+python build_app.py --target harvest      # JobHarvester.exe
 ```
 
-That registers "Jobs Harvester" to run at log-on and every 12 hours after,
-without a console window, skipping a firing while the previous run is still
-going. A run started by hand while one is running exits at once (lock file
-in the data directory). Logs land in `data/logs/session-harvest-*.log`.
+Launched from Explorer or the Startup folder it shows no console window;
+launched from a terminal it prints as usual. Either way each pass writes its
+own `data/logs/session-*-harvest.log`. A second copy started while one is
+running exits at once (lock file in the data directory).
 
 The store runs SQLite in WAL mode so the harvester, the web UI and the
 scheduled crawl can write at the same time; when copying `jobs.db` by hand,
