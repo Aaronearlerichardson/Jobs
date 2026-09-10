@@ -16,7 +16,7 @@ Four defects the logs showed, each pinned here offline:
 import requests
 
 import core.store as store
-from discovery import fetchpool, local_sourcing
+from discovery import fetchpool, local_sourcing, paste_ingest
 from core.names import junk_name_reason
 from scrapers import ops
 from scrapers.fetchers import company as cf
@@ -179,10 +179,10 @@ class TestJunkNamesInThePasteFlow:
 
     def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health",
                                              "Required Qualifications"])
-        rows = local_sourcing.preview_names("x", use_llm=False)
+        rows = paste_ingest.preview_names("x", use_llm=False)
         assert [(r["name"], r["state"]) for r in rows] == [
             ("Alpaca Health", "new"), ("Required Qualifications", "junk")]
         assert rows[1]["why"] == "section-heading"
@@ -190,18 +190,18 @@ class TestJunkNamesInThePasteFlow:
     def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
         store.block_name(db, "Oncology", "not a company")
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "parse_company_names",
+        monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Oncology"])
         assert [r["state"] for r in
-                local_sourcing.preview_names("x", use_llm=False)] == ["blocked"]
+                paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
 
     def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
             self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda n, *a, **k: tried.append(n) or (None, "x"))
-        local_sourcing.add_names(["Proficiency in SQL.", "Alpaca Health"],
+        paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
                                  max_workers=1)
         assert tried == ["Alpaca Health"]
         row = db.execute("SELECT miss_reason, active FROM companies "

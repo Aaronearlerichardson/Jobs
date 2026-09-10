@@ -355,7 +355,7 @@ def api_names_preview():
     names are shown first and only the ticked ones are sent to the op."""
     if _running():
         return jsonify(error=f"'{TASK['name']}' is already running"), 409
-    from discovery.local_sourcing import preview_names
+    from discovery.paste_ingest import preview_names
     p = request.get_json(silent=True) or {}
     raw = p.get("use_llm")
     try:

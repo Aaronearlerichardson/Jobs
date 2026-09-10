@@ -5,8 +5,8 @@ Fixture postings below are written in realistic biotech/health-tech
 job-posting prose -- partnership/investor/acquisition language plus the
 standard EEO/benefits/aggregator boilerplate every real posting carries --
 so the precision assertions pin against the actual failure modes this
-module exists to avoid (see discovery/local_sourcing.py's paste-ingestion
-path, whose permissive parser let "Home"/"My Network"/"Create cover letter"
+module exists to avoid (see discovery/paste_ingest.py, whose permissive
+parser let "Home"/"My Network"/"Create cover letter"
 through), not toy strings.
 """
 
