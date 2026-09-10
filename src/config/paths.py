@@ -88,8 +88,13 @@ if "__compiled__" in globals():
                      if _looks_like_install(d) or (d / "data").is_dir()),
                     _exe_dir)
 else:
-    # This file is src/config/paths.py; the code root is one level up.
-    SCRIPT_DIR = Path(__file__).resolve().parent.parent
+    # This file is <root>/src/config/paths.py, so the checkout root is two
+    # levels above the package. Counted from the path itself rather than
+    # hardcoded: when the package tree moved under src/ this line still
+    # said `.parent.parent`, which silently repointed DATA_DIR from the
+    # user's real store to an empty per-user one -- the app came up
+    # working, on nothing. tests/test_config_env.py pins it.
+    SCRIPT_DIR = Path(__file__).resolve().parents[2]
     APP_HOME = SCRIPT_DIR
 
 DATA_DIR = _resolve_data_dir(APP_HOME)
