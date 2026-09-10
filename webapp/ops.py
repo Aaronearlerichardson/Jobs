@@ -240,7 +240,7 @@ def _op_add_names(p):
 def _op_prune(p):
     conn = store.connect(_op_track(p)["db_path"])
     try:
-        store.prune_dead_boards(
+        maint.prune_dead_boards(
             conn, deactivate_offmission=bool(p.get("offmission")))
     finally:
         conn.close()

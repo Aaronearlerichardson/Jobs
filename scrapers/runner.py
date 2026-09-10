@@ -16,7 +16,7 @@ same pipeline for any track:
     4. scoring           resume-fit on new postings, cost_guard budget,
                          self-heal of newly-described rows, verify_top
     5. persist + digest  company-linked rows upsert with fit columns; sweep
-                         rows mark_seen; ranked digest and/or match digest;
+                         rows upsert without them; ranked digest and/or match digest;
                          optional email
 
 The legacy entry points delegate here unchanged, as does the web UI's
@@ -108,8 +108,8 @@ def build_sources(cfg, t, include_websearch=None):
     Returns a list of dicts {name, platform, thunk, company}: `company` is
     the store row for location-scoped store boards (their jobs sync/upsert
     against that company) and None for sweep sources (priority companies,
-    lightweight ATS sweep, aggregators, USAJOBS, Getro boards, web search — persisted via
-    mark_seen). Priority companies come first so cross-source duplicates
+    lightweight ATS sweep, aggregators, USAJOBS, Getro boards, web search — persisted by a plain
+    upsert_job). Priority companies come first so cross-source duplicates
     resolve deterministically."""
     from . import ops
     from .fetchers import company as company_fetch
@@ -409,7 +409,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
         else:
             # Sweep source: anchor + title (+ engine excludes) gates, remote
             # signal stamped (or geo-gated when configured), deduped across
-            # sources, persisted via mark_seen.
+            # sources, persisted via upsert_job.
             anchor_here = tech_here = surfaced = new_here = 0
             for job in jobs:
                 title = job.get("title", "")
@@ -435,7 +435,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 if jid in seen_ids:
                     continue
                 seen_ids.add(jid)
-                new = store.is_new(conn, jid)
+                new = not store.job_exists(conn, jid)
                 if new:
                     new_here += 1
                 job["track_tag"] = f"[{t['label'].upper()}]"
@@ -514,8 +514,28 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                      reverse=True)
 
     if commit:
+        # Sweep rows: the fetched dict's id/company become job_id/company_name.
+        # The fit columns ride along when --fit scored the job in place
+        # (j.update(FitResult.as_columns())) and are None otherwise, which
+        # upsert_job's COALESCE reads as "keep the stored score" -- a
+        # --fit --commit run once computed scores, printed them in the
+        # digest, then dropped every one on this write.
         for job in matches:
-            store.mark_seen(conn, job, track=t["track"])
+            store.upsert_job(conn, {
+                "job_id": job["id"], "company_id": job.get("company_id"),
+                "company_name": job.get("company"), "title": job.get("title"),
+                "url": job.get("url"), "location": job.get("location"),
+                "track": t["track"],
+                "remote_eligible": job.get("remote_eligible"),
+                "remote_signal": job.get("remote_signal"),
+                "anchor_signal": job.get("anchor_signal"),
+                "posted_at": job.get("posted_at"),
+                "description": (job.get("description") or "")
+                               [:config.MAX_DESC_CHARS],
+                **{k: job.get(k) for k in (
+                    "resume_fit_score", "fit_reason", "fit_gates", "fit_model",
+                    "fit_domain", "fit_function", "fit_stack", "fit_seniority")},
+            })
 
     # ─── Self-heal + deep-verify (company-linked crawls) ──────────────────
     if resume and commit and t["sources"]["store"] \

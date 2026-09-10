@@ -9,16 +9,44 @@ Design (merged from both development tracks):
   * The company row carries the mission judgment once, so individual jobs
     inherit it instead of paying a per-job mission LLM call — "the company
     list simplifies the job list."  (local-clinical insight)
+
+Layout: this module is the single import surface (``from core import
+store``; ``store.X``), and holds the roster, crawl-scheduling, jobs and
+ranking code itself. Three seams live in sibling modules and are
+re-exported below, so no caller has to know which file a name is in:
+
+  * store_schema    the SQLite schema, migrations, connect/checkpoint/batch
+  * store_review    the review queue (pending / confirm / reject / blocklist)
+  * store_pipeline  dispositions, application tracking, follow-ups, conversion
+
+Those siblings never import this module at load time (it imports them), so
+a name they need from here is imported inside the function that uses it.
 """
 
 import math
 import re
-import sqlite3
 from datetime import datetime, timedelta
 
 import config
 
 import tags
+
+from .store_schema import (  # noqa: F401  (re-exported: store.connect etc.)
+    _SCHEMA, _INDEXES, _MIGRATIONS, _RENAMED_COLUMNS, _DROPPED_COLUMNS,
+    _ensure_columns, _migrate_tags, BUSY_TIMEOUT_S, connect, checkpoint,
+    _BATCHING, _commit, batch,
+)
+from .store_review import (  # noqa: F401
+    _name_key, mark_pending, is_confirmed_company, _PENDING_FIELDS,
+    pending_companies, confirm_company, reject_company, block_name,
+    blocked_name_keys,
+)
+from .store_pipeline import (  # noqa: F401
+    DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
+    APPLIED_DISPOSITIONS, PIPELINE_FIELDS, OUTCOME_REASONS, FIT_BANDS,
+    set_job_status, _resolve_job, set_disposition, get_pipeline,
+    update_pipeline_fields, _fit_band, conversion_report, followups_due,
+)
 
 
 def combined_score(fit, mission):
@@ -68,374 +96,6 @@ def combined_score(fit, mission):
     if fit < 0 or mission < 0:
         return None
     return math.sqrt(fit * mission)
-
-
-# --------------------------------------------------------------------------- #
-#  Schema                                                                      #
-# --------------------------------------------------------------------------- #
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS companies (
-    id             INTEGER PRIMARY KEY,
-    name           TEXT UNIQUE NOT NULL,
-    ats            TEXT,              -- greenhouse|lever|ashby|workday|...
-    slug           TEXT,              -- board slug (non-workday)
-    wd_tenant      TEXT,              -- workday triple
-    wd_pod         INTEGER,
-    wd_site        TEXT,
-    careers_url    TEXT,
-    local_job_count INTEGER DEFAULT 0, -- openings inside your [locality]
-    total_job_count INTEGER DEFAULT 0,
-    mission_tier   TEXT,              -- a tier name from profile [mission]
-    mission_score  REAL,              -- 0..1 (alignment with what you care about)
-    mission_reason TEXT,
-    tags           TEXT,              -- comma scope tokens; see tags.py
-    source         TEXT,              -- how it was discovered
-    active         INTEGER DEFAULT 1, -- crawl this company?
-    last_probed    TEXT,
-    notes          TEXT,
-    created_at     TEXT,              -- first time this row was inserted
-    miss_reason    TEXT,              -- why it is not crawlable (see MISS_REASONS)
-    miss_at        TEXT               -- when that failure was last recorded
-);
-
-CREATE TABLE IF NOT EXISTS jobs (
-    id             INTEGER PRIMARY KEY,
-    job_id         TEXT UNIQUE NOT NULL,  -- source-stable id
-    company_id     INTEGER REFERENCES companies(id),
-    company_name   TEXT,
-    title          TEXT,
-    url            TEXT,
-    location       TEXT,
-    track          TEXT,                  -- comma-separated SET of track names
-    geo_mode       TEXT,                  -- onsite|remote
-    remote_eligible INTEGER,              -- 1 when the remote filter passed
-    remote_signal  TEXT,                  -- phrase/hint that marked it remote
-    anchor_signal  TEXT,                  -- the CORE keyword that anchored it
-    description    TEXT,
-    desc_checked_at TEXT,                 -- last FAILED description backfill
-                                          -- attempt (ops.backfill_* skip
-                                          -- recently-checked rows)
-    resume_fit_score REAL,
-    fit_reason     TEXT,
-    first_seen     TEXT,
-    last_seen      TEXT,
-    status         TEXT DEFAULT 'open'   -- open|closed (see sync_job_statuses)
-);
-
--- Company names a person rejected from the review queue. Keyed by the
--- normalized name (see _name_key), so one rejected spelling blocks the rest.
-CREATE TABLE IF NOT EXISTS name_blocklist (
-    key      TEXT PRIMARY KEY,
-    name     TEXT,              -- the spelling that was rejected
-    reason   TEXT,
-    added_at TEXT
-);
-"""
-
-# Created after _ensure_columns: on a pre-merge DB the jobs table exists
-# without `track`, so these must not run before the column migrations.
-_INDEXES = """
-CREATE INDEX IF NOT EXISTS ix_jobs_company ON jobs(company_id);
-CREATE INDEX IF NOT EXISTS ix_jobs_track   ON jobs(track);
-"""
-
-# Columns added after a table's first release: additive, idempotent
-# migrations so existing DBs (e.g. an old local_tech.db) upgrade in place.
-_MIGRATIONS = {
-    "companies": {
-        "tags": "TEXT",
-        # No DEFAULT, unlike _SCHEMA's fresh-DB declaration: ADD COLUMN with a
-        # default writes that default into every existing row, which would
-        # make the _RENAMED_COLUMNS copy below (guarded on IS NULL) a no-op
-        # and silently drop the counts inherited from nc_job_count.
-        "local_job_count": "INTEGER",   # was nc_job_count
-        # When the row was first inserted. Deliberately NOT backfilled on an
-        # existing DB: we do not know when a pre-migration row arrived, and a
-        # backfill would invent a roster-growth spike at migration time. NULL
-        # reads as "predates the column" (see roster_growth).
-        "created_at":  "TEXT",
-        # Why a candidate is not crawlable, and when we last found that out.
-        # See MISS_REASONS; rows carrying these are always active=0.
-        "miss_reason": "TEXT",
-        "miss_at":     "TEXT",
-        # Crawl scheduling (record_crawl_outcome / crawlable_companies).
-        # 181 of 300 active companies had never produced a single job yet
-        # were fetched on every crawl, and a handful of huge off-mission
-        # boards (a state health agency: 663 local rows, best fit 0.15)
-        # burned most of the run. `crawl_state` NULL reads as 'active', so
-        # existing rows need no backfill.
-        "crawl_state":      "TEXT",      # active|dormant|off (NULL=active)
-        "empty_streak":     "INTEGER",   # consecutive empty DAYS
-        "last_crawled_at":  "TEXT",
-        "last_nonempty_at": "TEXT",
-        "next_crawl_at":    "TEXT",      # dormant rows wake at/after this
-        # Last SUCCESSFUL whole-board pull by the background harvester
-        # (scrapers/harvest.py). Independent of the crawl stamps above: the
-        # harvester ignores crawl_state and never writes it.
-        "last_harvested_at": "TEXT",
-    },
-    "jobs": {
-        # Stamped by the background harvester when it stored or refreshed
-        # the row. A harvested row arrives with NO track and NO score; the
-        # crawl adopts it (gates, scores, stamps its track) the next time
-        # that company's board comes round -- see crawl_seen.
-        "harvested_at":    "TEXT",
-        "track":           "TEXT",
-        "remote_eligible": "INTEGER",
-        "remote_signal":   "TEXT",
-        "anchor_signal":   "TEXT",   # was neural_signal
-        # Per-axis fit sub-scores (core/fit.py). resume_fit_score stays
-        # the combined scalar; these expose the breakdown for querying/sorting.
-        "fit_domain":      "REAL",
-        "fit_function":    "REAL",
-        "fit_stack":       "REAL",
-        "fit_seniority":   "REAL",
-        "fit_gates":       "TEXT",   # comma-joined tripped gate names, or NULL
-        # Model id that wrote the current score (NULL before this column
-        # existed). verify_top re-verifies a finalist unless fit_model is
-        # the CURRENT verify model, so a model change re-reads the top N once.
-        "fit_model":       "TEXT",
-        # When status flipped to 'closed' (NULL while open). Set by
-        # sync_job_statuses / set_job_status, cleared on reopen.
-        "closed_at":       "TEXT",
-        # Real posting date from the board (YYYY-MM-DD; first-known wins).
-        # first_seen is when WE noticed it; posted_at is when it went up.
-        "posted_at":       "TEXT",
-        # The user's decision on this job (see DISPOSITIONS): drives ranking
-        # exclusion, the digest pipeline section, and few-shot calibration.
-        "disposition":      "TEXT",
-        "disposition_note": "TEXT",
-        "disposition_at":   "TEXT",
-        # Last FAILED description-backfill attempt. The backfill ops skip
-        # rows checked in the last few days: a posting that has dropped off
-        # its board never matches, and without this stamp every rerun
-        # re-fetched the same boards to fail on the same rows ("0 of 18
-        # backfilled" three runs in a row, 2026-08-28 session logs).
-        "desc_checked_at":  "TEXT",
-        # Application-pipeline tracking (see update_pipeline_fields,
-        # conversion_report, followups_due). applied_at is stamped the FIRST
-        # time a row is marked applied and never again: a later
-        # interviewing/rejected must not move the date the application went
-        # out, or every elapsed-time question loses its clock. The other four
-        # are user-entered; `referral` is 0/1, `outcome_reason` one of
-        # OUTCOME_REASONS.
-        "applied_at":       "TEXT",
-        "followup_at":      "TEXT",   # YYYY-MM-DD, the next nudge
-        "contact":          "TEXT",   # recruiter / hiring manager / referrer
-        "referral":         "INTEGER",
-        "outcome_reason":   "TEXT",
-    },
-}
-
-# The user's recorded decision on a job. `saved` = shortlisted, still shown
-# in ranking; the rest leave the ranking: applied/interviewing move to the
-# digest's pipeline section, rejected/dismissed disappear (and dismissed
-# rows become negative few-shot examples for the fit scorer — 
-# fit.py reads them, so a --note saying WHY is worth writing).
-DISPOSITIONS = ("saved", "applied", "interviewing", "rejected", "dismissed")
-RANKING_EXCLUDED_DISPOSITIONS = ("applied", "interviewing", "rejected", "dismissed")
-
-# A live application: one that went out and has not come back. followups_due
-# only chases these, and conversion_report counts everything else as closed.
-LIVE_DISPOSITIONS = ("applied", "interviewing")
-
-# An application that actually went out, however it ended. The denominator
-# conversion_report divides by; `saved` and `dismissed` never applied.
-APPLIED_DISPOSITIONS = ("applied", "interviewing", "rejected")
-
-# The user-editable application-tracking columns. update_pipeline_fields
-# writes these and nothing else, so an API caller cannot reach `disposition`
-# (which has its own validated path) or any scorer-owned column through it.
-PIPELINE_FIELDS = ("followup_at", "contact", "referral", "outcome_reason")
-
-# How an application ENDED, as a closed vocabulary rather than free text: the
-# free-text note already exists for nuance, and a fixed set is what lets
-# conversion_report tell "never answered" from "interviewed and lost".
-OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
-                   "withdrew", "closed", "other")
-
-# The resume_fit_score bands conversion_report groups by: (name, low, high),
-# half-open on the high side, ordered low to high.
-FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
-
-# Columns whose CONTENT lives on under a new, field-neutral name: the old
-# ones were named for one user's search ("neural" anchors, "nc" for the local
-# region). new -> old; _ensure_columns copies old values across before the
-# old column is dropped, so no history is lost on an existing DB.
-_RENAMED_COLUMNS = {
-    "jobs":      {"anchor_signal": "neural_signal"},
-    "companies": {"local_job_count": "nc_job_count"},
-}
-
-# Columns retired for good. Dropped idempotently on connect so existing DBs
-# (which keep old columns under CREATE TABLE IF NOT EXISTS) shed them too.
-# mission/tech_bar_score became company-level after unification and
-# hq_location was never populated — all three were 100% NULL. The last two
-# are the _RENAMED_COLUMNS sources, dropped only after their copy runs.
-_DROPPED_COLUMNS = {
-    "jobs": ("mission", "tech_bar_score", "neural_signal"),
-    "companies": ("hq_location", "nc_job_count"),
-}
-
-
-def _ensure_columns(conn):
-    # Concurrency-tolerant: the web UI opens several connections to the same
-    # DB at once (one per API request), and on a DB this process hasn't
-    # migrated yet they all read PRAGMA table_info before any ALTER lands —
-    # every loser then raises "duplicate column name" (or "no such column"
-    # for drops). Both mean "another connection already did it": skip.
-    for table, cols in _MIGRATIONS.items():
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for col, decl in cols.items():
-            if col not in existing:
-                try:
-                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
-                except sqlite3.OperationalError as e:
-                    if "duplicate column" not in str(e).lower():
-                        raise
-    # Carry renamed columns' values across BEFORE the old ones are dropped.
-    # Only fills rows the new column hasn't got a value for, so re-running is
-    # a no-op and a re-crawl's fresh value is never overwritten by stale data.
-    for table, renames in _RENAMED_COLUMNS.items():
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for new, old in renames.items():
-            if new in existing and old in existing:
-                conn.execute(f"UPDATE {table} SET {new}={old} "
-                             f"WHERE {new} IS NULL AND {old} IS NOT NULL")
-    for table, cols in _DROPPED_COLUMNS.items():
-        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for col in cols:
-            if col in existing:
-                try:
-                    conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
-                except sqlite3.OperationalError as e:
-                    if "no such column" not in str(e).lower():
-                        raise
-    conn.commit()
-
-
-def _migrate_tags(conn):
-    """Rewrite retired company scope-tag tokens in place (tags.py).
-
-    The tags started out named after one user's search ('nc_local', 'neural')
-    and now say what they DO ('local', 'sweep'). Reads tolerate the old names
-    via tags.canonical(), but rewriting the stored tokens keeps SQL tag
-    filters — which match the literal token — honest. Idempotent, and done in
-    Python rather than SQL string surgery so a row that somehow holds both a
-    legacy name and its replacement collapses to one token instead of two.
-    Costs one scan of a table with hundreds of rows, not millions.
-    """
-    if not tags.ALIASES:
-        return
-    where = " OR ".join(["(',' || tags || ',') LIKE ?"] * len(tags.ALIASES))
-    rows = conn.execute(
-        f"SELECT id, tags FROM companies WHERE tags IS NOT NULL AND ({where})",
-        tuple(f"%,{legacy},%" for legacy in tags.ALIASES)).fetchall()
-    for row in rows:
-        conn.execute("UPDATE companies SET tags=? WHERE id=?",
-                     (tags.join(tags.parse(row["tags"])), row["id"]))
-    conn.commit()
-
-
-# How long a writer waits on another process's write lock before giving up.
-# The web UI, the scheduled crawl and the background harvester all write to
-# one file, so a locked DB is normal, not an error.
-BUSY_TIMEOUT_S = 30.0
-
-
-def connect(path=None):
-    """Open the store: schema applied, migrations run, WAL journaling on.
-
-    WAL matters because several PROCESSES share this file (the web UI, the
-    Task-Scheduler crawl, the background harvester): under the default
-    rollback journal a reader blocks a writer and two writers collide the
-    moment they overlap, and nothing here waited, so the loser died with
-    "database is locked". In WAL mode readers never block the writer and
-    the busy timeout queues writers instead of failing them. Cost: two
-    sidecar files (jobs.db-wal, jobs.db-shm) beside the DB while any
-    connection is open -- copy all three when backing up by hand, or run
-    checkpoint() first.
-    """
-    conn = sqlite3.connect(path or config.STORE_DB_PATH,
-                           timeout=BUSY_TIMEOUT_S)
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-    except sqlite3.OperationalError:
-        pass                    # read-only media: the pragmas are optional
-    conn.executescript(_SCHEMA)
-    conn.commit()
-    _ensure_columns(conn)
-    _migrate_tags(conn)
-    conn.executescript(_INDEXES)
-    conn.commit()
-    return conn
-
-
-def checkpoint(conn):
-    """Fold the WAL back into the main file (before a file-copy backup)."""
-    try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        pass
-
-
-# Connections currently inside a batch() block: their per-row writers skip
-# the commit and the block commits once at the end. Keyed by id() because
-# sqlite3.Connection accepts no attributes.
-_BATCHING = set()
-
-
-def _commit(conn):
-    """Commit unless the caller is batching (see batch)."""
-    if id(conn) not in _BATCHING:
-        conn.commit()
-
-
-class batch:
-    """Group many upsert_job / sync_job_statuses calls into ONE transaction.
-
-    >>> conn = connect(":memory:")
-    >>> with batch(conn):
-    ...     for i in range(3):
-    ...         _ = upsert_job(conn, {"job_id": f"b{i}", "title": "T"})
-    >>> conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    3
-
-    An exception inside the block rolls the whole group back:
-
-    >>> try:
-    ...     with batch(conn):
-    ...         _ = upsert_job(conn, {"job_id": "b9", "title": "T"})
-    ...         raise RuntimeError("boom")
-    ... except RuntimeError:
-    ...     pass
-    >>> job_exists(conn, "b9")
-    False
-
-    Notes:
-        The harvester stores one whole board per block: 1,000 rows as one
-        write-lock acquisition instead of 1,000, which is what keeps it from
-        starving the web UI's own writes while it runs.
-    """
-
-    def __init__(self, conn):
-        self.conn = conn
-
-    def __enter__(self):
-        _BATCHING.add(id(self.conn))
-        return self.conn
-
-    def __exit__(self, exc_type, exc, tb):
-        _BATCHING.discard(id(self.conn))
-        if exc_type is None:
-            self.conn.commit()
-        else:
-            self.conn.rollback()
-        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -711,68 +371,6 @@ def roster_growth(conn, days=7):
         (cutoff,)).fetchone()[0]
 
 
-def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
-    """Deactivate active companies whose JSON-API ATS board no longer resolves
-    (a hard 404/error — the source of the crawl's `HTTP 404` spam), and
-    optionally off-mission `other`-tier companies (excluding multi-division).
-    Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
-    from "dead" (404) are probed. Returns (n_dead, n_offmission)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import config
-    from discovery.probes import (probe_greenhouse, probe_lever,
-                                   probe_ashby, probe_bamboohr)
-
-    def _ultipro_alive(slug):
-        # Not discovery.probes.probe_ultipro: its ok flag means "has jobs",
-        # which would prune a live-but-currently-empty board. Dead here
-        # means the board REQUEST fails (the 404 spam three roster rows
-        # produced in every 2026-08-28 crawl log); an empty listing is
-        # alive.
-        from scrapers.fetchers.ultipro import parse_board
-        try:
-            return (True, len(parse_board(slug)))
-        except Exception:
-            return (False, 0)
-
-    PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
-             "ashby": probe_ashby, "bamboohr": probe_bamboohr,
-             "ultipro": _ultipro_alive}
-
-    rows = [c for c in get_companies(conn, active_only=True)
-            if c.get("ats") in PROBE and c.get("slug")]
-
-    def _check(c):
-        ok, _ = PROBE[c["ats"]](c["slug"])
-        return c, ok
-
-    dead = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_check, c): c for c in rows}):
-            c, ok = fut.result()
-            if not ok:
-                dead.append(c)
-    for c in dead:
-        conn.execute("UPDATE companies SET active=0, notes=? WHERE id=?",
-                     (f"deactivated: dead {c['ats']} board '{c['slug']}'", c["id"]))
-        print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} {c['slug']}")
-
-    n_off = 0
-    if deactivate_offmission:
-        # Watched companies are exempt: a watch tag is the user deliberately
-        # keeping an off-mission employer (e.g. a defense DSP shop) crawled.
-        off = [c for c in get_companies(conn, active_only=True)
-               if c.get("mission_tier") == "other"
-               and not config.is_multi_division(c.get("name"))
-               and "watch" not in (c.get("tags") or "").split(",")]
-        for c in off:
-            conn.execute("UPDATE companies SET active=0 WHERE id=?", (c["id"],))
-            print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
-                  f"mission_score={c.get('mission_score')}")
-        n_off = len(off)
-    conn.commit()
-    return len(dead), n_off
-
-
 # --------------------------------------------------------------------------- #
 #  Company identity, dedup, and roster CRUD (incl. capture-only rows)          #
 # --------------------------------------------------------------------------- #
@@ -860,27 +458,18 @@ def company_by_host(conn, url):
     host, path = _split_url(url)
     if not host:
         return None
-    domain = ".".join(host.split(".")[-2:])
     shared = bool(_SHARED_HOST_RE.search(host))
-    sibling = None
-    for c in conn.execute("SELECT * FROM companies ORDER BY id").fetchall():
-        c = dict(c)
-        for cand in (c.get("careers_url"), c.get("slug")):
-            if not cand or "." not in str(cand):
-                continue
-            if not re.match(r"https?://", str(cand), re.I):
-                cand = f"https://{cand}"
-            chost, cpath = _split_url(cand)
-            if not chost:
-                continue
-            if chost == host:
-                prefix = _board_prefix(cpath) if shared else ""
-                if not prefix or path.lower().startswith(prefix.lower()):
-                    return c
-            elif (not shared and sibling is None
-                  and ".".join(chost.split(".")[-2:]) == domain):
-                sibling = c
-    return sibling
+    idx = _company_index(conn)
+    for c, cpath in idx["by_host"].get(host, ()):
+        prefix = _board_prefix(cpath) if shared else ""
+        if not prefix or path.lower().startswith(prefix.lower()):
+            return c
+    if shared:
+        return None
+    for c, chost in idx["by_domain"].get(_domain(host), ()):
+        if chost != host:
+            return c
+    return None
 
 
 def board_key(r):
@@ -916,6 +505,64 @@ def board_key(r):
     return None
 
 
+def _domain(host):
+    """The registrable-ish tail of a host, the piece two sibling careers
+    hosts share ('jobs.acme.org' -> 'acme.org')."""
+    return ".".join(host.split(".")[-2:])
+
+
+def _company_index(conn):
+    """One scan of the companies table, shaped for the identity lookups
+    (company_by_host, company_by_board, dedup_companies) so none of them
+    re-walks and re-parses the roster on its own. Built per call, never
+    cached: every caller may have just written the row it is about to look
+    for.
+
+    Returns a dict:
+
+    * ``rows``       every row as a dict, id order
+    * ``by_board``   board_key -> rows with that board, id order
+    * ``by_host``    careers host -> [(row, path)], id order, a row's
+                     careers_url candidate before its URL-shaped slug
+    * ``by_domain``  _domain(host) -> [(row, host)], same order
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "A", "ats": "lever", "slug": "a",
+    ...                           "careers_url": "https://www.a.org/jobs/"})
+    >>> _ = upsert_company(conn, {"name": "B", "ats": "lever", "slug": "a"})
+    >>> idx = _company_index(conn)
+    >>> [r["name"] for r in idx["rows"]]
+    ['A', 'B']
+    >>> [r["name"] for r in idx["by_board"][("lever", "a")]]
+    ['A', 'B']
+    >>> [(r["name"], p) for r, p in idx["by_host"]["a.org"]]
+    [('A', '/jobs/')]
+    >>> [(r["name"], h) for r, h in idx["by_domain"]["a.org"]]
+    [('A', 'a.org')]
+    """
+    from collections import defaultdict
+
+    rows = [dict(r) for r in
+            conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
+    by_board, by_host, by_domain = defaultdict(list), defaultdict(list), defaultdict(list)
+    for c in rows:
+        key = board_key(c)
+        if key is not None:
+            by_board[key].append(c)
+        for cand in (c.get("careers_url"), c.get("slug")):
+            if not cand or "." not in str(cand):
+                continue
+            if not re.match(r"https?://", str(cand), re.I):
+                cand = f"https://{cand}"
+            chost, cpath = _split_url(cand)
+            if not chost:
+                continue
+            by_host[chost].append((c, cpath))
+            by_domain[_domain(chost)].append((c, chost))
+    return {"rows": rows, "by_board": by_board,
+            "by_host": by_host, "by_domain": by_domain}
+
+
 def company_by_board(conn, row):
     """The existing company row whose board matches `row`'s (see board_key),
     or None. Discovery resolves a pasted or harvested NAME to a board, and a
@@ -927,11 +574,8 @@ def company_by_board(conn, row):
     key = board_key(row)
     if key is None:
         return None
-    for c in conn.execute("SELECT * FROM companies").fetchall():
-        c = dict(c)
-        if board_key(c) == key:
-            return c
-    return None
+    matches = _company_index(conn)["by_board"].get(key)
+    return matches[0] if matches else None
 
 
 def dedup_companies(conn):
@@ -940,16 +584,9 @@ def dedup_companies(conn):
     ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
     those, so the crawl fetches one board several times. Jobs are re-pointed to
     the kept row and tags merge, so the merge is lossless. Returns rows merged."""
-    from collections import defaultdict
-
-    rows = [dict(r) for r in conn.execute("SELECT * FROM companies")]
+    groups = _company_index(conn)["by_board"]
     jobcount = {cid: n for cid, n in conn.execute(
         "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
-    groups = defaultdict(list)
-    for r in rows:
-        k = board_key(r)
-        if k:
-            groups[k].append(r)
 
     def keep_rank(r):
         # Prefer a scored row, then active, then most-referenced, then the
@@ -1140,248 +777,6 @@ def get_companies(conn, active_only=True, missions=None, tag=None):
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY mission_score DESC, local_job_count DESC"
     return [dict(r) for r in conn.execute(q, args).fetchall()]
-
-
-# --------------------------------------------------------------------------- #
-#  Review queue                                                                #
-# --------------------------------------------------------------------------- #
-#
-# Automated discovery guesses, and the guesses were bad. One pasted page
-# produced 15 names that were never employers ("Oncology", "Job Location",
-# "Who You Are"); the resolver spent about a thousand HTTP requests on them
-# and turned four into ACTIVE roster rows with real boards. Verifying that a
-# board exists at a guessed domain proves a board exists -- never that the
-# NAME was an employer. So every automated path writes its candidates here
-# instead of onto the roster: an `active = 0` row carrying tags.PENDING,
-# invisible to every crawl (they all read get_companies(active_only=True)),
-# until a person confirms or rejects it.
-
-
-def _name_key(name):
-    """Normalized comparison key for a company name: [a-z0-9] only.
-
-    The key discovery already compares names by (local_sourcing's
-    `_NONALNUM_RE`, snowball's `_norm_key`, config's name blocklist), so one
-    rejected spelling blocks the others:
-
-    >>> _name_key("Iris Diagnostics, Inc.")
-    'irisdiagnosticsinc'
-    >>> _name_key(" Foo-Bar!! ") == _name_key("foobar")
-    True
-    >>> _name_key(None)
-    ''
-    """
-    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
-
-
-def mark_pending(row):
-    """A company-row dict rewritten as a REVIEW CANDIDATE: inactive, and
-    carrying the pending-review scope tag.
-
-    The contract every automated discovery path writes new companies under.
-
-    >>> sorted(mark_pending({"name": "Acme", "active": 1}).items())
-    [('active', 0), ('name', 'Acme'), ('tags', 'pending-review')]
-
-    Scope tags already on the row survive, so confirming it leaves a company
-    the crawl knows how to fetch:
-
-    >>> mark_pending({"name": "Acme", "tags": "local"})["tags"]
-    'local,pending-review'
-    """
-    return {**row, "active": 0,
-            "tags": tags.join(tags.parse(row.get("tags")) | {tags.PENDING})}
-
-
-def is_confirmed_company(conn, name):
-    """True when the roster already holds a REVIEWED company under `name`: a
-    row with a board that is not sitting in the review queue.
-
-    Every discovery write asks this first -- a confirmed company is refreshed
-    in place, anything else goes (back) to the queue.
-
-    >>> conn = connect(":memory:")
-    >>> is_confirmed_company(conn, "Acme")
-    False
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "Acme", "ats": "lever", "slug": "acme"}))
-    >>> is_confirmed_company(conn, "Acme")
-    False
-
-    Confirming it makes it one, and so does any pre-queue row that already
-    carried a board:
-
-    >>> _ = confirm_company(conn, company_id_by_name(conn, "Acme"))
-    >>> is_confirmed_company(conn, "Acme")
-    True
-
-    A boardless lead or miss row is not a company yet, whatever its tags:
-
-    >>> _ = record_miss(conn, "Zeta", "no-board-found")
-    >>> is_confirmed_company(conn, "Zeta")
-    False
-    """
-    row = conn.execute(
-        "SELECT ats, tags FROM companies WHERE lower(name)=lower(?)",
-        (name,)).fetchone()
-    return bool(row and row["ats"] and not tags.has(row["tags"], tags.PENDING))
-
-
-# What the review UI shows per candidate: who it is, what board was found,
-# how much it produces, and where the guess came from.
-_PENDING_FIELDS = (
-    "id", "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
-    "careers_url", "local_job_count", "total_job_count", "mission_tier",
-    "mission_score", "mission_reason", "tags", "source", "created_at", "notes",
-)
-
-
-def pending_companies(conn):
-    """The review queue: candidates an automated path resolved and nobody has
-    ruled on yet, newest first.
-
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "First", "ats": "lever", "slug": "first"}))
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "Second", "ats": "ashby", "slug": "second"}))
-    >>> [c["name"] for c in pending_companies(conn)]
-    ['Second', 'First']
-
-    Only tagged rows -- an ordinary inactive row (a miss, a boardless
-    capture lead) is not a review candidate:
-
-    >>> _ = record_miss(conn, "Missed", "no-board-found")
-    >>> [c["name"] for c in pending_companies(conn)]
-    ['Second', 'First']
-    """
-    cols = ", ".join(_PENDING_FIELDS)
-    return [dict(r) for r in conn.execute(
-        f"SELECT {cols} FROM companies "
-        "WHERE (',' || COALESCE(tags,'') || ',') LIKE ? "
-        "ORDER BY created_at DESC, id DESC",
-        (f"%,{tags.PENDING},%",)).fetchall()]
-
-
-def confirm_company(conn, cid):
-    """Accept a review candidate onto the roster: the pending tag comes off
-    and `active` follows the shared mission rule (core.claude.
-    is_active_mission) applied to the tier already stored on the row.
-
-    Returns the confirmed row, or None when there is no such company.
-
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "Acme", "ats": "lever", "slug": "acme", "tags": "local"}))
-    >>> row = confirm_company(conn, company_id_by_name(conn, "Acme"))
-    >>> row["tags"], row["active"]
-    ('local', 1)
-
-    The crawl picks it up from that moment; it could not see it before:
-
-    >>> [c["name"] for c in crawlable_companies(conn)]
-    ['Acme']
-
-    >>> confirm_company(conn, 9999) is None
-    True
-    """
-    from core.claude import is_active_mission
-    row = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
-    if not row:
-        return None
-    kept = tags.parse(row["tags"]) - {tags.PENDING}
-    conn.execute(
-        "UPDATE companies SET tags=?, active=? WHERE id=?",
-        (tags.join(kept), is_active_mission(row["mission_tier"], row["name"]),
-         cid))
-    conn.commit()
-    return get_company(conn, cid)
-
-
-def reject_company(conn, cid, reason=None):
-    """Throw a review candidate away for good: the row and any jobs it
-    produced are deleted, and its name is blocklisted so no discovery path
-    re-finds it.
-
-    Returns the rejected name, or None when there is no such company.
-
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, mark_pending(
-    ...     {"name": "Job Location", "ats": "lever", "slug": "joblocation"}))
-    >>> cid = company_id_by_name(conn, "Job Location")
-    >>> _ = upsert_job(conn, {"job_id": "x1", "company_id": cid,
-    ...                       "company_name": "Job Location", "title": "T"})
-    >>> reject_company(conn, cid, "not a company")
-    'Job Location'
-    >>> get_companies(conn, active_only=False), job_exists(conn, "x1")
-    ([], False)
-
-    Deletion alone would not stick -- the same page re-pasted would resolve
-    the same junk again -- so the name is remembered as blocked:
-
-    >>> sorted(blocked_name_keys(conn))
-    ['joblocation']
-
-    >>> reject_company(conn, 9999) is None
-    True
-    """
-    row = conn.execute("SELECT name FROM companies WHERE id=?",
-                       (cid,)).fetchone()
-    if not row:
-        return None
-    name = row["name"]
-    conn.execute("DELETE FROM jobs WHERE company_id=?", (cid,))
-    conn.execute("DELETE FROM companies WHERE id=?", (cid,))
-    conn.commit()
-    block_name(conn, name, reason)
-    return name
-
-
-def block_name(conn, name, reason=None):
-    """Blocklist a company name so no discovery path adds it again. Returns
-    its normalized key.
-
-    >>> conn = connect(":memory:")
-    >>> block_name(conn, "Who You Are", "JD section header")
-    'whoyouare'
-
-    Re-blocking another spelling updates the one row instead of growing a
-    second -- the blocklist is keyed by the normalized name:
-
-    >>> block_name(conn, "who you are!", "seen again")
-    'whoyouare'
-    >>> sorted(blocked_name_keys(conn))
-    ['whoyouare']
-
-    A name with nothing to key on is not blockable:
-
-    >>> block_name(conn, "  ") is None
-    True
-    """
-    key = _name_key(name)
-    if not key:
-        return None
-    conn.execute(
-        "INSERT INTO name_blocklist (key, name, reason, added_at) "
-        "VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
-        "name=excluded.name, reason=excluded.reason, added_at=excluded.added_at",
-        (key, name, reason, datetime.now().isoformat()))
-    conn.commit()
-    return key
-
-
-def blocked_name_keys(conn):
-    """Every blocklisted name key -- the set a paste is filtered against.
-
-    >>> conn = connect(":memory:")
-    >>> blocked_name_keys(conn) == set()
-    True
-    >>> _ = block_name(conn, "Oncology")
-    >>> blocked_name_keys(conn) == {"oncology"}
-    True
-    """
-    return {r["key"] for r in
-            conn.execute("SELECT key FROM name_blocklist").fetchall()}
 
 
 # --------------------------------------------------------------------------- #
@@ -1588,6 +983,35 @@ def reactivate_company(conn, company_id):
     conn.commit()
 
 
+def deactivate_company(conn, company_id, note=None):
+    """Flip one company's `active` switch off, optionally recording why in
+    `notes`. The primitive behind scrapers.ops.prune_dead_boards; the
+    decision (probe the board, apply the off-mission policy) lives there,
+    only the write lives here.
+
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Gone Co", "ats": "lever",
+    ...                             "slug": "gone", "notes": "was fine"})
+    >>> deactivate_company(conn, cid, note="deactivated: dead lever board")
+    >>> row = get_company(conn, cid)
+    >>> row["active"], row["notes"]
+    (0, 'deactivated: dead lever board')
+
+    Without a note the existing notes are left alone:
+
+    >>> cid2 = upsert_company(conn, {"name": "Quiet Co", "notes": "keep"})
+    >>> deactivate_company(conn, cid2)
+    >>> get_company(conn, cid2)["notes"]
+    'keep'
+    """
+    if note is None:
+        conn.execute("UPDATE companies SET active=0 WHERE id=?", (company_id,))
+    else:
+        conn.execute("UPDATE companies SET active=0, notes=? WHERE id=?",
+                     (note, company_id))
+    _commit(conn)
+
+
 # --------------------------------------------------------------------------- #
 #  Jobs                                                                        #
 # --------------------------------------------------------------------------- #
@@ -1713,7 +1137,7 @@ def upsert_job(conn, j):
 
 
 # --------------------------------------------------------------------------- #
-#  Job status, disposition/pipeline, follow-ups, conversion, ranking            #
+#  Job status sync, score columns, ranking                                     #
 # --------------------------------------------------------------------------- #
 
 def _norm_title(t):
@@ -1726,204 +1150,6 @@ def _norm_url(u):
     u = re.sub(r"^https?://", "", u)
     return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
-
-def set_job_status(conn, job_id, status):
-    """Mark one job 'open' or 'closed' directly (closed_at maintained)."""
-    conn.execute(
-        "UPDATE jobs SET status=?, closed_at=? WHERE job_id=?",
-        (status, datetime.now().isoformat() if status == "closed" else None,
-         job_id))
-    conn.commit()
-
-
-def resolve_job(conn, ref):
-    """Resolve a user-supplied job reference to rows: exact job_id first,
-    then unique job_id substring, then normalized URL. Returns a list of
-    matching rows (ideally one; several = ambiguous; empty = no match) so
-    callers can report ambiguity instead of guessing."""
-    row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (ref,)).fetchone()
-    if row:
-        return [dict(row)]
-    rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM jobs WHERE job_id LIKE ?", (f"%{ref}%",)).fetchall()]
-    if rows:
-        return rows
-    want = _norm_url(ref)
-    if want:
-        return [dict(r) for r in conn.execute("SELECT * FROM jobs").fetchall()
-                if _norm_url(r["url"]) == want]
-    return []
-
-
-def set_disposition(conn, ref, disposition, note=None):
-    """Record the user's decision on one job. `ref` is a job_id, a unique
-    job_id fragment, or the posting URL; `disposition` is one of
-    DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
-    the matched job on success, error a printable message otherwise.
-
-    Marking a row 'applied' also stamps `applied_at`, once: a later
-    interviewing/rejected leaves the original apply date alone. See
-    tests/test_store.py::TestPipelineTracking."""
-    d = (disposition or "").strip().lower()
-    clearing = d in ("none", "clear")
-    if not clearing and d not in DISPOSITIONS:
-        return None, (f"unknown disposition {disposition!r} — use one of "
-                      f"{', '.join(DISPOSITIONS)} (or 'clear')")
-    matches = resolve_job(conn, ref)
-    if not matches:
-        return None, f"no job matches {ref!r} (job_id, id fragment, or URL)"
-    if len(matches) > 1:
-        opts = "\n".join(f"    {m['job_id']}  {(m['title'] or '')[:50]}"
-                         for m in matches[:8])
-        return None, f"{ref!r} is ambiguous ({len(matches)} matches):\n{opts}"
-    row = matches[0]
-    now = datetime.now().isoformat()
-    sets = ["disposition=?", "disposition_note=?", "disposition_at=?"]
-    args = [None if clearing else d, None if clearing else note,
-            None if clearing else now]
-    if d == "applied":
-        # COALESCE, not an assignment: the FIRST apply owns the date. Without
-        # it, re-marking a row that came back 'rejected' and then 'applied'
-        # again — or any later edit — would silently reset the clock every
-        # elapsed-time question is measured against.
-        sets.append("applied_at=COALESCE(applied_at, ?)")
-        args.append(now)
-    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?",
-                 [*args, row["job_id"]])
-    conn.commit()
-    return row, None
-
-
-def get_pipeline(conn):
-    """Every job the user has dispositioned, newest decision first — the
-    digest's pipeline section and the --pipeline CLI. Includes closed rows
-    on purpose: 'posting closed after you applied' is a signal."""
-    return [dict(r) for r in conn.execute(
-        "SELECT * FROM jobs WHERE disposition IS NOT NULL "
-        "ORDER BY disposition_at DESC").fetchall()]
-
-
-def update_pipeline_fields(conn, job_id, **fields):
-    """Write the application-tracking columns (PIPELINE_FIELDS) on one job.
-
-    Any other column name is refused rather than written, empty strings
-    normalize to NULL, `referral` to 0/1, and `outcome_reason` must be one of
-    OUTCOME_REASONS. Returns (row, error) like set_disposition — the updated
-    job on success, a printable message otherwise. See
-    tests/test_store.py::TestPipelineTracking.
-
-    Notes:
-        The whitelist is the point: this is reachable from the browser, and a
-        blanket "UPDATE jobs SET <whatever the JSON body named>" would let a
-        typo — or a crafted request — overwrite a scorer-owned column such as
-        resume_fit_score or the validated `disposition` itself.
-    """
-    unknown = sorted(set(fields) - set(PIPELINE_FIELDS))
-    if unknown:
-        return None, (f"unknown pipeline field(s) {', '.join(unknown)} — "
-                      f"writable: {', '.join(PIPELINE_FIELDS)}")
-    if conn.execute("SELECT 1 FROM jobs WHERE job_id=?",
-                    (job_id,)).fetchone() is None:
-        return None, f"no job matches {job_id!r}"
-    sets = {}
-    for k, v in fields.items():
-        if k == "referral":
-            sets[k] = None if v is None else int(bool(v))
-            continue
-        v = (str(v).strip() if v is not None else "") or None
-        if k == "outcome_reason" and v is not None and v not in OUTCOME_REASONS:
-            return None, (f"unknown outcome_reason {v!r} — use one of "
-                          f"{', '.join(OUTCOME_REASONS)}")
-        sets[k] = v
-    if sets:
-        conn.execute(
-            f"UPDATE jobs SET {', '.join(f'{k}=?' for k in sets)} "
-            f"WHERE job_id=?", [*sets.values(), job_id])
-        conn.commit()
-    return dict(conn.execute("SELECT * FROM jobs WHERE job_id=?",
-                             (job_id,)).fetchone()), None
-
-
-def _fit_band(score):
-    """The conversion_report bucket one resume_fit_score falls in.
-
-    >>> _fit_band(0.2), _fit_band(0.45), _fit_band(0.9)
-    ('low', 'mid', 'high')
-
-    Each edge belongs to the band above it, and a perfect score still lands
-    in the top band rather than off the end:
-
-    >>> _fit_band(0.4), _fit_band(0.6), _fit_band(1.0)
-    ('mid', 'high', 'high')
-
-    A row the scorer never reached is reported separately, not counted as a
-    weak one:
-
-    >>> _fit_band(None)
-    'unscored'
-    """
-    if score is None:
-        return "unscored"
-    for name, lo, hi in FIT_BANDS:
-        if lo <= score < hi:
-            return name
-    return FIT_BANDS[-1][0] if score >= FIT_BANDS[-1][1] else FIT_BANDS[0][0]
-
-
-def conversion_report(conn):
-    """Where applications actually convert, sliced by fit band and geo_mode.
-
-    One dict per (band, geo_mode) that has at least one application, ordered
-    by band (FIT_BANDS low to high, then 'unscored') then geo_mode. Each
-    carries `applications` (every row that went out), the live `applied` and
-    `interviewing` counts, `rejected`, `interviews`, and `interview_rate` =
-    interviews / applications, rounded to three places.
-
-    `interviews` counts a row that REACHED an interview, which is not the
-    same as one sitting in 'interviewing': a rejected row whose
-    outcome_reason is 'rejected-interview' got there too, and without it
-    every conversion number would decay as applications resolve. See
-    tests/test_store.py::TestPipelineTracking.
-    """
-    ph = ",".join("?" for _ in APPLIED_DISPOSITIONS)
-    rows = conn.execute(
-        f"SELECT resume_fit_score, geo_mode, disposition, outcome_reason "
-        f"FROM jobs WHERE disposition IN ({ph})",
-        APPLIED_DISPOSITIONS).fetchall()
-    order = [name for name, _, _ in FIT_BANDS] + ["unscored"]
-    buckets = {}
-    for r in rows:
-        key = (_fit_band(r["resume_fit_score"]), r["geo_mode"] or "unknown")
-        bucket = buckets.setdefault(key, {
-            "band": key[0], "geo_mode": key[1], "applications": 0,
-            "applied": 0, "interviewing": 0, "rejected": 0, "interviews": 0})
-        bucket["applications"] += 1
-        bucket[r["disposition"]] += 1
-        if (r["disposition"] == "interviewing"
-                or r["outcome_reason"] == "rejected-interview"):
-            bucket["interviews"] += 1
-    out = sorted(buckets.values(),
-                 key=lambda x: (order.index(x["band"]), x["geo_mode"]))
-    for bucket in out:
-        bucket["interview_rate"] = round(
-            bucket["interviews"] / bucket["applications"], 3)
-    return out
-
-
-def followups_due(conn, today=None):
-    """Live applications whose follow-up date has arrived, oldest first.
-
-    A row qualifies when `followup_at` is set and not in the future and the
-    application is still live (LIVE_DISPOSITIONS) — nudging a rejected row
-    is noise. `today` is a 'YYYY-MM-DD' string and defaults to today. See
-    tests/test_store.py::TestPipelineTracking.
-    """
-    today = today or datetime.now().strftime("%Y-%m-%d")
-    ph = ",".join("?" for _ in LIVE_DISPOSITIONS)
-    return [dict(r) for r in conn.execute(
-        f"SELECT * FROM jobs WHERE COALESCE(followup_at,'') != '' "
-        f"AND followup_at <= ? AND disposition IN ({ph}) "
-        f"ORDER BY followup_at", (today, *LIVE_DISPOSITIONS)).fetchall()]
 
 
 def touch_job(conn, job_id):
@@ -2225,49 +1451,3 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     if limit:
         rows = rows[:int(limit)]
     return rows
-
-
-# --------------------------------------------------------------------------- #
-#  Seen-jobs compatibility (dedupe-only callers)                               #
-# --------------------------------------------------------------------------- #
-
-def is_new(conn, job_id):
-    """Dedupe check against the unified jobs table."""
-    return not job_exists(conn, job_id)
-
-
-def mark_seen(conn, job, track=None):
-    """Record a fetched job dict ({id, company, title, url, location, ...})
-    in the unified jobs table. Adapter for callers that only need
-    seen/unseen dedupe semantics.
-
-    Fit columns are passed through when the caller has already scored the
-    job in place (e.g. the sweep runner's ``--fit --commit`` path, which
-    ``j.update(FitResult.as_columns())``s before committing). Dedupe-only
-    callers simply omit those keys, so ``.get`` yields None and upsert_job's
-    COALESCE preserves any existing score — this adapter never clobbers a
-    stored score with a null. Without this pass-through, a ``--fit --commit``
-    run computed scores, wrote them to the digest, and then dropped every
-    one on the DB write."""
-    upsert_job(conn, {
-        "job_id":          job["id"],
-        "company_id":      job.get("company_id"),
-        "company_name":    job.get("company"),
-        "title":           job.get("title"),
-        "url":             job.get("url"),
-        "location":        job.get("location"),
-        "track":           track or job.get("track"),
-        "remote_eligible": job.get("remote_eligible"),
-        "remote_signal":   job.get("remote_signal"),
-        "anchor_signal":   job.get("anchor_signal"),
-        "description":     (job.get("description") or "")[:config.MAX_DESC_CHARS],
-        "posted_at":       job.get("posted_at"),
-        "resume_fit_score": job.get("resume_fit_score"),
-        "fit_reason":      job.get("fit_reason"),
-        "fit_gates":       job.get("fit_gates"),
-        "fit_domain":      job.get("fit_domain"),
-        "fit_function":    job.get("fit_function"),
-        "fit_stack":       job.get("fit_stack"),
-        "fit_seniority":   job.get("fit_seniority"),
-        "fit_model":       job.get("fit_model"),
-    })

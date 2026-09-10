@@ -176,12 +176,24 @@ class TestCrawlableSelection:
 
 
 class TestDedupe:
-    def test_mark_seen_dedupes(self, db):
-        store.mark_seen(db, {"id": "j1", "company": "X", "title": "t",
-                             "url": "u", "location": "Remote"},
-                        track="remote-neural")
-        assert not store.is_new(db, "j1")
-        assert store.is_new(db, "j2")
+    def test_upsert_then_exists(self, db):
+        # The sweep runner's dedupe is job_exists on the unified table; the
+        # old is_new/mark_seen shim over these two was inlined 2026-09-10.
+        store.upsert_job(db, {"job_id": "j1", "company_name": "X",
+                              "title": "t", "url": "u", "location": "Remote",
+                              "track": "remote-neural"})
+        assert store.job_exists(db, "j1")
+        assert not store.job_exists(db, "j2")
+
+    def test_a_null_fit_column_keeps_the_stored_score(self, db):
+        # A dedupe-only re-upsert (no fit keys) must not clobber a score
+        # written by an earlier --fit run: upsert_job COALESCEs.
+        store.upsert_job(db, {"job_id": "j1", "title": "t",
+                              "resume_fit_score": 0.7})
+        store.upsert_job(db, {"job_id": "j1", "title": "t",
+                              "resume_fit_score": None})
+        assert db.execute("SELECT resume_fit_score FROM jobs WHERE job_id='j1'"
+                          ).fetchone()[0] == 0.7
 
 
 class TestClosedLifecycle:
@@ -891,6 +903,18 @@ class TestReviewQueue:
                           mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid)["active"] == 0
         assert store.pending_companies(db) == []
+
+    def test_an_explicit_verdict_is_written_without_consulting_the_rule(
+            self, db, monkeypatch):
+        # The store writes the caller's decision; it only falls back to
+        # core.claude.is_active_mission when no verdict was passed.
+        import core.claude
+        monkeypatch.setattr(core.claude, "is_active_mission",
+                            lambda *a, **k: 1 / 0)
+        cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")
+        assert store.confirm_company(db, cid, active=1)["active"] == 1
+        cid2 = self._queue(db, "Parked")
+        assert store.confirm_company(db, cid2, active=0)["active"] == 0
 
     def test_reject_deletes_the_row_its_jobs_and_blocks_the_name(self, db):
         cid = self._queue(db, "Job Location")
