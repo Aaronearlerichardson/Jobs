@@ -77,7 +77,6 @@ from core.locality import NC_HQ_RE, geo_mode, is_nc
 from core.remote_filter import remote_signal, remote_signal_for
 
 from . import ops
-from .fetchers import company as company_fetch
 from .harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
 from .runner import apply_keyword_focus, core_anchor
 from .util import worker_count
