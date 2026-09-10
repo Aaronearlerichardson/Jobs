@@ -14,16 +14,22 @@ background (Task Scheduler at log-on, repeating every few hours) and
   * takes every company with a fetchable board (store.harvestable_companies:
     active or not, dormant or not, any tag, any mission score -- only rows
     with no board, or a blocklisted name, are skipped);
-  * pulls the WHOLE board, no location filter, and hydrates every posting's
-    description;
+  * pulls the WHOLE board, no location filter, as a bodiless listing;
   * stores the rows unscored and untracked (jobs.harvested_at stamped), and
     reconciles open/closed status against the full snapshot;
-  * never calls Claude, never reads the resume, never touches crawl_state.
+  * never touches crawl_state;
+  * then hands everything pending to the triage pass (scrapers/triage.py),
+    which runs the crawl's gates cheapest-first, hydrates only the
+    survivors, and fit-scores only the hydrated survivors.
 
-The crawl then adopts the harvested rows: a row without a track label is
-"fresh" to it (store.crawl_seen), so it is gated and scored like a posting
-seen for the first time, only without the network round-trips (the runner
-reuses the stored description).
+Triage is where the Claude spend is: one mission call per never-scored
+company and one fit call per posting that clears four free gates. A row
+triage surfaces carries its track labels and score exactly as a crawled
+row would; a row it drops records the gate that dropped it. The crawl
+still adopts anything triage has not reached yet: a row without a track
+label is "fresh" to it (store.crawl_seen), so it is gated and scored like
+a posting seen for the first time, only without the network round-trips
+(the runner reuses the stored description).
 
 Concurrency: several processes write the one SQLite file (the web UI, the
 scheduled crawl, this). store.connect runs WAL with a busy timeout, and
@@ -31,8 +37,9 @@ each board is written in ONE transaction (store.batch), so a 1,000-row
 board takes the write lock once rather than a thousand times.
 
 Wall clock is the only thing this trades away: the whole roster is on the
-order of 20,000 postings, and hydrating all of them is hours of polite
-detail GETs. Boards run concurrently (one worker per board; a board's own
+order of 20,000 postings, and even the listings alone take a while at
+polite pacing (with --hydrate, every posting's detail GET on top of that
+is hours). Boards run concurrently (one worker per board; a board's own
 requests stay serial, which is the per-host politeness), cheapest ATSes
 first so the store fills early, and a board that makes no progress for
 STALL_S is abandoned rather than allowed to wedge the run.
@@ -185,7 +192,7 @@ def hydrate_delay(ats):
     return max(entry[2], HYDRATE_DELAY_S) if entry else HYDRATE_DELAY_S
 
 
-def harvest_board(company, db_path, progress=lambda: None, hydrate=True,
+def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
                   delay=None, now=None, backoff_s=MISS_BACKOFF_S):
     """Fetch, hydrate and store ONE board. Runs on a worker thread and opens
     its own connection (sqlite connections are per-thread). Returns a stats
@@ -195,6 +202,12 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=True,
     `progress()` is called after the listing returns and after every
     hydrated row, which is how the run's watchdog tells a slow board from a
     wedged one. `delay` defaults to hydrate_delay(ats).
+
+    `hydrate` is OFF by default: the listing is stored bodiless and the
+    triage pass (scrapers/triage.py) fetches bodies for the rows that
+    survive its free gates. Turning it on hydrates the whole board here
+    (the pre-triage behaviour), which spends the host's detail budget on
+    rows a title check would have dropped.
     """
     t0 = time.monotonic()
     if delay is None:
@@ -258,6 +271,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
     try:
         for i, j in enumerate(todo):
             _log.debug("hydrate %s", j.get("url"))
+            j["_tried"] = True          # attempted (vs. left over the cap)
             try:
                 company_fetch.hydrate_description(j)
             except Exception as e:              # noqa: BLE001 - per row
@@ -292,13 +306,18 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
 # --------------------------------------------------------------------------- #
 
 def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
-        limit=None, max_workers=DEFAULT_WORKERS, hydrate=True,
+        limit=None, max_workers=DEFAULT_WORKERS, hydrate=False,
         max_hours=None, stall_s=STALL_S, poll_s=30.0,
-        board_fn=harvest_board):
-    """Harvest every planned board. Returns the summary dict (also printed).
+        board_fn=harvest_board, triage=True, score_cap=None):
+    """Harvest every planned board, then triage what was stored. Returns
+    the summary dict (also printed); the triage summary rides in it under
+    "triage".
 
-    `poll_s` is how often the watchdog looks at the in-flight boards;
-    `board_fn` exists for tests (it is harvest_board's signature).
+    `triage=False` skips the gate/hydrate/score pass (the rows wait for
+    the next one, or for `run_scraper.py --triage`); `score_cap` bounds
+    that pass's Claude fit calls (triage.SCORE_CAP when None). `poll_s` is
+    how often the watchdog looks at the in-flight boards; `board_fn`
+    exists for tests (it is harvest_board's signature).
     """
     db_path = db_path or config.STORE_DB_PATH
     conn = store.connect(db_path)
@@ -318,6 +337,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
                "reopened": 0, "secs": 0.0}
     if not boards:
         print("  nothing to do")
+        if triage:
+            summary["triage"] = _triage(db_path, max_workers, score_cap)
         return summary
 
     t_start = time.monotonic()
@@ -405,4 +426,15 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
           f"{summary['hydrated']} hydrated, {summary['closed']} closed, "
           f"{summary['reopened']} reopened")
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
+    if triage:
+        summary["triage"] = _triage(db_path, max_workers, score_cap)
     return summary
+
+
+def _triage(db_path, max_workers, score_cap):
+    """The gate/hydrate/score pass over everything pending in the store --
+    this pass's rows and any earlier pass left waiting on a body or over
+    the scoring cap. Imported here: triage imports this module."""
+    from . import triage
+    kw = {"score_cap": score_cap} if score_cap is not None else {}
+    return triage.run(db_path=db_path, max_workers=max_workers, **kw)

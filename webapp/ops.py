@@ -308,6 +308,14 @@ OPS = {
             stale_days=_int(p, "stale_days", 2), limit=_int(p, "limit"),
             t=_op_track(p)),
     },
+    "triage": {
+        "label": "Triage harvested rows",
+        "engine": None,
+        "fn": lambda p: __import__("scrapers.triage", fromlist=["run"]).run(
+            db_path=_op_track(p)["db_path"], limit=_int(p, "limit"),
+            **({"score_cap": _int(p, "score_cap")}
+               if _int(p, "score_cap") is not None else {})),
+    },
     "rescore": {
         "label": "Rescore all",
         "engine": None,

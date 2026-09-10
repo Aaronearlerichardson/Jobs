@@ -124,6 +124,14 @@ _MIGRATIONS = {
         # crawl adopts it (gates, scores, stamps its track) the next time
         # that company's board comes round -- see crawl_seen.
         "harvested_at":    "TEXT",
+        # Harvest triage (scrapers/triage.py). NULL = not yet judged (or
+        # judged but still waiting on a body); 'ok' = surfaced into the
+        # track set below; anything else names the cheapest gate that
+        # dropped the row (mission|title|anchor|geo|exclude|division|fit).
+        # triage_detail is the per-track record ("local-tech=geo;...").
+        "triage_status":   "TEXT",
+        "triage_detail":   "TEXT",
+        "triaged_at":      "TEXT",
         "track":           "TEXT",
         "remote_eligible": "INTEGER",
         "remote_signal":   "TEXT",

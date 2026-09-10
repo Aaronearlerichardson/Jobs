@@ -72,6 +72,12 @@ def main(argv=None):
     ap.add_argument("--check-closed", action="store_true",
                     help="Probe stale job URLs and close the provably dead")
     ap.add_argument("--stale-days", type=int, default=2)
+    ap.add_argument("--triage", action="store_true",
+                    help="Gate, hydrate and score the harvester's pending "
+                         "rows (scrapers/triage.py); --limit caps rows, "
+                         "--score-cap caps fit calls")
+    ap.add_argument("--score-cap", type=int, default=None, metavar="N",
+                    help="With --triage: Claude fit calls this pass")
     ap.add_argument("--rescore", action="store_true",
                     help="Re-score every stored job with the current rubric")
     ap.add_argument("--described-only", action="store_true",
@@ -280,6 +286,12 @@ def main(argv=None):
         conn = store.connect(t["db_path"] if t else None)
         store.backfill_axis_columns(conn)
         conn.close()
+        return
+    if args.triage:
+        from scrapers import triage
+        kw = {"score_cap": args.score_cap} if args.score_cap is not None else {}
+        triage.run(db_path=(t["db_path"] if t else None), limit=args.limit,
+                   max_workers=args.workers, **kw)
         return
     if args.rescore:
         from scrapers.ops import rescore_all

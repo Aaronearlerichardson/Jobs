@@ -8,6 +8,8 @@
     python harvest.py --only greenhouse,lever --limit 5 --once
     python harvest.py --names "NVIDIA" "IQVIA" --once   # named boards, even if fresh
     python harvest.py --max-hours 6         # abandon a pass still running after 6 h
+    python harvest.py --once --no-triage    # store listings only; gate/score later
+    python harvest.py --once --score-cap 50 # at most 50 fit calls this pass
 
 Meant to sit in the background for the whole session: put a shortcut to
 JobHarvester.exe in the Startup folder (Win+R, `shell:startup`) and it
@@ -16,10 +18,12 @@ one. Parked, it costs no CPU at all -- the thread is not scheduled until
 its deadline -- and the deadline is wall-clock, so a laptop that slept
 through it runs the pass as soon as it wakes. Each pass pulls every board
 with a fetchable ATS that has not been harvested in the last
---min-age-hours and stores every posting unscored; nothing here calls
-Claude or reads the resume. A second copy started while one is running
-exits at once (lock file in the data directory). Each pass gets its own
-session log (data/logs/session-*-harvest.log).
+--min-age-hours and stores every posting unscored, then runs the triage
+pass (scrapers/triage.py): the crawl's gates cheapest-first, bodies only
+for survivors, one Claude fit call only for each hydrated survivor, capped
+per pass. A second copy started while one is running exits at once (lock
+file in the data directory). Each pass gets its own session log
+(data/logs/session-*-harvest.log).
 """
 
 import argparse
@@ -135,9 +139,16 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=None,
                     help="Boards in flight at once (default: n_cpus-1, "
                          "or HARVEST_WORKERS)")
-    ap.add_argument("--no-hydrate", action="store_true",
-                    help="Store listings only; skip the per-posting detail "
-                         "fetches")
+    ap.add_argument("--hydrate", action="store_true",
+                    help="Fetch every posting's description during the pull "
+                         "(default: triage fetches only the rows that pass "
+                         "its free gates)")
+    ap.add_argument("--no-triage", action="store_true",
+                    help="Skip the gate/hydrate/score pass after the pull "
+                         "(run it later with run_scraper.py --triage)")
+    ap.add_argument("--score-cap", type=int, default=None, metavar="N",
+                    help="Claude fit calls per pass (default 300, "
+                         "scrapers.triage.SCORE_CAP)")
     ap.add_argument("--db", help="Store path (default: the data dir's jobs.db)")
     args = ap.parse_args(argv)
 
@@ -178,7 +189,8 @@ def main(argv=None):
                     db_path=args.db, only=only, names=args.names,
                     min_age_hours=min_age, limit=args.limit,
                     max_workers=args.workers or harvest.DEFAULT_WORKERS,
-                    hydrate=not args.no_hydrate, max_hours=args.max_hours)
+                    hydrate=args.hydrate, max_hours=args.max_hours,
+                    triage=not args.no_triage, score_cap=args.score_cap)
                 stalled[0] += summary["stalled"]
             except Exception:
                 # Put the traceback in the session log while it is still

@@ -72,11 +72,12 @@ def apply_band_rows(ranked, limit=APPLY_BAND_LIMIT):
 
 
 def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
-                        followups=None):
+                        followups=None, triage=None):
     """Fit-ranked markdown digest for a store-crawl track: pipeline section,
     follow-ups due, apply band, watched-company section, then the full
     ranked table. `followups` is `store.followups_due` output; omitted, the
-    section is skipped."""
+    section is skipped. `triage` is `store.triage_counts` output (the
+    harvest funnel, rows per gate); omitted or empty, no section."""
     config.REPORT_DIR.mkdir(exist_ok=True)
     path = config.REPORT_DIR / f"{t['id']}_{datetime.now():%Y-%m-%d}.md"
     today = datetime.now().strftime("%Y-%m-%d")
@@ -132,6 +133,14 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
                 f.write(f"- **{c['name']}** — [{j.get('title')}]({j.get('url')}) "
                         f"— {j.get('location') or '?'} *({note})*\n")
             f.write("\n")
+        if triage:
+            f.write("## Harvest triage, last 7 days\n\n")
+            f.write("Harvested rows by the gate that decided them "
+                    "(`ok` surfaced into the ranking; `fit` scored under the "
+                    "digest floor; the rest never cost a fetch or a score).\n\n")
+            f.write("| " + " | ".join(triage) + " |\n")
+            f.write("|" + "---:|" * len(triage) + "\n")
+            f.write("| " + " | ".join(str(n) for n in triage.values()) + " |\n\n")
         f.write(f"**{len(ranked)} open job(s)** (closed, dismissed, and in-pipeline "
                 f"postings excluded), ranked by resume fit "
                 f"(combined = sqrt(resume-fit x company-mission), shown for reference). "

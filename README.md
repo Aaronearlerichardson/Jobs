@@ -661,27 +661,43 @@ is watched, sweep-tagged or above the mission floor, and hydrates only rows
 that pass the gates. `harvest.py` is the other half — a slow, thorough pass
 that pulls **every** board with a fetchable ATS (dormant, inactive, pending
 review, any mission score; only dead/no-board rows and blocklisted names are
-skipped), whole and unfiltered, hydrates every posting, and stores it all
-**unscored**. It never calls Claude and never reads the resume. The next
-crawl treats a harvested row as fresh (it has no track label yet), gates and
-scores it, and reuses the stored description instead of fetching it again.
-A full snapshot is also the best evidence of what a board lists, so the
-harvester closes stored rows that have vanished and reopens returners.
+skipped), whole and unfiltered, and stores every listing **unscored and
+bodiless**. A full snapshot is the best evidence of what a board lists, so
+the harvester closes stored rows that have vanished and reopens returners.
+
+Each pass then ends with **triage** (`scrapers/triage.py`), which is where
+the spend is decided. Every stored row no crawl has adopted is run through
+the crawl's own gates, cheapest first, for every track that reads the
+roster: the company's cached mission tier (one Claude call per never-scored
+company, using the harvested titles as context), the technical-title regex,
+the core-keyword anchor, the geography rule (watched or mission-trusted
+companies keep remote postings, everyone else onsite only), and the exclude
+tables. Only rows that clear every free gate get a description fetched, and
+only hydrated survivors get a fit score (at most `--score-cap` per pass,
+default 300; the rest wait with their bodies stored). A surfaced row is
+stamped with its track labels and score exactly as a crawled row would be,
+so it enters the ranking and the crawl never re-scores it; a dropped row
+records the gate that dropped it (`jobs.triage_status`, per-track detail in
+`jobs.triage_detail`), and the ranked digest shows the funnel. Rows triage
+has not reached still read as fresh to the crawl, as before.
 
 ```bash
 python harvest.py --list                  # what would be pulled
 python harvest.py --only greenhouse,lever # one family first
 python harvest.py                         # everything not harvested in 6 h
+python harvest.py --once --no-triage      # listings only; judge later
+python run_scraper.py --triage            # the triage pass on its own
+python run_scraper.py --triage --limit 500 --score-cap 50
+python harvest.py --once --hydrate        # the old whole-board hydration
 ```
 
-Whole-roster hydration is on the order of 20,000 detail requests, so a full
-pass takes hours; boards run concurrently (`--workers`, `HARVEST_WORKERS`),
-cheapest ATSes first, and a board with no progress for 15 minutes is
-abandoned. Bodies already in the store are never fetched twice, so each pass
-advances the roster. Workday closes the connection after roughly 150 detail
-requests per tenant, so the harvester takes at most 100 bodiless Workday rows
-per board per pass (`HYDRATE_CAP` in `scrapers/harvest.py`) and leaves the
-rest for the next one.
+Listings alone take a while at polite pacing; boards run concurrently
+(`--workers`, `HARVEST_WORKERS`), cheapest ATSes first, and a board with no
+progress for 15 minutes is abandoned. Bodies already in the store are never
+fetched twice, so each pass advances the roster. Workday closes the
+connection after roughly 150 detail requests per tenant, so triage fetches
+at most 100 bodiless Workday rows per board per pass (`HYDRATE_CAP` in
+`scrapers/harvest.py`) and leaves the rest for the next one.
 
 By default the process stays up and runs a pass every 12 hours (`--every`;
 `--once` for a single pass). Between passes it parks on a timed wait, which

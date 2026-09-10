@@ -137,7 +137,7 @@ def test_harvest_board_stores_hydrates_and_closes(tmp_path, monkeypatch):
                         fake_hydrate)
     ticks = []
     stats = harvest.harvest_board(c, db, progress=lambda: ticks.append(1),
-                                  delay=0)
+                                  delay=0, hydrate=True)
 
     assert stats["err"] is None
     assert (stats["fetched"], stats["new"], stats["hydrated"],
@@ -187,7 +187,7 @@ def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(
                         lambda j: calls.append(j) or j)      # never a body
     naps = []
     monkeypatch.setattr(harvest.time, "sleep", lambda s: naps.append(s))
-    stats = harvest.harvest_board(c, db, delay=0, backoff_s=7)
+    stats = harvest.harvest_board(c, db, delay=0, backoff_s=7, hydrate=True)
     # One streak -> pause -> second streak -> stop. 2 * MISS_STREAK calls.
     assert len(calls) == 2 * harvest.MISS_STREAK
     assert naps == [7]
@@ -217,7 +217,7 @@ def test_harvest_board_reuses_stored_bodies_and_caps_workday(
         return j
     monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
                         fake_hydrate)
-    stats = harvest.harvest_board(c, db, delay=0)
+    stats = harvest.harvest_board(c, db, delay=0, hydrate=True)
     assert not any(cid in calls for cid in ("gh_acme_0", "gh_acme_1", "gh_acme_2"))
     assert len(calls) == 100                         # the cap, not 150
     assert stats["hydrated"] == 100 and stats["unhydrated"] == 50

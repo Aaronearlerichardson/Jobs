@@ -567,7 +567,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
         followups = store.followups_due(conn)
         digest_path = digest_md.write_ranked_digest(
             ranked, t, watch_hits=watch_hits, pipeline=pipeline,
-            followups=followups)
+            followups=followups, triage=store.triage_counts(conn, days=7))
         if send:
             if digest_md.send_ranked_digest(ranked, t, watch_hits=watch_hits,
                                             pipeline=pipeline,

@@ -1051,6 +1051,146 @@ def descriptions_for_company(conn, company_id):
         "AND length(COALESCE(description,'')) > 0", (company_id,))}
 
 
+# --------------------------------------------------------------------------- #
+#  Harvest triage (scrapers/triage.py)                                        #
+# --------------------------------------------------------------------------- #
+
+# Row verdicts, cheapest gate first. The digest and the pass summary count
+# rows by these; `ok` is the only one that puts a row into a track set.
+TRIAGE_GATES = ("mission", "title", "anchor", "geo", "exclude", "division",
+                "fit")
+TRIAGE_OK = "ok"
+
+
+def triage_pending(conn, company_id=None, limit=None):
+    """Open, company-linked rows no crawl has adopted (no track label) and
+    triage has not judged yet -- the harvester's unscored material. A row
+    triage looked at but could not hydrate stays NULL, so it comes back
+    here next pass.
+
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
+    >>> for jid, extra in [("h1", {}), ("h2", {"track": "local"}),
+    ...                    ("h3", {"status": "closed"}),
+    ...                    ("h4", {"triage_status": "title"})]:
+    ...     _ = upsert_job(conn, {"job_id": jid, "title": "T",
+    ...                           "company_id": cid, **extra})
+    >>> record_triage(conn, "h4", "title", "local=title")
+    >>> [r["job_id"] for r in triage_pending(conn)]
+    ['h1']
+    """
+    q = ("SELECT j.*, c.name AS company_name_row FROM jobs j "
+         "JOIN companies c ON j.company_id = c.id "
+         "WHERE j.triage_status IS NULL "
+         "AND COALESCE(j.track,'') = '' "
+         "AND COALESCE(j.status,'open') != 'closed'")
+    args = []
+    if company_id is not None:
+        q += " AND j.company_id = ?"
+        args.append(company_id)
+    q += " ORDER BY j.company_id, j.first_seen"
+    if limit:
+        q += " LIMIT ?"
+        args.append(int(limit))
+    return [dict(r) for r in conn.execute(q, args).fetchall()]
+
+
+def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
+                  geo_mode=None, remote_signal=None, scores=None, now=None):
+    """Write one row's triage verdict. `tracks` (the track labels the row
+    surfaced into) MERGE into the stored set exactly as a crawl's label
+    would, so crawl_seen reads the row as handled; `description` fills an
+    empty body only; `scores` is a FitResult.as_columns() dict.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T", "track": "x"})
+    >>> record_triage(conn, "j", "ok", "y=ok", tracks=["y"],
+    ...               description="body", scores={"resume_fit_score": 0.5})
+    >>> r = conn.execute("SELECT * FROM jobs").fetchone()
+    >>> (r["triage_status"], r["triage_detail"], sorted(track_set(r["track"])),
+    ...  r["description"], r["resume_fit_score"])
+    ('ok', 'y=ok', ['x', 'y'], 'body', 0.5)
+    """
+    sets = ["triage_status=?", "triage_detail=?", "triaged_at=?"]
+    args = [status, detail, (now or datetime.now()).isoformat()]
+    if tracks:
+        prev = conn.execute("SELECT track FROM jobs WHERE job_id=?",
+                            (job_id,)).fetchone()
+        merged = track_set(prev["track"] if prev else None) | set(tracks)
+        sets.append("track=?")
+        args.append(join_tracks(merged))
+    if description:
+        sets.append("description=COALESCE(NULLIF(description,''), ?)")
+        args.append(description[:config.MAX_DESC_CHARS])
+    if geo_mode:
+        sets.append("geo_mode=COALESCE(geo_mode, ?)")
+        args.append(geo_mode)
+    if remote_signal:
+        sets.append("remote_eligible=1")
+        sets.append("remote_signal=COALESCE(remote_signal, ?)")
+        args.append(remote_signal)
+    if scores:
+        for c in _SCORE_COLS:
+            sets.append(f"{c}=?")
+            args.append(scores.get(c))
+    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?",
+                 [*args, job_id])
+    _commit(conn)
+
+
+def store_body(conn, job_id, description, location=None):
+    """Keep a freshly fetched body (and, when the detail page named one,
+    the real location) on a row whose verdict is still open, so the next
+    pass does not fetch it again. An empty body never blanks a stored one.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
+    ...                       "location": "2 Locations"})
+    >>> store_body(conn, "j", "body", "Durham, NC; Remote")
+    >>> r = conn.execute("SELECT description, location FROM jobs").fetchone()
+    >>> (r["description"], r["location"])
+    ('body', 'Durham, NC; Remote')
+    """
+    conn.execute(
+        "UPDATE jobs SET description=COALESCE(NULLIF(?,''), description), "
+        "location=COALESCE(NULLIF(?,''), location) WHERE job_id=?",
+        ((description or "")[:config.MAX_DESC_CHARS], location or "", job_id))
+    _commit(conn)
+
+
+def mark_desc_checked(conn, job_id, now=None):
+    """Stamp a failed body fetch so the next pass does not retry it at once
+    (the same desc_checked_at the backfill ops honour)."""
+    conn.execute("UPDATE jobs SET desc_checked_at=? WHERE job_id=?",
+                 ((now or datetime.now()).isoformat(), job_id))
+    _commit(conn)
+
+
+def triage_counts(conn, days=None):
+    """{verdict: n} over triaged rows, optionally only those judged in the
+    last `days` days -- the per-gate funnel the digest shows.
+
+    >>> conn = connect(":memory:")
+    >>> for jid, st in [("a", "ok"), ("b", "title"), ("c", "title")]:
+    ...     _ = upsert_job(conn, {"job_id": jid, "title": "T"})
+    ...     record_triage(conn, jid, st, "")
+    >>> triage_counts(conn)
+    {'ok': 1, 'title': 2}
+    """
+    q = ("SELECT triage_status AS s, COUNT(*) AS n FROM jobs "
+         "WHERE triage_status IS NOT NULL")
+    args = []
+    if days:
+        q += " AND triaged_at >= ?"
+        args.append((datetime.now() - timedelta(days=days)).isoformat())
+    q += " GROUP BY triage_status"
+    rows = conn.execute(q, args).fetchall()
+    order = (TRIAGE_OK, *TRIAGE_GATES)
+    return {r["s"]: r["n"] for r in sorted(
+        rows, key=lambda r: order.index(r["s"]) if r["s"] in order
+        else len(order))}
+
+
 def upsert_job(conn, j):
     """Insert or refresh a job. Returns True if it was new.
 
