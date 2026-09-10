@@ -97,7 +97,9 @@ _fitp = profile_section("fit")
 CORE_KEYWORDS   = list(_kw.get("core", []))
 DOMAIN_KEYWORDS = list(_kw.get("domain", []))
 SKILL_KEYWORDS  = list(_kw.get("skill", []))
-# Flat back-compat view; --expand-live appends here (treated as Tier 1).
+# Flat view of the three tiers (discover.py --from-keywords, tools/expand.py
+# and the source checkers read it). scrapers/runner.py rebuilds it IN PLACE
+# when a track swaps its keyword focus, so hold the list, not a copy.
 INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
 EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
