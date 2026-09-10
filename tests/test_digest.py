@@ -1,7 +1,7 @@
 """The emailed digest is a push, not a page: it must carry only what is new
 enough and good enough to interrupt someone, and must stay silent otherwise.
 
-Offline by construction — `send_gmail` is monkeypatched in every test, so no
+Offline by construction — `_send_gmail` is monkeypatched in every test, so no
 SMTP socket is ever opened.
 """
 
@@ -41,7 +41,7 @@ def sent(monkeypatch):
         out.append((subject, plain, html))
         return True
 
-    monkeypatch.setattr(digest_md, "send_gmail", _fake)
+    monkeypatch.setattr(digest_md, "_send_gmail", _fake)
     return out
 
 
@@ -229,7 +229,7 @@ class TestSendRankedDigest:
         assert sent == []
 
     def test_reports_failure_when_the_send_fails(self, track, monkeypatch):
-        monkeypatch.setattr(digest_md, "send_gmail",
+        monkeypatch.setattr(digest_md, "_send_gmail",
                             lambda *a, **k: False)
         assert digest_md.send_ranked_digest([row("fresh")], track) is False
 

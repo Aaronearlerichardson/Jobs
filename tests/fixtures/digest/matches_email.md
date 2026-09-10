@@ -1,9 +1,8 @@
-[GOLDEN] 2 posting(s) - 2026-09-10
+# [GOLDEN] Job Alert - 2026-09-10
 
-- [GOLDEN] M One
-  Mco | Remote
-  https://m.io/1
+**2 posting(s)** (1 remote-eligible; location-agnostic sweep).
 
-- [GOLDEN] M Two
-  Nco | Elsewhere, YY
-  https://m.io/2
+| Fit | Tag | Company | Title | Location | Anchor | Remote signal |
+|----:|-----|---------|-------|----------|--------|---------------|
+| 0.50 | [GOLDEN] | Mco | [M One](https://m.io/1) | Remote | core:eeg | location:remote |
+| n/a | [GOLDEN] | Nco | [M Two](https://m.io/2) | Elsewhere, YY |  |  |
