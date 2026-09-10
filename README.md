@@ -890,7 +890,7 @@ identically to a dead one.
 |---|---|
 | `run_scraper.py` / `webapp.py` | entry points: daily refresh + maintenance CLI, web UI launcher (`crawler.py` = deprecation shim) |
 | `discover.py` / `capture.py` | entry points: roster growth, manual page capture |
-| `config.py` / `profile.toml` | plumbing (paths, data dir, track parsing) vs. all search criteria |
+| `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
 | `core/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
 | `scrapers/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `scrapers/ops.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |

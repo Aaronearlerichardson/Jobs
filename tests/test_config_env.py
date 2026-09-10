@@ -1,4 +1,4 @@
-"""Environment handling in config.py.
+"""Environment handling in config/secrets.py (reached as `config.env`).
 
 A variable that EXISTS but is blank must read as unset. `os.environ.get`
 doesn't do that — it returns "" — which made an exported-but-empty
