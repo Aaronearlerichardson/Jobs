@@ -4,10 +4,11 @@ Paylocity-hosted boards live at
 ``https://recruiting.paylocity.com/recruiting/jobs/All/<company-guid>/<name>``.
 The board page embeds the whole listing as a ``pageData`` JSON blob (there is
 no separate list API): ``pageData.Jobs[]`` carries
-``{JobId, JobTitle, JobLocation{City,State,Country}, LocationName, IsRemote}``.
-Each posting's full description is server-rendered on its detail page
-(``/Recruiting/Jobs/Details/<JobId>`` -> ``.job-preview-details``) and fetched
-lazily, the same title-screen-then-hydrate shape as the BambooHR fetcher.
+``{JobId, JobTitle, JobLocation{City,State,Country}, LocationName, IsRemote,
+Description}``. A posting whose listing entry carries no ``Description`` gets
+it from its server-rendered detail page
+(``/Recruiting/Jobs/Details/<JobId>`` -> ``.job-preview-details``), within
+the budget fetchers/board.py describes.
 
 The store slug is the company GUID; the name segment of the board URL is
 cosmetic (the GUID-only URL returns the same data).
@@ -15,11 +16,11 @@ cosmetic (the GUID-only URL returns the same data).
 
 import json
 import re
-import time
 
 from bs4 import BeautifulSoup
 
 from ..http import SESSION, HEADERS
+from .board import board_jobs
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
 _DETAIL = "https://recruiting.paylocity.com/Recruiting/Jobs/Details/{jid}"
@@ -66,37 +67,28 @@ def fetch_description(job_id, timeout=None):
         return ""
 
 
-def fetch_paylocity(guid, company_name, gate=None, max_details=40,
+def _row(guid, j):
+    jid = str(j.get("JobId") or "")
+    title = j.get("JobTitle") or ""
+    if not jid or not title:
+        return None
+    row = {"id": f"paylocity_{guid[:8]}_{jid}", "title": title,
+           "url": _DETAIL.format(jid=jid), "location": location_str(j),
+           "description": re.sub(r"<[^>]+>", " ", j.get("Description") or ""),
+           "_jid": jid}
+    if j.get("IsRemote"):
+        row["remote_hint"] = "paylocity:isRemote"
+    return row
+
+
+def fetch_paylocity(guid, company_name="", gate=None, loc_re=None, max_details=40,
                     detail_delay=0.2):
-    """Keyword-gated fetch (for sweeping unvetted boards): title-screen first,
-    hydrate the description only when the title alone didn't decide relevance."""
     try:
         raw = parse_board(guid)
     except Exception as e:
-        print(f"    [!] Paylocity {company_name}: {e}")
+        print(f"    [!] Paylocity {company_name or guid[:8]}: {e}")
         return []
-    out, fetched = [], 0
-    for j in raw:
-        jid = str(j.get("JobId") or "")
-        title = j.get("JobTitle") or ""
-        if not jid or not title:
-            continue
-        desc = re.sub(r"<[^>]+>", " ", j.get("Description") or "")
-        if gate is not None:
-            if not gate(title) and fetched < max_details:
-                desc = fetch_description(jid)
-                fetched += 1
-                time.sleep(detail_delay)
-            if not gate(title, desc):
-                continue
-        if not desc and fetched < max_details:
-            desc = fetch_description(jid)
-            fetched += 1
-            time.sleep(detail_delay)
-        rec = {"id": f"paylocity_{guid[:8]}_{jid}", "company": company_name,
-               "title": title, "url": _DETAIL.format(jid=jid),
-               "location": location_str(j), "description": desc}
-        if j.get("IsRemote"):
-            rec["remote_hint"] = "paylocity:isRemote"
-        out.append(rec)
-    return out
+    return board_jobs((_row(guid, j) for j in raw), company_name,
+                      gate=gate, loc_re=loc_re,
+                      fetch_description=lambda row: fetch_description(row["_jid"]),
+                      max_details=max_details, detail_delay=detail_delay)

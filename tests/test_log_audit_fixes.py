@@ -13,16 +13,24 @@ Four defects the logs showed, each pinned here offline:
     before fetching any path on it.
 """
 
+import re
+
 import requests
 
 import core.store as store
 from discovery import local_sourcing, sniffer
 from discovery.names import junk_name_reason
 from scrapers import ops
-from scrapers.fetchers import company as cf
+from scrapers.fetchers import workday as wd
 
 
 # ─── Workday scope guard ─────────────────────────────────────────────────
+
+# The fixtures are North Carolina boards; the suite runs on whatever
+# profile is loaded, so the scope regex is spelled out rather than taken
+# from core.locality.
+NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)
+
 
 def _posting(loc, path, title="Data Engineer"):
     return {"title": title, "locationsText": loc, "externalPath": path,
@@ -63,11 +71,11 @@ class _WorkdaySession:
 
 class TestWorkdayScopeGuard:
     def _wire(self, monkeypatch, session):
-        monkeypatch.setattr(cf, "SESSION", session)
-        monkeypatch.setattr(cf, "_wd_cxs_tenant", lambda t, p, s: t)
-        monkeypatch.setattr(cf, "_wd_detail_locations",
+        monkeypatch.setattr(wd, "SESSION", session)
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        monkeypatch.setattr(wd, "_wd_detail_locations",
                             lambda *a: ["US, NC, Durham"] if session.get(a[-1]) else [])
-        monkeypatch.setattr(cf.time, "sleep", lambda *a: None)
+        monkeypatch.setattr(wd.time, "sleep", lambda *a: None)
 
     def test_unnarrowed_scope_keeps_listed_matches_only_without_detail_gets(
             self, monkeypatch, capsys):
@@ -77,7 +85,7 @@ class TestWorkdayScopeGuard:
                     _posting("3 Locations", "/job/US-NC-Durham/Eng_NC2")])
         s = _WorkdaySession(board, scoped=board[:2], ignores_scope=True)
         self._wire(monkeypatch, s)
-        out = cf.fetch_workday_all("nvidia", 5, "Site", loc_re=cf.NC_RE,
+        out = wd.fetch_workday_all("nvidia", 5, "Site", loc_re=NC_RE,
                                    page_size=20, max_pages=3)
         assert [j["id"] for j in out] == ["wd_nvidia_Eng_NC1", "wd_nvidia_Eng_NC2"]
         assert s.detail_gets == [], "a failed scope must not detail-GET the board"
@@ -90,7 +98,7 @@ class TestWorkdayScopeGuard:
         local = [_posting("5 Locations", "/job/US-CA-Santa-Clara/Eng_NC")]
         s = _WorkdaySession(board, scoped=local)
         self._wire(monkeypatch, s)
-        out = cf.fetch_workday_all("acme", 5, "Site", loc_re=cf.NC_RE,
+        out = wd.fetch_workday_all("acme", 5, "Site", loc_re=NC_RE,
                                    page_size=20, max_pages=3)
         assert len(out) == 1 and out[0]["location"] == "US, NC, Durham"
         assert len(s.detail_gets) == 1
@@ -101,8 +109,8 @@ class TestWorkdayScopeGuard:
         s = _WorkdaySession(local + [_posting("US, TX, Austin", "/job/x/y")] * 30,
                             scoped=local)
         self._wire(monkeypatch, s)
-        monkeypatch.setattr(cf, "_WD_RESCUE_CAP", 4)
-        out = cf.fetch_workday_all("acme", 5, "Site", loc_re=cf.NC_RE,
+        monkeypatch.setattr(wd, "_WD_RESCUE_CAP", 4)
+        out = wd.fetch_workday_all("acme", 5, "Site", loc_re=NC_RE,
                                    page_size=20, max_pages=3)
         assert len(s.detail_gets) == 4
         # facet-vouched rows past the budget are kept on their listed text
@@ -114,7 +122,7 @@ class TestWorkdayScopeGuard:
                  for i in range(25)]
         s = _WorkdaySession(board, scoped=[], ignores_scope=True)
         self._wire(monkeypatch, s)
-        out = cf.fetch_workday_all("acme", 5, "Site", loc_re=None,
+        out = wd.fetch_workday_all("acme", 5, "Site", loc_re=None,
                                    page_size=20, max_pages=3)
         assert len(out) == 25
         assert "unnarrowed" not in capsys.readouterr().out
@@ -128,18 +136,18 @@ class TestWorkdayLocalCount:
     def test_scoped_total_when_the_scope_narrowed(self, monkeypatch):
         s = _WorkdaySession([_posting("x", "/job/a/b")] * 50,
                             scoped=[_posting("US, NC, Durham", "/job/US-NC/a")] * 3)
-        monkeypatch.setattr(cf, "SESSION", s)
-        monkeypatch.setattr(cf, "_wd_cxs_tenant", lambda t, p, s: t)
-        assert cf.wd_local_count("acme", 5, "Site", cf.NC_RE) == 3
+        monkeypatch.setattr(wd, "SESSION", s)
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        assert wd.wd_local_count("acme", 5, "Site", NC_RE) == 3
 
     def test_listed_location_count_when_the_scope_failed(self, monkeypatch):
         board = ([_posting("US, CA, Santa Clara", f"/job/US-CA/Eng_{i}")
                   for i in range(150)]
                  + [_posting("US, NC, Durham", "/job/US-NC-Durham/Eng_NC")])
         s = _WorkdaySession(board, scoped=[], ignores_scope=True)
-        monkeypatch.setattr(cf, "SESSION", s)
-        monkeypatch.setattr(cf, "_wd_cxs_tenant", lambda t, p, s: t)
-        n = cf.wd_local_count("nvidia", 5, "Site", cf.NC_RE, page_size=20,
+        monkeypatch.setattr(wd, "SESSION", s)
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        n = wd.wd_local_count("nvidia", 5, "Site", NC_RE, page_size=20,
                               sample_pages=2)
         assert n == 0            # the NC row sits past the sampled pages
         assert n != len(board)   # and the whole board is never reported

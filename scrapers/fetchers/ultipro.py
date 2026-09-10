@@ -9,6 +9,11 @@ client-rendered SPA) and expose a public JSON search API:
 
 The listing carries the ``BriefDescription`` inline, so no per-job detail call
 is needed. The store slug is ``"<CODE>|<GUID>"``.
+
+Notes:
+    parse_board posts through a bare requests.Session rather than the shared
+    PoliteSession (as it has since the fetcher was added), so it names its
+    timeout explicitly instead of inheriting the session default.
 """
 
 import sys
@@ -18,6 +23,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from ..http import DEFAULT_TIMEOUT, HEADERS
+from .board import board_jobs
 
 _JSON = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
 
@@ -69,27 +75,26 @@ def _detail_url(slug, oid):
             f"/OpportunityDetail?opportunityId={oid}")
 
 
-def fetch_ultipro(slug, company_name, gate=None):
-    """Keyword-gated fetch. The BriefDescription is inline, so title+desc gate
-    directly with no per-job detail call."""
+def _row(slug, code, o):
+    title = (o.get("Title") or "").strip()
+    oid = o.get("Id") or ""
+    if not title or not oid:
+        return None
+    return {"id": f"ultipro_{code}_{oid[:12]}", "title": title,
+            "url": _detail_url(slug, oid), "location": location_str(o),
+            "description": _desc(o)}
+
+
+def fetch_ultipro(slug, company_name="", gate=None, loc_re=None):
+    code = slug.split("|")[0]
     try:
         opps = parse_board(slug)
     except Exception as e:
-        # Single write (worker-thread print interleaves mid-line otherwise —
-        # see fetch_ultipro_all's twin note in fetchers/company.py).
-        sys.stdout.write(f"    [!] UltiPro {company_name}: {e}\n")
+        # Single write, not print(): this runs on fetch worker threads, and
+        # print()'s separate text/newline writes let a concurrently printing
+        # thread splice its line into the middle of this one (seen fused with
+        # a [SNIFF] line in the 2026-08-28 discover session log).
+        sys.stdout.write(f"    [!] UltiPro {company_name or code}: {e}\n")
         return []
-    code = slug.split("|")[0]
-    out = []
-    for o in opps:
-        title = (o.get("Title") or "").strip()
-        oid = o.get("Id") or ""
-        if not title or not oid:
-            continue
-        desc = _desc(o)
-        if gate is not None and not gate(title, desc):
-            continue
-        out.append({"id": f"ultipro_{code}_{oid[:12]}", "company": company_name,
-                    "title": title, "url": _detail_url(slug, oid),
-                    "location": location_str(o), "description": desc})
-    return out
+    return board_jobs((_row(slug, code, o) for o in opps), company_name,
+                      gate=gate, loc_re=loc_re)

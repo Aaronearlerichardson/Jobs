@@ -5,6 +5,36 @@ import os
 import re
 from datetime import datetime, timedelta
 
+import config
+
+# City, ST  |  City, State  |  Remote — a location as a careers page prints
+# it, for reading one off a listing row's text (custom boards, iCIMS).
+LOC_TEXT_RE = re.compile(r"[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+)*,\s*"
+                         r"(?:[A-Z]{2}|[A-Z][a-z]+)\b|\bremote\b", re.I)
+
+
+def cache_dir(*parts):
+    """A directory under the data dir's `.cache/` for a fetcher's disk
+    cache (board detection, Workday and iCIMS location lookups). Not
+    created here: callers mkdir when they first write."""
+    return config.DATA_DIR.joinpath(".cache", *parts)
+
+
+def default_search_text():
+    """A free-text place term derived from the profile's [locality], for
+    the search boxes that narrow a board server-side (Workday's
+    `searchText`, the discovery probe's local count).
+
+    Prefer a spelled-out state/region suffix ("california") over a two-letter
+    abbreviation, which matches far too much in a free-text field; fall back
+    to the longest place name. "" when no locality is configured, which
+    simply means an unnarrowed board pull."""
+    words = [s for s in config.LOCALITY_STATE_SUFFIX if len(s) > 2]
+    if words:
+        return max(words, key=len)
+    places = [s for s in config.LOCALITY_SUBSTRINGS if s]
+    return max(places, key=len) if places else ""
+
 
 def worker_count(env_var, floor=4):
     """Default thread-pool size: n_cpus - 1, overridable via `env_var`.

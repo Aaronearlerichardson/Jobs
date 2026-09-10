@@ -14,8 +14,10 @@ and ``p.jv-job-list-location``):
 A job page ``/<tenant>/job/<id>`` embeds a schema.org JobPosting in JSON-LD
 (title, description, location, datePosted), which ``fetchers.jsonld``
 already knows how to read. Titles and locations come from the listing;
-the page is fetched only for the description, screened the way the
-BambooHR fetcher screens — cheap fields first, the page within a budget.
+the page is fetched only for the description, screened the way
+fetchers/board.py screens — location, then cheap fields, then the page
+within a budget (the order is the same; the listing's paging keeps this
+module off the shared driver).
 
 ``jobs.jobvite.com`` publishes no robots.txt (a 404), which RFC 9309 reads
 as "no restrictions". Ids are ``jv_<tenant>_<id>``.
@@ -28,6 +30,7 @@ from bs4 import BeautifulSoup
 
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
+from .board import loc_ok
 from .jsonld import (_normalize_description, _normalize_location,
                      extract_jsonld, is_jobposting)
 
@@ -161,29 +164,15 @@ def _hydrate(rows, label, max_details, detail_delay):
             time.sleep(detail_delay)
 
 
-def fetch_jobvite_board(tenant, want=None, max_details=40, detail_delay=0.2):
-    """Every row on the site, ungated, with pages fetched for the rows
-    `want(row)` accepts (all of them when None) within `max_details`.
-
-    The company-vetted, location-scoped callers use this: they decide
-    relevance themselves and only pay for the pages they will keep.
-    """
-    tenant = tenant_of(tenant)
-    if not tenant:
-        return []
-    rows = _listing(tenant, tenant)
-    _hydrate([r for r in rows if want is None or want(r)],
-             tenant, max_details, detail_delay)
-    return rows
-
-
-def fetch_jobvite(tenant, company_name, gate=None, max_details=40,
+def fetch_jobvite(tenant, company_name="", gate=None, loc_re=None, max_details=40,
                   detail_delay=0.2):
-    """Relevant postings from one Jobvite tenant.
+    """Postings from one Jobvite tenant that pass `loc_re` (on the listed
+    location, before any page is fetched) and `gate`.
 
     Rows relevant on their title get their page first; the rest get one
     while the budget lasts, so a generic title can still qualify on its
-    description. Returns [] — never raises — when the site is unreachable.
+    description. With no gate every in-area row gets a page within the
+    budget. Returns [] — never raises — when the site is unreachable.
 
     See tests/test_fetcher_parsers.py::TestJobvite.
     """
@@ -191,7 +180,7 @@ def fetch_jobvite(tenant, company_name, gate=None, max_details=40,
     if not tenant:
         return []
     label = company_name or tenant
-    rows = _listing(tenant, label)
+    rows = [r for r in _listing(tenant, label) if loc_ok(loc_re, r.get("location", ""))]
     title_ok = (lambda title: True) if gate is None else gate
     first = [r for r in rows if title_ok(r["title"])]
     rest = [r for r in rows if not title_ok(r["title"])]

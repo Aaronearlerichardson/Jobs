@@ -9,17 +9,16 @@ rendered SPA), but the data comes from a clean public JSON API:
 The listing carries uuid / name / department / workLocation; the per-job
 endpoint adds the full description (an HTML ``{company, role}`` dict) and a
 ``companyName`` for attribution. The store slug is the board slug (e.g.
-``blackrockneurotech``).
+``blackrockneurotech``). Filters and the detail budget: fetchers/board.py.
 
 Replaces the old ``custom`` treatment of Rippling boards, whose static HTML
 scrape returned nothing because the board is client-rendered.
 """
 
-import time
-
 from bs4 import BeautifulSoup
 
 from ..http import SESSION, HEADERS
+from .board import board_jobs
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
 _JSON = {**HEADERS, "Accept": "application/json"}
@@ -66,37 +65,25 @@ def _dept(job):
     return d.get("label", "") if isinstance(d, dict) else str(d)
 
 
-def fetch_rippling(slug, company_name, gate=None, max_details=40,
+def _row(slug, j):
+    uuid = j.get("uuid") or ""
+    title = (j.get("name") or "").strip()
+    if not uuid or not title:
+        return None
+    return {"id": f"rippling_{slug}_{uuid[:12]}", "title": title,
+            "url": j.get("url") or f"https://ats.rippling.com/{slug}/jobs/{uuid}",
+            "location": location_str(j), "description": "",
+            "head": f"{title} {_dept(j)}", "_uuid": uuid}
+
+
+def fetch_rippling(slug, company_name="", gate=None, loc_re=None, max_details=40,
                    detail_delay=0.2):
-    """Keyword-gated fetch (for sweeping unvetted boards): title/department
-    screen first, hydrate the description only when the cheap fields didn't
-    already decide relevance."""
     try:
         raw = parse_board(slug)
     except Exception as e:
-        print(f"    [!] Rippling {company_name}: {e}")
+        print(f"    [!] Rippling {company_name or slug}: {e}")
         return []
-    out, fetched = [], 0
-    for j in raw:
-        uuid = j.get("uuid") or ""
-        title = (j.get("name") or "").strip()
-        if not uuid or not title:
-            continue
-        head = f"{title} {_dept(j)}"
-        desc = ""
-        if gate is not None:
-            if not gate(head) and fetched < max_details:
-                desc = fetch_description(slug, uuid)
-                fetched += 1
-                time.sleep(detail_delay)
-            if not gate(head, desc):
-                continue
-        if not desc and fetched < max_details:
-            desc = fetch_description(slug, uuid)
-            fetched += 1
-            time.sleep(detail_delay)
-        out.append({"id": f"rippling_{slug}_{uuid[:12]}", "company": company_name,
-                    "title": title,
-                    "url": j.get("url") or f"https://ats.rippling.com/{slug}/jobs/{uuid}",
-                    "location": location_str(j), "description": desc})
-    return out
+    return board_jobs((_row(slug, j) for j in raw), company_name,
+                      gate=gate, loc_re=loc_re,
+                      fetch_description=lambda row: fetch_description(slug, row["_uuid"]),
+                      max_details=max_details, detail_delay=detail_delay)

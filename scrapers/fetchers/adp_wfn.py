@@ -8,7 +8,10 @@ same params drive an unauthenticated JSON API:
     /mascsr/default/careercenter/public/events/staffing/v1/
         job-requisitions?cid=<cid>&ccId=<ccid>&locale=en_US&$top=N&$skip=K
 
-Each requisition has itemID, requisitionTitle, postDate, and
+Each requisition has itemID, requisitionTitle, postDate and
+requisitionLocations; the description comes from a per-requisition detail
+call (see fetchers/board.py for the order of filters and the budget). The
+store slug is ``"<cid>|<ccid>"``.
 """
 
 import time
@@ -16,6 +19,7 @@ import time
 from bs4 import BeautifulSoup
 
 from ..http import SESSION, HEADERS
+from .board import board_jobs
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
         "/events/staffing/v1/job-requisitions")
@@ -54,56 +58,46 @@ def _fetch_description(item_id, cid, ccid, timeout=None):
         return ""
 
 
-def fetch_adp(cid, ccid, company_name, gate=None, page_size=50, max_pages=10,
-              max_details=60, detail_delay=0.2):
-    jobs, details_fetched = [], 0
+def _row(cid, ccid, req):
+    item_id = str(req.get("itemID") or "")
+    title = req.get("requisitionTitle") or ""
+    if not item_id or not title:
+        return None
+    return {"id": f"adp_{cid[:8]}_{item_id}", "title": title,
+            "url": (f"{_PORTAL}?cid={cid}&ccId={ccid}"
+                    f"&jobId={item_id}&lang=en_US"),
+            "location": _location_str(req), "description": "",
+            "_item_id": item_id}
+
+
+def _rows(cid, ccid, label, page_size, max_pages):
+    """Every requisition on the board, paged; stops (reported) on an error."""
     for page in range(max_pages):
         try:
             r = SESSION.get(
                 _API,
                 params={"cid": cid, "ccId": ccid, "locale": "en_US",
-                        "$top": page_size, "$skip": page * page_size}, headers=_JSON_HEADERS,
+                        "$top": page_size, "$skip": page * page_size},
+                headers=_JSON_HEADERS,
             )
             r.raise_for_status()
-            data = r.json()
+            reqs = r.json().get("jobRequisitions") or []
         except Exception as e:
-            print(f"    [!] ADP {company_name} p{page}: {e}")
-            break
-
-        reqs = data.get("jobRequisitions") or []
+            print(f"    [!] ADP {label} p{page}: {e}")
+            return
         if not reqs:
-            break
-
+            return
         for req in reqs:
-            item_id = str(req.get("itemID") or "")
-            title   = req.get("requisitionTitle") or ""
-            if not item_id or not title:
-                continue
-
-            desc = ""
-            if gate is not None:
-                if not gate(title) and details_fetched < max_details:
-                    desc = _fetch_description(item_id, cid, ccid)
-                    details_fetched += 1
-                    time.sleep(detail_delay)
-                if not gate(title, desc):
-                    continue
-            if not desc and details_fetched < max_details:
-                desc = _fetch_description(item_id, cid, ccid)
-                details_fetched += 1
-                time.sleep(detail_delay)
-
-            jobs.append({
-                "id":          f"adp_{cid[:8]}_{item_id}",
-                "company":     company_name,
-                "title":       title,
-                "url":         (f"{_PORTAL}?cid={cid}&ccId={ccid}"
-                                f"&jobId={item_id}&lang=en_US"),
-                "location":    _location_str(req),
-                "description": desc,
-            })
-
+            yield _row(cid, ccid, req)
         if len(reqs) < page_size:
-            break
+            return
         time.sleep(0.4)
-    return jobs
+
+
+def fetch_adp(cid, ccid, company_name="", gate=None, loc_re=None, page_size=50,
+              max_pages=10, max_details=60, detail_delay=0.2):
+    return board_jobs(_rows(cid, ccid, company_name or cid[:8], page_size, max_pages),
+                      company_name, gate=gate, loc_re=loc_re,
+                      fetch_description=lambda row: _fetch_description(
+                          row["_item_id"], cid, ccid),
+                      max_details=max_details, detail_delay=detail_delay)
