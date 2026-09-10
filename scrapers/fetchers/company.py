@@ -1749,6 +1749,7 @@ def fetch_company(company, loc_re=None):
     return fn(company, loc_re) if fn else []
 
 
-# Back-compat alias for callers written against the old local_fetch module.
+# fetch_company with the profile's locality regex; used by discovery
+# (ats_dork, local_sourcing) to sample a board's local postings.
 def fetch_company_nc(company):
     return fetch_company(company, NC_RE)

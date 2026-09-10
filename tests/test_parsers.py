@@ -1155,7 +1155,7 @@ class TestScoreMissionsHonoursTheReviewQueue:
 
     def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
         import core.store as store
-        from core import tags
+        import tags
         self._wire(monkeypatch, db)
         store.upsert_company(db, {"name": "Queued Co", "ats": "lever",
                                   "slug": "queued", "active": 0,

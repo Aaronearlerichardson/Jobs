@@ -18,7 +18,7 @@ from contextlib import ExitStack
 from datetime import datetime
 
 import config
-from core import tags as company_tags
+import tags as company_tags
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("discovery")
@@ -317,7 +317,7 @@ def gather_names(extra=None):
 
 
 # --------------------------------------------------------------------------- #
-#  Slug candidates + probing                                                   #
+#  Board probing and discover_local (slug guesses live in names.py)           #
 # --------------------------------------------------------------------------- #
 
 from core.locality import is_nc as _has_nc  # single source of truth for NC locality
@@ -681,7 +681,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 
 
 # --------------------------------------------------------------------------- #
-#  Config-ready output                                                         #
+#  Locality signals, sampling, and store writes (populate / add_board)        #
 # --------------------------------------------------------------------------- #
 
 from core.locality import NC_HQ_RE as _NC_HQ_RE  # "<Triangle city>, NC" HQ/office signal

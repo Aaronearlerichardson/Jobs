@@ -12,17 +12,16 @@ from .discourse import fetch_discourse
 from .getro import fetch_getro_all
 from .hibob import fetch_hibob
 from .hnhiring import fetch_hnhiring
-from .html_scrape import fetch_custom, fetch_kula, fetch_successfactors
+from .html_scrape import fetch_kula, fetch_successfactors
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
-from .jsonld import fetch_jsonld_careers, fetch_jsonld_page
+from .jsonld import fetch_jsonld_page
 from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
 from .remoteok import fetch_remoteok
 from .remotive import fetch_remotive
 from .rippling import fetch_rippling
 from .rssfeed import fetch_rss
-from .sitemap import fetch_sitemap
 from .ultipro import fetch_ultipro
 from .usajobs import fetch_usajobs
 from .websearch import fetch_websearch
@@ -32,7 +31,6 @@ __all__ = [
     "fetch_adp",
     "fetch_ashby",
     "fetch_bamboohr",
-    "fetch_custom",
     "fetch_discourse",
     "fetch_getro_all",
     "fetch_greenhouse",
@@ -40,7 +38,6 @@ __all__ = [
     "fetch_hnhiring",
     "fetch_jazzhr",
     "fetch_jobvite",
-    "fetch_jsonld_careers",
     "fetch_jsonld_page",
     "fetch_kula",
     "fetch_lever",
@@ -52,7 +49,6 @@ __all__ = [
     "fetch_rippling",
     "fetch_ultipro",
     "fetch_rss",
-    "fetch_sitemap",
     "fetch_successfactors",
     "fetch_usajobs",
     "fetch_websearch",

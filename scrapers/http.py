@@ -4,8 +4,9 @@ A single module-level `SESSION` gives every fetcher connection pooling and
 keep-alive, so repeated hits to the same host (greenhouse/lever/ashby/workday
 probes, board pagination) reuse one TCP+TLS connection instead of paying a
 fresh handshake per request. Call sites use `SESSION.get(...)` /
-`SESSION.post(...)`; `HEADERS` stays exported for the few callers that still
-pass headers explicitly (the session already carries them as defaults).
+`SESSION.post(...)`; `HEADERS` stays exported because many call sites still
+pass `headers=HEADERS` explicitly (redundant: the session already carries
+them as defaults) and robots.py builds its own requests from it.
 """
 
 import logging

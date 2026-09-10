@@ -12,7 +12,7 @@ from flask import jsonify, make_response, request, send_file
 
 import config
 from core import digest_md, locality, profile_edit, remote_filter, store
-from core import tags as company_tags
+import tags as company_tags
 
 from . import BOOT_ID, STATE, app
 from .ops import _LOG_LOCK, OPS, TASK, _int, _run_op, _running

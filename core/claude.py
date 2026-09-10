@@ -10,10 +10,14 @@ import time
 
 import requests
 
-from scrapers.http import SESSION
-
 import config
 from config import ANTHROPIC_API_KEY, CLAUDE_MODEL
+
+# A plain pooled session. The crawler's PoliteSession (scrapers.http) was
+# used here before, which made core depend on scrapers and consulted
+# robots.txt before every API call for nothing: the Anthropic endpoint is
+# not a crawl target.
+SESSION = requests.Session()
 
 # File-only per-call trace (session log DEBUG channel — never printed).
 _log = logging.getLogger("claude")

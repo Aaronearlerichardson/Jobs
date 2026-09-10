@@ -19,7 +19,8 @@ from scrapers import ddg
 
 from .sniffer import _SIGS
 from .probes import _extract_workday_triple
-from core import store, tags as company_tags
+import tags as company_tags
+from core import store
 from scrapers.fetchers import company as company_fetch
 from core.claude import is_active_mission, score_company_mission
 from .local_sourcing import _sample_titles, nc_hq_signal

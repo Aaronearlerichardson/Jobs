@@ -58,35 +58,6 @@ def fetch_kula(company_name, kula_slug):
     return jobs
 
 
-def fetch_custom(company_name, page_url, css_selector=None):
-    try:
-        r = SESSION.get(page_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    [!] Custom {company_name}: {e}")
-        return []
-    soup = BeautifulSoup(r.text, "html.parser")
-    anchors = soup.select(css_selector) if css_selector else [
-        a for a in soup.find_all("a", href=True)
-        if is_relevant(a.get_text(strip=True))
-    ]
-    jobs, seen = [], set()
-    for a in anchors:
-        title = a.get_text(strip=True)
-        href  = a.get("href", "")
-        if not href.startswith("http"):
-            href = urljoin(page_url, href)
-        if len(title) < 5 or href in seen or not is_relevant(title):
-            continue
-        seen.add(href)
-        jobs.append({
-            "id": f"custom_{company_name.replace(' ','_')}_{stable_id(href)}",
-            "company": company_name, "title": title,
-            "url": href, "location": "See posting", "description": "",
-        })
-    return jobs
-
-
 def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
     """
     Scrape a SuccessFactors career site (e.g. careers.duke.edu). SF serves

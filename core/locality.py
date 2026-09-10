@@ -3,9 +3,8 @@ Single source of truth for LOCALITY detection (the local track's "is this
 job in my area?" gate).
 
 The terms come from profile.toml [locality] — not hard-coded — so the local
-track works for any region. Module name kept as `nc` for import stability;
-NC_RE / NC_HQ_RE / is_nc are the historical public names (region-agnostic
-now). fetchers/company, discovery/local_sourcing, discovery/sniffer, and the
+track works for any region. NC_RE / NC_HQ_RE / is_nc are the historical
+public names, kept for import stability (region-agnostic now). fetchers/company, discovery/local_sourcing, discovery/sniffer, and the
 local track all delegate here.
 """
 

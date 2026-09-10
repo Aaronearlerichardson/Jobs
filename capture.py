@@ -36,7 +36,8 @@ try:
 except Exception:
     pass
 
-from core import store, tags
+import tags
+from core import store
 from scrapers.page_capture import page_url, parse_page
 from scrapers.ops import ingest_external_jobs
 

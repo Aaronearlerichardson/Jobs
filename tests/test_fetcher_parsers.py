@@ -797,7 +797,8 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_an_unknown_employer_is_queued_for_review(self, db):
-        from core import store, tags
+        import tags
+        from core import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
                         slug="orbit-health", domain="orbit.health")
         assert getro.attribute_employers(db, [job]) == [job]
@@ -812,7 +813,8 @@ class TestGetroAttribution:
         assert not store.is_confirmed_company(db, "Orbit Health")
 
     def test_the_apply_link_supplies_the_candidates_board(self, db):
-        from core import store, tags
+        import tags
+        from core import store
         getro.attribute_employers(
             db, [self._job("Acme Analytics", self.GH_URL, slug="acme-analytics")])
         (row,) = store.pending_companies(db)

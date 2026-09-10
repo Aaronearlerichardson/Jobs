@@ -27,6 +27,7 @@ import os
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 
 import config
@@ -172,12 +173,22 @@ def main(argv=None):
         # its own and retention pruning treats it like any other run.
         session_log.start(["--harvest", *argv])
         try:
-            summary = harvest.run(
-                db_path=args.db, only=only, names=args.names,
-                min_age_hours=min_age, limit=args.limit,
-                max_workers=args.workers or harvest.DEFAULT_WORKERS,
-                hydrate=not args.no_hydrate, max_hours=args.max_hours)
-            stalled[0] += summary["stalled"]
+            try:
+                summary = harvest.run(
+                    db_path=args.db, only=only, names=args.names,
+                    min_age_hours=min_age, limit=args.limit,
+                    max_workers=args.workers or harvest.DEFAULT_WORKERS,
+                    hydrate=not args.no_hydrate, max_hours=args.max_hours)
+                stalled[0] += summary["stalled"]
+            except Exception:
+                # Put the traceback in the session log while it is still
+                # open: with no console it is the only place output goes.
+                # A pass that dies must not take the timer down with it;
+                # --once is the interactive case and should fail loudly.
+                print("\n  [!] harvest pass failed:", file=sys.stderr)
+                traceback.print_exc()
+                if args.once:
+                    raise
             if not args.once:
                 nxt = datetime.fromtimestamp(time.time() + args.every * 3600)
                 print(f"  next pass at {nxt:%Y-%m-%d %H:%M} "

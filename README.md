@@ -755,7 +755,7 @@ default they share:
   name rather than stealing the row (`store.track_set`).
 
 Company `tags` are **scope** tokens describing how to crawl a company, not
-what it does (`core/tags.py`): `local` (query its board per-region — the
+what it does (`tags.py`): `local` (query its board per-region — the
 expensive enterprise boards), `sweep` (pull the whole board — the cheap JSON
 APIs), `watch` (human-set: fetch every crawl, flag anything new).
 
@@ -884,7 +884,7 @@ identically to a dead one.
 | `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
 | `core/store.py` | unified companies + jobs store (+ export/import, prune, migrations) |
-| `core/tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
+| `tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
 | `core/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m core.fit` |
 | `core/claude.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
 | `core/gates.py` / `core/digest_md.py` | config-driven title/exclude gates; ranked + matches digest renderers |

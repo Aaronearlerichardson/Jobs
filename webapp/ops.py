@@ -246,6 +246,28 @@ def _op_prune(p):
         conn.close()
 
 
+def _op_discover(p):
+    """Free-text sector discovery, the discover.py path reachable from the
+    UI: ask Claude for likely employers matching a sector/term, probe each
+    against the ATS registry, and (matching the CLI's apply-by-default)
+    queue the confirmed ones unless the caller asked for a dry run.
+
+    This helper was lost in a refactor while the OPS entry that calls it
+    survived, so the button raised NameError (found by pyflakes 2026-09-10).
+    """
+    from discovery import apply_to_store, discover, print_summary, write_discovery_report
+    term = (p.get("term") or "").strip()
+    if not term:
+        print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
+        return
+    result = discover(term)
+    print_summary(result)
+    if not p.get("no_report"):
+        write_discovery_report(result)
+    for line in apply_to_store(result, dry_run=bool(p.get("dry_run"))):
+        print(line)
+
+
 def _op_dedup(p):
     conn = store.connect(_op_track(p)["db_path"])
     try:

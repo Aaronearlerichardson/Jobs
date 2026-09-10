@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 
 import config
 
-from . import tags
+import tags
 
 
 def combined_score(fit, mission):
@@ -89,7 +89,7 @@ CREATE TABLE IF NOT EXISTS companies (
     mission_tier   TEXT,              -- a tier name from profile [mission]
     mission_score  REAL,              -- 0..1 (alignment with what you care about)
     mission_reason TEXT,
-    tags           TEXT,              -- comma scope tokens; see core/tags.py
+    tags           TEXT,              -- comma scope tokens; see tags.py
     source         TEXT,              -- how it was discovered
     active         INTEGER DEFAULT 1, -- crawl this company?
     last_probed    TEXT,
@@ -316,7 +316,7 @@ def _ensure_columns(conn):
 
 
 def _migrate_tags(conn):
-    """Rewrite retired company scope-tag tokens in place (core/tags.py).
+    """Rewrite retired company scope-tag tokens in place (tags.py).
 
     The tags started out named after one user's search ('nc_local', 'neural')
     and now say what they DO ('local', 'sweep'). Reads tolerate the old names
@@ -774,7 +774,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
 
 
 # --------------------------------------------------------------------------- #
-#  Capture-only companies                                                      #
+#  Company identity, dedup, and roster CRUD (incl. capture-only rows)          #
 # --------------------------------------------------------------------------- #
 #
 # Some of the best employers cannot be fetched at all: the careers host
@@ -1713,7 +1713,7 @@ def upsert_job(conn, j):
 
 
 # --------------------------------------------------------------------------- #
-#  Open/closed status                                                           #
+#  Job status, disposition/pipeline, follow-ups, conversion, ranking            #
 # --------------------------------------------------------------------------- #
 
 def _norm_title(t):
@@ -2242,7 +2242,7 @@ def mark_seen(conn, job, track=None):
     seen/unseen dedupe semantics.
 
     Fit columns are passed through when the caller has already scored the
-    job in place (e.g. remote_neural_run's ``--fit --commit`` path, which
+    job in place (e.g. the sweep runner's ``--fit --commit`` path, which
     ``j.update(FitResult.as_columns())``s before committing). Dedupe-only
     callers simply omit those keys, so ``.get`` yields None and upsert_job's
     COALESCE preserves any existing score — this adapter never clobbers a

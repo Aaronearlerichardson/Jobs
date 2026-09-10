@@ -13,8 +13,6 @@ Use it two ways:
 
 import json
 import re
-import time
-from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -154,44 +152,3 @@ def fetch_jsonld_page(company_name, page_url, timeout=FETCH_TIMEOUT):
     return jobs
 
 
-def fetch_jsonld_careers(company_name, careers_url, max_job_urls=50):
-    """
-    Try the careers index page for JSON-LD. If it has none, follow up to
-    `max_job_urls` job-like links from that page and parse each.
-    """
-    try:
-        r = SESSION.get(careers_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    [!] JSON-LD {company_name}: {e}")
-        return []
-
-    jobs = []
-    for obj in extract_jsonld(r.text):
-        if is_jobposting(obj):
-            job = _job_from_posting(obj, company_name, careers_url)
-            if is_relevant(job["title"], job["description"]):
-                jobs.append(job)
-    if jobs:
-        return jobs
-
-    # Follow job-like links
-    soup = BeautifulSoup(r.text, "html.parser")
-    urls, seen = [], set()
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        if not href.startswith("http"):
-            href = urljoin(careers_url, href)
-        if not _JOB_URL_HINTS.search(urlparse(href).path):
-            continue
-        if href in seen:
-            continue
-        seen.add(href)
-        urls.append(href)
-        if len(urls) >= max_job_urls:
-            break
-
-    for url in urls:
-        jobs.extend(fetch_jsonld_page(company_name, url))
-        time.sleep(0.3)
-    return jobs

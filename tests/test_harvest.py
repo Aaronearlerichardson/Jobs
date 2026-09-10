@@ -4,7 +4,6 @@ file with the crawl and the web UI."""
 import sqlite3
 import threading
 
-import pytest
 
 from core import store
 from scrapers import harvest

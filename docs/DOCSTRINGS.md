@@ -241,7 +241,7 @@ someone who just broke it and does not know why.
 
 ```bash
 pytest                                    # everything: tests/ + all doctests
-pytest --doctest-modules core/tags.py     # doctests in one module
+pytest --doctest-modules tags.py          # doctests in one module
 pytest tests/test_invariants.py           # the cross-module claims
 pytest --doctest-modules core -v          # see each doctest by name
 

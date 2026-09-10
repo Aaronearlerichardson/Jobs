@@ -32,6 +32,7 @@ Notes:
 
 import atexit
 import logging
+import os
 import sys
 import threading
 import time
@@ -262,6 +263,12 @@ class SessionLog:
             pass
 
 
+def _null_stream():
+    """A real file object that swallows everything, so the tee can treat it
+    exactly like a console stream (write/flush/encoding/isatty all work)."""
+    return open(os.devnull, "w", encoding="utf-8")
+
+
 class _Tee:
     """Writes to the original stream and mirrors into the SessionLog; reads
     everything else (isatty, encoding, ...) from the original stream.
@@ -331,7 +338,15 @@ def start(argv, now=None):
     """
     session = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
 
-    out, err = sys.stdout, sys.stderr
+    # A Windows binary launched with no console (double-clicked, or from
+    # the Startup folder, under --windows-console-mode=attach) starts with
+    # sys.stdout and sys.stderr both None. The tee still needs a stream
+    # behind it -- the first print() would otherwise die on None.write,
+    # and the traceback would have nowhere to go either (JobHarvester.exe
+    # exited in 0s with an empty log, 2026-09-10). Sink to devnull; the
+    # session log is the only output that matters in that mode anyway.
+    out = sys.stdout if sys.stdout is not None else _null_stream()
+    err = sys.stderr if sys.stderr is not None else _null_stream()
     sys.stdout = _Tee(out, session)
     sys.stderr = _Tee(err, session, err=True)
 

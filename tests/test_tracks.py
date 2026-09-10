@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import core.store as store
 import scrapers.ops as ops
 import scrapers.runner as runner
-from core import tags
+import tags
 
 
 class TestTrackConfig:

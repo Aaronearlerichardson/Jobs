@@ -17,7 +17,7 @@ import socket
 import sys
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as fut_wait
 
 import requests
@@ -328,8 +328,9 @@ def _detect(text, final_url=""):
     """Scan text + final URL for an ATS signature.
 
     Returns (kind, ats, slug) where kind is "fetchable" | "semi" | "lead",
-    or None. Workday first (triple, highest confidence), then ADP (two
-    params, generic host), then single-capture platforms.
+    or None. Workday first (triple, highest confidence), then UKG/UltiPro
+    and PeopleAdmin (host-shaped), then ADP (two params, generic host),
+    then the single-capture platforms.
     """
     blob = f"{final_url}\n{text}"
     triple = _extract_workday_triple(blob)

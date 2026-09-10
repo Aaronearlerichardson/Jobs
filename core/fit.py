@@ -252,7 +252,7 @@ def _profile_block():
 
 def disposition_examples_block(conn, limit=3):
     """Few-shot calibration from the candidate's OWN recorded decisions
-    (crawler.py --mark): up to `limit` applied/interviewing postings as
+    (run_scraper.py --mark): up to `limit` applied/interviewing postings as
     positive examples, `limit` dismissed ones as negatives, and `limit`
     rejected ones — pursued, but the employer said no — newest first.
     Returns '' when there are none. A --why note rides along verbatim,

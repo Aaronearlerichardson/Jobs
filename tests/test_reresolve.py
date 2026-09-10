@@ -12,7 +12,7 @@ stubbed, exactly as the pasted-name tests stub them.
 """
 
 import core.store as store
-from core import tags
+import tags
 from discovery import local_sourcing, sniffer
 from scrapers import ops
 

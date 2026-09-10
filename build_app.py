@@ -56,8 +56,8 @@ from pathlib import Path
 ROOT = Path(__file__).parent
 
 # --target NAME -> (entry script, Windows output name, other-platform name).
-# Both binaries bundle the same packages; they differ only in entry point,
-# so the harvester needs no separate package list.
+# The two binaries share the crawler packages but not the rest: see
+# HARVEST_SKIP for what the harvester leaves out.
 TARGETS = {
     "ui":      ("webapp.py",  "JobCrawlerUI.exe", "job-crawler-ui"),
     "harvest": ("harvest.py", "JobHarvester.exe", "job-harvester"),
@@ -109,6 +109,16 @@ PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright",
 # normally from a source checkout.
 DATA_PACKAGES = ["playwright", "fake_useragent"]
 
+# The harvester never serves the UI, runs a dork sweep, or probes a JS-only
+# board: it imports core + scrapers and nothing else at module level, and
+# the only paths that reach playwright/ddgs are lazy, guarded imports in
+# discovery that a whole-board pull does not take. Not following these at
+# all is what makes the difference -- Nuitka would otherwise compile every
+# module it can see through those lazy imports and ship the ~100 MB driver.
+# Roughly a third of the C files and three quarters of the payload.
+HARVEST_SKIP = ["webapp", "flask", "werkzeug", "jinja2", "playwright",
+                "ddgs", "fake_useragent", "primp"]
+
 
 def build_command(name=None):
     name = name or target()
@@ -123,10 +133,16 @@ def build_command(name=None):
         # "attach" does exactly that split; output always reaches the
         # session log either way.
         cmd.append("--windows-console-mode=attach")
-    cmd += [f"--include-package={p}" for p in PACKAGES]
-    cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
-    cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]
-    cmd += [f"--include-data-dir={src}={dst}" for src, dst in DATA_DIRS]
+    if name == "harvest":
+        cmd += ["--include-package=core", "--include-package=scrapers"]
+        cmd += [f"--nofollow-import-to={p}" for p in HARVEST_SKIP]
+        cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
+                if not src.startswith("webapp/")]
+    else:
+        cmd += [f"--include-package={p}" for p in PACKAGES]
+        cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
+        cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]
+        cmd += [f"--include-data-dir={src}={dst}" for src, dst in DATA_DIRS]
     # Any other --flag on our command line is Nuitka's (e.g.
     # --force-dll-dependency-cache-update after a build that ran without
     # the env on PATH cached "no DLL dependencies" for the extension

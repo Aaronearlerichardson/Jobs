@@ -6,11 +6,13 @@ serial orchestrator. Every crawl path iterates STORE company rows — the
 companies table is the single roster (config.py seed lists retired 2026-07;
 manage the roster with discover.py, --add-board, or --import-companies).
 
-Seed tags (core/tags.py): the lightweight JSON-API boards
-(greenhouse/lever/.../adp) return their whole board in one cheap request, so
-they seed as "sweep". The heavyweight enterprise boards
-(workday/successfactors/peopleadmin) are expensive to pull whole and are
-queried per-region instead, so they seed as "local".
+Two independent axes per ATS. The seed TAG (tags.py) is the scope a newly
+added company gets: "sweep" for the cheap JSON-API boards, "local" for the
+enterprise boards that are queried per region (workday/successfactors/
+peopleadmin) -- and also for paylocity and ultipro, which were added as
+region-scoped boards. LIGHTWEIGHT is which boards the sweep pulls whole
+regardless of tag; paylocity and ultipro are in it, so they are swept
+whole even though they seed "local".
 
 Deliberately absent: ``core.store.CAPTURE_ATS`` ("capture"). A capture-only
 company has no fetchable board -- its pages are saved by hand through
@@ -19,7 +21,7 @@ crawl path, so it neither needs a thunk here nor counts as "unsupported":
 an ATS name this table lacks is simply skipped by iter_store_sources.
 """
 
-from core import tags
+import tags
 
 from .fetchers import (
     fetch_adp,

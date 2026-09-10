@@ -328,7 +328,8 @@ def attribute_employers(conn, jobs, commit=True):
 
     See tests/test_fetcher_parsers.py::TestGetroAttribution.
     """
-    from core import store, tags
+    import tags
+    from core import store
     from scrapers.sources import seed_tag_for
 
     groups = {}

@@ -144,7 +144,7 @@ default = true
 #   # location_scoped: store boards fetched through the [locality] filter
 #   #   (whole-board for watched companies); false = lightweight ATS sweep
 # store_tag = ""               # only sweep store companies with this tag
-#                              # ("local" / "sweep" / "watch"; core/tags.py)
+#                              # ("local" / "sweep" / "watch"; tags.py)
 # require_core_anchor = false  # gate: posting must hit a CORE keyword
 # geo_gate = true              # gate: drop non-local, non-remote postings
 # remote_mission_floor = 0.85  # a company at or above this mission score is

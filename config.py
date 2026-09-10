@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # Dependency-free (imports nothing, not even this module) — safe here.
-from core import tags
+import tags
 
 # =========================================================================
 #  SECRETS (env-var first, fallbacks kept for local dev only)
@@ -51,7 +51,7 @@ CLAUDE_VERIFY_MODEL = env("CLAUDE_VERIFY_MODEL", "claude-opus-5")
 # CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
 # (NLx) feed, where federal contractors must list openings (VEVRAA). Register
 # at https://www.careeronestop.org/Developers/WebAPI/registration.aspx; DOL
-# emails a UserId + token. Used by `python crawler.py --nlx "Meta,Google"`.
+# emails a UserId + token. Used by `python run_scraper.py --nlx "Meta,Google"`.
 CAREERONESTOP_USER_ID = env("CAREERONESTOP_USER_ID")
 CAREERONESTOP_TOKEN   = env("CAREERONESTOP_TOKEN")
 
@@ -381,7 +381,7 @@ DISCOVERY_PRIORITY_COMPANIES = [
     for c in _dsc.get("priority_companies", [])
 ]
 
-# --- UI tracks (webapp.py) — [tracks.<id>] tables ------------------------------
+# --- UI tracks (webapp/routes.py) — [tracks.<id>] tables ------------------------------
 # Each track bundles a DB, a jobs.track value, ranking knobs, and the UI
 # filter defaults that flip on switch. When the section is absent, the two
 # built-in tracks are synthesized so existing installs work unchanged.
@@ -494,7 +494,7 @@ _ENGINE_CRAWL_DEFAULTS = {
 }
 
 # Retired engine name -> current one, so a profile written against the old
-# names keeps working (see core/tags.py for the same treatment of store tags).
+# names keeps working (see tags.py for the same treatment of store tags).
 ENGINE_ALIASES = {"neural": "sweep"}
 
 
@@ -534,8 +534,8 @@ def _build_ui_tracks(raw):
             "db_path": DATA_DIR / str(t.get("db") or f"{tid}.db"),
             "track": str(t.get("track") or tid.replace("_", "-")),
             # Which crawl machinery this track runs on — "local" (the
-            # location-scoped crawler, scrapers/ops.py) or
-            # "neural" (the location-agnostic runner, remote_neural_run.py).
+            # location-scoped crawl) or "sweep" (the location-agnostic
+            # whole-board crawl); both run through scrapers/runner.py.
             # Code keys ops off the ENGINE, never off the user-chosen id.
             "engine": engine,
             "rank_by": str(t.get("rank_by") or "fit"),
@@ -597,7 +597,7 @@ USER_AGENT = (
 #
 # The per-ATS company ROSTER now lives in the SQLite store (companies
 # table), not here. Manage it with:  discover.py --local / --add-board /
-# --apply,  or  crawler.py --import-companies roster.json.  What remains
+# --apply,  or  run_scraper.py --import-companies roster.json.  What remains
 # below is non-ATS sources (forums / custom scrapes) and crawl policy.
 
 # Discourse forums with a jobs category, from profile [sources].discourse

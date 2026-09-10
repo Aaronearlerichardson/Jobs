@@ -12,7 +12,7 @@ import capture
 import config
 import core.fit as fit
 import core.store as store
-import core.tags as tags
+import tags
 import scrapers.ops as ops
 from scrapers.page_capture import parse_page
 

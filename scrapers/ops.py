@@ -16,7 +16,8 @@ from datetime import datetime, timedelta
 
 import config
 
-from core import digest_md, gates, store, tags
+import tags
+from core import digest_md, gates, store
 from core.claude import score_resume_fit
 from .fetchers import company as company_fetch
 from core.filters import is_relevant
@@ -49,7 +50,7 @@ def _ranked(conn, t, limit=None):
 # --------------------------------------------------------------------------- #
 
 def _is_sweep_tagged(company):
-    """True if a company store row carries the 'sweep' scope tag (core/tags.py
+    """True if a company store row carries the 'sweep' scope tag (tags.py
     — 'neural' in older stores). Its board is cheap to pull whole, so it is
     fetched unfiltered; the geo gate is then applied per posting below."""
     if not company:
