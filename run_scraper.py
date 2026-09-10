@@ -202,8 +202,9 @@ def main(argv=None):
 
     if args.prune:
         from core import store
+        from scrapers.ops import prune_dead_boards
         conn = store.connect(t["db_path"] if t else None)
-        n_dead, n_off = store.prune_dead_boards(
+        n_dead, n_off = prune_dead_boards(
             conn, deactivate_offmission=args.prune_offmission)
         conn.close()
         print(f"\n  deactivated {n_dead} dead-board compan(ies)"

@@ -711,68 +711,6 @@ def roster_growth(conn, days=7):
         (cutoff,)).fetchone()[0]
 
 
-def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
-    """Deactivate active companies whose JSON-API ATS board no longer resolves
-    (a hard 404/error — the source of the crawl's `HTTP 404` spam), and
-    optionally off-mission `other`-tier companies (excluding multi-division).
-    Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
-    from "dead" (404) are probed. Returns (n_dead, n_offmission)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    import config
-    from discovery.probes import (probe_greenhouse, probe_lever,
-                                   probe_ashby, probe_bamboohr)
-
-    def _ultipro_alive(slug):
-        # Not discovery.probes.probe_ultipro: its ok flag means "has jobs",
-        # which would prune a live-but-currently-empty board. Dead here
-        # means the board REQUEST fails (the 404 spam three roster rows
-        # produced in every 2026-08-28 crawl log); an empty listing is
-        # alive.
-        from scrapers.fetchers.ultipro import parse_board
-        try:
-            return (True, len(parse_board(slug)))
-        except Exception:
-            return (False, 0)
-
-    PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
-             "ashby": probe_ashby, "bamboohr": probe_bamboohr,
-             "ultipro": _ultipro_alive}
-
-    rows = [c for c in get_companies(conn, active_only=True)
-            if c.get("ats") in PROBE and c.get("slug")]
-
-    def _check(c):
-        ok, _ = PROBE[c["ats"]](c["slug"])
-        return c, ok
-
-    dead = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_check, c): c for c in rows}):
-            c, ok = fut.result()
-            if not ok:
-                dead.append(c)
-    for c in dead:
-        conn.execute("UPDATE companies SET active=0, notes=? WHERE id=?",
-                     (f"deactivated: dead {c['ats']} board '{c['slug']}'", c["id"]))
-        print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} {c['slug']}")
-
-    n_off = 0
-    if deactivate_offmission:
-        # Watched companies are exempt: a watch tag is the user deliberately
-        # keeping an off-mission employer (e.g. a defense DSP shop) crawled.
-        off = [c for c in get_companies(conn, active_only=True)
-               if c.get("mission_tier") == "other"
-               and not config.is_multi_division(c.get("name"))
-               and "watch" not in (c.get("tags") or "").split(",")]
-        for c in off:
-            conn.execute("UPDATE companies SET active=0 WHERE id=?", (c["id"],))
-            print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
-                  f"mission_score={c.get('mission_score')}")
-        n_off = len(off)
-    conn.commit()
-    return len(dead), n_off
-
-
 # --------------------------------------------------------------------------- #
 #  Company identity, dedup, and roster CRUD (incl. capture-only rows)          #
 # --------------------------------------------------------------------------- #
@@ -1586,6 +1524,35 @@ def reactivate_company(conn, company_id):
         "UPDATE companies SET crawl_state='active', empty_streak=0, "
         "next_crawl_at=NULL WHERE id=?", (company_id,))
     conn.commit()
+
+
+def deactivate_company(conn, company_id, note=None):
+    """Flip one company's `active` switch off, optionally recording why in
+    `notes`. The primitive behind scrapers.ops.prune_dead_boards; the
+    decision (probe the board, apply the off-mission policy) lives there,
+    only the write lives here.
+
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Gone Co", "ats": "lever",
+    ...                             "slug": "gone", "notes": "was fine"})
+    >>> deactivate_company(conn, cid, note="deactivated: dead lever board")
+    >>> row = get_company(conn, cid)
+    >>> row["active"], row["notes"]
+    (0, 'deactivated: dead lever board')
+
+    Without a note the existing notes are left alone:
+
+    >>> cid2 = upsert_company(conn, {"name": "Quiet Co", "notes": "keep"})
+    >>> deactivate_company(conn, cid2)
+    >>> get_company(conn, cid2)["notes"]
+    'keep'
+    """
+    if note is None:
+        conn.execute("UPDATE companies SET active=0 WHERE id=?", (company_id,))
+    else:
+        conn.execute("UPDATE companies SET active=0, notes=? WHERE id=?",
+                     (note, company_id))
+    _commit(conn)
 
 
 # --------------------------------------------------------------------------- #

@@ -907,6 +907,72 @@ def add_manual_job(url, title, company, location, description="",
             "board": has_board, "company": name}
 
 
+def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
+    """Deactivate active companies whose JSON-API ATS board no longer resolves
+    (a hard 404/error, the source of the crawl's `HTTP 404` spam), and
+    optionally off-mission `other`-tier companies (excluding multi-division).
+    Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
+    from "dead" (404) are probed. Returns (n_dead, n_offmission).
+
+    Lived in core.store until 2026-09-10; it probes the network and applies
+    roster policy, so it is an operation, and the store keeps only the
+    write (store.deactivate_company).
+    """
+    from discovery.probes import (probe_greenhouse, probe_lever,
+                                   probe_ashby, probe_bamboohr)
+
+    def _ultipro_alive(slug):
+        # Not discovery.probes.probe_ultipro: its ok flag means "has jobs",
+        # which would prune a live-but-currently-empty board. Dead here
+        # means the board REQUEST fails (the 404 spam three roster rows
+        # produced in every 2026-08-28 crawl log); an empty listing is
+        # alive.
+        from .fetchers.ultipro import parse_board
+        try:
+            return (True, len(parse_board(slug)))
+        except Exception:
+            return (False, 0)
+
+    PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
+             "ashby": probe_ashby, "bamboohr": probe_bamboohr,
+             "ultipro": _ultipro_alive}
+
+    rows = [c for c in store.get_companies(conn, active_only=True)
+            if c.get("ats") in PROBE and c.get("slug")]
+
+    def _check(c):
+        ok, _ = PROBE[c["ats"]](c["slug"])
+        return c, ok
+
+    dead = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        for fut in as_completed({ex.submit(_check, c): c for c in rows}):
+            c, ok = fut.result()
+            if not ok:
+                dead.append(c)
+    with store.batch(conn):
+        for c in dead:
+            store.deactivate_company(
+                conn, c["id"],
+                note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
+            print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} {c['slug']}")
+
+        n_off = 0
+        if deactivate_offmission:
+            # Watched companies are exempt: a watch tag is the user
+            # deliberately keeping an off-mission employer crawled.
+            off = [c for c in store.get_companies(conn, active_only=True)
+                   if c.get("mission_tier") == "other"
+                   and not config.is_multi_division(c.get("name"))
+                   and not _is_watched(c)]
+            for c in off:
+                store.deactivate_company(conn, c["id"])
+                print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
+                      f"mission_score={c.get('mission_score')}")
+            n_off = len(off)
+    return len(dead), n_off
+
+
 # --------------------------------------------------------------------------- #
 #  Re-resolution of rows that died at resolution                               #
 # --------------------------------------------------------------------------- #
