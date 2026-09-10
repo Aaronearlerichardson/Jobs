@@ -32,8 +32,8 @@ from datetime import datetime
 import config
 import tags as company_tags
 
-from core.locality import NC_HQ_RE as _NC_HQ_RE, is_nc as _has_nc
-from core.names import domain_tokens, name_key, slug_guesses
+from core.digest.locality import NC_HQ_RE as _NC_HQ_RE, is_nc as _has_nc
+from core.digest.names import domain_tokens, name_key, slug_guesses
 from scrapers.http import HEADERS, SESSION
 from scrapers.parallel import drain_or_abandon
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
@@ -546,7 +546,7 @@ def _score_hit(hit):
     """(tier, score, reason) for a resolved board: a few live job titles
     (_sample_titles) as domain context for core.claude.score_company_mission.
     Pure network I/O, safe to run off the main thread."""
-    from core.claude import score_company_mission
+    from core.claude.api import score_company_mission
     titles = _sample_titles(hit)
     return score_company_mission(hit["name"], " | ".join(t for t in titles if t))
 
@@ -585,7 +585,7 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
         board coordinates first) still differ in ways this helper does not
         cover.
     """
-    from core.claude import is_active_mission
+    from core.claude.api import is_active_mission
     from core.store import is_confirmed_company, mark_pending, upsert_company
 
     name = hit["name"]
@@ -737,11 +737,11 @@ def add_board(name, url, capture=False):
         way, nothing is fetched until the host is listed in the profile's
         [policy] robots_exempt_hosts.
     """
-    from core.claude import score_company_mission
+    from core.claude.api import score_company_mission
     from scrapers.fetchers import company as company_fetch
     from core.store import (CAPTURE_ATS, connect, is_confirmed_company,
                             mark_pending, upsert_company)
-    from core.ats_signatures import detect, pack
+    from core.digest.ats_signatures import detect, pack
     from .sniffer import sniff_ats
 
     if capture:
@@ -842,7 +842,7 @@ def score_missions(max_workers=6, rescore_all=False):
     reactivates it below. `rescore_all` stays active-only — it is a
     re-judgement of the live roster, not a recovery pass, and widening it
     would resurrect everything ever deactivated for being off-mission."""
-    from core.claude import ACTIVE_MISSION_TIERS, score_company_mission
+    from core.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
     from core.store import connect, get_companies, upsert_company
 
     conn = connect()
@@ -1047,7 +1047,7 @@ def classify_miss(name, careers_url=""):
         path and only by the on-demand resolvers — never per candidate in
         a full discover_local pass.
     """
-    from core.ats_signatures import ATS_LEAD_PATTERNS
+    from core.digest.ats_signatures import ATS_LEAD_PATTERNS
     from .sniffer import diagnose_no_board, sniff_careers_ats
     try:
         lead = sniff_careers_ats(name, careers_url or "")

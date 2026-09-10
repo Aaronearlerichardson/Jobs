@@ -18,7 +18,7 @@ combiner is a weighted geometric mean -- the same imbalance-punishing shape
 store.combined_score() already uses -- times the worst gate multiplier.
 
 Wired into:
-  - claude.py:  `score_resume_fit(resume, title, desc)` delegates here and
+  - api.py:  `score_resume_fit(resume, title, desc)` delegates here and
     returns the FitResult (resume is ignored; the rubric scores the profile).
   - config/profile.py:  loads the optional `[fit]` profile block (weights / gate
     penalties / domain ladder / stack / region); omit it and the defaults
@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 try:
     import config
-    from core.claude import call_claude_json
+    from core.claude.api import call_claude_json
 except Exception:                      # importable standalone for calibration
     config = None
     call_claude_json = None

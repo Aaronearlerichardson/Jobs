@@ -46,7 +46,7 @@ from core.store import connect, get_companies  # noqa: E402
 # The comparison key every other discovery path uses (discovery/names.py),
 # so a name already tracked under any spelling/punctuation is recognized as
 # the same company.
-from core.names import name_key as _norm_key  # noqa: E402
+from core.digest.names import name_key as _norm_key  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -731,7 +731,7 @@ def _llm_refine(candidates):
         error or empty response returns `candidates` unchanged rather than
         `[]`.
     """
-    from core.claude import call_claude_json
+    from core.claude.api import call_claude_json
     system = (
         "You are cleaning a list of candidate organization names auto-extracted "
         "from job-posting text via regex. Some entries are real distinct "

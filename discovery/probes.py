@@ -7,7 +7,7 @@ import time
 
 import config
 
-from core.ats_signatures import extract_workday_triple
+from core.digest.ats_signatures import extract_workday_triple
 from scrapers.http import HEADERS, SESSION
 from .fetchpool import _fetch_all, candidate_urls
 from .identity import _corroborates, _foreign_board, _risky_token_in_url

@@ -2,7 +2,7 @@
 truth for "is this job where I live?". Fixtures come from the active
 profile, so these pass for any configured region."""
 
-import core.locality as locality
+import core.digest.locality as locality
 
 
 def test_configured_place_is_local(local_addr):

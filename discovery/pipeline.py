@@ -10,7 +10,7 @@ from datetime import datetime
 import os
 
 from config import PROBE_TIMEOUT, REPORT_DIR
-from core.claude import DISCOVER_SYSTEM, call_claude_json
+from core.claude.api import DISCOVER_SYSTEM, call_claude_json
 from scrapers.parallel import drain_or_abandon
 from scrapers.util import worker_count
 from .probes import (
@@ -20,8 +20,8 @@ from .probes import (
     probe_workday,
 )
 from .sniffer import sniff_careers_ats
-from core.names import (GENERIC_WORDS, name_words, strip_parentheticals,
-                    strip_suffixes)
+from core.digest.names import (GENERIC_WORDS, name_words, strip_parentheticals,
+                               strip_suffixes)
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost
@@ -237,7 +237,7 @@ def _probe_identity_ok(name, ats, slug):
     display, titles = _board_evidence(ats, slug)
     if not display and not titles:
         return True
-    from core.claude import board_is_own
+    from core.claude.api import board_is_own
     return board_is_own(name, f"{ats}:{slug}", site=display,
                         titles=titles) is not False
 

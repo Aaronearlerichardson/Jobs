@@ -180,7 +180,7 @@ def confirm_company(conn, cid, active=None):
     if not row:
         return None
     if active is None:
-        from core.claude import is_active_mission
+        from core.claude.api import is_active_mission
         active = is_active_mission(row["mission_tier"], row["name"])
     kept = tags.parse(row["tags"]) - {tags.PENDING}
     conn.execute(

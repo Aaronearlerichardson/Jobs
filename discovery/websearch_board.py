@@ -14,8 +14,8 @@ import re
 
 import config
 
-from core.ats_signatures import detect, pack
-from core.names import name_key
+from core.digest.ats_signatures import detect, pack
+from core.digest.names import name_key
 from scrapers import ddg
 from scrapers.http import HEADERS, SESSION
 from .identity import _foreign_board

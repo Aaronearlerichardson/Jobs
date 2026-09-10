@@ -19,7 +19,7 @@ from functools import lru_cache
 
 import config
 
-from .filters import SHORT_EXCLUDE, scrub_boilerplate, token_in
+from core.digest.filters import SHORT_EXCLUDE, scrub_boilerplate, token_in
 
 
 def _tok_in(token, text):

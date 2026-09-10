@@ -66,7 +66,7 @@ def local_addr(cfg):
 @pytest.fixture(scope="session")
 def elsewhere():
     """Somewhere no sane profile calls local — verified, not assumed."""
-    import core.locality as locality
+    import core.digest.locality as locality
     for place in ("Ulaanbaatar, Mongolia", "Reykjavik, Iceland",
                   "Hobart, Tasmania"):
         if not locality.is_nc(place):

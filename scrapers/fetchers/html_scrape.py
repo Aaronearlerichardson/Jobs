@@ -13,7 +13,7 @@ from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup
 
-from core.locality import location_snippet
+from core.digest.locality import location_snippet
 from ..http import SESSION, HEADERS
 from ..util import stable_id
 from .board import board_jobs

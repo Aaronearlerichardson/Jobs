@@ -6,10 +6,10 @@ import re
 
 import pytest
 
-import core.filters as filters
-import core.gates as gates
-import core.locality as locality
-import core.remote_filter as remote_filter
+import core.digest.filters as filters
+import core.digest.gates as gates
+import core.digest.locality as locality
+import core.digest.remote_filter as remote_filter
 
 
 class TestRule:

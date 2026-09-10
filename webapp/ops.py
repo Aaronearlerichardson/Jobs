@@ -9,8 +9,9 @@ import threading
 from datetime import datetime
 
 import config
-from core import claude, session_log
+from core import session_log
 from core.ops import registry
+from core.claude import api as claude_api
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
         "started": None, "ended": None, "error": None, "active": False}
@@ -128,7 +129,7 @@ def _run_op(name, fn):
             # Re-arm the unrecoverable-API-error breaker: it is process-
             # lifetime and this server process outlives many operations
             # (see core.claude.reset_breaker).
-            claude.reset_breaker()
+            claude_api.reset_breaker()
             _restore_keywords()
             fn()
         except Exception as e:

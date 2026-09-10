@@ -13,7 +13,7 @@ stubbed, exactly as the pasted-name tests stub them.
 
 import core.store as store
 import tags
-from core import ats_signatures
+from core.digest import ats_signatures
 from discovery import local_sourcing
 from scrapers import ops
 
@@ -81,7 +81,7 @@ class TestReresolveWrites:
         monkeypatch.setattr(local_sourcing, "resolve_or_miss",
                             lambda *a, **k: result)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("core.claude.score_company_mission",
+        monkeypatch.setattr("core.claude.api.score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
 
     def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
@@ -182,9 +182,9 @@ class TestManualAddUsesTheSharedResolver:
 
         monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("core.claude.score_company_mission",
+        monkeypatch.setattr("core.claude.api.score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
-        monkeypatch.setattr("core.claude.is_active_mission",
+        monkeypatch.setattr("core.claude.api.is_active_mission",
                             lambda *a, **k: True)
         # No crawl, no ingest, no résumé read — this test is about the
         # resolver call, and all three would reach the disk or the network.

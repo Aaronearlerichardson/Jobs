@@ -6,6 +6,7 @@ import threading
 
 
 from core import store
+from core.digest import gates
 from scrapers import harvest
 
 
@@ -322,7 +323,7 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
             hydrated.append(j)
         return j
     monkeypatch.setattr(ops.company_fetch, "hydrate_description", fake_hydrate)
-    monkeypatch.setattr(ops.gates, "is_technical_role",
+    monkeypatch.setattr(gates, "is_technical_role",
                         lambda title, tt: True)
 
     class R:

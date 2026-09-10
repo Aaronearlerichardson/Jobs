@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from core.filters import is_relevant
+from core.digest.filters import is_relevant
 from scrapers.fetchers import ats_api, getro, hibob, jobvite, peopleadmin, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -655,7 +655,7 @@ class TestAshbyKeyAcrossCallSites:
         assert probe_ashby("susteon") == (True, 2)
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):
-        from core.locality import is_nc
+        from core.digest.locality import is_nc
         from discovery.local_sourcing import _nc_count_ashby
         # The fixture board has two jobs in NC. Skip the test if the active
         # profile's locality doesn't include NC — the test would correctly

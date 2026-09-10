@@ -25,7 +25,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from core.locality import location_snippet
+from core.digest.locality import location_snippet
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date, stable_id
 

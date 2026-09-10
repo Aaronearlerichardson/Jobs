@@ -21,8 +21,8 @@ from concurrent.futures import wait as fut_wait
 import requests
 
 from config import PROBE_TIMEOUT
-from core.ats_signatures import FETCHABLE_HOST_RE
-from core.names import domain_tokens
+from core.digest.ats_signatures import FETCHABLE_HOST_RE
+from core.digest.names import domain_tokens
 from scrapers.http import HEADERS, SESSION
 
 # File-only diagnostics (session log DEBUG channel — never printed).

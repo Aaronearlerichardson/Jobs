@@ -104,7 +104,7 @@ That directory holds `jobs.db`, your `profile.toml`, your résumé,
   and rejects a key sent with any other.
 
 **Prompt caching is on by default.** Every scorer sends the same stable system
-prompt (rubric + profile) with a per-posting user turn, so `core/claude.py`
+prompt (rubric + profile) with a per-posting user turn, so `core/claude/api.py`
 puts a cache breakpoint at the end of `system`: the first call in a run writes
 the prefix (1.25x) and the rest read it (0.1x), roughly a 5-10x cut on input
 cost for a several-hundred-job crawl. Each run prints a
@@ -390,7 +390,7 @@ Employers this is for, and what their saved pages carry (checked 2026-09-02):
 ## Résumé-fit scoring
 
 Each job gets a résumé-fit score in [0, 1] from a **multi-axis rubric**
-(`core/fit.py`), not a single opaque number. The LLM scores four orthogonal
+(`core/claude/fit.py`), not a single opaque number. The LLM scores four orthogonal
 axes and flags disqualifying gates; Python combines them (a weighted geometric
 mean times the worst gate penalty), so the math is transparent and tunable:
 
@@ -736,7 +736,7 @@ Everything personal lives in `profile.toml` on your machine;
 | `[candidate]` | who you are — injected verbatim into every scoring/discovery prompt; also your `resume` path |
 | `[fit]` | résumé-fit rubric: axis `weights`, `gate_penalty`, `domain_ladder`, `stack_core`/`stack_anti`, `region_terms` |
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
-| `[locality]` | what counts as "local" (`core/locality.py`) |
+| `[locality]` | what counts as "local" (`core/digest/locality.py`) |
 | `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
 | `[discovery]` | seed companies, Workday majors, directory URLs, web-search name queries, priority companies |
 
@@ -901,10 +901,10 @@ identically to a dead one.
 | `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
 | `core/store/__init__.py` | unified companies + jobs store (+ export/import, prune, migrations) |
 | `tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
-| `core/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m core.fit` |
-| `core/claude.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
-| `core/gates.py` / `core/digest_md.py` | config-driven title/exclude gates; ranked + matches digest renderers |
-| `core/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all profile-driven |
+| `core/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m core.fit` |
+| `core/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
+| `core/digest/gates.py` / `core/digest/digest_md.py` | config-driven title/exclude gates; ranked + matches digest renderers |
+| `core/digest/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all profile-driven |
 | `webapp/` | Flask package: `routes.py`, `ops.py` (op registry), `server.py`, `templates/` + `static/` |
 | `scrapers/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
 | `scrapers/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |

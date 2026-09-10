@@ -11,7 +11,8 @@ from pathlib import Path
 from flask import jsonify, make_response, request, send_file
 
 import config
-from core import digest_md, locality, profile_edit, remote_filter, store
+from core import profile_edit, store
+from core.digest import digest_md, remote_filter, locality
 import tags as company_tags
 
 from . import BOOT_ID, STATE, app
@@ -326,7 +327,7 @@ def api_pending():
 def api_confirm(cid):
     """Accept a review candidate: the pending tag comes off and the shared
     mission rule decides whether it is crawled."""
-    from core.claude import is_active_mission
+    from core.claude.api import is_active_mission
     conn = _conn(_track())
     pending = store.get_company(conn, cid)
     if not pending:

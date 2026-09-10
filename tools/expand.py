@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 import config  # noqa: E402
 
-from core.claude import expand_location, expand_search  # noqa: E402
+from core.claude.api import expand_location, expand_search  # noqa: E402
 
 INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
 LOCATION_INCLUDE = config.LOCATION_INCLUDE

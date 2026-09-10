@@ -38,7 +38,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 _ANCHORS_ONLY = SoupStrainer("a")
 
 from ..http import HEADERS, SESSION
-from core.locality import NC_RE  # profile [locality]: the location gate
+from core.digest.locality import NC_RE  # profile [locality]: the location gate
 from ..util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
 from . import icims, workday
 from .adp_wfn import fetch_adp

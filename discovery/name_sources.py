@@ -14,7 +14,7 @@ import re
 
 import config
 
-from core.names import name_key
+from core.digest.names import name_key
 from scrapers import ddg
 from scrapers.http import HEADERS, SESSION
 
@@ -246,7 +246,7 @@ def brainstorm_company_names(n=None):
     cached = ddg.cache_get(key)
     if cached is not None:
         return cached
-    from core.claude import call_claude_json
+    from core.claude.api import call_claude_json
     system = ("You help maintain a job-search company roster. "
               "Return ONLY valid JSON. No markdown, no commentary.")
     user = (

@@ -54,7 +54,7 @@ from datetime import datetime, timedelta
 
 import config
 from core import store
-from core.locality import geo_mode
+from core.digest.locality import geo_mode
 
 from .fetchers import company as company_fetch
 from .sources import ATS_REGISTRY, LIGHTWEIGHT

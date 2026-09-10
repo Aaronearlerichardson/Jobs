@@ -581,7 +581,7 @@ def score_resume_fit(resume, title, description=""):
     `.as_legacy()`). `resume` is accepted for backward compatibility but the
     rubric scores against the config profile (strengths, domain ladder, stack),
     not raw résumé text. Imported lazily to avoid a claude<->fit import cycle."""
-    from core import fit
+    from core.claude import fit
     return fit.score_resume_fit(title, description)
 
 
@@ -593,7 +593,7 @@ def score_technical_bar(title, description=""):
     Falls back to ``(None, "", None)`` when the API key is unset or the call
     fails, so callers can degrade to a heuristic without crashing.
     """
-    from core.fit import clip_desc
+    from core.claude.fit import clip_desc
     desc = clip_desc(description or "")
     user = f"TITLE: {title}\n\nDESCRIPTION:\n{desc or '(no description provided)'}"
     result = call_claude_json(_TECH_BAR_SCORE_SYSTEM, user, max_tokens=120)

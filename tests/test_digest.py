@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 import config
-import core.digest_md as digest_md
-import core.locality as locality
+import core.digest.digest_md as digest_md
+import core.digest.locality as locality
 
 
 TODAY = datetime.now().strftime("%Y-%m-%d")

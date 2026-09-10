@@ -22,7 +22,7 @@ from email.mime.text import MIMEText
 
 import config
 
-from . import locality
+from core.digest import locality
 
 # The mid-fit local band, half-open on the high side. The interviews to date
 # came from applications scored in this range at local onsite postings, not

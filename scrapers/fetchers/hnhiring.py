@@ -15,7 +15,7 @@ import re
 import time
 
 
-from core.names import strip_parentheticals
+from core.digest.names import strip_parentheticals
 from ..http import SESSION, HEADERS
 
 BASE = "https://hacker-news.firebaseio.com/v0"

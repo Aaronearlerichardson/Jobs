@@ -289,7 +289,7 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
 def _coords_from_urls(urls):
     """Roster-shaped board coordinates for the employer, read off its
     apply links, or None when none of them names a known ATS."""
-    from core.ats_signatures import detect, pack
+    from core.digest.ats_signatures import detect, pack
     for url in urls:
         hit = detect("", url or "")
         if not hit or hit[0] not in ("fetchable", "semi"):

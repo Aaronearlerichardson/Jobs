@@ -17,13 +17,14 @@ from datetime import datetime, timedelta
 import config
 
 import tags
-from core import digest_md, gates, store
-from core.claude import score_resume_fit
+from core import store
+from core.digest import digest_md, gates
+from core.claude.api import score_resume_fit
 from .fetchers import company as company_fetch
-from core.filters import is_relevant
-from core.locality import NC_RE, geo_mode
+from core.digest.filters import is_relevant
+from core.digest.locality import NC_RE, geo_mode
 from .parallel import drain_or_abandon, fetch_all
-from core.resume import resume_text
+from core.claude.resume import resume_text
 
 
 def _default_track():
@@ -225,7 +226,7 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     stay out of the ranking forever even once its description is recovered.
     Score any NULL-score row that now carries a real body (hydrated by
     backfill_board_descriptions, or by an earlier run). Returns #scored."""
-    from core.fit import MIN_DESC_CHARS
+    from core.claude.fit import MIN_DESC_CHARS
     _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
     pending = [dict(r) for r in conn.execute(
         "SELECT job_id, title, description FROM jobs "
@@ -357,7 +358,7 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
 
     Closed and dispositioned-out jobs are always skipped — no Claude API
     spend on postings that can't surface anyway."""
-    from core.fit import MIN_DESC_CHARS
+    from core.claude.fit import MIN_DESC_CHARS
     t = _t(t)
     resume = resume_text()
     if not resume:
@@ -468,8 +469,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
     `force=True` re-verifies every finalist regardless."""
-    from core.claude import api_disabled
-    from core.fit import FitResult, verify_fit, verify_model
+    from core.claude.api import api_disabled
+    from core.claude.fit import FitResult, verify_fit, verify_model
     t = _t(t)
     current = verify_model()
     done_ids = set()   # verified THIS run: never stale again, even under force
@@ -814,7 +815,7 @@ def add_manual_job(url, title, company, location, description="",
         is exactly the collision this path is most exposed to: a hand-typed
         employer name lands on a same-named stranger's board.
     """
-    from core.claude import is_active_mission, score_company_mission
+    from core.claude.api import is_active_mission, score_company_mission
     from discovery.local_sourcing import _sample_titles, resolve_or_miss
 
     t = _t(t)
@@ -1078,11 +1079,11 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """
-    from core.claude import score_company_mission
+    from core.claude.api import score_company_mission
     from discovery.local_sourcing import (_board_already_tracked,
                                           _report_dup_board, _sample_titles,
                                           resolve_or_miss)
-    from core.names import junk_name_reason
+    from core.digest.names import junk_name_reason
 
     t = _t(t)
     own_conn = conn is None

@@ -19,7 +19,7 @@ import requests
 
 import core.store as store
 from discovery import fetchpool, local_sourcing, paste_ingest
-from core.names import junk_name_reason
+from core.digest.names import junk_name_reason
 from scrapers import ops
 from scrapers.fetchers import workday as wd
 

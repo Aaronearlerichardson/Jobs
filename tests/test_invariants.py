@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 import config
-from core.claude import ACTIVE_MISSION_TIERS, is_active_mission
+from core.claude.api import ACTIVE_MISSION_TIERS, is_active_mission
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -163,7 +163,7 @@ class TestActivationRule:
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
 RULE_SITES_ALLOWED = {
-    ("core/claude.py", "is_active_mission"),
+    ("core/claude/api.py", "is_active_mission"),
     ("discovery/local_sourcing.py", "_scored"),
 }
 

@@ -12,7 +12,7 @@ web-search resolver, so it depends on nothing in this package.
 import re
 import sys
 
-from core.names import domain_tokens, risky_domain_tokens
+from core.digest.names import domain_tokens, risky_domain_tokens
 
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
@@ -157,7 +157,7 @@ def _foreign_board(name, triple):
     """
     if _tenant_affinity(name, triple):
         return False
-    from core.claude import board_is_own
+    from core.claude.api import board_is_own
     own = board_is_own(name, triple[0], triple[2])
     # Announce each (name, board) verdict ONCE — the sniff scans many
     # candidate URLs that embed the same board link, and the 2026-08-28

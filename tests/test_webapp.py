@@ -622,13 +622,13 @@ class TestOpRearmsTheClaudeBreaker:
     def test_run_op_resets_a_tripped_breaker(self, monkeypatch):
         import time
 
-        from core import claude
+        from core.claude import api
         from webapp import ops
-        monkeypatch.setattr(claude, "_FATAL_MSG", "HTTP 400: 'credit balance'")
+        monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         seen = {}
 
         def probe():
-            seen["disabled"] = claude.api_disabled()
+            seen["disabled"] = api.api_disabled()
 
         assert ops._run_op("probe", probe) is True
         while ops._running():

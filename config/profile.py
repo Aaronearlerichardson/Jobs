@@ -130,7 +130,7 @@ REMOTE_HARD_NEGATIONS = list(_loc.get("hard_negations", []))
 REMOTE_US_MARKERS     = list(_loc.get("us_markers", []))
 REMOTE_NON_US_REGIONS = list(_loc.get("non_us_regions", []))
 
-# --- Candidate identity (injected into Claude prompts; core/claude.py,
+# --- Candidate identity (injected into Claude prompts; core/api.py,
 #     core/fit.py) --
 CANDIDATE_SUMMARY   = (_cand.get("summary") or "").strip()
 CANDIDATE_STRENGTHS = list(_cand.get("strengths", []))
@@ -195,7 +195,7 @@ FIT_DISPOSITION_EXAMPLES = _fitp.get("disposition_examples")
 FIT_CLEARANCE_VERBS      = list(_fitp.get("clearance_verbs", []))
 FIT_CLEARANCE_QUALIFIERS = list(_fitp.get("clearance_qualifiers", []))
 
-# --- Mission taxonomy (employer-alignment ladder; core/claude.py) -------
+# --- Mission taxonomy (employer-alignment ladder; core/api.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
 MISSION_TIERS = [
     {"name": t["name"], "desc": t.get("desc", ""),

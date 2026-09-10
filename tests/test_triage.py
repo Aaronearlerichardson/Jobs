@@ -7,7 +7,7 @@ import pytest
 
 import tags
 from core import store
-from core.fit import FitResult
+from core.claude.fit import FitResult
 from scrapers import harvest, triage
 
 LOCAL = "local-tech"

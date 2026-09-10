@@ -69,12 +69,13 @@ from datetime import datetime, timedelta
 import config
 
 import tags
-from core import gates, store
-from core.claude import is_active_mission, score_company_mission
-from core.filters import is_relevant
-from core.fit import score_resume_fit
-from core.locality import NC_HQ_RE, geo_mode, is_nc
-from core.remote_filter import remote_signal, remote_signal_for
+from core import store
+from core.digest import gates
+from core.claude.api import is_active_mission, score_company_mission
+from core.digest.filters import is_relevant
+from core.claude.fit import score_resume_fit
+from core.digest.locality import NC_HQ_RE, geo_mode, is_nc
+from core.digest.remote_filter import remote_signal, remote_signal_for
 
 from . import ops
 from .harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay

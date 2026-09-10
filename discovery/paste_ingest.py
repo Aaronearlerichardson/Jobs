@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import config
 
-from core.names import junk_name_reason, name_key
+from core.digest.names import junk_name_reason, name_key
 from scrapers.parallel import drain_or_abandon
 from .local_sourcing import resolve_or_miss, score_and_upsert
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
@@ -276,7 +276,7 @@ def extract_names_llm(blob, limit=60):
     words it has never seen. One call fixes that for a messy paste. Returns []
     without an API key, so the caller falls back to the regex.
     """
-    from core.claude import call_claude_json
+    from core.claude.api import call_claude_json
     system = ("You extract EMPLOYER NAMES from text copied off a job-search or "
               "company-directory page. Return only organisations that could "
               "employ someone. Never return job titles, locations, dates, "

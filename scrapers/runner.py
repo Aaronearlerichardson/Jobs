@@ -32,10 +32,10 @@ from datetime import datetime
 import config
 
 from core import store
-from core.filters import SHORT_KEYWORD, is_relevant, token_in
+from core.digest.filters import SHORT_KEYWORD, is_relevant, token_in
 from .parallel import fetch_all
-from core.remote_filter import remote_signal_for, us_eligible
-from core.resume import resume_text
+from core.digest.remote_filter import remote_signal_for, us_eligible
+from core.claude.resume import resume_text
 from .sources import ATS_REGISTRY, iter_store_sources
 
 # Rough per-posting cost for the cost_guard message: ~700 input tokens
@@ -284,9 +284,10 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     skips resume scoring; `commit=False` is the legacy sweep preview (no
     DB writes). Returns the ranked list (company-linked crawls) or the
     surfaced match list."""
-    from core import digest_md, gates
+    from core.digest import gates
+    from core.digest import digest_md
     from . import ops
-    from core.locality import NC_RE, geo_mode
+    from core.digest.locality import NC_RE, geo_mode
 
     engine = t["engine"]
     send = t["email"] if send is None else send
@@ -504,7 +505,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                                [:config.MAX_DESC_CHARS]})
 
     if fit and matches and resume and not guard_tripped:
-        from core.claude import score_resume_fit
+        from core.claude.api import score_resume_fit
         print(f"  scoring {len(matches)} match(es) against resume...")
 
         def _one(j):

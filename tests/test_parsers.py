@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import pytest
 from bs4 import BeautifulSoup
 
-import core.digest_md as digest_md
+import core.digest.digest_md as digest_md
 import discovery.ats_dork as dork
 import discovery.local_sourcing as local_sourcing
 import discovery.name_sources as name_sources
@@ -15,7 +15,7 @@ import discovery.paste_ingest as paste_ingest
 import discovery.fetchpool as fetchpool
 import discovery.probes as probes
 import discovery.sniffer as sniffer
-from core import ats_signatures
+from core.digest import ats_signatures
 import scrapers.fetchers.company as company_fetch
 from scrapers.util import norm_posted_date
 
@@ -590,7 +590,7 @@ class TestPastedNameBoardGuard:
 
     def _wire(self, monkeypatch, db, hit):
         import core.store as store
-        import core.claude as claude
+        import core.claude.api as claude
 
         class _NoClose:
             # add_names closes the connection it opens; the test still
@@ -1061,7 +1061,7 @@ class TestAddNamesQueue:
             "count": 8, "nc": 3, "via": "sniff"}
 
     def _wire(self, monkeypatch, db, hit=None):
-        import core.claude as claude
+        import core.claude.api as claude
         import core.store as store
 
         class _NoClose:
@@ -1149,7 +1149,7 @@ class TestScoreAndUpsert:
     def _wire(self, monkeypatch, scored=("adjacent", 0.5, "stub")):
         """Stub the network (titles) and the LLM; returns the list of names
         the scorer was asked about."""
-        import core.claude as claude
+        import core.claude.api as claude
         asked = []
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
@@ -1255,7 +1255,7 @@ class TestScoreMissionsHonoursTheReviewQueue:
     skipping the queue."""
 
     def _wire(self, monkeypatch, db):
-        import core.claude as claude
+        import core.claude.api as claude
         import core.store as store
 
         class _NoClose:

@@ -3,7 +3,7 @@ regex, both resolved per track from configuration rather than code."""
 
 import pytest
 
-import core.gates as gates
+import core.digest.gates as gates
 
 
 @pytest.fixture

@@ -10,7 +10,8 @@ the whole top N (the "re-verify all" tick box in the web UI).
 Offline: the verifier and the live-JD fetch are stubbed.
 """
 
-from core import fit, store
+from core import store
+from core.claude import fit
 from scrapers import ops
 
 
@@ -157,17 +158,17 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     def test_tripped_before_the_pass_skips_it_in_one_line(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from core import claude
+        from core.claude import api
         t = self._track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
-        monkeypatch.setattr(claude, "_FATAL_MSG", "HTTP 400: 'credit balance'")
+        monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         fetched, verified = [], []
         monkeypatch.setattr(ops, "_live_jd",
                             lambda r: fetched.append(r["job_id"]) or "")
         monkeypatch.setattr(fit, "verify_fit",
                             lambda *a, **k: verified.append(a)
-                            or fit.FitResult(score=None))
+                                            or fit.FitResult(score=None))
         n = ops.verify_top(top_n=10, max_workers=1, conn=db, t=t)
         out = capsys.readouterr().out
         assert (n, fetched, verified) == (0, [], [])
@@ -176,17 +177,17 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
 
     def test_tripping_mid_round_halts_without_fetching_the_rest(
             self, db, add_job, local_track, monkeypatch, capsys):
-        from core import claude
+        from core.claude import api
         t = self._track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
-        monkeypatch.setattr(claude, "_FATAL_MSG", None)
+        monkeypatch.setattr(api, "_FATAL_MSG", None)
         fetched = []
         monkeypatch.setattr(ops, "_live_jd",
                             lambda r: fetched.append(r["job_id"]) or "d" * 400)
 
         def dead_api(title, text, *, location=""):
-            claude._trip_fatal("HTTP 400: 'credit balance'")
+            api._trip_fatal("HTTP 400: 'credit balance'")
             return fit.FitResult(score=None, reason="unverified")
 
         monkeypatch.setattr(fit, "verify_fit", dead_api)

@@ -10,7 +10,7 @@ after the first.
 import pytest
 import requests
 
-import core.claude as claude
+import core.claude.api as claude
 
 
 class _Resp:

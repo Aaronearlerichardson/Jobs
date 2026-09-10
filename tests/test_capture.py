@@ -10,7 +10,7 @@ import pytest
 
 import capture
 import config
-import core.fit as fit
+import core.claude.fit as fit
 import core.store as store
 import tags
 import scrapers.ops as ops

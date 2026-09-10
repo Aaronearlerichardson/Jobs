@@ -38,7 +38,7 @@ ANTHROPIC_API_KEY  = env("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
 # Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
 # pricing ($3/$15 per MTok; intro $2/$10 through 2026-08-31, cheaper than the
 # Sonnet 4.6 it replaces). NOTE for 5-family models: thinking is ON by
-# default and max_tokens caps thinking+text together — core/claude.py
+# default and max_tokens caps thinking+text together — core/api.py
 # disables thinking for these small structured-JSON calls.
 CLAUDE_MODEL       = env("CLAUDE_MODEL", "claude-sonnet-5")
 # Deep-verify pass over ranking finalists only (~15-30 calls/run, judgment-

@@ -17,7 +17,7 @@ import config
 
 from scrapers import ddg
 
-from core.ats_signatures import detect
+from core.digest.ats_signatures import detect
 import tags as company_tags
 from core import store
 from scrapers.fetchers import company as company_fetch

@@ -18,7 +18,7 @@ import logging
 from bs4 import BeautifulSoup, SoupStrainer
 
 from config import PROBE_TIMEOUT
-from core.ats_signatures import detect, pack
+from core.digest.ats_signatures import detect, pack
 from scrapers.http import HEADERS, SESSION
 from .fetchpool import ROOT_PATTERNS, _fetch_all, candidate_urls
 from .identity import _corroborates, _foreign_board, _risky_token_in_url

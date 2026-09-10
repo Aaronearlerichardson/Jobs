@@ -13,7 +13,7 @@ import re
 
 import config
 
-from .filters import SHORT_PLACE, token_pattern
+from core.digest.filters import SHORT_PLACE, token_pattern
 
 # Word-boundary for short/ambiguous tokens (so "nc" doesn't hit "clinic",
 # "sf" doesn't hit "surf"); substring for distinctive multi-char names.

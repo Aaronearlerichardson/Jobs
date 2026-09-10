@@ -24,7 +24,7 @@ an ATS name this table lacks is simply skipped by iter_store_sources.
 """
 
 import tags
-from core.filters import is_relevant
+from core.digest.filters import is_relevant
 
 from .fetchers import (
     fetch_adp,

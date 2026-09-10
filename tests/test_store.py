@@ -4,7 +4,7 @@ lifecycle, dispositions, crawl dormancy, and track membership."""
 from datetime import datetime, timedelta
 
 import config
-import core.locality as locality
+import core.digest.locality as locality
 import core.store as store
 
 
@@ -403,7 +403,7 @@ class TestDispositions:
         self._seed(add_job)
         store.set_disposition(db, "gh_acme_200", "dismissed", note="wrong archetype")
         store.set_disposition(db, "gh_acme_300", "applied")
-        from core.fit import disposition_examples_block
+        from core.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert 'PURSUED: "Data Engineer"' in block
         assert "wrong archetype" in block
@@ -569,7 +569,7 @@ class TestPipelineTracking:
         store.set_disposition(db, "p1", "rejected", note="no headcount")
         store.update_pipeline_fields(db, "p1",
                                      outcome_reason="rejected-interview")
-        from core.fit import disposition_examples_block
+        from core.claude.fit import disposition_examples_block
         block = disposition_examples_block(db, 3)
         assert "Imaging Scientist" in block
         assert "rejected-interview" in block
@@ -908,8 +908,8 @@ class TestReviewQueue:
             self, db, monkeypatch):
         # The store writes the caller's decision; it only falls back to
         # core.claude.is_active_mission when no verdict was passed.
-        import core.claude
-        monkeypatch.setattr(core.claude, "is_active_mission",
+        import core.claude.api
+        monkeypatch.setattr(core.claude.api, "is_active_mission",
                             lambda *a, **k: 1 / 0)
         cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid, active=1)["active"] == 1

@@ -27,7 +27,7 @@ tracks surface these for human review before emailing:
 
 import config
 
-from .filters import SHORT_REMOTE, token_in
+from core.digest.filters import SHORT_REMOTE, token_in
 
 # Location-field signals. The location string is short and ATS-curated
 # ("Remote", "Remote, US", "Remote - United States", "Distributed"), so a

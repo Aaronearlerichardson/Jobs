@@ -33,7 +33,7 @@ class TestEnvHelper:
 
 
 class TestKeyDetection:
-    """The 'is a key configured?' test used across claude.py, webapp
+    """The 'is a key configured?' test used across api.py, webapp
     routes, and the server banner."""
 
     def test_placeholder_means_unconfigured(self):
