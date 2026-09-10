@@ -4,13 +4,16 @@ job in my area?" gate).
 
 The terms come from profile.toml [locality] — not hard-coded — so the local
 track works for any region. NC_RE / NC_HQ_RE / is_nc are the historical
-public names, kept for import stability (region-agnostic now). fetchers/company, discovery/local_sourcing, discovery/sniffer, and the
-local track all delegate here.
+public names, kept for import stability (region-agnostic now).
+scrapers/fetchers/company, discovery/local_sourcing, the runner, and the
+webapp all delegate here.
 """
 
 import re
 
 import config
+
+from .filters import SHORT_PLACE, token_pattern
 
 # Word-boundary for short/ambiguous tokens (so "nc" doesn't hit "clinic",
 # "sf" doesn't hit "surf"); substring for distinctive multi-char names.
@@ -50,17 +53,13 @@ def is_nc(text):
 # careers pages) publish no location field — the city is just words in the
 # row. Scrapers recover it by searching that text for a place they recognise,
 # which means the vocabulary has to come from [locality]; a hard-coded city
-# list only ever works for the person who wrote it.
+# list only ever works for the person who wrote it. Here the word/substring
+# split is by length (filters.SHORT_PLACE), not the profile's own
+# word_tokens/substrings classification: state codes and four-letter towns
+# get boundaries whichever list they came from.
 
-_SHORT_TOKEN = 4          # <= this many chars: match on word boundaries
-
-
-def _alt(term):
-    esc = re.escape(term)
-    return rf"\b{esc}\b" if len(term) <= _SHORT_TOKEN else esc
-
-
-_SNIPPET_ALTS = [_alt(t) for t in (_WB + _SUB + [s for s in config.LOCALITY_STATE_SUFFIX if s])]
+_SNIPPET_ALTS = [token_pattern(t, SHORT_PLACE)
+                 for t in (_WB + _SUB + [s for s in config.LOCALITY_STATE_SUFFIX if s])]
 # "Remote" always counts: it's a location on every board, in every field.
 _SNIPPET_ALTS.append(r"\bremote\b")
 
