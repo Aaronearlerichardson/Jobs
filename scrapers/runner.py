@@ -32,7 +32,7 @@ from datetime import datetime
 import config
 
 from core import store
-from core.filters import is_relevant
+from core.filters import SHORT_KEYWORD, is_relevant, token_in
 from .parallel import fetch_all
 from core.remote_filter import remote_signal_for, us_eligible
 from core.resume import resume_text
@@ -95,11 +95,7 @@ def core_anchor(title, description=""):
     track's own CORE keyword vocabulary."""
     text = f"{title} {description}".lower()
     for a in config.CORE_KEYWORDS:
-        k = a.lower()
-        if k.isalpha() and len(k) <= 5:
-            if re.search(rf"\b{re.escape(k)}\b", text):
-                return a
-        elif k in text:
+        if token_in(a, text, SHORT_KEYWORD):
             return a
     return None
 
