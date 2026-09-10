@@ -1,9 +1,10 @@
 """Remote-eligibility detection.
 
-Self-contained, side-effect-free module used by the remote-focused track
-(``track_remote_neural.py``). It does NOT touch the shared location filter,
-so it can be added/removed without disturbing the local (onsite) crawl path
-or a parallel track. Its term lists DO come from ``config``/profile.toml
+Side-effect-free: the sweep runner (scrapers/runner.py) stamps
+`remote_signal` / `_us_eligible` on its rows with it, core.locality.geo_mode
+borrows `remote_signal` for the "remote" bucket, and the webapp reads it.
+It does NOT touch the locality gate, so the onsite crawl path is
+undisturbed by changes here. Its term lists come from ``config``/profile.toml
 [locations] (falling back to built-in defaults when unconfigured), so
 they're editable in one place like every other keyword list.
 
@@ -12,8 +13,8 @@ advertises remote / distributed / work-from-anywhere / US-remote work,
 and nothing in the text hard-negates that (e.g. "this role is not
 remote", "on-site only", "relocation required").
 
-Two precision rules keep false positives down — important because the
-remote-neural track surfaces these for human review before emailing:
+Two precision rules keep false positives down — important because sweep
+tracks surface these for human review before emailing:
 
   * In the body, "distributed" and "anywhere" only count in a *workforce*
     context ("distributed team", "work from anywhere"). A bare
@@ -24,12 +25,9 @@ remote-neural track surfaces these for human review before emailing:
     "remote" / "distributed" / "anywhere" token is trusted as a signal.
 """
 
-import re
+import config
 
-try:
-    import config
-except Exception:                      # importable standalone
-    config = None
+from .filters import SHORT_REMOTE, token_in
 
 # Location-field signals. The location string is short and ATS-curated
 # ("Remote", "Remote, US", "Remote - United States", "Distributed"), so a
@@ -130,16 +128,12 @@ _DEFAULT_HARD_NEGATIONS = (
 )
 _HARD_NEGATIONS = tuple(getattr(config, "REMOTE_HARD_NEGATIONS", None) or _DEFAULT_HARD_NEGATIONS)
 
-# "wfh" needs word boundaries so it doesn't match inside other tokens.
-_WFH_RE = re.compile(r"\bwfh\b")
-
-
 def _has_token(text, tokens):
+    """The first of `tokens` found in `text`, or None. Short codes ("wfh",
+    "us", "uk") match on word boundaries so they cannot fire inside other
+    words; phrases and longer words are substrings (filters.SHORT_REMOTE)."""
     for tok in tokens:
-        if tok == "wfh":
-            if _WFH_RE.search(text):
-                return tok
-        elif tok in text:
+        if token_in(tok, text, SHORT_REMOTE):
             return tok
     return None
 
@@ -208,20 +202,13 @@ _DEFAULT_NON_US_REGIONS = (
 _NON_US_REGIONS = tuple(getattr(config, "REMOTE_NON_US_REGIONS", None) or _DEFAULT_NON_US_REGIONS)
 
 
-def _region_match(token, text):
-    # Short tokens ("us", "uk", "eu") need word boundaries.
-    if token.isalpha() and len(token) <= 3:
-        return re.search(rf"\b{re.escape(token)}\b", text) is not None
-    return token in text
-
-
 def us_eligible(location):
     """True unless the location names a non-US region with no US marker."""
     loc = (location or "").lower()
     if not loc:
         return True
-    if any(_region_match(t, loc) for t in _US_MARKERS):
+    if _has_token(loc, _US_MARKERS):
         return True
-    if any(_region_match(t, loc) for t in _NON_US_REGIONS):
+    if _has_token(loc, _NON_US_REGIONS):
         return False
     return True

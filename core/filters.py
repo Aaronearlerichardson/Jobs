@@ -1,8 +1,11 @@
-"""Keyword + location filtering.
+"""Keyword relevance filtering, plus the term matcher every vocabulary gate
+shares (`token_pattern` / `token_in`).
 
-Reads CORE/DOMAIN/SKILL_KEYWORDS, EXCLUDE_PHRASES, and LOCATION_* from
-config at call time, so `--expand-live` and friends can mutate those
-lists and this module will see the updated values on the next call.
+The keyword lists (CORE/DOMAIN/SKILL/INCLUDE/EXCLUDE_*) are bound from
+config at import time as the SAME list objects config holds, and
+scrapers.runner.apply_keyword_focus mutates those lists in place, so a
+track's focus is visible here without a reload (tests/test_tracks.py pins
+that). The boilerplate regex is compiled once at import.
 
 Relevance model (tiered):
   1. CORE match  -> standalone signal, relevant.
@@ -11,6 +14,7 @@ Relevance model (tiered):
 """
 
 import re
+from functools import lru_cache
 
 import config
 from config import (
@@ -24,26 +28,92 @@ from config import (
 
 
 # --------------------------------------------------------------------- #
+#  Term matching                                                         #
+# --------------------------------------------------------------------- #
+#
+# One rule for every vocabulary list in the crawler: a SHORT ALPHABETIC term
+# matches on word boundaries, anything else as a plain substring. Short
+# tokens are the false-positive engine ("ecog" in "recognized", "sf" in
+# "surf", "us" in "campus"); longer terms are distinctive enough that
+# substring matching is what covers their inflections ("weapon" ->
+# "weapons", "cortical" <- "subcortical"). Non-alphabetic terms never get
+# boundaries: `\b` needs a word character on the inside, so "c++" or
+# "u.s." would silently stop matching at all.
+#
+# Where the short/long line falls depends on the vocabulary, so each caller
+# has its own threshold, all kept here so the reasoning sits in one place:
+
+# Relevance keywords: acronyms run to five letters (eeg, ecog, ieeg, fnirs,
+# fmri); six-letter words are real words whose inflections we want.
+SHORT_KEYWORD = 5
+# Per-track exclusion vocabulary (core/gates.py): the only ambiguous tokens
+# are the two/three-letter ones (sdr, bdr, rf); the defense/role terms are
+# plural-prone nouns ("drone", "weapon", "army") that must stay substring
+# from four letters up so "drones" and "weapons" still hit.
+SHORT_EXCLUDE = 3
+# Remote-work tokens and region codes (core/remote_filter.py): us / uk /
+# eu / wfh need boundaries; "asia", "emea", "america" stay substring so the
+# longer forms ("americas", "southeast asia") match too.
+SHORT_REMOTE = 3
+# Place names pulled out of page text (core/locality.py): four-letter towns
+# and two-letter state codes hide inside ordinary words ("rome" in "chrome",
+# "nc" in "clinic"); five letters and up are distinctive.
+SHORT_PLACE = 4
+
+
+def _bounded(term, short_len):
+    return term.isalpha() and len(term) <= short_len
+
+
+def token_pattern(term, short_len):
+    """Regex source that matches `term` literally: on word boundaries when it
+    is an alphabetic token of at most `short_len` characters, as a bare
+    substring otherwise. For building alternations; compile with re.I.
+
+    >>> token_pattern("rome", 4)
+    '\\\\brome\\\\b'
+    >>> token_pattern("boston", 4)
+    'boston'
+    >>> token_pattern("c++", 4)           # no boundary can follow "+"
+    'c\\\\+\\\\+'
+    >>> token_pattern("san jose", 4)
+    'san\\\\ jose'
+    """
+    esc = re.escape(term)
+    return rf"\b{esc}\b" if _bounded(term, short_len) else esc
+
+
+@lru_cache(maxsize=4096)
+def _short_re(term):
+    return re.compile(rf"\b{re.escape(term)}\b")
+
+
+def token_in(term, text, short_len):
+    """Whether `term` occurs in `text` under the `token_pattern` rule.
+    `text` must already be lowercase — every caller lowercases a posting
+    once up front, and the long-term case is a plain substring test so a
+    thousand keywords over a thousand postings stays cheap.
+
+    >>> token_in("rome", "rome, italy", 4), token_in("rome", "chrome", 4)
+    (True, False)
+    >>> token_in("Boston", "bostonian", 4)
+    True
+    """
+    term = term.lower()
+    if _bounded(term, short_len):
+        return _short_re(term).search(text) is not None
+    return term in text
+
+
+# --------------------------------------------------------------------- #
 #  Relevance                                                             #
 # --------------------------------------------------------------------- #
 
-def _kw_match(kw, text):
-    """
-    Case-insensitive keyword hit. Short single-token alphabetic keywords
-    (acronyms: eeg, bci, ecog, ieeg, meg, mri, dsp, ...) use word-boundary
-    matching — plain substring fires inside ordinary words ("ecog" in
-    "recognized", "meg" in "omega") and floods aggregator sources with
-    off-topic roles. Multi-word phrases and longer tokens stay substring
-    so "subcortical" still matches "cortical".
-    """
-    k = kw.lower()
-    if k.isalpha() and len(k) <= 5:
-        return re.search(rf"\b{re.escape(k)}\b", text) is not None
-    return k in text
-
-
 def _kw_in(text, keywords):
-    return any(_kw_match(k, text) for k in keywords)
+    """Any keyword hits `text` — acronyms on word boundaries (a bare "meg"
+    would fire inside "omega" and flood aggregator sources with off-topic
+    roles), longer terms as substrings (see SHORT_KEYWORD)."""
+    return any(token_in(k, text, SHORT_KEYWORD) for k in keywords)
 
 
 def _excluded(title, text):
@@ -66,9 +136,10 @@ _PAIR_SCAN_CHARS = 1200
 # "drug-free workplace"), EEO statements ("military or veteran status" — the
 # defense gate's #1 false positive: 126 of 1116 stored JDs), vaccination
 # policies, and infra-health prose ("service health checks"). Scrubbed from
-# text before keyword/exclusion matching. Shared with the local track's
-# defense gate via scrub_boilerplate(). Source list: config.EXCLUDE_BOILERPLATE_PHRASES
-# (profile.toml [exclude] boilerplate_phrases).
+# text before keyword/exclusion matching. Shared with the per-track defense
+# gate (core/gates.py) via scrub_boilerplate(). Source list:
+# config.EXCLUDE_BOILERPLATE_PHRASES (profile.toml [exclude]
+# boilerplate_phrases); these are the fallback when it is empty.
 _DEFAULT_BOILERPLATE_PHRASES = (
     # benefits
     r"medical[,/&\s]+(?:dental|vision)(?:[,/&\s]+(?:dental|vision))?(?:\s+(?:insurance|coverage|benefits|plans?))?",

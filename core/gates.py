@@ -19,18 +19,14 @@ from functools import lru_cache
 
 import config
 
-from .filters import scrub_boilerplate
-
-# Short/ambiguous tokens (<= 3 chars) use word-boundary matching so "sdr"
-# doesn't fire inside other words; longer terms stay substring.
-_SHORT = 3
+from .filters import SHORT_EXCLUDE, scrub_boilerplate, token_in
 
 
 def _tok_in(token, text):
-    t = token.lower()
-    if len(t) <= _SHORT:
-        return re.search(rf"\b{re.escape(t)}\b", text) is not None
-    return t in text
+    """Defense/radar vocabulary hit: two- and three-letter tokens on word
+    boundaries, longer plural-prone terms as substrings (the threshold and
+    its reasoning live with filters.SHORT_EXCLUDE)."""
+    return token_in(token, text, SHORT_EXCLUDE)
 
 
 @lru_cache(maxsize=32)
@@ -93,11 +89,13 @@ def exclude_reason(title, description="", allow_defense=False, *,
         weak = [d for d in tables["defense_weak"] if _tok_in(d, scrubbed)]
         if len(weak) >= 2:
             return f"defense: {'+'.join(weak[:3])}"
-        # Military RF-radar: only exclude "radar" in a defense context.
+        # Military RF-radar: only exclude "radar" in a defense context
+        # ("rf" is a bounded token, so "RF/microwave" counts and "perf"
+        # does not).
         if "radar" in scrubbed and any(_tok_in(d, scrubbed) for d in
                                        ("military", "defense", "defence",
                                         "weapon", "warfare", "missile",
-                                        "rf ")):
+                                        "rf")):
             return "defense: military radar"
 
     nc_hit = next((d for d in tables["nonclinical"]
