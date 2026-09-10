@@ -698,7 +698,10 @@ def fetch_icims_all(tenant, loc_re=None, loc_label="NC", search_location="NC"):
         return found
 
     try:
-        out = _one_page(f"&searchLocation={search_location}", located=True)
+        # search_location=None/"" is a whole-board pull: skip the located
+        # search entirely rather than send the literal "None".
+        out = (_one_page(f"&searchLocation={search_location}", located=True)
+               if search_location else [])
         if not out:
             for page in range(1, 9):   # locationless, paged
                 batch = _one_page(f"&pr={page - 1}" if page > 1 else "", located=False)

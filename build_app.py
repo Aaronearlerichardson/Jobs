@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 r"""Build a standalone distribution of the web UI with Nuitka.
 
-    python build_app.py            # build for the current platform
-    python build_app.py --check    # print the command without running it
+    python build_app.py                    # the web UI, for this platform
+    python build_app.py --target harvest   # the background harvester
+    python build_app.py --check            # print the command without running it
 
-Output: single-file binary (`JobCrawlerUI.exe` or `job-crawler-ui`) —
+Output: single-file binary (`JobCrawlerUI.exe` or `job-crawler-ui`; the
+harvester is `JobHarvester.exe` / `job-harvester`) —
 self-contained (bundled CPython + Flask + the crawler packages + lxml),
 copy it anywhere and run; no Python or pip needed on the target.
 
@@ -44,7 +46,33 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-OUTPUT_NAME = "JobCrawlerUI.exe" if sys.platform == "win32" else "job-crawler-ui"
+
+# --target NAME -> (entry script, Windows output name, other-platform name).
+# Both binaries bundle the same packages; they differ only in entry point,
+# so the harvester needs no separate package list.
+TARGETS = {
+    "ui":      ("webapp.py",  "JobCrawlerUI.exe", "job-crawler-ui"),
+    "harvest": ("harvest.py", "JobHarvester.exe", "job-harvester"),
+}
+
+
+def target():
+    """The --target NAME from argv (default 'ui')."""
+    argv = sys.argv[1:]
+    for i, a in enumerate(argv):
+        if a == "--target" and i + 1 < len(argv):
+            return argv[i + 1]
+        if a.startswith("--target="):
+            return a.split("=", 1)[1]
+    return "ui"
+
+
+def output_name(name=None):
+    entry, win, other = TARGETS[name or target()]
+    return win if sys.platform == "win32" else other
+
+
+OUTPUT_NAME = output_name()
 
 # Data files the app reads at runtime but Nuitka can't infer from imports.
 DATA_FILES = [
@@ -74,9 +102,10 @@ PACKAGES = ["core", "scrapers", "discovery", "webapp", "ddgs", "playwright",
 DATA_PACKAGES = ["playwright", "fake_useragent"]
 
 
-def build_command():
-    cmd = [sys.executable, "-m", "nuitka", "webapp.py",
-           "--onefile", f"--output-filename={OUTPUT_NAME}",
+def build_command(name=None):
+    entry = TARGETS[name or target()][0]
+    cmd = [sys.executable, "-m", "nuitka", entry,
+           "--onefile", f"--output-filename={output_name(name)}",
            "--assume-yes-for-downloads"]
     cmd += [f"--include-package={p}" for p in PACKAGES]
     cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]

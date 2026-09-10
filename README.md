@@ -653,6 +653,52 @@ pointing at `crawler.py` keep working — it's a shim that forwards to
 `run_scraper.py`. Note that `run_scraper.py` with NO flags refreshes EVERY
 configured track.)
 
+### The background harvester
+
+The crawl above is deliberately narrow: it fetches only the boards due for a
+crawl (active, not parked dormant), scoped to your locality unless a company
+is watched, sweep-tagged or above the mission floor, and hydrates only rows
+that pass the gates. `harvest.py` is the other half — a slow, thorough pass
+that pulls **every** board with a fetchable ATS (dormant, inactive, pending
+review, any mission score; only dead/no-board rows and blocklisted names are
+skipped), whole and unfiltered, hydrates every posting, and stores it all
+**unscored**. It never calls Claude and never reads the resume. The next
+crawl treats a harvested row as fresh (it has no track label yet), gates and
+scores it, and reuses the stored description instead of fetching it again.
+A full snapshot is also the best evidence of what a board lists, so the
+harvester closes stored rows that have vanished and reopens returners.
+
+```bash
+python harvest.py --list                  # what would be pulled
+python harvest.py --only greenhouse,lever # one family first
+python harvest.py                         # everything not harvested in 6 h
+```
+
+Whole-roster hydration is on the order of 20,000 detail requests, so a full
+pass takes hours; boards run concurrently (`--workers`, `HARVEST_WORKERS`),
+cheapest ATSes first, and a board with no progress for 15 minutes is
+abandoned. Bodies already in the store are never fetched twice, so each run
+advances the roster. Workday closes the connection after roughly 150 detail
+requests per tenant, so the harvester takes at most 100 bodiless Workday rows
+per board per run (`HYDRATE_CAP` in `scrapers/harvest.py`) and leaves the
+rest for the next run. Each run exits when done; the loop is Task Scheduler:
+
+```powershell
+python build_app.py --target harvest      # optional: JobHarvester.exe
+powershell -ExecutionPolicy Bypass -File tools
+egister_harvest_task.ps1 -Every 12
+```
+
+That registers "Jobs Harvester" to run at log-on and every 12 hours after,
+without a console window, skipping a firing while the previous run is still
+going. A run started by hand while one is running exits at once (lock file
+in the data directory). Logs land in `data/logs/session-harvest-*.log`.
+
+The store runs SQLite in WAL mode so the harvester, the web UI and the
+scheduled crawl can write at the same time; when copying `jobs.db` by hand,
+copy `jobs.db-wal` and `jobs.db-shm` alongside it (or close every process
+first).
+
 ---
 
 ## Customizing — `profile.toml`

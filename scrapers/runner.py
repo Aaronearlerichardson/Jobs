@@ -355,6 +355,14 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                                                      track=t["track"])
                 n_reopened += n_re
                 n_closed += n_cl
+            # Reuse bodies the background harvester already fetched, so
+            # the gates and the scorer below do not pay a detail GET for
+            # a posting whose description is sitting in the store.
+            if jobs and c.get("id"):
+                stored = store.descriptions_for_company(conn, c["id"])
+                for j in jobs:
+                    if not j.get("description") and j["id"] in stored:
+                        j["description"] = stored[j["id"]]
             kept = []
             for j in jobs:
                 if t["require_core_anchor"] and not core_anchor(
@@ -363,7 +371,10 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 if not ops._keep_job(c, j, t):
                     continue
                 kept.append(j)
-            fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
+            # Fresh = no crawl has handled it yet. A row the harvester
+            # stored (no track, no score) still counts as fresh: it was
+            # never gated or scored, only fetched.
+            fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
             n_seen += len(kept) - len(fresh)
             for j in fresh:
                 to_score.append((c, j))
@@ -373,7 +384,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                 # stored unscored so they aren't re-flagged next run.
                 fresh_ids = {f["id"] for f in fresh}
                 for j in jobs:
-                    if (store.job_exists(conn, j["id"])
+                    if (store.crawl_seen(conn, j["id"])
                             and j["id"] not in fresh_ids) \
                             or not gates.is_technical_role(j.get("title", ""), t) \
                             or (t["exclude_gate"] and gates.exclude_reason(

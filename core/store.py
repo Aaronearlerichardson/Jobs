@@ -170,8 +170,17 @@ _MIGRATIONS = {
         "last_crawled_at":  "TEXT",
         "last_nonempty_at": "TEXT",
         "next_crawl_at":    "TEXT",      # dormant rows wake at/after this
+        # Last SUCCESSFUL whole-board pull by the background harvester
+        # (scrapers/harvest.py). Independent of the crawl stamps above: the
+        # harvester ignores crawl_state and never writes it.
+        "last_harvested_at": "TEXT",
     },
     "jobs": {
+        # Stamped by the background harvester when it stored or refreshed
+        # the row. A harvested row arrives with NO track and NO score; the
+        # crawl adopts it (gates, scores, stamps its track) the next time
+        # that company's board comes round -- see crawl_seen.
+        "harvested_at":    "TEXT",
         "track":           "TEXT",
         "remote_eligible": "INTEGER",
         "remote_signal":   "TEXT",
@@ -329,9 +338,34 @@ def _migrate_tags(conn):
     conn.commit()
 
 
+# How long a writer waits on another process's write lock before giving up.
+# The web UI, the scheduled crawl and the background harvester all write to
+# one file, so a locked DB is normal, not an error.
+BUSY_TIMEOUT_S = 30.0
+
+
 def connect(path=None):
-    conn = sqlite3.connect(path or config.STORE_DB_PATH)
+    """Open the store: schema applied, migrations run, WAL journaling on.
+
+    WAL matters because several PROCESSES share this file (the web UI, the
+    Task-Scheduler crawl, the background harvester): under the default
+    rollback journal a reader blocks a writer and two writers collide the
+    moment they overlap, and nothing here waited, so the loser died with
+    "database is locked". In WAL mode readers never block the writer and
+    the busy timeout queues writers instead of failing them. Cost: two
+    sidecar files (jobs.db-wal, jobs.db-shm) beside the DB while any
+    connection is open -- copy all three when backing up by hand, or run
+    checkpoint() first.
+    """
+    conn = sqlite3.connect(path or config.STORE_DB_PATH,
+                           timeout=BUSY_TIMEOUT_S)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.OperationalError:
+        pass                    # read-only media: the pragmas are optional
     conn.executescript(_SCHEMA)
     conn.commit()
     _ensure_columns(conn)
@@ -339,6 +373,69 @@ def connect(path=None):
     conn.executescript(_INDEXES)
     conn.commit()
     return conn
+
+
+def checkpoint(conn):
+    """Fold the WAL back into the main file (before a file-copy backup)."""
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except sqlite3.OperationalError:
+        pass
+
+
+# Connections currently inside a batch() block: their per-row writers skip
+# the commit and the block commits once at the end. Keyed by id() because
+# sqlite3.Connection accepts no attributes.
+_BATCHING = set()
+
+
+def _commit(conn):
+    """Commit unless the caller is batching (see batch)."""
+    if id(conn) not in _BATCHING:
+        conn.commit()
+
+
+class batch:
+    """Group many upsert_job / sync_job_statuses calls into ONE transaction.
+
+    >>> conn = connect(":memory:")
+    >>> with batch(conn):
+    ...     for i in range(3):
+    ...         _ = upsert_job(conn, {"job_id": f"b{i}", "title": "T"})
+    >>> conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
+    3
+
+    An exception inside the block rolls the whole group back:
+
+    >>> try:
+    ...     with batch(conn):
+    ...         _ = upsert_job(conn, {"job_id": "b9", "title": "T"})
+    ...         raise RuntimeError("boom")
+    ... except RuntimeError:
+    ...     pass
+    >>> job_exists(conn, "b9")
+    False
+
+    Notes:
+        The harvester stores one whole board per block: 1,000 rows as one
+        write-lock acquisition instead of 1,000, which is what keeps it from
+        starving the web UI's own writes while it runs.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        _BATCHING.add(id(self.conn))
+        return self.conn
+
+    def __exit__(self, exc_type, exc, tb):
+        _BATCHING.discard(id(self.conn))
+        if exc_type is None:
+            self.conn.commit()
+        else:
+            self.conn.rollback()
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -1315,9 +1412,13 @@ def _offmission_volume(conn, company_id):
     """True when this company has stored >= 30 jobs and its BEST resume fit
     is still under 0.20 -- the high-volume off-mission board pattern. A NULL
     max (nothing scored yet) is missing data, not a verdict, so it fails."""
+    # Scored rows only: the harvester stores every posting on a board
+    # unscored, and 500 unjudged rows next to five scored ones say nothing
+    # about the employer.
     row = conn.execute(
         "SELECT COUNT(*) AS n, MAX(resume_fit_score) AS best FROM jobs "
-        "WHERE company_id = ?", (company_id,)).fetchone()
+        "WHERE company_id = ? AND resume_fit_score IS NOT NULL",
+        (company_id,)).fetchone()
     return bool(row and row["n"] >= _OFFMISSION_MIN_JOBS
                 and row["best"] is not None
                 and row["best"] < _OFFMISSION_MAX_FIT)
@@ -1428,6 +1529,56 @@ def crawlable_companies(conn, tag=None):
             if c.get("ats") != CAPTURE_ATS and _is_crawlable(c, now)]
 
 
+# miss_reason families that mean there is nothing at the board's address.
+# Everything else (inactive, dormant, pending review, off-mission, even
+# 'no-local-jobs') still HAS a board, and the harvester pulls it.
+_NO_BOARD_PREFIXES = ("board-dead", "no-board-found")
+
+
+def harvestable_companies(conn):
+    """Every company with a fetchable board, for the background harvester:
+    active or not, dormant or not, any tag, any mission score. Skipped only
+    when there is no board to fetch (capture rows, no ATS, a dead-board or
+    no-board miss) or the name is blocklisted.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Dormant", "ats": "lever",
+    ...                           "slug": "d", "crawl_state": "dormant",
+    ...                           "next_crawl_at": "2999-01-01"})
+    >>> _ = upsert_company(conn, mark_pending(
+    ...     {"name": "Guess", "ats": "greenhouse", "slug": "g"}))
+    >>> _ = record_miss(conn, "Dead", "board-dead:ultipro", ats="ultipro",
+    ...                 slug="x")
+    >>> _ = upsert_company(conn, {"name": "Saved", "ats": CAPTURE_ATS,
+    ...                           "careers_url": "https://j.x.org/"})
+    >>> sorted(c["name"] for c in harvestable_companies(conn))
+    ['Dormant', 'Guess']
+    >>> _ = block_name(conn, "Guess")
+    >>> sorted(c["name"] for c in harvestable_companies(conn))
+    ['Dormant']
+    """
+    blocked = blocked_name_keys(conn)
+    out = []
+    for c in get_companies(conn, active_only=False):
+        ats = c.get("ats")
+        if not ats or ats == CAPTURE_ATS:
+            continue
+        if (c.get("miss_reason") or "").startswith(_NO_BOARD_PREFIXES):
+            continue
+        if _name_key(c.get("name") or "") in blocked:
+            continue
+        out.append(c)
+    return out
+
+
+def mark_harvested(conn, company_id, n_jobs):
+    """Stamp a successful whole-board pull (and the board's true size)."""
+    conn.execute(
+        "UPDATE companies SET last_harvested_at=?, total_job_count=? "
+        "WHERE id=?", (datetime.now().isoformat(), n_jobs, company_id))
+    _commit(conn)
+
+
 def reactivate_company(conn, company_id):
     """Undormant one company: back to 'active', streak cleared, no parked
     wake time. The escape hatch for a board the rules retired too eagerly."""
@@ -1443,6 +1594,37 @@ def reactivate_company(conn, company_id):
 
 def job_exists(conn, job_id):
     return conn.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone() is not None
+
+
+def crawl_seen(conn, job_id):
+    """Has a CRAWL already handled this posting? True for a row that
+    carries a track label -- the crawl stamps one whether it scored the row
+    or stored it unscored under a budget guard. A row the harvester stored
+    (no track yet) reads as unseen, so the crawl still gates and scores it:
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "h1", "title": "T",
+    ...                       "harvested_at": "2026-09-10T01:00:00"})
+    >>> job_exists(conn, "h1"), crawl_seen(conn, "h1")
+    (True, False)
+    >>> _ = upsert_job(conn, {"job_id": "h1", "title": "T", "track": "local"})
+    >>> crawl_seen(conn, "h1")
+    True
+    """
+    row = conn.execute("SELECT track FROM jobs WHERE job_id=?",
+                       (job_id,)).fetchone()
+    return bool(row and (row["track"] or "").strip())
+
+
+def descriptions_for_company(conn, company_id):
+    """{job_id: description} for a company's stored rows that have a body,
+    so a crawl can reuse what the harvester already hydrated instead of
+    re-fetching every detail page."""
+    if not company_id:
+        return {}
+    return {r["job_id"]: r["description"] for r in conn.execute(
+        "SELECT job_id, description FROM jobs WHERE company_id=? "
+        "AND length(COALESCE(description,'')) > 0", (company_id,))}
 
 
 def upsert_job(conn, j):
@@ -1491,8 +1673,9 @@ def upsert_job(conn, j):
              geo_mode, remote_eligible, remote_signal, anchor_signal,
              description, resume_fit_score, fit_reason,
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
-             fit_model, posted_at, first_seen, last_seen, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+             fit_model, posted_at, first_seen, last_seen, status,
+             harvested_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url, location=excluded.location,
              track=COALESCE(excluded.track, track),
@@ -1500,7 +1683,7 @@ def upsert_job(conn, j):
              remote_eligible=COALESCE(excluded.remote_eligible, remote_eligible),
              remote_signal=COALESCE(excluded.remote_signal, remote_signal),
              anchor_signal=COALESCE(excluded.anchor_signal, anchor_signal),
-             description=excluded.description,
+             description=COALESCE(NULLIF(excluded.description,''), description),
              resume_fit_score=COALESCE(excluded.resume_fit_score, resume_fit_score),
              fit_reason=COALESCE(NULLIF(excluded.fit_reason,''), fit_reason),
              fit_domain=COALESCE(excluded.fit_domain, fit_domain),
@@ -1513,7 +1696,8 @@ def upsert_job(conn, j):
              last_seen=excluded.last_seen,
              status=excluded.status,
              closed_at=CASE WHEN excluded.status='closed'
-                            THEN closed_at ELSE NULL END""",
+                            THEN closed_at ELSE NULL END,
+             harvested_at=COALESCE(excluded.harvested_at, harvested_at)""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
          j.get("url"), j.get("location"), track, j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("anchor_signal"),
@@ -1521,9 +1705,10 @@ def upsert_job(conn, j):
          j.get("resume_fit_score"), j.get("fit_reason"),
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
          j.get("fit_seniority"), j.get("fit_gates"), j.get("fit_model"),
-         j.get("posted_at"), now, now, j.get("status", "open")),
+         j.get("posted_at"), now, now, j.get("status", "open"),
+         j.get("harvested_at")),
     )
-    conn.commit()
+    _commit(conn)
     return new
 
 
@@ -1843,7 +2028,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
                 "UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?",
                 (now, r["job_id"]))
             n_closed += 1
-    conn.commit()
+    _commit(conn)
     return (n_reopened, n_closed)
 
 
