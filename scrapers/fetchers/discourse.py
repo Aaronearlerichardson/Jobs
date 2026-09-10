@@ -1,16 +1,13 @@
 """Discourse forum job-category feed."""
 
-
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 
-def fetch_discourse(display_name, base_url, category_id):
+def fetch_discourse(display_name, base_url, category_id, gate=None):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     dsc_headers = {**HEADERS, "Accept": "application/json"}
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=dsc_headers)
+        r = SESSION.get(url, headers=dsc_headers)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Discourse {display_name}: {e}")
@@ -26,7 +23,7 @@ def fetch_discourse(display_name, base_url, category_id):
         tid   = t.get("id", "")
         jurl  = f"{base_url}/t/{slug}/{tid}"
         loc   = t.get("last_posted_at", "")[:10] if t.get("last_posted_at") else "See post"
-        if is_relevant(title):
+        if gate is None or gate(title):
             jobs.append({
                 "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
                 "company":     display_name,

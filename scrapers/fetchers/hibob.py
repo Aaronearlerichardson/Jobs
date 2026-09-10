@@ -23,14 +23,12 @@ other detectable ATS signature on the page itself).
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = "https://{tenant}.careers.hibob.com/api/job-ad"
 
 
-def parse_board(tenant, timeout=FETCH_TIMEOUT):
+def parse_board(tenant, timeout=None):
     """Return the raw ``jobAdDetails`` list for one tenant subdomain."""
     root = f"https://{tenant}.careers.hibob.com/"
     r = SESSION.get(_API.format(tenant=tenant), timeout=timeout,
@@ -51,7 +49,7 @@ def _dept(job):
     return job.get("department") or ""
 
 
-def fetch_hibob(tenant, company_name):
+def fetch_hibob(tenant, company_name, gate=None):
     """Keyword-gated fetch (for sweeping unvetted boards): the description
     is already inline in the listing payload (no separate detail request,
     unlike Rippling/Paylocity), so there's nothing to lazily hydrate."""
@@ -67,7 +65,7 @@ def fetch_hibob(tenant, company_name):
         if not jid or not title:
             continue
         desc = BeautifulSoup(j.get("description") or "", "html.parser").get_text(" ", strip=True)
-        if not is_relevant(f"{title} {_dept(j)}", desc):
+        if gate is not None and not gate(f"{title} {_dept(j)}", desc):
             continue
         rec = {"id": f"hibob_{tenant}_{jid[:12]}", "company": company_name,
                "title": title,

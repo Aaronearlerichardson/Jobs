@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from core.filters import is_relevant
 from scrapers.fetchers import ats_api, getro, hibob, jobvite, peopleadmin, usajobs
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -40,6 +41,9 @@ def match_everything(cfg, pristine_keywords):
     """Widen the relevance filter so these tests measure PARSING only.
 
     Mutated in place — filters.py bound the list objects at import time.
+    The fetchers are ungated unless a `gate` is passed, so this only
+    matters for the tests that pass `gate=is_relevant` to mirror the
+    registry, and for the callers outside this file that do.
     """
     cfg.CORE_KEYWORDS[:] = [""]
     cfg.DOMAIN_KEYWORDS[:] = []
@@ -547,17 +551,50 @@ class TestUsajobs:
 
 
 class TestRelevanceGate:
-    """The filter is applied INSIDE the fetchers — which is why the canary
-    widens it before judging a board's health."""
+    """The keyword filter is a `gate` PARAMETER of every fetcher, injected
+    by the ATS registry (and the runner's feed thunks) rather than
+    imported by the fetcher modules. A fetcher called with no gate keeps
+    every posting; the registry's thunk keeps only the relevant ones —
+    which is why the canary widens the filter before judging a board's
+    health."""
 
-    def test_irrelevant_postings_are_dropped(self, cfg, fake_get,
-                                             pristine_keywords):
+    @pytest.fixture
+    def nothing_matches(self, cfg, pristine_keywords):
         cfg.CORE_KEYWORDS[:] = ["quantum basket weaving"]
         cfg.DOMAIN_KEYWORDS[:] = []
         cfg.SKILL_KEYWORDS[:] = []
         cfg.INCLUDE_KEYWORDS[:] = ["quantum basket weaving"]
+
+    def test_irrelevant_postings_are_dropped_by_the_gate(
+            self, fake_get, nothing_matches):
         fake_get(load("greenhouse_board.json"))
-        assert ats_api.fetch_greenhouse("databricks", "Databricks") == []
+        assert ats_api.fetch_greenhouse("databricks", "Databricks",
+                                        gate=is_relevant) == []
+
+    def test_no_gate_keeps_everything(self, fake_get, nothing_matches):
+        fake_get(load("greenhouse_board.json"))
+        assert ats_api.fetch_greenhouse("databricks", "Databricks")
+
+    def test_the_registry_thunk_is_gated(self, fake_get, nothing_matches):
+        from scrapers.sources import ATS_REGISTRY
+        fake_get(load("greenhouse_board.json"))
+        thunk = ATS_REGISTRY["greenhouse"][0]("Databricks", "databricks")
+        assert thunk() == []
+
+    def test_no_fetcher_module_imports_the_filter_or_config_timeouts(self):
+        """The point of the parameter: a fetcher module is reusable with
+        any gate and any session, so none of them may bind the keyword
+        filter or the timeout constant at import. The few that read
+        `config` need something else from it (credentials, locality,
+        the data dir)."""
+        import re
+        from pathlib import Path
+        pkg = Path(ats_api.__file__).parent
+        for src in pkg.glob("*.py"):
+            text = src.read_text(encoding="utf-8")
+            assert not re.search(r"^from core\.filters import", text, re.M), src.name
+            assert not re.search(r"^from config import", text, re.M), src.name
+            assert "FETCH_TIMEOUT" not in text, src.name
 
 
 class TestAshbyKeyAcrossCallSites:
@@ -694,11 +731,10 @@ class TestGetro:
         ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert "getro_91000003" not in ids
 
-    def test_titles_are_screened_before_any_page_fetch(
-            self, board, monkeypatch):
-        monkeypatch.setattr(getro, "is_relevant",
-                            lambda title, desc="": "data" in title.lower())
-        jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
+    def test_titles_are_screened_before_any_page_fetch(self, board):
+        jobs = getro.fetch_getro_all(
+            self.BOARD, detail_delay=0,
+            gate=lambda title, desc="": "data" in title.lower())
         assert [j["id"] for j in jobs] == ["getro_91000001", "getro_91000004"]
         pages = [u for u in board if "/jobs/" in u]
         assert all("91000001" in u or "91000004" in u for u in pages)
@@ -913,20 +949,18 @@ class TestJobvite:
         assert "<" not in j["description"]
         assert j["posted_at"] == "2026-04-27"
 
-    def test_relevant_titles_get_their_page_first(self, acme, monkeypatch):
-        monkeypatch.setattr(jobvite, "is_relevant",
-                            lambda t, d="": "data engineer" in t.lower())
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=1,
-                                     detail_delay=0)
+    def test_relevant_titles_get_their_page_first(self, acme):
+        jobs = jobvite.fetch_jobvite(
+            "acme", "Acme Labs", max_details=1, detail_delay=0,
+            gate=lambda t, d="": "data engineer" in t.lower())
         assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA"]
         assert [u for u in acme if "/job/" in u] == [
             "https://jobs.jobvite.com/acme/job/oAaa1fwA"]
 
-    def test_a_generic_title_qualifies_on_its_page(self, acme, monkeypatch):
-        monkeypatch.setattr(jobvite, "is_relevant",
-                            lambda t, d="": "python" in f"{t} {d}".lower())
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=4,
-                                     detail_delay=0)
+    def test_a_generic_title_qualifies_on_its_page(self, acme):
+        jobs = jobvite.fetch_jobvite(
+            "acme", "Acme Labs", max_details=4, detail_delay=0,
+            gate=lambda t, d="": "python" in f"{t} {d}".lower())
         assert "Lab Assistant (Temp)" in [j["title"] for j in jobs]
 
     def test_a_dead_search_falls_back_to_the_jobs_page(self, site,

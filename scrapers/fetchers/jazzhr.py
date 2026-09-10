@@ -13,18 +13,17 @@ Used for Paradromics (subdomain ``paradromicsinc``), whose careers site is
 import re
 import time
 
-
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from .jsonld import fetch_jsonld_page
 
 _APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
 
 
-def fetch_jazzhr(company_name, subdomain, max_jobs=60, per_job_delay=0.3):
+def fetch_jazzhr(company_name, subdomain, gate=None, max_jobs=60,
+                 per_job_delay=0.3):
     base = f"https://{subdomain}.applytojob.com"
     try:
-        r = SESSION.get(base + "/", timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(base + "/", headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] JazzHR {company_name}: {e}")
@@ -42,6 +41,6 @@ def fetch_jazzhr(company_name, subdomain, max_jobs=60, per_job_delay=0.3):
 
     jobs = []
     for url in urls:
-        jobs.extend(fetch_jsonld_page(company_name, url))
+        jobs.extend(fetch_jsonld_page(company_name, url, gate=gate))
         time.sleep(per_job_delay)
     return jobs

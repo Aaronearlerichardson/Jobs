@@ -16,8 +16,6 @@ import re
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date as _norm_posted
 from ..util import stable_id
@@ -133,7 +131,7 @@ def _job_from_posting(jp, company_name, source_url):
     return job
 
 
-def fetch_jsonld_page(company_name, page_url, timeout=FETCH_TIMEOUT):
+def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
     """Fetch ONE URL; extract JobPosting records from its JSON-LD."""
     try:
         r = SESSION.get(page_url, timeout=timeout, headers=HEADERS)
@@ -147,7 +145,7 @@ def fetch_jsonld_page(company_name, page_url, timeout=FETCH_TIMEOUT):
         if not is_jobposting(obj):
             continue
         job = _job_from_posting(obj, company_name, page_url)
-        if is_relevant(job["title"], job["description"]):
+        if gate is None or gate(job["title"], job["description"]):
             jobs.append(job)
     return jobs
 

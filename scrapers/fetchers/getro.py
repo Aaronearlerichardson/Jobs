@@ -39,8 +39,6 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from config import FETCH_TIMEOUT
-from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
 
@@ -222,7 +220,7 @@ def _fetch_sitemap(origin, label):
         url = queue.pop(0)
         fetched += 1
         try:
-            r = SESSION.get(url, timeout=FETCH_TIMEOUT,
+            r = SESSION.get(url,
                             headers={**HEADERS, "Accept": "application/xml"})
             r.raise_for_status()
         except Exception as e:
@@ -238,13 +236,14 @@ def _fetch_sitemap(origin, label):
 
 
 def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
-                    detail_delay=DETAIL_DELAY):
+                    detail_delay=DETAIL_DELAY, gate=None):
     """Relevant postings from one Getro board, as crawler job dicts.
 
     Sitemap first; then, newest first, one page fetch per posting whose
-    slug title passes the relevance filter, up to `max_details`. The final
-    relevance decision uses the page's full description. Returns [] —
-    never raises — when the board is unreachable.
+    slug title passes `gate`, up to `max_details`. The final relevance
+    decision is `gate(title, description)` on the page's full text;
+    `gate=None` keeps every posting. Returns [] — never raises — when
+    the board is unreachable.
 
     See tests/test_fetcher_parsers.py::TestGetro.
     """
@@ -259,14 +258,14 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
 
     jobs, fetched = [], 0
     for e in entries:
-        if not is_relevant(e["title_guess"]):
+        if gate is not None and not gate(e["title_guess"]):
             continue
         if fetched >= max_details:
             print(f"    [i] Getro {label}: detail cap ({max_details}) reached; "
                   f"older postings wait for the next crawl")
             break
         try:
-            r = SESSION.get(e["url"], timeout=FETCH_TIMEOUT, headers=HEADERS)
+            r = SESSION.get(e["url"], headers=HEADERS)
             r.raise_for_status()
         except Exception as ex:
             print(f"    [!] Getro {label} {e['url']}: {ex}")
@@ -276,7 +275,7 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
         job = parse_job_page(r.text, board_url, e["url"])
         if job and not job["posted_at"]:
             job["posted_at"] = norm_posted_date(e["lastmod"])
-        if job and is_relevant(job["title"], job["description"]):
+        if job and (gate is None or gate(job["title"], job["description"])):
             jobs.append(job)
         if detail_delay:
             time.sleep(detail_delay)

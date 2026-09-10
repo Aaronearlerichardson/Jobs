@@ -19,7 +19,6 @@ from urllib.parse import urlparse
 
 import config
 
-from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date, stable_id
 
@@ -72,7 +71,7 @@ def _cxs_tenant_variants(detail_url):
     return urls
 
 
-def _cxs_description(detail_url, timeout=config.FETCH_TIMEOUT):
+def _cxs_description(detail_url, timeout=None):
     """GET a CXS job-detail endpoint; return (plain_text_description, remoteType)."""
     for url in _cxs_tenant_variants(detail_url):
         try:
@@ -95,7 +94,8 @@ def fetch_workday_description(job_url):
     return text or None
 
 
-def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25):
+def fetch_workday(tenant, wd_pod, site, company_name, gate=None, page_size=20,
+                  max_pages=25):
     """
     Poll a Workday career-site listing (JSON POST) and enrich each relevant
     posting with its full JD text from the CXS per-job endpoint. Falls back to
@@ -113,7 +113,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
         body = {"appliedFacets": {}, "limit": page_size,
                 "offset": page * page_size, "searchText": ""}
         try:
-            r = SESSION.post(api, json=body, timeout=config.FETCH_TIMEOUT, headers=wd_headers)
+            r = SESSION.post(api, json=body, headers=wd_headers)
             r.raise_for_status()
             data = r.json()
         except Exception as e:
@@ -129,7 +129,7 @@ def fetch_workday(tenant, wd_pod, site, company_name, page_size=20, max_pages=25
             path   = p.get("externalPath", "") or ""
             loc    = p.get("locationsText", "") or "Unknown"
             posted = p.get("postedOn", "") or ""
-            if not is_relevant(title, posted):
+            if gate is not None and not gate(title, posted):
                 continue
             jid  = path.rsplit("/", 1)[-1] if path else stable_id(title, loc)
             desc = None

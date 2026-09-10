@@ -6,16 +6,13 @@ https://remotive.com/api/remote-jobs that returns every active listing
 in a single payload. No API key, no pagination, permissive CORS.
 
 Optional `category` parameter narrows by slug
-(e.g. "software-dev", "data"). We don't use it by default: our own
-is_relevant() filter is narrower than any single Remotive category.
+(e.g. "software-dev", "data"). We don't use it by default: the caller's
+relevance gate is narrower than any single Remotive category.
 """
 
 import html
 import re
 
-
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 API_URL = "https://remotive.com/api/remote-jobs"
@@ -27,7 +24,7 @@ def _strip_html(s):
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
-def fetch_remotive(category=None, max_jobs=None):
+def fetch_remotive(category=None, max_jobs=None, gate=None):
     """
     Pull Remotive's job feed; return relevant listings.
 
@@ -39,7 +36,7 @@ def fetch_remotive(category=None, max_jobs=None):
         url = f"{API_URL}?category={category}"
 
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -63,7 +60,7 @@ def fetch_remotive(category=None, max_jobs=None):
         tag_text = " ".join(str(t) for t in tags if t)
         cat      = entry.get("category") or ""
 
-        if not is_relevant(title, desc + " " + tag_text + " " + cat):
+        if gate is not None and not gate(title, desc + " " + tag_text + " " + cat):
             continue
 
         jobs.append({

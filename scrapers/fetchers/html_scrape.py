@@ -6,17 +6,15 @@ from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import stable_id
 from core.locality import location_snippet
 
 
-def fetch_kula(company_name, kula_slug):
+def fetch_kula(company_name, kula_slug, gate=None):
     base_url = f"https://careers.kula.ai/{kula_slug}"
     try:
-        r = SESSION.get(base_url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(base_url, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Kula {company_name}: {e}")
@@ -46,7 +44,7 @@ def fetch_kula(company_name, kula_slug):
         dept  = lines[0] if len(lines) > 1 else ""
         loc   = lines[2] if len(lines) > 2 else "See posting"
 
-        if is_relevant(f"{title} {dept}"):
+        if gate is None or gate(f"{title} {dept}"):
             jobs.append({
                 "id": f"kula_{kula_slug}_{jid.group(1)}",
                 "company": company_name,
@@ -58,7 +56,8 @@ def fetch_kula(company_name, kula_slug):
     return jobs
 
 
-def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
+def fetch_successfactors(company_name, base_url, gate=None, step=25,
+                         max_pages=80):
     """
     Scrape a SuccessFactors career site (e.g. careers.duke.edu). SF serves
     ~25 jobs per HTML page at /search/?startrow=N. Each tile has two anchors
@@ -70,7 +69,7 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
         startrow = page * step
         url = f"{base_url.rstrip('/')}/search/?startrow={startrow}"
         try:
-            r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=sf_headers)
+            r = SESSION.get(url, headers=sf_headers)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] SuccessFactors {company_name} p{page}: {e}")
@@ -110,7 +109,7 @@ def fetch_successfactors(company_name, base_url, step=25, max_pages=80):
                      or re.search(r"/job/([^/?#]+)", href))
             jid = jid_m.group(1) if jid_m else stable_id(href)
             new_on_page += 1
-            if is_relevant(title):
+            if gate is None or gate(title):
                 jobs.append({
                     "id":          f"sf_{re.sub(r'[^a-z0-9]+', '', base_url.lower())[-16:]}_{jid}",
                     "company":     company_name,

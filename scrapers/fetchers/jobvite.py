@@ -26,8 +26,6 @@ import time
 
 from bs4 import BeautifulSoup
 
-from config import FETCH_TIMEOUT
-from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
 from .jsonld import (_normalize_description, _normalize_location,
@@ -117,8 +115,7 @@ def _listing(tenant, label):
     rows, seen = [], set()
     for page in range(MAX_PAGES):
         try:
-            r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": page},
-                            timeout=FETCH_TIMEOUT, headers=HEADERS)
+            r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": page}, headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] Jobvite {label} search p={page}: {e}")
@@ -132,7 +129,7 @@ def _listing(tenant, label):
     if rows:
         return rows
     try:
-        r = SESSION.get(f"{BASE}/{tenant}/jobs", timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(f"{BASE}/{tenant}/jobs", headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] Jobvite {label} jobs: {e}")
@@ -148,7 +145,7 @@ def _hydrate(rows, label, max_details, detail_delay):
             break
         n += 1
         try:
-            r = SESSION.get(row["url"], timeout=FETCH_TIMEOUT, headers=HEADERS)
+            r = SESSION.get(row["url"], headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] Jobvite {label} {row['url']}: {e}")
@@ -180,7 +177,8 @@ def fetch_jobvite_board(tenant, want=None, max_details=40, detail_delay=0.2):
     return rows
 
 
-def fetch_jobvite(tenant, company_name, max_details=40, detail_delay=0.2):
+def fetch_jobvite(tenant, company_name, gate=None, max_details=40,
+                  detail_delay=0.2):
     """Relevant postings from one Jobvite tenant.
 
     Rows relevant on their title get their page first; the rest get one
@@ -194,12 +192,13 @@ def fetch_jobvite(tenant, company_name, max_details=40, detail_delay=0.2):
         return []
     label = company_name or tenant
     rows = _listing(tenant, label)
-    first = [r for r in rows if is_relevant(r["title"])]
-    rest = [r for r in rows if not is_relevant(r["title"])]
+    title_ok = (lambda title: True) if gate is None else gate
+    first = [r for r in rows if title_ok(r["title"])]
+    rest = [r for r in rows if not title_ok(r["title"])]
     _hydrate(first + rest, label, max_details, detail_delay)
     jobs = []
     for row in rows:
-        if not is_relevant(row["title"], row.get("description", "")):
+        if gate is not None and not gate(row["title"], row.get("description", "")):
             continue
         jobs.append({**row, "company": company_name})
     return jobs

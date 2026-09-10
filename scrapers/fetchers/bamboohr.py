@@ -14,8 +14,6 @@ import time
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
@@ -34,7 +32,7 @@ def _is_remote(job):
     return bool(job.get("isRemote")) or str(job.get("locationType")) == "1"
 
 
-def _fetch_description(base, jid, timeout=FETCH_TIMEOUT):
+def _fetch_description(base, jid, timeout=None):
     try:
         r = SESSION.get(f"{base}/careers/{jid}/detail",
                          timeout=timeout, headers=_JSON_HEADERS)
@@ -46,10 +44,11 @@ def _fetch_description(base, jid, timeout=FETCH_TIMEOUT):
         return ""
 
 
-def fetch_bamboohr(subdomain, company_name, max_details=40, detail_delay=0.2):
+def fetch_bamboohr(subdomain, company_name, gate=None, max_details=40,
+                   detail_delay=0.2):
     base = f"https://{subdomain}.bamboohr.com"
     try:
-        r = SESSION.get(f"{base}/careers/list", timeout=FETCH_TIMEOUT,
+        r = SESSION.get(f"{base}/careers/list",
                          headers=_JSON_HEADERS)
         r.raise_for_status()
         entries = r.json().get("result") or []
@@ -68,12 +67,13 @@ def fetch_bamboohr(subdomain, company_name, max_details=40, detail_delay=0.2):
         # Title/department screen first; fetch the description only when
         # the cheap fields didn't already decide relevance.
         desc = ""
-        if not is_relevant(f"{title} {dept}") and details_fetched < max_details:
-            desc = _fetch_description(base, jid)
-            details_fetched += 1
-            time.sleep(detail_delay)
-        if not is_relevant(f"{title} {dept}", desc):
-            continue
+        if gate is not None:
+            if not gate(f"{title} {dept}") and details_fetched < max_details:
+                desc = _fetch_description(base, jid)
+                details_fetched += 1
+                time.sleep(detail_delay)
+            if not gate(f"{title} {dept}", desc):
+                continue
         if not desc and details_fetched < max_details:
             desc = _fetch_description(base, jid)
             details_fetched += 1

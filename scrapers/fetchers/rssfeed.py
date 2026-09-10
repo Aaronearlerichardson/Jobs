@@ -15,8 +15,6 @@ import re
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import stable_id
 
@@ -70,7 +68,7 @@ def _parse_title(title):
 
 
 def fetch_rss(source_label, url, default_location="Remote", max_items=200,
-              remote_board=False):
+              remote_board=False, gate=None):
     """
     Pull an RSS/Atom feed, yield relevant jobs.
 
@@ -81,7 +79,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
     the parsed region is an eligibility constraint, not an office.
     """
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] RSS {source_label}: {e}")
@@ -114,7 +112,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
 
         location = region or default_location
 
-        if not is_relevant(role, desc):
+        if gate is not None and not gate(role, desc):
             continue
 
         job = {

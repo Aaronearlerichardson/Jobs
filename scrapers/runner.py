@@ -32,6 +32,7 @@ from datetime import datetime
 import config
 
 from core import store
+from core.filters import is_relevant
 from .parallel import fetch_all
 from core.remote_filter import remote_signal_for, us_eligible
 from core.resume import resume_text
@@ -165,26 +166,31 @@ def build_sources(cfg, t, include_websearch=None):
             for ats, name, slug, thunk in iter_store_sources(rows):
                 add(name, ats, thunk, key=(ats, str(slug)))
 
-    # 3) Forums + aggregator feeds (remote-native boards).
+    # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
+    # registry, the crawl injects the keyword gate here; the fetchers are
+    # ungated on their own.
     if src["aggregators"]:
         from .fetchers import (fetch_discourse, fetch_hnhiring,
                                 fetch_remoteok, fetch_remotive, fetch_rss)
         for name, base, cat in cfg.DISCOURSE_BOARDS:
             add(name, "discourse",
-                lambda n=name, b=base, c=cat: fetch_discourse(n, b, c))
+                lambda n=name, b=base, c=cat: fetch_discourse(n, b, c, gate=is_relevant))
         if getattr(cfg, "REMOTEOK_ENABLED", True):
-            add("RemoteOK", "remoteok", fetch_remoteok)
+            add("RemoteOK", "remoteok", lambda: fetch_remoteok(gate=is_relevant))
         if getattr(cfg, "REMOTIVE_ENABLED", True):
             add("Remotive", "remotive",
-                lambda: fetch_remotive(category=cfg.REMOTIVE_CATEGORY))
+                lambda: fetch_remotive(category=cfg.REMOTIVE_CATEGORY,
+                                       gate=is_relevant))
         if getattr(cfg, "HNHIRING_ENABLED", True):
             add("HN Who-is-hiring", "hn",
-                lambda: fetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS))
+                lambda: fetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS,
+                                       gate=is_relevant))
         for label, url, default_loc in cfg.RSS_FEEDS:
             is_remote_board = default_loc.strip().lower() == "remote"
             add(label, "rss",
                 lambda l=label, u=url, d=default_loc, rb=is_remote_board:
-                    fetch_rss(l, u, default_location=d, remote_board=rb))
+                    fetch_rss(l, u, default_location=d, remote_board=rb,
+                              gate=is_relevant))
 
     # 4) USAJOBS (federal openings). Deliberately NOT under `aggregators`:
     # that family is remote-native boards and is off for location-scoped
@@ -198,7 +204,8 @@ def build_sources(cfg, t, include_websearch=None):
             lambda: fetch_usajobs(
                 keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
                 radius=cfg.USAJOBS_RADIUS, series=cfg.USAJOBS_SERIES,
-                results_per_page=cfg.USAJOBS_RESULTS_PER_PAGE))
+                results_per_page=cfg.USAJOBS_RESULTS_PER_PAGE,
+                gate=is_relevant))
 
     # 4b) Getro network boards (a VC portfolio, an association). Outside the
     # `aggregators` gate for the same reason as USAJOBS: a board is a place,
@@ -213,14 +220,16 @@ def build_sources(cfg, t, include_websearch=None):
                 continue
             add(f"Getro {host}", "getro",
                 lambda b=board: fetch_getro_all(
-                    b, max_details=getattr(cfg, "GETRO_MAX_DETAILS", 150)))
+                    b, max_details=getattr(cfg, "GETRO_MAX_DETAILS", 150),
+                    gate=is_relevant))
 
     # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
         from .fetchers import fetch_websearch
         for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):
             add(label, "websearch",
-                lambda l=label, q=query, m=n: fetch_websearch(l, q, max_results=m))
+                lambda l=label, q=query, m=n: fetch_websearch(
+                    l, q, max_results=m, gate=is_relevant))
 
     return specs
 

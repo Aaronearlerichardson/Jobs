@@ -19,15 +19,13 @@ import time
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
 _JSON = {**HEADERS, "Accept": "application/json"}
 
 
-def parse_board(slug, timeout=FETCH_TIMEOUT):
+def parse_board(slug, timeout=None):
     """Return the raw listing (list of job dicts) for one board slug."""
     r = SESSION.get(_API.format(slug=slug), timeout=timeout, headers=_JSON)
     r.raise_for_status()
@@ -45,7 +43,7 @@ def location_str(job):
     return "Unknown"
 
 
-def fetch_description(slug, uuid, timeout=FETCH_TIMEOUT):
+def fetch_description(slug, uuid, timeout=None):
     """Full JD text for one posting. Rippling's description is a
     ``{company, role}`` HTML dict — 'role' is the actual JD (put first);
     'company' is the shared boilerplate."""
@@ -68,7 +66,8 @@ def _dept(job):
     return d.get("label", "") if isinstance(d, dict) else str(d)
 
 
-def fetch_rippling(slug, company_name, max_details=40, detail_delay=0.2):
+def fetch_rippling(slug, company_name, gate=None, max_details=40,
+                   detail_delay=0.2):
     """Keyword-gated fetch (for sweeping unvetted boards): title/department
     screen first, hydrate the description only when the cheap fields didn't
     already decide relevance."""
@@ -85,12 +84,13 @@ def fetch_rippling(slug, company_name, max_details=40, detail_delay=0.2):
             continue
         head = f"{title} {_dept(j)}"
         desc = ""
-        if not is_relevant(head) and fetched < max_details:
-            desc = fetch_description(slug, uuid)
-            fetched += 1
-            time.sleep(detail_delay)
-        if not is_relevant(head, desc):
-            continue
+        if gate is not None:
+            if not gate(head) and fetched < max_details:
+                desc = fetch_description(slug, uuid)
+                fetched += 1
+                time.sleep(detail_delay)
+            if not gate(head, desc):
+                continue
         if not desc and fetched < max_details:
             desc = fetch_description(slug, uuid)
             fetched += 1

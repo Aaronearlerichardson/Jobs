@@ -22,6 +22,7 @@ an ATS name this table lacks is simply skipped by iter_store_sources.
 """
 
 import tags
+from core.filters import is_relevant
 
 from .fetchers import (
     fetch_adp,
@@ -42,24 +43,30 @@ from .fetchers import (
 )
 
 # ats -> (thunk(name, slug) -> fetch callable, seed tag, politeness pause)
+#
+# Every thunk passes `gate=is_relevant`: the fetchers themselves are
+# ungated (gate=None keeps every posting), and this registry is where the
+# profile's keyword filter is injected for the unvetted-board sweep. The
+# company-vetted path (fetchers/company.py) calls the same fetchers with
+# no gate and a location regex instead.
 ATS_REGISTRY = {
-    "greenhouse": (lambda n, s: lambda: fetch_greenhouse(s, n), tags.SWEEP, 0.5),
-    "lever":      (lambda n, s: lambda: fetch_lever(s, n), tags.SWEEP, 0.5),
-    "ashby":      (lambda n, s: lambda: fetch_ashby(s, n), tags.SWEEP, 0.5),
-    "kula":       (lambda n, s: lambda: fetch_kula(n, s), tags.SWEEP, 0.5),
-    "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s), tags.SWEEP, 0.5),
-    "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n), tags.SWEEP, 0.5),
-    "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n), tags.SWEEP, 0.5),
-    "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n), tags.SWEEP, 0.5),
-    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n), tags.LOCAL, 0.5),
-    "rippling":   (lambda n, s: lambda: fetch_rippling(s, n), tags.SWEEP, 0.5),
-    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n), tags.LOCAL, 0.5),
-    "hibob":      (lambda n, s: lambda: fetch_hibob(s, n), tags.SWEEP, 0.5),
+    "greenhouse": (lambda n, s: lambda: fetch_greenhouse(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "lever":      (lambda n, s: lambda: fetch_lever(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "ashby":      (lambda n, s: lambda: fetch_ashby(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "kula":       (lambda n, s: lambda: fetch_kula(n, s, gate=is_relevant), tags.SWEEP, 0.5),
+    "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s, gate=is_relevant), tags.SWEEP, 0.5),
+    "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n, gate=is_relevant), tags.SWEEP, 0.5),
+    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n, gate=is_relevant), tags.LOCAL, 0.5),
+    "rippling":   (lambda n, s: lambda: fetch_rippling(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n, gate=is_relevant), tags.LOCAL, 0.5),
+    "hibob":      (lambda n, s: lambda: fetch_hibob(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
                                         st=s.split("|")[2]:
-                                 fetch_workday(t, p, st, n)), tags.LOCAL, 1.0),
-    "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s), tags.LOCAL, 1.0),
-    "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n), tags.LOCAL, 1.0),
+                                 fetch_workday(t, p, st, n, gate=is_relevant)), tags.LOCAL, 1.0),
+    "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s, gate=is_relevant), tags.LOCAL, 1.0),
+    "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole

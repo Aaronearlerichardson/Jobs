@@ -35,7 +35,6 @@ import re
 
 import config
 
-from core.filters import is_relevant
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date
 
@@ -317,8 +316,9 @@ def _credentials():
 
 def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
                   results_per_page=DEFAULT_RESULTS_PER_PAGE,
-                  max_pages=MAX_PAGES):
-    """Search USAJOBS and return the relevant announcements as job dicts.
+                  max_pages=MAX_PAGES, gate=None):
+    """Search USAJOBS and return the announcements passing `gate` as job
+    dicts (all of them when `gate` is None).
 
     Pages until ``SearchResult.SearchResultCountAll`` is covered. `series`
     is a list of occupational series codes; every scope argument normally
@@ -339,7 +339,7 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
     jobs, seen, fetched, total = [], set(), 0, None
     for page in range(1, int(max_pages) + 1):
         try:
-            r = SESSION.get(API_URL, timeout=config.FETCH_TIMEOUT, headers=headers,
+            r = SESSION.get(API_URL, headers=headers,
                             params={**params, "Page": page})
             r.raise_for_status()
             data = r.json()
@@ -364,7 +364,7 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
             if not job or job["id"] in seen:
                 continue
             seen.add(job["id"])
-            if is_relevant(job["title"], job["description"]):
+            if gate is None or gate(job["title"], job["description"]):
                 jobs.append(job)
 
         if not total or fetched >= total:

@@ -15,8 +15,6 @@ import time
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
@@ -36,7 +34,7 @@ def _location_str(req):
     return "; ".join(names) or "Unknown"
 
 
-def _fetch_description(item_id, cid, ccid, timeout=FETCH_TIMEOUT):
+def _fetch_description(item_id, cid, ccid, timeout=None):
     try:
         r = SESSION.get(
             f"{_API}/{item_id}",
@@ -56,7 +54,7 @@ def _fetch_description(item_id, cid, ccid, timeout=FETCH_TIMEOUT):
         return ""
 
 
-def fetch_adp(cid, ccid, company_name, page_size=50, max_pages=10,
+def fetch_adp(cid, ccid, company_name, gate=None, page_size=50, max_pages=10,
               max_details=60, detail_delay=0.2):
     jobs, details_fetched = [], 0
     for page in range(max_pages):
@@ -64,8 +62,7 @@ def fetch_adp(cid, ccid, company_name, page_size=50, max_pages=10,
             r = SESSION.get(
                 _API,
                 params={"cid": cid, "ccId": ccid, "locale": "en_US",
-                        "$top": page_size, "$skip": page * page_size},
-                timeout=FETCH_TIMEOUT, headers=_JSON_HEADERS,
+                        "$top": page_size, "$skip": page * page_size}, headers=_JSON_HEADERS,
             )
             r.raise_for_status()
             data = r.json()
@@ -84,12 +81,13 @@ def fetch_adp(cid, ccid, company_name, page_size=50, max_pages=10,
                 continue
 
             desc = ""
-            if not is_relevant(title) and details_fetched < max_details:
-                desc = _fetch_description(item_id, cid, ccid)
-                details_fetched += 1
-                time.sleep(detail_delay)
-            if not is_relevant(title, desc):
-                continue
+            if gate is not None:
+                if not gate(title) and details_fetched < max_details:
+                    desc = _fetch_description(item_id, cid, ccid)
+                    details_fetched += 1
+                    time.sleep(detail_delay)
+                if not gate(title, desc):
+                    continue
             if not desc and details_fetched < max_details:
                 desc = _fetch_description(item_id, cid, ccid)
                 details_fetched += 1

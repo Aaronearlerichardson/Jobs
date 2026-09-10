@@ -2,15 +2,13 @@
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 
-def fetch_greenhouse(slug, company_name):
+def fetch_greenhouse(slug, company_name, gate=None):
     url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true"
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -28,7 +26,7 @@ def fetch_greenhouse(slug, company_name):
         dept  = " ".join(d.get("name", "") for d in job.get("departments", []))
         offices = " ".join((o.get("name") or "")
                            for o in job.get("offices", []) or [])
-        if is_relevant(f"{title} {dept}", desc):
+        if gate is None or gate(f"{title} {dept}", desc):
             rec = {"id": f"gh_{slug}_{jid}", "company": company_name,
                    "title": title, "url": jurl, "location": loc,
                    "description": desc}
@@ -38,10 +36,10 @@ def fetch_greenhouse(slug, company_name):
     return jobs
 
 
-def fetch_lever(slug, company_name):
+def fetch_lever(slug, company_name, gate=None):
     url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -57,7 +55,7 @@ def fetch_lever(slug, company_name):
         loc   = job.get("categories", {}).get("location", "Unknown")
         team  = job.get("categories", {}).get("team", "")
         desc  = job.get("descriptionPlain") or ""
-        if is_relevant(f"{title} {team}", desc):
+        if gate is None or gate(f"{title} {team}", desc):
             rec = {"id": f"lv_{slug}_{jid}", "company": company_name,
                    "title": title, "url": jurl, "location": loc,
                    "description": desc}
@@ -67,10 +65,10 @@ def fetch_lever(slug, company_name):
     return jobs
 
 
-def fetch_ashby(slug, company_name):
+def fetch_ashby(slug, company_name, gate=None):
     url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
     try:
-        r = SESSION.get(url, timeout=FETCH_TIMEOUT, headers=HEADERS)
+        r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
@@ -91,7 +89,7 @@ def fetch_ashby(slug, company_name):
         loc   = job.get("location", "Unknown") or "Unknown"
         dept  = " ".join(x for x in (job.get("department"), job.get("team")) if x)
         desc  = job.get("descriptionPlain", "") or ""
-        if is_relevant(f"{title} {dept}", desc):
+        if gate is None or gate(f"{title} {dept}", desc):
             rec = {"id": f"ashby_{slug}_{jid}", "company": company_name,
                    "title": title, "url": jurl, "location": loc,
                    "description": desc,

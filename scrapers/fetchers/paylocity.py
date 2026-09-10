@@ -19,8 +19,6 @@ import time
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
@@ -28,7 +26,7 @@ _DETAIL = "https://recruiting.paylocity.com/Recruiting/Jobs/Details/{jid}"
 _PAGEDATA_RE = re.compile(r"pageData\s*=\s*(\{.*?\});", re.S)
 
 
-def parse_board(guid, timeout=FETCH_TIMEOUT):
+def parse_board(guid, timeout=None):
     """Return the raw ``pageData.Jobs`` list for one board GUID."""
     r = SESSION.get(_BOARD.format(guid=guid), timeout=timeout, headers=HEADERS)
     r.raise_for_status()
@@ -50,7 +48,7 @@ def location_str(job):
     return (jl.get("Country") or "Unknown")
 
 
-def fetch_description(job_id, timeout=FETCH_TIMEOUT):
+def fetch_description(job_id, timeout=None):
     """Full JD text for one posting, from its server-rendered detail page."""
     try:
         r = SESSION.get(_DETAIL.format(jid=job_id), timeout=timeout, headers=HEADERS)
@@ -68,7 +66,8 @@ def fetch_description(job_id, timeout=FETCH_TIMEOUT):
         return ""
 
 
-def fetch_paylocity(guid, company_name, max_details=40, detail_delay=0.2):
+def fetch_paylocity(guid, company_name, gate=None, max_details=40,
+                    detail_delay=0.2):
     """Keyword-gated fetch (for sweeping unvetted boards): title-screen first,
     hydrate the description only when the title alone didn't decide relevance."""
     try:
@@ -83,12 +82,13 @@ def fetch_paylocity(guid, company_name, max_details=40, detail_delay=0.2):
         if not jid or not title:
             continue
         desc = re.sub(r"<[^>]+>", " ", j.get("Description") or "")
-        if not is_relevant(title) and fetched < max_details:
-            desc = fetch_description(jid)
-            fetched += 1
-            time.sleep(detail_delay)
-        if not is_relevant(title, desc):
-            continue
+        if gate is not None:
+            if not gate(title) and fetched < max_details:
+                desc = fetch_description(jid)
+                fetched += 1
+                time.sleep(detail_delay)
+            if not gate(title, desc):
+                continue
         if not desc and fetched < max_details:
             desc = fetch_description(jid)
             fetched += 1

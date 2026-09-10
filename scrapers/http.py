@@ -4,9 +4,10 @@ A single module-level `SESSION` gives every fetcher connection pooling and
 keep-alive, so repeated hits to the same host (greenhouse/lever/ashby/workday
 probes, board pagination) reuse one TCP+TLS connection instead of paying a
 fresh handshake per request. Call sites use `SESSION.get(...)` /
-`SESSION.post(...)`; `HEADERS` stays exported because many call sites still
-pass `headers=HEADERS` explicitly (redundant: the session already carries
-them as defaults) and robots.py builds its own requests from it.
+`SESSION.post(...)` and inherit DEFAULT_TIMEOUT; `HEADERS` stays exported
+because many call sites still pass `headers=HEADERS` explicitly (redundant:
+the session already carries them as defaults) and robots.py builds its own
+requests from it.
 """
 
 import logging
@@ -14,7 +15,7 @@ import logging
 from requests import Session
 from requests.adapters import HTTPAdapter
 
-from config import USER_AGENT
+from config import FETCH_TIMEOUT, USER_AGENT
 
 # File-only request trace (core/session_log.py installs the handler; there
 # is no console handler, so this never reaches the terminal). One record
@@ -30,6 +31,12 @@ _log = logging.getLogger("http")
 # the board just looks empty/unreachable (e.g. science.xyz careers pages). gzip
 # and deflate are universally supported, so dropping br loses nothing.
 HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
+
+# Every request through SESSION waits this long (connect, read) unless the
+# call names its own `timeout=`; passing `timeout=None` also means this
+# default, never "wait forever". Fetchers therefore need no timeout
+# constant of their own; discovery probes still pass PROBE_TIMEOUT.
+DEFAULT_TIMEOUT = FETCH_TIMEOUT
 
 
 class PoliteSession(Session):
@@ -48,6 +55,8 @@ class PoliteSession(Session):
     """
 
     def request(self, method, url, *args, **kwargs):
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = DEFAULT_TIMEOUT
         # Imported lazily: robots.py imports HEADERS from this module.
         from .robots import CACHE, RobotsDisallowed
         if not CACHE.allowed(url):

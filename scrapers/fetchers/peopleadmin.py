@@ -25,9 +25,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from core.filters import is_relevant
 from core.locality import location_snippet
-from config import FETCH_TIMEOUT
 from ..http import SESSION, HEADERS
 from ..util import norm_posted_date, stable_id
 
@@ -77,7 +75,7 @@ def _text(el):
     return el.get_text(" ", strip=True) if el is not None else ""
 
 
-def _parse_feed(xml, host, company_name):
+def _parse_feed(xml, host, company_name, gate=None):
     """(entries seen, relevant postings) from one Atom document.
 
     The entry count is separate from the postings because they answer
@@ -110,7 +108,7 @@ def _parse_feed(xml, host, company_name):
         author = e.find("author")
         dept = _text(author.find("name")) if author is not None else ""
         desc = " | ".join(p for p in (dept, body) if p)
-        if not is_relevant(title, desc):
+        if gate is not None and not gate(title, desc):
             continue
         jid_m = _POSTING_ID_RE.search(jurl)
         jobs.append({
@@ -129,7 +127,7 @@ def _parse_feed(xml, host, company_name):
     return len(entries), jobs
 
 
-def fetch_peopleadmin(host, company_name):
+def fetch_peopleadmin(host, company_name, gate=None):
     """Relevant postings from a PeopleAdmin tenant's Atom feed.
 
     `host` may be a bare hostname or any URL on the tenant. FEED_PATHS are
@@ -145,13 +143,13 @@ def fetch_peopleadmin(host, company_name):
     label = company_name or host
     for path in FEED_PATHS:
         try:
-            r = SESSION.get(f"https://{host}{path}", timeout=FETCH_TIMEOUT,
+            r = SESSION.get(f"https://{host}{path}",
                             headers={**HEADERS, "Accept": "application/atom+xml"})
             r.raise_for_status()
         except Exception as e:
             print(f"    [!] PeopleAdmin {label} {path}: {e}")
             continue
-        entries, jobs = _parse_feed(r.text, host, company_name)
+        entries, jobs = _parse_feed(r.text, host, company_name, gate)
         if entries:
             return jobs
         print(f"    [!] PeopleAdmin {label}: {path} returned no entries")
