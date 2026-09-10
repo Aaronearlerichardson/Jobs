@@ -1201,17 +1201,22 @@ def pending_companies(conn):
         (f"%,{tags.PENDING},%",)).fetchall()]
 
 
-def confirm_company(conn, cid):
+def confirm_company(conn, cid, active=None):
     """Accept a review candidate onto the roster: the pending tag comes off
-    and `active` follows the shared mission rule (core.claude.
-    is_active_mission) applied to the tier already stored on the row.
+    and `active` is written as given (1 = crawl it, 0 = park it).
+
+    The decision itself is the caller's: the shared mission rule
+    (core.claude.is_active_mission) applied to the tier already stored on
+    the row. A caller that omits `active` gets that rule applied here as a
+    fallback, so the store does not depend on the LLM module on any path
+    where the caller decided.
 
     Returns the confirmed row, or None when there is no such company.
 
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, mark_pending(
     ...     {"name": "Acme", "ats": "lever", "slug": "acme", "tags": "local"}))
-    >>> row = confirm_company(conn, company_id_by_name(conn, "Acme"))
+    >>> row = confirm_company(conn, company_id_by_name(conn, "Acme"), active=1)
     >>> row["tags"], row["active"]
     ('local', 1)
 
@@ -1220,18 +1225,25 @@ def confirm_company(conn, cid):
     >>> [c["name"] for c in crawlable_companies(conn)]
     ['Acme']
 
+    An explicit verdict is written as-is, whatever the row's tier:
+
+    >>> _ = upsert_company(conn, mark_pending({"name": "Parked"}))
+    >>> confirm_company(conn, company_id_by_name(conn, "Parked"), active=0)["active"]
+    0
+
     >>> confirm_company(conn, 9999) is None
     True
     """
-    from core.claude import is_active_mission
     row = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
     if not row:
         return None
+    if active is None:
+        from core.claude import is_active_mission
+        active = is_active_mission(row["mission_tier"], row["name"])
     kept = tags.parse(row["tags"]) - {tags.PENDING}
     conn.execute(
         "UPDATE companies SET tags=?, active=? WHERE id=?",
-        (tags.join(kept), is_active_mission(row["mission_tier"], row["name"]),
-         cid))
+        (tags.join(kept), int(active), cid))
     conn.commit()
     return get_company(conn, cid)
 
@@ -2192,49 +2204,3 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     if limit:
         rows = rows[:int(limit)]
     return rows
-
-
-# --------------------------------------------------------------------------- #
-#  Seen-jobs compatibility (dedupe-only callers)                               #
-# --------------------------------------------------------------------------- #
-
-def is_new(conn, job_id):
-    """Dedupe check against the unified jobs table."""
-    return not job_exists(conn, job_id)
-
-
-def mark_seen(conn, job, track=None):
-    """Record a fetched job dict ({id, company, title, url, location, ...})
-    in the unified jobs table. Adapter for callers that only need
-    seen/unseen dedupe semantics.
-
-    Fit columns are passed through when the caller has already scored the
-    job in place (e.g. the sweep runner's ``--fit --commit`` path, which
-    ``j.update(FitResult.as_columns())``s before committing). Dedupe-only
-    callers simply omit those keys, so ``.get`` yields None and upsert_job's
-    COALESCE preserves any existing score — this adapter never clobbers a
-    stored score with a null. Without this pass-through, a ``--fit --commit``
-    run computed scores, wrote them to the digest, and then dropped every
-    one on the DB write."""
-    upsert_job(conn, {
-        "job_id":          job["id"],
-        "company_id":      job.get("company_id"),
-        "company_name":    job.get("company"),
-        "title":           job.get("title"),
-        "url":             job.get("url"),
-        "location":        job.get("location"),
-        "track":           track or job.get("track"),
-        "remote_eligible": job.get("remote_eligible"),
-        "remote_signal":   job.get("remote_signal"),
-        "anchor_signal":   job.get("anchor_signal"),
-        "description":     (job.get("description") or "")[:config.MAX_DESC_CHARS],
-        "posted_at":       job.get("posted_at"),
-        "resume_fit_score": job.get("resume_fit_score"),
-        "fit_reason":      job.get("fit_reason"),
-        "fit_gates":       job.get("fit_gates"),
-        "fit_domain":      job.get("fit_domain"),
-        "fit_function":    job.get("fit_function"),
-        "fit_stack":       job.get("fit_stack"),
-        "fit_seniority":   job.get("fit_seniority"),
-        "fit_model":       job.get("fit_model"),
-    })
