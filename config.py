@@ -12,10 +12,14 @@ Secrets come from environment variables (see top of file).
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 # Dependency-free (imports nothing, not even this module) — safe here.
 import tags
+# Pure track-building logic (imports only tags); the tables it consumes
+# are defined below, under "UI tracks".
+from core import tracks as _tracks
 
 # =========================================================================
 #  SECRETS (env-var first, fallbacks kept for local dev only)
@@ -179,8 +183,6 @@ MAX_DESC_CHARS = 12000
 # so the crawler stays generic and your terms are easy to edit, share, or
 # reset. Falls back to the checked-in profile.example.toml when profile.toml
 # is absent. See profile.example.toml for the schema + the relevance model.
-
-import tomllib
 
 
 # Canonical location of YOUR profile; the Settings tab writes here
@@ -498,88 +500,23 @@ _ENGINE_CRAWL_DEFAULTS = {
 ENGINE_ALIASES = {"neural": "sweep"}
 
 
-def _mission_floor(v):
-    """A track's `remote_mission_floor` as a float, or None when the track
-    switches the admission off.
-
-    >>> _mission_floor(0.85)
-    0.85
-    >>> _mission_floor(False) is None
-    True
-    >>> _mission_floor(None) is None
-    True
-
-    Notes:
-        TOML has no null, so `false` is how a profile disables the key
-        rather than merely lowering it.
-    """
-    return None if v is None or v is False else float(v)
+# The building logic lives in core/tracks.py (pure functions over the
+# tables above); these names stay here because callers and tests reach
+# them through `config`.
+_mission_floor = _tracks.mission_floor
 
 
 def _build_ui_tracks(raw):
-    tracks = {}
-    for tid, t in (raw or _DEFAULT_TRACKS).items():
-        if not isinstance(t, dict):
-            continue
-        engine = str(t.get("engine") or "local")
-        engine = ENGINE_ALIASES.get(engine, engine)
-        eng_defaults = _ENGINE_CRAWL_DEFAULTS.get(
-            engine, _ENGINE_CRAWL_DEFAULTS["local"])
-        src = dict(eng_defaults["sources"])
-        src.update({k: bool(v) for k, v in (t.get("sources") or {}).items()
-                    if k in src})
-        tracks[tid] = {
-            "id": tid,
-            "label": str(t.get("label") or tid),
-            "db_path": DATA_DIR / str(t.get("db") or f"{tid}.db"),
-            "track": str(t.get("track") or tid.replace("_", "-")),
-            # Which crawl machinery this track runs on — "local" (the
-            # location-scoped crawl) or "sweep" (the location-agnostic
-            # whole-board crawl); both run through scrapers/runner.py.
-            # Code keys ops off the ENGINE, never off the user-chosen id.
-            "engine": engine,
-            "rank_by": str(t.get("rank_by") or "fit"),
-            "min_mission": (float(t["min_mission"])
-                            if t.get("min_mission") is not None else None),
-            "min_fit_default": float(t.get("min_fit_default", 0.0)),
-            "willing_to_move_default": bool(t.get("willing_to_move_default", False)),
-            "remote_requires_watch": bool(t.get("remote_requires_watch", False)),
-            "default": bool(t.get("default", False)),
-            # --- crawl methodology (scrapers/runner.py) -----------
-            "keyword_mode": str(t.get("keyword_mode")
-                                or eng_defaults["keyword_mode"]),
-            "accept_remote": bool(t.get("accept_remote",
-                                        eng_defaults["accept_remote"])),
-            "sources": src,
-            "store_tag": (tags.canonical(t["store_tag"]) if t.get("store_tag")
-                          else eng_defaults["store_tag"]),
-            "require_core_anchor": bool(t.get("require_core_anchor",
-                                              eng_defaults["require_core_anchor"])),
-            "geo_gate": bool(t.get("geo_gate", eng_defaults["geo_gate"])),
-            "remote_mission_floor": _mission_floor(
-                t.get("remote_mission_floor",
-                      eng_defaults["remote_mission_floor"])),
-            "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
-            "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
-            "email": bool(t.get("email", eng_defaults["email"])),
-            "digest_min_fit": float(t.get("digest_min_fit",
-                                          eng_defaults["digest_min_fit"])),
-            "notify": bool(t.get("notify", eng_defaults["notify"])),
-            "exclude_gate": bool(t.get("exclude_gate",
-                                       eng_defaults["exclude_gate"])),
-            "dormant_after": int(t.get("dormant_after",
-                                       eng_defaults["dormant_after"])),
-            "dormant_days": int(t.get("dormant_days",
-                                      eng_defaults["dormant_days"])),
-            "tech_title_regex": str(t.get("tech_title_regex")
-                                    or eng_defaults["tech_title_regex"]),
-        }
-    return tracks
+    """The profile's [tracks] table (or None -> the built-in pair) as
+    runtime track dicts. See core.tracks.build_tracks."""
+    return _tracks.build_tracks(raw, data_dir=DATA_DIR,
+                                default_tracks=_DEFAULT_TRACKS,
+                                engine_defaults=_ENGINE_CRAWL_DEFAULTS,
+                                aliases=ENGINE_ALIASES)
 
 
 UI_TRACKS = _build_ui_tracks(_PROFILE.get("tracks"))
-DEFAULT_TRACK = next((tid for tid, t in UI_TRACKS.items() if t["default"]),
-                     next(iter(UI_TRACKS), None))
+DEFAULT_TRACK = _tracks.default_track_id(UI_TRACKS)
 
 # =========================================================================
 #  HTTP
