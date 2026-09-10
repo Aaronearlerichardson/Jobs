@@ -756,7 +756,7 @@ discovery sourcing all follow. No code edits.
 ## Data model & files
 
 One SQLite store for everything — `jobs.db` in your data directory
-(`core/store.py`). A track can get its own file via `[tracks.*].db`, but by
+(`core/store/__init__.py`). A track can get its own file via `[tracks.*].db`, but by
 default they share:
 
 - **companies** — name, ats, slug / Workday triple / careers_url,
@@ -899,7 +899,7 @@ identically to a dead one.
 | `scrapers/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
 | `scrapers/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `discovery/` | pipeline, slug probes, careers-page sniffer, directory imports, local sourcing, dorking; `apply.py` upserts into the store |
-| `core/store.py` | unified companies + jobs store (+ export/import, prune, migrations) |
+| `core/store/__init__.py` | unified companies + jobs store (+ export/import, prune, migrations) |
 | `tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
 | `core/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m core.fit` |
 | `core/claude.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |

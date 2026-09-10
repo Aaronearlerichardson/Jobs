@@ -14,26 +14,26 @@ Usage:
     python discover.py --local          # employers in your [locality]
 
 Every flag except --from-bciwiki is the CLI spelling of an operation in
-core/ops_registry.py, the same table the web UI's roster buttons run from.
+core/ops/registry.py, the same table the web UI's roster buttons run from.
 """
 
 import argparse
 import sys
 
 import config
-from core import ops_registry
+from core.ops import registry
 
 
 def _op(name, params):
     """A handler that runs registry op `name` with `params(args)`."""
     def run(args):
-        ops_registry.invoke(name, params(args), track=None)
+        registry.invoke(name, params(args), track=None)
     return run
 
 
 def _cmd_from_keywords(args):
     for kw in config.INCLUDE_KEYWORDS:
-        ops_registry.invoke("discover-term", {
+        registry.invoke("discover-term", {
             "term": kw, "no_report": args.no_report, "dry_run": args.dry_run},
             track=None)
 
@@ -157,7 +157,7 @@ def main():
         ap.print_help()
         sys.exit(1)
 
-    ops_registry.invoke("discover-term", {
+    registry.invoke("discover-term", {
         "term": args.term, "no_report": args.no_report, "dry_run": args.dry_run},
         track=None)
 

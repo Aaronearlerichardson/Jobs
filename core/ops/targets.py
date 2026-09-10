@@ -1,4 +1,4 @@
-"""Composite operation targets for core/ops_registry.py.
+"""Composite operation targets for core/ops/registry.py.
 
 Each function here is the glue that used to be spelled out inline in one
 front end (open the track's store, call a maintenance function, close and

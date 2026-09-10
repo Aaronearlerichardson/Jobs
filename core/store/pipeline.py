@@ -59,7 +59,7 @@ def _resolve_job(conn, ref):
     matching rows (ideally one; several = ambiguous; empty = no match) so
     set_disposition, its only caller, can report ambiguity instead of
     guessing."""
-    from .store import _norm_url   # not at module level: see module doc
+    from . import _norm_url   # not at module level: see module doc
     row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (ref,)).fetchone()
     if row:
         return [dict(row)]

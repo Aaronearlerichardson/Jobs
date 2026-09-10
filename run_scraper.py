@@ -12,7 +12,7 @@ Tracks come from your profile's [tracks.*] tables — the ids are whatever you
 named them, and a track's jobs.track value works too. The old crawler.py
 forwards here, so scheduled tasks keep working.
 
-Most flags are the CLI spelling of an operation in core/ops_registry.py —
+Most flags are the CLI spelling of an operation in core/registry.py —
 the same table the web UI's buttons run from — so a flag and a button pass
 the same parameters to the same function. The few commands below that are
 not registry ops (watch, mark, pipeline, export/import, score) are store
@@ -23,7 +23,7 @@ import argparse
 import sys
 
 import config
-from core import ops_registry
+from core.ops import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -48,7 +48,7 @@ def _op(name, params):
     `params(args)` draws off the parsed arguments, against the --track
     selection (None = the op's own default-track rule)."""
     def run(args, t):
-        ops_registry.invoke(name, params(args), track=t)
+        registry.invoke(name, params(args), track=t)
     return run
 
 
@@ -288,7 +288,7 @@ def main(argv=None):
               "confirm_cost": args.confirm_cost, "workers": args.workers,
               "top": args.top, "samples": args.samples}
     for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
-        ops_registry.invoke("crawl", params, track=tcfg)
+        registry.invoke("crawl", params, track=tcfg)
 
 
 if __name__ == "__main__":

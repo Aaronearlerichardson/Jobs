@@ -16,27 +16,27 @@ import pytest
 import config
 import discover
 import run_scraper
-from core import ops_registry
-from core.ops_registry import OMIT, Param, build_kwargs
+from core.ops import registry
+from core.ops.registry import OMIT, Param, build_kwargs
 
 
 class TestTable:
     def test_every_entry_is_well_formed(self):
-        for name, e in ops_registry.REGISTRY.items():
+        for name, e in registry.REGISTRY.items():
             assert set(e) >= {"label", "engine", "target", "params"}, name
             assert e["engine"] in (None, "local", "sweep"), name
             assert ":" in e["target"], name
             assert all(isinstance(p, Param) for p in e["params"]), name
 
     def test_every_target_resolves_to_a_callable(self):
-        for name, e in ops_registry.REGISTRY.items():
-            assert callable(ops_registry.resolve(e["target"])), name
+        for name, e in registry.REGISTRY.items():
+            assert callable(registry.resolve(e["target"])), name
 
     def test_every_param_names_a_real_keyword_of_its_target(self):
         """A typo in a Param.kw would surface only when someone clicked
         the button: the call would raise TypeError inside the op thread."""
-        for name, e in ops_registry.REGISTRY.items():
-            sig = inspect.signature(ops_registry.resolve(e["target"]))
+        for name, e in registry.REGISTRY.items():
+            sig = inspect.signature(registry.resolve(e["target"]))
             accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD
                               for p in sig.parameters.values())
             for p in e["params"]:
@@ -47,8 +47,8 @@ class TestTable:
         """A target parameter with no default must come from a Param that
         always produces a value (a default, or a kind that never omits)."""
         never_omits = {"track", "db_path", "veto", "assert", "not"}
-        for name, e in ops_registry.REGISTRY.items():
-            sig = inspect.signature(ops_registry.resolve(e["target"]))
+        for name, e in registry.REGISTRY.items():
+            sig = inspect.signature(registry.resolve(e["target"]))
             supplied = {(p.kw or p.key) for p in e["params"]
                         if p.default is not OMIT or p.kind in never_omits}
             required = {n for n, prm in sig.parameters.items()
@@ -58,10 +58,10 @@ class TestTable:
             assert required <= supplied, (name, required - supplied)
 
     def test_ui_view_hides_only_the_flagged_entries(self):
-        hidden = {n for n, e in ops_registry.REGISTRY.items()
+        hidden = {n for n, e in registry.REGISTRY.items()
                   if e.get("ui") is False}
         assert hidden, "expected at least one CLI-only op"
-        assert set(ops_registry.ui_ops()) == set(ops_registry.REGISTRY) - hidden
+        assert set(registry.ui_ops()) == set(registry.REGISTRY) - hidden
 
 
 class TestInvoke:
@@ -69,22 +69,22 @@ class TestInvoke:
         seen = {}
         monkeypatch.setattr("scrapers.ops.sync_status_all",
                             lambda **kw: seen.update(kw))
-        ops_registry.invoke("sync", {"top": "7"})
+        registry.invoke("sync", {"top": "7"})
         assert seen == {"top_n": 7, "t": config.UI_TRACKS[config.DEFAULT_TRACK]}
-        ops_registry.invoke("sync", {}, track=None)
+        registry.invoke("sync", {}, track=None)
         assert seen == {"top_n": 15, "t": None}
 
     def test_honors_a_monkeypatched_target_at_call_time(self, monkeypatch):
         """Targets are looked up when invoked, not captured at import, so
         tests (and reloads) see the current function."""
         calls = []
-        monkeypatch.setattr("core.ops_targets.dedup", lambda **kw: calls.append(kw))
-        ops_registry.invoke("dedup", {}, track=None)
+        monkeypatch.setattr("core.ops.targets.dedup", lambda **kw: calls.append(kw))
+        registry.invoke("dedup", {}, track=None)
         assert calls == [{"t": None}]
 
     def test_unknown_op_raises(self):
         with pytest.raises(KeyError):
-            ops_registry.invoke("no-such-op", {})
+            registry.invoke("no-such-op", {})
 
 
 class TestParamCoercion:
@@ -108,10 +108,10 @@ class TestParamCoercion:
 class TestWebView:
     def test_ops_is_the_ui_subset_with_the_legacy_shape(self):
         import webapp
-        assert set(webapp.OPS) == set(ops_registry.ui_ops())
+        assert set(webapp.OPS) == set(registry.ui_ops())
         for name, o in webapp.OPS.items():
             assert set(o) == {"label", "engine", "fn"}, name
-            assert o["label"] == ops_registry.REGISTRY[name]["label"]
+            assert o["label"] == registry.REGISTRY[name]["label"]
 
     def test_fn_runs_the_registry_with_the_posted_params(self, monkeypatch):
         import webapp
@@ -145,7 +145,7 @@ class TestCliDispatch:
     @pytest.fixture
     def calls(self, monkeypatch):
         seen = []
-        monkeypatch.setattr(ops_registry, "invoke",
+        monkeypatch.setattr(registry, "invoke",
                             lambda name, params, track=None: seen.append((name, params, track)))
         return seen
 
@@ -175,7 +175,7 @@ class TestCliDispatch:
                              "reresolve_misses": 50, "nlx": "A,B"}), None)
             assert calls, dest
             for name, _params, _t in calls:
-                assert name in ops_registry.REGISTRY, (dest, name)
+                assert name in registry.REGISTRY, (dest, name)
 
     def test_selected_treats_zero_as_given(self):
         assert run_scraper._selected(_args(verify_top=0), "verify_top")
@@ -186,7 +186,7 @@ class TestCliDispatch:
 class TestDiscoverDispatch:
     def test_flags_map_onto_registry_ops(self, monkeypatch):
         seen = []
-        monkeypatch.setattr(ops_registry, "invoke",
+        monkeypatch.setattr(registry, "invoke",
                             lambda name, params, track=None: seen.append((name, params)))
         cmds = dict(discover.__dict__["_COMMANDS"])
         cmds["add_board"](SimpleNamespace(add_board=["Acme", "https://x"], capture=True))

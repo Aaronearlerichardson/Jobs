@@ -1,6 +1,6 @@
 """Background operation runner (one op at a time, console tee'd to the
 browser via /api/run/status polling), and the web UI's view of the shared
-operation table in core/ops_registry.py."""
+operation table in core/registry.py."""
 
 import functools
 import io
@@ -9,7 +9,8 @@ import threading
 from datetime import datetime
 
 import config
-from core import claude, ops_registry, session_log
+from core import claude, session_log
+from core.ops import registry
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
         "started": None, "ended": None, "error": None, "active": False}
@@ -189,6 +190,6 @@ def _int(p, key, default=None):
 # ops_registry.invoke, which coerces the params and imports the target.
 OPS = {
     name: {"label": e["label"], "engine": e["engine"],
-           "fn": functools.partial(ops_registry.invoke, name)}
-    for name, e in ops_registry.ui_ops().items()
+           "fn": functools.partial(registry.invoke, name)}
+    for name, e in registry.ui_ops().items()
 }

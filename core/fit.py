@@ -23,7 +23,7 @@ Wired into:
   - config/profile.py:  loads the optional `[fit]` profile block (weights / gate
     penalties / domain ladder / stack / region); omit it and the defaults
     below apply.
-  - store.py :  jobs table carries one column per axis (fit_domain/function/
+  - store/__init__.py :  jobs table carries one column per axis (fit_domain/function/
     stack/seniority) plus fit_gates; FitResult.as_columns() produces them and
     store.update_job_scores() writes them. resume_fit_score stays the combined
     scalar, so ranked_jobs()/combined_score() keep working untouched.
@@ -200,7 +200,7 @@ class FitResult:
     def as_columns(self) -> dict:
         """DB-ready fields: the scalar, the reason tag, the tripped gates, the
         scoring model, and one column per axis. Keys match the jobs-table
-        columns added in store.py. Axes are None on an unscored result, so
+        columns added in __init__.py. Axes are None on an unscored result, so
         those columns clear."""
         cols = {"resume_fit_score": self.score,
                 "fit_reason": self.summary(),

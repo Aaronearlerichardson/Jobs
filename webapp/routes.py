@@ -311,7 +311,7 @@ def api_active(cid):
 # --------------------------------------------------------------------------- #
 #
 # Nothing an automated path discovers joins the roster by itself: it lands as
-# an inactive, pending-review company row (core/store.py) and waits here.
+# an inactive, pending-review company row (core/__init__.py) and waits here.
 
 
 @app.get("/api/pending")

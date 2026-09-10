@@ -228,7 +228,7 @@ REGISTRY = {
     "backfill-axes": {
         "label": "Backfill fit axes",
         "engine": None,
-        "target": "core.ops_targets:backfill_axes",
+        "target": "core.ops.targets:backfill_axes",
         "params": [_TRACK],
         "ui": False,      # offline column fill; a CLI repair, not a button
     },
@@ -242,13 +242,13 @@ REGISTRY = {
     "prune": {
         "label": "Prune dead boards",
         "engine": None,
-        "target": "core.ops_targets:prune",
+        "target": "core.ops.targets:prune",
         "params": [Param("offmission", kind="bool", default=False), _TRACK],
     },
     "dedup": {
         "label": "Dedup companies",
         "engine": None,
-        "target": "core.ops_targets:dedup",
+        "target": "core.ops.targets:dedup",
         "params": [_TRACK],
     },
     "add-job": {
@@ -263,7 +263,7 @@ REGISTRY = {
     "nlx": {
         "label": "NLx ingest",
         "engine": "local",
-        "target": "core.ops_targets:ingest_nlx",
+        "target": "core.ops.targets:ingest_nlx",
         "params": [Param("companies", kind="names", default=[]), _TRACK],
     },
     "add-names": {
@@ -291,13 +291,13 @@ REGISTRY = {
     "dork": {
         "label": "ATS dork sweep",
         "engine": "local",
-        "target": "core.ops_targets:dork_sweep",
+        "target": "core.ops.targets:dork_sweep",
         "params": [],
     },
     "discover-term": {
         "label": "Discover companies by term",
         "engine": "local",
-        "target": "core.ops_targets:discover_term",
+        "target": "core.ops.targets:discover_term",
         "params": [Param("term", default=""),
                    Param("no_report", kind="bool", default=False),
                    Param("dry_run", kind="bool", default=False)],

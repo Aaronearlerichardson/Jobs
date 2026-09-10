@@ -3,7 +3,7 @@ Company-scoped fetching: ALL of a *mission-vetted* company's postings,
 optionally location-filtered, in one shape whatever the ATS.
 
 The company was already vetted (mission scored at discovery time, stored in
-core/store.py), so the whole board is pulled with no relevance gate and the
+core/store/__init__.py), so the whole board is pulled with no relevance gate and the
 caller's own filter chain decides. `fetch_company` dispatches a store row
 to the ATS's fetcher module (fetchers/<ats>.py, the same functions the
 unvetted-board sweep calls with `gate=is_relevant`) and `_adapt` puts the

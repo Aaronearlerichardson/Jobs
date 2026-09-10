@@ -15,7 +15,7 @@ from datetime import datetime
 
 import tags
 
-from .store_schema import connect  # noqa: F401  (the doctests open stores)
+from .schema import connect  # noqa: F401  (the doctests open stores)
 
 
 # --------------------------------------------------------------------------- #
@@ -187,7 +187,7 @@ def confirm_company(conn, cid, active=None):
         "UPDATE companies SET tags=?, active=? WHERE id=?",
         (tags.join(kept), int(active), cid))
     conn.commit()
-    from .store import get_company   # not at module level: see module doc
+    from .__init__ import get_company   # not at module level: see module doc
     return get_company(conn, cid)
 
 

@@ -31,17 +31,17 @@ import config
 
 import tags
 
-from .store_schema import (  # noqa: F401  (re-exported: store.connect etc.)
+from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
     _SCHEMA, _INDEXES, _MIGRATIONS, _RENAMED_COLUMNS, _DROPPED_COLUMNS,
     _ensure_columns, _migrate_tags, BUSY_TIMEOUT_S, connect, checkpoint,
     _BATCHING, _commit, batch,
 )
-from .store_review import (  # noqa: F401
+from .review import (  # noqa: F401
     _name_key, mark_pending, is_confirmed_company, _PENDING_FIELDS,
     pending_companies, confirm_company, reject_company, block_name,
     blocked_name_keys,
 )
-from .store_pipeline import (  # noqa: F401
+from .pipeline import (  # noqa: F401
     DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
     APPLIED_DISPOSITIONS, PIPELINE_FIELDS, OUTCOME_REASONS, FIT_BANDS,
     set_job_status, _resolve_job, set_disposition, get_pipeline,
