@@ -46,7 +46,7 @@ from core.store import connect, get_companies  # noqa: E402
 # The comparison key every other discovery path uses (discovery/names.py),
 # so a name already tracked under any spelling/punctuation is recognized as
 # the same company.
-from discovery.names import name_key as _norm_key  # noqa: E402
+from core.names import name_key as _norm_key  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

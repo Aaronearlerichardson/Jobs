@@ -20,7 +20,7 @@ from .probes import (
     probe_workday,
 )
 from .sniffer import sniff_careers_ats
-from .names import (GENERIC_WORDS, name_words, strip_parentheticals,
+from core.names import (GENERIC_WORDS, name_words, strip_parentheticals,
                     strip_suffixes)
 from .seeds import seed_candidates_for
 

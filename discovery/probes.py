@@ -7,7 +7,10 @@ import time
 
 import config
 
+from core.ats_signatures import extract_workday_triple
 from scrapers.http import HEADERS, SESSION
+from .fetchpool import _fetch_all, candidate_urls
+from .identity import _corroborates, _foreign_board, _risky_token_in_url
 
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
@@ -267,48 +270,14 @@ PROBES = {
 # ─── Workday (separate signature — needs name + careers URL hint) ────────
 #
 # Workday URLs are a tenant+pod+site triple we can't derive from the
-# company name alone (e.g. redhat.wd5.myworkdayjobs.com/Jobs_External).
-# So probe_workday scrapes the company's careers page looking for a
-# myworkdayjobs.com link, then validates the triple against the CXS
-# search API to get a live job count.
+# company name alone (e.g. redhat.wd5.myworkdayjobs.com/Jobs_External), so
+# probe_workday scans the company's careers page(s) for a myworkdayjobs.com
+# link (core.ats_signatures.extract_workday_triple), then validates the
+# triple against the CXS search API to get a live job count.
 #
 # Because the signature differs from the other probes, this one is NOT
-# in PROBES — validate_candidate calls it explicitly as a fallback.
+# in PROBES — pipeline.validate_candidate calls it explicitly as a fallback.
 
-# Prefer the CXS URL (high confidence: tenant appears twice) and fall
-# back to any public board URL. `site` is the segment AFTER any
-# optional en-US locale prefix.
-_WD_CXS_RE = re.compile(
-    r"https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
-    r"/wday/cxs/[a-z0-9-]+/([A-Za-z0-9_-]+)/",
-    re.IGNORECASE,
-)
-_WD_BOARD_RE = re.compile(
-    r"https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
-    r"(?:/[a-z]{2}-[A-Z]{2})?"
-    r"/([A-Za-z0-9_-]+)",
-    re.IGNORECASE,
-)
-# Segments that show up as the "site" slot but are API paths or assets,
-# never real board names.
-_WD_SITE_BLOCKLIST = {"wday", "cxs", "api", "static", "assets", "login"}
-
-
-def _extract_workday_triple(text: str):
-    """
-    Return (tenant, wd_pod_int, site) from the first Workday URL found
-    in `text`, or None. Checks the CXS API form first (higher signal),
-    then falls back to any public board URL.
-    """
-    if not text:
-        return None
-    m = _WD_CXS_RE.search(text)
-    if m:
-        return m.group(1).lower(), int(m.group(2)), m.group(3)
-    for tenant, pod, site in _WD_BOARD_RE.findall(text):
-        if site.lower() not in _WD_SITE_BLOCKLIST:
-            return tenant.lower(), int(pod), site
-    return None
 
 def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
     """
@@ -340,7 +309,7 @@ def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
 def probe_workday(name: str, careers_url: str = ""):
     """
     Discover a Workday tenant/pod/site for `name`: the careers-page sniff
-    (sniffer.candidate_urls, fetched through its per-run memo) filtered to
+    (fetchpool.candidate_urls, fetched through its per-run memo) filtered to
     myworkdayjobs.com links, validated with the CXS API on a hit.
 
     Returns dict {tenant, wd_pod, site, count, validated, source_url}
@@ -353,8 +322,6 @@ def probe_workday(name: str, careers_url: str = ""):
         company's shared tenant, went unchecked here while the sniffer
         rejected it. Same guards on both paths now.
     """
-    from .sniffer import (_corroborates, _fetch_all, _foreign_board,
-                          _risky_token_in_url, candidate_urls)
     urls = candidate_urls(name, careers_url)
     if not urls:
         return None
@@ -368,7 +335,7 @@ def probe_workday(name: str, careers_url: str = ""):
             continue
         # Workday login redirects usually land on the wd host -- check
         # the final URL first, then fall through to HTML body.
-        triple = _extract_workday_triple(r.url) or _extract_workday_triple(r.text)
+        triple = extract_workday_triple(r.url) or extract_workday_triple(r.text)
         if not triple or _foreign_board(name, triple):
             continue
         tenant, wd_pod, site = triple
@@ -411,6 +378,8 @@ class WorkdayJsProbe:
             meta = js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
+    failure is reported once per process (_report_js_disabled) and every
+    later probe() returns None.
     """
 
     def __init__(self):
@@ -491,13 +460,13 @@ class WorkdayJsProbe:
             cur = page.url
         except Exception:
             cur = ""
-        if (triple := _extract_workday_triple(cur)):
+        if (triple := extract_workday_triple(cur)):
             return triple
         try:
             html = page.content()
         except Exception:
             html = ""
-        if (triple := _extract_workday_triple(html)):
+        if (triple := extract_workday_triple(html)):
             return triple
         # Wait for JS-deferred content (iframes, ajax-injected links).
         try:
@@ -509,13 +478,12 @@ class WorkdayJsProbe:
             html = page.content()
         except Exception:
             return None
-        return _extract_workday_triple(cur) or _extract_workday_triple(html)
+        return extract_workday_triple(cur) or extract_workday_triple(html)
 
     # ── public API ───────────────────────────────────────────────────────
 
     def _probe_impl(self, name: str, careers_url: str = ""):
         """Runs entirely on the browser-owning thread."""
-        from .sniffer import candidate_urls
         page = self._ensure_page()
         if page is None:
             return None
@@ -598,6 +566,7 @@ class WorkdayJsProbePool:
     instances at once: each owns its own Playwright + browser + thread, so
     K of them give K-way parallel scraping. Discovery workers that need the
     JS fallback borrow a free browser from the pool (blocking only when all
+    K are busy) and hand it back when their scrape finishes.
     """
 
     def __init__(self, size):

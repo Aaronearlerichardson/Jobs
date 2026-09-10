@@ -290,12 +290,12 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
 def _coords_from_urls(urls):
     """Roster-shaped board coordinates for the employer, read off its
     apply links, or None when none of them names a known ATS."""
-    from discovery.sniffer import _detect, _pack
+    from core.ats_signatures import detect, pack
     for url in urls:
-        hit = _detect("", url or "")
+        hit = detect("", url or "")
         if not hit or hit[0] not in ("fetchable", "semi"):
             continue
-        packed = _pack(hit[1], hit[2], url)
+        packed = pack(hit[1], hit[2], url)
         row = {"ats": packed["ats"], "careers_url": packed.get("careers_url")}
         if packed["ats"] == "workday":
             t, pod, site = packed["triple"]

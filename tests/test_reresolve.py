@@ -13,7 +13,8 @@ stubbed, exactly as the pasted-name tests stub them.
 
 import core.store as store
 import tags
-from discovery import local_sourcing, sniffer
+from core import ats_signatures
+from discovery import local_sourcing
 from scrapers import ops
 
 
@@ -248,19 +249,19 @@ class TestPeopleAdminSignature:
     URL = "https://unc.peopleadmin.com/postings/search?query=data"
 
     def test_a_hosted_tenant_is_detected(self):
-        assert sniffer._detect("", self.URL) == ("semi", "peopleadmin", "unc")
+        assert ats_signatures.detect("", self.URL) == ("semi", "peopleadmin", "unc")
 
     def test_the_vendor_site_is_not_a_tenant(self):
-        assert sniffer._detect("", "https://www.peopleadmin.com/") is None
+        assert ats_signatures.detect("", "https://www.peopleadmin.com/") is None
 
     def test_a_tenant_on_its_own_hostname_has_no_signature(self):
         # Still an import-file job: nothing on jobs.ncsu.edu says which ATS
         # serves it. Documented on local_sourcing.add_board.
-        assert sniffer._detect(
+        assert ats_signatures.detect(
             "", "https://jobs.ncsu.edu/postings/all_jobs.atom") is None
 
     def test_every_page_of_a_tenant_packs_to_one_board(self):
-        keys = {store.board_key(sniffer._pack("peopleadmin", "unc", u))
+        keys = {store.board_key(ats_signatures.pack("peopleadmin", "unc", u))
                 for u in (self.URL,
                           "https://unc.peopleadmin.com/postings/all_jobs.atom",
                           "https://unc.peopleadmin.com")}
@@ -268,7 +269,7 @@ class TestPeopleAdminSignature:
 
     def test_the_packed_host_is_what_the_fetcher_reads(self):
         from scrapers.fetchers.peopleadmin import feed_host
-        packed = sniffer._pack("peopleadmin", "unc", self.URL)
+        packed = ats_signatures.pack("peopleadmin", "unc", self.URL)
         assert feed_host(packed["careers_url"]) == "unc.peopleadmin.com"
 
 
@@ -280,16 +281,16 @@ class TestJobviteSignature:
     URL = "https://jobs.jobvite.com/acme/job/oAaa1fwA"
 
     def test_a_tenant_is_detected_as_fetchable(self):
-        assert sniffer._detect("", self.URL) == ("fetchable", "jobvite", "acme")
+        assert ats_signatures.detect("", self.URL) == ("fetchable", "jobvite", "acme")
 
     def test_the_vendor_site_is_not_a_tenant(self):
-        assert sniffer._detect("", "https://www.jobvite.com/") is None
+        assert ats_signatures.detect("", "https://www.jobvite.com/") is None
 
     def test_the_board_key_is_the_tenant(self):
-        assert store.board_key(sniffer._pack("jobvite", "acme", self.URL)) \
+        assert store.board_key(ats_signatures.pack("jobvite", "acme", self.URL)) \
             == ("jobvite", "acme")
 
     def test_the_packed_slug_is_what_the_fetcher_reads(self):
         from scrapers.fetchers.jobvite import tenant_of
-        packed = sniffer._pack("jobvite", "acme", self.URL)
+        packed = ats_signatures.pack("jobvite", "acme", self.URL)
         assert tenant_of(packed["slug"]) == "acme"

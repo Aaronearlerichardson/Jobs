@@ -27,7 +27,7 @@ from scrapers import ddg
 from scrapers.parallel import drain_or_abandon
 from scrapers.http import HEADERS, SESSION
 from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
-from .names import domain_tokens, junk_name_reason, name_key, slug_guesses
+from core.names import domain_tokens, junk_name_reason, name_key, slug_guesses
 
 
 # --------------------------------------------------------------------------- #
@@ -932,7 +932,8 @@ def add_board(name, url, capture=False):
     from scrapers.fetchers import company as company_fetch
     from core.store import (CAPTURE_ATS, connect, is_confirmed_company,
                             mark_pending, upsert_company)
-    from .sniffer import _detect, _pack, sniff_ats
+    from core.ats_signatures import detect, pack
+    from .sniffer import sniff_ats
 
     if capture:
         conn = connect()
@@ -951,9 +952,9 @@ def add_board(name, url, capture=False):
               f"capture.py --watch")
         return {"ats": CAPTURE_ATS, "careers_url": url}
 
-    hit = _detect("", url)
+    hit = detect("", url)
     if hit and hit[0] in ("fetchable", "semi"):
-        found = _pack(hit[1], hit[2], url)
+        found = pack(hit[1], hit[2], url)
     else:
         found = sniff_ats(name, careers_url=url)
     if not found:
@@ -1095,7 +1096,8 @@ def _websearch_board(name, max_results=8):
     """
     from scrapers.http import HEADERS as _H
     from scrapers.fetchers.company import custom_board_listing_url
-    from .sniffer import _detect, _foreign_board, _pack
+    from core.ats_signatures import detect, pack
+    from .identity import _foreign_board
 
     def _search(query):
         out = []
@@ -1112,9 +1114,9 @@ def _websearch_board(name, max_results=8):
         # page context, so an unrelated board (nc.wd108 for "Novamed") is
         # otherwise indistinguishable from a real hit.
         for u in urls:
-            hit = _detect("", u)
+            hit = detect("", u)
             if hit and hit[0] in ("fetchable", "semi") and _slug_matches_name(hit[2], name):
-                return _pack(hit[1], hit[2], u)
+                return pack(hit[1], hit[2], u)
         # Pass 2: fetch the top real (non-aggregator) results and sniff for
         # an embedded ATS or a self-hosted board with genuine job links.
         for u in urls[:5]:
@@ -1126,7 +1128,7 @@ def _websearch_board(name, max_results=8):
             except Exception:
                 continue
             own = _host_matches_name(r.url, name)
-            hit = _detect(r.text, r.url)
+            hit = detect(r.text, r.url)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
             # An own-page Workday embed can still be a parent conglomerate's
@@ -1135,7 +1137,7 @@ def _websearch_board(name, max_results=8):
             # same guard as the sniffer.
             if hit and hit[0] in ("fetchable", "semi") and (own or _slug_matches_name(hit[2], name)):
                 if not (hit[1] == "workday" and _foreign_board(name, hit[2])):
-                    return _pack(hit[1], hit[2], r.url)
+                    return pack(hit[1], hit[2], r.url)
             # Custom self-hosted board: only on the company's OWN domain —
             # otherwise a third-party jobs site with ≥3 listings
             # (healthecareers, dotmed, expertini, …) resolves as the board.
@@ -1380,7 +1382,8 @@ def classify_miss(name, careers_url=""):
         path and only by the on-demand resolvers — never per candidate in
         a full discover_local pass.
     """
-    from .sniffer import sniff_careers_ats, ATS_LEAD_PATTERNS, diagnose_no_board
+    from core.ats_signatures import ATS_LEAD_PATTERNS
+    from .sniffer import diagnose_no_board, sniff_careers_ats
     try:
         lead = sniff_careers_ats(name, careers_url or "")
     except Exception as e:

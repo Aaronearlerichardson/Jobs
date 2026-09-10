@@ -10,7 +10,10 @@ from bs4 import BeautifulSoup
 import core.digest_md as digest_md
 import discovery.ats_dork as dork
 import discovery.local_sourcing as local_sourcing
+import discovery.fetchpool as fetchpool
+import discovery.probes as probes
 import discovery.sniffer as sniffer
+from core import ats_signatures
 import scrapers.fetchers.company as company_fetch
 from scrapers.util import norm_posted_date
 
@@ -28,10 +31,10 @@ class TestSniffer:
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
                "&ccid=19000101_000003")
-        assert sniffer._detect(url)[1] == "adp"
+        assert ats_signatures.detect(url)[1] == "adp"
 
     def test_detects_lead_platform(self):
-        assert sniffer._detect("via acme.eightfold.ai portal")[0] == "lead"
+        assert ats_signatures.detect("via acme.eightfold.ai portal")[0] == "lead"
 
     def test_probes_cover_sniffable_atses(self):
         from discovery.probes import PROBES
@@ -46,12 +49,15 @@ class _FakeResp:
 
 
 def _stub_fetch_all(monkeypatch, mapping):
-    """Replace sniffer._fetch_all with a lookup into `mapping` (url -> html),
-    so no network call happens; any URL not in `mapping` fetches as None."""
+    """Replace fetchpool._fetch_all with a lookup into `mapping` (url -> html),
+    so no network call happens; any URL not in `mapping` fetches as None.
+    The sniffer and the Workday probes bind the name at import, so their
+    copies are replaced too."""
     def _fake(urls):
         return {u: (_FakeResp(mapping[u], u) if u in mapping else None)
                 for u in urls}
-    monkeypatch.setattr(sniffer, "_fetch_all", _fake)
+    for mod in (fetchpool, sniffer, probes):
+        monkeypatch.setattr(mod, "_fetch_all", _fake)
 
 
 class TestDeadHostCache:
@@ -68,17 +74,17 @@ class TestDeadHostCache:
                 calls.append(url)
                 raise exc
 
-        monkeypatch.setattr(sniffer, "SESSION", _S())
-        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        monkeypatch.setattr(fetchpool, "SESSION", _S())
+        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
         return calls
 
     def test_refused_host_is_not_retried_on_other_paths(self, monkeypatch):
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
-        assert sniffer._fetch_page("https://www.dead.example/") is None
-        assert sniffer._fetch_page("https://www.dead.example/careers") is None
-        assert sniffer._fetch_page("https://www.other.example/careers") is None
+        assert fetchpool._fetch_page("https://www.dead.example/") is None
+        assert fetchpool._fetch_page("https://www.dead.example/careers") is None
+        assert fetchpool._fetch_page("https://www.other.example/careers") is None
         assert calls == ["https://www.dead.example/",
                          "https://www.other.example/careers"]
 
@@ -87,16 +93,16 @@ class TestDeadHostCache:
         # connections (DNS, TLS, connect timeout) are remembered.
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ReadTimeout("slow"))
-        sniffer._fetch_page("https://www.slow.example/")
-        sniffer._fetch_page("https://www.slow.example/careers")
+        fetchpool._fetch_page("https://www.slow.example/")
+        fetchpool._fetch_page("https://www.slow.example/careers")
         assert len(calls) == 2
 
     def test_entry_expires(self, monkeypatch):
         import time
         import requests
         calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
-        sniffer._DEAD_HOSTS["www.dead.example"] = time.time() - sniffer._DEAD_HOST_TTL - 1
-        sniffer._fetch_page("https://www.dead.example/careers")
+        fetchpool._DEAD_HOSTS["www.dead.example"] = time.time() - fetchpool._DEAD_HOST_TTL - 1
+        fetchpool._fetch_page("https://www.dead.example/careers")
         assert calls == ["https://www.dead.example/careers"]
 
 
@@ -119,43 +125,43 @@ class TestPageMemo:
                 calls.append(url)
                 return _R()
 
-        monkeypatch.setattr(sniffer, "SESSION", _S())
-        monkeypatch.setattr(sniffer, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO", {})
+        monkeypatch.setattr(fetchpool, "SESSION", _S())
+        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
         return calls
 
     def test_live_page_is_fetched_once_per_run(self, monkeypatch):
         calls = self._session(monkeypatch)
-        a = sniffer._fetch_page("https://www.sgs.com/")
-        b = sniffer._fetch_page("https://www.sgs.com/")
+        a = fetchpool._fetch_page("https://www.sgs.com/")
+        b = fetchpool._fetch_page("https://www.sgs.com/")
         assert a is b and a is not None
         assert calls == ["https://www.sgs.com/"]
 
     def test_misses_are_memoized_too(self, monkeypatch):
         calls = self._session(monkeypatch, status=403)
-        assert sniffer._fetch_page("https://www.infosys.com/") is None
-        assert sniffer._fetch_page("https://www.infosys.com/") is None
+        assert fetchpool._fetch_page("https://www.infosys.com/") is None
+        assert fetchpool._fetch_page("https://www.infosys.com/") is None
         assert len(calls) == 1
 
     def test_distinct_urls_still_fetch(self, monkeypatch):
         calls = self._session(monkeypatch)
-        sniffer._fetch_page("https://www.sgs.com/")
-        sniffer._fetch_page("https://www.sgs.com/careers")
+        fetchpool._fetch_page("https://www.sgs.com/")
+        fetchpool._fetch_page("https://www.sgs.com/careers")
         assert len(calls) == 2
 
     def test_oversized_bodies_are_not_hoarded(self, monkeypatch):
-        calls = self._session(monkeypatch, body="x" * (sniffer._PAGE_MEMO_MAX_BYTES + 1))
-        sniffer._fetch_page("https://big.example/")
-        sniffer._fetch_page("https://big.example/")
-        assert len(calls) == 2 and sniffer._PAGE_MEMO == {}
+        calls = self._session(monkeypatch, body="x" * (fetchpool._PAGE_MEMO_MAX_BYTES + 1))
+        fetchpool._fetch_page("https://big.example/")
+        fetchpool._fetch_page("https://big.example/")
+        assert len(calls) == 2 and fetchpool._PAGE_MEMO == {}
 
     def test_cap_evicts_the_oldest_entry(self, monkeypatch):
         calls = self._session(monkeypatch)
-        monkeypatch.setattr(sniffer, "_PAGE_MEMO_CAP", 2)
+        monkeypatch.setattr(fetchpool, "_PAGE_MEMO_CAP", 2)
         for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
-            sniffer._fetch_page(u)
-        assert "https://a.example/" not in sniffer._PAGE_MEMO
-        assert len(sniffer._PAGE_MEMO) == 2
+            fetchpool._fetch_page(u)
+        assert "https://a.example/" not in fetchpool._PAGE_MEMO
+        assert len(fetchpool._PAGE_MEMO) == 2
 
 
 class TestJobPageMeta:
