@@ -25,7 +25,7 @@ from core.claude import ACTIVE_MISSION_TIERS, is_active_mission
 ROOT = Path(__file__).resolve().parent.parent
 
 #: Directories scanned by the source-level guards, plus root-level modules.
-SOURCE_DIRS = ("core", "scrapers", "discovery", "webapp", "tools")
+SOURCE_DIRS = ("config", "core", "scrapers", "discovery", "webapp", "tools")
 
 #: Root-level modules pytest cannot doctest-collect, with the reason. Kept
 #: here so `test_pytest_ini_covers_every_source_module` stays honest instead
