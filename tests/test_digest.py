@@ -5,8 +5,10 @@ Offline by construction — `send_gmail` is monkeypatched in every test, so no
 SMTP socket is ever opened.
 """
 
+import os
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -263,3 +265,155 @@ class TestTrackKeys:
             {"x": {"engine": "local", "digest_min_fit": 0.75, "notify": True}})
         assert built["x"]["digest_min_fit"] == 0.75
         assert built["x"]["notify"] is True
+
+
+# --------------------------------------------------------------------------- #
+#  Golden renders
+# --------------------------------------------------------------------------- #
+#
+# Every digest shape rendered from one fixed input set under a frozen clock,
+# compared byte-for-byte (after newline normalisation) with the files under
+# tests/fixtures/digest/. Regenerate them ONLY for a deliberate format change:
+#
+#   DIGEST_GOLDEN_REGEN=1 python -m pytest tests/test_digest.py -k Golden
+#
+# The track's id/label are overridden so the renders do not depend on which
+# profile.toml is loaded.
+
+GOLDEN_DIR = Path(__file__).parent / "fixtures" / "digest"
+GOLDEN_TODAY = "2026-09-10"
+
+
+class _FrozenClock(datetime):
+    """datetime with `now()` pinned to GOLDEN_TODAY; everything else inherited."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 9, 10, 7, 30, 0)
+
+
+@pytest.fixture
+def golden_clock(monkeypatch):
+    monkeypatch.setattr(digest_md, "datetime", _FrozenClock)
+    return GOLDEN_TODAY
+
+
+@pytest.fixture
+def golden_track(track):
+    return dict(track, id="golden", label="Golden")
+
+
+def golden_inputs(hometown):
+    """One input set that exercises every branch of every section: NEW /
+    aged / stale / undated rows, an unscored row, a saved row (in the
+    ranking, out of the band), open and closed pipeline rows, a follow-up
+    with and without a contact, a scored and an unscored watch hit."""
+    T = GOLDEN_TODAY
+    ranked = [
+        row("r1", fit=0.91, location=hometown, first_seen="2026-09-01",
+            posted_at="2026-09-04", combined_score=0.8, mission_tier="A"),
+        row("r2", fit=0.55, location=hometown, first_seen=T,
+            posted_at="2026-07-01"),
+        row("r3", fit=None, location="Remote - US", first_seen=T,
+            fit_reason=""),
+        row("r4", fit=0.62, location=hometown, first_seen="2026-08-01",
+            posted_at="2026-07-01"),
+        row("r5", fit=0.45, location=hometown, first_seen=T,
+            disposition="saved"),
+    ]
+    pipeline = [
+        {"disposition": "applied", "disposition_at": "2026-09-02T10:00",
+         "company_name": "Acme", "title": "Applied Role",
+         "url": "https://acme.io/p1", "status": "open",
+         "disposition_note": "referral"},
+        {"disposition": "interviewing", "disposition_at": "2026-08-20",
+         "company_name": "Beta", "title": "Closed Today",
+         "url": "https://beta.io/p2", "status": "closed", "closed_at": T},
+        {"disposition": "applied", "disposition_at": "2026-08-01",
+         "company_name": "Gamma", "title": "Closed Before",
+         "url": "https://gamma.io/p3", "status": "closed",
+         "closed_at": "2026-09-09"},
+    ]
+    followups = [followup("f1", due=T),
+                 followup("f2", due="2026-09-08", contact=None)]
+    watch_hits = [
+        ({"name": "Watched Co"},
+         {"title": "Watched Role", "url": "https://w.co/1",
+          "location": hometown}, True),
+        ({"name": "Listed Co"},
+         {"title": "Listed Role", "url": "https://l.co/2",
+          "location": None}, False),
+    ]
+    matches = [
+        {"title": "M One", "url": "https://m.io/1", "company": "Mco",
+         "location": "Remote", "remote_eligible": True,
+         "anchor_signal": "core:eeg", "remote_signal": "location:remote",
+         "resume_fit_score": 0.5},
+        {"title": "M Two", "url": "https://m.io/2", "company_name": "Nco",
+         "location": "Elsewhere, YY", "resume_fit_score": None},
+    ]
+    return ranked, pipeline, followups, watch_hits, matches
+
+
+def _check_golden(name, text):
+    path = GOLDEN_DIR / name
+    text = text.replace("\r\n", "\n")
+    if os.environ.get("DIGEST_GOLDEN_REGEN"):
+        path.write_text(text, encoding="utf-8", newline="\n")
+    assert text == path.read_text(encoding="utf-8"), f"{name} drifted"
+
+
+class TestGolden:
+    def test_written_ranked_digest(self, golden_track, hometown, report_dir,
+                                   golden_clock):
+        ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
+        path = digest_md.write_ranked_digest(
+            ranked, golden_track, watch_hits=hits, pipeline=pipeline,
+            followups=followups)
+        assert path == report_dir / f"golden_{golden_clock}.md"
+        _check_golden("ranked.md", path.read_text(encoding="utf-8"))
+
+    def test_written_ranked_digest_bare(self, golden_track, hometown,
+                                        report_dir, golden_clock):
+        path = digest_md.write_ranked_digest([], golden_track)
+        _check_golden("ranked_bare.md", path.read_text(encoding="utf-8"))
+
+    def test_ranked_email(self, golden_track, hometown, sent, golden_clock):
+        ranked, pipeline, followups, hits, _ = golden_inputs(hometown)
+        assert digest_md.send_ranked_digest(
+            ranked, golden_track, watch_hits=hits, pipeline=pipeline,
+            followups=followups) is True
+        subject, plain, html = sent[0]
+        assert subject == f"[GOLDEN] 2 new match(es) - {golden_clock}"
+        _check_golden("ranked_email.md", plain)
+        _check_golden("ranked_email.html", html)
+
+    def test_written_matches_digest(self, golden_track, hometown, report_dir,
+                                    golden_clock):
+        *_, matches = golden_inputs(hometown)
+        path = digest_md.write_matches_digest(matches, report_dir,
+                                              golden_track)
+        assert path == report_dir / f"golden_matches_{golden_clock}.md"
+        _check_golden("matches.md", path.read_text(encoding="utf-8"))
+
+    def test_written_matches_digest_without_fit(self, golden_track, hometown,
+                                                report_dir, golden_clock):
+        *_, matches = golden_inputs(hometown)
+        unscored = [{k: v for k, v in m.items() if k != "resume_fit_score"}
+                    for m in matches]
+        path = digest_md.write_matches_digest(unscored, report_dir,
+                                              golden_track)
+        _check_golden("matches_nofit.md", path.read_text(encoding="utf-8"))
+
+    def test_written_matches_digest_empty(self, golden_track, report_dir,
+                                          golden_clock):
+        path = digest_md.write_matches_digest([], report_dir, golden_track)
+        _check_golden("matches_empty.md", path.read_text(encoding="utf-8"))
+
+    def test_matches_email(self, golden_track, hometown, sent, golden_clock):
+        *_, matches = golden_inputs(hometown)
+        digest_md.send_matches_digest(matches, golden_track, config)
+        subject, plain, html = sent[0]
+        assert subject == f"[GOLDEN] 2 posting(s) - {golden_clock}"
+        _check_golden("matches_email.md", plain)
+        _check_golden("matches_email.html", html)
