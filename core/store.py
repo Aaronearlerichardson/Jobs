@@ -458,27 +458,18 @@ def company_by_host(conn, url):
     host, path = _split_url(url)
     if not host:
         return None
-    domain = ".".join(host.split(".")[-2:])
     shared = bool(_SHARED_HOST_RE.search(host))
-    sibling = None
-    for c in conn.execute("SELECT * FROM companies ORDER BY id").fetchall():
-        c = dict(c)
-        for cand in (c.get("careers_url"), c.get("slug")):
-            if not cand or "." not in str(cand):
-                continue
-            if not re.match(r"https?://", str(cand), re.I):
-                cand = f"https://{cand}"
-            chost, cpath = _split_url(cand)
-            if not chost:
-                continue
-            if chost == host:
-                prefix = _board_prefix(cpath) if shared else ""
-                if not prefix or path.lower().startswith(prefix.lower()):
-                    return c
-            elif (not shared and sibling is None
-                  and ".".join(chost.split(".")[-2:]) == domain):
-                sibling = c
-    return sibling
+    idx = _company_index(conn)
+    for c, cpath in idx["by_host"].get(host, ()):
+        prefix = _board_prefix(cpath) if shared else ""
+        if not prefix or path.lower().startswith(prefix.lower()):
+            return c
+    if shared:
+        return None
+    for c, chost in idx["by_domain"].get(_domain(host), ()):
+        if chost != host:
+            return c
+    return None
 
 
 def board_key(r):
@@ -514,6 +505,64 @@ def board_key(r):
     return None
 
 
+def _domain(host):
+    """The registrable-ish tail of a host, the piece two sibling careers
+    hosts share ('jobs.acme.org' -> 'acme.org')."""
+    return ".".join(host.split(".")[-2:])
+
+
+def _company_index(conn):
+    """One scan of the companies table, shaped for the identity lookups
+    (company_by_host, company_by_board, dedup_companies) so none of them
+    re-walks and re-parses the roster on its own. Built per call, never
+    cached: every caller may have just written the row it is about to look
+    for.
+
+    Returns a dict:
+
+    * ``rows``       every row as a dict, id order
+    * ``by_board``   board_key -> rows with that board, id order
+    * ``by_host``    careers host -> [(row, path)], id order, a row's
+                     careers_url candidate before its URL-shaped slug
+    * ``by_domain``  _domain(host) -> [(row, host)], same order
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "A", "ats": "lever", "slug": "a",
+    ...                           "careers_url": "https://www.a.org/jobs/"})
+    >>> _ = upsert_company(conn, {"name": "B", "ats": "lever", "slug": "a"})
+    >>> idx = _company_index(conn)
+    >>> [r["name"] for r in idx["rows"]]
+    ['A', 'B']
+    >>> [r["name"] for r in idx["by_board"][("lever", "a")]]
+    ['A', 'B']
+    >>> [(r["name"], p) for r, p in idx["by_host"]["a.org"]]
+    [('A', '/jobs/')]
+    >>> [(r["name"], h) for r, h in idx["by_domain"]["a.org"]]
+    [('A', 'a.org')]
+    """
+    from collections import defaultdict
+
+    rows = [dict(r) for r in
+            conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
+    by_board, by_host, by_domain = defaultdict(list), defaultdict(list), defaultdict(list)
+    for c in rows:
+        key = board_key(c)
+        if key is not None:
+            by_board[key].append(c)
+        for cand in (c.get("careers_url"), c.get("slug")):
+            if not cand or "." not in str(cand):
+                continue
+            if not re.match(r"https?://", str(cand), re.I):
+                cand = f"https://{cand}"
+            chost, cpath = _split_url(cand)
+            if not chost:
+                continue
+            by_host[chost].append((c, cpath))
+            by_domain[_domain(chost)].append((c, chost))
+    return {"rows": rows, "by_board": by_board,
+            "by_host": by_host, "by_domain": by_domain}
+
+
 def company_by_board(conn, row):
     """The existing company row whose board matches `row`'s (see board_key),
     or None. Discovery resolves a pasted or harvested NAME to a board, and a
@@ -525,11 +574,8 @@ def company_by_board(conn, row):
     key = board_key(row)
     if key is None:
         return None
-    for c in conn.execute("SELECT * FROM companies").fetchall():
-        c = dict(c)
-        if board_key(c) == key:
-            return c
-    return None
+    matches = _company_index(conn)["by_board"].get(key)
+    return matches[0] if matches else None
 
 
 def dedup_companies(conn):
@@ -538,16 +584,9 @@ def dedup_companies(conn):
     ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
     those, so the crawl fetches one board several times. Jobs are re-pointed to
     the kept row and tags merge, so the merge is lossless. Returns rows merged."""
-    from collections import defaultdict
-
-    rows = [dict(r) for r in conn.execute("SELECT * FROM companies")]
+    groups = _company_index(conn)["by_board"]
     jobcount = {cid: n for cid, n in conn.execute(
         "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
-    groups = defaultdict(list)
-    for r in rows:
-        k = board_key(r)
-        if k:
-            groups[k].append(r)
 
     def keep_rank(r):
         # Prefer a scored row, then active, then most-referenced, then the
