@@ -12,20 +12,68 @@ Usage:
     python discover.py "climate tech startups"
     python discover.py "medical device companies hiring ML engineers"
     python discover.py --local          # employers in your [locality]
+
+Every flag except --from-bciwiki is the CLI spelling of an operation in
+core/ops_registry.py, the same table the web UI's roster buttons run from.
 """
 
 import argparse
 import sys
 
-from config import INCLUDE_KEYWORDS
-from discovery import (
-    apply_to_store,
-    bciwiki_seed_candidates,
-    discover,
-    discover_companies,
-    print_summary,
-    write_discovery_report,
-)
+import config
+from core import ops_registry
+
+
+def _op(name, params):
+    """A handler that runs registry op `name` with `params(args)`."""
+    def run(args):
+        ops_registry.invoke(name, params(args), track=None)
+    return run
+
+
+def _cmd_from_keywords(args):
+    for kw in config.INCLUDE_KEYWORDS:
+        ops_registry.invoke("discover-term", {
+            "term": kw, "no_report": args.no_report, "dry_run": args.dry_run},
+            track=None)
+
+
+def _cmd_from_bciwiki(args):
+    """A worked example of bulk-importing a public industry directory: the
+    BCIWiki company list, resolved to crawlable boards. Not a registry op —
+    it is directory-specific and only useful if that is your field."""
+    from discovery import (apply_to_store, bciwiki_seed_candidates,
+                           discover_companies, print_summary,
+                           write_discovery_report)
+    cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
+    print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
+    seeds = bciwiki_seed_candidates(categories=cats)
+    if args.limit:
+        seeds = seeds[: args.limit]
+    print(f"  > {len(seeds)} candidate(s) to resolve")
+    result = discover_companies(seeds, term=f"bciwiki:{','.join(cats)}",
+                                use_js=args.js)
+    print_summary(result)
+    if not args.no_report:
+        write_discovery_report(result)
+    for line in apply_to_store(result, dry_run=args.dry_run):
+        print(line)
+
+
+# In precedence order: the first whose flag is set runs and the process
+# exits. `dest` is the argparse attribute that selects it.
+_COMMANDS = [
+    ("from_keywords", _cmd_from_keywords),
+    ("from_bciwiki", _cmd_from_bciwiki),
+    ("local", _op("discover-local", lambda a: {})),
+    ("add_board", _op("add-board", lambda a: {
+        "name": a.add_board[0], "url": a.add_board[1], "capture": a.capture})),
+    ("score_missions", _op("score-missions", lambda a: {"rescore": a.rescore_missions})),
+    ("rescore_missions", _op("score-missions", lambda a: {"rescore": a.rescore_missions})),
+    ("resolve_leads", _op("resolve-leads", lambda a: {
+        "all_leads": a.all_leads, "limit": a.limit})),
+    ("dork", _op("dork", lambda a: {})),
+]
 
 
 def main():
@@ -100,69 +148,18 @@ def main():
     from core import bootstrap
     bootstrap.ensure_profile()
 
-    if args.from_keywords:
-        for kw in INCLUDE_KEYWORDS:
-            result = discover(kw)
-            print_summary(result)
-            if not args.no_report:
-                write_discovery_report(result)
-            for line in apply_to_store(result, dry_run=args.dry_run):
-                print(line)
-        return
-
-    if args.from_bciwiki:
-        cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
-        print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
-        seeds = bciwiki_seed_candidates(categories=cats)
-        if args.limit:
-            seeds = seeds[: args.limit]
-        print(f"  > {len(seeds)} candidate(s) to resolve")
-        result = discover_companies(seeds, term=f"bciwiki:{','.join(cats)}",
-                                    use_js=args.js)
-        print_summary(result)
-        if not args.no_report:
-            write_discovery_report(result)
-        for line in apply_to_store(result, dry_run=args.dry_run):
-            print(line)
-        return
-
-    if args.local:
-        from discovery.local_sourcing import populate_companies
-        populate_companies()
-        return
-
-    if args.add_board:
-        from discovery.local_sourcing import add_board
-        add_board(*args.add_board, capture=args.capture)
-        return
-
-    if args.score_missions or args.rescore_missions:
-        from discovery.local_sourcing import score_missions
-        score_missions(rescore_all=args.rescore_missions)
-        return
-
-    if args.resolve_leads:
-        from discovery.local_sourcing import resolve_leads
-        resolve_leads(all_leads=args.all_leads, limit=args.limit)
-        return
-
-    if args.dork:
-        from discovery.ats_dork import run_ddgs_dorks
-        added, checked = run_ddgs_dorks()
-        print(f"\n  {added} new NC board(s) added to the store "
-              f"({checked} extracted from dork results)")
-        return
+    for dest, handler in _COMMANDS:
+        if getattr(args, dest):
+            handler(args)
+            return
 
     if not args.term:
         ap.print_help()
         sys.exit(1)
 
-    result = discover(args.term)
-    print_summary(result)
-    if not args.no_report:
-        write_discovery_report(result)
-    for line in apply_to_store(result, dry_run=args.dry_run):
-        print(line)
+    ops_registry.invoke("discover-term", {
+        "term": args.term, "no_report": args.no_report, "dry_run": args.dry_run},
+        track=None)
 
 
 if __name__ == "__main__":

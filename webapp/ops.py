@@ -1,14 +1,15 @@
-"""Background operation registry + runner (one op at a time, console tee'd
-to the browser via /api/run/status polling)."""
+"""Background operation runner (one op at a time, console tee'd to the
+browser via /api/run/status polling), and the web UI's view of the shared
+operation table in core/ops_registry.py."""
 
+import functools
 import io
 import sys
 import threading
 from datetime import datetime
 
 import config
-from core import claude, session_log, store
-from scrapers import ops as maint
+from core import claude, ops_registry, session_log
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
         "started": None, "ended": None, "error": None, "active": False}
@@ -178,233 +179,16 @@ def _int(p, key, default=None):
     return int(v) if v else default
 
 
-def _op_track(p):
-    """The track cfg an op should run against (api_run injects p["track"])."""
-    return config.UI_TRACKS.get(p.get("track") or config.DEFAULT_TRACK)
-
-
-def _op_crawl(p):
-    """ONE crawl command for every track: scrapers/runner.run_track, the
-    single pipeline whose methodology (keyword handling, source families,
-    gates, scoring budget, digest/email) comes entirely from the track's
-    profile.toml [tracks.*] config. The track's keyword focus swaps the
-    shared keyword lists — _run_op restores the baseline before every op,
-    so runs can't leak keywords into each other."""
-    from scrapers import runner
-    runner.run_track(
-        _op_track(p), commit=True,
-        fit=not p.get("no_fit"),
-        verify=False if p.get("no_verify") else None,   # None = track config
-        websearch=False if p.get("no_websearch") else None,
-        confirm_cost=bool(p.get("confirm_cost")),
-        max_workers=_int(p, "workers", 6),
-        top_n=_int(p, "top", 15))
-
-
-def _op_nlx(p):
-    """Pull postings for bot-gated employers (Meta/Google/Qualcomm...) from
-    the federal NLx feed and run them through the standard ingest."""
-    from scrapers.fetchers.careeronestop import fetch_nlx_company
-    names = [n.strip() for n in (p.get("companies") or "").split(",") if n.strip()]
-    if not names:
-        print("  [!] give a comma-separated list of employer names")
-        return
-    total = 0
-    for name in names:
-        jobs = fetch_nlx_company(name)
-        print(f"  {name}: {len(jobs)} NLx posting(s)")
-        if jobs:
-            total += maint.ingest_external_jobs(jobs, source="nlx",
-                                                t=_op_track(p))
-    print(f"  {total} new job(s) ingested from the NLx feed.")
-
-
-# The bulk-discovery ops (discover-local, dork, discover-term) are slow (a
-# discover-local pass can hold the single op slot for half an hour) and
-# low-yield now that the roster is saturated, but they stay available here
-# as well as on the CLI (`python discover.py --local / --dork / "<term>"`).
-# Every path, bulk or targeted, writes candidates to the Review queue;
-# nothing goes live until a person confirms it.
-
-
-def _op_add_names(p):
-    """Resolve the names a person ticked in the Review step.
-
-    `params["names"]` is the confirmed LIST from /api/names/preview; a raw
-    string is still accepted (add_names parses it) so an older client, or a
-    scripted POST, keeps working."""
-    from discovery.paste_ingest import add_names
-    add_names(p.get("names") or [], use_llm=bool(p.get("use_llm")))
-
-
-def _op_prune(p):
-    conn = store.connect(_op_track(p)["db_path"])
-    try:
-        maint.prune_dead_boards(
-            conn, deactivate_offmission=bool(p.get("offmission")))
-    finally:
-        conn.close()
-
-
-def _op_discover(p):
-    """Free-text sector discovery, the discover.py path reachable from the
-    UI: ask Claude for likely employers matching a sector/term, probe each
-    against the ATS registry, and (matching the CLI's apply-by-default)
-    queue the confirmed ones unless the caller asked for a dry run.
-
-    This helper was lost in a refactor while the OPS entry that calls it
-    survived, so the button raised NameError (found by pyflakes 2026-09-10).
-    """
-    from discovery import apply_to_store, discover, print_summary, write_discovery_report
-    term = (p.get("term") or "").strip()
-    if not term:
-        print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
-        return
-    result = discover(term)
-    print_summary(result)
-    if not p.get("no_report"):
-        write_discovery_report(result)
-    for line in apply_to_store(result, dry_run=bool(p.get("dry_run"))):
-        print(line)
-
-
-def _op_dedup(p):
-    conn = store.connect(_op_track(p)["db_path"])
-    try:
-        store.dedup_companies(conn)
-        store.dedup_jobs(conn)
-    finally:
-        conn.close()
-
-
-# Each op declares which crawl ENGINE it needs ("local" = the location-scoped
-# crawler, "sweep" = the location-agnostic one — scrapers/runner.py;
-# None = engine-agnostic, runs against whichever track is active). Ops are
-# matched to the active track by its profile-configured `engine` — never by
-# the user-chosen track id.
+# The operations, from the ONE registry shared with the CLIs. Each entry
+# keeps the {label, engine, fn} shape routes.py and the tests read: `engine`
+# is the crawl engine the op needs ("local" = the location-scoped crawler,
+# "sweep" = the location-agnostic one — scrapers/runner.py; None = any
+# track), matched against the active track's profile-configured engine and
+# never against a user-chosen track id. `fn(params)` takes the JSON the
+# browser POSTed (api_run injects params["track"]) and runs the op through
+# ops_registry.invoke, which coerces the params and imports the target.
 OPS = {
-    "crawl": {
-        "label": "Crawl",
-        "engine": None,   # one command for every track — dispatches on engine
-        "fn": lambda p: _op_crawl(p),
-    },
-    "sync": {
-        "label": "Sync statuses",
-        "engine": None,
-        "fn": lambda p: maint.sync_status_all(top_n=_int(p, "top", 15),
-                                              t=_op_track(p)),
-    },
-    "verify": {
-        "label": "Deep-verify top N",
-        "engine": None,
-        "fn": lambda p: maint.verify_top_cli(top_n=_int(p, "top", 15),
-                                             max_workers=4, t=_op_track(p),
-                                             force=bool(p.get("force"))),
-    },
-    "check-closed": {
-        "label": "Probe stale URLs",
-        "engine": None,
-        "fn": lambda p: maint.check_closed_jobs(
-            stale_days=_int(p, "stale_days", 2), limit=_int(p, "limit"),
-            t=_op_track(p)),
-    },
-    "triage": {
-        "label": "Triage harvested rows",
-        "engine": None,
-        "fn": lambda p: __import__("scrapers.triage", fromlist=["run"]).run(
-            db_path=_op_track(p)["db_path"], limit=_int(p, "limit"),
-            **({"score_cap": _int(p, "score_cap")}
-               if _int(p, "score_cap") is not None else {})),
-    },
-    "rescore": {
-        "label": "Rescore all",
-        "engine": None,
-        "fn": lambda p: maint.rescore_all(
-            described_only=bool(p.get("described_only", True)),
-            t=_op_track(p)),
-    },
-    "backfill-descriptions": {
-        "label": "Backfill descriptions",
-        "engine": None,
-        "fn": lambda p: maint.backfill_board_descriptions(
-            limit=_int(p, "limit"), t=_op_track(p)),
-    },
-    "backfill-workday": {
-        "label": "Backfill Workday JDs",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "scrapers.fetchers.workday",
-            fromlist=["backfill_workday_descriptions"]
-        ).backfill_workday_descriptions(limit=_int(p, "limit")),
-    },
-    "nlx": {
-        "label": "NLx ingest",
-        "engine": "local",
-        "fn": lambda p: _op_nlx(p),
-    },
-    "add-names": {
-        "label": "Add companies from pasted text",
-        "engine": "local",
-        "fn": lambda p: _op_add_names(p),
-    },
-    "discover-local": {
-        "label": "Discover local companies",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.local_sourcing",
-            fromlist=["populate_companies"]
-        ).populate_companies(dork=not p.get("no_dork")),
-    },
-    "dork": {
-        "label": "ATS dork sweep",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.ats_dork", fromlist=["run_ddgs_dorks"]
-        ).run_ddgs_dorks(),
-    },
-    "discover-term": {
-        "label": "Discover companies by term",
-        "engine": "local",
-        "fn": lambda p: _op_discover(p),
-    },
-    "score-missions": {
-        "label": "Score missions",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.local_sourcing",
-            fromlist=["score_missions"]
-        ).score_missions(rescore_all=bool(p.get("rescore"))),
-    },
-    "add-board": {
-        "label": "Add company board",
-        "engine": "local",
-        "fn": lambda p: __import__(
-            "discovery.local_sourcing", fromlist=["add_board"]
-        ).add_board((p.get("name") or "").strip(), (p.get("url") or "").strip()),
-    },
-    "reresolve": {
-        "label": "Retry unresolved companies",
-        "engine": None,   # any track
-        "fn": lambda p: maint.reresolve_misses(
-            limit=_int(p, "limit", 50), days=_int(p, "days"),
-            t=_op_track(p)),
-    },
-    "prune": {
-        "label": "Prune dead boards",
-        "engine": None,   # any track
-        "fn": lambda p: _op_prune(p),
-    },
-    "dedup": {
-        "label": "Dedup companies",
-        "engine": None,   # any track
-        "fn": lambda p: _op_dedup(p),
-    },
-    "add-job": {
-        "label": "Add manual job",
-        "engine": None,
-        "fn": lambda p: maint.add_manual_job(
-            url=p.get("url", ""), title=p.get("title", ""),
-            company=p.get("company", ""), location=p.get("location", ""),
-            t=_op_track(p)),
-    },
+    name: {"label": e["label"], "engine": e["engine"],
+           "fn": functools.partial(ops_registry.invoke, name)}
+    for name, e in ops_registry.ui_ops().items()
 }

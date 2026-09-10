@@ -131,7 +131,9 @@ class TestWebOpPassesTheTickBox:
     def test_verify_op_forwards_force(self, monkeypatch):
         from webapp import ops as web_ops
         seen = {}
-        monkeypatch.setattr(web_ops.maint, "verify_top_cli",
+        # The registry resolves "scrapers.ops:verify_top_cli" at call time,
+        # so patching the target module is enough.
+        monkeypatch.setattr("scrapers.ops.verify_top_cli",
                             lambda **kw: seen.update(kw))
         web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
         assert seen["force"] is True and seen["top_n"] == 5
