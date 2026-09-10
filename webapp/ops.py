@@ -7,7 +7,7 @@ import threading
 from datetime import datetime
 
 import config
-from core import session_log, store
+from core import claude, session_log, store
 from scrapers import ops as maint
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
@@ -123,6 +123,10 @@ def _run_op(name, fn):
         tee = _Tee(orig, sink=slog)
         sys.stdout = tee
         try:
+            # Re-arm the unrecoverable-API-error breaker: it is process-
+            # lifetime and this server process outlives many operations
+            # (see core.claude.reset_breaker).
+            claude.reset_breaker()
             _restore_keywords()
             fn()
         except Exception as e:

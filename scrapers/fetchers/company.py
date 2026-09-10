@@ -253,13 +253,24 @@ def _wd_location_facets(api, hdr, loc_re):
     callers fall back to free-text search. Solves tenants like Labcorp
     whose searchText ignores state names ('North Carolina' -> 2 hits vs
     191 real NC reqs across 46 city facet values)."""
+    return _wd_facets_and_total(api, hdr, loc_re)[0]
+
+
+def _wd_facets_and_total(api, hdr, loc_re):
+    """(_wd_location_facets result, the board's UNSCOPED posting total) from
+    the one page-0 call both come from; total is None when the call fails.
+    The total is what lets a scoped pull notice that its scope did nothing
+    (see _wd_scope_failed)."""
     try:
         r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1,
                                     "offset": 0, "searchText": ""},
                          timeout=config.FETCH_TIMEOUT, headers=hdr)
-        facets = r.json().get("facets", []) or []
+        data = r.json()
+        facets = data.get("facets", []) or []
+        total = data.get("total")
+        total = int(total) if isinstance(total, (int, float)) else None
     except Exception:
-        return {}
+        return {}, None
 
     applied = {}
 
@@ -274,7 +285,47 @@ def _wd_location_facets(api, hdr, loc_re):
         if re.search(r"location|country|region|city|state",
                      f.get("facetParameter") or "", re.I):
             walk(f.get("values"), f.get("facetParameter"))
-    return applied
+    return applied, total
+
+
+def _wd_scope_failed(scoped_total, board_total, cap):
+    """Whether a locality-scoped Workday listing came back unnarrowed.
+
+    A scope that returns as many postings as the whole board, or at least
+    `cap` (the most the pager will ever read), did nothing: the tenant
+    ignored the facet or the search text. 2026-09-09: NVIDIA's board
+    answered every scoped call with all 2000 reqs for a day; the pull read
+    60 pages, detail-fetched 1,199 "N Locations" rows to rescue them (531s
+    of an 872s crawl), and kept all 1,200 as local.
+
+    >>> _wd_scope_failed(82, 2000, 1200)
+    False
+    >>> _wd_scope_failed(2000, 2000, 1200)
+    True
+    >>> _wd_scope_failed(1300, None, 1200)
+    True
+    >>> _wd_scope_failed(None, 2000, 1200)
+    False
+    >>> _wd_scope_failed(0, 0, 1200)
+    False
+    """
+    if not isinstance(scoped_total, (int, float)) or scoped_total <= 0:
+        return False
+    if isinstance(board_total, (int, float)) and board_total > 0 \
+            and scoped_total >= board_total:
+        return True
+    return scoped_total >= cap
+
+
+# Detail GETs a single board pull may spend expanding "N Locations" rows.
+# Each is a request plus the politeness pause; a scoped board needing more
+# than this has a scope that failed (caught by _wd_scope_failed) or is a
+# multi-site conglomerate whose remaining rows are not worth the wait.
+_WD_RESCUE_CAP = 150
+# Pages a board pull reads at most (x page_size 20 = the 1,200-row cap the
+# funnel shows for Abbott, J&J, Aah). A scoped total at or past it is one
+# the scope never narrowed.
+_WD_MAX_PAGES = 60
 
 
 def _default_search_text():
@@ -292,7 +343,7 @@ def _default_search_text():
 
 
 def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
-                      page_size=20, max_pages=60):
+                      page_size=20, max_pages=_WD_MAX_PAGES):
     """List postings (title/location/path only). Descriptions hydrated later.
 
     Location scoping, most-precise first:
@@ -314,9 +365,9 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     link = f"{host}/en-US/{site}"
     hdr = _wd_cxs_headers()
 
-    applied_facets = {}
+    applied_facets, board_total = {}, None
     if loc_re is not None:
-        applied_facets = _wd_location_facets(api, hdr, loc_re)
+        applied_facets, board_total = _wd_facets_and_total(api, hdr, loc_re)
     # Never send a location term on a whole-board pull: loc_re=None IS the
     # request for everything, and narrowing it anyway silently hid every
     # out-of-area posting from callers that asked for the full board.
@@ -327,37 +378,69 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                   {"appliedFacets": {}, "searchText": search_text})
 
     out = []
+    scope_failed = False   # the scope came back unnarrowed (see below)
+    rescues = 0            # detail GETs spent on "N Locations" rows
     for page in range(max_pages):
         try:
             r = SESSION.post(api, json={**body_extra, "limit": page_size,
                                         "offset": page * page_size},
                              timeout=config.FETCH_TIMEOUT, headers=hdr)
-            posts = r.json().get("jobPostings", []) or []
+            data = r.json()
+            posts = data.get("jobPostings", []) or []
         except Exception as e:
             print(f"    [!] workday {tenant} p{page}: {e}")
             break
         if not posts:
             break
+        if page == 0 and loc_re is not None and _wd_scope_failed(
+                data.get("total"), board_total, page_size * max_pages):
+            # The tenant ignored the facet/search text: every row is here,
+            # not just the local ones, so the facet no longer vouches for
+            # anything and a per-row detail rescue would GET the whole
+            # board. Keep only rows whose LISTED location matches.
+            scope_failed = True
+            print(f"    [!] workday {tenant}: locality scope came back "
+                  f"unnarrowed ({data.get('total')} of {board_total or '?'} "
+                  f"postings) - keeping listed-location matches only, no "
+                  f"detail rescue")
         for p in posts:
             loc = p.get("locationsText", "") or ""
             path = p.get("externalPath", "") or ""
-            if not _loc_ok(loc_re, loc):
+            if scope_failed:
+                slug_loc = _wd_path_location(path)
+                if _loc_ok(loc_re, loc):
+                    pass
+                elif _loc_ok(loc_re, slug_loc):
+                    loc = f"{slug_loc}" + (f" ({loc})" if loc else "")
+                else:
+                    continue
+            elif not _loc_ok(loc_re, loc):
                 # Rescue 1: the externalPath's location slug (free).
                 slug_loc = _wd_path_location(path)
                 if _loc_ok(loc_re, slug_loc):
                     loc = f"{slug_loc}" + (f" ({loc})" if loc else "")
                 # Rescue 2: "N Locations" rows — full list via CXS detail.
                 elif _WD_N_LOCATIONS_RE.match(loc) and path:
-                    locs = _wd_detail_locations(tenant, pod, site, path)
-                    if not any(_loc_ok(loc_re, l) for l in locs):
-                        continue
-                    loc = "; ".join(locs)
+                    if rescues >= _WD_RESCUE_CAP:
+                        # Budget spent. A facet-scoped listing vouched the
+                        # row is in-area: keep it on its listed text. A
+                        # search-text one did not: unknown stays out.
+                        if not applied_facets:
+                            continue
+                    else:
+                        rescues += 1
+                        locs = _wd_detail_locations(tenant, pod, site, path)
+                        if not any(_loc_ok(loc_re, l) for l in locs):
+                            continue
+                        loc = "; ".join(locs)
                 else:
                     continue
-            elif _WD_N_LOCATIONS_RE.match(loc) and path:
+            elif (_WD_N_LOCATIONS_RE.match(loc) and path
+                  and rescues < _WD_RESCUE_CAP):
                 # Facet-filtered fetch already vouches this req is in-area,
                 # but "2 Locations" is useless downstream (geo_mode, ranking
                 # location filters) — resolve the real list.
+                rescues += 1
                 locs = _wd_detail_locations(tenant, pod, site, path)
                 if locs:
                     loc = "; ".join(locs)
@@ -371,7 +454,58 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                                                       or p.get("postedOn"))})
         if len(posts) < page_size:
             break
+    if rescues >= _WD_RESCUE_CAP:
+        print(f"    [!] workday {tenant}: \"N Locations\" detail budget "
+              f"({_WD_RESCUE_CAP}) spent; later multi-site rows "
+              f"{'kept unexpanded' if applied_facets else 'dropped'}")
     return out
+
+
+def wd_local_count(tenant, pod, site, loc_re, search_text=None, page_size=20,
+                   sample_pages=5):
+    """How many of a Workday board's postings are in `loc_re`'s area, the
+    way fetch_workday_all would scope them: the facet-scoped (else
+    search-text-scoped) total when the scope narrowed the board, otherwise
+    a count over the first `sample_pages` pages by LISTED location only.
+
+    The discovery probe used to trust the scoped total outright, and wrote
+    local_job_count = total_job_count = 1200 for NVIDIA on 2026-09-09 when
+    the tenant ignored its search text (the crawl then pulled the whole
+    board). Returns 0 when the board cannot be read at all."""
+    host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
+    api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
+    hdr = _wd_cxs_headers()
+    applied, board_total = _wd_facets_and_total(api, hdr, loc_re)
+    if search_text is None:
+        search_text = _default_search_text()
+    body = ({"appliedFacets": applied, "searchText": ""} if applied
+            else {"appliedFacets": {}, "searchText": search_text})
+    try:
+        r = SESSION.post(api, json={**body, "limit": 1, "offset": 0},
+                         timeout=config.PROBE_TIMEOUT, headers=hdr)
+        scoped = int(r.json().get("total", 0) or 0)
+    except Exception:
+        return 0
+    if not _wd_scope_failed(scoped, board_total, page_size * _WD_MAX_PAGES):
+        return scoped
+    n = 0
+    for page in range(sample_pages):
+        try:
+            r = SESSION.post(api, json={"appliedFacets": {}, "searchText": "",
+                                        "limit": page_size,
+                                        "offset": page * page_size},
+                             timeout=config.PROBE_TIMEOUT, headers=hdr)
+            posts = r.json().get("jobPostings", []) or []
+        except Exception:
+            break
+        for p in posts:
+            loc = p.get("locationsText", "") or ""
+            if _loc_ok(loc_re, loc) or _loc_ok(
+                    loc_re, _wd_path_location(p.get("externalPath", "") or "")):
+                n += 1
+        if len(posts) < page_size:
+            break
+    return n
 
 
 def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):

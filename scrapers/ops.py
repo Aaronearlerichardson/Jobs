@@ -460,11 +460,15 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     re-ranks and repeats up to `rounds` times.
 
     Unverifiable rows (dead URL and no stored body, API down) keep their
-    first-pass score untouched. Costs at most top_n x rounds API calls per
+    first-pass score untouched; once core.claude's breaker has disabled the
+    API for this run the pass stops with ONE line instead of a per-row
+    'unverified' (2026-09-09: 121 rows x 2 rounds x 2 runs, every live JD
+    fetched for nothing). Costs at most top_n x rounds API calls per
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
     `force=True` re-verifies every finalist regardless."""
-    from core.fit import verify_fit, verify_model
+    from core.claude import api_disabled
+    from core.fit import FitResult, verify_fit, verify_model
     t = _t(t)
     current = verify_model()
     done_ids = set()   # verified THIS run: never stale again, even under force
@@ -481,6 +485,15 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
         conn = store.connect(t["db_path"])
     n_done = 0
     for rnd in range(rounds):
+        down = api_disabled()
+        if down:
+            # Tripped before this round (the crawl's screen pass, or an
+            # earlier round here): nothing below can score, so say so once
+            # instead of fetching every finalist's live JD to print
+            # '[?] kept' per row.
+            print(f"  [!] deep verify skipped: Claude API disabled for this "
+                  f"run ({down})")
+            break
         ranked = _ranked(conn, t, limit=top_n)
         todo = [r for r in ranked if _stale(r)]
         if not todo:
@@ -490,11 +503,17 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
               f"{', forced' if force else ''})...")
 
         def _one(r):
+            # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
+            # verify call hit an exhausted credit balance). A row the API
+            # can no longer score doesn't need its live JD fetched.
+            if api_disabled():
+                return r, None, FitResult(score=None, reason="api disabled")
             text = _live_jd(r)
             return r, text, verify_fit(r["title"], text,
                                        location=r.get("location") or "")
 
         n_scored = n_crushed = 0
+        halted = None
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             for fut in as_completed({ex.submit(_one, r): r for r in todo}):
                 try:
@@ -503,6 +522,12 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                     print(f"    [!] verify error: {e}")
                     continue
                 if res.score is None:
+                    halted = api_disabled()
+                    if halted:
+                        # One line for the round, not one '[?] kept' per
+                        # finalist; rows still queued never start.
+                        ex.shutdown(wait=False, cancel_futures=True)
+                        break
                     print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
                     continue
                 store.update_job_scores(conn, r["job_id"], res.as_columns())
@@ -522,6 +547,11 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                 n_scored += 1
                 if isinstance(old, float) and res.score < old - 0.25:
                     n_crushed += 1
+        if halted:
+            print(f"  [!] deep verify halted: Claude API disabled for this run "
+                  f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
+                  f"first-pass score")
+            break
         # Tripwire: the two passes disagreeing WHOLESALE is a calibration or
         # parsing defect, not information. Stop instead of compounding.
         if n_scored >= 5 and n_crushed / n_scored >= 0.8:
@@ -985,6 +1015,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from discovery.local_sourcing import (_board_already_tracked,
                                           _report_dup_board, _sample_titles,
                                           resolve_or_miss)
+    from discovery.names import junk_name_reason
 
     t = _t(t)
     own_conn = conn is None
@@ -992,6 +1023,18 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         conn = store.connect(t["db_path"])
     try:
         rows = _reresolve_candidates(conn, days=days, names=names, limit=limit)
+        # Misses recorded before the paste screen existed include section
+        # headings and category nouns ("Required Qualifications",
+        # "Proficiency in SQL.", "Oncology"). Re-stamp them into the
+        # 'junk-name' family, which no pass retries, instead of paying a
+        # sniff, two web searches and a stall slot for each again.
+        junk = [(r, junk_name_reason(r["name"])) for r in rows]
+        for r, why in junk:
+            if why:
+                store.record_miss(conn, r["name"], f"junk-name:{why}")
+                print(f"    [junk]    {r['name'][:30]:30} {why} - retired "
+                      f"from the retry queue")
+        rows = [r for r, why in junk if not why]
         if not rows:
             print("  no re-resolvable misses "
                   f"(families: {', '.join(RERESOLVE_FAMILIES)}).")

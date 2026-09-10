@@ -123,6 +123,139 @@ def strip_suffixes(name):
     return re.sub(r"\s+", " ", s).strip()
 
 
+# --- junk-name screen -------------------------------------------------------
+# Words that, alone, name a job-posting section or a category rather than an
+# employer. A pasted posting yields "Required Qualifications", "Proficiency
+# in SQL." and "Oncology" as readily as it yields the employer, and each one
+# that reaches resolution costs a careers-page sniff (a dozen guessed URLs),
+# two web searches and a mission call (2026-09-01 add-names, 2026-09-02
+# reresolve logs).
+_JUNK_SECTION_WORDS = frozenset({
+    "qualifications", "qualification", "requirements", "requirement",
+    "responsibilities", "responsibility", "proficiency", "proficient",
+    "experience", "skills", "skill", "benefits", "salary", "compensation",
+    "preferred", "required", "results", "result", "title", "summary",
+    "description", "overview", "about", "apply", "applicants", "duties",
+    "education", "degree", "years", "location", "remote", "hybrid",
+    "onsite", "on-site", "position", "positions", "role", "roles", "job",
+    "jobs", "career", "careers", "posted", "ago", "full-time", "part-time",
+})
+# Category nouns a name may consist of ENTIRELY without naming anyone:
+# "Oncology", "Medical Devices", "Health Care Services".
+_JUNK_CATEGORY_WORDS = frozenset({
+    "oncology", "medical", "devices", "device", "health", "healthcare",
+    "care", "services", "service", "biotech", "biotechnology", "pharma",
+    "pharmaceutical", "pharmaceuticals", "software", "engineering",
+    "research", "clinical", "data", "analytics", "technology",
+    "technologies", "university", "hospital", "laboratory", "laboratories",
+    "science", "sciences", "life", "solutions", "consulting", "staffing",
+    "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
+    "group", "team", "company", "companies", "industry", "industries",
+})
+_JUNK_LOCATION_RE = re.compile(
+    r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
+    re.IGNORECASE)
+_JUNK_PREFIX_RE = re.compile(r"^\s*(?:\d+\+?\s*results?|\d+\s+jobs?)\b",
+                             re.IGNORECASE)
+_TRAILING_NUMBER_RE = re.compile(r"^(.*\S)\s+\d{1,2}$")
+_LEGAL_ABBREV_RE = re.compile(
+    r"\b(?:inc|co|corp|ltd|llc|plc|sa|ag|gmbh|bv|nv|jr|sr)\.$", re.IGNORECASE)
+
+
+def junk_name_reason(name):
+    """Why `name` is not an employer, or '' when it may be one.
+
+    A screen, not a verdict: it rejects only the shapes that a pasted job
+    posting or a scraped listing produces and a real company name never
+    does. Every reason is a stable token for a miss_reason qualifier.
+
+    Section headings and requirement fragments:
+
+    >>> junk_name_reason("Required Qualifications")
+    'section-heading'
+    >>> junk_name_reason("Proficiency in SQL.")
+    'section-heading'
+    >>> junk_name_reason("Title")
+    'section-heading'
+
+    Sentence fragments end in punctuation a name never carries:
+
+    >>> junk_name_reason("Experience with Python and R.")
+    'section-heading'
+    >>> junk_name_reason("We are hiring:")
+    'sentence-fragment'
+
+    A category is not a company:
+
+    >>> junk_name_reason("Oncology")
+    'category-only'
+    >>> junk_name_reason("Medical Devices")
+    'category-only'
+
+    Location strings and search-result chrome:
+
+    >>> junk_name_reason("Raleigh-Durham-Chapel Hill Area (On-site)")
+    'location-string'
+    >>> junk_name_reason("99+ results")
+    'listing-chrome'
+
+    A numbered copy of a name ("Fairwai 1", "Luna Physical Therapy 1") is a
+    scraper's duplicate marker, not a second employer:
+
+    >>> junk_name_reason("Luna Physical Therapy 1")
+    'numbered-duplicate'
+
+    Too short, too long, or empty:
+
+    >>> junk_name_reason("A")
+    'too-short'
+    >>> junk_name_reason("Senior data engineer to build the pipelines that power our platform")
+    'too-long'
+    >>> junk_name_reason("")
+    'empty'
+
+    Real names pass, including ones that contain a category or section
+    word alongside a proper noun, a legal suffix, or a number that is part
+    of the name:
+
+    >>> [junk_name_reason(n) for n in ("Beacon Biosignals", "Judi Health",
+    ...     "SAS Institute", "Cala Health, Inc.", "3M", "Studio 54",
+    ...     "Duke University", "Blue Cross NC", "Q2 Solutions", "IBM")]
+    ['', '', '', '', '', '', '', '', '', '']
+    """
+    s = (name or "").strip()
+    if not s:
+        return "empty"
+    if _JUNK_PREFIX_RE.match(s):
+        return "listing-chrome"
+    if _JUNK_LOCATION_RE.search(s):
+        return "location-string"
+    words = name_words(s)
+    if not words or (len(s) < 2):
+        return "too-short"
+    if len(words) > 7:
+        return "too-long"
+    if s[-1] in ".:;,!?" and not _LEGAL_ABBREV_RE.search(s):
+        # A trailing period belongs to a legal abbreviation ("Cala Health,
+        # Inc.") or to a sentence; any other end punctuation to a sentence.
+        if s[-1] == "." and any(w in _JUNK_SECTION_WORDS for w in words):
+            return "section-heading"
+        return "sentence-fragment"
+    if all(w in _JUNK_SECTION_WORDS or w in {"in", "with", "and", "or", "of", "the", "a", "to"}
+           for w in words):
+        return "section-heading"
+    if words[0] in _JUNK_SECTION_WORDS and len(words) >= 2 and words[1] in (
+            _JUNK_SECTION_WORDS | {"in", "with", "of"}):
+        return "section-heading"
+    if all(w in _JUNK_CATEGORY_WORDS for w in words):
+        return "category-only"
+    m = _TRAILING_NUMBER_RE.match(s)
+    if m and len(words) >= 2 and not re.search(r"\d", m.group(1)) \
+            and m.group(1).split()[-1].lower() not in {"studio", "area", "channel", "route", "no", "number"}:
+        return "numbered-duplicate"
+    return ""
+
+
 def _dedupe(items):
     out, seen = [], set()
     for t in items:

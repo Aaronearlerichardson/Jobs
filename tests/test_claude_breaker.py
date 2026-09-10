@@ -98,3 +98,22 @@ def test_persistent_500_gives_up_without_tripping(api):
     # 5xx is transient — the next call must still reach the API.
     claude.call_claude_json("sys", "user", cache=False)
     assert len(calls) == 2 * (1 + len(claude._RETRY_DELAYS))
+
+
+def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
+    """The web UI runs many operations in one process (webapp/ops._run_op).
+    On 2026-09-09 a crawl tripped the breaker on an exhausted balance and the
+    next two verify runs skipped every call silently — the banner prints once
+    per trip. Re-arming per operation makes a topped-up balance take effect
+    without a server restart, and a still-dead API fails once and explains
+    itself again."""
+    responses, calls = api
+    responses.append(_Resp(400, body='{"message":"Your credit balance is '
+                                     'too low to access the Anthropic API."}'))
+    claude.call_claude_json("sys", "user", cache=False)
+    assert claude.api_disabled() and len(calls) == 1
+    claude.reset_breaker()
+    assert claude.api_disabled() is None
+    claude.call_claude_json("sys", "user", cache=False)
+    assert len(calls) == 2                       # reached the API again
+    assert capsys.readouterr().out.count("Claude API disabled") == 2

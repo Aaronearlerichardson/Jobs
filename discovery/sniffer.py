@@ -13,10 +13,12 @@ This merges the two sniffers built independently on the remote-neural and
 import html
 import logging
 import re
+import socket
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import wait as fut_wait
 
 import requests
 from bs4 import BeautifulSoup, SoupStrainer
@@ -480,19 +482,94 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
     return resp
 
 
+# Per-host DNS verdicts for the run, host -> (time recorded, resolved?).
+# Most candidate hosts are name-guesses that do not exist; each path on one
+# used to pay the OS resolver's full failure latency, and the candidates for
+# a name are fetched CONCURRENTLY, so a dead host's five paths all paid it
+# before _DEAD_HOSTS could learn anything. On a machine whose resolver is
+# refusing or timing out (VPN plus a second adapter, 2026-09-02 reresolve:
+# 32 names abandoned by the stall watchdog at once, 2 of 50 resolved), that
+# was minutes per name. Resolve each host ONCE, bounded, before any GET.
+_DNS_CACHE = {}
+_DNS_TIMEOUT = 4.0
+
+
+def _host_of(url):
+    m = re.match(r"https?://([^/]+)", url or "")
+    return m.group(1).lower() if m else ""
+
+
+def _resolves(host):
+    """Whether `host` has an address, cached per run. A failure marks the
+    host dead for _fetch_page (see _DEAD_HOSTS); a success is remembered so
+    the next stage's rebuilt candidate list does not ask again."""
+    with _DEAD_HOSTS_LOCK:
+        hit = _DNS_CACHE.get(host)
+        if hit is not None and time.time() - hit[0] < _DEAD_HOST_TTL:
+            return hit[1]
+    try:
+        socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        ok = True
+    except OSError:
+        ok = False
+    with _DEAD_HOSTS_LOCK:
+        _DNS_CACHE[host] = (time.time(), ok)
+    if not ok:
+        _mark_dead_host(f"https://{host}/")
+        _log.debug("skip host %s: does not resolve", host)
+    return ok
+
+
+def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
+    """`urls` minus every one whose host is known dead or fails a bounded
+    DNS lookup. Distinct hosts are resolved concurrently; a host the
+    resolver has not answered within `timeout` is skipped for THIS call
+    (not marked dead: a slow resolver is not a missing name) and its lookup
+    thread is left to finish on its own."""
+    hosts = {}
+    for u in urls:
+        h = _host_of(u)
+        if h:
+            hosts.setdefault(h, []).append(u)
+    todo = [h for h in hosts if not _dead_host(f"https://{h}/")]
+    with _DEAD_HOSTS_LOCK:
+        todo = [h for h in todo
+                if not (_DNS_CACHE.get(h) and
+                        time.time() - _DNS_CACHE[h][0] < _DEAD_HOST_TTL)]
+    slow = set()
+    if todo:
+        ex = ThreadPoolExecutor(max_workers=min(8, len(todo)))
+        futs = {ex.submit(_resolves, h): h for h in todo}
+        _done, pending = fut_wait(futs, timeout=timeout)
+        for f in pending:
+            slow.add(futs[f])
+            _log.debug("skip host %s this pass: resolver silent for %.0fs",
+                       futs[f], timeout)
+        ex.shutdown(wait=False, cancel_futures=True)
+    return [u for u in urls
+            if _host_of(u) not in slow and not _dead_host(u)]
+
+
 def _fetch_all(urls):
     """Fetch candidates concurrently (a miss otherwise pays ~12 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
-    evaluated in priority order regardless of completion order.
+    evaluated in priority order regardless of completion order. Every
+    requested URL is a key of the result; one on a host that does not
+    resolve (see _drop_unresolvable) maps to None without a GET.
 
     These are GUESSES — `<token>.io`, `<token>.co`, `careers.<token>.com` —
     so their robots.txt failures are expected and say nothing worth logging;
     `robots.quiet()` keeps the notice for hosts we actually mean to crawl.
     """
     from scrapers import robots
+    out = dict.fromkeys(urls)
+    live = _drop_unresolvable(urls)
+    if not live:
+        return out
     with robots.quiet():
-        with ThreadPoolExecutor(max_workers=min(8, len(urls))) as pool:
-            return dict(zip(urls, pool.map(_fetch_page, urls)))
+        with ThreadPoolExecutor(max_workers=min(8, len(live))) as pool:
+            out.update(zip(live, pool.map(_fetch_page, live)))
+    return out
 
 
 def _pack(ats, slug, careers_url):

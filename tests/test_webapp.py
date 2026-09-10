@@ -612,3 +612,26 @@ class TestOpConcurrency:
         n = len(ops.TASK["log"])
         print("this line belongs to no operation")
         assert len(ops.TASK["log"]) == n
+
+
+class TestOpRearmsTheClaudeBreaker:
+    """core.claude's breaker is process-lifetime; the server process outlives
+    many operations. 2026-09-09: a crawl tripped it at 18:22, and the verify
+    runs at 18:29 and 19:24 skipped every Claude call without saying why."""
+
+    def test_run_op_resets_a_tripped_breaker(self, monkeypatch):
+        import time
+
+        from core import claude
+        from webapp import ops
+        monkeypatch.setattr(claude, "_FATAL_MSG", "HTTP 400: 'credit balance'")
+        seen = {}
+
+        def probe():
+            seen["disabled"] = claude.api_disabled()
+
+        assert ops._run_op("probe", probe) is True
+        while ops._running():
+            time.sleep(0.02)
+        time.sleep(0.15)          # let the worker's finally block land
+        assert seen["disabled"] is None

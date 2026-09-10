@@ -27,7 +27,7 @@ from scrapers import ddg
 from scrapers.parallel import drain_or_abandon
 from scrapers.http import HEADERS, SESSION
 from .probes import probe_greenhouse, probe_lever, probe_ashby, probe_workday
-from .names import domain_tokens, name_key, slug_guesses
+from .names import domain_tokens, junk_name_reason, name_key, slug_guesses
 
 
 # --------------------------------------------------------------------------- #
@@ -355,13 +355,14 @@ def _nc_count_ashby(slug):
 
 
 def _nc_count_workday(tenant, pod, site):
-    """Count Workday postings in your [locality] (searchText hits location)."""
-    api = f"https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{tenant}/{site}/jobs"
+    """Count Workday postings in your [locality], scoped the way the crawl
+    scopes the board (location facets, else searchText), and never taken
+    at face value when the scope did not narrow anything -- see
+    scrapers.fetchers.company.wd_local_count."""
+    from scrapers.fetchers.company import NC_RE, wd_local_count
     try:
-        r = SESSION.post(api, json={"appliedFacets": {}, "limit": 1, "offset": 0,
-                                     "searchText": _wd_search_text()},
-                          timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
-        return int(r.json().get("total", 0) or 0)
+        return wd_local_count(tenant, pod, site, NC_RE,
+                              search_text=_wd_search_text())
     except Exception:
         return 0
 
@@ -1893,6 +1894,24 @@ def _blocked_keys(conn):
     return blocked_name_keys(conn) | set(NAME_BLOCKLIST)
 
 
+def screen_names(names):
+    """Split `names` into (employer-shaped, [(name, reason)]) with
+    names.junk_name_reason. Runs ahead of every resolution path, because a
+    section heading or a category noun that reaches the resolver costs a
+    careers-page sniff, two web searches and a mission call before it
+    fails (2026-09-01/02 add-names and reresolve runs: "Required
+    Qualifications", "Proficiency in SQL.", "Oncology", "99+ results").
+
+    >>> screen_names(["Beacon Biosignals", "Required Qualifications", ""])
+    (['Beacon Biosignals'], [('Required Qualifications', 'section-heading'), ('', 'empty')])
+    """
+    kept, junk = [], []
+    for n in names:
+        why = junk_name_reason(n)
+        (junk if why else kept).append((n, why) if why else n)
+    return kept, junk
+
+
 def _name_state(key, tracked, blocked, missed):
     """Which review bucket a parsed name falls in, given the three key sets
     the store answers with.
@@ -1965,8 +1984,16 @@ def preview_names(blob, use_llm=None):
         if not key or key in seen:
             continue
         seen.add(key)
-        out.append({"name": n, "key": key,
-                    "state": _name_state(key, tracked, blocked, missed)})
+        state = _name_state(key, tracked, blocked, missed)
+        row = {"name": n, "key": key, "state": state}
+        if state == "new":
+            # Employer-shaped? A section heading or a category noun is
+            # shown unticked with the reason, so the reviewer can still
+            # override it, and is never resolved by default.
+            why = junk_name_reason(n)
+            if why:
+                row.update(state="junk", why=why)
+        out.append(row)
     return out
 
 
@@ -2003,11 +2030,19 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
     skip = ({name_key(r["name"])
              for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
             | _blocked_keys(conn))
-    fresh = [n for n in names if name_key(n) not in skip]
-    skipped = len(names) - len(fresh)
+    fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
+    skipped = len(names) - len(fresh) - len(junk)
+    for n, why in junk:
+        # Recorded, not resolved: the miss keeps the paste a worklist, and
+        # its 'junk-name' family is one no re-resolution pass retries.
+        record_miss(conn, n, f"junk-name:{why}", source="paste")
+        print(f"    [junk]  {n[:30]:30} {why} - not an employer name, skipped")
     print(f"  {len(names)} name(s) given"
           + (f", {skipped} already tracked or blocked" if skipped else "")
+          + (f", {len(junk)} not employer names" if junk else "")
           + f" -> resolving {len(fresh)}...")
+    if not fresh:
+        return []
 
     written, unresolved = [], []
 

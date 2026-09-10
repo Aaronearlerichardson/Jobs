@@ -344,6 +344,29 @@ def _trip_fatal(msg):
                   f"(unrecoverable): {msg}")
 
 
+def api_disabled():
+    """The breaker's message while an unrecoverable API error has disabled
+    Claude calls for this run, else None. Long loops (the deep-verify pass)
+    check it to stop with one line instead of a per-row 'unverified' for
+    work the API can no longer do."""
+    with _FATAL_LOCK:
+        return _FATAL_MSG
+
+
+def reset_breaker():
+    """Re-arm the breaker for a NEW run. It is process-lifetime by design
+    (one CLI run = one process), but the web UI runs every operation on a
+    thread inside one long-lived server process: on 2026-09-09 a crawl
+    tripped it on an exhausted credit balance at 18:22 and the verify runs
+    at 18:29 and 19:24 skipped every call without trying — and without
+    saying why, since the banner prints once per trip. webapp/ops._run_op
+    re-arms it per operation, so a topped-up balance takes effect without a
+    server restart and a still-dead API fails once and explains itself."""
+    global _FATAL_MSG
+    with _FATAL_LOCK:
+        _FATAL_MSG = None
+
+
 def call_claude_json(system_prompt, user_content, max_tokens=1000,
                      model=None, thinking=False, cache=True):
     """POST to /v1/messages, return the JSON block from the text response.

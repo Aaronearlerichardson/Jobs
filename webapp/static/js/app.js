@@ -745,6 +745,7 @@ const NAME_CHIPS = {
   tracked: `<span class="chip tier">already tracked</span>`,
   blocked: `<span class="chip gate">blocked</span>`,
   missed:  `<span class="chip age-stale">missed recently</span>`,
+  junk:    `<span class="chip gate" title="a section heading, category or location, not an employer - tick it to resolve anyway">not a company?</span>`,
 };
 const nameLocked = r => !!r.reject || r.state === "tracked" || r.state === "blocked";
 
