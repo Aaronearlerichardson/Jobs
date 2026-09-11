@@ -189,28 +189,6 @@ _USAGE = {"calls": 0, "uncached_input": 0, "cache_write": 0,
           "cache_read": 0, "output": 0}
 
 
-# Minimum cacheable prefix per model (Anthropic docs, 2026-08). Not monotonic
-# across generations — Opus 5 caches from 512 tokens, Sonnet 5 needs 1024,
-# Haiku 4.5 needs 4096 — so a prompt that caches on the verify model may
-# silently not cache on the screen model. Informational: we mark every call
-# regardless (below the floor the API just doesn't cache, at no extra cost).
-_CACHE_MIN_TOKENS = {
-    "claude-opus-5": 512, "claude-fable-5": 512, "claude-mythos-5": 512,
-    "claude-opus-4-8": 1024, "claude-sonnet-5": 1024, "claude-sonnet-4-6": 1024,
-    "claude-opus-4-7": 2048,
-    "claude-opus-4-6": 4096, "claude-haiku-4-5": 4096,
-}
-
-
-def min_cacheable_tokens(model=None):
-    """Smallest prefix the given model will cache; 1024 if unknown."""
-    name = model or config.CLAUDE_MODEL
-    for prefix, floor in _CACHE_MIN_TOKENS.items():
-        if name.startswith(prefix):
-            return floor
-    return 1024
-
-
 def _system_field(system_prompt, cache=True):
     """`system` as a cache-marked block list, or the plain string when caching
     is off. One breakpoint, on the last (only) system block — that covers the

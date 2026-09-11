@@ -283,8 +283,9 @@ def connect(path=None):
     "database is locked". In WAL mode readers never block the writer and
     the busy timeout queues writers instead of failing them. Cost: two
     sidecar files (jobs.db-wal, jobs.db-shm) beside the DB while any
-    connection is open -- copy all three when backing up by hand, or run
-    checkpoint() first.
+    connection is open -- copy all three when backing up by hand (the
+    -wal is not optional: the newest writes live there until SQLite
+    folds them back in).
     """
     conn = sqlite3.connect(path or config.STORE_DB_PATH,
                            timeout=BUSY_TIMEOUT_S)
@@ -302,14 +303,6 @@ def connect(path=None):
     conn.executescript(_INDEXES)
     conn.commit()
     return conn
-
-
-def checkpoint(conn):
-    """Fold the WAL back into the main file (before a file-copy backup)."""
-    try:
-        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    except sqlite3.OperationalError:
-        pass
 
 
 # Connections currently inside a batch() block: their per-row writers skip
