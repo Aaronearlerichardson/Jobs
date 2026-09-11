@@ -31,8 +31,7 @@ from src.claude.resume import resume_text
 
 
 def _default_track():
-    from src.crawl.runner import track_for_engine
-    return track_for_engine("local")
+    return config.track_for_engine("local")
 
 
 def _t(t):

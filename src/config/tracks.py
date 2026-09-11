@@ -52,7 +52,7 @@ from src import tags
 from src.config import track_build as _tracks
 
 from .paths import DATA_DIR
-from .profile import profile_section
+from .profile import PROFILE_PATH, profile_section
 
 # The two built-in tracks, synthesized when [tracks] is absent so existing
 # installs work unchanged.
@@ -143,3 +143,22 @@ def _build_ui_tracks(raw):
 
 UI_TRACKS = _build_ui_tracks(profile_section("tracks") or None)
 DEFAULT_TRACK = _tracks.default_track_id(UI_TRACKS)
+
+
+def track_for_engine(engine):
+    """The configured track to use when an engine-level entry point is
+    invoked without naming a track: the default-flagged track with that
+    engine, else the first. Legacy engine names resolve too.
+
+    Lived in src/crawl/runner.py, which made it the only reason src/ops
+    imported src/crawl -- a deferred import, inside `_default_track`,
+    dodging the cycle that a module-level one would have made obvious. It
+    reads nothing but UI_TRACKS and ENGINE_ALIASES, both of which are
+    here; it was never a crawl function.
+    """
+    engine = ENGINE_ALIASES.get(engine, engine)
+    cands = [t for t in UI_TRACKS.values() if t["engine"] == engine]
+    if not cands:
+        raise SystemExit(f"no [tracks.*] entry with engine={engine!r} "
+                         f"in {PROFILE_PATH}")
+    return next((t for t in cands if t["default"]), cands[0])

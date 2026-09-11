@@ -689,7 +689,13 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     if dork:
         print("\n  ATS-dork sweep (search-indexed board URLs)...")
         try:
-            from src.ats.dork import run_ddgs_dorks
+            # Still deferred, but for a different reason than before: dork
+            # imports this module's write path (score_and_upsert), so the
+            # two are peers in the sourcing layer with an orchestration
+            # edge back. That is a file-level cycle inside one package, not
+            # a package-level one -- what the deferred import used to hide
+            # was src/ats depending on src/discovery.
+            from .dork import run_ddgs_dorks
             added, checked = run_ddgs_dorks()
             print(f"  dork: {added} new board(s) added "
                   f"({checked} extracted from search results)")

@@ -44,16 +44,12 @@ _EST_TOKENS_PER_POSTING = 820
 _EST_USD_PER_MTOK = 4.0
 
 
-def track_for_engine(engine):
-    """The configured track to use when an engine-level entry point is
-    invoked without naming a track: the default-flagged track with that
-    engine, else the first. Legacy engine names resolve too."""
-    engine = config.ENGINE_ALIASES.get(engine, engine)
-    cands = [t for t in config.UI_TRACKS.values() if t["engine"] == engine]
-    if not cands:
-        raise SystemExit(f"no [tracks.*] entry with engine={engine!r} "
-                         f"in {config.PROFILE_PATH}")
-    return next((t for t in cands if t["default"]), cands[0])
+#: Re-exported, not defined here: it moved to src/config/tracks.py, beside
+#: the two tables it reads. Keeping the name importable from the runner is
+#: not a compatibility shim -- "the track this engine runs" is a question
+#: the crawl asks constantly, and `runner.track_for_engine` is where a
+#: reader looks for it.
+track_for_engine = config.track_for_engine
 
 
 def apply_keyword_focus(cfg, t):

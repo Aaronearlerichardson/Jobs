@@ -8,7 +8,7 @@ import pytest
 from bs4 import BeautifulSoup
 
 import src.digest.render as digest
-import src.ats.dork as dork
+import src.discovery.dork as dork
 import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
@@ -430,7 +430,7 @@ class TestDiscoveryWiring:
         assert "dork" in ls.populate_companies.__code__.co_varnames
 
     def test_dork_queries_built_from_profile(self):
-        from src.ats.dork import DORK_QUERIES
+        from src.discovery.dork import DORK_QUERIES
         assert len(DORK_QUERIES) >= 4
         assert any("greenhouse" in q for q in DORK_QUERIES)
 

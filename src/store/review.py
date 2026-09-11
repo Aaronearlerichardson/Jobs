@@ -13,6 +13,7 @@ imported inside the function; doctests import what they use.
 import re
 from datetime import datetime
 
+from src import config
 from src import tags
 
 from .schema import connect  # noqa: F401  (the doctests open stores)
@@ -146,10 +147,12 @@ def confirm_company(conn, cid, active=None):
     and `active` is written as given (1 = crawl it, 0 = park it).
 
     The decision itself is the caller's: the shared mission rule
-    (src.claude.is_active_mission) applied to the tier already stored on
-    the row. A caller that omits `active` gets that rule applied here as a
-    fallback, so the store does not depend on the LLM module on any path
-    where the caller decided.
+    (config.is_active_mission) applied to the tier already stored on the
+    row. A caller that omits `active` gets that rule applied here as a
+    fallback. That fallback used to reach UP into src/claude for the rule,
+    which made the store depend on the LLM layer; the rule is config
+    policy and lives there now, so this is a downward call like every
+    other import in this package.
 
     Returns the confirmed row, or None when there is no such company.
 
@@ -180,8 +183,7 @@ def confirm_company(conn, cid, active=None):
     if not row:
         return None
     if active is None:
-        from src.claude.api import is_active_mission
-        active = is_active_mission(row["mission_tier"], row["name"])
+        active = config.is_active_mission(row["mission_tier"], row["name"])
     kept = tags.parse(row["tags"]) - {tags.PENDING}
     conn.execute(
         "UPDATE companies SET tags=?, active=? WHERE id=?",

@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from src import config
-from src.claude.api import ACTIVE_MISSION_TIERS, is_active_mission
+from src.config import ACTIVE_MISSION_TIERS, is_active_mission
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -121,7 +121,7 @@ class TestActivationRule:
         """
         name = multi_division if multi else "Nowhere Robotics"
         old_rules = [
-            # src/ats/dork.py:138 (harvest_urls), post-fix
+            # src/discovery/dork.py:138 (harvest_urls), post-fix
             lambda t, n: 1 if (t in ACTIVE_MISSION_TIERS or t is None
                                or config.is_multi_division(n)) else 0,
             # src/discovery/local_sourcing.py:640 (populate_companies), with
@@ -150,7 +150,9 @@ class TestActivationRule:
 
 #: (module, function) pairs allowed to spell the activation rule out.
 #:
-#: `src.claude.is_active_mission` is the rule.
+#: `config.is_active_mission` is the rule (src/config/policy.py, beside
+#: `is_multi_division`, which it calls). Still re-exported as
+#: `src.claude.api.is_active_mission`, which is what most call sites say.
 #:
 #: `local_sourcing.score_missions` (its per-row consumer, `_scored`) is
 #: the REACTIVATION half and is
@@ -161,7 +163,7 @@ class TestActivationRule:
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
 RULE_SITES_ALLOWED = {
-    ("src/claude/api.py", "is_active_mission"),
+    ("src/config/policy.py", "is_active_mission"),
     ("src/discovery/local_sourcing.py", "_scored"),
 }
 
@@ -230,7 +232,7 @@ def test_activation_rule_is_not_re_implemented():
     unexpected = found - RULE_SITES_ALLOWED
     assert not unexpected, (
         "the company-activation rule is spelled out inline at "
-        f"{sorted(unexpected)}. Call src.claude.is_active_mission instead, "
+        f"{sorted(unexpected)}. Call config.is_active_mission instead, "
         "or add the site to RULE_SITES_ALLOWED with a written reason.")
 
 

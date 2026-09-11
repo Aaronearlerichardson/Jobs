@@ -5,8 +5,16 @@
     coords.py      those coordinates as the store's company columns
     registry.py    which ATS families the crawl fetches, and how politely
     fetchers/      one module per ATS, all returning the same job dicts
-    dork.py        mine search-engine-indexed board URLs for new boards
 
 Nothing here knows about tracks, ranking or the digest: an ATS module
-turns board coordinates into job dicts and stops.
+turns board coordinates into job dicts and stops. It reads config, match
+and net, and nothing above them.
+
+`dork.py` used to live here, on the strength of its subject being ATS
+URLs. What it actually does is source companies -- it mines search
+results, scores what it finds and upserts it -- so it imported
+src/discovery and src/store, and was the only reason this package did
+either. That made src/ats and src/discovery mutually dependent, which
+discovery worked around with a deferred import. It is src/discovery/
+dork.py now and the cycle is gone.
 """

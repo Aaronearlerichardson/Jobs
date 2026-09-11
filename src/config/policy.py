@@ -7,7 +7,7 @@ not here. Manage it with discover.py --local / --add-board, or
 run_scraper.py --import-companies roster.json.
 """
 
-from .profile import profile_section
+from .profile import MISSION_TIERS, profile_section
 
 _pol = profile_section("policy")
 
@@ -60,6 +60,74 @@ def is_multi_division(name):
     False
     """
     return (name or "").strip().lower() in MULTI_DIVISION_COMPANIES
+
+
+# Mission tiers as loaded (highest alignment -> lowest, last is the
+# catch-all), and the subset a newly-sourced company is crawled for.
+ACTIVE_MISSION_TIERS = tuple(t["name"] for t in MISSION_TIERS if t["active"])
+
+
+def is_active_mission(tier, name, include_missions=None):
+    """The one activation rule: should a newly-sourced company be crawled?
+
+    `tier` is the mission tier from src.claude.score_company_mission, `name`
+    the company name, `include_missions` an optional override of the
+    profile's active tiers. Returns 1 (crawl it) or 0 (park it) -- an int,
+    because it goes straight into the ``companies.active`` column.
+
+    A company is active when ANY of these hold:
+
+    * its tier is one of the active tiers,
+    * its tier is ``None`` -- scoring was UNAVAILABLE, not negative,
+    * it is a multi-division conglomerate (profile policy).
+
+    >>> tiers = ("green", "blue")
+    >>> is_active_mission("green", "Nowhere Robotics", tiers)
+    1
+    >>> is_active_mission("red", "Nowhere Robotics", tiers)
+    0
+
+    An unavailable score must never read as "off-mission". A failed or
+    rate-limited call returns ``(None, None, "")``, and treating that as a
+    rejection buries a whole discovery sweep in inactive rows:
+
+    >>> is_active_mission(None, "Nowhere Robotics", tiers)
+    1
+
+    Omitting `include_missions` falls back to the profile's active tiers,
+    so the answer depends on the loaded profile rather than this literal:
+
+    >>> is_active_mission(ACTIVE_MISSION_TIERS[0], "Nowhere Robotics")
+    1
+
+    Notes:
+        This lived inline at six call sites before it was named, then in
+        src/claude/api.py because it reads a tier that the LLM produces.
+        Nothing about it is an LLM concern: it is a profile table, a
+        None-means-unknown rule, and `is_multi_division` above. Being in
+        the claude module made src/store reach up to the LLM layer just to
+        default one column, which was the only thing stopping store from
+        depending on config alone. Still re-exported as
+        `src.claude.api.is_active_mission`, which is where the call sites
+        and their comments point.
+        tests/test_invariants.py keeps the rule single-sourced.
+    """
+    tiers = ACTIVE_MISSION_TIERS if include_missions is None else include_missions
+    # Through the PACKAGE, not the module global beside it: a test that
+    # narrows the conglomerate list patches `config.is_multi_division`, and
+    # that is the documented way to reach anything in config (never
+    # `from config import`). A bare local call would silently ignore it --
+    # which is exactly what tests/test_triage.py caught when this rule
+    # moved here.
+    return 1 if (tier in tiers or tier is None
+                 or _self().is_multi_division(name)) else 0
+
+
+def _self():
+    """The config PACKAGE, which is what callers monkeypatch; its
+    attributes are this module's objects, re-exported."""
+    import src.config as _cfg
+    return _cfg
 
 
 # Honor robots.txt: skip paths a host asks crawlers to leave alone, and

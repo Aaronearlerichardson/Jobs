@@ -70,7 +70,7 @@ def ingest_nlx(companies, t=None):
 def dork_sweep():
     """ATS dorking via DuckDuckGo: mine search-indexed board URLs for
     companies in your locality into the store. Returns (added, checked)."""
-    from src.ats.dork import run_ddgs_dorks
+    from src.discovery.dork import run_ddgs_dorks
     added, checked = run_ddgs_dorks()
     print(f"\n  {added} new local board(s) added to the store "
           f"({checked} extracted from dork results)")

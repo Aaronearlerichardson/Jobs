@@ -917,7 +917,7 @@ class TestReviewQueue:
 
     def test_confirm_parks_an_off_mission_candidate(self, db):
         # Confirming says "this IS the employer", not "crawl it whatever its
-        # mission" -- src.claude.is_active_mission still decides that.
+        # mission" -- config.is_active_mission still decides that.
         cid = self._queue(db, "Off Mission",
                           mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid)["active"] == 0
@@ -926,9 +926,12 @@ class TestReviewQueue:
     def test_an_explicit_verdict_is_written_without_consulting_the_rule(
             self, db, monkeypatch):
         # The store writes the caller's decision; it only falls back to
-        # src.claude.is_active_mission when no verdict was passed.
-        import src.claude.api
-        monkeypatch.setattr(src.claude.api, "is_active_mission",
+        # config.is_active_mission when no verdict was passed. Patched on
+        # the config PACKAGE, which is where the rule lives now -- it used
+        # to sit in src/claude/api.py, which is what made the store import
+        # the LLM layer to default one column.
+        from src import config
+        monkeypatch.setattr(config, "is_active_mission",
                             lambda *a, **k: 1 / 0)
         cid = self._queue(db, "Decided", mission_tier="not-a-configured-tier")
         assert store.confirm_company(db, cid, active=1)["active"] == 1
