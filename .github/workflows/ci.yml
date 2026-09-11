@@ -199,9 +199,16 @@ jobs:
           cache: pip
 
       - name: Install dependencies
+        # envs/requirements-dev.txt is where the Nuitka floor is written
+        # down (with zstandard, which --onefile needs to compress the
+        # payload); installing it here rather than `requirements.txt
+        # nuitka` means the build job cannot quietly drift onto an older
+        # Nuitka than the one build_app.py's flags were checked against.
+        # It is the same file the test job installs, so there is one
+        # source of truth for the pin.
         run: |
           python -m pip install --upgrade pip
-          pip install -r envs/requirements.txt nuitka
+          pip install -r envs/requirements-dev.txt
 
       - name: Cache the Nuitka compiler downloads + ccache
         uses: actions/cache@v4
@@ -214,7 +221,19 @@ jobs:
           restore-keys: nuitka-${{ matrix.os }}-py312-
 
       - name: Build the standalone app
-        run: python build_app.py
+        # --report writes Nuitka's inclusion report: every module, data
+        # file and DLL that made it into the binary, and the reason each
+        # one was pulled in. Every packaging surprise this project has
+        # hit would have been visible there without a rebuild -- the
+        # missing sqlite3.dll when the conda env was not on PATH
+        # (JobHarvester.exe, 2026-09-10), fake_useragent's
+        # data/browsers.jsonl, and the ddgs engine modules that are only
+        # found by walking the package directory. --report-diffable
+        # leaves out timestamps and absolute paths, so two runs' reports
+        # can be diffed to see what a dependency bump actually changed.
+        # build_app.py passes any --flag it does not recognise straight
+        # through to Nuitka, so these go on the command line.
+        run: python build_app.py --report=jobcrawlerui.report.xml --report-diffable
 
       - name: Smoke-launch the built binary
         # A build that compiles but can't boot is not a passing build: run
@@ -235,6 +254,30 @@ jobs:
           curl -sf -m 10 http://127.0.0.1:5601/ | grep -q 'app.js?v=' \
             && echo "OK: built binary serves the cache-busted UI"
 
+      - name: Build the harvester
+        # The second binary ships too, so it has to be built where it is
+        # released from. It is also the cheaper build by far: --target
+        # harvest drops flask, playwright, ddgs, fake_useragent and primp
+        # (HARVEST_SKIP in build_app.py), which is roughly three quarters
+        # of the UI payload.
+        run: python build_app.py --target harvest --report=jobharvester.report.xml --report-diffable
+
+      - name: Smoke-launch the harvester binary
+        # --help is the whole smoke test: harvest.py parks on a timer and
+        # every other mode wants a store, while --help returns 0 without
+        # touching one. It is not a no-op -- harvest.py imports
+        # `src.config` at module level and src/config/profile.py loads a
+        # profile at import, so this proves the compiled entry point
+        # boots AND that the bundled profile.example.toml landed in the
+        # binary and parses. It would have caught the sqlite3.dll build
+        # (2026-09-10), which compiled fine and died on import.
+        shell: bash
+        run: |
+          BIN=JobHarvester.exe
+          [ -f "$BIN" ] || BIN=job-harvester
+          ./"$BIN" --help
+          echo "OK: harvester binary starts"
+
       - name: Upload the build
         uses: actions/upload-artifact@v4
         with:
@@ -242,7 +285,26 @@ jobs:
           path: |
             JobCrawlerUI.exe
             job-crawler-ui
+            JobHarvester.exe
+            job-harvester
           retention-days: 7
+
+      - name: Upload the Nuitka inclusion reports
+        # Kept as their own artifact rather than mixed in with the
+        # binaries: they are the thing you download to answer "why is
+        # this 189 MB" or "did that data file ship", and nobody wants a
+        # 190 MB download to read an XML file. `if: always()` because a
+        # report from a build that FAILED is the most useful one there
+        # is.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuitka-reports-${{ matrix.os }}
+          path: |
+            jobcrawlerui.report.xml
+            jobharvester.report.xml
+          retention-days: 7
+          if-no-files-found: warn
 
   release:
     name: GitHub Release
@@ -257,12 +319,20 @@ jobs:
           path: artifacts
 
       - name: Prepare assets
+        # Both binaries are released together. They share a store and a
+        # profile, so a release that shipped only the UI would leave
+        # anyone running the harvester on whatever build they happened to
+        # have, against a schema the UI had already moved on from.
         run: |
           mkdir release
           mv artifacts/job-crawler-ubuntu-latest/job-crawler-ui release/job-crawler-linux
           mv artifacts/job-crawler-windows-latest/JobCrawlerUI.exe release/JobCrawlerUI.exe
           mv artifacts/job-crawler-macos-latest/job-crawler-ui release/job-crawler-macos
+          mv artifacts/job-crawler-ubuntu-latest/job-harvester release/job-harvester-linux
+          mv artifacts/job-crawler-windows-latest/JobHarvester.exe release/JobHarvester.exe
+          mv artifacts/job-crawler-macos-latest/job-harvester release/job-harvester-macos
           chmod +x release/job-crawler-linux release/job-crawler-macos
+          chmod +x release/job-harvester-linux release/job-harvester-macos
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -271,6 +341,9 @@ jobs:
             release/job-crawler-linux
             release/JobCrawlerUI.exe
             release/job-crawler-macos
+            release/job-harvester-linux
+            release/JobHarvester.exe
+            release/job-harvester-macos
           generate_release_notes: true
           draft: false
           prerelease: false

@@ -117,11 +117,20 @@ def compare(sets):
 
 
 def check_build(sets):
-    """The harvester's reachable set against build_app.py's skip list.
+    """Each compiled entry's reachable set against build_app.py's flags.
 
-    A skip that names something the entry cannot reach anyway is harmless
-    but is not what is keeping the binary small — worth knowing which is
-    which before trimming.
+    For the harvester, the skip list: a skip that names something the
+    entry cannot reach anyway is harmless but is not what is keeping the
+    binary small — worth knowing which is which before trimming.
+
+    For the UI, the registry's operation targets, which is this tool's
+    own blind spot. `reachable()` follows imports, and an operation target
+    is a "src.crawl.runner:run_track" STRING resolved with importlib at
+    call time: nothing imports it, so nothing here reports it. Four of the
+    six target modules are reachable no other way, so reading `--modules`
+    as "what the UI must contain" under-counts — the mistake that shipped
+    a JobCrawlerUI.exe with no src.crawl in it (2026-09-11).
+    build_app.include_modules() supplies them.
     """
     argv, sys.argv = sys.argv, [sys.argv[0]]
     try:
@@ -139,6 +148,17 @@ def check_build(sets):
                                   f"is doing real work"
                                   if hit else
                                   "not reachable anyway — belt and braces"))
+    ui = sets.get("webapp.py")
+    if ui is None:
+        return
+    targets = build_app.include_modules()
+    print(f"\nbuild_app.py UI --include-module = {len(targets)} registry "
+          f"target module(s)")
+    for m in targets:
+        print(f"  {m:<28} " + ("also reachable by import"
+                               if m in ui else
+                               "STRING ONLY — in the binary because of that "
+                               "flag, and nothing else"))
 
 
 def graph(sets, mermaid=False):

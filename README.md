@@ -550,11 +550,14 @@ self-contained single-file binary, `JobCrawlerUI.exe`, bundling CPython,
 Flask, the crawler package, and lxml. The exe finds its data the same way the
 source install does (`JOBS_DATA_DIR`, then a `data/` beside or above it, then
 the per-user directory), so copying it to a new machine starts a clean install
-and dropping it into an existing one picks up that store. The only feature
-missing from a compiled build is the optional Playwright headless-browser
-probing for JS-only boards (it needs its own browser download; those code
-paths degrade gracefully). First build downloads a C compiler if none is
-present and takes 10–30 minutes; rebuilds are fast.
+and dropping it into an existing one picks up that store. What a compiled
+build does not bundle is a **browser**: Playwright itself, driver included,
+ships inside the binary (Nuitka's own package configuration carries the
+driver), so the headless probing of JS-only boards works by driving a Chrome
+or Edge already installed on the machine — only the ~150 MB per-platform
+browser download is missing, and a machine with neither browser degrades
+gracefully. First build downloads a C compiler if none is present and takes
+10–30 minutes; rebuilds are fast.
 
 ---
 
@@ -834,7 +837,11 @@ to a `tmp_path`.
   and boots the web app to exercise the API and asset cache-busting.
 - **build** (Ubuntu + Windows + macOS) — `python build_app.py`, then *launches
   the built binary* and requires its API to answer; a build that compiles but
-  can't boot is not a pass. Runs only after the tests pass.
+  can't boot is not a pass. Runs only after the tests pass. The same job also
+  builds the harvester (`--target harvest`) and smoke-tests its `--help`, so a
+  tagged release carries six assets: `JobCrawlerUI.exe`, `job-crawler-linux`,
+  `job-crawler-macos`, `JobHarvester.exe`, `job-harvester-linux` and
+  `job-harvester-macos`.
 
 `python smoke_test.py` still works — a shim that runs pytest.
 

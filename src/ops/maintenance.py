@@ -409,7 +409,37 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     fetched once. Safe to re-run: a row that failed within the last
     `retry_days` days is skipped (its desc_checked_at stamp), so reruns
     don't re-fetch every board to fail on the same vanished postings
-    (retry_days=0 retries everything)."""
+    (retry_days=0 retries everything).
+
+    Companies are fetched CONCURRENTLY (`max_workers`), like the Workday
+    sibling below. This function advertised max_workers=8 and then never
+    used it: it walked `group_by_company` one company at a time, and every
+    board pull and every per-job hydration in it was a blocking GET on the
+    calling thread. 2026-09-11
+    (data/logs/session-20260911-162142-webui-backfill-descriptions.log):
+    "backfilling 43600 description(s) via company board(s)..." at 16:21:43,
+    and by 16:40:39 — nineteen minutes — roughly twenty company lines and
+    about 1,878 rows had gone through, one of them ("J&J MedTech 1063
+    stale -> 1060 matched", 16:37:11) holding the op alone for some nine
+    minutes. The log has no footer: the run was killed before it finished.
+
+    Notes:
+        Company lines now print in COMPLETION order, not roster order —
+        `fan_out` yields as boards come back, and the sibling has always
+        printed that way. The counts either line adds up to are unchanged.
+
+        Only the fetching runs in the pool. Every jobs write stays on the
+        calling thread (SQLite connections are not shareable across
+        threads, and the store grants one writer at a time through
+        src.store.schema._WRITE_LOCK, e814fac), grouped per company by
+        `store.batch` so a 1,000-row board takes the write lock once
+        instead of a thousand times.
+
+        The per-row loop stays serial INSIDE each worker: those rows share
+        one board pull and, when the board doesn't cover them, hit one
+        host's detail pages, which is exactly the traffic the fetchers'
+        own per-source pacing is written to bound.
+    """
     t = _t(t)
     with track_store(t) as conn:
         rows = stale_body_rows(conn, "company_id IS NOT NULL",
@@ -417,21 +447,33 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                                min_len=min_len, retry_days=retry_days,
                                limit=limit,
                                label="description(s) via company board(s)")
-        n = 0
+        # Resolve the company rows HERE, on the connection's own thread,
+        # and hand the workers plain dicts.
+        groups, boardless = [], []
         for cid, rs in group_by_company(rows).items():
             company = store.get_company(conn, cid)
             if not company or not company.get("ats"):
                 # No board to fetch IS a failed attempt — stamp these rows too,
                 # or they are re-selected (and silently re-counted) every run
                 # while never even printing a company line.
-                for r in rs:
-                    save_body(conn, r["job_id"], None)
+                boardless.extend(rs)
                 continue
-            # Batched board pull for the common case (one fetch per company);
-            # boards we can't pull simply yield no title matches, and each row
-            # falls through to per-job-URL hydration below.
+            groups.append((dict(company), rs))
+        if boardless:
+            with store.batch(conn):
+                for r in boardless:
+                    save_body(conn, r["job_id"], None)
+
+        def _bodies(group):
+            """One company's fetching, in a worker thread: the batched board
+            pull for the common case (one fetch per company), then per-job-URL
+            hydration for the rows that pull didn't cover. Boards we can't
+            pull simply yield no title matches, so every row falls through to
+            hydration either way. Returns [(job_id, description_or_None)] for
+            the caller's thread to write."""
+            company, rs = group
             index = board_index(company)
-            n_matched = 0
+            out = []
             for r in rs:
                 match = board_match(index, r["title"])
                 desc = match.get("description") if match else None
@@ -442,9 +484,20 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                             "ats": company.get("ats"), "description": ""}
                     company_fetch.hydrate_description(stub)
                     desc = stub.get("description")
-                if save_body(conn, r["job_id"], desc):
-                    n += 1
-                    n_matched += 1
+                out.append((r["job_id"], desc))
+            return out
+
+        n = 0
+        for (company, rs), bodies in fan_out(
+                groups, _bodies,
+                lambda g: f"{g[0]['name']} board backfill",
+                max_workers, with_item=True):
+            n_matched = 0
+            with store.batch(conn):
+                for job_id, desc in bodies:
+                    if save_body(conn, job_id, desc):
+                        n += 1
+                        n_matched += 1
             print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
     print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n
@@ -713,12 +766,64 @@ def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
     return n
 
 
+# Why a fetched board can't be reconciled, in the order the footer reports
+# them. Distinct on purpose: "the fetch raised", "the fetch came back with
+# nothing", and "the roster row has no primary key" are three different
+# faults with three different fixes, and the sync used to treat all three as
+# the same silent `continue`.
+_SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
+
+
+def _sync_skip_reason(company, jobs, err):
+    """Why this company's board cannot be reconciled, or None when it can.
+
+    >>> _sync_skip_reason({"id": 1}, [{"id": "j1"}], None) is None
+    True
+    >>> _sync_skip_reason({"id": 1}, [], RuntimeError("HTTP 404"))
+    'fetch error'
+    >>> _sync_skip_reason({"id": 1}, [], None)
+    'empty board'
+    >>> _sync_skip_reason({"name": "Acme"}, [{"id": "j1"}], None)
+    'no roster id'
+    """
+    if err is not None:
+        return "fetch error"
+    if not jobs:
+        return "empty board"
+    if not company.get("id"):
+        return "no roster id"
+    return None
+
+
+def _sync_skip_note(skipped):
+    """The footer's skipped-board clause, or "" when nothing was skipped.
+
+    >>> _sync_skip_note({"fetch error": 6, "empty board": 1, "no roster id": 1})
+    ', 8 skipped (6 fetch error, 1 empty board, 1 no roster id)'
+    >>> _sync_skip_note({"fetch error": 0, "empty board": 0})
+    ''
+
+    It sits beside the "N board(s) reconciled" count because that count on
+    its own is what hid the gap: 216 attempted, 208 reconciled, and no
+    arithmetic in the log to say the other eight existed.
+    """
+    parts = [f"{skipped[why]} {why}" for why in _SYNC_SKIP_REASONS
+             if skipped.get(why)]
+    if not parts:
+        return ""
+    return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
+
+
 def sync_status_all(top_n=15, t=None):
     """Status-only reconciliation: re-fetch every active company's board
     (same scoping as the crawl — locality unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
     corrected ranking. NO scoring, no Claude API — the cheap recovery pass
-    for when statuses have drifted without paying for a full crawl."""
+    for when statuses have drifted without paying for a full crawl.
+
+    A board that cannot be reconciled is skipped (never closed on a failed
+    fetch) and SAID SO: one "[!]" line per board with the reason, and the
+    reason counts beside the footer's reconciled count."""
     t = _t(t)
     with track_store(t) as conn:
         companies = store.crawlable_companies(conn, tag=t["store_tag"])
@@ -731,8 +836,26 @@ def sync_status_all(top_n=15, t=None):
                    for c in companies]
         fetched = fetch_all(sources)
         n_closed = n_reopened = n_boards = 0
+        skipped = {why: 0 for why in _SYNC_SKIP_REASONS}
         for c, (jobs, err) in zip(companies, fetched):
-            if err is not None or not jobs or not c.get("id"):
+            why = _sync_skip_reason(c, jobs, err)
+            if why:
+                # The skip itself is right and stays: fetchers soft-fail to
+                # [], so an error or an empty snapshot is indistinguishable
+                # from a board that emptied for real, and reconciling one
+                # would close every job of a company whose ATS merely
+                # hiccuped. What was wrong is that it happened in silence —
+                # 2026-09-11 (data/logs/session-20260911-161836-webui-sync
+                # .log): 16:18:37 "reconciling statuses across 216 active
+                # compan(ies)...", 16:20:51 "208 board(s) reconciled", and
+                # not one line in between about the other eight. A skipped
+                # board is a company whose statuses are now stale, so it is
+                # a WARNING ("  [!]" lines are logged at WARNING —
+                # src/session_log.py::_level_for), named and counted.
+                skipped[why] += 1
+                detail = f": {err}" if err is not None else ""
+                print(f"    [!] {(c.get('name') or '?')[:34]:34} "
+                      f"not reconciled ({why}){detail}")
                 continue
             n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs,
                                                  track=t["track"])
@@ -745,7 +868,8 @@ def sync_status_all(top_n=15, t=None):
         n_open = len(_ranked(conn, t))
         rewrite_digest(conn, t, top_n,
                        f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
-                       f"{n_reopened} reopened; {n_open} open job(s) in ranking.")
+                       f"{n_reopened} reopened{_sync_skip_note(skipped)}; "
+                       f"{n_open} open job(s) in ranking.")
         return (n_closed, n_reopened)
 
 

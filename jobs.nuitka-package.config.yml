@@ -1,0 +1,35 @@
+# Nuitka package configuration for the packages this app needs and that
+# Nuitka's own bundled config (nuitka/plugins/standard/standard.nuitka-package.config.yml)
+# says nothing about. Passed to both builds with
+# --user-package-configuration-file= from build_app.py; written in the same
+# format as the bundled file, so entries can be copied either way.
+#
+# yamllint disable rule:line-length
+---
+# ddgs does not import its search engines. It builds its engine registry by
+# walking its own package directory at import time (pkgutil.iter_modules over
+# ddgs/engines/), so a compiled build that follows imports alone gets the
+# package and none of the engines, and every dork query dies on
+# KeyError('text'). build_app.py used to answer that with
+# --include-package=ddgs, which compiles in every module of the package --
+# ddgs.cli and ddgs.api_server among them, and nothing in this repo imports
+# either (grep, 2026-09-11).
+#
+# iterate_modules() does the same directory walk Nuitka-side, at build time,
+# so the build follows whatever engines the INSTALLED ddgs release ships --
+# 17 modules in the version here, annasarchive through yandex, which is
+# exactly what a 2026-09-11 UI build's inclusion report lists. That is the
+# point of routing it through the yaml rather than a flag: the hardcoded
+# _DDGS_ENGINE_MODULES fallback list in src/net/ddg.py exists for the same
+# reason and has to be maintained by hand, and the build no longer has to be
+# kept in sync with it as well.
+#
+# The checksum is the one Nuitka computes for this entry's parsed data
+# (nuitka.utils.Yaml.getYamlDataHash). Without it every build logs
+# "Detected 1 module(s) with mismatching checksum" and falls back to
+# validating the file against the JSON schema, which it will download to do.
+# Recompute it whenever the entry below changes; comments do not count.
+- module-name: 'ddgs.engines' # checksum: c697a090
+  implicit-imports:
+    - depends:
+        - 'iterate_modules("ddgs.engines")'

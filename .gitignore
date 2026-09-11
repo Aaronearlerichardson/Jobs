@@ -28,6 +28,9 @@ JobHarvester.exe
 job-crawler-ui
 job-crawler-linux
 job-crawler-macos
+# Nuitka's --report=, which CI uploads as an artifact and a local build
+# writes into the checkout (*.report.xml is ~1 MB of module inventory).
+*.report.xml
 
 # Python cruft
 __pycache__/

@@ -9,6 +9,7 @@ passes are the ones the target accepts.
 """
 
 import inspect
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -62,6 +63,49 @@ class TestTable:
                   if e.get("ui") is False}
         assert hidden, "expected at least one CLI-only op"
         assert set(registry.ui_ops()) == set(registry.REGISTRY) - hidden
+
+
+class TestPackaging:
+    """Every target module has to be INSIDE the compiled UI binary.
+
+    Targets are strings resolved with importlib, so no import statement
+    reaches them and Nuitka's import graph cannot see them either.
+    build_app.py therefore derives its `--include-module=` list from this
+    table's source. While that list was written by hand it went stale, and
+    the failure only showed up in a build nobody can press a button in
+    during CI: JobCrawlerUI.exe built from 5525f88 answered the first
+    operation started from the web UI with "operation failed:
+    ModuleNotFoundError: No module named 'src.crawl'" (2026-09-11).
+
+    The other half of the guarantee -- that each "module:attr" names a real
+    callable, not just a real module -- is
+    `TestTable.test_every_target_resolves_to_a_callable` above.
+    """
+
+    @staticmethod
+    def _include_list():
+        """build_app's UI includes, imported with a neutral argv.
+
+        build_app reads sys.argv at import time to pick the --target, and
+        under pytest sys.argv is the pytest command line.
+        """
+        argv, sys.argv = sys.argv, [sys.argv[0]]
+        try:
+            import build_app
+        finally:
+            sys.argv = argv
+        return set(build_app.include_modules())
+
+    def test_every_target_module_ships_in_the_ui_binary(self):
+        included = self._include_list()
+        for name, e in registry.REGISTRY.items():
+            assert e["target"].partition(":")[0] in included, name
+
+    def test_the_derived_list_names_nothing_else(self):
+        """A parser that over-collected would pad every UI build with
+        modules no operation asks for, and would hide the opposite bug."""
+        assert self._include_list() == {e["target"].partition(":")[0]
+                                        for e in registry.REGISTRY.values()}
 
 
 class TestInvoke:
