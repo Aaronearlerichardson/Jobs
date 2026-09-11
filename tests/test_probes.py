@@ -11,19 +11,9 @@ ANY slug, so every guessed slug "confirmed" with zero jobs.
 
 import pytest
 
+from conftest import fake_response
+
 from src.discovery.resolve import probes
-
-
-class _Resp:
-    def __init__(self, payload=None, text="", status=200):
-        self._payload = payload
-        self.text = text
-        self.status_code = status
-
-    def json(self):
-        if self._payload is None:
-            raise ValueError("not json")
-        return self._payload
 
 
 @pytest.fixture
@@ -43,37 +33,37 @@ def answer(monkeypatch):
 
 class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, answer):
-        answer(_Resp({"jobs": [1, 2, 3]}))
+        answer(fake_response({"jobs": [1, 2, 3]}))
         assert probes.probe_greenhouse("acme") == (True, 3)
 
     def test_lever_counts_a_bare_list(self, answer):
-        answer(_Resp([1, 2]))
+        answer(fake_response([1, 2]))
         assert probes.probe_lever("acme") == (True, 2)
 
     def test_lever_tolerates_a_non_list_payload(self, answer):
-        answer(_Resp({"unexpected": True}))
+        answer(fake_response({"unexpected": True}))
         assert probes.probe_lever("acme") == (True, 0)
 
     def test_ashby_reads_the_posting_api_key(self, answer):
-        answer(_Resp({"jobs": [1, 2], "jobPostings": []}))
+        answer(fake_response({"jobs": [1, 2], "jobPostings": []}))
         assert probes.probe_ashby("acme") == (True, 2)
 
     def test_ashby_falls_back_to_the_embed_key(self, answer):
-        answer(_Resp({"jobPostings": [1]}))
+        answer(fake_response({"jobPostings": [1]}))
         assert probes.probe_ashby("acme") == (True, 1)
 
     def test_bamboohr_asks_for_json(self, answer):
-        seen = answer(_Resp({"result": [1, 2, 3, 4]}))
+        seen = answer(fake_response({"result": [1, 2, 3, 4]}))
         assert probes.probe_bamboohr("acme") == (True, 4)
         assert seen["headers"]["Accept"] == "application/json"
 
     def test_jazzhr_counts_apply_links_in_the_page(self, answer):
-        answer(_Resp(text="<a href='/apply/AbC123/'>x</a>"
+        answer(fake_response(text="<a href='/apply/AbC123/'>x</a>"
                           "<a href='/apply/dEf456/'>y</a>"))
         assert probes.probe_jazzhr("acme") == (True, 2)
 
     def test_kula_accepts_a_substantial_page(self, answer):
-        answer(_Resp(text="x" * 1001))
+        answer(fake_response(text="x" * 1001))
         assert probes.probe_kula("acme") == (True, 0)
 
 
@@ -82,23 +72,23 @@ class TestAnEmptyBoardIsNotAlwaysAMiss:
     one that answers for any slug must show postings to count as found."""
 
     def test_greenhouse_empty_is_still_a_board(self, answer):
-        answer(_Resp({"jobs": []}))
+        answer(fake_response({"jobs": []}))
         assert probes.probe_greenhouse("acme") == (True, 0)
 
     def test_smartrecruiters_empty_is_not_a_board(self, answer):
-        answer(_Resp({"totalFound": 0}))
+        answer(fake_response({"totalFound": 0}))
         assert probes.probe_smartrecruiters("acme") == (False, 0)
 
     def test_smartrecruiters_with_postings_is(self, answer):
-        answer(_Resp({"totalFound": 7}))
+        answer(fake_response({"totalFound": 7}))
         assert probes.probe_smartrecruiters("acme") == (True, 7)
 
     def test_jazzhr_with_no_apply_links_is_not_a_board(self, answer):
-        answer(_Resp(text="<html>nothing here</html>"))
+        answer(fake_response(text="<html>nothing here</html>"))
         assert probes.probe_jazzhr("acme") == (False, 0)
 
     def test_kula_rejects_a_stub_page(self, answer):
-        answer(_Resp(text="too short"))
+        answer(fake_response(text="too short"))
         assert probes.probe_kula("acme") == (False, 0)
 
 
@@ -109,11 +99,11 @@ class TestFailureIsReportedNeverRaised:
     """
 
     def test_a_non_200_is_a_miss(self, answer):
-        answer(_Resp({"jobs": [1]}, status=404))
+        answer(fake_response({"jobs": [1]}, status=404))
         assert probes.probe_greenhouse("acme") == (False, 0)
 
     def test_unparseable_json_is_a_miss(self, answer):
-        answer(_Resp(None))
+        answer(fake_response(None))
         assert probes.probe_greenhouse("acme") == (False, 0)
 
     def test_a_raising_session_is_a_miss(self, monkeypatch):

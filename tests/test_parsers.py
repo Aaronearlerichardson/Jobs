@@ -13,7 +13,7 @@ import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
-from conftest import keep_store_open
+from conftest import fake_response, keep_store_open
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
 import src.discovery.resolve.probes as probes
@@ -121,16 +121,12 @@ class TestPageMemo:
 
     def _session(self, monkeypatch, status=200, body="x" * 400):
         calls = []
-
-        class _R:
-            status_code = status
-            text = body
-            content = body.encode()
+        resp = fake_response(text=body, status=status)
 
         class _S:
             def get(self, url, **kw):
                 calls.append(url)
-                return _R()
+                return resp
 
         monkeypatch.setattr(fetchpool, "SESSION", _S())
         monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
@@ -176,13 +172,10 @@ class TestJobPageMeta:
     nine empty-title rows sat in the 2026-09-01 store because nothing did."""
 
     def _serve(self, monkeypatch, html):
-        class _R:
-            status_code = 200
-            text = html
-
+        resp = fake_response(text=html)
         class _S:
             def get(self, *a, **k):
-                return _R()
+                return resp
 
         monkeypatch.setattr(company_fetch, "SESSION", _S())
 

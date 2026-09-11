@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+from conftest import fake_response
 from src.match.filters import is_relevant
 from src.ats.fetchers import (api, discourse, getro, hibob, jobvite,
                               peopleadmin, remoteok, remotive, usajobs)
@@ -53,18 +54,9 @@ def match_everything(cfg, pristine_keywords):
 def fake_get(monkeypatch):
     """Serve a fixture instead of the network."""
     def _install(payload, status=200):
-        class _Resp:
-            status_code = status
-            def raise_for_status(self):
-                if status >= 400:
-                    raise RuntimeError(f"{status} Client Error")
-            def json(self):
-                return payload
-            @property
-            def text(self):
-                return json.dumps(payload)
         monkeypatch.setattr(api.SESSION, "get",
-                            lambda *a, **k: _Resp())
+                            lambda *a, **k: fake_response(payload,
+                                                          status=status))
     return _install
 
 
@@ -80,22 +72,14 @@ def fake_get_text(monkeypatch):
     def _install(routes):
         calls = []
 
-        class _Resp:
-            def __init__(self, text, status):
-                self.text = text
-                self.status_code = status
-
-            def raise_for_status(self):
-                if self.status_code >= 400:
-                    raise RuntimeError(f"{self.status_code} Server Error")
-
         def _get(url, *a, **k):
             calls.append(url)
             for fragment, body in routes.items():
                 if fragment in url:
-                    return (_Resp("", body) if isinstance(body, int)
-                            else _Resp(body, 200))
-            return _Resp("", 404)
+                    return (fake_response(text="", status=body)
+                            if isinstance(body, int)
+                            else fake_response(text=body))
+            return fake_response(text="", status=404)
 
         monkeypatch.setattr(peopleadmin.SESSION, "get", _get)
         return calls
@@ -123,22 +107,12 @@ def usajobs_pages(monkeypatch):
     def _install(payloads, status=200):
         calls = []
 
-        class _Resp:
-            def __init__(self, payload):
-                self._payload = payload
-                self.status_code = status
-
-            def raise_for_status(self):
-                if status >= 400:
-                    raise RuntimeError(f"{status} Client Error")
-
-            def json(self):
-                return self._payload
-
         def _get(url, **kwargs):
             calls.append({"url": url, "params": kwargs.get("params") or {},
                           "headers": kwargs.get("headers") or {}})
-            return _Resp(payloads[min(len(calls) - 1, len(payloads) - 1)])
+            return fake_response(
+                payloads[min(len(calls) - 1, len(payloads) - 1)],
+                status=status)
 
         monkeypatch.setattr(usajobs.SESSION, "get", _get)
         return calls
@@ -620,19 +594,11 @@ class TestAshbyKeyAcrossCallSites:
     @pytest.fixture
     def ashby_board(self, monkeypatch):
         """Serve BOARD to every module that reads the Ashby posting API."""
-        class _Resp:
-            status_code = 200
-            text = json.dumps(TestAshbyKeyAcrossCallSites.BOARD)
-
-            def raise_for_status(self):
-                pass
-
-            def json(self):
-                return TestAshbyKeyAcrossCallSites.BOARD
-
         # One shared session object behind every module (src.net.http.SESSION).
         from src.discovery.resolve import probes
-        monkeypatch.setattr(probes.SESSION, "get", lambda *a, **k: _Resp())
+        monkeypatch.setattr(
+            probes.SESSION, "get",
+            lambda *a, **k: fake_response(TestAshbyKeyAcrossCallSites.BOARD))
 
     def test_probe_reports_the_real_total(self, ashby_board):
         from src.discovery.resolve.probes import probe_ashby
@@ -664,14 +630,11 @@ class TestAshbyKeyAcrossCallSites:
         """Workday really does return `jobPostings`. The two branches sit in
         one function, so a careless sweep would break Workday while fixing
         Ashby — this pins the other direction."""
-        class _Resp:
-            status_code = 200
-
-            def json(self):
-                return {"jobPostings": [{"title": "Clinical Trial Liaison"}]}
-
         from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing.SESSION, "post", lambda *a, **k: _Resp())
+        monkeypatch.setattr(
+            local_sourcing.SESSION, "post",
+            lambda *a, **k: fake_response(
+                {"jobPostings": [{"title": "Clinical Trial Liaison"}]}))
         titles = local_sourcing._sample_titles(
             {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
         assert titles == ["Clinical Trial Liaison"]
@@ -891,15 +854,6 @@ class TestJobvite:
         def _install(routes):
             calls = []
 
-            class _Resp:
-                def __init__(self, text, status):
-                    self.text = text
-                    self.status_code = status
-
-                def raise_for_status(self):
-                    if self.status_code >= 400:
-                        raise RuntimeError(f"{self.status_code} Error")
-
             def _get(url, *a, **k):
                 params = k.get("params") or {}
                 full = url + ("?" + "&".join(f"{kk}={vv}" for kk, vv
@@ -908,9 +862,10 @@ class TestJobvite:
                 calls.append(full)
                 for fragment, body in routes.items():
                     if fragment in full:
-                        return (_Resp("", body) if isinstance(body, int)
-                                else _Resp(body, 200))
-                return _Resp("", 404)
+                        return (fake_response(text="", status=body)
+                                if isinstance(body, int)
+                                else fake_response(text=body))
+                return fake_response(text="", status=404)
 
             monkeypatch.setattr(jobvite.SESSION, "get", _get)
             return calls

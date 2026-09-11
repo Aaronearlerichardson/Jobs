@@ -9,6 +9,7 @@ cities, keywords, or track names.
 Nothing in the suite may touch the Claude API or the network.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -173,3 +174,44 @@ def keep_store_open(monkeypatch, db):
 
     monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
     return db
+
+
+def fake_response(payload=None, *, text=None, status=200, content=None):
+    """A stand-in for a requests Response: `status_code`,
+    `raise_for_status()`, `json()`, `text`, `content`.
+
+    Thirteen of these were defined across five test files, each with its
+    own idea of which two or three attributes mattered and what
+    raise_for_status should raise. That is fine until a fetcher starts
+    reading an attribute one stub happens not to have, and the test that
+    should have caught it passes because a DIFFERENT stub has it.
+
+    `payload` is what json() returns; `text` defaults to that payload as
+    JSON, so a stub serves both the JSON and the scrape paths. `status`
+    >= 400 makes raise_for_status raise, which is what net.http.get_json
+    turns into a reported miss.
+    """
+    body = text if text is not None else (
+        json.dumps(payload) if payload is not None else "")
+
+    class _Response:
+        status_code = status
+
+        def raise_for_status(self):
+            if status >= 400:
+                raise RuntimeError(f"{status} Error")
+
+        def json(self):
+            if payload is None:
+                raise ValueError("no JSON payload on this stub")
+            return payload
+
+        @property
+        def text(self):
+            return body
+
+        @property
+        def content(self):
+            return body.encode() if content is None else content
+
+    return _Response()

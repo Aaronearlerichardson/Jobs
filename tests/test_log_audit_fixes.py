@@ -17,7 +17,7 @@ import re
 
 import requests
 
-from conftest import keep_store_open
+from conftest import fake_response, keep_store_open
 import src.store as store
 from src.discovery import local_sourcing, paste_ingest
 from src.discovery.resolve import board as resolve_board, fetchpool
@@ -39,14 +39,6 @@ def _posting(loc, path, title="Data Engineer"):
             "postedOn": "Posted Today"}
 
 
-class _Resp:
-    def __init__(self, payload, status=200):
-        self._p, self.status_code = payload, status
-
-    def json(self):
-        return self._p
-
-
 class _WorkdaySession:
     """A Workday CXS tenant: `total` and `postings` answer every listing
     POST regardless of scope (the 2026-09-09 NVIDIA behaviour when
@@ -62,13 +54,13 @@ class _WorkdaySession:
         scoped = bool(body.get("appliedFacets")) or bool(body.get("searchText"))
         rows = self.postings if (self.ignores_scope or not scoped) else self.scoped
         page = rows[body.get("offset", 0):body.get("offset", 0) + body.get("limit", 20)]
-        return _Resp({"total": len(rows), "jobPostings": page,
+        return fake_response({"total": len(rows), "jobPostings": page,
                       "facets": [{"facetParameter": "locations", "values": [
                           {"id": "nc-id", "descriptor": "North Carolina"}]}]})
 
     def get(self, url, **kw):
         self.detail_gets.append(url)
-        return _Resp({"jobPostingInfo": {"location": "US, NC, Durham"}})
+        return fake_response({"jobPostingInfo": {"location": "US, NC, Durham"}})
 
 
 class TestWorkdayScopeGuard:
