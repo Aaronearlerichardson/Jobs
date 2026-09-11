@@ -4,10 +4,11 @@ it guessed, until a person confirms or rejects them. Split out of src.store
 on 2026-09-10; src.store re-exports every public name here, so callers keep
 saying ``store.confirm_company``.
 
-This module must not import src.store at module level: store imports it
-at load time to re-export it, and a module-level import back would make
-whichever side loads first fail. The one row helper a body needs is
-imported inside the function; doctests import what they use.
+This module must not import a store sibling at module level: store's
+__init__ imports all of them to re-export, and companies.py reaches
+back here for the rejection blocklist. Both directions are function-
+local, so neither module depends on the other at load time and the
+package may import them in any order. Doctests import what they use.
 """
 
 import re
@@ -189,7 +190,7 @@ def confirm_company(conn, cid, active=None):
         "UPDATE companies SET tags=?, active=? WHERE id=?",
         (tags.join(kept), int(active), cid))
     conn.commit()
-    from .__init__ import get_company   # not at module level: see module doc
+    from .companies import get_company  # not at module level: see module doc
     return get_company(conn, cid)
 
 

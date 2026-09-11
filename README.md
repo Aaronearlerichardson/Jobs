@@ -901,7 +901,7 @@ identically to a dead one.
 | `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `src/discovery/` | sourcing: where company names come from (seeds, directories, pasted pages, search dorking), local sourcing and the pipeline; `apply.py` upserts into the store |
 | `src/discovery/resolve/` | resolution: name -> board. Candidate URLs, the identity guard, the careers-page sniffer, the ATS slug probes, the web-search fallback. Reads no store |
-| `src/store/__init__.py` | unified companies + jobs store (+ export/import, prune, migrations) |
+| `src/store/` | the SQLite store, one import surface (`store.X`): `schema.py` (tables, migrations, connect/batch), `companies.py` (roster, misses, board identity, dormancy), `jobs.py` (postings, track membership, triage columns, ranking), `review.py` (the review queue), `pipeline.py` (dispositions, follow-ups) |
 | `src/tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
 | `src/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m src.claude.fit` |
 | `src/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
