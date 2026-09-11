@@ -17,6 +17,7 @@ import re
 
 import requests
 
+from conftest import keep_store_open
 import src.store as store
 from src.discovery import local_sourcing, paste_ingest
 from src.discovery.resolve import board as resolve_board, fetchpool
@@ -178,13 +179,7 @@ class TestJunkNames:
 
 class TestJunkNamesInThePasteFlow:
     def _wire(self, monkeypatch, db):
-        class _NoClose:
-            def __getattr__(self, k):
-                return getattr(db, k)
-
-            def close(self):
-                pass
-        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        keep_store_open(monkeypatch, db)
 
     def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
         self._wire(monkeypatch, db)

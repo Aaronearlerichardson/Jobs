@@ -141,3 +141,35 @@ def client():
     from src import web
     web.app.config["TESTING"] = True
     return web.app.test_client()
+
+
+# --------------------------------------------------------------------------- #
+#  Store plumbing the tests share
+# --------------------------------------------------------------------------- #
+
+def keep_store_open(monkeypatch, db):
+    """Point `store.connect()` at the test's OWN connection, with close()
+    disarmed.
+
+    The paths under test (add_names, preview_names, populate_companies,
+    score_missions, reresolve) open their own connection and close it when
+    they are done, which would leave the test with nothing to assert
+    against. Five test classes across two files had written this same
+    eight-line passthrough out.
+
+    A plain function rather than a fixture: it is called from the `_wire`
+    helpers those classes already have, and threading one more fixture
+    through twenty-six test signatures to reach them would cost more than
+    it saves.
+    """
+    import src.store as store
+
+    class _NoClose:
+        def __getattr__(self, k):
+            return getattr(db, k)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+    return db

@@ -13,6 +13,7 @@ import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
+from conftest import keep_store_open
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
 import src.discovery.resolve.probes as probes
@@ -593,19 +594,9 @@ class TestPastedNameBoardGuard:
     insert now."""
 
     def _wire(self, monkeypatch, db, hit):
-        import src.store as store
         import src.claude.api as claude
 
-        class _NoClose:
-            # add_names closes the connection it opens; the test still
-            # needs to read the fixture DB afterwards.
-            def __getattr__(self, k):
-                return getattr(db, k)
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        keep_store_open(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit, None))
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
@@ -923,9 +914,9 @@ class TestDiscoverLocalWebsearchPass:
             pass
 
     def _patch_common(self, monkeypatch, names, recent=frozenset()):
+        import src.store as store
         monkeypatch.setattr(local_sourcing, "gather_names", lambda extra=None: list(names))
         monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
-        import src.store as store
         monkeypatch.setattr(store, "connect", lambda *a, **k: self._FakeConn())
         monkeypatch.setattr(store, "recent_miss_names",
                             lambda conn, days=14: set(recent))
@@ -983,18 +974,8 @@ class TestPastedNamePreview:
     thousand HTTP requests."""
 
     def _wire(self, monkeypatch, db):
-        import src.store as store
 
-        class _NoClose:
-            # preview_names closes the connection it opens; the test still
-            # needs to read the fixture DB afterwards.
-            def __getattr__(self, k):
-                return getattr(db, k)
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        keep_store_open(monkeypatch, db)
 
     def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
         import src.store as store
@@ -1066,16 +1047,8 @@ class TestAddNamesQueue:
 
     def _wire(self, monkeypatch, db, hit=None):
         import src.claude.api as claude
-        import src.store as store
 
-        class _NoClose:
-            def __getattr__(self, k):
-                return getattr(db, k)
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        keep_store_open(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "resolve_or_miss",
                             lambda *a, **k: (hit or self._HIT, None))
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
@@ -1260,16 +1233,8 @@ class TestScoreMissionsHonoursTheReviewQueue:
 
     def _wire(self, monkeypatch, db):
         import src.claude.api as claude
-        import src.store as store
 
-        class _NoClose:
-            def __getattr__(self, k):
-                return getattr(db, k)
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+        keep_store_open(monkeypatch, db)
         monkeypatch.setattr(claude, "score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
