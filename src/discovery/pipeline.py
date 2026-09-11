@@ -3,7 +3,6 @@
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -11,7 +10,7 @@ import os
 
 from src.config import PROBE_TIMEOUT, REPORT_DIR
 from src.claude.api import DISCOVER_SYSTEM, call_claude_json
-from src.net.parallel import drain_or_abandon
+from src.net.parallel import drain
 from src.net.util import worker_count
 from .resolve.probes import (
     PROBES,
@@ -482,12 +481,11 @@ def _validate_all(candidate_dicts, use_js=True):
 
     js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
     try:
-        pool = ThreadPoolExecutor(max_workers=_DISCOVERY_WORKERS)
-        drain_or_abandon(
-            pool,
-            {pool.submit(_worker, i, rc, js_probe): (rc.get("name") or "").strip()
-             for i, rc in enumerate(candidate_dicts)},
-            _done, lambda _name: None)
+        drain(list(enumerate(candidate_dicts)),
+              lambda irc: _worker(irc[0], irc[1], js_probe),
+              _done, lambda _name: None,
+              label=lambda irc: (irc[1].get("name") or "").strip(),
+              max_workers=_DISCOVERY_WORKERS)
     finally:
         if js_probe is not None:
             js_probe.close()

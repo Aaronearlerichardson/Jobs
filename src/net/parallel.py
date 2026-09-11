@@ -56,6 +56,30 @@ def drain_or_abandon(ex, futs, consume, stalled):
     ex.shutdown(wait=False, cancel_futures=True)
 
 
+def drain(items, fn, consume, stalled, label=str,
+          max_workers=DEFAULT_WORKERS):
+    """`fan_out`'s sibling for work that can WEDGE rather than fail.
+
+    Builds the pool, submits `fn` over `items`, and runs the whole thing
+    under `drain_or_abandon`'s stall watchdog: `consume(future, label)`
+    per completion, `stalled(label)` for anything still unstarted when
+    nothing has completed for RESOLVE_STALL_S.
+
+    Six call sites wrote the two-line preamble out -- construct the
+    executor, build the {future: label} dict -- and every one of them
+    then threw the executor away. The choice between this and `fan_out`
+    is whether the work can hang: a bounded API call cannot, a company
+    resolution chaining page fetches can, and did (2026-08-28: 59 of 60
+    names in 8 minutes, then >1h on the last).
+    """
+    items = list(items)
+    if not items:
+        return
+    ex = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items))))
+    drain_or_abandon(ex, {ex.submit(fn, x): label(x) for x in items},
+                     consume, stalled)
+
+
 def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
             with_item=False, on_error=None):
     """Run `fn` over every item in a thread pool; yield what came back.

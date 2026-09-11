@@ -366,11 +366,11 @@ def _by_company(conn, rows):
     """Rows grouped by company, plus the roster row for each.
 
     Both gate phases work per company, not per row: the mission gate is a
-    company-level verdict and hydration is per host.
+    company-level verdict and hydration is per host. The grouping itself
+    is ops.group_by_company -- this module had reimplemented it, and the
+    body gates a third time inline.
     """
-    groups = {}
-    for r in rows:
-        groups.setdefault(r["company_id"], []).append(r)
+    groups = ops.group_by_company(rows)
     return groups, {cid: store.get_company(conn, cid) for cid in groups}
 
 
@@ -458,9 +458,9 @@ def _body_gates(conn, companies, survivors, tracks, mission_scorer, decided,
     pass rather than entering a track unscorable.
     """
     final = {}
-    groups = {}
-    for jid, (c, r, _) in survivors.items():
-        groups.setdefault(c["id"], []).append(r)
+    # The survivor rows carry company_id themselves, so the same grouping
+    # helper works here without rebuilding the (company, row) pairs.
+    groups = ops.group_by_company([r for _, r, _ in survivors.values()])
     for c, r, status, detail, surfaced in _judged(conn, companies, groups,
                                                   tracks, mission_scorer):
         if status == OK and (r.get("description") or "").strip():

@@ -295,3 +295,53 @@ def test_doctests_actually_exist():
     """
     with_doctests = [rel for rel, src in source_files() if ">>> " in src]
     assert len(with_doctests) >= 5, with_doctests
+
+
+# --------------------------------------------------------------------------- #
+#  4. Parallelism goes through src/net/parallel.py                             #
+# --------------------------------------------------------------------------- #
+
+#: Modules allowed to build a thread pool of their own, and why. Everything
+#: else calls net.parallel (fan_out for work that can FAIL, drain for work
+#: that can HANG, fetch_all for the crawl's source fan-out).
+POOL_OWNERS = {
+    "src/net/parallel.py":
+        "owns the shared primitives",
+    "src/crawl/harvest.py":
+        "its own FIRST_COMPLETED watchdog, with a per-pass wall-clock budget",
+    "src/discovery/resolve/fetchpool.py":
+        "per-run candidate-URL memo; the pool is part of the cache",
+    "src/discovery/resolve/probes.py":
+        "pins one headless browser to one dedicated thread (Playwright "
+        "thread affinity)",
+    "tools/check_sources.py":
+        "the pool sits inside a per-thread stdout capture that has to wrap "
+        "the whole threaded section (see _ThreadCapture)",
+}
+
+
+def test_thread_pools_go_through_net_parallel():
+    """A hand-rolled pool is how the submit/as_completed/try/print block
+    came back eight times, and how one wedged resolution held the web UI's
+    single op slot for over an hour. The exceptions are real and named;
+    a new one has to be argued for here."""
+    offenders = {}
+    for rel, src in source_files():
+        if rel in POOL_OWNERS or "ThreadPoolExecutor(" not in src:
+            continue
+        offenders[rel] = [l.strip() for l in src.splitlines()
+                          if "ThreadPoolExecutor(" in l and
+                          not l.strip().startswith("#")]
+    offenders = {k: v for k, v in offenders.items() if v}
+    assert not offenders, (
+        f"{sorted(offenders)} build their own thread pool. Use "
+        "src.net.parallel (fan_out / drain / fetch_all), or add the module "
+        "to POOL_OWNERS with the reason.")
+
+
+def test_pool_owners_still_own_pools():
+    """The allowlist must not rot into a list of modules that moved on."""
+    stale = [rel for rel in POOL_OWNERS
+             if not any(r == rel and "ThreadPoolExecutor(" in s
+                        for r, s in source_files())]
+    assert not stale, f"POOL_OWNERS lists {stale}, which no longer build one."

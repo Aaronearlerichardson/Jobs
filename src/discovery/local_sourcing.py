@@ -27,7 +27,6 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 """
 
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
 from datetime import datetime
 
@@ -37,7 +36,7 @@ from src import tags as company_tags
 from src.ats import coords
 from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
-from src.net.parallel import drain_or_abandon
+from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import resolve_or_miss
 from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
@@ -97,8 +96,6 @@ def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
     drain_or_abandon, not a plain pool: one wedged resolution used to hold
     the web UI's single op slot until the app was restarted.
     """
-    ex = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(todo))))
-
     def _done(fut, n):
         h = fut.result()
         if h and h.get("nc"):
@@ -110,9 +107,9 @@ def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
         elif h:
             misses.append(h)
 
-    drain_or_abandon(
-        ex, {ex.submit(resolve_one, n): n for n in todo}, _done,
-        lambda n: misses.append({"name": n, "reason": "fetch-error:stalled"}))
+    drain(todo, resolve_one, _done,
+          lambda n: misses.append({"name": n, "reason": "fetch-error:stalled"}),
+          max_workers=max_workers)
 
 
 def _probe_pass(names, max_workers):
@@ -121,15 +118,12 @@ def _probe_pass(names, max_workers):
     n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
           f"({n_wd} with Workday fallback)...")
-    hits = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(probe_company, n, name_key(n) in _MAJORS_KEYS): n
-                for n in names}
-        for fut in as_completed(futs):
-            hit = fut.result()
-            if hit:
-                hits.append(hit)
-    return hits
+    # A probe that raises is now reported and skipped rather than ending
+    # the pass -- this was the last pool in src/ with a bare fut.result(),
+    # the same shape as the prune_dead_boards bug.
+    return [h for h in fan_out(names,
+                               lambda n: probe_company(n, name_key(n) in _MAJORS_KEYS),
+                               "probe", max_workers) if h]
 
 
 def _js_workday_pass(hits, max_workers):
@@ -171,19 +165,17 @@ def _js_workday_pass(hits, max_workers):
                     "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
                     "count": wd["count"], "nc": nc}
 
-        with ThreadPoolExecutor(max_workers=k) as ex:
-            futs = {ex.submit(_js_one, i, m): m for i, m in enumerate(missed)}
-            for fut in as_completed(futs):
-                try:
-                    h = fut.result()
-                except Exception as e:
-                    print(f"    [!] JS probe failed for {futs[fut]!r}: {e}")
-                    continue
-                if h:
-                    hits.append(h)
-                    t, p, s = h["slug"]
-                    print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
-                          f"nc={h['nc']}/{h['count']}")
+        # `i` picks the browser, so the items are (index, name) pairs.
+        # on_error keeps this pass's own wording rather than fan_out's.
+        for h in fan_out(list(enumerate(missed)), lambda im: _js_one(*im),
+                         "JS probe", k,
+                         on_error=lambda im, e: print(
+                             f"    [!] JS probe failed for {im[1]!r}: {e}")):
+            if h:
+                hits.append(h)
+                t, p, s = h["slug"]
+                print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
+                      f"nc={h['nc']}/{h['count']}")
 
 
 def _sniff_pass(names, hits, misses, max_workers):
@@ -550,9 +542,8 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                 else "active" if active else "INACTIVE(other)")
         ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
         print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
-    ex = ThreadPoolExecutor(max_workers=min(8, max(1, len(confirmed))))
-    drain_or_abandon(ex, {ex.submit(_score_one, h): h["name"] for h in confirmed},
-                     _score_done, lambda name: None)
+    drain(confirmed, _score_one, _score_done, lambda name: None,
+          label=lambda h: h["name"], max_workers=8)
     conn.close()
 
     if dork:
@@ -779,9 +770,8 @@ def score_missions(max_workers=6, rescore_all=False):
                 else "  -> REACTIVATED (was unscored + inactive)" if revived
                 else "")
         print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
-    ex = ThreadPoolExecutor(max_workers=max_workers)
-    drain_or_abandon(ex, {ex.submit(_one, c): c["name"] for c in cos},
-                     _scored, lambda name: None)
+    drain(cos, _one, _scored, lambda name: None,
+          label=lambda c: c["name"], max_workers=max_workers)
     conn.close()
     print(f"\n  {n} compan(ies) scored.")
     return n
@@ -899,12 +889,10 @@ def resolve_leads(max_workers=8,
         print(f"    [{mark}] {c['name'][:30]:30} "
               f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
               f"{str(tier):18} {ss}{flag}")
-    ex = ThreadPoolExecutor(max_workers=max_workers)
-    drain_or_abandon(
-        ex,
-        {ex.submit(resolve_or_miss, c["name"], c.get("careers_url") or ""):
-         c["name"] for c in leads},
-        _consume, _stalled)
+    drain(leads,
+          lambda c: resolve_or_miss(c["name"], c.get("careers_url") or ""),
+          _consume, _stalled, label=lambda c: c["name"],
+          max_workers=max_workers)
     conn.close()
     queued = sum(1 for r in resolved
                  if company_tags.has(r.get("tags"), company_tags.PENDING))

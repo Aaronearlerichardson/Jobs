@@ -16,12 +16,11 @@ resolve.board.resolve_or_miss, score, queue for review).
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor
 
 from src import config
 
 from src.match.names import junk_name_reason, name_key
-from src.net.parallel import drain_or_abandon
+from src.net.parallel import drain
 from .local_sourcing import score_and_upsert
 from .resolve.board import resolve_or_miss
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
@@ -501,9 +500,8 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
               f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
               f"{state}{flag}")
 
-    ex = ThreadPoolExecutor(max_workers=max_workers)
-    drain_or_abandon(ex, {ex.submit(resolve_or_miss, n): n for n in fresh},
-                      _consume, _stalled)
+    drain(fresh, resolve_or_miss, _consume, _stalled,
+          max_workers=max_workers)
     conn.commit()
     conn.close()
     if unresolved:

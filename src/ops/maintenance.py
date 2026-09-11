@@ -11,7 +11,6 @@ UI and run_scraper.py can run any op against any configured track.
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 
@@ -26,7 +25,7 @@ from src.ats import coords
 from src.ats.fetchers import company as company_fetch
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
-from src.net.parallel import drain_or_abandon, fan_out, fetch_all
+from src.net.parallel import drain, fan_out, fetch_all
 from src.claude.resume import resume_text
 
 
@@ -1258,12 +1257,10 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
                   f"nc={hit['nc']:<3} tot={hit['count']:<4} "
                   f"{str(tier):18} {ss}  (was {was[name]})")
 
-        ex = ThreadPoolExecutor(max_workers=max_workers)
-        drain_or_abandon(
-            ex,
-            {ex.submit(resolve_or_miss, r["name"], r.get("careers_url") or ""):
-             r["name"] for r in rows},
-            _consume, _stalled)
+        drain(rows,
+              lambda r: resolve_or_miss(r["name"], r.get("careers_url") or ""),
+              _consume, _stalled, label=lambda r: r["name"],
+              max_workers=max_workers)
         conn.commit()
         print(f"\n  {len(written)} board(s) re-resolved and queued for review "
               f"(active=0, tagged {tags.PENDING})"
