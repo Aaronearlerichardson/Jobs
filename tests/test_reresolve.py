@@ -295,3 +295,31 @@ class TestJobviteSignature:
         from src.ats.fetchers.jobvite import tenant_of
         packed = ats_signatures.pack("jobvite", "acme", self.URL)
         assert tenant_of(packed["slug"]) == "acme"
+
+
+class TestARaisedResolutionIsReported:
+    """`resolve_or_miss` converts the exceptions it can see; the FUTURE can
+    still fail (a worker that dies, a cancelled task). Three consumers
+    unwrapped that by hand and the reresolve copy had dropped the report
+    line, so a resolution that blew up there became a miss with nothing in
+    the log to say why. resolve.board.resolved is the one unwrap now."""
+
+    def test_the_reason_and_the_report_both_survive(self, capsys):
+        from concurrent.futures import Future
+        from src.discovery.resolve.board import resolved
+
+        fut = Future()
+        fut.set_exception(RuntimeError("boom"))
+        hit, reason = resolved(fut, "Acme Bio")
+        assert hit is None
+        assert reason == "fetch-error:RuntimeError"
+        out = capsys.readouterr().out
+        assert "Acme Bio" in out and "RuntimeError" in out
+
+    def test_a_normal_result_passes_straight_through(self):
+        from concurrent.futures import Future
+        from src.discovery.resolve.board import resolved
+
+        fut = Future()
+        fut.set_result(({"name": "Acme"}, None))
+        assert resolved(fut, "Acme") == ({"name": "Acme"}, None)

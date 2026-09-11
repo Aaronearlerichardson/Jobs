@@ -1181,7 +1181,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from src.discovery.local_sourcing import (_board_already_tracked,
                                               _report_dup_board,
                                               _sample_titles)
-    from src.discovery.resolve.board import resolve_or_miss
+    from src.discovery.resolve.board import resolve_or_miss, resolved
     from src.match.names import junk_name_reason
 
     t = _t(t)
@@ -1216,10 +1216,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
             still.append((name, "fetch-error:stalled"))
 
         def _consume(fut, name):
-            try:
-                hit, reason = fut.result()
-            except Exception as e:
-                hit, reason = None, f"fetch-error:{type(e).__name__}"
+            hit, reason = resolved(fut, name)
             if not hit:
                 store.record_miss(conn, name, reason)
                 still.append((name, reason))

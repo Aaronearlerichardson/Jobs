@@ -38,7 +38,7 @@ from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import resolve_or_miss
+from .resolve.board import resolve_or_miss, resolved
 from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
 from .resolve.websearch_board import _websearch_board
 
@@ -860,11 +860,7 @@ def resolve_leads(max_workers=8,
 
     def _consume(fut, name):
         c = by_name[name]
-        try:
-            hit, reason = fut.result()
-        except Exception as e:
-            print(f"    [!] {name}: {type(e).__name__}: {e}")
-            hit, reason = None, f"fetch-error:{type(e).__name__}"
+        hit, reason = resolved(fut, name)
         if not hit:
             # Was printed and forgotten; now the lead row keeps WHY, so
             # the next run can skip it and the user can see the tally.

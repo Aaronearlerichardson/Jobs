@@ -186,3 +186,21 @@ def resolve_or_miss(name, careers_url=""):
     if not hit.get("nc"):
         return hit, "no-local-jobs"
     return hit, None
+
+
+def resolved(fut, name):
+    """`resolve_or_miss`'s (hit, reason) off a completed future, with a
+    RAISE turned into a miss reason of the same shape.
+
+    `resolve_or_miss` already converts the exceptions it can see, but the
+    future itself can still fail -- a worker that dies in the pool, a
+    cancelled task. Its three consumers (resolve_leads, add_names,
+    reresolve_misses) each wrote this out, and the third had already
+    dropped the report line, so a resolution that blew up during a
+    reresolve became a miss with nothing in the log to say why.
+    """
+    try:
+        return fut.result()
+    except Exception as e:          # noqa: BLE001 - the reason IS the result
+        print(f"    [!] {name}: {type(e).__name__}: {e}")
+        return None, f"fetch-error:{type(e).__name__}"

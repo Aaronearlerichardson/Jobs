@@ -22,7 +22,7 @@ from src import config
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import drain
 from .local_sourcing import score_and_upsert
-from .resolve.board import resolve_or_miss
+from .resolve.board import resolve_or_miss, resolved
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
 
 
@@ -467,11 +467,7 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         unresolved.append((n, "fetch-error:stalled"))
 
     def _consume(fut, name):
-        try:
-            hit, reason = fut.result()
-        except Exception as e:
-            print(f"    [!] {name}: {type(e).__name__}: {e}")
-            hit, reason = None, f"fetch-error:{type(e).__name__}"
+        hit, reason = resolved(fut, name)
         if not hit:
             # A pasted name that resolves to nothing used to be printed
             # once and lost; keep it with a reason so the paste is a
