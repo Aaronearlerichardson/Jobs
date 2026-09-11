@@ -57,6 +57,12 @@ Keyword focus (runner.apply_keyword_focus) mutates config's shared lists,
 so the gate phases run on the calling thread, one track at a time, with
 the lists restored afterwards. Only hydration and scoring fan out to
 threads, and neither reads those lists.
+
+Those seven steps are seven functions -- _free_gates, _hydrate,
+_body_gates, _score, _write_verdicts, over _by_company and _judged -- and
+`run` is the order they go in. They were numbered comments inside one
+167-line function; the two gate phases ask the identical question and had
+written the asking out twice.
 """
 
 import logging
@@ -356,6 +362,186 @@ def _score_one(job):
 #  The pass                                                                    #
 # --------------------------------------------------------------------------- #
 
+def _by_company(conn, rows):
+    """Rows grouped by company, plus the roster row for each.
+
+    Both gate phases work per company, not per row: the mission gate is a
+    company-level verdict and hydration is per host.
+    """
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["company_id"], []).append(r)
+    return groups, {cid: store.get_company(conn, cid) for cid in groups}
+
+
+def _judged(conn, companies, groups, tracks, mission_scorer):
+    """Yield (company, row, status, detail, surfaced) for every grouped row.
+
+    The two gate phases differ only in what they DO with a verdict -- the
+    asking is identical, and was written out twice.
+    """
+    for cid, rs in groups.items():
+        c = companies[cid]
+        verdicts = judge(conn, c, rs, tracks, mission_scorer=mission_scorer)
+        for r in rs:
+            status, detail, surfaced = summarize(verdicts[r["job_id"]])
+            yield c, r, status, detail, surfaced
+
+
+def _free_gates(conn, companies, groups, tracks, mission_scorer):
+    """Phase 1: the free gates, on the text the rows already have.
+
+    Returns (decided, survivors). A survivor is OK on some track, or
+    DEFER -- deferred meaning "cannot be ruled on without a body", which
+    is what phase 2 goes and fetches.
+    """
+    decided, survivors = {}, {}
+    for c, r, status, detail, _ in _judged(conn, companies, groups, tracks,
+                                           mission_scorer):
+        if status in (OK, DEFER):
+            survivors[r["job_id"]] = (c, r, status)
+        else:
+            decided[r["job_id"]] = (status, detail, [])
+    print(f"  free gates: {len(decided)} dropped, {len(survivors)} survive")
+    return decided, survivors
+
+
+def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
+             hydrate_fn):
+    """Phase 2: fetch a body for every survivor that lacks one.
+
+    One worker per company (hydration is per host), rows already fully
+    decided on some track first, so a board's per-host cap is spent on the
+    surest material. A row that failed recently is not retried.
+    """
+    todo = {}
+    cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
+    for jid, (c, r, status) in survivors.items():
+        if (r.get("description") or "").strip():
+            continue
+        if (r.get("desc_checked_at") or "") >= cutoff:
+            continue
+        todo.setdefault(c["id"], []).append(_fetcher_shape(r, c))
+    if not todo:
+        return
+    for cid, js in todo.items():
+        js.sort(key=lambda j: survivors[j["id"]][2] != OK)
+    n_todo = sum(len(js) for js in todo.values())
+    print(f"  hydrating {n_todo} bodiless survivor(s) across "
+          f"{len(todo)} board(s), {max_workers} at a time...")
+    for cid, st in fan_out(
+            list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
+            lambda cid: f"{companies[cid]['name']}: hydrate",
+            max_workers, with_item=True):
+        summary["hydrated"] += st.get("hydrated", 0)
+        for j in todo[cid]:
+            r = survivors[j["id"]][1]
+            if j.get("description"):
+                # Persist at once: a row that ends this pass still pending
+                # (over the cap, or deferred) must not be fetched again
+                # next pass.
+                r["description"] = j["description"]
+                r["location"] = j.get("location") or r.get("location")
+                store.store_body(conn, j["id"], r["description"],
+                                 r["location"])
+            elif j.get("_tried"):
+                store.mark_desc_checked(conn, j["id"], now=stamp)
+    print(f"  hydrated {summary['hydrated']} of {n_todo}")
+
+
+def _body_gates(conn, companies, survivors, tracks, mission_scorer, decided,
+                summary, n_free):
+    """Phase 3: the same gates again, now with bodies.
+
+    Returns the rows to score. A survivor still without a body -- DEFER,
+    or clear on every gate but unfetchable -- stays pending for the next
+    pass rather than entering a track unscorable.
+    """
+    final = {}
+    groups = {}
+    for jid, (c, r, _) in survivors.items():
+        groups.setdefault(c["id"], []).append(r)
+    for c, r, status, detail, surfaced in _judged(conn, companies, groups,
+                                                  tracks, mission_scorer):
+        if status == OK and (r.get("description") or "").strip():
+            final[r["job_id"]] = (c, r, surfaced, detail)
+        elif status in (OK, DEFER):
+            summary["left"] += 1
+        else:
+            decided[r["job_id"]] = (status, detail, [])
+    print(f"  body gates: {len(decided) - n_free} more dropped, "
+          f"{len(final)} to score, {summary['left']} still waiting on a body")
+    return final
+
+
+def _score(final, summary, score_cap, fit, max_workers):
+    """Phase 4: the only paid step, best companies first, under the cap.
+
+    Returns (scores, over_cap). Rows over the cap stay pending -- their
+    bodies are stored now, so the next pass reaches them for free.
+    """
+    order = sorted(final.values(),
+                   key=lambda x: -(x[0].get("mission_score") or 0.0))
+    to_score = order[:score_cap] if fit else []
+    over_cap = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
+    scores = {}
+    if to_score:
+        print(f"  scoring {len(to_score)} survivor(s) against the profile"
+              + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
+                 f"for the next pass)" if over_cap else "") + "...")
+        for r, res in fan_out([x[1] for x in to_score], _score_one,
+                              "scoring", max(2, min(max_workers, 6))):
+            if res.score is not None:
+                scores[r["job_id"]] = res
+                summary["scored"] += 1
+    return scores, over_cap
+
+
+def _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
+                    stamp):
+    """Phase 5: one batch, every verdict.
+
+    A survivor the scorer could not reach (no key, breaker tripped) is
+    still stamped into its tracks unscored: the crawl's self-heal scores
+    NULL-score tracked rows that have a body.
+    """
+    with store.batch(conn):
+        for jid, (status, detail, _) in decided.items():
+            store.record_triage(conn, jid, status, detail, now=stamp)
+            summary[status] += 1
+        for jid, (c, r, surfaced, detail) in final.items():
+            if jid in over_cap:
+                summary["left"] += 1
+                continue
+            res = scores.get(jid)
+            floors = [t["digest_min_fit"] for t in tracks
+                      if t["track"] in surfaced]
+            status = OK
+            if res is not None and floors and res.score < min(floors):
+                status = "fit"
+            loc, desc = r.get("location") or "", r.get("description") or ""
+            store.record_triage(
+                conn, jid, status, detail, tracks=surfaced, description=desc,
+                geo_mode=geo_mode(loc, desc),
+                remote_signal=remote_signal_for(
+                    {"location": loc, "description": desc}),
+                scores=res.as_columns() if res is not None else None,
+                now=stamp)
+            summary["surfaced" if status == OK else status] += 1
+
+
+def _print_summary(summary, bar):
+    """The funnel, as one line per pass, for whoever reads the session log."""
+    gate_bits = ", ".join(f"{summary[g]} {g}" for g in store.TRIAGE_GATES
+                          if summary[g])
+    print(f"\n{bar}\n  TRIAGE SUMMARY")
+    print(f"  pending {summary['pending']}: dropped [{gate_bits or 'none'}]; "
+          f"{summary['hydrated']} hydrated, {summary['scored']} scored, "
+          f"{summary['surfaced']} surfaced"
+          + (f", {summary['left']} left for next pass" if summary["left"] else ""))
+    print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
+
+
 def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
         score_cap=SCORE_CAP, fit=True, hydrate=True,
         mission_scorer=score_company_mission, hydrate_fn=hydrate_company,
@@ -363,6 +549,14 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
     """Triage every pending row in the store. Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,
     scored, surfaced, and how many rows are left pending.
+
+    Five phases, in cost order, each one working on what the last left:
+
+      1. _free_gates     the gates that cost nothing, on stored text
+      2. _hydrate        one detail GET per surviving bodiless row
+      3. _body_gates     the same gates again, now with bodies
+      4. _score          the only paid step, capped per pass
+      5. _write_verdicts one batch, every verdict
 
     `limit` caps the rows read this pass; `score_cap` the Claude fit calls;
     `fit=False` stamps survivors unscored (the crawl's self-heal scores
@@ -388,138 +582,20 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
     t0 = time.monotonic()
     stamp = now or datetime.now()
 
-    # Group by company: the mission gate is per company, and hydration is
-    # per host.
-    by_company, companies = {}, {}
-    for r in rows:
-        by_company.setdefault(r["company_id"], []).append(r)
-    for cid in by_company:
-        companies[cid] = store.get_company(conn, cid)
-
-    # Phase 1: free gates on the text the rows have now.
-    decided, survivors = {}, {}           # job_id -> (status, detail, tracks)
-    for cid, rs in by_company.items():
-        c = companies[cid]
-        verdicts = judge(conn, c, rs, tracks, mission_scorer=mission_scorer)
-        for r in rs:
-            status, detail, surfaced = summarize(verdicts[r["job_id"]])
-            if status == OK or status == DEFER:
-                survivors[r["job_id"]] = (c, r, status)
-            else:
-                decided[r["job_id"]] = (status, detail, [])
+    groups, companies = _by_company(conn, rows)
+    decided, survivors = _free_gates(conn, companies, groups, tracks,
+                                     mission_scorer)
     n_free = len(decided)
-    print(f"  free gates: {n_free} dropped, {len(survivors)} survive")
-
-    # Phase 2: hydrate survivors that lack a body, one worker per company,
-    # rows that are already fully decided (OK on some track) first so the
-    # per-host cap is spent on the surest material.
-    todo = {}
-    cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
-    for jid, (c, r, status) in survivors.items():
-        if (r.get("description") or "").strip():
-            continue
-        if (r.get("desc_checked_at") or "") >= cutoff:
-            continue
-        todo.setdefault(c["id"], []).append(_fetcher_shape(r, c))
-    if hydrate and todo:
-        for cid, js in todo.items():
-            js.sort(key=lambda j: survivors[j["id"]][2] != OK)
-        n_todo = sum(len(js) for js in todo.values())
-        print(f"  hydrating {n_todo} bodiless survivor(s) across "
-              f"{len(todo)} board(s), {max_workers} at a time...")
-        for cid, st in fan_out(
-                list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
-                lambda cid: f"{companies[cid]['name']}: hydrate",
-                max_workers, with_item=True):
-            summary["hydrated"] += st.get("hydrated", 0)
-            for j in todo[cid]:
-                r = survivors[j["id"]][1]
-                if j.get("description"):
-                    # Persist at once: a row that ends this pass still
-                    # pending (over the cap, or deferred) must not be
-                    # fetched again next pass.
-                    r["description"] = j["description"]
-                    r["location"] = j.get("location") or r.get("location")
-                    store.store_body(conn, j["id"], r["description"],
-                                     r["location"])
-                elif j.get("_tried"):
-                    store.mark_desc_checked(conn, j["id"], now=stamp)
-        print(f"  hydrated {summary['hydrated']} of {n_todo}")
-
-    # Phase 3: the text gates again, with bodies. A survivor still without
-    # a body (DEFER, or clear on every gate but unfetchable) stays pending
-    # for the next pass rather than entering a track unscorable.
-    final = {}                            # job_id -> (c, r, surfaced tracks)
-    by_company2 = {}
-    for jid, (c, r, _) in survivors.items():
-        by_company2.setdefault(c["id"], []).append(r)
-    for cid, rs in by_company2.items():
-        c = companies[cid]
-        verdicts = judge(conn, c, rs, tracks, mission_scorer=mission_scorer)
-        for r in rs:
-            status, detail, surfaced = summarize(verdicts[r["job_id"]])
-            if status == OK and (r.get("description") or "").strip():
-                final[r["job_id"]] = (c, r, surfaced, detail)
-            elif status in (OK, DEFER):
-                summary["left"] += 1
-            else:
-                decided[r["job_id"]] = (status, detail, [])
-    print(f"  body gates: {len(decided) - n_free} more dropped, "
-          f"{len(final)} to score, {summary['left']} still waiting on a body")
-
-    # Phase 4: score, best companies first, under the per-pass cap. Rows
-    # over the cap stay pending (their bodies are stored now, so the next
-    # pass reaches them for free).
-    order = sorted(final.values(),
-                   key=lambda x: -(x[0].get("mission_score") or 0.0))
-    to_score = order[:score_cap] if fit else []
-    over_cap = {x[1]["job_id"] for x in order[score_cap:]} if fit else set()
-    scores = {}
-    if to_score:
-        print(f"  scoring {len(to_score)} survivor(s) against the profile"
-              + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
-                 f"for the next pass)" if over_cap else "") + "...")
-        for r, res in fan_out([x[1] for x in to_score], _score_one,
-                              "scoring", max(2, min(max_workers, 6))):
-            if res.score is not None:
-                scores[r["job_id"]] = res
-                summary["scored"] += 1
-
-    # Phase 5: write every verdict. A survivor the scorer could not reach
-    # (no key, breaker tripped) is still stamped into its tracks unscored:
-    # the crawl's self-heal scores NULL-score tracked rows with a body.
-    with store.batch(conn):
-        for jid, (status, detail, _) in decided.items():
-            store.record_triage(conn, jid, status, detail, now=stamp)
-            summary[status] += 1
-        for jid, (c, r, surfaced, detail) in final.items():
-            if jid in over_cap:
-                summary["left"] += 1
-                continue
-            res = scores.get(jid)
-            floors = [t["digest_min_fit"] for t in tracks
-                      if t["track"] in surfaced]
-            status = OK
-            if res is not None and floors and res.score < min(floors):
-                status = "fit"
-            loc, desc = r.get("location") or "", r.get("description") or ""
-            store.record_triage(
-                conn, jid, status, detail, tracks=surfaced, description=desc,
-                geo_mode=geo_mode(loc, desc),
-                remote_signal=remote_signal_for(
-                    {"location": loc, "description": desc}),
-                scores=res.as_columns() if res is not None else None,
-                now=stamp)
-            summary["surfaced" if status == OK else status] += 1
+    if hydrate:
+        _hydrate(conn, companies, survivors, summary, stamp, max_workers,
+                 hydrate_fn)
+    final = _body_gates(conn, companies, survivors, tracks, mission_scorer,
+                        decided, summary, n_free)
+    scores, over_cap = _score(final, summary, score_cap, fit, max_workers)
+    _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
+                    stamp)
     conn.close()
 
     summary["secs"] = time.monotonic() - t0
-    gate_bits = ", ".join(f"{summary[g]} {g}" for g in store.TRIAGE_GATES
-                          if summary[g])
-    print(f"\n{bar}\n  TRIAGE SUMMARY")
-    print(f"  pending {summary['pending']}: dropped [{gate_bits or 'none'}]; "
-          f"{summary['hydrated']} hydrated, {summary['scored']} scored, "
-          f"{summary['surfaced']} surfaced"
-          + (f", {summary['left']} left for next pass" if summary["left"] else ""))
-    print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
+    _print_summary(summary, bar)
     return summary
