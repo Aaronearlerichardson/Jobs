@@ -12,7 +12,10 @@ web-search resolver, so it depends on nothing in this package.
 import re
 import sys
 
-from src.match.names import domain_tokens, risky_domain_tokens
+from src import config
+from src.match.locality import NC_HQ_RE as _NC_HQ_RE
+from src.match.names import domain_tokens, name_key, risky_domain_tokens
+from src.net.http import HEADERS, SESSION
 
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
@@ -27,6 +30,7 @@ from src.match.names import domain_tokens, risky_domain_tokens
 # no-local-jobs board instead of the wrong company it actually is). A hit
 # reached only through a risky token (names.risky_domain_tokens) must
 # corroborate against the page content before it's trusted.
+
 
 def _risky_token_in_url(url, name):
     """The risky domain token (names.risky_domain_tokens) `url`'s host
@@ -250,3 +254,85 @@ def candidate_pages(name, careers_url="", **kw):
     for url, r in candidate_responses(name, careers_url, **kw):
         if r is not None and corroborated(url, name, r.text):
             yield r
+
+
+# --------------------------------------------------------------------------- #
+#  Is the company REALLY in your area?                                         #
+# --------------------------------------------------------------------------- #
+#
+# The same question the rest of this module asks about a PAGE ("is this
+# really that company's site?"), asked about a place: a company with no
+# local openings today may still be worth tracking if it demonstrably has
+# a local presence. Two functions, no callers in common with anything
+# else in local_sourcing -- the component analysis flagged them as an
+# island inside that module before they moved here.
+
+
+def _hq_match_beyond_brand(text, name, hq_re=None):
+    r"""True if `text` carries a "<place>, ST" match whose place is NOT just
+    the company's own name.
+
+    Garner Health is a New York company, but "Garner" is also a configured
+    locality town — so every page of garnerhealth.com address-matched and
+    the 2026-08-28 discover run activated it as NC-local with zero NC jobs.
+    A match whose place tokens all appear in the company name is brand
+    text; a match on any OTHER configured place still counts.
+
+    `hq_re` defaults to the profile-derived locality pattern; the examples
+    pass their own so they hold on any profile (the suite must pass on
+    profile.example.toml, whose [locality] lists no Garner — a worktree
+    without a personal profile failed this doctest on 2026-09-01):
+
+    >>> pat = re.compile(r"\b(?:Garner|Durham),\s*NC\b")
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health", pat)
+    False
+    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio", pat)
+    True
+    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health", pat)
+    True
+    >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
+    False
+    """
+    squashed = name_key(name)
+    for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
+        toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
+        place_toks = toks[:-1] or toks          # drop the state suffix token
+        if all(t in squashed for t in place_toks):
+            continue
+        return True
+    return False
+
+
+def nc_hq_signal(name, careers_url="", board_jobs=None):
+    """
+    True if the company has a verifiable NC presence — used to TRACK local
+    companies that currently have no NC openings. Checks the board's job
+    locations first (cheap), then the company site/careers/contact pages.
+    Page-text matches that are just the company's own brand name don't
+    count (see _hq_match_beyond_brand); a JOB posted in a locality town is
+    a genuine signal regardless of what the company is called.
+    """
+    if board_jobs:
+        for j in board_jobs:
+            if _NC_HQ_RE.search(j.get("location", "") or ""):
+                return True
+    urls = []
+    if careers_url:
+        urls.append(careers_url)
+    for tok in domain_tokens(name):
+        urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
+                 f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
+                 f"https://www.{tok}.com/company"]
+    seen = set()
+    for u in urls[:8]:
+        if u in seen:
+            continue
+        seen.add(u)
+        try:
+            r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
+                            allow_redirects=True)
+            if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
+                return True
+        except Exception:
+            continue
+    return False

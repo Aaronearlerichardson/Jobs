@@ -13,6 +13,8 @@ import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
+import src.discovery.resolve.board as resolve_board
+import src.discovery.resolve.identity as identity
 import src.discovery.resolve.probes as probes
 import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
@@ -609,7 +611,7 @@ class TestPastedNameBoardGuard:
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr(claude, "score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))
-        monkeypatch.setattr(local_sourcing, "nc_hq_signal", lambda *a, **k: True)
+        monkeypatch.setattr(identity, "nc_hq_signal", lambda *a, **k: True)
 
     def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
         import src.store as store
@@ -826,13 +828,13 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
             calls["websearch"] += 1
             return None
 
-        monkeypatch.setattr(local_sourcing, "probe_company", _probe)
-        monkeypatch.setattr(local_sourcing, "_websearch_board", _websearch)
+        monkeypatch.setattr(resolve_board, "probe_company", _probe)
+        monkeypatch.setattr(resolve_board, "_websearch_board", _websearch)
         # The marketing page "validates" (a handful of scraped fragments)
         # but has zero LOCAL jobs.
-        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (9, 0))
+        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (9, 0))
 
-        hit = local_sourcing.resolve_board_sniff_first("Pfizer")
+        hit = resolve_board.resolve_board_sniff_first("Pfizer")
 
         assert calls == {"probe": 1, "websearch": 1}
         assert hit is not None and hit["ats"] == "custom" and hit["nc"] == 0
@@ -843,14 +845,14 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
         calls = {"probe": 0, "websearch": 0}
         monkeypatch.setattr(
-            local_sourcing, "probe_company",
+            resolve_board, "probe_company",
             lambda *a, **k: calls.update(probe=calls["probe"] + 1))
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            resolve_board, "_websearch_board",
             lambda *a, **k: calls.update(websearch=calls["websearch"] + 1))
-        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (5, 2))
+        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (5, 2))
 
-        hit = local_sourcing.resolve_board_sniff_first("Science.xyz")
+        hit = resolve_board.resolve_board_sniff_first("Science.xyz")
 
         assert calls == {"probe": 0, "websearch": 0}
         assert hit["ats"] == "custom" and hit["nc"] == 2 and hit["via"] == "sniff"
@@ -859,11 +861,11 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         """probe and websearch both miss entirely -> the weak custom hit,
         not None, is the answer: it still beats no answer at all."""
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
-        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
-        monkeypatch.setattr(local_sourcing, "_websearch_board", lambda *a, **k: None)
-        monkeypatch.setattr(local_sourcing, "_validate_board", lambda comp: (9, 0))
+        monkeypatch.setattr(resolve_board, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(resolve_board, "_websearch_board", lambda *a, **k: None)
+        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (9, 0))
 
-        hit = local_sourcing.resolve_board_sniff_first("Novozymes")
+        hit = resolve_board.resolve_board_sniff_first("Novozymes")
 
         assert hit is not None
         assert hit["ats"] == "custom" and hit["nc"] == 0 and hit["via"] == "sniff"
@@ -873,20 +875,20 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         fallback, even though the custom hit was found first."""
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
         monkeypatch.setattr(
-            local_sourcing, "probe_company",
+            resolve_board, "probe_company",
             lambda name, try_workday=True: {
                 "name": name, "ats": "greenhouse", "slug": "acme",
                 "count": 10, "nc": 4})
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            resolve_board, "_websearch_board",
             lambda *a, **k: pytest.fail("websearch must not run: probe already won"))
 
         def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (10, 4)
 
-        monkeypatch.setattr(local_sourcing, "_validate_board", _validate)
+        monkeypatch.setattr(resolve_board, "_validate_board", _validate)
 
-        hit = local_sourcing.resolve_board_sniff_first("Acme")
+        hit = resolve_board.resolve_board_sniff_first("Acme")
 
         assert hit["ats"] == "greenhouse" and hit["nc"] == 4 and hit["via"] == "probe"
 
@@ -894,18 +896,18 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         """A real ATS found only at step 3 (websearch) beats the held
         custom fallback when probe also misses."""
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
-        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(resolve_board, "probe_company", lambda *a, **k: None)
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            resolve_board, "_websearch_board",
             lambda name, max_results=8: {
                 "ats": "workday", "triple": ("acme", 1, "Acme")})
 
         def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (20, 6)
 
-        monkeypatch.setattr(local_sourcing, "_validate_board", _validate)
+        monkeypatch.setattr(resolve_board, "_validate_board", _validate)
 
-        hit = local_sourcing.resolve_board_sniff_first("Acme")
+        hit = resolve_board.resolve_board_sniff_first("Acme")
 
         assert hit["ats"] == "workday" and hit["nc"] == 6 and hit["via"] == "websearch"
 
@@ -1129,7 +1131,7 @@ class TestAddNamesQueue:
         that judgement now, and it costs nothing."""
         import src.store as store
         probed = []
-        monkeypatch.setattr(local_sourcing, "nc_hq_signal",
+        monkeypatch.setattr(identity, "nc_hq_signal",
                             lambda *a, **k: probed.append(a) or False)
         self._wire(monkeypatch, db, {**self._HIT, "nc": 0, "via": "websearch"})
         paste_ingest.add_names(["Alpaca Health"], max_workers=1)

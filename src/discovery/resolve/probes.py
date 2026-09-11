@@ -8,6 +8,8 @@ import time
 from src import config
 
 from src.ats.signatures import extract_workday_triple
+from src.match.locality import is_nc as _has_nc
+from src.match.names import slug_guesses
 from src.net.http import HEADERS, SESSION
 from .fetchpool import candidate_urls
 from .identity import _foreign_board, candidate_pages
@@ -558,3 +560,98 @@ class WorkdayJsProbePool:
 
     def __exit__(self, *_a):
         self.close()
+
+
+# ─── Probing a COMPANY, not a handle ────────────────────────────
+#
+# The probes above take a handle someone already has. These take a NAME:
+# guess its slugs (match.names.slug_guesses), try each platform, and then
+# count how many of the board's postings are in your [locality] -- which
+# is what rejects a slug-guess that lands on a real board belonging to
+# somebody else. Store-free, like everything in this package.
+#
+# Lived in discovery/local_sourcing.py, which is the SOURCING half: it
+# decides which names to try and writes the results to the roster. This
+# is resolution, and it sat there only because that is where the caller
+# was.
+
+
+def _wd_search_text():
+    """Free-text location term for Workday's CXS search, from [locality] —
+    the same derivation the crawl fetcher uses, so a probe's count and the
+    later crawl agree on what "in your area" means."""
+    from src.ats.fetchers.company import _default_search_text
+    return _default_search_text()
+
+
+def _nc_count_greenhouse(slug):
+    try:
+        r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
+        return sum(1 for j in r.json().get("jobs", [])
+                   if _has_nc(j.get("location", {}).get("name", "")))
+    except Exception:
+        return 0
+
+
+def _nc_count_lever(slug):
+    try:
+        r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
+        return sum(1 for j in r.json()
+                   if _has_nc(j.get("categories", {}).get("location", "")))
+    except Exception:
+        return 0
+
+
+def _nc_count_ashby(slug):
+    try:
+        r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
+        data = r.json()
+        return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
+                   if _has_nc(j.get("location", "")))
+    except Exception:
+        return 0
+
+
+def _nc_count_workday(tenant, pod, site):
+    """Count Workday postings in your [locality], scoped the way the crawl
+    scopes the board (location facets, else searchText), and never taken
+    at face value when the scope did not narrow anything -- see
+    src.ats.fetchers.company.wd_local_count."""
+    from src.ats.fetchers.company import NC_RE, wd_local_count
+    try:
+        return wd_local_count(tenant, pod, site, NC_RE,
+                              search_text=_wd_search_text())
+    except Exception:
+        return 0
+
+
+def probe_company(name, try_workday=True):
+    """
+    Probe Greenhouse/Lever/Ashby (fast) then — only if ``try_workday`` —
+    Workday (slow careers-page fallback), then VERIFY the board has NC-area
+    jobs (kills false-positive slug collisions and enforces local relevance).
+    Returns a hit dict with an ``nc`` count, or None.
+    """
+    hit = None
+    for slug in slug_guesses(name):
+        for ats, fn, nc_fn in (("greenhouse", probe_greenhouse, _nc_count_greenhouse),
+                               ("lever", probe_lever, _nc_count_lever),
+                               ("ashby", probe_ashby, _nc_count_ashby)):
+            ok, count = fn(slug)
+            if ok:
+                hit = {"name": name, "ats": ats, "slug": slug,
+                       "count": count, "nc": nc_fn(slug)}
+                break
+        if hit:
+            break
+    if not hit and try_workday:
+        wd = probe_workday(name)
+        if wd and wd.get("validated"):
+            hit = {"name": name, "ats": "workday",
+                   "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
+                   "count": wd["count"],
+                   "nc": _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])}
+    return hit

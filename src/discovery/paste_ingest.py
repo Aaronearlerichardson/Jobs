@@ -12,7 +12,7 @@ isn't an employer simply fails to resolve.
 
 Two steps, so requests are spent only on names a person ticked:
 preview_names (parse and classify, no network) then add_names (resolve via
-local_sourcing.resolve_or_miss, score, queue for review).
+resolve.board.resolve_or_miss, score, queue for review).
 """
 
 import re
@@ -22,7 +22,8 @@ from src import config
 
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import drain_or_abandon
-from .local_sourcing import resolve_or_miss, score_and_upsert
+from .local_sourcing import score_and_upsert
+from .resolve.board import resolve_or_miss
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
 
 

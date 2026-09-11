@@ -170,7 +170,7 @@ def sniff_careers_ats(name, careers_url=""):
 # A bare "no-board-found" means "we don't know why" -- which of the very
 # different failure modes below it was is invisible until someone probes by
 # hand. diagnose_no_board turns the sniff's own fetch results into one of
-# four qualifiers (src.discovery.local_sourcing.classify_miss appends it to the
+# four qualifiers (board.classify_miss appends it to the
 # "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
 
 def diagnose_no_board(name, careers_url=""):

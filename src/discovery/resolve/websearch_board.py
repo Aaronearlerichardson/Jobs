@@ -2,7 +2,7 @@
 domain the careers-page sniffer cannot guess (gov/org domains, acronyms,
 product-named domains -- 'Core Sound Imaging' -> corestudycast.com).
 
-Third and last step of local_sourcing.resolve_board_sniff_first. Two guards
+Third and last step of board.resolve_board_sniff_first. Two guards
 keep a search result from becoming the wrong employer's board: job
 aggregators are skipped outright (_is_aggregator), and a hit is taken only
 when its slug or host plausibly belongs to the name (_slug_matches_name /

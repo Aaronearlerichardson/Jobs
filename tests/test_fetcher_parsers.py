@@ -651,7 +651,7 @@ class TestAshbyKeyAcrossCallSites:
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):
         from src.match.locality import is_nc
-        from src.discovery.local_sourcing import _nc_count_ashby
+        from src.discovery.resolve.probes import _nc_count_ashby
         # The fixture board has two jobs in NC. Skip the test if the active
         # profile's locality doesn't include NC — the test would correctly
         # return 0, so there's nothing to test.

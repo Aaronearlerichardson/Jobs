@@ -19,7 +19,7 @@ import requests
 
 import src.store as store
 from src.discovery import local_sourcing, paste_ingest
-from src.discovery.resolve import fetchpool
+from src.discovery.resolve import board as resolve_board, fetchpool
 from src.match.names import junk_name_reason
 from src.ops import maintenance as ops
 from src.ats.fetchers import workday as wd
@@ -228,7 +228,7 @@ class TestJunkNamesInReresolve:
         store.record_miss(db, "Required Qualifications", "no-board-found:x")
         store.record_miss(db, "Emmes", "no-board-found:wrong-domain")
         tried = []
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             lambda n, *a, **k: tried.append(n)
                             or (None, "no-board-found:x"))
         ops.reresolve_misses(conn=db, max_workers=1, t=self.T)

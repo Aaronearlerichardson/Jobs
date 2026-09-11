@@ -8,15 +8,18 @@ The stages, and where each lives:
      harvesting, an LLM brainstorm (src.discovery.name_sources) -- or take them
      from a pasted page (src.discovery.paste_ingest) or a banked lead
      (resolve_leads below).
-  2. Resolve each name to a board: careers-page sniff first
-     (src.discovery.resolve.sniffer), name-guessed slug probes second (probe_company /
-     src.discovery.resolve.probes), web search last (src.discovery.resolve.websearch_board), every
-     hit validated by a live fetch (resolve_board_sniff_first). A name that
-     resolves to nothing gets a reason instead (resolve_or_miss /
-     classify_miss).
+  2. Resolve each name to a board. That whole step is src.discovery.resolve
+     now -- sniff the careers page, probe guessed slugs, search the web,
+     validate every hit with a live fetch, and say WHY when none of it
+     worked (resolve.board.resolve_or_miss). It used to live here, which
+     put ~300 lines of store-free resolution in the middle of the module
+     that decides what to store.
   3. Verify the board has jobs in your [locality], or the company an office
-     there (nc_hq_signal); mission-score it; write it to the store as a
-     review candidate (score_and_upsert), or record the miss.
+     there (resolve.identity.nc_hq_signal); mission-score it; write it to
+     the store as a review candidate (score_and_upsert), or record the miss.
+
+This module is the SOURCING half: which names to try, and what to do with
+what comes back. Everything here that writes, writes to the store.
 
 Entry points: populate_companies (the bulk pass), add_board (a URL the user
 already knows), resolve_leads (leads banked by capture.py), score_missions
@@ -33,99 +36,18 @@ from src import config
 from src import tags as company_tags
 
 from src.ats import coords
-from src.match.locality import NC_HQ_RE as _NC_HQ_RE, is_nc as _has_nc
-from src.match.names import domain_tokens, name_key, slug_guesses
+from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain_or_abandon
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.probes import probe_ashby, probe_greenhouse, probe_lever, probe_workday
+from .resolve.board import resolve_or_miss
+from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
 from .resolve.websearch_board import _websearch_board
 
 
 # --------------------------------------------------------------------------- #
-#  Board probing and discover_local (slug guesses live in src/match/names.py)      #
+#  discover_local: the bulk pass over gathered names                          #
 # --------------------------------------------------------------------------- #
-
-
-def _wd_search_text():
-    """Free-text location term for Workday's CXS search, from [locality] —
-    the same derivation the crawl fetcher uses, so a probe's count and the
-    later crawl agree on what "in your area" means."""
-    from src.ats.fetchers.company import _default_search_text
-    return _default_search_text()
-
-
-def _nc_count_greenhouse(slug):
-    try:
-        r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        return sum(1 for j in r.json().get("jobs", [])
-                   if _has_nc(j.get("location", {}).get("name", "")))
-    except Exception:
-        return 0
-
-
-def _nc_count_lever(slug):
-    try:
-        r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        return sum(1 for j in r.json()
-                   if _has_nc(j.get("categories", {}).get("location", "")))
-    except Exception:
-        return 0
-
-
-def _nc_count_ashby(slug):
-    try:
-        r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        data = r.json()
-        return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
-                   if _has_nc(j.get("location", "")))
-    except Exception:
-        return 0
-
-
-def _nc_count_workday(tenant, pod, site):
-    """Count Workday postings in your [locality], scoped the way the crawl
-    scopes the board (location facets, else searchText), and never taken
-    at face value when the scope did not narrow anything -- see
-    src.ats.fetchers.company.wd_local_count."""
-    from src.ats.fetchers.company import NC_RE, wd_local_count
-    try:
-        return wd_local_count(tenant, pod, site, NC_RE,
-                              search_text=_wd_search_text())
-    except Exception:
-        return 0
-
-
-def probe_company(name, try_workday=True):
-    """
-    Probe Greenhouse/Lever/Ashby (fast) then — only if ``try_workday`` —
-    Workday (slow careers-page fallback), then VERIFY the board has NC-area
-    jobs (kills false-positive slug collisions and enforces local relevance).
-    Returns a hit dict with an ``nc`` count, or None.
-    """
-    hit = None
-    for slug in slug_guesses(name):
-        for ats, fn, nc_fn in (("greenhouse", probe_greenhouse, _nc_count_greenhouse),
-                               ("lever", probe_lever, _nc_count_lever),
-                               ("ashby", probe_ashby, _nc_count_ashby)):
-            ok, count = fn(slug)
-            if ok:
-                hit = {"name": name, "ats": ats, "slug": slug,
-                       "count": count, "nc": nc_fn(slug)}
-                break
-        if hit:
-            break
-    if not hit and try_workday:
-        wd = probe_workday(name)
-        if wd and wd.get("validated"):
-            hit = {"name": name, "ats": "workday",
-                   "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                   "count": wd["count"],
-                   "nc": _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])}
-    return hit
 
 
 _DEFAULT_WEBSEARCH_CAP = 20
@@ -413,77 +335,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 
 
 # --------------------------------------------------------------------------- #
-#  Locality signals, sampling, and store writes (populate / add_board)        #
-# --------------------------------------------------------------------------- #
-
-def _hq_match_beyond_brand(text, name, hq_re=None):
-    r"""True if `text` carries a "<place>, ST" match whose place is NOT just
-    the company's own name.
-
-    Garner Health is a New York company, but "Garner" is also a configured
-    locality town — so every page of garnerhealth.com address-matched and
-    the 2026-08-28 discover run activated it as NC-local with zero NC jobs.
-    A match whose place tokens all appear in the company name is brand
-    text; a match on any OTHER configured place still counts.
-
-    `hq_re` defaults to the profile-derived locality pattern; the examples
-    pass their own so they hold on any profile (the suite must pass on
-    profile.example.toml, whose [locality] lists no Garner — a worktree
-    without a personal profile failed this doctest on 2026-09-01):
-
-    >>> pat = re.compile(r"\b(?:Garner|Durham),\s*NC\b")
-    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health", pat)
-    False
-    >>> _hq_match_beyond_brand("visit us in Garner, NC", "Acme Bio", pat)
-    True
-    >>> _hq_match_beyond_brand("HQ: Durham, NC", "Garner Health", pat)
-    True
-    >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
-    False
-    """
-    squashed = name_key(name)
-    for m in (hq_re or _NC_HQ_RE).finditer(text or ""):
-        toks = re.findall(r"[a-z0-9]+", m.group(0).lower())
-        place_toks = toks[:-1] or toks          # drop the state suffix token
-        if all(t in squashed for t in place_toks):
-            continue
-        return True
-    return False
-
-
-def nc_hq_signal(name, careers_url="", board_jobs=None):
-    """
-    True if the company has a verifiable NC presence — used to TRACK local
-    companies that currently have no NC openings. Checks the board's job
-    locations first (cheap), then the company site/careers/contact pages.
-    Page-text matches that are just the company's own brand name don't
-    count (see _hq_match_beyond_brand); a JOB posted in a locality town is
-    a genuine signal regardless of what the company is called.
-    """
-    if board_jobs:
-        for j in board_jobs:
-            if _NC_HQ_RE.search(j.get("location", "") or ""):
-                return True
-    urls = []
-    if careers_url:
-        urls.append(careers_url)
-    for tok in domain_tokens(name):
-        urls += [f"https://www.{tok}.com/contact", f"https://www.{tok}.com/about",
-                 f"https://www.{tok}.com/locations", f"https://www.{tok}.com/",
-                 f"https://www.{tok}.com/company"]
-    seen = set()
-    for u in urls[:8]:
-        if u in seen:
-            continue
-        seen.add(u)
-        try:
-            r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
-                            allow_redirects=True)
-            if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
-                return True
-        except Exception:
-            continue
-    return False
+#  Sampling and store writes (populate / add_board / resolve_leads)           #
 
 
 def _sample_titles(hit, n=6):
@@ -916,164 +768,6 @@ def score_missions(max_workers=6, rescore_all=False):
     conn.close()
     print(f"\n  {n} compan(ies) scored.")
     return n
-
-
-def _validate_board(comp):
-    """Fetch a resolved board and return (total, nc) live job counts. A board
-    that returns zero jobs is treated as dead/wrong by the caller — this is
-    what rejects a slug-guess that resolves to an empty or nonexistent board."""
-    from src.ats.fetchers import company as company_fetch
-    try:
-        allj = company_fetch.fetch_company(comp, None)
-    except Exception:
-        return 0, 0
-    if not allj:
-        return 0, 0
-    try:
-        nc = sum(1 for j in allj
-                 if company_fetch.NC_RE.search(j.get("location", "") or ""))
-    except Exception:
-        nc = 0
-    return len(allj), nc
-
-
-def resolve_board_sniff_first(name, careers_url=""):
-    """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
-    slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
-
-    The only resolver the interactive paths use. It replaced a probe-first
-    one that guessed slugs from the name before looking at the company's own
-    site, which false-positived onto same-named but unrelated boards ('Oxford
-    Biomedica' -> a different Oxford Workday tenant; 'Raya Health' -> the Raya
-    dating app on Lever). Sniffing the company's OWN careers page can't
-    collide that way, so it goes first; a probe-only hit is tagged
-    ``via='probe'`` so the caller can flag it for a human sanity-check.
-
-    Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
-    a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
-    a custom self-hosted board."""
-    from .resolve.sniffer import sniff_ats
-
-    def _mk(ats, slug, curl, via):
-        total, nc = _validate_board(coords.columns(ats, slug, curl))
-        if total <= 0:
-            return None
-        return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
-                "count": total, "nc": nc, "via": via}
-
-    # 1) Authoritative: detect the ATS embedded on the company's own careers page.
-    # A `custom` sniff hit is held back rather than returned outright: a
-    # marketing/careers page with no real ATS embedded still classifies as
-    # `custom`, and a handful of scraped page fragments is enough for
-    # _validate_board's total > 0 to pass (Pfizer/Sanofi/AstraZeneca/Syngenta/
-    # Novozymes all resolved this way, each with a single-digit `total` that
-    # was never their real Workday board). Only a `custom` hit that already
-    # carries LOCAL jobs (nc > 0) is a genuine self-hosted board worth taking
-    # immediately; an nc == 0 custom hit is kept as a last-resort fallback so
-    # steps 2/3 get a chance to find the real ATS first.
-    fallback = None
-    s = sniff_ats(name, careers_url or "")
-    if s:
-        if s["ats"] == "workday":
-            hit = _mk("workday", s["triple"], s.get("careers_url"), "sniff")
-        elif s["ats"] == "custom":
-            hit = _mk("custom", None, s.get("careers_url"), "sniff")
-        else:
-            hit = _mk(s["ats"], s.get("slug"), s.get("careers_url"), "sniff")
-        if hit:
-            if s["ats"] != "custom" or hit["nc"] > 0:
-                return hit
-            fallback = hit
-
-    # 2) Fallback: name-guessed slug/Workday probe (collision risk -> validated).
-    p = probe_company(name, try_workday=True)
-    if p:
-        hit = _mk(p["ats"], p["slug"], p.get("careers_url"), "probe")
-        if hit:
-            return hit
-
-    # 3) Web-search fallback: find the careers page for names whose domain the
-    #    sniffer can't guess (acronyms, hyphenated or product-named domains --
-    #    'OXB' -> oxb.com, 'United Imaging - North America' -> united-imaging.com,
-    #    'Core Sound Imaging' -> studycast). _websearch_board already validates
-    #    slug/own-domain against the name, so it's not collision-flagged.
-    #    Best-effort: degrades to a miss when the search backend is rate-limited.
-    w = _websearch_board(name)
-    if w:
-        if w["ats"] == "workday":
-            hit = _mk("workday", w["triple"], w.get("careers_url"), "websearch")
-        elif w["ats"] == "custom":
-            hit = _mk("custom", None, w.get("careers_url"), "websearch")
-        else:
-            hit = _mk(w["ats"], w.get("slug"), w.get("careers_url"), "websearch")
-        if hit:
-            return hit
-
-    # Nothing better than the weak custom sniff turned up: it beats a miss.
-    return fallback
-
-
-def classify_miss(name, careers_url=""):
-    """Second look at a name that would not resolve: which src.store
-    MISS_REASONS code explains it.
-
-    Re-sniffs the careers page for detections resolve_board_sniff_first
-    discards — an ATS we can RECOGNIZE but not fetch (Taleo, Eightfold,
-    Dayforce, ...) is a very different problem from a company we could find
-    nothing for, and the two were previously indistinguishable.
-
-    A bare "no-board-found" is itself four different problems (nothing
-    resolves, the domain is dead, a careers page exists with no known ATS,
-    or a candidate resolved to someone else's site) — sniffer.diagnose_no_board
-    tells them apart, appended as the ':'-qualifier a rerun's miss_counts
-    already knows how to aggregate past (see src.store.miss_family).
-
-    Notes:
-        Costs one extra careers-page sniff (plus diagnose_no_board's own,
-        on the no-board-found path), so it is called only on the failure
-        path and only by the on-demand resolvers — never per candidate in
-        a full discover_local pass.
-    """
-    from src.ats.signatures import ATS_LEAD_PATTERNS
-    from .resolve.sniffer import diagnose_no_board, sniff_careers_ats
-    try:
-        lead = sniff_careers_ats(name, careers_url or "")
-    except Exception as e:
-        return f"fetch-error:{type(e).__name__}"
-    if not lead:
-        try:
-            sub = diagnose_no_board(name, careers_url or "")
-        except Exception:
-            sub = ""
-        return f"no-board-found:{sub}" if sub else "no-board-found"
-    ats = lead.get("ats") or "?"
-    if ats in {a for a, _ in ATS_LEAD_PATTERNS}:
-        return f"ats-unsupported:{ats}"
-    return f"board-dead:{ats}"
-
-
-def resolve_or_miss(name, careers_url=""):
-    """Resolve a company NAME to a crawlable board, or say why it failed.
-
-    Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
-    no hit is a failed resolution (see classify_miss); a hit WITH a reason is
-    a live, readable board that simply has no openings in your [locality]
-    (``no-local-jobs``) — worth keeping, not worth crawling today.
-
-    Notes:
-        The single entry point for "attempt a company, and record the
-        outcome either way". Callers persist the reason with
-        src.store.record_miss so a rerun can skip, retry or report it.
-    """
-    try:
-        hit = resolve_board_sniff_first(name, careers_url or "")
-    except Exception as e:
-        return None, f"fetch-error:{type(e).__name__}"
-    if not hit:
-        return None, classify_miss(name, careers_url)
-    if not hit.get("nc"):
-        return hit, "no-local-jobs"
-    return hit, None
 
 
 def _miss_row(m):

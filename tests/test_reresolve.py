@@ -15,6 +15,7 @@ import src.store as store
 from src import tags
 from src.ats import signatures as ats_signatures
 from src.discovery import local_sourcing
+from src.discovery.resolve import board as resolve_board
 from src.ops import maintenance as ops
 
 
@@ -78,7 +79,7 @@ class TestReresolveWrites:
     T = {"db_path": None}
 
     def _wire(self, monkeypatch, result):
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             lambda *a, **k: result)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr("src.claude.api.score_company_mission",
@@ -180,7 +181,7 @@ class TestManualAddUsesTheSharedResolver:
             seen.append(name)
             return result
 
-        monkeypatch.setattr(local_sourcing, "resolve_or_miss", _resolve)
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
         monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
         monkeypatch.setattr("src.claude.api.score_company_mission",
                             lambda *a, **k: ("adjacent", 0.5, "stub"))

@@ -22,7 +22,8 @@ from src.ats.signatures import detect
 from src import tags as company_tags
 from src import store
 from src.ats.fetchers import company as company_fetch
-from src.discovery.local_sourcing import nc_hq_signal, score_and_upsert
+from src.discovery.local_sourcing import score_and_upsert
+from src.discovery.resolve.identity import nc_hq_signal
 
 
 def _or_group(terms, n=8):

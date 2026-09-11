@@ -917,7 +917,7 @@ def add_manual_job(url, title, company, location, description="",
     later. Returns a summary dict.
 
     Notes:
-        Resolution goes through src.discovery.local_sourcing.resolve_or_miss —
+        Resolution goes through src.discovery.resolve.board.resolve_or_miss —
         the same careers-page-sniff-first resolver every other interactive
         add path uses. It replaced a probe-first resolver that guessed a
         slug from the name before looking at the company's own site, which
@@ -925,7 +925,8 @@ def add_manual_job(url, title, company, location, description="",
         employer name lands on a same-named stranger's board.
     """
     from src.claude.api import is_active_mission, score_company_mission
-    from src.discovery.local_sourcing import _sample_titles, resolve_or_miss
+    from src.discovery.local_sourcing import _sample_titles
+    from src.discovery.resolve.board import resolve_or_miss
 
     t = _t(t)
     name = (company or "").strip()
@@ -1179,8 +1180,9 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     """
     from src.claude.api import score_company_mission
     from src.discovery.local_sourcing import (_board_already_tracked,
-                                          _report_dup_board, _sample_titles,
-                                          resolve_or_miss)
+                                              _report_dup_board,
+                                              _sample_titles)
+    from src.discovery.resolve.board import resolve_or_miss
     from src.match.names import junk_name_reason
 
     t = _t(t)
