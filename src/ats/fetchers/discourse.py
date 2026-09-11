@@ -1,13 +1,12 @@
 """Discourse forum job-category feed."""
 
-from src.net.http import HEADERS, get_json
+from src.net.http import JSON_HEADERS, get_json
 
 
 def fetch_discourse(display_name, base_url, category_id, gate=None):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
-    dsc_headers = {**HEADERS, "Accept": "application/json"}
     data = get_json(url, f"Discourse {display_name}", default={},
-                    headers=dsc_headers)
+                    headers=JSON_HEADERS)
     topics = (data.get("topic_list") or {}).get("topics", []) if data else []
     jobs = []
     for t in topics:

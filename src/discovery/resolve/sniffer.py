@@ -76,7 +76,7 @@ def _confirm_coords(ats, slug):
                 "/public/events/staffing/v1/job-requisitions",
                 params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
                 timeout=PROBE_TIMEOUT,
-                headers={**HEADERS, "Accept": "application/json"},
+                headers=JSON_HEADERS,
             )
             if r.status_code != 200:
                 return None

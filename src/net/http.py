@@ -32,6 +32,12 @@ _log = logging.getLogger("http")
 # and deflate are universally supported, so dropping br loses nothing.
 HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 
+#: HEADERS plus the JSON Accept every API-shaped board wants. Four
+#: fetchers had their own module constant for this and four more built
+#: it inline; a header set that must agree across them belongs in one
+#: place, beside the UA it extends.
+JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
+
 # Every request through SESSION waits this long (connect, read) unless the
 # call names its own `timeout=`; passing `timeout=None` also means this
 # default, never "wait forever". Fetchers therefore need no timeout

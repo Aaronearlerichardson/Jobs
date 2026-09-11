@@ -371,7 +371,7 @@ def probe_job_open(url):
         for u in workday._cxs_tenant_variants(cxs):
             try:
                 r = SESSION.get(u,
-                                headers={**HEADERS, "Accept": "application/json"})
+                                headers=JSON_HEADERS)
             except Exception as e:
                 return None, f"workday cxs fetch error: {e}"
             last_status = r.status_code

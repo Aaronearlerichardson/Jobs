@@ -18,14 +18,13 @@ import time
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import SESSION, HEADERS, JSON_HEADERS
 from .board import board_jobs
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
         "/events/staffing/v1/job-requisitions")
 _PORTAL = ("https://workforcenow.adp.com/mascsr/default/mdf/recruitment"
            "/recruitment.html")
-_JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 
 
 def _location_str(req):
@@ -43,7 +42,7 @@ def _fetch_description(item_id, cid, ccid, timeout=None):
         r = SESSION.get(
             f"{_API}/{item_id}",
             params={"cid": cid, "ccId": ccid, "locale": "en_US"},
-            timeout=timeout, headers=_JSON_HEADERS,
+            timeout=timeout, headers=JSON_HEADERS,
         )
         r.raise_for_status()
         data = r.json()
@@ -78,7 +77,7 @@ def _rows(cid, ccid, label, page_size, max_pages):
                 _API,
                 params={"cid": cid, "ccId": ccid, "locale": "en_US",
                         "$top": page_size, "$skip": page * page_size},
-                headers=_JSON_HEADERS,
+                headers=JSON_HEADERS,
             )
             r.raise_for_status()
             reqs = r.json().get("jobRequisitions") or []

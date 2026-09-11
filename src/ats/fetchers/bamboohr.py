@@ -16,10 +16,9 @@ call (see fetchers/board.py for the order of filters and the budget).
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import SESSION, HEADERS, JSON_HEADERS
 from .board import board_jobs
 
-_JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 
 
 def _location_str(job):
@@ -38,7 +37,7 @@ def _is_remote(job):
 def _fetch_description(base, jid, timeout=None):
     try:
         r = SESSION.get(f"{base}/careers/{jid}/detail",
-                         timeout=timeout, headers=_JSON_HEADERS)
+                         timeout=timeout, headers=JSON_HEADERS)
         r.raise_for_status()
         opening = (r.json().get("result") or {}).get("jobOpening") or {}
         html = opening.get("description") or ""
@@ -66,7 +65,7 @@ def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
                    max_details=40, detail_delay=0.2):
     base = f"https://{subdomain}.bamboohr.com"
     try:
-        r = SESSION.get(f"{base}/careers/list", headers=_JSON_HEADERS)
+        r = SESSION.get(f"{base}/careers/list", headers=JSON_HEADERS)
         r.raise_for_status()
         entries = r.json().get("result") or []
     except Exception as e:

@@ -66,7 +66,6 @@ written the asking out twice.
 """
 
 import logging
-import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -76,6 +75,10 @@ from src import config
 from src import tags
 from src import store
 from src.ats import coords
+# Workday's "N Locations" placeholder: the real list only comes with
+# the detail JSON (fetchers.company.hydrate_description fixes the
+# field). The pattern is the fetcher's to own; triage had a copy.
+from src.ats.fetchers.workday import N_LOCATIONS_RE
 from src.match import gates
 from src.claude.api import is_active_mission, score_company_mission
 from src.match.filters import is_relevant
@@ -84,6 +87,7 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, remote_signal,
                                 remote_signal_for)
 
 from src.ops import maintenance as ops
+from src.crawl import harvest
 from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.net.parallel import fan_out
@@ -109,13 +113,12 @@ SCORE_CAP = 300
 # A body fetch that failed this recently is not retried (the backfill ops'
 # convention); the row stays pending until then.
 RETRY_DAYS = 3
-# Workday "N Locations" placeholder: the real list only comes with the
-# detail JSON (fetchers.company.hydrate_description fixes the field).
-_N_LOCATIONS_RE = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
 # Location strings that say nothing: empty, or the custom-board scrapers'
 # default when no place was found (src.match.locality.location_snippet).
 _UNKNOWN_LOC = {"", "see posting"}
-DEFAULT_WORKERS = worker_count("HARVEST_WORKERS")
+# The harvester's pool size, shared: triage runs as the harvest pass's
+# second half and must not disagree with it about HARVEST_WORKERS.
+DEFAULT_WORKERS = harvest.DEFAULT_WORKERS
 
 
 # --------------------------------------------------------------------------- #
@@ -214,7 +217,7 @@ def _location_unknown(location):
     """The listing did not really say where: empty, the custom-board
     placeholder, or Workday's "N Locations" (the detail page names them)."""
     loc = (location or "").strip().lower()
-    return loc in _UNKNOWN_LOC or bool(_N_LOCATIONS_RE.match(loc))
+    return loc in _UNKNOWN_LOC or bool(N_LOCATIONS_RE.match(loc))
 
 
 def _geo_verdict(company, job, t, has_body):

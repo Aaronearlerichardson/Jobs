@@ -26,12 +26,11 @@ from urllib.parse import urlparse
 
 from src import config
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import SESSION, HEADERS, JSON_HEADERS
 from src.net.util import cache_dir, default_search_text, norm_posted_date
 from .board import board_jobs, loc_ok
 
-_JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
-_CXS_HEADERS = {**_JSON_HEADERS, "Content-Type": "application/json"}
+_CXS_HEADERS = {**JSON_HEADERS, "Content-Type": "application/json"}
 
 # Multi-location rows list as literally "2 Locations" / "12 Locations" in
 # locationsText, a string no locality regex can match, which silently
@@ -135,7 +134,7 @@ def _cxs_description(detail_url, timeout=None):
     """GET a CXS job-detail endpoint; return (plain_text_description, remoteType)."""
     for url in _cxs_tenant_variants(detail_url):
         try:
-            r = SESSION.get(url, timeout=timeout, headers=_JSON_HEADERS)
+            r = SESSION.get(url, timeout=timeout, headers=JSON_HEADERS)
             if r.status_code != 200:
                 continue
             info = r.json().get("jobPostingInfo", {}) or {}
@@ -164,7 +163,7 @@ def cxs_detail(tenant, pod, site, path):
     api = (f"https://{tenant}.wd{pod}.myworkdayjobs.com"
            f"/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}{path}")
     try:
-        r = SESSION.get(api, headers=_JSON_HEADERS)
+        r = SESSION.get(api, headers=JSON_HEADERS)
         if r.status_code != 200:
             return {}
         return r.json().get("jobPostingInfo", {}) or {}
