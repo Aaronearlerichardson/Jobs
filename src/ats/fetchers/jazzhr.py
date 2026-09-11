@@ -15,7 +15,7 @@ the display name, so the sweep and the company-vetted pull agree.
 import re
 import time
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 from .jsonld import _job_from_posting, extract_jsonld, is_jobposting
 
@@ -29,7 +29,7 @@ def _rows(subdomain, urls, label, per_job_delay):
             r = SESSION.get(url, headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] JazzHR {label} {url}: {e}")
+            fetch_failed(f"JazzHR {label} {url}", e)
             continue
         for obj in extract_jsonld(r.text):
             if is_jobposting(obj):
@@ -45,8 +45,7 @@ def fetch_jazzhr(company_name, subdomain, gate=None, loc_re=None, max_jobs=60,
         r = SESSION.get(base + "/", headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] JazzHR {label}: {e}")
-        return []
+        return fetch_failed(f"JazzHR {label}", e)
 
     seen, urls = set(), []
     for path in _APPLY_RE.findall(r.text):

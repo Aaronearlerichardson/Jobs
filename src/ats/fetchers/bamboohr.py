@@ -16,7 +16,7 @@ call (see fetchers/board.py for the order of filters and the budget).
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, JSON_HEADERS
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 
 
@@ -68,8 +68,7 @@ def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
         r.raise_for_status()
         entries = r.json().get("result") or []
     except Exception as e:
-        print(f"    [!] BambooHR {company_name or subdomain}: {e}")
-        return []
+        return fetch_failed(f"BambooHR {company_name or subdomain}", e)
     return board_jobs((_row(base, subdomain, e) for e in entries), company_name,
                       gate=gate, loc_re=loc_re,
                       fetch_description=lambda row: _fetch_description(base, row["_jid"]),

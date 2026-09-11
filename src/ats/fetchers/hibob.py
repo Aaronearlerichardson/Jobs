@@ -25,7 +25,7 @@ other detectable ATS signature on the page itself).
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date
 from .board import board_jobs
 
@@ -74,7 +74,6 @@ def fetch_hibob(tenant, company_name="", gate=None, loc_re=None):
     try:
         raw = parse_board(tenant)
     except Exception as e:
-        print(f"    [!] HiBob {company_name or tenant}: {e}")
-        return []
+        return fetch_failed(f"HiBob {company_name or tenant}", e)
     return board_jobs((_row(tenant, j) for j in raw), company_name,
                       gate=gate, loc_re=loc_re)

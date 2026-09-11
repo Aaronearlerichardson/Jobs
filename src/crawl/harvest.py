@@ -57,6 +57,7 @@ from src import store
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
 from src.match.locality import geo_mode
+from src.net import http
 from src.net.util import worker_count
 
 _log = logging.getLogger(__name__)
@@ -213,15 +214,24 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
         delay = hydrate_delay(company.get("ats"))
     stats = {"name": company.get("name"), "ats": company.get("ats"),
              "fetched": 0, "new": 0, "hydrated": 0, "unhydrated": 0,
-             "closed": 0, "reopened": 0, "err": None, "secs": 0.0}
+             "closed": 0, "reopened": 0, "fetch_errors": 0, "err": None,
+             "secs": 0.0}
+    # A fetcher does not RAISE on a dead board -- it reports and returns [],
+    # which is also what a board with nothing on it returns, so `fetched: 0`
+    # alone cannot tell "404" from "no openings". net.http counts the
+    # reported failures per thread, and one board owns one thread here, so
+    # resetting around the fetch attributes them to exactly this board.
+    http.reset_fetch_failures()
     try:
         jobs = fetch_whole_board(company) or []
     except Exception as e:                      # noqa: BLE001 - reported
+        stats["fetch_errors"] = http.fetch_failures()
         stats["err"] = f"fetch: {type(e).__name__}: {e}"
         stats["secs"] = time.monotonic() - t0
         return stats
     progress()
     stats["fetched"] = len(jobs)
+    stats["fetch_errors"] = http.fetch_failures()
 
     try:
         _store_board(db_path, jobs, company, stats, progress,
@@ -348,7 +358,7 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
           + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
 
     summary = {"boards": len(boards), "ok": 0, "err": 0, "stalled": 0,
-               "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
+               "dead": 0, "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
                "reopened": 0, "secs": 0.0}
     if not boards:
         print("  nothing to do")
@@ -373,6 +383,11 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
         done_n[0] += 1
         if s["err"]:
             status = s["err"]
+        elif not s["fetched"] and s.get("fetch_errors"):
+            # The distinction the log could not previously draw: this board
+            # answered with an error, it is not merely empty.
+            status = (f"no jobs - {s['fetch_errors']} fetch error(s), "
+                      f"{s['secs']:.0f}s")
         else:
             status = (f"{s['fetched']} job(s), {s['new']} new, "
                       f"{s['hydrated']} hydrated"
@@ -407,6 +422,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
                 summary["err"] += 1
             else:
                 summary["ok"] += 1
+                if not s["fetched"] and s.get("fetch_errors"):
+                    summary["dead"] += 1
             for k in ("fetched", "new", "hydrated", "closed", "reopened"):
                 summary[k] += s[k]
         now = time.monotonic()
@@ -436,6 +453,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     print(f"\n{bar}\n  HARVEST SUMMARY")
     print(f"  boards: {summary['ok']} ok, {summary['err']} failed, "
           f"{summary['stalled']} abandoned"
+          + (f", {summary['dead']} answered with an error and no jobs"
+             if summary["dead"] else "")
           + (f", {skipped} not started" if skipped > 0 else ""))
     print(f"  jobs:   {summary['fetched']} fetched, {summary['new']} new, "
           f"{summary['hydrated']} hydrated, {summary['closed']} closed, "

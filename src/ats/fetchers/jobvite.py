@@ -28,7 +28,7 @@ import time
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date
 from .board import loc_ok
 from .jsonld import (_normalize_description, _normalize_location,
@@ -121,7 +121,7 @@ def _listing(tenant, label):
             r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": page}, headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] Jobvite {label} search p={page}: {e}")
+            fetch_failed(f"Jobvite {label} search p={page}", e)
             break
         new = [row for row in parse_listing(r.text, tenant)
                if row["id"] not in seen]
@@ -135,8 +135,7 @@ def _listing(tenant, label):
         r = SESSION.get(f"{BASE}/{tenant}/jobs", headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] Jobvite {label} jobs: {e}")
-        return []
+        return fetch_failed(f"Jobvite {label} jobs", e)
     return parse_listing(r.text, tenant)
 
 
@@ -151,7 +150,7 @@ def _hydrate(rows, label, max_details, detail_delay):
             r = SESSION.get(row["url"], headers=HEADERS)
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] Jobvite {label} {row['url']}: {e}")
+            fetch_failed(f"Jobvite {label} {row['url']}", e)
             continue
         detail = parse_detail(r.text)
         row["description"] = detail.get("description", "")

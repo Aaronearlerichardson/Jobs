@@ -19,7 +19,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
@@ -86,8 +86,7 @@ def fetch_paylocity(guid, company_name="", gate=None, loc_re=None, max_details=4
     try:
         raw = parse_board(guid)
     except Exception as e:
-        print(f"    [!] Paylocity {company_name or guid[:8]}: {e}")
-        return []
+        return fetch_failed(f"Paylocity {company_name or guid[:8]}", e)
     return board_jobs((_row(guid, j) for j in raw), company_name,
                       gate=gate, loc_re=loc_re,
                       fetch_description=lambda row: fetch_description(row["_jid"]),

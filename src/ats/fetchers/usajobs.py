@@ -34,7 +34,7 @@ import html
 import re
 
 from src import config
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date
 
 API_URL = "https://data.usajobs.gov/api/search"
@@ -343,7 +343,7 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
             r.raise_for_status()
             data = r.json()
         except Exception as e:
-            print(f"    [!] USAJOBS: {e}")
+            fetch_failed("USAJOBS", e)
             break
         result = data.get("SearchResult") if isinstance(data, dict) else None
         if not isinstance(result, dict):

@@ -11,6 +11,8 @@ requests from it.
 """
 
 import logging
+import sys
+import threading
 
 from requests import Session
 from requests.adapters import HTTPAdapter
@@ -119,5 +121,47 @@ def get_json(url, label, default=None, **kw):
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"    [!] {label}: {e}")
+        fetch_failed(label, e)
         return default
+
+
+#: Per-THREAD count of fetch failures, because the harvester runs one board
+#: per worker thread and the question is always "did THIS board fail?".
+_FAILED = threading.local()
+
+
+def fetch_failed(label, err, indent=4):
+    """Report one failed fetch, count it, and hand back [].
+
+    Thirty-seven sites across src/ats had written
+    `print(f"    [!] {label}: {e}")` out by hand, and the copies had
+    already drifted -- two indents, and ultipro.py using sys.stdout.write
+    because print() emits the text and the newline as SEPARATE writes,
+    which let another thread splice a line into the middle of one (seen
+    fused with a [SNIFF] line in the 2026-08-28 log). One writer means one
+    indent and one atomic write for everybody.
+
+    Counting is the point, though. A fetcher that fails soft-returns [],
+    and `[]` is also what a board with nothing on it returns, so by the
+    time a caller sees the result the difference is gone -- 116 of 620
+    boards came back empty in EVERY harvest run of the last 25 logs and
+    not one of them was recorded as anything but an ordinary empty board.
+    The failure was only ever in the log text. Now it is also a number the
+    caller can read.
+
+    Returns [] so a soft-failing fetcher can `return fetch_failed(...)`;
+    call it as a statement where the failure path breaks or continues.
+    """
+    _FAILED.n = getattr(_FAILED, "n", 0) + 1
+    sys.stdout.write(f"{' ' * indent}[!] {label}: {err}\n")
+    return []
+
+
+def fetch_failures():
+    """Fetch failures reported on this thread since the last reset."""
+    return getattr(_FAILED, "n", 0)
+
+
+def reset_fetch_failures():
+    """Start counting this thread's fetch failures from zero."""
+    _FAILED.n = 0

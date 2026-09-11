@@ -26,7 +26,7 @@ import re
 from bs4 import BeautifulSoup
 
 from src.match.locality import location_snippet
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date, stable_id
 
 # Tried in order; the first feed with entries wins.
@@ -147,7 +147,7 @@ def fetch_peopleadmin(host, company_name, gate=None):
                             headers={**HEADERS, "Accept": "application/atom+xml"})
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] PeopleAdmin {label} {path}: {e}")
+            fetch_failed(f"PeopleAdmin {label} {path}", e)
             continue
         entries, jobs = _parse_feed(r.text, host, company_name, gate)
         if entries:

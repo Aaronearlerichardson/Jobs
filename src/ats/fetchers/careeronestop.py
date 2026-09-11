@@ -25,7 +25,7 @@ import re
 from urllib.parse import quote
 
 from src import config
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import stable_id
 
 # v2 — v1 was retired and returns a blanket 401 even with valid credentials.
@@ -116,19 +116,20 @@ def fetch_nlx_company(name, location=None, days=60,
                              params={"showFilters": "false",
                                      "enableJobDescriptionSnippet": "true"})
         except Exception as e:
-            print(f"  [!] CareerOneStop request failed: {e}")
+            fetch_failed("CareerOneStop", e, indent=2)
             break
         if r.status_code == 401:
-            print("  [!] CareerOneStop rejected the credentials (401) — "
-                  "check CAREERONESTOP_USER_ID / CAREERONESTOP_TOKEN.")
+            fetch_failed("CareerOneStop", "rejected the credentials (401)"
+                         " - check CAREERONESTOP_USER_ID / "
+                         "CAREERONESTOP_TOKEN", indent=2)
             break
         if r.status_code != 200:
-            print(f"  [!] CareerOneStop HTTP {r.status_code}")
+            fetch_failed("CareerOneStop", f"HTTP {r.status_code}", indent=2)
             break
         try:
             data = r.json()
         except ValueError:
-            print("  [!] CareerOneStop returned non-JSON")
+            fetch_failed("CareerOneStop", "non-JSON response", indent=2)
             break
         rows = data.get("Jobs") or []
         if not isinstance(rows, list) or not rows:

@@ -14,7 +14,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import stable_id, strip_html
 
 # WWR titles take either shape:
@@ -74,8 +74,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
         r = SESSION.get(url, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] RSS {source_label}: {e}")
-        return []
+        return fetch_failed(f"RSS {source_label}", e)
 
     # Use the xml parser; lxml is already a dep for sitemap.
     soup = BeautifulSoup(r.content, "xml")

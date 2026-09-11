@@ -16,7 +16,7 @@ import re
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
 from src.net.util import stable_id
 
@@ -136,8 +136,7 @@ def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
         r = SESSION.get(page_url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] JSON-LD {company_name} {page_url}: {e}")
-        return []
+        return fetch_failed(f"JSON-LD {company_name} {page_url}", e)
 
     jobs = []
     for obj in extract_jsonld(r.text):

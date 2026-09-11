@@ -7,6 +7,7 @@ import threading
 from src import store
 from src.match import gates
 from src.crawl import harvest
+from src.net import http
 
 
 def _company(conn, name, ats="greenhouse", **extra):
@@ -263,6 +264,50 @@ def test_harvest_board_empty_snapshot_closes_nothing(tmp_path, monkeypatch):
     stats = harvest.harvest_board(c, db, delay=0)
     assert stats["err"] is None and stats["closed"] == 0
     assert conn.execute("SELECT status FROM jobs").fetchone()[0] == "open"
+
+
+def test_a_dead_board_is_told_apart_from_an_empty_one(tmp_path, monkeypatch):
+    """Both return [], so only the failure COUNT separates them.
+
+    116 of 620 boards came back empty in every harvest run across 25 logs
+    -- dead slugs like the Lever board "netherlands" -- and every one was
+    recorded as an ordinary empty board, because a fetcher reports its 404
+    to stdout and then returns [] exactly as a board with no openings
+    does. net.http counts what it reports; the harvester reads the count.
+    """
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+
+    def empty(comp):
+        return []
+
+    def dead(comp):
+        return http.fetch_failed("Lever netherlands", "404 Client Error")
+
+    monkeypatch.setattr(harvest, "fetch_whole_board", empty)
+    quiet = harvest.harvest_board(c, db, delay=0)
+
+    monkeypatch.setattr(harvest, "fetch_whole_board", dead)
+    gone = harvest.harvest_board(c, db, delay=0)
+
+    assert quiet["fetched"] == gone["fetched"] == 0
+    assert quiet["fetch_errors"] == 0
+    assert gone["fetch_errors"] == 1
+    # Neither closes anything: an empty snapshot is still not evidence.
+    assert quiet["closed"] == gone["closed"] == 0
+
+
+def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
+                                                             monkeypatch):
+    """The count is per-thread, and a worker thread runs one board."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    monkeypatch.setattr(harvest, "fetch_whole_board",
+                        lambda comp: http.fetch_failed("x", "boom"))
+    assert harvest.harvest_board(c, db, delay=0)["fetch_errors"] == 1
+    assert harvest.harvest_board(c, db, delay=0)["fetch_errors"] == 1
 
 
 # ── run ─────────────────────────────────────────────────────────────────────

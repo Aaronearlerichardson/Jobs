@@ -18,7 +18,7 @@ import time
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, JSON_HEADERS
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
@@ -82,7 +82,7 @@ def _rows(cid, ccid, label, page_size, max_pages):
             r.raise_for_status()
             reqs = r.json().get("jobRequisitions") or []
         except Exception as e:
-            print(f"    [!] ADP {label} p{page}: {e}")
+            fetch_failed(f"ADP {label} p{page}", e)
             return
         if not reqs:
             return

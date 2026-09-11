@@ -25,7 +25,7 @@ import time
 from urllib.parse import urlparse
 
 from src import config
-from src.net.http import SESSION, JSON_HEADERS
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed
 from src.net.util import cache_dir, default_search_text, norm_posted_date
 from .board import board_jobs, loc_ok
 
@@ -329,7 +329,7 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
             data = r.json()
             posts = data.get("jobPostings", []) or []
         except Exception as e:
-            print(f"    [!] workday {tenant} p{page}: {e}")
+            fetch_failed(f"workday {tenant} p{page}", e)
             break
         if not posts:
             break

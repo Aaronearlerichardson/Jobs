@@ -38,7 +38,7 @@ from src import config
 # full tree via _get_soup.
 _ANCHORS_ONLY = SoupStrainer("a")
 
-from src.net.http import HEADERS, SESSION, JSON_HEADERS
+from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed
 from src.match.locality import NC_RE  # profile [locality]: the location gate
 from src.net.util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
 from . import icims, workday
@@ -72,15 +72,15 @@ def _get_json(url, label, **kw):
     surfaces as a cryptic ``Expecting value`` further up the stack."""
     r = SESSION.get(url, headers=HEADERS, **kw)
     if r.status_code != 200:
-        print(f"    [!] {label}: HTTP {r.status_code}")
+        fetch_failed(label, f"HTTP {r.status_code}")
         return None
     if not r.content.strip():
-        print(f"    [!] {label}: empty response")
+        fetch_failed(label, "empty response")
         return None
     try:
         return r.json()
     except ValueError:
-        print(f"    [!] {label}: non-JSON response")
+        fetch_failed(label, "non-JSON response")
         return None
 
 
@@ -123,7 +123,7 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
                              f"?limit=100&offset={page*100}", headers=HEADERS)
             data = r.json()
         except Exception as e:
-            print(f"    [!] smartrecruiters {slug}: {e}")
+            fetch_failed(f"smartrecruiters {slug}", e)
             break
         content = data.get("content", []) or []
         if not content:

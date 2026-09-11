@@ -40,7 +40,7 @@ from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date
 
 # Job pages beyond this many are left for the next crawl. Newest first, so
@@ -225,7 +225,7 @@ def _fetch_sitemap(origin, label):
                             headers={**HEADERS, "Accept": "application/xml"})
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] Getro {label} sitemap: {e}")
+            fetch_failed(f"Getro {label} sitemap", e)
             continue
         jobs, children = parse_sitemap(r.text, origin)
         for j in jobs:
@@ -269,7 +269,7 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
             r = SESSION.get(e["url"], headers=HEADERS)
             r.raise_for_status()
         except Exception as ex:
-            print(f"    [!] Getro {label} {e['url']}: {ex}")
+            fetch_failed(f"Getro {label} {e['url']}", ex)
             fetched += 1
             continue
         fetched += 1

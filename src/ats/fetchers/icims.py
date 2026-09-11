@@ -28,7 +28,7 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup
 
 from src import config
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import LOC_TEXT_RE, cache_dir
 from .board import board_jobs, loc_ok
 from .jsonld import (_normalize_description, _normalize_location,
@@ -236,7 +236,7 @@ def fetch_icims_all(tenant, loc_re=None, loc_label=LOCAL_LABEL,
                    if loc_ok(loc_re, j["location"])
                    or (not j["location"] and loc_ok(loc_re, j["title"]))]
     except Exception as e:
-        print(f"    [!] icims {tenant}: {e}")
+        fetch_failed(f"icims {tenant}", e)
     return out
 
 

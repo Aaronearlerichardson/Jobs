@@ -16,13 +16,12 @@ Notes:
     timeout explicitly instead of inheriting the session default.
 """
 
-import sys
 import time
 
 import requests
 from bs4 import BeautifulSoup
 
-from src.net.http import DEFAULT_TIMEOUT, HEADERS
+from src.net.http import DEFAULT_TIMEOUT, HEADERS, fetch_failed
 from .board import board_jobs
 
 _JSON = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
@@ -90,11 +89,6 @@ def fetch_ultipro(slug, company_name="", gate=None, loc_re=None):
     try:
         opps = parse_board(slug)
     except Exception as e:
-        # Single write, not print(): this runs on fetch worker threads, and
-        # print()'s separate text/newline writes let a concurrently printing
-        # thread splice its line into the middle of this one (seen fused with
-        # a [SNIFF] line in the 2026-08-28 discover session log).
-        sys.stdout.write(f"    [!] UltiPro {company_name or code}: {e}\n")
-        return []
+        return fetch_failed(f"UltiPro {company_name or code}", e)
     return board_jobs((_row(slug, code, o) for o in opps), company_name,
                       gate=gate, loc_re=loc_re)

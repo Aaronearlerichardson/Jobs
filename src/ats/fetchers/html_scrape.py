@@ -14,7 +14,7 @@ from urllib.parse import unquote, urljoin
 from bs4 import BeautifulSoup
 
 from src.match.locality import location_snippet
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import stable_id
 from .board import board_jobs
 
@@ -51,8 +51,7 @@ def fetch_kula(company_name, kula_slug, gate=None, loc_re=None):
         r = SESSION.get(base_url, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
-        print(f"    [!] Kula {company_name or kula_slug}: {e}")
-        return []
+        return fetch_failed(f"Kula {company_name or kula_slug}", e)
     soup = BeautifulSoup(r.text, "html.parser")
     return board_jobs(_kula_rows(kula_slug, soup), company_name,
                       gate=gate, loc_re=loc_re)
@@ -76,7 +75,7 @@ def _sf_rows(base_url, label, step, max_pages):
             r = SESSION.get(url, headers=sf_headers)
             r.raise_for_status()
         except Exception as e:
-            print(f"    [!] SuccessFactors {label} p{page}: {e}")
+            fetch_failed(f"SuccessFactors {label} p{page}", e)
             return
         soup = BeautifulSoup(r.text, "html.parser")
         anchors = soup.select("a.jobTitle-link") or [

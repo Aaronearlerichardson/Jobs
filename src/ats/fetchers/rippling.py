@@ -17,7 +17,7 @@ scrape returned nothing because the board is client-rendered.
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, JSON_HEADERS
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
@@ -80,8 +80,7 @@ def fetch_rippling(slug, company_name="", gate=None, loc_re=None, max_details=40
     try:
         raw = parse_board(slug)
     except Exception as e:
-        print(f"    [!] Rippling {company_name or slug}: {e}")
-        return []
+        return fetch_failed(f"Rippling {company_name or slug}", e)
     return board_jobs((_row(slug, j) for j in raw), company_name,
                       gate=gate, loc_re=loc_re,
                       fetch_description=lambda row: fetch_description(slug, row["_uuid"]),
