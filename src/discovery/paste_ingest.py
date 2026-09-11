@@ -18,13 +18,11 @@ resolve.board.resolve_or_miss, score, queue for review).
 import re
 
 from src import config
-
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import drain
 from .local_sourcing import score_and_upsert
-from .resolve.board import resolve_or_miss, resolved
 from .name_sources import NAME_BLOCKLIST, _is_nav_noise
-
+from .resolve.board import resolve_or_miss, resolved
 
 # Lines that are never a company name in a pasted results page.
 _PASTE_NOISE_RE = re.compile(

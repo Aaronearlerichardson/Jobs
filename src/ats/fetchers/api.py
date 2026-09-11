@@ -11,7 +11,7 @@ must see them all.
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS, get_json
+from src.net.http import get_json
 from src.net.util import norm_posted_date
 from .board import board_jobs
 

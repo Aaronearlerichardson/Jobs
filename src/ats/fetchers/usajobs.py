@@ -34,7 +34,6 @@ import html
 import re
 
 from src import config
-
 from src.net.http import SESSION, HEADERS
 from src.net.util import norm_posted_date
 

@@ -25,8 +25,7 @@ import time
 from urllib.parse import urlparse
 
 from src import config
-
-from src.net.http import SESSION, HEADERS, JSON_HEADERS
+from src.net.http import SESSION, JSON_HEADERS
 from src.net.util import cache_dir, default_search_text, norm_posted_date
 from .board import board_jobs, loc_ok
 

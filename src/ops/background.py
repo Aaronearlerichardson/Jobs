@@ -10,8 +10,8 @@ from datetime import datetime
 
 from src import config
 from src import session_log
-from src.ops import registry
 from src.claude import api as claude_api
+from src.ops import registry
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
         "started": None, "ended": None, "error": None, "active": False}

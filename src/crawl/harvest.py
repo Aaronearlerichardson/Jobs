@@ -54,10 +54,9 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import store
-from src.match.locality import geo_mode
-
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
+from src.match.locality import geo_mode
 from src.net.util import worker_count
 
 _log = logging.getLogger(__name__)

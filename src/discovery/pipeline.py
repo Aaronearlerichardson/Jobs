@@ -1,15 +1,16 @@
 """Company discovery pipeline — Claude → candidates → ATS probe → report."""
 
+import os
 import re
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
-import os
-
-from src.config import PROBE_TIMEOUT, REPORT_DIR
 from src.claude.api import DISCOVER_SYSTEM, call_claude_json
+from src.config import PROBE_TIMEOUT, REPORT_DIR
+from src.match.names import (GENERIC_WORDS, name_words, strip_parentheticals,
+                             strip_suffixes)
 from src.net.parallel import drain
 from src.net.util import worker_count
 from .resolve.probes import (
@@ -19,8 +20,6 @@ from .resolve.probes import (
     probe_workday,
 )
 from .resolve.sniffer import sniff_careers_ats
-from src.match.names import (GENERIC_WORDS, name_words, strip_parentheticals,
-                               strip_suffixes)
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost

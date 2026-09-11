@@ -71,27 +71,24 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from src import config
-
-from src import tags
 from src import store
+from src import tags
 from src.ats import coords
 # Workday's "N Locations" placeholder: the real list only comes with
 # the detail JSON (fetchers.company.hydrate_description fixes the
 # field). The pattern is the fetcher's to own; triage had a copy.
 from src.ats.fetchers.workday import N_LOCATIONS_RE
-from src.match import gates
 from src.claude.api import is_active_mission, score_company_mission
-from src.match.filters import is_relevant
 from src.claude.fit import score_resume_fit
-from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, remote_signal,
-                                remote_signal_for)
-
-from src.ops import maintenance as ops
 from src.crawl import harvest
 from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
 from src.crawl.runner import apply_keyword_focus, core_anchor
+from src.match import gates
+from src.match.filters import is_relevant
+from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, remote_signal,
+                                remote_signal_for)
 from src.net.parallel import fan_out
-from src.net.util import worker_count
+from src.ops import maintenance as ops
 
 _log = logging.getLogger(__name__)
 

@@ -20,7 +20,6 @@ from src.net.http import SESSION, HEADERS
 from src.net.util import norm_posted_date as _norm_posted
 from src.net.util import stable_id
 
-
 _JOB_URL_HINTS = re.compile(
     r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
 )

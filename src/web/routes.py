@@ -11,14 +11,13 @@ from pathlib import Path
 from flask import jsonify, make_response, request, send_file
 
 from src import config
-from src import store
-from src.config import profile_edit
 from src import digest
-from src.match import locality
+from src import store
 from src import tags as company_tags
-
-from . import BOOT_ID, STATE, app
+from src.config import profile_edit
+from src.match import locality
 from src.ops.background import _LOG_LOCK, OPS, TASK, _int, _run_op, _running
+from . import BOOT_ID, STATE, app
 from .server import schedule_restart
 
 

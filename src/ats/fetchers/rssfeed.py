@@ -17,7 +17,6 @@ from bs4 import BeautifulSoup
 from src.net.http import SESSION, HEADERS
 from src.net.util import stable_id, strip_html
 
-
 # WWR titles take either shape:
 #   "Company Name: Role Title"            (current convention)
 #   "Role Title at Company Name (Region)" (older posts)

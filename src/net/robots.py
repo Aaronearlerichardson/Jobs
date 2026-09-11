@@ -54,7 +54,6 @@ from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
 from src import config
-
 from .http import HEADERS
 
 # How long a parsed robots.txt stays good before we re-fetch it.

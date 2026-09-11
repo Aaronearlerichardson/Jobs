@@ -16,9 +16,9 @@ layers hit, results are merged and de-duplicated by job id.
 import json
 import re
 
-from src import config
 from bs4 import BeautifulSoup
 
+from src import config
 from src.net.util import stable_id
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")

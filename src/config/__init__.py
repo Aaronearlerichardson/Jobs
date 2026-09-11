@@ -20,20 +20,20 @@ attribute at use time — src/crawl/runner.py and src/ops/background.py reassign
 while a track runs, and a from-bound copy goes stale.
 """
 
-from .secrets import (                                      # noqa: F401
-    env,
-    GMAIL_ADDRESS, GMAIL_APP_PASSWORD,
-    ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_VERIFY_MODEL,
-    CAREERONESTOP_USER_ID, CAREERONESTOP_TOKEN,
-    USAJOBS_API_KEY, USAJOBS_EMAIL,
-)
-from .paths import (                                        # noqa: F401
+from .paths import (  # noqa: F401
     APP_NAME, _DB_NAMES, _platform_data_dir, _looks_like_install,
     _resolve_data_dir,
     SCRIPT_DIR, APP_HOME, DATA_DIR, STORE_DB_PATH, REPORT_DIR,
     MAX_DESC_CHARS,
 )
-from .profile import (                                      # noqa: F401
+from .policy import (  # noqa: F401
+    USER_AGENT, PROBE_TIMEOUT, FETCH_TIMEOUT, BROWSER_UA,
+    MULTI_DIVISION_COMPANIES, MULTI_DIVISION_MISSION_FLOOR, is_multi_division,
+    ACTIVE_MISSION_TIERS, is_active_mission,
+    RESPECT_ROBOTS, ROBOTS_EXEMPT_HOSTS, SEARCH_DNS_FALLBACK,
+    ROBOTS_CONNECT_TIMEOUT, ROBOTS_READ_TIMEOUT, BROWSER_CHANNELS,
+)
+from .profile import (  # noqa: F401
     PROFILE_PATH, PROFILE_EXAMPLE_PATH, PROFILE_SOURCE,
     _load_profile, _PROFILE, profile_section,
     CORE_KEYWORDS, DOMAIN_KEYWORDS, SKILL_KEYWORDS, INCLUDE_KEYWORDS,
@@ -59,19 +59,14 @@ from .profile import (                                      # noqa: F401
     DISCOVERY_AGGREGATOR_HOSTS, DISCOVERY_GENERIC_NAME_WORDS,
     DISCOVERY_PRIORITY_COMPANIES,
 )
-from .tracks import (                                       # noqa: F401
-    _DEFAULT_TRACKS, _DEFAULT_TECH_TITLE_REGEX, _ENGINE_CRAWL_DEFAULTS,
-    ENGINE_ALIASES, _mission_floor, _build_ui_tracks,
-    UI_TRACKS, DEFAULT_TRACK, track_for_engine,
+from .secrets import (  # noqa: F401
+    env,
+    GMAIL_ADDRESS, GMAIL_APP_PASSWORD,
+    ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_VERIFY_MODEL,
+    CAREERONESTOP_USER_ID, CAREERONESTOP_TOKEN,
+    USAJOBS_API_KEY, USAJOBS_EMAIL,
 )
-from .policy import (                                       # noqa: F401
-    USER_AGENT, PROBE_TIMEOUT, FETCH_TIMEOUT, BROWSER_UA,
-    MULTI_DIVISION_COMPANIES, MULTI_DIVISION_MISSION_FLOOR, is_multi_division,
-    ACTIVE_MISSION_TIERS, is_active_mission,
-    RESPECT_ROBOTS, ROBOTS_EXEMPT_HOSTS, SEARCH_DNS_FALLBACK,
-    ROBOTS_CONNECT_TIMEOUT, ROBOTS_READ_TIMEOUT, BROWSER_CHANNELS,
-)
-from .sources import (                                      # noqa: F401
+from .sources import (  # noqa: F401
     DISCOURSE_BOARDS, WEBSEARCH_QUERIES,
     REMOTEOK_ENABLED, REMOTIVE_ENABLED, REMOTIVE_CATEGORY,
     HNHIRING_ENABLED, HNHIRING_MAX_THREADS,
@@ -79,4 +74,9 @@ from .sources import (                                      # noqa: F401
     USAJOBS_SERIES, USAJOBS_RESULTS_PER_PAGE,
     GETRO_ENABLED, GETRO_BOARDS, GETRO_MAX_DETAILS,
     _DEFAULT_RSS_FEEDS, RSS_FEEDS,
+)
+from .tracks import (  # noqa: F401
+    _DEFAULT_TRACKS, _DEFAULT_TECH_TITLE_REGEX, _ENGINE_CRAWL_DEFAULTS,
+    ENGINE_ALIASES, _mission_floor, _build_ui_tracks,
+    UI_TRACKS, DEFAULT_TRACK, track_for_engine,
 )

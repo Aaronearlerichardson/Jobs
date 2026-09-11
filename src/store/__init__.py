@@ -32,11 +32,6 @@ name one of them needs from another is imported directly from that
 sibling.
 """
 
-from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
-    _SCHEMA, _INDEXES, _MIGRATIONS, _RENAMED_COLUMNS, _DROPPED_COLUMNS,
-    _ensure_columns, _migrate_tags, BUSY_TIMEOUT_S, connect, checkpoint,
-    _BATCHING, _commit, batch,
-)
 from .companies import (  # noqa: F401
     CAPTURE_ATS, MISS_REASONS, _COMPANY_COLS, _INSERT_ONLY_COLS,
     _NO_BOARD_PREFIXES, _OFFMISSION_MAX_FIT, _OFFMISSION_MIN_JOBS,
@@ -57,14 +52,19 @@ from .jobs import (  # noqa: F401
     remote_admitted, store_body, sync_job_statuses, touch_job, track_set,
     triage_counts, triage_pending, update_job_scores, upsert_job,
 )
-from .review import (  # noqa: F401
-    _name_key, mark_pending, is_confirmed_company, _PENDING_FIELDS,
-    pending_companies, confirm_company, reject_company, block_name,
-    blocked_name_keys,
-)
 from .pipeline import (  # noqa: F401
     DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
     APPLIED_DISPOSITIONS, PIPELINE_FIELDS, OUTCOME_REASONS, FIT_BANDS,
     set_job_status, _resolve_job, set_disposition, get_pipeline,
     update_pipeline_fields, _fit_band, conversion_report, followups_due,
+)
+from .review import (  # noqa: F401
+    _name_key, mark_pending, is_confirmed_company, _PENDING_FIELDS,
+    pending_companies, confirm_company, reject_company, block_name,
+    blocked_name_keys,
+)
+from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
+    _SCHEMA, _INDEXES, _MIGRATIONS, _RENAMED_COLUMNS, _DROPPED_COLUMNS,
+    _ensure_columns, _migrate_tags, BUSY_TIMEOUT_S, connect, checkpoint,
+    _BATCHING, _commit, batch,
 )

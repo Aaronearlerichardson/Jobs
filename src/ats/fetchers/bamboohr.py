@@ -16,9 +16,8 @@ call (see fetchers/board.py for the order of filters and the budget).
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS, JSON_HEADERS
+from src.net.http import SESSION, JSON_HEADERS
 from .board import board_jobs
-
 
 
 def _location_str(job):

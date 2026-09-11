@@ -20,8 +20,8 @@ from concurrent.futures import wait as fut_wait
 
 import requests
 
-from src.config import PROBE_TIMEOUT
 from src.ats.signatures import FETCHABLE_HOST_RE
+from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net.http import HEADERS, SESSION
 

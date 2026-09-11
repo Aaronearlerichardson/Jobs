@@ -7,7 +7,6 @@ import sys
 import threading
 
 from src import config
-
 from . import STATE, app
 
 

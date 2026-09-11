@@ -13,9 +13,8 @@ Firebase API:
 import re
 import time
 
-
 from src.match.names import strip_parentheticals
-from src.net.http import SESSION, HEADERS, get_json
+from src.net.http import get_json
 from src.net.util import strip_html
 
 BASE = "https://hacker-news.firebaseio.com/v0"

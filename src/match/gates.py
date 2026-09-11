@@ -32,7 +32,6 @@ import re
 from functools import lru_cache
 
 from src import config
-
 from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
                                scrub_boilerplate, token_in)
 

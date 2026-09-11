@@ -13,13 +13,11 @@ _host_matches_name), with the shared parent-tenant check on Workday
 import re
 
 from src import config
-
 from src.ats.signatures import detect, pack
 from src.match.names import name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
 from .identity import _foreign_board
-
 
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing

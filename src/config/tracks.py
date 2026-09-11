@@ -49,15 +49,14 @@ Crawl-methodology keys, every one overridable in the track's own table:
 """
 
 from src import tags
+from .paths import DATA_DIR
+from .profile import PROFILE_PATH, profile_section
 # Sibling, by its own name -- NOT `from src.config import track_build`,
 # which reaches the config PACKAGE while its __init__ is still running
 # to fetch a module sitting right here. That worked only by import
 # ordering, and an AST rewrite during the src/ move once turned the
 # same line into this module importing itself.
 from .track_build import build_tracks, default_track_id, mission_floor
-
-from .paths import DATA_DIR
-from .profile import PROFILE_PATH, profile_section
 
 # The two built-in tracks, synthesized when [tracks] is absent so existing
 # installs work unchanged.

@@ -22,7 +22,6 @@ harvest triage pass and the webapp all delegate here.
 import re
 
 from src import config
-
 from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, token_in,
                                token_pattern)
 

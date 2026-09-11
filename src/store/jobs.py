@@ -17,9 +17,7 @@ import re
 from datetime import datetime, timedelta
 
 from src import config
-
 from src import tags
-
 from .schema import _commit, batch, connect  # noqa: F401  (doctests connect)
 
 

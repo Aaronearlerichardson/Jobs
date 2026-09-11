@@ -6,14 +6,12 @@ import threading
 import time
 
 from src import config
-
 from src.ats.signatures import extract_workday_triple
 from src.match.locality import is_nc as _has_nc
 from src.match.names import slug_guesses
 from src.net.http import HEADERS, SESSION
 from .fetchpool import candidate_urls
 from .identity import _foreign_board, candidate_pages
-
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
 # one. The JS pass runs several WorkdayJsProbe instances in parallel, each with

@@ -32,16 +32,14 @@ from datetime import datetime
 
 from src import config
 from src import tags as company_tags
-
 from src.ats import coords
 from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import resolve_or_miss, resolved
+from .resolve.board import resolve_or_miss
 from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
 from .resolve.websearch_board import _websearch_board
-
 
 # --------------------------------------------------------------------------- #
 #  discover_local: the bulk pass over gathered names                          #

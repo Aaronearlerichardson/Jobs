@@ -21,7 +21,6 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
 from src import config
-
 from src.match import locality
 
 # The mid-fit local band, half-open on the high side. The interviews to date

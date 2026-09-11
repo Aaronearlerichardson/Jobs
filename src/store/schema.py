@@ -9,9 +9,7 @@ everything below so callers keep saying ``store.connect``.
 import sqlite3
 
 from src import config
-
 from src import tags
-
 
 # --------------------------------------------------------------------------- #
 #  Schema                                                                      #

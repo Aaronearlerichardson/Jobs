@@ -37,13 +37,12 @@ from datetime import datetime
 from typing import NamedTuple
 
 from src import config
-
 from src import store
-from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
-from src.net.parallel import fan_out, fetch_all
-from src.match.locality import remote_signal_for, us_eligible
-from src.claude.resume import resume_text
 from src.ats.registry import ATS_REGISTRY, iter_store_sources
+from src.claude.resume import resume_text
+from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
+from src.match.locality import remote_signal_for, us_eligible
+from src.net.parallel import fan_out, fetch_all
 
 # Rough per-posting cost for the cost_guard message: ~700 input tokens
 # (cached system prompt) + ~120 output at a blended per-token rate.

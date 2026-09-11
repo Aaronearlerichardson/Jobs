@@ -24,9 +24,7 @@ until you open the URL. Better a shallow lead than an invisible job.
 import re
 from urllib.parse import quote
 
-
 from src import config
-
 from src.net.http import SESSION, HEADERS
 from src.net.util import stable_id
 

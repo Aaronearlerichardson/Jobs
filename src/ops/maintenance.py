@@ -15,18 +15,17 @@ from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 
 from src import config
-
-from src import tags
-from src import store
 from src import digest
-from src.match import gates
-from src.claude.api import score_resume_fit
+from src import store
+from src import tags
 from src.ats import coords
 from src.ats.fetchers import company as company_fetch
+from src.claude.api import score_resume_fit
+from src.claude.resume import resume_text
+from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
 from src.net.parallel import drain, fan_out, fetch_all
-from src.claude.resume import resume_text
 
 
 def _default_track():

@@ -25,8 +25,9 @@ import re
 import time
 from urllib.parse import unquote
 
-from src import config
 from bs4 import BeautifulSoup, SoupStrainer
+
+from src import config
 
 # Parse pages with lxml (2-3x faster than html.parser, and the gap widens with
 # page size). For paths that only need job/nav anchors (link counting and the

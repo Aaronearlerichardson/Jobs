@@ -14,16 +14,14 @@ import json
 import time
 
 from src import config
-
-from src.net import ddg
-
-from src.ats import coords
-from src.ats.signatures import detect
-from src import tags as company_tags
 from src import store
+from src import tags as company_tags
+from src.ats import coords
 from src.ats.fetchers import company as company_fetch
+from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
 from src.discovery.resolve.identity import nc_hq_signal
+from src.net import ddg
 
 
 def _or_group(terms, n=8):

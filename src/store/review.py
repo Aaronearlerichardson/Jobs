@@ -16,7 +16,6 @@ from datetime import datetime
 
 from src import config
 from src import tags
-
 from .schema import connect  # noqa: F401  (the doctests open stores)
 
 

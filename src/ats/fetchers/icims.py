@@ -28,7 +28,6 @@ from urllib.parse import unquote
 from bs4 import BeautifulSoup
 
 from src import config
-
 from src.net.http import SESSION, HEADERS
 from src.net.util import LOC_TEXT_RE, cache_dir
 from .board import board_jobs, loc_ok

@@ -13,11 +13,9 @@ requests rather than roster rows -- which is why the shape filters
 import re
 
 from src import config
-
 from src.match.names import name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
-
 
 # Seed employers + Workday-fallback majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
