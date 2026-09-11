@@ -621,6 +621,20 @@ python tools/snowball.py --min-mentions 3 --llm   # stricter, + optional LLM pas
 Neither writes to the store or to `profile.toml` — they print candidates for
 you to copy in.
 
+`tools/entrydeps.py` maps the other direction: what each launcher pulls in.
+
+```bash
+python tools/entrydeps.py                        # every entry point
+python tools/entrydeps.py harvest.py --check     # vs build_app.py's skip list
+python tools/entrydeps.py --dot | dot -Tsvg -o deps.svg
+```
+
+It reads compiled bytecode (stdlib `modulefinder`), so it follows imports
+inside function bodies and accounts for package `__init__` execution — both
+of which Nuitka follows too. `pydeps` draws the same graph, but pass
+`--max-bacon=0`: its default of 2 truncates by distance and reports 26 of
+the harvester's 86 modules.
+
 `--prune` probes every active Greenhouse/Lever/Ashby/BambooHR board and
 deactivates the dead ones — run it whenever a crawl starts spamming `HTTP 404`
 (usually after a big discovery import leaves stale slugs). It never touches a
@@ -913,3 +927,4 @@ identically to a dead one.
 | `src/net/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |
 | `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |
+| `tools/entrydeps.py` | which `src/` modules each entry point reaches — what a compiled binary must contain, and what only one of them needs |
