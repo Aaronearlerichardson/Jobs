@@ -543,8 +543,8 @@ def board_is_own(company, board, site="", titles=()):
 
 def score_resume_fit(resume, title, description=""):
     """Delegate to the multi-axis rubric in src/claude/fit.py; returns a
-    FitResult (`.score`, `.axes`, `.gates`, `.reason`, and `.as_columns()` /
-    `.as_legacy()`). `resume` is accepted for backward compatibility but the
+    FitResult (`.score`, `.axes`, `.gates`, `.reason`, `.as_columns()`).
+    `resume` is accepted for backward compatibility but the
     rubric scores against the config profile (strengths, domain ladder, stack),
     not raw résumé text. Imported lazily to avoid a claude<->fit import cycle."""
     from src.claude import fit

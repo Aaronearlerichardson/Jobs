@@ -98,26 +98,6 @@ def _log_dir():
     return config.DATA_DIR / "logs"
 
 
-def log_basename(argv, now):
-    """The log file name for a session: timestamp plus the command run.
-
-    The first flag that is not a scope/tuning modifier names the session:
-
-    >>> t = datetime(2026, 8, 28, 9, 30, 0)
-    >>> log_basename(["--sync-status", "--track", "local"], t)
-    'session-20260828-093000-sync-status.log'
-    >>> log_basename(["--mark", "applied", "1234"], t)
-    'session-20260828-093000-mark.log'
-
-    A run with only modifiers (or no flags at all) is the daily crawl:
-
-    >>> log_basename(["--track", "local", "--preview"], t)
-    'session-20260828-093000-crawl.log'
-    >>> log_basename([], t)
-    'session-20260828-093000-crawl.log'
-    """
-    return f"session-{now:%Y%m%d-%H%M%S}-{_clean(_mode(argv))}.log"
-
 
 def _mode(argv):
     """The first flag that isn't a scope/tuning modifier, else 'crawl'.

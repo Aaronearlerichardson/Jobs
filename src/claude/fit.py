@@ -193,10 +193,6 @@ class FitResult:
         g = f" gate:{'+'.join(self.gates)}" if self.gates else ""
         return f"[{a}{g}] {self.reason}".strip()
 
-    def as_legacy(self):
-        """`(fit, reason)` tuple for any caller that only wants the scalar."""
-        return self.score, self.summary()
-
     def as_columns(self) -> dict:
         """DB-ready fields: the scalar, the reason tag, the tripped gates, the
         scoring model, and one column per axis. Keys match the jobs-table
