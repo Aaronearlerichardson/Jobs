@@ -11,7 +11,7 @@ must see them all.
 
 from bs4 import BeautifulSoup
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import SESSION, HEADERS, get_json
 from src.net.util import norm_posted_date
 from .board import board_jobs
 
@@ -38,15 +38,9 @@ def merge_locations(primary, extras):
     return loc
 
 
-def _get_board(url, label):
-    """The board's JSON, or None (reported) on any HTTP or JSON failure."""
-    try:
-        r = SESSION.get(url, headers=HEADERS)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"    [!] {label}: {e}")
-        return None
+#: The board's JSON, or None (reported) on any HTTP or JSON failure.
+#: net.http.get_json -- eight fetchers had written this out.
+_get_board = get_json
 
 
 def _greenhouse_row(slug, j):

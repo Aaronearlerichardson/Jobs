@@ -15,7 +15,7 @@ import time
 
 
 from src.match.names import strip_parentheticals
-from src.net.http import SESSION, HEADERS
+from src.net.http import SESSION, HEADERS, get_json
 from src.net.util import strip_html
 
 BASE = "https://hacker-news.firebaseio.com/v0"
@@ -76,13 +76,8 @@ def _is_location(s):
 
 
 def _get_json(url, timeout=None):
-    try:
-        r = SESSION.get(url, timeout=timeout, headers=HEADERS)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        print(f"    [!] HN {url}: {e}")
-        return None
+    """One Firebase item, or None (reported). net.http.get_json."""
+    return get_json(url, f"HN {url}", timeout=timeout)
 
 
 def _parse_post(text):

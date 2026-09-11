@@ -1,19 +1,14 @@
 """Discourse forum job-category feed."""
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import HEADERS, get_json
 
 
 def fetch_discourse(display_name, base_url, category_id, gate=None):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     dsc_headers = {**HEADERS, "Accept": "application/json"}
-    try:
-        r = SESSION.get(url, headers=dsc_headers)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"    [!] Discourse {display_name}: {e}")
-        return []
-
-    topics = r.json().get("topic_list", {}).get("topics", [])
+    data = get_json(url, f"Discourse {display_name}", default={},
+                    headers=dsc_headers)
+    topics = (data.get("topic_list") or {}).get("topics", []) if data else []
     jobs = []
     for t in topics:
         if t.get("posts_count", 0) == 1 and t.get("reply_count", 0) == 0:

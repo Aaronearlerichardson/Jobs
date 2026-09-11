@@ -10,7 +10,7 @@ Optional `category` parameter narrows by slug
 relevance gate is narrower than any single Remotive category.
 """
 
-from src.net.http import SESSION, HEADERS
+from src.net.http import get_json
 from src.net.util import strip_html
 
 API_URL = "https://remotive.com/api/remote-jobs"
@@ -27,15 +27,8 @@ def fetch_remotive(category=None, max_jobs=None, gate=None):
     if category:
         url = f"{API_URL}?category={category}"
 
-    try:
-        r = SESSION.get(url, headers=HEADERS)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"    [!] Remotive: {e}")
-        return []
-
-    entries = data.get("jobs", []) or []
+    data = get_json(url, "Remotive", default={})
+    entries = (data.get("jobs") or []) if isinstance(data, dict) else []
     if max_jobs is not None:
         entries = entries[:max_jobs]
 

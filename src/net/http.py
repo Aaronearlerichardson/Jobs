@@ -86,3 +86,32 @@ def _build_session():
 
 
 SESSION = _build_session()
+
+
+def get_json(url, label, default=None, **kw):
+    """The endpoint's JSON, or `default` -- reported, never raised.
+
+    Eight fetchers wrote this out, two of them having already named it
+    (`api._get_board`, `hnhiring._get_json`). A board that 500s, times out
+    or answers with something that will not parse is a DEAD SOURCE, not an
+    exception for the crawl to handle: the fan-out is running two hundred
+    other boards and one of them being down says nothing about the rest.
+    So this reports and returns, and every caller's failure path is the
+    same shape.
+
+    `label` names the source in the failure line -- it is the only thing a
+    session log has to go on when a board stops answering. `default` is
+    what the caller wants back: [] for a board listing, None for a detail
+    payload the caller checks.
+
+    No doctest: it would have to pin requests' own error wording, which
+    changes between versions. tests/test_fetcher_parsers.py pins the
+    contract through the fetchers instead.
+    """
+    try:
+        r = SESSION.get(url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"    [!] {label}: {e}")
+        return default

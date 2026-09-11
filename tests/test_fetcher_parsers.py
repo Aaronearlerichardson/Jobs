@@ -22,7 +22,8 @@ from pathlib import Path
 import pytest
 
 from src.match.filters import is_relevant
-from src.ats.fetchers import api, getro, hibob, jobvite, peopleadmin, usajobs
+from src.ats.fetchers import (api, discourse, getro, hibob, jobvite,
+                              peopleadmin, remoteok, remotive, usajobs)
 from src.discovery import apply
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -170,10 +171,6 @@ class TestGreenhouse:
         fake_get(payload)
         assert api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
 
-    def test_http_error_returns_empty_not_raises(self, fake_get, match_everything):
-        fake_get({}, status=500)
-        assert api.fetch_greenhouse("x", "X") == []
-
     def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
         fake_get(["not", "a", "dict"])
         assert api.fetch_greenhouse("x", "X") == []
@@ -188,10 +185,6 @@ class TestLever:
         # Prefixes are the store's dedup namespace: gh_ / lv_ / ashby_.
         assert j["id"].startswith("lv_veeva_")
         assert j["title"] and j["url"].startswith("http")
-
-    def test_http_error_returns_empty(self, fake_get, match_everything):
-        fake_get({}, status=404)
-        assert api.fetch_lever("x", "X") == []
 
 
 class TestAshby:
@@ -232,10 +225,6 @@ class TestAshby:
         fake_get(load("ashby_board.json"))
         jobs = api.fetch_ashby("vanta", "Vanta")
         assert any(j.get("posted_at") for j in jobs)
-
-    def test_http_error_returns_empty(self, fake_get, match_everything):
-        fake_get({}, status=403)
-        assert api.fetch_ashby("x", "X") == []
 
 
 class TestHibob:
@@ -1045,3 +1034,52 @@ class TestOneFetcherPerAts:
         nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
                                         re.compile("nowhere-at-all"))
         assert everything and nowhere == []
+
+
+class TestADeadEndpointIsNeverAnException:
+    """Every JSON-pulling fetcher goes through net.http.get_json, so the
+    "a dead source reports and returns empty" contract is ONE contract.
+
+    It used to be a per-fetcher test, which meant greenhouse, lever, ashby
+    and hibob had one while remoteok, remotive and the Discourse forums did
+    not. Parametrised here it costs less and covers more -- and it covers
+    both failure shapes, a refused socket and an HTTP error, which reach
+    get_json's handler by different routes.
+    """
+
+    CALLS = {
+        "greenhouse": lambda: api.fetch_greenhouse("x", "X"),
+        "lever": lambda: api.fetch_lever("x", "X"),
+        "ashby": lambda: api.fetch_ashby("x", "X"),
+        "remoteok": lambda: remoteok.fetch_remoteok(),
+        "remotive": lambda: remotive.fetch_remotive(),
+        "discourse": lambda: discourse.fetch_discourse(
+            "Forum", "https://forum.test", 1),
+    }
+
+    @pytest.fixture(params=["refused", "http-500"])
+    def dead_source(self, request, monkeypatch):
+        """SESSION is one shared object, so patching `get` on it covers
+        every module that imported the name."""
+        if request.param == "refused":
+            def _get(*a, **k):
+                raise OSError("connection refused")
+        else:
+            class _Resp:
+                status_code = 500
+
+                def raise_for_status(self):
+                    raise RuntimeError("500 Server Error")
+
+                def json(self):
+                    raise AssertionError("json() must not be reached")
+
+            def _get(*a, **k):
+                return _Resp()
+        monkeypatch.setattr(api.SESSION, "get", _get)
+
+    @pytest.mark.parametrize("name", sorted(CALLS))
+    def test_reports_and_returns_empty(self, name, dead_source, capsys,
+                                       match_everything):
+        assert self.CALLS[name]() == []
+        assert "[!]" in capsys.readouterr().out, "a dead source must be reported"
