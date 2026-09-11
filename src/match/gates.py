@@ -12,6 +12,20 @@ per-track from configuration instead:
     tables (config.EXCLUDE_BY_TRACK) at call time — no hardcoded track key,
     so any user-defined track gets its own exclusion vocabulary. An absent
     or empty table makes the gate a no-op.
+
+There are two exclusion gates in this package, and they stay two on
+purpose. `filters._excluded` is the PROFILE-wide one: fragments from
+[exclude] phrases/title_phrases, matched as plain substrings against text
+`is_relevant` has already scrubbed, answering yes/no. `exclude_reason`
+here is the PER-TRACK one: single terms from [exclude.<id>], matched on
+word boundaries (so "scribe" does not fire inside "describe"), scrubbing
+only for the defense stage, and answering WITH the term that did it —
+because a posting dropped by a track needs to be debuggable in
+triage_detail, while a posting that simply is not relevant does not.
+
+Merging them would mean picking one of each pair of answers and silently
+changing which postings survive. What they do share is the matcher:
+every vocabulary walk in both goes through `filters.first_hit`.
 """
 
 import re
@@ -19,14 +33,14 @@ from functools import lru_cache
 
 from src import config
 
-from src.match.filters import SHORT_EXCLUDE, scrub_boilerplate, token_in
+from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
+                               scrub_boilerplate, token_in)
 
-
-def _tok_in(token, text):
-    """Defense/radar vocabulary hit: two- and three-letter tokens on word
-    boundaries, longer plural-prone terms as substrings (the threshold and
-    its reasoning live with filters.SHORT_EXCLUDE)."""
-    return token_in(token, text, SHORT_EXCLUDE)
+#: "radar" is only a defense signal in defense company. Not from the
+#: profile: this is the shape of the false positive (radar appears in
+#: automotive, weather and imaging postings), not a vocabulary choice.
+_RADAR_CONTEXT = ("military", "defense", "defence", "weapon", "warfare",
+                  "missile", "rf")
 
 
 @lru_cache(maxsize=32)
@@ -66,40 +80,41 @@ def exclude_reason(title, description="", allow_defense=False, *,
     title_l = (title or "").lower()
     text = f"{title} {description}".lower()
 
-    # Word-boundary match so "scribe" doesn't fire on "describe", "data
-    # entry" doesn't fire mid-word, etc.
-    for phrase in tables["role_phrases"]:
-        if re.search(rf"\b{re.escape(phrase)}\b", text):
-            return f"role: {phrase}"
-    for tok in tables["title_tokens"]:
-        if re.search(rf"\b{re.escape(tok)}\b", title_l):
-            return f"role-title: {tok.upper()}"
+    # BOUNDED so "scribe" doesn't fire on "describe", "data entry" doesn't
+    # fire mid-word. These used to be three hand-written `\b...\b` regexes
+    # built per call; an exclude phrase that ended in punctuation could
+    # therefore never match at all, since `\b` has nothing to anchor to.
+    hit = first_hit(tables["role_phrases"], text, BOUNDED)
+    if hit:
+        return f"role: {hit}"
+    hit = first_hit(tables["title_tokens"], title_l, BOUNDED)
+    if hit:
+        return f"role-title: {hit.upper()}"
 
     if not allow_defense and (tables["defense_strong"]
                               or tables["defense_weak"]):
         # EEO/benefits boilerplate scrub first: "military or veteran status"
         # must never read as a defense signal. STRONG terms are unambiguous
         # (one hit excludes); WEAK terms are words health postings use
-        # innocently, so TWO DISTINCT weak hits are required.
+        # innocently, so TWO DISTINCT weak hits are required. SHORT_EXCLUDE
+        # rather than BOUNDED: these are plural-prone nouns, so "weapon"
+        # must still reach "weapons".
         scrubbed = scrub_boilerplate(text)
-        hit = next((d for d in tables["defense_strong"]
-                    if _tok_in(d, scrubbed)), None)
+        hit = first_hit(tables["defense_strong"], scrubbed, SHORT_EXCLUDE)
         if hit:
             return f"defense: {hit}"
-        weak = [d for d in tables["defense_weak"] if _tok_in(d, scrubbed)]
+        weak = [d for d in tables["defense_weak"]
+                if token_in(d, scrubbed, SHORT_EXCLUDE)]
         if len(weak) >= 2:
             return f"defense: {'+'.join(weak[:3])}"
         # Military RF-radar: only exclude "radar" in a defense context
         # ("rf" is a bounded token, so "RF/microwave" counts and "perf"
         # does not).
-        if "radar" in scrubbed and any(_tok_in(d, scrubbed) for d in
-                                       ("military", "defense", "defence",
-                                        "weapon", "warfare", "missile",
-                                        "rf")):
+        if "radar" in scrubbed and first_hit(_RADAR_CONTEXT, scrubbed,
+                                             SHORT_EXCLUDE):
             return "defense: military radar"
 
-    nc_hit = next((d for d in tables["nonclinical"]
-                   if re.search(rf"\b{re.escape(d)}\b", text)), None)
-    if nc_hit:
-        return f"non-clinical: {nc_hit}"
+    hit = first_hit(tables["nonclinical"], text, BOUNDED)
+    if hit:
+        return f"non-clinical: {hit}"
     return None

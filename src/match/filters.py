@@ -61,7 +61,29 @@ SHORT_REMOTE = 3
 SHORT_PLACE = 4
 
 
+#: `short_len` values for the two vocabularies that do not want the
+#: length rule at all. BOUNDED asks for word boundaries on every term
+#: however long -- the per-track exclude tables, where "scribe" must not
+#: fire inside "describe" and "data entry" must not fire mid-word.
+#: SUBSTRING asks for none -- the profile's global EXCLUDE_PHRASES, which
+#: are written as fragments meant to match anywhere.
+BOUNDED = "bounded"
+SUBSTRING = 0
+
+
 def _bounded(term, short_len):
+    """Whether `term` gets \\b anchors under the `short_len` rule.
+
+    A boundary needs a word character on the inside of it, so a term that
+    starts or ends in punctuation can never be anchored -- `\\bc++\\b`
+    matches nothing at all, including the literal "c++". src/match/gates.py
+    anchored its exclude phrases unconditionally and so had exactly that
+    hole: an exclude phrase ending in punctuation silently never fired.
+    BOUNDED means "anchor where anchoring is meaningful", not "anchor".
+    """
+    if short_len is BOUNDED:
+        return bool(term) and (term[0].isalnum() or term[0] == "_") \
+            and (term[-1].isalnum() or term[-1] == "_")
     return term.isalpha() and len(term) <= short_len
 
 
@@ -98,11 +120,34 @@ def token_in(term, text, short_len):
     (True, False)
     >>> token_in("Boston", "bostonian", 4)
     True
+
+    BOUNDED anchors however long the term is; SUBSTRING never anchors:
+
+    >>> token_in("scribe", "we describe things", BOUNDED)
+    False
+    >>> token_in("scribe", "we describe things", SUBSTRING)
+    True
     """
     term = term.lower()
     if _bounded(term, short_len):
         return _short_re(term).search(text) is not None
     return term in text
+
+
+def first_hit(terms, text, short_len):
+    """The first of `terms` that occurs in `text`, or None.
+
+    The shape every vocabulary gate in this package was writing out for
+    itself -- walk a list, return what matched so the verdict can say why.
+    Five loops over four vocabularies, in two modules, with three
+    different spellings of the match test between them.
+
+    >>> first_hit(("scribe", "data entry"), "senior data entry clerk", BOUNDED)
+    'data entry'
+    >>> first_hit(("scribe",), "we describe things", BOUNDED) is None
+    True
+    """
+    return next((t for t in terms if token_in(t, text, short_len)), None)
 
 
 # --------------------------------------------------------------------- #
@@ -117,11 +162,23 @@ def _kw_in(text, keywords):
 
 
 def _excluded(title, text):
-    """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only."""
-    if any(p.lower() in text for p in EXCLUDE_PHRASES):
+    """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only.
+
+    The profile-wide exclusion gate. Its per-track sibling is
+    gates.exclude_reason, and the two are deliberately NOT one function --
+    see the note at the top of gates.py for what differs and why. What
+    they do share is `first_hit`, so neither can quietly grow a third
+    spelling of "does this term occur in this text".
+
+    SUBSTRING here: these phrases come from the profile as fragments meant
+    to match anywhere, and `text` has already been through
+    scrub_boilerplate. The per-track tables are single terms and get
+    boundaries instead.
+    """
+    if first_hit(EXCLUDE_PHRASES, text, SUBSTRING):
         return True
-    t = (title or "").lower()
-    return any(p.lower() in t for p in EXCLUDE_TITLE_PHRASES)
+    return bool(first_hit(EXCLUDE_TITLE_PHRASES, (title or "").lower(),
+                          SUBSTRING))
 
 
 # DOMAIN+SKILL pairing only reads the posting head. Specific CORE terms

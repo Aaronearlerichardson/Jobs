@@ -74,8 +74,26 @@ class TestExclusion:
             track_id=defense_track) is None
 
     def test_plural_defense_terms_are_substrings(self):
-        assert gates._tok_in("drone", "drones and uavs")
-        assert not gates._tok_in("uav", "suave design")
+        assert filters.token_in("drone", "drones and uavs",
+                                filters.SHORT_EXCLUDE)
+        assert not filters.token_in("uav", "suave design",
+                                    filters.SHORT_EXCLUDE)
+
+    def test_role_phrases_are_bounded_however_long(self):
+        """The per-track exclude tables ask for boundaries on every term,
+        not just short ones: "scribe" must not fire inside "describe"."""
+        assert filters.token_in("scribe", "medical scribe", filters.BOUNDED)
+        assert not filters.token_in("scribe", "we describe the role",
+                                    filters.BOUNDED)
+        assert filters.token_in("data entry", "senior data entry clerk",
+                                filters.BOUNDED)
+
+    def test_a_term_ending_in_punctuation_still_matches(self):
+        """`\\b` needs a word character to anchor to, so anchoring such a
+        term unconditionally matched NOTHING -- which is what gates.py did
+        to its exclude phrases before they went through token_in."""
+        assert filters.token_in("c++", "c++ developer", filters.BOUNDED)
+        assert filters.token_in("u.s.", "u.s. citizenship", filters.BOUNDED)
 
 
 class TestRemote:
