@@ -959,3 +959,54 @@ class TestReviewQueue:
         store.confirm_company(db, cid)
         assert store.is_confirmed_company(db, "real co") is True
         assert store.is_confirmed_company(db, "Never Seen") is False
+
+
+class TestConcurrentWriters:
+    """SQLite admits ONE writer. The harvester runs eleven."""
+
+    def test_a_stalled_machine_never_costs_a_whole_board(self, tmp_path):
+        """Eleven threads batching at once must not lose a write.
+
+        On 2026-09-11 eighteen harvest boards died with "database is
+        locked" and dropped 12,674 already-fetched postings. The machine
+        was saturated, not the database -- HTTP throughput in the same
+        minute fell from 493 GETs to 35 -- and every lost board had waited
+        out the full 30s busy timeout.
+
+        The timeout is shrunk here rather than the machine slowed: same
+        branch, no wall-clock dependence. Without store's write lock this
+        loses most of the boards.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        db = tmp_path / "jobs.db"
+        conn = store.connect(db)
+        ids = [store.upsert_company(conn, {
+            "name": f"Co{b}", "ats": "greenhouse", "slug": f"co{b}",
+            "active": 1, "tags": "local"}) for b in range(8)]
+        conn.close()
+
+        failures = []
+
+        def board(b, rows=60):
+            conn = store.connect(db)
+            conn.execute("PRAGMA busy_timeout=1")
+            try:
+                with store.batch(conn):
+                    for i in range(rows):
+                        store.upsert_job(conn, {
+                            "job_id": f"c{b}-j{i}", "company_id": ids[b],
+                            "company_name": f"Co{b}", "title": f"Eng {i}",
+                            "url": f"https://x.test/{b}/{i}"})
+            except Exception as e:                      # noqa: BLE001
+                failures.append(f"{type(e).__name__}: {e}")
+            finally:
+                conn.close()
+
+        with ThreadPoolExecutor(max_workers=11) as ex:
+            list(as_completed([ex.submit(board, b) for b in range(8)]))
+
+        assert not failures, failures
+        conn = store.connect(db)
+        assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8 * 60
+        conn.close()

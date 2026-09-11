@@ -1,12 +1,13 @@
 """
 The store's physical layer: the SQLite schema, the additive migrations that
 bring an older file up to date, and the connection/transaction helpers
-(connect, checkpoint, batch). No roster or job semantics live here; the
+(connect, batch). No roster or job semantics live here; the
 functions that read and write rows are in src.store, which re-exports
 everything below so callers keep saying ``store.connect``.
 """
 
 import sqlite3
+import threading
 
 from src import config
 from src import tags
@@ -317,6 +318,25 @@ def _commit(conn):
         conn.commit()
 
 
+#: Held for the duration of every batch() block in this process.
+#
+# SQLite grants exactly one writer at a time, so eleven harvest threads
+# racing for the file lock were never writing in parallel -- they were
+# queueing, in a queue implemented as a busy-wait with a 30-second
+# deadline. That is fine until the machine stalls: on 2026-09-11 the box
+# was saturated (HTTP throughput in the same minute fell from 493 GETs a
+# minute to 35), eighteen boards waited out the full BUSY_TIMEOUT_S, and
+# each one threw away its whole fetched snapshot -- 12,674 postings
+# re-fetched on the next pass.
+#
+# A lock turns the same queue into a FIFO with no deadline. Throughput is
+# unchanged, because the writes were serial either way; what goes away is
+# the deadline, and with it the only way an in-process writer can lose
+# work it already paid for. BUSY_TIMEOUT_S now means what it should: the
+# wait for a writer in ANOTHER process (the web UI, a backup).
+_WRITE_LOCK = threading.Lock()
+
+
 class batch:
     """Group many upsert_job / sync_job_statuses calls into ONE transaction.
 
@@ -349,13 +369,17 @@ class batch:
         self.conn = conn
 
     def __enter__(self):
+        _WRITE_LOCK.acquire()
         _BATCHING.add(id(self.conn))
         return self.conn
 
     def __exit__(self, exc_type, exc, tb):
         _BATCHING.discard(id(self.conn))
-        if exc_type is None:
-            self.conn.commit()
-        else:
-            self.conn.rollback()
+        try:
+            if exc_type is None:
+                self.conn.commit()
+            else:
+                self.conn.rollback()
+        finally:
+            _WRITE_LOCK.release()
         return False
