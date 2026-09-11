@@ -26,7 +26,6 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 (mission backfill).
 """
 
-import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import ExitStack
@@ -52,6 +51,259 @@ from .resolve.websearch_board import _websearch_board
 
 _DEFAULT_WEBSEARCH_CAP = 20
 
+def _boardless(names, hits):
+    """The names with no LOCAL board yet.
+
+    Only an nc>0 hit counts as found: a junk 0-NC slug collision must not
+    stop a later pass from looking for the real employer. Asked before
+    each of the three fallback passes.
+    """
+    have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+    return [n for n in names if name_key(n) not in have]
+
+
+def _hit_from_detection(name, det):
+    """A sniff/websearch DETECTION turned into a hit, by asking the board
+    how many LOCAL jobs it actually holds.
+
+    The two fallback passes each wrote this out, and had drifted: only the
+    websearch copy special-cased a `custom` board. Coordinates go through
+    src.ats.coords now (the rule for every other board write in the repo),
+    which handles Workday's triple, a plain slug and a careers-URL-only
+    custom board without a branch per caller.
+
+    The `reason` rides along and is popped by the caller when nc>0:
+    coordinates that read empty are a DEAD board, which is a different
+    miss from a name nothing could be found for.
+    """
+    from src.ats.fetchers import company as company_fetch
+    ats = det["ats"]
+    slug = det["triple"] if ats == "workday" else det.get("slug")
+    try:
+        jobs = company_fetch.fetch_company_nc(
+            coords.columns(ats, slug, det.get("careers_url")))
+    except Exception:
+        jobs = []
+    nc = len(jobs)
+    return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
+            "careers_url": det.get("careers_url"),
+            "reason": "board-dead:" + ats}
+
+
+def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
+    """Run one fallback resolver over `todo`, appending to `hits` (nc>0) or
+    `misses` (anything else), under the stall watchdog.
+
+    drain_or_abandon, not a plain pool: one wedged resolution used to hold
+    the web UI's single op slot until the app was restarted.
+    """
+    ex = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(todo))))
+
+    def _done(fut, n):
+        h = fut.result()
+        if h and h.get("nc"):
+            h.pop("reason", None)
+            hits.append(h)
+            # Widths chosen so both tags print one aligned table.
+            print(f"    {tag} {h['name']:{35 - len(tag)}} {h['ats']:14} "
+                  f"{h['slug']!s:26} nc={h['nc']}")
+        elif h:
+            misses.append(h)
+
+    drain_or_abandon(
+        ex, {ex.submit(resolve_one, n): n for n in todo}, _done,
+        lambda n: misses.append({"name": n, "reason": "fetch-error:stalled"}))
+
+
+def _probe_pass(names, max_workers):
+    """Name-guessed slug probes over every candidate. The cheap first pass:
+    no page fetched, just the platforms' own APIs."""
+    n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
+    print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
+          f"({n_wd} with Workday fallback)...")
+    hits = []
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        futs = {ex.submit(probe_company, n, name_key(n) in _MAJORS_KEYS): n
+                for n in names}
+        for fut in as_completed(futs):
+            hit = fut.result()
+            if hit:
+                hits.append(hit)
+    return hits
+
+
+def _js_workday_pass(hits, max_workers):
+    """Re-probe the MAJORS that got no board, with a headless browser.
+
+    Big employers often have React/SPA careers pages whose
+    myworkdayjobs.com link only appears after JS runs, so the static probe
+    misses them entirely.
+    """
+    missed = _boardless(MAJORS_WORKDAY, hits)
+    import importlib.util
+    if importlib.util.find_spec("playwright.sync_api") is None:
+        if missed:
+            print(f"    [js] playwright not installed; skipping JS probe "
+                  f"of {len(missed)} major(s)")
+        return
+    if not missed:
+        return
+    from .resolve.probes import WorkdayJsProbe
+    # Parallel across DIFFERENT sites is safe: each target still sees
+    # exactly one page load; the serial design existed for sync-
+    # Playwright's thread affinity, not politeness. Each probe instance
+    # already pins its browser to its own dedicated thread, so K instances
+    # + K caller threads = K-way parallelism with the thread-safety model
+    # untouched. K is memory-bound (one headless Chromium each), so it is
+    # capped low and separate from the HTTP worker count.
+    k = min(4, len(missed))
+    print(f"  JS-probing {len(missed)} major(s) with no static board "
+          f"({k} parallel browser(s))...")
+    with ExitStack() as stack:
+        probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(k)]
+
+        def _js_one(i, name):
+            wd = probes[i % k].probe(name)
+            if not (wd and wd.get("validated")):
+                return None
+            nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
+            return {"name": name, "ats": "workday",
+                    "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
+                    "count": wd["count"], "nc": nc}
+
+        with ThreadPoolExecutor(max_workers=k) as ex:
+            futs = {ex.submit(_js_one, i, m): m for i, m in enumerate(missed)}
+            for fut in as_completed(futs):
+                try:
+                    h = fut.result()
+                except Exception as e:
+                    print(f"    [!] JS probe failed for {futs[fut]!r}: {e}")
+                    continue
+                if h:
+                    hits.append(h)
+                    t, p, s = h["slug"]
+                    print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
+                          f"nc={h['nc']}/{h['count']}")
+
+
+def _sniff_pass(names, hits, misses, max_workers):
+    """Fetch each still-boardless name's careers page and read the ATS +
+    exact slug off it. The main recall lever over the directory: it covers
+    every hosted platform and finds slugs the name-guesser cannot."""
+    from .resolve.sniffer import sniff_ats
+
+    todo = _boardless(names, hits)
+    print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
+
+    def _sniff_one(n):
+        s = sniff_ats(n)
+        return _hit_from_detection(n, s) if s else {
+            "name": n, "reason": "no-board-found"}
+
+    _resolve_pass(todo, _sniff_one, "[SNIFF]", hits, misses, max_workers)
+
+
+def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
+    """Search the web for a careers page, for names probe+sniff could not
+    board. A measured 60-company gap study found 5 of 6 eventual
+    resolutions came through here -- names on gov/acronym/product-named
+    domains the slug-guesser and the careers-page sniff cannot reach.
+
+    Capped, and recent misses skipped, because DDG rate-limits hard: an
+    earlier uncapped profile blocked ~1271s of a 1726s run inside DDG's
+    own retry/backoff (see src.net.ddg).
+    """
+    cap = (config.DISCOVERY_WEBSEARCH_CAP if cap is None else cap)
+    cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
+    todo = _boardless(names, hits)
+    if todo and cap > 0:
+        from src.store import connect as _connect, recent_miss_names
+        conn = _connect()
+        try:
+            recent = recent_miss_names(conn, days=retry_days)
+        finally:
+            conn.close()
+        todo = [n for n in todo if n not in recent][:cap]
+    else:
+        todo = []
+    print(f"  websearch-resolving {len(todo)} name(s) without a board "
+          f"(cap={cap})...")
+    if not todo:
+        return
+    t0 = time.time()
+
+    def _websearch_one(n):
+        w = _websearch_board(n)
+        return _hit_from_detection(n, w) if w else {
+            "name": n, "reason": "no-board-found"}
+
+    _resolve_pass(todo, _websearch_one, "[WEBSEARCH]", hits, misses,
+                  max_workers)
+    print(f"  websearch pass: {time.time() - t0:.1f}s for "
+          f"{len(todo)} name(s)")
+
+
+def _reduce_hits(names, hits, pass_misses):
+    """Everything the passes found, accounted for exactly once.
+
+    Returns (hits, confirmed, dropped, misses). Every candidate that is
+    not confirmed is a MISS with a reason: a live board with no local
+    openings, a board whose coordinates read empty, or a name nothing
+    could be found for.
+    """
+    # Names that reached a live board under SOME spelling, before the
+    # blocklist and the by-board dedup collapse them: they are accounted
+    # for by their surviving row and must not ALSO be filed as
+    # no-board-found.
+    boarded = {h["name"] for h in hits}
+
+    # Drop known bad name->board matches.
+    hits = [h for h in hits if name_key(h["name"]) not in NAME_BLOCKLIST]
+
+    # De-dup by resolved board (same slug/triple reached via different
+    # names, e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter.
+    by_board = {}
+    for h in hits:
+        key = (h["ats"], str(h["slug"]))
+        if key not in by_board or len(h["name"]) < len(by_board[key]["name"]):
+            by_board[key] = h
+    hits = list(by_board.values())
+
+    # Split on the locality check: nc>0 is confirmed-local; nc==0 is either
+    # a false-positive slug collision or a non-local employer -- dropped,
+    # but shown.
+    confirmed = sorted([h for h in hits if h["nc"] > 0],
+                       key=lambda h: h["nc"], reverse=True)
+    dropped = sorted([h for h in hits if h["nc"] == 0],
+                     key=lambda h: h["name"].lower())
+    misses = {}
+    for h in dropped:
+        misses[h["name"]] = {**h, "reason": "no-local-jobs"}
+    for h in pass_misses:
+        misses.setdefault(h["name"], h)
+    for n in names:
+        if n not in boarded:
+            misses.setdefault(n, {"name": n, "reason": "no-board-found"})
+    for h in confirmed:
+        misses.pop(h["name"], None)
+    return hits, confirmed, dropped, sorted(misses.values(),
+                                            key=lambda m: m["name"].lower())
+
+
+def _report_discovery(hits, confirmed, dropped, misses):
+    """The pass's own scoreboard, printed for a human reading the log."""
+    print(f"\n  live boards: {len(hits)}  |  NC-local confirmed: {len(confirmed)}  "
+          f"|  dropped (no NC jobs): {len(dropped)}  "
+          f"|  misses recorded: {len(misses)}")
+    print("\n  --- NC-LOCAL CONFIRMED (nc jobs / total) ---")
+    for h in confirmed:
+        print(f"    [OK]   {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
+              f"{h['nc']}/{h['count']}")
+    print("\n  --- DROPPED: live board but no NC jobs (likely wrong slug or non-local) ---")
+    for h in dropped:
+        print(f"    [drop] {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
+              f"0/{h['count']}")
+
 
 def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                    websearch=True, websearch_cap=None, websearch_retry_days=14):
@@ -59,14 +311,18 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     Gather names + probe each. Returns (confirmed, checked, misses) where
     confirmed is a list of NC-local hit dicts and misses is one dict per
     candidate that did NOT become one, carrying a ``reason`` code from
-    src.store.MISS_REASONS. ``js_majors`` runs a headless-browser Workday
-    probe for big employers the static probe missed.
+    src.store.MISS_REASONS.
 
-    ``websearch`` runs resolve_board_sniff_first's third step (DDG search for
-    a careers page) over names still boardless after probe+sniff, capped at
-    ``websearch_cap`` names (None -> config [discovery].websearch_cap, else a
-    small built-in default; 0 disables it). Names that missed within
-    ``websearch_retry_days`` (src.store.recent_miss_names) are skipped.
+    Four passes, cheapest first, each one only looking at the names the
+    ones before it could not board (_boardless):
+
+      1. _probe_pass       name-guessed slugs against the platform APIs
+      2. _js_workday_pass  headless browser, MAJORS only (``js_majors``)
+      3. _sniff_pass       fetch the careers page and read the ATS off it
+      4. _websearch_pass   search the web for one, capped (``websearch``)
+
+    then _reduce_hits accounts for every candidate exactly once and
+    _report_discovery prints the scoreboard.
 
     Notes:
         The misses used to be printed and dropped, so a name that failed
@@ -79,260 +335,21 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         would re-fetch every candidate URL for every one of the hundreds of
         boardless names in a full pass. The on-demand paths (resolve_or_miss,
         add_names, resolve_leads) work on tens of names and do classify.
-
-        websearch defaults ON but is capped rather than run over the whole
-        gather (~100+ names): DDG rate-limits hard, and an earlier uncapped
-        profile blocked ~1271s of a 1726s run in DDG's own retry/backoff
-        (see src.net.ddg) — the on-demand resolvers (resolve_or_miss et
-        al.) can afford to run it uncapped only because they work on tens of
-        names, not the full candidate gather.
     """
     names = gather_names(extra_names)
-    n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
-    print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
-          f"({n_wd} with Workday fallback)...")
-    hits, sniff_misses = [], []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(probe_company, n,
-                          name_key(n) in _MAJORS_KEYS): n
-                for n in names}
-        for fut in as_completed(futs):
-            hit = fut.result()
-            if hit:
-                hits.append(hit)
-
-    # JS-Workday pass: big employers often have React/SPA careers pages whose
-    # myworkdayjobs.com link only appears after JS runs, so the static probe
-    # misses them. Re-probe MAJORS that got no board using one headless browser.
+    misses = []
+    hits = _probe_pass(names, max_workers)
     if js_majors:
-        # Only an NC>0 board counts as "found" — a junk 0-NC slug collision
-        # must not block the JS fallback for the real employer.
-        found = {name_key(h["name"])
-                 for h in hits if h["nc"] > 0}
-        missed = [m for m in MAJORS_WORKDAY
-                  if name_key(m) not in found]
-        import importlib.util
-        if importlib.util.find_spec("playwright.sync_api") is None:
-            if missed:
-                print(f"    [js] playwright not installed; skipping JS probe "
-                      f"of {len(missed)} major(s)")
-            missed = []
-        if missed:
-            from .resolve.probes import WorkdayJsProbe
-            # Parallel across DIFFERENT sites is safe: each target still sees
-            # exactly one page load; the serial design existed for sync-
-            # Playwright's thread affinity, not politeness. Each probe
-            # instance already pins its browser to its own dedicated thread,
-            # so K instances + K caller threads = K-way parallelism with the
-            # thread-safety model untouched. K is memory-bound (one headless
-            # Chromium each), so it's capped low and separate from the HTTP
-            # worker count.
-            k = min(4, len(missed))
-            print(f"  JS-probing {len(missed)} major(s) with no static board "
-                  f"({k} parallel browser(s))...")
-            with ExitStack() as stack:
-                probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(k)]
-
-                def _js_one(i, name):
-                    wd = probes[i % k].probe(name)
-                    if not (wd and wd.get("validated")):
-                        return None
-                    nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
-                    return {"name": name, "ats": "workday",
-                            "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                            "count": wd["count"], "nc": nc}
-
-                with ThreadPoolExecutor(max_workers=k) as ex:
-                    futs = {ex.submit(_js_one, i, m): m
-                            for i, m in enumerate(missed)}
-                    for fut in as_completed(futs):
-                        try:
-                            h = fut.result()
-                        except Exception as e:
-                            print(f"    [!] JS probe failed for "
-                                  f"{futs[fut]!r}: {e}")
-                            continue
-                        if h:
-                            hits.append(h)
-                            t, p, s = h["slug"]
-                            print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
-                                  f"nc={h['nc']}/{h['count']}")
-
-    # Sniffer pass: for names still without a real (NC>0) board, fetch their
-    # careers page and detect the embedded ATS + exact slug (covers Greenhouse/
-    # Lever/Ashby/Workday/SmartRecruiters/iCIMS/SuccessFactors and finds slugs
-    # the name-guesser can't). This is the main recall lever over the directory.
+        _js_workday_pass(hits, max_workers)
     if sniff:
-        from .resolve.sniffer import sniff_ats
-        from src.ats.fetchers import company as company_fetch
-        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if name_key(n) not in have]
-        print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
-
-        def _sniff_one(n):
-            s = sniff_ats(n)
-            if not s:
-                return {"name": n, "reason": "no-board-found"}
-            ats = s["ats"]
-            if ats == "workday":
-                t, p, site = s["triple"]
-                comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
-                slug = (t, p, site)
-            else:
-                comp = {"ats": ats, "slug": s.get("slug"), "careers_url": s.get("careers_url")}
-                slug = s.get("slug")
-            try:
-                jobs = company_fetch.fetch_company_nc(comp)
-            except Exception:
-                jobs = []
-            nc = len(jobs)
-            return {"name": n, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-                    "careers_url": s.get("careers_url"),
-                    # Coordinates were detected but the board yields nothing:
-                    # a dead/wrong board, not an absent one. Overwritten by
-                    # the nc>0 branch below when it does yield.
-                    "reason": "board-dead:" + ats}
-
-        def _sniff_done(fut, n):
-            h = fut.result()
-            if h and h.get("nc"):
-                h.pop("reason", None)
-                hits.append(h)
-                print(f"    [SNIFF] {h['name']:28} {h['ats']:14} "
-                      f"{h['slug']!s:26} nc={h['nc']}")
-            elif h:
-                sniff_misses.append(h)
-
-        ex = ThreadPoolExecutor(max_workers=max_workers)
-        drain_or_abandon(
-            ex, {ex.submit(_sniff_one, n): n for n in todo}, _sniff_done,
-            lambda n: sniff_misses.append(
-                {"name": n, "reason": "fetch-error:stalled"}))
-
-    # Websearch pass: the third resolve_board_sniff_first step, bounded, for
-    # names probe+sniff still could not board. This is the recovery path a
-    # measured 60-company gap study found 5 of 6 eventual resolutions came
-    # through (Eli Lilly, Fujifilm Diosynth Biotechnologies, Q2 Solutions,
-    # ...) — names on gov/acronym/product-named domains the slug-guesser and
-    # careers-page sniff can't reach on their own. Capped and skip-recent
-    # because DDG rate-limits hard: an earlier uncapped profile blocked
-    # ~1271s of a 1726s run in DDG's own retry/backoff (see src.net.ddg).
+        _sniff_pass(names, hits, misses, max_workers)
     if websearch:
-        cap = (config.DISCOVERY_WEBSEARCH_CAP if websearch_cap is None
-              else websearch_cap)
-        cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
-        have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
-        todo = [n for n in names if name_key(n) not in have]
-        if todo and cap > 0:
-            from src.store import connect as _connect, recent_miss_names
-            conn = _connect()
-            try:
-                recent = recent_miss_names(conn, days=websearch_retry_days)
-            finally:
-                conn.close()
-            todo = [n for n in todo if n not in recent][:cap]
-        else:
-            todo = []
-        print(f"  websearch-resolving {len(todo)} name(s) without a board "
-              f"(cap={cap})...")
-        if todo:
-            t0 = time.time()
+        _websearch_pass(names, hits, misses, max_workers, websearch_cap,
+                        websearch_retry_days)
 
-            def _websearch_one(n):
-                from src.ats.fetchers import company as company_fetch
-                w = _websearch_board(n)
-                if not w:
-                    return {"name": n, "reason": "no-board-found"}
-                ats = w["ats"]
-                if ats == "workday":
-                    t, p, site = w["triple"]
-                    comp = {"ats": "workday", "wd_tenant": t, "wd_pod": p, "wd_site": site}
-                    slug = (t, p, site)
-                elif ats == "custom":
-                    comp = {"ats": "custom", "careers_url": w.get("careers_url")}
-                    slug = None
-                else:
-                    comp = {"ats": ats, "slug": w.get("slug"), "careers_url": w.get("careers_url")}
-                    slug = w.get("slug")
-                try:
-                    jobs = company_fetch.fetch_company_nc(comp)
-                except Exception:
-                    jobs = []
-                nc = len(jobs)
-                return {"name": n, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-                        "careers_url": w.get("careers_url"),
-                        "reason": "board-dead:" + ats}
-
-            def _websearch_done(fut, n):
-                h = fut.result()
-                if h and h.get("nc"):
-                    h.pop("reason", None)
-                    hits.append(h)
-                    print(f"    [WEBSEARCH] {h['name']:24} {h['ats']:14} "
-                          f"{h['slug']!s:26} nc={h['nc']}")
-                elif h:
-                    sniff_misses.append(h)
-
-            ex = ThreadPoolExecutor(max_workers=min(max_workers, len(todo)))
-            drain_or_abandon(
-                ex, {ex.submit(_websearch_one, n): n for n in todo},
-                _websearch_done,
-                lambda n: sniff_misses.append(
-                    {"name": n, "reason": "fetch-error:stalled"}))
-            print(f"  websearch pass: {time.time() - t0:.1f}s for "
-                  f"{len(todo)} name(s)")
-
-    # Names that reached a live board under SOME spelling, before the
-    # blocklist and the by-board dedup collapse them: they are accounted for
-    # by their surviving row and must not also be filed as no-board-found.
-    boarded = {h["name"] for h in hits}
-
-    # Drop known bad name→board matches.
-    hits = [h for h in hits
-            if name_key(h["name"]) not in NAME_BLOCKLIST]
-
-    # De-dup by resolved board (same slug/triple reached via different names,
-    # e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter name.
-    by_board = {}
-    for h in hits:
-        key = (h["ats"], str(h["slug"]))
-        if key not in by_board or len(h["name"]) < len(by_board[key]["name"]):
-            by_board[key] = h
-    hits = list(by_board.values())
-
-    # Split on the NC-locality check: nc>0 is confirmed-local; nc==0 is either
-    # a false-positive slug collision or a non-NC employer — dropped, but shown.
-    confirmed = sorted([h for h in hits if h["nc"] > 0],
-                       key=lambda h: h["nc"], reverse=True)
-    dropped = sorted([h for h in hits if h["nc"] == 0],
-                     key=lambda h: h["name"].lower())
-    # Every candidate that is not confirmed is a MISS with a reason: a live
-    # board with no local openings, a board whose coordinates read empty, or
-    # a name nothing could be found for. Deduped by name, confirmed wins.
-    misses = {}
-    for h in dropped:
-        misses[h["name"]] = {**h, "reason": "no-local-jobs"}
-    for h in sniff_misses:
-        misses.setdefault(h["name"], h)
-    for n in names:
-        if n not in boarded:
-            misses.setdefault(n, {"name": n, "reason": "no-board-found"})
-    for h in confirmed:
-        misses.pop(h["name"], None)
-    misses = sorted(misses.values(), key=lambda m: m["name"].lower())
-    print(f"\n  live boards: {len(hits)}  |  NC-local confirmed: {len(confirmed)}  "
-          f"|  dropped (no NC jobs): {len(dropped)}  "
-          f"|  misses recorded: {len(misses)}")
-    print("\n  --- NC-LOCAL CONFIRMED (nc jobs / total) ---")
-    for h in confirmed:
-        print(f"    [OK]   {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
-              f"{h['nc']}/{h['count']}")
-    print("\n  --- DROPPED: live board but no NC jobs (likely wrong slug or non-local) ---")
-    for h in dropped:
-        print(f"    [drop] {h['name']:32} {h['ats']:10} {h['slug']!s:34} "
-              f"0/{h['count']}")
+    hits, confirmed, dropped, misses = _reduce_hits(names, hits, misses)
+    _report_discovery(hits, confirmed, dropped, misses)
     return confirmed, names, misses
-
 
 # --------------------------------------------------------------------------- #
 #  Sampling and store writes (populate / add_board / resolve_leads)           #
