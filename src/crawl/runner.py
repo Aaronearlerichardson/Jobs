@@ -26,14 +26,13 @@ rendering — but never the methodology.
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from src import config
 
 from src import store
 from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
-from src.net.parallel import fetch_all
+from src.net.parallel import fan_out, fetch_all
 from src.match.locality import remote_signal_for, us_eligible
 from src.claude.resume import resume_text
 from src.ats.registry import ATS_REGISTRY, iter_store_sources
@@ -473,17 +472,16 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     if to_score and score_linked:
         print(f"\n  scoring {len(to_score)} new job(s) against resume "
               f"({n_seen} already scored)...")
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {ex.submit(ops._score_job, resume, c, j,
-                              t["track"]): j for c, j in to_score}
-            for fut in as_completed(futs):
-                try:
-                    row = fut.result()
-                    if commit:
-                        store.upsert_job(conn, row)
-                    scored += 1
-                except Exception as e:
-                    print(f"    [!] scoring error: {e}")
+        for row in fan_out(to_score,
+                           lambda cj: ops._score_job(resume, cj[0], cj[1],
+                                                     t["track"]),
+                           "scoring", max_workers):
+            try:
+                if commit:
+                    store.upsert_job(conn, row)
+                scored += 1
+            except Exception as e:
+                print(f"    [!] store error: {e}")
     elif to_score:
         # Scoring skipped (fit off, or budget guard) — store the fresh rows
         # UNSCORED so they aren't re-flagged as new next run; the self-heal
@@ -513,8 +511,10 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
                                    j.get("description", ""))
             j.update(res.as_columns())
 
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            list(ex.map(_one, matches))
+        # `ex.map` re-raised the first failure, so one unscorable posting
+        # abandoned the scoring of every other match in the sweep.
+        for _ in fan_out(matches, _one, "match scoring", max_workers):
+            pass
         matches.sort(key=lambda j: (j.get("resume_fit_score") is not None,
                                     j.get("resume_fit_score") or 0.0),
                      reverse=True)

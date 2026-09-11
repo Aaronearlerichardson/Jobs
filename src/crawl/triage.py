@@ -62,7 +62,6 @@ threads, and neither reads those lists.
 import logging
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -81,6 +80,7 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, remote_signal,
 from src.ops import maintenance as ops
 from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
 from src.crawl.runner import apply_keyword_focus, core_anchor
+from src.net.parallel import fan_out
 from src.net.util import worker_count
 
 _log = logging.getLogger(__name__)
@@ -427,30 +427,23 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
         n_todo = sum(len(js) for js in todo.values())
         print(f"  hydrating {n_todo} bodiless survivor(s) across "
               f"{len(todo)} board(s), {max_workers} at a time...")
-        with ThreadPoolExecutor(max_workers=max_workers,
-                                thread_name_prefix="triage") as ex:
-            futs = {ex.submit(hydrate_fn, companies[cid], js): cid
-                    for cid, js in todo.items()}
-            for fut in as_completed(futs):
-                cid = futs[fut]
-                try:
-                    st = fut.result()
-                except Exception as e:          # noqa: BLE001 - per board
-                    print(f"    [!] {companies[cid]['name']}: hydrate failed: {e}")
-                    continue
-                summary["hydrated"] += st.get("hydrated", 0)
-                for j in todo[cid]:
-                    r = survivors[j["id"]][1]
-                    if j.get("description"):
-                        # Persist at once: a row that ends this pass still
-                        # pending (over the cap, or deferred) must not be
-                        # fetched again next pass.
-                        r["description"] = j["description"]
-                        r["location"] = j.get("location") or r.get("location")
-                        store.store_body(conn, j["id"], r["description"],
-                                         r["location"])
-                    elif j.get("_tried"):
-                        store.mark_desc_checked(conn, j["id"], now=stamp)
+        for cid, st in fan_out(
+                list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
+                lambda cid: f"{companies[cid]['name']}: hydrate",
+                max_workers, with_item=True):
+            summary["hydrated"] += st.get("hydrated", 0)
+            for j in todo[cid]:
+                r = survivors[j["id"]][1]
+                if j.get("description"):
+                    # Persist at once: a row that ends this pass still
+                    # pending (over the cap, or deferred) must not be
+                    # fetched again next pass.
+                    r["description"] = j["description"]
+                    r["location"] = j.get("location") or r.get("location")
+                    store.store_body(conn, j["id"], r["description"],
+                                     r["location"])
+                elif j.get("_tried"):
+                    store.mark_desc_checked(conn, j["id"], now=stamp)
         print(f"  hydrated {summary['hydrated']} of {n_todo}")
 
     # Phase 3: the text gates again, with bodies. A survivor still without
@@ -486,18 +479,11 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
         print(f"  scoring {len(to_score)} survivor(s) against the profile"
               + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
                  f"for the next pass)" if over_cap else "") + "...")
-        with ThreadPoolExecutor(max_workers=max(2, min(max_workers, 6)),
-                                thread_name_prefix="triage-fit") as ex:
-            futs = [ex.submit(_score_one, x[1]) for x in to_score]
-            for fut in as_completed(futs):
-                try:
-                    r, res = fut.result()
-                except Exception as e:          # noqa: BLE001 - per row
-                    print(f"    [!] scoring error: {e}")
-                    continue
-                if res.score is not None:
-                    scores[r["job_id"]] = res
-                    summary["scored"] += 1
+        for r, res in fan_out([x[1] for x in to_score], _score_one,
+                              "scoring", max(2, min(max_workers, 6))):
+            if res.score is not None:
+                scores[r["job_id"]] = res
+                summary["scored"] += 1
 
     # Phase 5: write every verdict. A survivor the scorer could not reach
     # (no key, breaker tripped) is still stamped into its tracks unscored:
