@@ -128,6 +128,35 @@ _WD_BOARD_RE = re.compile(
 # never real board names.
 _WD_SITE_BLOCKLIST = {"wday", "cxs", "api", "static", "assets", "login"}
 
+# A single posting's URL: the site segment, then everything from /job/ on,
+# which is what the CXS detail endpoint wants as its path. Same optional
+# locale prefix as _WD_BOARD_RE -- triage carried its own copy of this that
+# only knew /en-US and /en, so a board served under any other locale fell
+# back to scraping the rendered page.
+_WD_JOB_PATH_RE = re.compile(
+    r"myworkdayjobs\.com(?:/[a-z]{2}(?:-[A-Za-z]{2})?)?/([^/]+)(/job/.*)$",
+    re.IGNORECASE,
+)
+
+
+def workday_job_path(url):
+    """(site, path) from a Workday JOB url, or None if it isn't one.
+
+    >>> workday_job_path("https://acme.wd5.myworkdayjobs.com/External/job/RTP/Engineer_R1")
+    ('External', '/job/RTP/Engineer_R1')
+    >>> workday_job_path("https://acme.wd5.myworkdayjobs.com/en-US/External/job/x")
+    ('External', '/job/x')
+
+    A board URL with no posting on it has no path to give:
+
+    >>> workday_job_path("https://acme.wd5.myworkdayjobs.com/en-US/External") is None
+    True
+    >>> workday_job_path("") is None
+    True
+    """
+    m = _WD_JOB_PATH_RE.search(url or "")
+    return (m.group(1), m.group(2)) if m else None
+
 
 def extract_workday_triple(text):
     """(tenant, wd_pod_int, site) from the first Workday URL found in

@@ -14,6 +14,8 @@ One function now. Callers say what they resolved; this says what the
 store calls it.
 """
 
+from src.ats import signatures
+
 #: The columns a board's identity occupies in `companies` (core.store).
 BOARD_COLUMNS = ("ats", "slug", "wd_tenant", "wd_pod", "wd_site",
                  "careers_url")
@@ -65,6 +67,42 @@ def columns(ats, slug=None, careers_url=None, name=None, **extra):
         out["name"] = name
     out.update(extra)
     return out
+
+
+def wd_handle(company, url):
+    """The reverse trip: a stored company row plus one job URL back into the
+    (tenant, pod, site, path) handle `fetchers.workday.cxs_detail` takes.
+    None when the row isn't a Workday board, or the URL isn't a posting.
+
+    The roster's site wins over the URL's, because the URL's segment is
+    whatever locale-shaped thing happened to sit in that slot; the URL is
+    only asked for the path, which the roster cannot know:
+
+    >>> c = {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5,
+    ...      "wd_site": "External"}
+    >>> wd_handle(c, "https://acme.wd5.myworkdayjobs.com/Careers/job/RTP/Eng_R1")
+    ('acme', 5, 'External', '/job/RTP/Eng_R1')
+
+    A row whose triple is incomplete has no handle -- half a triple builds a
+    CXS URL that 404s, and the caller's fallback (fetch the rendered page)
+    is the correct answer instead:
+
+    >>> wd_handle({"ats": "workday", "wd_tenant": "acme"},
+    ...           "https://acme.wd5.myworkdayjobs.com/X/job/y") is None
+    True
+    >>> wd_handle({"ats": "greenhouse", "slug": "acme"}, "https://x/job/y") is None
+    True
+    """
+    if company.get("ats") != "workday":
+        return None
+    if not (company.get("wd_tenant") and company.get("wd_pod")):
+        return None
+    found = signatures.workday_job_path(url)
+    if not found:
+        return None
+    site_from_url, path = found
+    return (company["wd_tenant"], company["wd_pod"],
+            company.get("wd_site") or site_from_url, path)
 
 
 def from_hit(hit, name=None, **extra):

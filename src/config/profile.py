@@ -132,6 +132,40 @@ def restore_keywords(snapshot, cfg=None):
     cfg.ACCEPT_REMOTE = snapshot[-1]
 
 
+#: What `widen_keywords` empties. EXCLUDE_* are not part of the keyword
+#: FOCUS (a track swap leaves them alone), but they are part of "the
+#: profile is not judging this posting", so widening clears them too.
+_WIDENED_EMPTY = ("DOMAIN_KEYWORDS", "SKILL_KEYWORDS", "EXCLUDE_PHRASES",
+                  "EXCLUDE_TITLE_PHRASES")
+
+
+def widen_keywords(cfg=None):
+    """Turn the relevance filter off, in place: everything is relevant.
+
+    For measuring a SOURCE rather than the profile. Every fetcher applies
+    `is_relevant` internally, so without this a healthy board that simply
+    doesn't match your search terms reports identically to a dead one --
+    which is the whole question the canaries in tools/ exist to answer.
+
+    "" rather than [] for the two ANY-of tiers: `is_relevant` treats an
+    empty CORE list as "nothing to match" and drops the posting, while ""
+    is a substring of any text and so admits it.
+
+    In place, and only in place: src/match/filters.py bound these list
+    objects at import, so rebinding them would leave the gate reading the
+    originals. Pair it with `keyword_snapshot` / `restore_keywords` if the
+    process has anything to do afterwards -- three copies of this lived in
+    two canaries and a test fixture, and the test fixture's copy was the
+    one that forgot ACCEPT_REMOTE.
+    """
+    cfg = _self() if cfg is None else cfg
+    cfg.CORE_KEYWORDS[:] = [""]
+    cfg.INCLUDE_KEYWORDS[:] = [""]
+    for name in _WIDENED_EMPTY:
+        getattr(cfg, name)[:] = []
+    cfg.ACCEPT_REMOTE = True
+
+
 def _self():
     """The config PACKAGE, which is what every caller mutates -- its
     attributes are these module's objects, re-exported."""

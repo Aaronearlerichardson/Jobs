@@ -37,7 +37,7 @@ from .profile import (                                      # noqa: F401
     PROFILE_PATH, PROFILE_EXAMPLE_PATH, PROFILE_SOURCE,
     _load_profile, _PROFILE, profile_section,
     CORE_KEYWORDS, DOMAIN_KEYWORDS, SKILL_KEYWORDS, INCLUDE_KEYWORDS,
-    keyword_snapshot, restore_keywords,
+    keyword_snapshot, restore_keywords, widen_keywords,
     EXCLUDE_PHRASES, EXCLUDE_TITLE_PHRASES, EXCLUDE_BOILERPLATE_PHRASES,
     KEYWORDS_BY_TRACK, EXCLUDE_BY_TRACK,
     ACCEPT_REMOTE, LOCATION_EXCLUDE, LOCATION_INCLUDE,

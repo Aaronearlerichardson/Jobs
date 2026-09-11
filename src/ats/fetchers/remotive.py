@@ -10,18 +10,10 @@ Optional `category` parameter narrows by slug
 relevance gate is narrower than any single Remotive category.
 """
 
-import html
-import re
-
 from src.net.http import SESSION, HEADERS
+from src.net.util import strip_html
 
 API_URL = "https://remotive.com/api/remote-jobs"
-
-
-def _strip_html(s):
-    if not s:
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
 def fetch_remotive(category=None, max_jobs=None, gate=None):
@@ -54,7 +46,7 @@ def fetch_remotive(category=None, max_jobs=None, gate=None):
         company  = entry.get("company_name") or "Remotive"
         jurl     = entry.get("url") or ""
         location = entry.get("candidate_required_location") or "Remote"
-        desc     = _strip_html(entry.get("description", ""))
+        desc     = strip_html(entry.get("description", ""))
 
         tags     = entry.get("tags") or []
         tag_text = " ".join(str(t) for t in tags if t)

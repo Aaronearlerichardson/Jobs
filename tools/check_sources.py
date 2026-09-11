@@ -48,10 +48,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-try:  # Windows consoles default to cp1252; the status glyphs are not in it.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from tools._harness import BLOCKED_RE, blame, console_utf8   # noqa: E402
+
+console_utf8()
 
 from src import config                                       # noqa: E402
 from src.net.http import SESSION, HEADERS          # noqa: E402
@@ -61,11 +60,6 @@ OK, BLOCKED, BROKEN, ROBOTS_OFF, SKIPPED = (
     "ok", "blocked", "broken", "robots", "skipped")
 
 EMOJI = {OK: "✅", BLOCKED: "🚧", BROKEN: "❌", ROBOTS_OFF: "🤖", SKIPPED: "⏭️"}
-
-_BLOCKED_RE = re.compile(
-    r"\b(401|403|429|451)\b|captcha|cloudflare|forbidden|rate.?limit|"
-    r"too many requests|access denied|challenge", re.I)
-
 
 # A fetcher that declined on POLICY, not on failure. RobotsDisallowed is
 # raised (and printed) by the session before any request goes out.
@@ -80,14 +74,12 @@ def verdict(blob, has_rows):
         return OK
     if _ROBOTS_RE.search(blob or ""):
         return ROBOTS_OFF
-    if _BLOCKED_RE.search(blob or ""):
-        return BLOCKED
-    return BROKEN
+    return blame(blob)
 
 
 def classify(status_code=None, note=""):
     """HTTP status + any diagnostic text -> one of our four verdicts."""
-    if _BLOCKED_RE.search(note or ""):
+    if BLOCKED_RE.search(note or ""):
         return BLOCKED
     if status_code is None:
         return BROKEN
@@ -198,23 +190,6 @@ def probe_robots(label, url):
 # --------------------------------------------------------------------------- #
 #  2. aggregator feeds                                                         #
 # --------------------------------------------------------------------------- #
-
-def widen_keyword_filter():
-    """Make `is_relevant()` accept everything, in place.
-
-    Every feed and board fetcher applies the keyword filter INTERNALLY, so
-    without this a healthy source that simply doesn't match your search
-    reports identically to a dead one. We are measuring the SOURCE here, not
-    the profile. (filters.py bound these list objects at import time, so they
-    must be mutated rather than rebound — see runner.apply_keyword_focus.)"""
-    config.CORE_KEYWORDS[:] = [""]          # "" is a substring of any text
-    config.DOMAIN_KEYWORDS[:] = []
-    config.SKILL_KEYWORDS[:] = []
-    config.INCLUDE_KEYWORDS[:] = [""]
-    config.EXCLUDE_PHRASES[:] = []
-    config.EXCLUDE_TITLE_PHRASES[:] = []
-    config.ACCEPT_REMOTE = True
-
 
 class _ThreadCapture:
     """A stdout stand-in that routes each thread's writes to its own buffer.
@@ -375,7 +350,7 @@ def probe_search(deep=False):
             elif exc:
                 status, detail = BROKEN, exc[:110]
             else:
-                status = BLOCKED if _BLOCKED_RE.search(blob) else BROKEN
+                status = blame(blob)
                 detail = (note[:110] or
                           "0 postings — no results, or none carried JSON-LD")
             out.append({"section": "search", "name": f"fetch_websearch: {label}",
@@ -568,7 +543,7 @@ def main():
     wanted = args.only or list(SECTIONS)
     # Fetchers filter internally; widen so a zero means "the source gave us
     # nothing", never "nothing matched your keywords".
-    widen_keyword_filter()
+    config.widen_keywords()
     started = time.monotonic()
     all_results = []
     for key in wanted:

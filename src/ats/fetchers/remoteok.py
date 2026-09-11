@@ -10,18 +10,10 @@ Schema (per job):
     description, location, salary, apply_url, url, original
 """
 
-import html
-import re
-
 from src.net.http import SESSION, HEADERS
+from src.net.util import strip_html
 
 API_URL = "https://remoteok.com/api"
-
-
-def _strip_html(s):
-    if not s:
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
 def fetch_remoteok(max_jobs=500, gate=None):
@@ -49,7 +41,7 @@ def fetch_remoteok(max_jobs=500, gate=None):
         company  = entry.get("company")  or "RemoteOK"
         url      = entry.get("url") or entry.get("apply_url") or ""
         location = entry.get("location") or "Remote"
-        desc     = _strip_html(entry.get("description", ""))
+        desc     = strip_html(entry.get("description", ""))
 
         # tags can enrich relevance matching (e.g. "ml", "python")
         tags = entry.get("tags") or []

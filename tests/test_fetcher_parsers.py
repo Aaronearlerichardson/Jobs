@@ -40,17 +40,11 @@ def load_text(name):
 def match_everything(cfg, pristine_keywords):
     """Widen the relevance filter so these tests measure PARSING only.
 
-    Mutated in place — filters.py bound the list objects at import time.
-    The fetchers are ungated unless a `gate` is passed, so this only
-    matters for the tests that pass `gate=is_relevant` to mirror the
-    registry, and for the callers outside this file that do.
+    The same widening the canaries in tools/ apply, through the same
+    function, so a test cannot pass against a filter the canary doesn't
+    actually use. `pristine_keywords` puts the profile back after.
     """
-    cfg.CORE_KEYWORDS[:] = [""]
-    cfg.DOMAIN_KEYWORDS[:] = []
-    cfg.SKILL_KEYWORDS[:] = []
-    cfg.INCLUDE_KEYWORDS[:] = [""]
-    cfg.EXCLUDE_PHRASES[:] = []
-    cfg.EXCLUDE_TITLE_PHRASES[:] = []
+    cfg.widen_keywords(cfg)
 
 
 @pytest.fixture

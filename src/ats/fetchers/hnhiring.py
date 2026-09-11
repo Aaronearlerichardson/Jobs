@@ -10,13 +10,13 @@ Firebase API:
   - https://hacker-news.firebaseio.com/v0/user/whoishiring.json
 """
 
-import html
 import re
 import time
 
 
 from src.match.names import strip_parentheticals
 from src.net.http import SESSION, HEADERS
+from src.net.util import strip_html
 
 BASE = "https://hacker-news.firebaseio.com/v0"
 
@@ -73,12 +73,6 @@ def _is_role(s):
 
 def _is_location(s):
     return bool(_LOC_HINT_RE.search(s)) and not _ROLE_HINT_RE.search(s)
-
-
-def _strip_html(s):
-    if not s:
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
 def _get_json(url, timeout=None):
@@ -192,7 +186,7 @@ def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
             time.sleep(0.02)        # gentle on Firebase
             if not comment or comment.get("deleted") or comment.get("dead"):
                 continue
-            text = _strip_html(comment.get("text", ""))
+            text = strip_html(comment.get("text", ""))
             if not text:
                 continue
 

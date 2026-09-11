@@ -1,6 +1,7 @@
 """Small shared helpers."""
 
 import hashlib
+import html
 import os
 import re
 from datetime import datetime, timedelta
@@ -50,6 +51,31 @@ def worker_count(env_var, floor=4):
     if v.isdigit() and int(v) > 0:
         return int(v)
     return max((os.cpu_count() or 9) - 1, floor)
+
+
+_TAG_RE   = re.compile(r"<[^>]+>")
+_SPACE_RE = re.compile(r"\s+")
+
+
+def strip_html(s):
+    """Markup out, one line of readable text back. "" for anything falsy.
+
+    Entities first, THEN tags: unescaping later would turn a literal
+    "&lt;script&gt;" in the copy into a tag this has already decided not to
+    strip. Feeds hand us HTML fragments (RemoteOK/Remotive descriptions,
+    RSS <description>, HN comment bodies), and the gate that reads the
+    result matches on substrings, so collapsing whitespace matters as much
+    as dropping the tags -- a keyword split across a newline inside a <li>
+    would otherwise miss.
+
+    >>> strip_html("<p>Hello&nbsp;&amp; welcome</p>\\n<li>EEG  work</li>")
+    'Hello & welcome EEG work'
+    >>> strip_html(None)
+    ''
+    """
+    if not s:
+        return ""
+    return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(s))).strip()
 
 
 def stable_id(*parts) -> str:

@@ -70,6 +70,7 @@ from src import config
 
 from src import tags
 from src import store
+from src.ats import coords
 from src.match import gates
 from src.claude.api import is_active_mission, score_company_mission
 from src.match.filters import is_relevant
@@ -323,19 +324,15 @@ def summarize(verdicts):
 
 def _fetcher_shape(row, company):
     """A stored row as the job dict fetchers.company.hydrate_description
-    expects, with the Workday triple rebuilt from the roster row so the
-    CXS detail endpoint is used rather than the slow page fallback."""
+    expects, with the Workday handle rebuilt from the roster row (coords.
+    wd_handle) so the CXS detail endpoint is used rather than the slow
+    page fallback."""
     job = {"id": row["job_id"], "job_id": row["job_id"],
            "title": row.get("title") or "", "url": row.get("url") or "",
            "location": row.get("location") or "",
            "description": row.get("description") or "",
-           "ats": company.get("ats"), "_wd": None, "_row": row}
-    if company.get("ats") == "workday" and job["url"]:
-        m = re.search(r"myworkdayjobs\.com(?:/en-US|/en)?/([^/]+)(/job/.*)$",
-                      job["url"])
-        if m and company.get("wd_tenant") and company.get("wd_pod"):
-            job["_wd"] = (company["wd_tenant"], company["wd_pod"],
-                          company.get("wd_site") or m.group(1), m.group(2))
+           "ats": company.get("ats"), "_row": row}
+    job["_wd"] = coords.wd_handle(company, job["url"])
     return job
 
 

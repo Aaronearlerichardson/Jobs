@@ -29,7 +29,6 @@ import argparse
 import contextlib
 import io
 import json
-import re
 import sys
 import time
 import tomllib
@@ -40,38 +39,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-try:  # Windows consoles default to cp1252; the status glyphs are not in it.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-except Exception:
-    pass
+from tools._harness import blame, console_utf8              # noqa: E402
+
+console_utf8()
 
 from src import config                                     # noqa: E402
 from src.ats.registry import ATS_REGISTRY         # noqa: E402
 
 SAMPLES = Path(__file__).parent / "board_samples.toml"
 
-# An anti-bot wall or a rate limit says nothing about our parser.
-_BLOCKED_RE = re.compile(
-    r"\b(401|403|429|451)\b|captcha|cloudflare|forbidden|rate.?limit|"
-    r"too many requests|access denied", re.I)
-_BROKEN_RE = re.compile(r"\b(404|4\d\d|5\d\d)\b|timeout|timed out|"
-                        r"connection|ssl|json|decode", re.I)
-
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
-
-
-def widen_keyword_filter():
-    """Make `is_relevant()` accept everything, in place.
-
-    filters.py bound these list objects at import time, so they must be
-    mutated rather than rebound (see runner.apply_keyword_focus)."""
-    config.CORE_KEYWORDS[:] = [""]      # "" is a substring of any text
-    config.DOMAIN_KEYWORDS[:] = []
-    config.SKILL_KEYWORDS[:] = []
-    config.INCLUDE_KEYWORDS[:] = [""]
-    config.EXCLUDE_PHRASES[:] = []
-    config.EXCLUDE_TITLE_PHRASES[:] = []
-    config.ACCEPT_REMOTE = True
 
 
 def check_board(entry):
@@ -92,10 +69,8 @@ def check_board(entry):
         n = len(jobs)
         if n >= floor:
             status, detail = "ok", ""
-        elif _BLOCKED_RE.search(note):
-            status, detail = "blocked", note[:160]
         elif note:
-            status, detail = "broken", note[:160]
+            status, detail = blame(note), note[:160]
         else:
             # 200 + parsed + zero postings: either a genuinely empty board or
             # a silent shape change. Worth a look, not an alarm.
@@ -103,7 +78,7 @@ def check_board(entry):
             detail = f"reachable but returned {n} (floor {floor})"
     except Exception as e:
         note = f"{type(e).__name__}: {e}"
-        status = "blocked" if _BLOCKED_RE.search(note) else "broken"
+        status = blame(note)
         detail, n = note[:160], 0
 
     return {"ats": ats, "name": name, "status": status, "jobs": n,
@@ -153,7 +128,7 @@ def main():
     args = ap.parse_args()
 
     entries = tomllib.loads(SAMPLES.read_text(encoding="utf-8"))["board"]
-    widen_keyword_filter()
+    config.widen_keywords()
 
     results = []
     for entry in entries:

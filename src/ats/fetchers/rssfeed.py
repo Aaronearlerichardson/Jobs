@@ -10,13 +10,12 @@ WeWorkRemotely feeds:
     https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
 """
 
-import html
 import re
 
 from bs4 import BeautifulSoup
 
 from src.net.http import SESSION, HEADERS
-from src.net.util import stable_id
+from src.net.util import stable_id, strip_html
 
 
 # WWR titles take either shape:
@@ -25,12 +24,6 @@ from src.net.util import stable_id
 # Some titles also embed sub-detail behind pipes ("Role | Region | Remote").
 _WWR_COLON_RE = re.compile(r"^([^:]+?):\s*(.+)$")
 _WWR_AT_RE    = re.compile(r"^(.*?)\s+at\s+(.*?)(?:\s*\(([^)]+)\))?\s*$", re.I)
-
-
-def _strip_html(s):
-    if not s:
-        return ""
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html.unescape(s))).strip()
 
 
 def _parse_title(title):
@@ -101,7 +94,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
         guid = (it.guid.text if it.guid else "") or link or raw_title
 
         desc_tag = it.find("description") or it.find("summary") or it.find("content")
-        desc     = _strip_html(desc_tag.text) if desc_tag else ""
+        desc     = strip_html(desc_tag.text) if desc_tag else ""
 
         role, company, region = _parse_title(raw_title)
 
