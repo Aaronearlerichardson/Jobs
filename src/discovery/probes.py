@@ -99,156 +99,127 @@ def launch_chromium(pw, **kwargs):
     raise first_error
 
 
-def probe_greenhouse(slug):
-    url = f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        if r.status_code != 200:
-            return (False, 0)
-        return (True, len(r.json().get("jobs", [])))
-    except Exception:
+# ─── The slug probes ─────────────────────────────────────────────────────
+#
+# Every one of these answers the same question -- does this handle name a
+# real board, and how many postings are on it -- and returns the same
+# (ok, count) pair. Twelve of them had been written out longhand, five
+# lines of identical request-and-swallow around the one expression that
+# differed. Two builders now.
+#
+# The interesting per-ATS decision is `require_jobs`, and writing it out
+# twelve times is how it gets forgotten: SmartRecruiters answers 200 with
+# totalFound:0 for ANY slug, so a 200 alone is not proof of a board, and
+# every guessed slug "confirmed" with zero jobs until that was noticed.
+# It is a named argument here, visible in one column.
+
+
+def _api_probe(url, count, *, require_jobs=False, accept=None, headers=None,
+               timeout=None, retries=0, backoff=1.0):
+    """Build a `(ok, n)` probe that GETs a URL and counts what came back.
+
+    `url` is a format string taking the handle, or a callable for a board
+    whose base URL is the fetcher's to know. `count(response, handle)`
+    returns the posting count; `accept(response)` replaces it for a board
+    that can only be recognised, not counted. Anything unexpected -- a bad
+    status, a timeout, malformed JSON -- is (False, 0): a probe reports,
+    it never raises at its caller.
+    """
+    def probe(handle):
+        for attempt in range(retries + 1):
+            try:
+                r = SESSION.get(url(handle) if callable(url)
+                                else url.format(handle),
+                                timeout=timeout or config.PROBE_TIMEOUT,
+                                headers={**HEADERS, **(headers or {})})
+                if r.status_code == 200:
+                    if accept is not None:
+                        return (True, 0) if accept(r) else (False, 0)
+                    n = count(r, handle)
+                    return (n > 0 if require_jobs else True, n)
+            except Exception:
+                pass
+            if attempt < retries:
+                time.sleep(backoff)
         return (False, 0)
+    return probe
 
 
-def probe_lever(slug):
-    url = f"https://api.lever.co/v0/postings/{slug}?mode=json"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        if r.status_code != 200:
-            return (False, 0)
-        data = r.json()
-        return (True, len(data) if isinstance(data, list) else 0)
-    except Exception:
-        return (False, 0)
+def _parser_probe(module):
+    """Build a probe out of the fetcher's own board parser, for the ATSes
+    where the fetcher already knows the URL and the payload shape. Imported
+    lazily: probes.py is pulled in by discovery paths that never fetch a
+    board, and these modules are not cheap.
 
-
-def probe_ashby(slug):
-    url = f"https://api.ashbyhq.com/posting-api/job-board/{slug}"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        if r.status_code != 200:
-            return (False, 0)
-        # Posting API key is "jobs" (not the embed payload's "jobPostings").
-        data = r.json()
-        return (True, len(data.get("jobs", data.get("jobPostings", []))))
-    except Exception:
-        return (False, 0)
-
-
-def probe_kula(slug, retries=1):
-    # Kula serves a full HTML page (no JSON API) and throttles under
-    # probe bursts — a confirmed-live board can 4xx/timeout once during
-    # a parallel discovery run. One retry with a short backoff recovers
-    # those without slowing genuine misses much.
-    url = f"https://careers.kula.ai/{slug}"
-    for attempt in range(retries + 1):
+    Their `ok` flag means "has jobs", not "board exists" -- see the
+    comment in ops.prune_dead_boards, which cannot use them for that
+    reason.
+    """
+    def probe(handle):
         try:
-            r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-            if r.status_code == 200 and len(r.text) > 1000:
-                return (True, 0)
+            mod = __import__(f"src.ats.fetchers.{module}", fromlist=["parse_board"])
+            jobs = mod.parse_board(handle)
+            return (len(jobs) > 0, len(jobs))
         except Exception:
-            pass
-        if attempt < retries:
-            time.sleep(1.0)
-    return (False, 0)
-
-
-def probe_jazzhr(slug):
-    url = f"https://{slug}.applytojob.com/"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        if r.status_code != 200:
             return (False, 0)
-        n = len(re.findall(r"/apply/[A-Za-z0-9]+/", r.text))
-        return (n > 0, n)
-    except Exception:
-        return (False, 0)
+    return probe
 
 
-def probe_bamboohr(slug):
-    url = f"https://{slug}.bamboohr.com/careers/list"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT,
-                         headers={**HEADERS, "Accept": "application/json"})
-        if r.status_code != 200:
-            return (False, 0)
-        return (True, len(r.json().get("result", []) or []))
-    except Exception:
-        return (False, 0)
+probe_greenhouse = _api_probe(
+    "https://boards-api.greenhouse.io/v1/boards/{}/jobs",
+    lambda r, h: len(r.json().get("jobs", [])))
+
+probe_lever = _api_probe(
+    "https://api.lever.co/v0/postings/{}?mode=json",
+    lambda r, h: len(d) if isinstance(d := r.json(), list) else 0)
+
+probe_ashby = _api_probe(
+    "https://api.ashbyhq.com/posting-api/job-board/{}",
+    # Posting API key is "jobs" (not the embed payload's "jobPostings").
+    lambda r, h: len((j := r.json()).get("jobs", j.get("jobPostings", []))))
+
+# Kula serves a full HTML page (no JSON API) and throttles under probe
+# bursts -- a confirmed-live board can 4xx/timeout once during a parallel
+# discovery run. One retry with a short backoff recovers those without
+# slowing genuine misses much. Nothing on the page is countable, so a
+# substantial body is the whole signal.
+probe_kula = _api_probe(
+    "https://careers.kula.ai/{}", None,
+    accept=lambda r: len(r.text) > 1000, retries=1)
+
+probe_jazzhr = _api_probe(
+    "https://{}.applytojob.com/",
+    lambda r, h: len(_JAZZHR_APPLY_RE.findall(r.text)),
+    require_jobs=True)
+
+probe_bamboohr = _api_probe(
+    "https://{}.bamboohr.com/careers/list",
+    lambda r, h: len(r.json().get("result", []) or []),
+    headers={"Accept": "application/json"})
+
+probe_smartrecruiters = _api_probe(
+    "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1",
+    lambda r, h: int(r.json().get("totalFound", 0) or 0),
+    require_jobs=True)
+
+probe_jobvite = _api_probe(
+    lambda h: f"{_jobvite().BASE}/{h}/search?p=0",
+    lambda r, h: len(_jobvite().parse_listing(r.text, h)),
+    require_jobs=True, timeout=10)
+
+#: Paylocity by company GUID, UKG Pro (UltiPro) by 'CODE|GUID', Rippling
+#: and HiBob by slug/tenant -- all four through the fetcher's parser.
+probe_paylocity = _parser_probe("paylocity")
+probe_rippling = _parser_probe("rippling")
+probe_ultipro = _parser_probe("ultipro")
+probe_hibob = _parser_probe("hibob")
+
+_JAZZHR_APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/")
 
 
-def probe_smartrecruiters(slug):
-    url = f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1"
-    try:
-        r = SESSION.get(url, timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        if r.status_code != 200:
-            return (False, 0)
-        # SmartRecruiters returns 200 / totalFound:0 for ANY slug, even
-        # nonexistent ones — so a 200 alone is not proof of a real board.
-        # Require live postings (like jazzhr), else every guessed slug
-        # "confirms" with zero jobs and floods discovery with false hits.
-        n = int(r.json().get("totalFound", 0) or 0)
-        return (n > 0, n)
-    except Exception:
-        return (False, 0)
-
-
-def probe_paylocity(guid):
-    """Confirm a Paylocity board by its company GUID (live job count from the
-    embedded pageData). Reuses the fetcher's parser."""
-    from src.ats.fetchers.paylocity import parse_board
-    try:
-        jobs = parse_board(guid)
-        return (len(jobs) > 0, len(jobs))
-    except Exception:
-        return (False, 0)
-
-
-def probe_rippling(slug):
-    """Confirm a Rippling board by its slug (live job count from the public
-    ATS API). Reuses the fetcher's parser."""
-    from src.ats.fetchers.rippling import parse_board
-    try:
-        jobs = parse_board(slug)
-        return (len(jobs) > 0, len(jobs))
-    except Exception:
-        return (False, 0)
-
-
-def probe_ultipro(slug):
-    """Confirm a UKG Pro (UltiPro) board by its slug ('CODE|GUID')."""
-    from src.ats.fetchers.ultipro import parse_board
-    try:
-        jobs = parse_board(slug)
-        return (len(jobs) > 0, len(jobs))
-    except Exception:
-        return (False, 0)
-
-
-def probe_hibob(tenant):
-    """Confirm a HiBob board by its tenant subdomain (live job count from
-    the public job-ad API)."""
-    from src.ats.fetchers.hibob import parse_board
-    try:
-        jobs = parse_board(tenant)
-        return (len(jobs) > 0, len(jobs))
-    except Exception:
-        return (False, 0)
-
-
-def probe_jobvite(tenant):
-    """Confirm a Jobvite career site by its tenant slug (live row count
-    from the server-rendered search listing). Reuses the fetcher's parser."""
-    from src.ats.fetchers.jobvite import BASE, parse_listing
-    try:
-        r = SESSION.get(f"{BASE}/{tenant}/search", params={"p": 0},
-                        timeout=10, headers=HEADERS)
-        if r.status_code != 200:
-            return (False, 0)
-        n = len(parse_listing(r.text, tenant))
-        return (n > 0, n)
-    except Exception:
-        return (False, 0)
+def _jobvite():
+    from src.ats.fetchers import jobvite
+    return jobvite
 
 
 PROBES = {
