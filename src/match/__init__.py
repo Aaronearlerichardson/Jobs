@@ -2,8 +2,10 @@
 
     gates.py          technical-title and per-track exclude tables
     filters.py        keyword relevance over title + body
-    locality.py       geography: is this posting in your area, or remote
-    remote_filter.py  the remote-work phrases locality leans on
+    locality.py       geography: in your area, remote, or neither --
+                      including the remote-work phrase tables, which used
+                      to be a separate remote_filter.py that locality
+                      imported from inside a function body
     names.py          company-name hygiene (junk names, slug guesses)
 
 Pure text in, verdict out -- no network, no API, no store. The crawl, the

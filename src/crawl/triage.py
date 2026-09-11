@@ -75,8 +75,8 @@ from src.match import gates
 from src.claude.api import is_active_mission, score_company_mission
 from src.match.filters import is_relevant
 from src.claude.fit import score_resume_fit
-from src.match.locality import NC_HQ_RE, geo_mode, is_nc
-from src.match.remote_filter import remote_signal, remote_signal_for
+from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, remote_signal,
+                                remote_signal_for)
 
 from src.ops import maintenance as ops
 from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
@@ -231,7 +231,7 @@ def _geo_verdict(company, job, t, has_body):
     if has_body and unknown:
         # The listing named no place: the body is all there is. Onsite
         # needs the strict "<place>, ST" form; remote (trusted companies)
-        # the remote_filter's workforce phrases.
+        # locality's workforce phrases.
         if NC_HQ_RE.search(desc) or (trusted and remote_signal("", desc)):
             return OK
     if not has_body and unknown:

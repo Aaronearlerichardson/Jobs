@@ -14,7 +14,7 @@ from src import config
 from src import store
 from src.config import profile_edit
 from src import digest
-from src.match import locality, remote_filter
+from src.match import locality
 from src import tags as company_tags
 
 from . import BOOT_ID, STATE, app
@@ -114,7 +114,7 @@ def _geo_tag(r):
     if locality.NC_RE.search(loc):
         return "local"
     if (r.get("remote_eligible") or r.get("geo_mode") == "remote"
-            or remote_filter.remote_signal(loc)):
+            or locality.remote_signal(loc)):
         return "remote"
     return "relocation"
 
@@ -126,7 +126,7 @@ def _job_json(r, today, rank=None, remote_floor=None):
     d["verified"] = "deep:" in (r.get("fit_reason") or "")
     d["geo_bucket"] = _geo_tag(r)
     d["relocation_required"] = d["geo_bucket"] == "relocation"
-    d["us_ok"] = remote_filter.us_eligible(r.get("location") or "")
+    d["us_ok"] = locality.us_eligible(r.get("location") or "")
     d["watched"] = "watch" in {t.strip() for t in
                                (r.get("company_tags") or "").split(",")}
     # Whether a REMOTE row here is worth showing in a location-scoped track.

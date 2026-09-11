@@ -51,7 +51,7 @@ SHORT_KEYWORD = 5
 # plural-prone nouns ("drone", "weapon", "army") that must stay substring
 # from four letters up so "drones" and "weapons" still hit.
 SHORT_EXCLUDE = 3
-# Remote-work tokens and region codes (src/match/remote_filter.py): us / uk /
+# Remote-work tokens and region codes (src/match/locality.py): us / uk /
 # eu / wfh need boundaries; "asia", "emea", "america" stay substring so the
 # longer forms ("americas", "southeast asia") match too.
 SHORT_REMOTE = 3

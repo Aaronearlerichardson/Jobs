@@ -9,7 +9,6 @@ import pytest
 import src.match.filters as filters
 import src.match.gates as gates
 import src.match.locality as locality
-import src.match.remote_filter as remote_filter
 
 
 class TestRule:
@@ -83,24 +82,24 @@ class TestRemote:
     """SHORT_REMOTE = 3: wfh / us / uk are bounded, region names are not."""
 
     def test_wfh_is_bounded(self):
-        if "wfh" not in remote_filter._LOC_REMOTE_TOKENS:
+        if "wfh" not in locality._LOC_REMOTE_TOKENS:
             pytest.skip("profile drops the wfh token")
-        assert remote_filter.remote_signal("WFH", "") == "location:wfh"
-        assert remote_filter.remote_signal("", "swfhx") is None
+        assert locality.remote_signal("WFH", "") == "location:wfh"
+        assert locality.remote_signal("", "swfhx") is None
 
     def test_region_codes_are_bounded(self):
-        if "uk" not in remote_filter._NON_US_REGIONS \
-                or "us" not in remote_filter._US_MARKERS:
+        if "uk" not in locality._NON_US_REGIONS \
+                or "us" not in locality._US_MARKERS:
             pytest.skip("profile drops the us/uk codes")
-        assert remote_filter.us_eligible("Remote (US)")
-        assert not remote_filter.us_eligible("Remote - UK")
+        assert locality.us_eligible("Remote (US)")
+        assert not locality.us_eligible("Remote - UK")
         # "campus" contains "us" but names no region: the default (eligible).
-        assert remote_filter.us_eligible("Main Campus")
+        assert locality.us_eligible("Main Campus")
 
     def test_region_names_are_substrings(self):
-        if "america" not in remote_filter._US_MARKERS:
+        if "america" not in locality._US_MARKERS:
             pytest.skip("profile drops the america marker")
-        assert remote_filter.us_eligible("Remote - Americas")
+        assert locality.us_eligible("Remote - Americas")
 
 
 class TestPlaces:

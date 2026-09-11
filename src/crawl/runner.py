@@ -34,7 +34,7 @@ from src import config
 from src import store
 from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
 from src.net.parallel import fetch_all
-from src.match.remote_filter import remote_signal_for, us_eligible
+from src.match.locality import remote_signal_for, us_eligible
 from src.claude.resume import resume_text
 from src.ats.registry import ATS_REGISTRY, iter_store_sources
 

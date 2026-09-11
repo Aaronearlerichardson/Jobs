@@ -81,7 +81,7 @@ remote = ["remote", "work from home", "wfh", "fully remote", "distributed", "any
 accept_remote = true
 exclude = []
 
-# Remote-eligibility detection (src/match/remote_filter.py). Falls back to
+# Remote-eligibility detection (src/match/locality.py). Falls back to
 # built-in generic defaults when left empty.
 remote_tokens = []
 remote_phrases = []

@@ -194,7 +194,7 @@ LOCATION_EXCLUDE = list(_loc.get("exclude", []))
 # [locations] onsite + remote, flattened — nothing reads the two halves apart.
 LOCATION_INCLUDE = list(_loc.get("onsite", [])) + list(_loc.get("remote", []))
 
-# --- Remote-eligibility detection (src/match/remote_filter.py) ---------------
+# --- Remote-eligibility detection (src/match/locality.py) -------------------
 REMOTE_LOC_TOKENS     = list(_loc.get("remote_tokens", []))
 REMOTE_BODY_PHRASES   = list(_loc.get("remote_phrases", []))
 REMOTE_HARD_NEGATIONS = list(_loc.get("hard_negations", []))

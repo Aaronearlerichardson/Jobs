@@ -904,7 +904,7 @@ identically to a dead one.
 | `src/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m src.claude.fit` |
 | `src/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
 | `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; ranked + matches digest renderers |
-| `src/match/filters.py` / `remote_filter.py` / `locality.py` | keyword tiers, remote eligibility, locality — all profile-driven |
+| `src/match/filters.py` / `locality.py` | keyword tiers; locality, remote eligibility and US eligibility — all profile-driven |
 | `src/web/` | Flask package: `routes.py`, `server.py`, `templates/` + `static/` |
 | `src/ops/` | every operation a front end can run: `registry.py` (the one table), `maintenance.py`, `roster.py`, `background.py` (the web UI's runner) |
 | `src/net/parallel.py` | thread-pool source fetching (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
