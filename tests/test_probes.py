@@ -11,7 +11,7 @@ ANY slug, so every guessed slug "confirmed" with zero jobs.
 
 import pytest
 
-from src.discovery import probes
+from src.discovery.resolve import probes
 
 
 class _Resp:

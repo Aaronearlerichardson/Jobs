@@ -295,7 +295,7 @@ def risky_domain_tokens(name):
     company's domain: the bare first word, or a generic word from
     GENERIC_WORDS. A hit reached only through one of these has no post-hoc
     job count to sanity-check it against, so the fetched page has to
-    corroborate the company name (see src.discovery.identity._corroborates) first.
+    corroborate the company name (see src.discovery.resolve.identity._corroborates) first.
 
     >>> sorted(risky_domain_tokens("Galaxy Diagnostics"))
     ['galaxy']

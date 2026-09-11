@@ -641,11 +641,11 @@ class TestAshbyKeyAcrossCallSites:
                 return TestAshbyKeyAcrossCallSites.BOARD
 
         # One shared session object behind every module (src.net.http.SESSION).
-        from src.discovery import probes
+        from src.discovery.resolve import probes
         monkeypatch.setattr(probes.SESSION, "get", lambda *a, **k: _Resp())
 
     def test_probe_reports_the_real_total(self, ashby_board):
-        from src.discovery.probes import probe_ashby
+        from src.discovery.resolve.probes import probe_ashby
         assert probe_ashby("susteon") == (True, 2)
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):

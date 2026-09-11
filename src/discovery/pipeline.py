@@ -13,13 +13,13 @@ from src.config import PROBE_TIMEOUT, REPORT_DIR
 from src.claude.api import DISCOVER_SYSTEM, call_claude_json
 from src.net.parallel import drain_or_abandon
 from src.net.util import worker_count
-from .probes import (
+from .resolve.probes import (
     PROBES,
     WorkdayJsProbePool,
     _count_workday_jobs,
     probe_workday,
 )
-from .sniffer import sniff_careers_ats
+from .resolve.sniffer import sniff_careers_ats
 from src.match.names import (GENERIC_WORDS, name_words, strip_parentheticals,
                                strip_suffixes)
 from .seeds import seed_candidates_for

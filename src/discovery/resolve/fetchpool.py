@@ -26,7 +26,7 @@ from src.match.names import domain_tokens
 from src.net.http import HEADERS, SESSION
 
 # File-only diagnostics (session log DEBUG channel — never printed).
-_log = logging.getLogger("src.discovery.fetchpool")
+_log = logging.getLogger("src.discovery.resolve.fetchpool")
 
 
 # ─── Candidate careers-page URLs ─────────────────────────────────────────

@@ -12,9 +12,9 @@ import src.discovery.dork as dork
 import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
-import src.discovery.fetchpool as fetchpool
-import src.discovery.probes as probes
-import src.discovery.sniffer as sniffer
+import src.discovery.resolve.fetchpool as fetchpool
+import src.discovery.resolve.probes as probes
+import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
 import src.ats.fetchers.company as company_fetch
 from src.net.util import norm_posted_date
@@ -39,7 +39,7 @@ class TestSniffer:
         assert ats_signatures.detect("via acme.eightfold.ai portal")[0] == "lead"
 
     def test_probes_cover_sniffable_atses(self):
-        from src.discovery.probes import PROBES
+        from src.discovery.resolve.probes import PROBES
         assert {"greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr",
                 "smartrecruiters"} <= set(PROBES)
 
@@ -439,7 +439,7 @@ class TestDiscoveryWiring:
         # ever starting a browser.
         from contextlib import ExitStack
 
-        from src.discovery.probes import WorkdayJsProbe
+        from src.discovery.resolve.probes import WorkdayJsProbe
         with ExitStack() as stack:
             probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
             assert len(probes) == 3

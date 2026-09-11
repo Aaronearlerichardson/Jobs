@@ -14,7 +14,7 @@ import re
 # ─── Platform signatures ─────────────────────────────────────────────────
 #
 # Fetchable platforms: regex captures the board slug; confirmable via a
-# live count (src.discovery.probes / ADP requisition API). ADP needs two params
+# live count (src.discovery.resolve.probes / ADP requisition API). ADP needs two params
 # (cid, ccId), handled specially. Workday (a triple) is detected first via
 # extract_workday_triple — highest confidence.
 ATS_LINK_PATTERNS = [

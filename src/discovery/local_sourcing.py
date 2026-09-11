@@ -9,8 +9,8 @@ The stages, and where each lives:
      from a pasted page (src.discovery.paste_ingest) or a banked lead
      (resolve_leads below).
   2. Resolve each name to a board: careers-page sniff first
-     (src.discovery.sniffer), name-guessed slug probes second (probe_company /
-     src.discovery.probes), web search last (src.discovery.websearch_board), every
+     (src.discovery.resolve.sniffer), name-guessed slug probes second (probe_company /
+     src.discovery.resolve.probes), web search last (src.discovery.resolve.websearch_board), every
      hit validated by a live fetch (resolve_board_sniff_first). A name that
      resolves to nothing gets a reason instead (resolve_or_miss /
      classify_miss).
@@ -38,8 +38,8 @@ from src.match.names import domain_tokens, name_key, slug_guesses
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain_or_abandon
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .probes import probe_ashby, probe_greenhouse, probe_lever, probe_workday
-from .websearch_board import _websearch_board
+from .resolve.probes import probe_ashby, probe_greenhouse, probe_lever, probe_workday
+from .resolve.websearch_board import _websearch_board
 
 
 # --------------------------------------------------------------------------- #
@@ -196,7 +196,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
                       f"of {len(missed)} major(s)")
             missed = []
         if missed:
-            from .probes import WorkdayJsProbe
+            from .resolve.probes import WorkdayJsProbe
             # Parallel across DIFFERENT sites is safe: each target still sees
             # exactly one page load; the serial design existed for sync-
             # Playwright's thread affinity, not politeness. Each probe
@@ -241,7 +241,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     # Lever/Ashby/Workday/SmartRecruiters/iCIMS/SuccessFactors and finds slugs
     # the name-guesser can't). This is the main recall lever over the directory.
     if sniff:
-        from .sniffer import sniff_ats
+        from .resolve.sniffer import sniff_ats
         from src.ats.fetchers import company as company_fetch
         have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
         todo = [n for n in names if name_key(n) not in have]
@@ -742,7 +742,7 @@ def add_board(name, url, capture=False):
     from src.store import (CAPTURE_ATS, connect, is_confirmed_company,
                             mark_pending, upsert_company)
     from src.ats.signatures import detect, pack
-    from .sniffer import sniff_ats
+    from .resolve.sniffer import sniff_ats
 
     if capture:
         conn = connect()
@@ -952,7 +952,7 @@ def resolve_board_sniff_first(name, careers_url=""):
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
     a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
     a custom self-hosted board."""
-    from .sniffer import sniff_ats
+    from .resolve.sniffer import sniff_ats
 
     def _mk(ats, slug, curl, via):
         total, nc = _validate_board(coords.columns(ats, slug, curl))
@@ -1035,7 +1035,7 @@ def classify_miss(name, careers_url=""):
         a full discover_local pass.
     """
     from src.ats.signatures import ATS_LEAD_PATTERNS
-    from .sniffer import diagnose_no_board, sniff_careers_ats
+    from .resolve.sniffer import diagnose_no_board, sniff_careers_ats
     try:
         lead = sniff_careers_ats(name, careers_url or "")
     except Exception as e:

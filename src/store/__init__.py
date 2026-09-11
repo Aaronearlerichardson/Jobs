@@ -217,7 +217,7 @@ def upsert_company(conn, c):
 # "fetch-error:ReadTimeout"); miss_counts aggregates on the family so the
 # qualifier stays readable without fragmenting the tally.
 MISS_REASONS = (
-    # no-board-found qualifiers (src.discovery.sniffer.diagnose_no_board):
+    # no-board-found qualifiers (src.discovery.resolve.sniffer.diagnose_no_board):
     #   :wrong-domain          a candidate resolved to an unrelated company
     #   :domain-unreachable    not one candidate URL answered
     #   :careers-page-no-ats   real job board found, but no known ATS on it

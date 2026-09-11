@@ -1018,11 +1018,11 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     roster policy, so it is an operation, and the store keeps only the
     write (store.deactivate_company).
     """
-    from src.discovery.probes import (probe_greenhouse, probe_lever,
+    from src.discovery.resolve.probes import (probe_greenhouse, probe_lever,
                                    probe_ashby, probe_bamboohr)
 
     def _ultipro_alive(slug):
-        # Not src.discovery.probes.probe_ultipro: its ok flag means "has jobs",
+        # Not src.discovery.resolve.probes.probe_ultipro: its ok flag means "has jobs",
         # which would prune a live-but-currently-empty board. Dead here
         # means the board REQUEST fails (the 404 spam three roster rows
         # produced in every 2026-08-28 crawl log); an empty listing is

@@ -26,7 +26,7 @@ from .identity import _foreign_board, candidate_pages, corroborated
 from .probes import PROBES
 
 # File-only diagnostics (session log DEBUG channel — never printed).
-_log = logging.getLogger("src.discovery.sniffer")
+_log = logging.getLogger("src.discovery.resolve.sniffer")
 
 _ANCHORS_ONLY = SoupStrainer("a")
 

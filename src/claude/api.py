@@ -516,7 +516,7 @@ def board_is_own(company, board, site="", titles=()):
 
     Notes:
         Consulted only for collision-prone resolutions — a Workday tenant
-        sharing no token with the name (src.discovery.sniffer._foreign_board),
+        sharing no token with the name (src.discovery.resolve.sniffer._foreign_board),
         or a first-word/generic slug probe hit (src.discovery.pipeline) — so
         this costs a call on the rare suspect, not per resolve. The
         asymmetric default matters: a wrong "keep" mislabels one company
