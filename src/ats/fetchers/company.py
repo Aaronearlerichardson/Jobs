@@ -38,7 +38,7 @@ from src import config
 # full tree via _get_soup.
 _ANCHORS_ONLY = SoupStrainer("a")
 
-from src.net.http import HEADERS, SESSION
+from src.net.http import HEADERS, SESSION, JSON_HEADERS
 from src.match.locality import NC_RE  # profile [locality]: the location gate
 from src.net.util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
 from . import icims, workday

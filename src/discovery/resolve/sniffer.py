@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup, SoupStrainer
 
 from src.ats.signatures import detect, pack
 from src.config import PROBE_TIMEOUT
-from src.net.http import SESSION
+from src.net.http import SESSION, JSON_HEADERS
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import (_foreign_board, candidate_pages,
                        candidate_responses, corroborated)

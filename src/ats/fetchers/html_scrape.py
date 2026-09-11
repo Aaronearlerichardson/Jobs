@@ -85,7 +85,7 @@ def _sf_rows(base_url, label, step, max_pages):
             return
         new_on_page = 0
         for a in anchors:
-            href = a.get("href", "")
+            href: str = a.get("href", "")
             if not href:
                 continue
             if not href.startswith("http"):
