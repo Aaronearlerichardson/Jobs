@@ -49,7 +49,12 @@ Crawl-methodology keys, every one overridable in the track's own table:
 """
 
 from src import tags
-from src.config import track_build as _tracks
+# Sibling, by its own name -- NOT `from src.config import track_build`,
+# which reaches the config PACKAGE while its __init__ is still running
+# to fetch a module sitting right here. That worked only by import
+# ordering, and an AST rewrite during the src/ move once turned the
+# same line into this module importing itself.
+from .track_build import build_tracks, default_track_id, mission_floor
 
 from .paths import DATA_DIR
 from .profile import PROFILE_PATH, profile_section
@@ -129,20 +134,20 @@ _ENGINE_CRAWL_DEFAULTS = {
 ENGINE_ALIASES = {"neural": "sweep"}
 
 # Kept under its old name: tests and src/crawl/runner.py reach it via config.
-_mission_floor = _tracks.mission_floor
+_mission_floor = mission_floor
 
 
 def _build_ui_tracks(raw):
     """The profile's [tracks] table (or None -> the built-in pair) as
     runtime track dicts. See src.config.track_build.build_tracks."""
-    return _tracks.build_tracks(raw, data_dir=DATA_DIR,
-                                default_tracks=_DEFAULT_TRACKS,
-                                engine_defaults=_ENGINE_CRAWL_DEFAULTS,
-                                aliases=ENGINE_ALIASES)
+    return build_tracks(raw, data_dir=DATA_DIR,
+                        default_tracks=_DEFAULT_TRACKS,
+                        engine_defaults=_ENGINE_CRAWL_DEFAULTS,
+                        aliases=ENGINE_ALIASES)
 
 
 UI_TRACKS = _build_ui_tracks(profile_section("tracks") or None)
-DEFAULT_TRACK = _tracks.default_track_id(UI_TRACKS)
+DEFAULT_TRACK = default_track_id(UI_TRACKS)
 
 
 def track_for_engine(engine):

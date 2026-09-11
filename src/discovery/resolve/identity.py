@@ -214,6 +214,30 @@ def corroborated(url, name, text):
     return not risky or _corroborates(text, name, risky)
 
 
+def candidate_responses(name, careers_url="", **kw):
+    """`name`'s candidate URLs paired with what each one answered, in
+    candidate-priority order. `None` where a URL did not answer at all.
+    `kw` goes to `candidate_urls` (patterns, cap).
+
+    The raw pass, for the one caller that needs to tell "nothing answered"
+    from "everything that answered was somebody else" --
+    sniffer.diagnose_no_board exists to name exactly that difference, so
+    it cannot use the filtered walk below. It reached into fetchpool for
+    the fetch itself before, which made the sniffer import its own package
+    and put a cycle between resolve/__init__ and resolve/sniffer.
+
+    Imported here rather than at module level so there is ONE place to
+    stub the fetch in tests (tests/test_parsers.py patches
+    fetchpool._fetch_all and every caller follows).
+    """
+    from .fetchpool import _fetch_all, candidate_urls
+    urls = candidate_urls(name, careers_url, **kw)
+    if not urls:
+        return []
+    responses = _fetch_all(urls)
+    return [(u, responses.get(u)) for u in urls]
+
+
 def candidate_pages(name, careers_url="", **kw):
     """Yield the responses from `name`'s candidate URLs, best first, with
     the ones that did not answer and the ones that do not corroborate
@@ -223,12 +247,6 @@ def candidate_pages(name, careers_url="", **kw):
     fetch runs in parallel but the walk does not, because the first hit
     wins and the precise domain must beat the generic guess.
     """
-    from .fetchpool import _fetch_all, candidate_urls
-    urls = candidate_urls(name, careers_url, **kw)
-    if not urls:
-        return
-    responses = _fetch_all(urls)
-    for url in urls:
-        r = responses.get(url)
+    for url, r in candidate_responses(name, careers_url, **kw):
         if r is not None and corroborated(url, name, r.text):
             yield r

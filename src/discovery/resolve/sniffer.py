@@ -20,9 +20,9 @@ from bs4 import BeautifulSoup, SoupStrainer
 from src.config import PROBE_TIMEOUT
 from src.ats.signatures import detect, pack
 from src.net.http import HEADERS, SESSION
-from . import fetchpool
 from .fetchpool import ROOT_PATTERNS, candidate_urls
-from .identity import _foreign_board, candidate_pages, corroborated
+from .identity import (_foreign_board, candidate_pages,
+                       candidate_responses, corroborated)
 from .probes import PROBES
 
 # File-only diagnostics (session log DEBUG channel — never printed).
@@ -213,17 +213,14 @@ def diagnose_no_board(name, careers_url=""):
         established failure path in classify_miss, never per candidate in
         a bulk pass.
     """
-    urls = (candidate_urls(name, careers_url)
-            + candidate_urls(name, careers_url, patterns=ROOT_PATTERNS, cap=None))
-    if not urls:
-        return "domain-unreachable"
-    # Through the module, not a from-import: this is the one
-    # place left that fetches candidates without going via
-    # identity.candidate_pages (it needs the URLs that FAILED,
-    # which the generator has already dropped), and a second
-    # binding of the name is a second thing to stub in tests.
-    responses = fetchpool._fetch_all(urls)
-    hits = [(u, r) for u, r in responses.items() if r is not None]
+    # The RAW pass (identity.candidate_responses), not the filtered walk:
+    # this function exists to tell "nothing answered" from "everything that
+    # answered was somebody else", and candidate_pages has already dropped
+    # the evidence for that distinction.
+    answered = (candidate_responses(name, careers_url)
+                + candidate_responses(name, careers_url,
+                                      patterns=ROOT_PATTERNS, cap=None))
+    hits = [(u, r) for u, r in answered if r is not None]
     if not hits:
         return "domain-unreachable"
     safe_hits, saw_risky_uncorroborated = [], False
