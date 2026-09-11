@@ -26,6 +26,7 @@ from src.match.filters import is_relevant
 from src.ats.fetchers import (api, discourse, getro, hibob, jobvite,
                               peopleadmin, remoteok, remotive, usajobs)
 from src.discovery import apply
+from src.net import http
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -54,7 +55,7 @@ def match_everything(cfg, pristine_keywords):
 def fake_get(monkeypatch):
     """Serve a fixture instead of the network."""
     def _install(payload, status=200):
-        monkeypatch.setattr(api.SESSION, "get",
+        monkeypatch.setattr(http.SESSION, "get",
                             lambda *a, **k: fake_response(payload,
                                                           status=status))
     return _install
@@ -1015,7 +1016,10 @@ class TestADeadEndpointIsNeverAnException:
     @pytest.fixture(params=["refused", "http-500"])
     def dead_source(self, request, monkeypatch):
         """SESSION is one shared object, so patching `get` on it covers
-        every module that imported the name."""
+        every module that imported the name. Patch it at its DEFINITION
+        site (src.net.http): reaching it through a fetcher that re-exports
+        but never calls it makes the test depend on an import that reads
+        as unused."""
         if request.param == "refused":
             def _get(*a, **k):
                 raise OSError("connection refused")
@@ -1031,7 +1035,7 @@ class TestADeadEndpointIsNeverAnException:
 
             def _get(*a, **k):
                 return _Resp()
-        monkeypatch.setattr(api.SESSION, "get", _get)
+        monkeypatch.setattr(http.SESSION, "get", _get)
 
     @pytest.mark.parametrize("name", sorted(CALLS))
     def test_reports_and_returns_empty(self, name, dead_source, capsys,
