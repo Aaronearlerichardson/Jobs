@@ -7,7 +7,10 @@ not here. Manage it with discover.py --local / --add-board, or
 run_scraper.py --import-companies roster.json.
 """
 
-from .profile import MISSION_TIERS, profile_section
+# _self: the config PACKAGE, which is what callers monkeypatch.
+# profile.py defines it; two identical copies is one too many for
+# a function whose whole job is naming one module.
+from .profile import MISSION_TIERS, _self, profile_section
 
 _pol = profile_section("policy")
 
@@ -121,13 +124,6 @@ def is_active_mission(tier, name, include_missions=None):
     # moved here.
     return 1 if (tier in tiers or tier is None
                  or _self().is_multi_division(name)) else 0
-
-
-def _self():
-    """The config PACKAGE, which is what callers monkeypatch; its
-    attributes are this module's objects, re-exported."""
-    import src.config as _cfg
-    return _cfg
 
 
 # Honor robots.txt: skip paths a host asks crawlers to leave alone, and
