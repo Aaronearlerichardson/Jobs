@@ -8,13 +8,24 @@
 
 Nothing here knows about tracks, ranking or the digest: an ATS module
 turns board coordinates into job dicts and stops. It reads config, match
-and net, and nothing above them.
+and net and nothing above them -- no store, no discovery, not even
+through a deferred import.
 
-`dork.py` used to live here, on the strength of its subject being ATS
-URLs. What it actually does is source companies -- it mines search
-results, scores what it finds and upserts it -- so it imported
-src/discovery and src/store, and was the only reason this package did
-either. That made src/ats and src/discovery mutually dependent, which
-discovery worked around with a deferred import. It is src/discovery/
-dork.py now and the cycle is gone.
+Two things used to break that, both filed here because their SUBJECT was
+ATS boards while their WORK was sourcing companies:
+
+    dork.py                       mined search results for board URLs,
+                                  scored them and upserted them. Made
+                                  src/ats and src/discovery mutually
+                                  dependent. Now src/discovery/dork.py.
+    getro.attribute_employers     matched an aggregator board's employers
+                                  to the roster and queued the unknown
+                                  ones for review -- a store WRITE inside
+                                  a fetcher. Now in
+                                  src/discovery/apply.py, beside the
+                                  other "turn a discovery into a roster
+                                  row" code.
+
+Subject and layer are different axes. A module belongs where its
+dependencies point, not where its topic sounds like it fits.
 """

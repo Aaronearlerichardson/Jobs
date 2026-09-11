@@ -456,7 +456,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     # roster row, queue employers the roster lacks for review, and drop the
     # copies an active roster company's own crawl already stored.
     if any(j.get("_employer") for j in matches):
-        from src.ats.fetchers.getro import attribute_employers
+        from src.discovery.apply import attribute_employers
         matches = attribute_employers(conn, matches, commit=commit)
 
     # ─── Scoring ──────────────────────────────────────────────────────────

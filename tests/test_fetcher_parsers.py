@@ -23,6 +23,7 @@ import pytest
 
 from src.match.filters import is_relevant
 from src.ats.fetchers import api, getro, hibob, jobvite, peopleadmin, usajobs
+from src.discovery import apply
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -782,6 +783,11 @@ class TestGetroAttribution:
     """Board-sourced jobs name their employer; the crawl links each to the
     roster and queues the employers the roster lacks -- never activating
     one on its own.
+
+    The subject is src.discovery.apply.attribute_employers, not the
+    getro parser. It used to live in the fetcher, which made that the
+    one module under src/ats that wrote to the store; the jobs it acts
+    on are still shaped by getro, which is why the cases stay here.
     """
 
     BOARD = "jobs.example-network.org"
@@ -800,7 +806,7 @@ class TestGetroAttribution:
                                         "ats": "greenhouse",
                                         "slug": "acmeanalytics", "active": 1})
         job = self._job("Acme Analytics", self.GH_URL)
-        kept = getro.attribute_employers(db, [job])
+        kept = apply.attribute_employers(db, [job])
         assert kept == [job] and job["company_id"] == cid
         assert len(store.get_companies(db, active_only=False)) == 1
 
@@ -812,7 +818,7 @@ class TestGetroAttribution:
         store.upsert_job(db, {"job_id": "gh_acmeanalytics_4000001",
                               "company_id": cid, "company_name": "Acme Analytics",
                               "title": "Data Engineer", "url": self.GH_URL})
-        assert getro.attribute_employers(
+        assert apply.attribute_employers(
             db, [self._job("Acme Analytics", self.GH_URL)]) == []
 
     def test_a_pending_row_does_not_own_a_crawl_yet(self, db):
@@ -824,7 +830,7 @@ class TestGetroAttribution:
                               "company_id": cid, "title": "Data Engineer",
                               "url": self.GH_URL})
         job = self._job("Acme Analytics", self.GH_URL)
-        assert getro.attribute_employers(db, [job]) == [job]
+        assert apply.attribute_employers(db, [job]) == [job]
         assert job["company_id"] == cid
 
     def test_links_by_name_when_the_apply_link_names_no_ats(self, db):
@@ -833,7 +839,7 @@ class TestGetroAttribution:
                                         "careers_url": "https://orbit.health/jobs",
                                         "active": 1})
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
-        getro.attribute_employers(db, [job])
+        apply.attribute_employers(db, [job])
         assert job["company_id"] == cid
         assert len(store.get_companies(db, active_only=False)) == 1
 
@@ -842,7 +848,7 @@ class TestGetroAttribution:
         from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
                         slug="orbit-health", domain="orbit.health")
-        assert getro.attribute_employers(db, [job]) == [job]
+        assert apply.attribute_employers(db, [job]) == [job]
         (row,) = store.pending_companies(db)
         assert row["name"] == "Orbit Health"
         assert row["source"] == f"getro:{self.BOARD}"
@@ -856,7 +862,7 @@ class TestGetroAttribution:
     def test_the_apply_link_supplies_the_candidates_board(self, db):
         from src import tags
         from src import store
-        getro.attribute_employers(
+        apply.attribute_employers(
             db, [self._job("Acme Analytics", self.GH_URL, slug="acme-analytics")])
         (row,) = store.pending_companies(db)
         assert (row["ats"], row["slug"]) == ("greenhouse", "acmeanalytics")
@@ -866,7 +872,7 @@ class TestGetroAttribution:
     def test_a_rejected_name_stays_rejected(self, db):
         from src import store
         store.block_name(db, "Bolt Logistics", "not a company")
-        kept = getro.attribute_employers(
+        kept = apply.attribute_employers(
             db, [self._job("Bolt Logistics", "https://bolt.example/careers/3")])
         assert kept == []
         assert store.get_companies(db, active_only=False) == []
@@ -874,13 +880,13 @@ class TestGetroAttribution:
     def test_a_preview_run_writes_nothing(self, db):
         from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst")
-        assert getro.attribute_employers(db, [job], commit=False) == [job]
+        assert apply.attribute_employers(db, [job], commit=False) == [job]
         assert "company_id" not in job
         assert store.get_companies(db, active_only=False) == []
 
     def test_jobs_without_an_employer_pass_through(self, db):
         plain = {"id": "usajobs_1", "url": "https://www.usajobs.gov/job/1"}
-        assert getro.attribute_employers(db, [plain]) == [plain]
+        assert apply.attribute_employers(db, [plain]) == [plain]
 
 
 class TestJobvite:

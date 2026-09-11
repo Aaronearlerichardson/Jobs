@@ -19,11 +19,12 @@ title survives the relevance filter, capped by ``max_details``, newest
 first. A title that says nothing ("Associate") never gets its page
 fetched; that is the trade for staying polite on a shared host.
 
-Employer attribution (``attribute_employers``) runs on the caller's thread
-once the crawl has gated the jobs: the employer named on the board is
-matched to the roster by its own ATS coordinates (the apply link usually
-points at its Greenhouse/Lever/... board) or by name, and an employer the
-roster has never seen becomes a REVIEW CANDIDATE — never an active row.
+Every job carries an ``_employer`` record (name, slug, board host, domain)
+read off the same page. What happens to it is somebody else's job:
+``src.discovery.apply.attribute_employers`` matches the employer to the
+roster and queues the unknown ones for review. That function lived here,
+which made this the one module under src/ats that wrote to the store —
+a fetcher parses a board and returns job dicts, and stops.
 
 Notes:
     A board that fronts itself with a browser challenge (Cloudflare's
@@ -280,104 +281,3 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
         if detail_delay:
             time.sleep(detail_delay)
     return jobs
-
-
-# --------------------------------------------------------------------------- #
-#  Employer attribution                                                       #
-# --------------------------------------------------------------------------- #
-
-def _coords_from_urls(urls):
-    """Roster-shaped board coordinates for the employer, read off its
-    apply links, or None when none of them names a known ATS."""
-    from src.ats.signatures import detect, pack
-    for url in urls:
-        hit = detect("", url or "")
-        if not hit or hit[0] not in ("fetchable", "semi"):
-            continue
-        packed = pack(hit[1], hit[2], url)
-        row = {"ats": packed["ats"], "careers_url": packed.get("careers_url")}
-        if packed["ats"] == "workday":
-            t, pod, site = packed["triple"]
-            row.update({"wd_tenant": t, "wd_pod": pod, "wd_site": site})
-        else:
-            row["slug"] = packed.get("slug")
-        return row
-    return None
-
-
-def attribute_employers(conn, jobs, commit=True):
-    """Link each board-sourced job to its employer's roster row, queueing
-    employers the roster lacks for review. Returns the jobs to keep.
-
-    Jobs without an ``_employer`` record pass through untouched. For the
-    rest, per employer:
-
-    * a roster row that owns the same board (the apply link's ATS
-      coordinates — ``src.store.company_by_board``) or the same name gets
-      ``company_id`` stamped on the jobs. When that row is ACTIVE and
-      confirmed, its own crawl covers the board, so a posting the store
-      already holds under the employer's URL is dropped here rather than
-      stored twice;
-    * a name the reviewer rejected (``src.store.block_name``) drops its
-      jobs — that decision was "not a company", and it sticks;
-    * anything else becomes a review candidate under `commit`:
-      ``src.store.mark_pending`` (inactive, tagged pending-review), with
-      ``source = "getro:<board host>"`` and the ATS coordinates when the
-      apply link revealed them. Never an active row.
-
-    See tests/test_fetcher_parsers.py::TestGetroAttribution.
-    """
-    from src import tags
-    from src import store
-    from src.ats.registry import seed_tag_for
-
-    groups = {}
-    for j in jobs:
-        emp = j.get("_employer")
-        if isinstance(emp, dict) and (emp.get("name") or emp.get("slug")):
-            groups.setdefault(emp.get("slug") or emp["name"].lower(),
-                              []).append(j)
-    if not groups:
-        return list(jobs)
-
-    blocked = store.blocked_name_keys(conn)
-    drop = set()
-    for key, group in groups.items():
-        emp = group[0]["_employer"]
-        name = emp.get("name") or key
-        coords = _coords_from_urls([j.get("url") for j in group])
-        row = store.company_by_board(conn, coords) if coords else None
-        if row is None:
-            cid = store.company_id_by_name(conn, name)
-            row = store.get_company(conn, cid) if cid else None
-        if row is not None:
-            crawled = bool(row.get("active")) and not tags.has(
-                row.get("tags"), tags.PENDING)
-            for j in group:
-                j["company_id"] = row["id"]
-                if crawled and j.get("url") and conn.execute(
-                        "SELECT 1 FROM jobs WHERE url=? LIMIT 1",
-                        (j["url"],)).fetchone():
-                    drop.add(id(j))
-            continue
-        if store._name_key(name) in blocked:
-            drop.update(id(j) for j in group)
-            continue
-        if not commit:
-            continue
-        via = f"getro:{emp.get('board') or ''}"
-        careers_url = ((coords or {}).get("careers_url")
-                       or (f"https://{emp['domain']}" if emp.get("domain")
-                           else None))
-        candidate = {"name": name, "careers_url": careers_url,
-                     "source": via,
-                     "notes": f"employer on the {emp.get('board')} board; "
-                              f"{len(group)} relevant posting(s)"}
-        if coords:
-            candidate.update(coords)
-            candidate["careers_url"] = careers_url
-            candidate["tags"] = seed_tag_for(coords["ats"])
-        cid = store.upsert_company(conn, store.mark_pending(candidate))
-        for j in group:
-            j["company_id"] = cid
-    return [j for j in jobs if id(j) not in drop]
