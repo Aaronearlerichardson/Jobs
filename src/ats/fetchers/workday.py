@@ -11,8 +11,10 @@ given; the company-vetted path (fetchers/company.py) takes those rows as
 they are and hydrates descriptions later from the `_wd` coordinates each
 row carries. `fetch_workday` runs the same rows through the shared board
 driver (fetchers/board.py) for the sweep, fetching a description where
-the driver asks for one. `fetch_workday_description` and
-`backfill_workday_descriptions` serve rows that are already stored.
+the driver asks for one. `fetch_workday_description` serves rows that are
+already stored; the op that sweeps it over the whole store lives with the
+other backfills, in src/ops/maintenance.py -- here it was the one backfill
+that could not reach `track_store`, and so ran against the default DB.
 """
 
 import hashlib
@@ -20,7 +22,6 @@ import html
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
 from src import config
@@ -458,67 +459,4 @@ def wd_local_count(tenant, pod, site, loc_re, search_text=None, page_size=20,
                 n += 1
         if len(posts) < page_size:
             break
-    return n
-
-
-def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200,
-                                  retry_days=3):
-    """One-shot: fill in full JD text for stored Workday jobs missing it
-    (description shorter than min_len chars), via the CXS per-job endpoint.
-    Only touches rows whose URL is a myworkdayjobs.com board. Safe to
-    re-run: a row that failed within the last `retry_days` days is skipped
-    (its desc_checked_at stamp), so reruns don't re-probe the same vanished
-    postings (retry_days=0 retries everything)."""
-    from datetime import datetime, timedelta
-
-    from src import store
-    conn = store.connect()
-    cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
-              if retry_days else "9999")
-    rows = conn.execute(
-        "SELECT job_id, url, desc_checked_at FROM jobs "
-        "WHERE url LIKE '%myworkdayjobs.com%' "
-        "AND COALESCE(status,'open') != 'closed' "
-        "AND length(COALESCE(description,'')) < ?",
-        (min_len,),
-    ).fetchall()
-    recent = [r for r in rows if (r["desc_checked_at"] or "") >= cutoff]
-    rows = [r for r in rows if (r["desc_checked_at"] or "") < cutoff]
-    if limit:
-        rows = rows[:int(limit)]
-    print(f"  backfilling {len(rows)} Workday description(s) via CXS..."
-          + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
-             if recent else ""))
-
-    def _one(r):
-        return r["job_id"], fetch_workday_description(r["url"])
-
-    n, empty = 0, []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_one, r): r for r in rows}):
-            try:
-                jid, text = fut.result()
-            except Exception as e:
-                print(f"    [!] backfill error: {e}")
-                continue
-            if not text:
-                empty.append(jid)
-                conn.execute("UPDATE jobs SET desc_checked_at=? "
-                             "WHERE job_id=?",
-                             (datetime.now().isoformat(), jid))
-                conn.commit()
-                continue
-            conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                         (text[:config.MAX_DESC_CHARS], jid))
-            conn.commit()
-            n += 1
-    conn.close()
-    # "0 of 4 backfilled" with no why was undiagnosable from the session
-    # log; name the silent failures (CXS answered but returned no JD text,
-    # usually a posting that closed since it was stored).
-    if empty:
-        print(f"    [!] {len(empty)} fetch(es) returned no JD text "
-              f"(posting gone from CXS?): "
-              + ", ".join(empty[:5]) + (" ..." if len(empty) > 5 else ""))
-    print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n

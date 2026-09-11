@@ -100,3 +100,50 @@ class TestBackfillRetryThrottle:
         assert row["description"] == "A real JD body."
         assert row["desc_checked_at"] is None, \
             "success must not stamp the failure timestamp"
+
+
+class TestWorkdayBackfillHonoursTheTrack:
+    """The Workday backfill lived in the fetcher module, where `track_store`
+    was out of reach: it called `store.connect()` with no argument, so it
+    always ran against the DEFAULT store no matter which track's button was
+    pressed. Under a profile that gives a track its own `db` that meant it
+    reported the track's name while reading and writing someone else's
+    rows. It sits with the other backfills now and takes `t` like them.
+    """
+
+    @staticmethod
+    def _seed(dbp, job_id):
+        conn = store.connect(dbp)
+        store.upsert_job(conn, {
+            "job_id": job_id, "company_name": "Acme", "title": "Engineer",
+            "url": "https://acme.wd5.myworkdayjobs.com/X/job/RTP/Eng_R1",
+            "location": "Durham, NC", "track": "local-tech"})
+        conn.close()
+
+    def test_it_reads_and_writes_the_given_track_store(
+            self, tmp_path, monkeypatch):
+        theirs, mine = tmp_path / "default.db", tmp_path / "track.db"
+        self._seed(theirs, "wd_theirs")
+        self._seed(mine, "wd_mine")
+        # Fail loudly if the op ever reaches for the default store again.
+        monkeypatch.setattr(store, "connect", _only(mine))
+        monkeypatch.setattr(
+            "src.ats.fetchers.workday.fetch_workday_description",
+            lambda url: "A real Workday JD body.")
+
+        assert ops.backfill_workday_descriptions(t={"db_path": mine}) == 1
+
+        conn = store.connect(mine)
+        assert conn.execute("SELECT description FROM jobs").fetchone()[0] \
+            == "A real Workday JD body."
+        conn.close()
+
+
+def _only(allowed):
+    """store.connect, refusing any path but `allowed`."""
+    real = store.connect
+
+    def _connect(db_path=None, *a, **kw):
+        assert db_path == allowed, f"opened {db_path!r}, not the track's store"
+        return real(db_path, *a, **kw)
+    return _connect

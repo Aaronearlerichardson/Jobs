@@ -11,7 +11,7 @@ UI and run_scraper.py can run any op against any configured track.
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 
@@ -26,7 +26,7 @@ from src.ats import coords
 from src.ats.fetchers import company as company_fetch
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
-from src.net.parallel import drain_or_abandon, fetch_all
+from src.net.parallel import drain_or_abandon, fan_out, fetch_all
 from src.claude.resume import resume_text
 
 
@@ -59,6 +59,56 @@ def track_store(t=None):
         yield conn
     finally:
         conn.close()
+
+
+def stale_body_rows(conn, where, columns="job_id, title, url", min_len=200,
+                    retry_days=3, limit=None, label="description(s)"):
+    """Stored rows with no usable body yet, minus the ones a recent attempt
+    already failed on, and the header line saying so.
+
+    `where` is the extra predicate that picks one backfill's population
+    (company-linked rows, Workday URLs); the rest -- too short to score,
+    not closed, not attempted inside `retry_days` -- is the same question
+    every backfill asks. Both of them had written it out, and they had
+    already diverged: one read `desc_checked_at` off a sqlite3.Row and the
+    other off a dict, which is the sort of difference that survives
+    because neither copy is ever read beside the other.
+
+    `retry_days=0` retries everything. The skip count is reported, not
+    hidden: "0 of 4 backfilled" with no explanation was undiagnosable from
+    the session log.
+    """
+    cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
+              if retry_days else "9999")
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT {columns}, desc_checked_at FROM jobs "
+        f"WHERE {where} "
+        "AND COALESCE(status,'open') != 'closed' "
+        "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
+    recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
+    rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
+    if limit:
+        rows = rows[:int(limit)]
+    print(f"  backfilling {len(rows)} {label}..."
+          + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
+             if recent else ""))
+    return rows
+
+
+def save_body(conn, job_id, text):
+    """Keep a fetched body, or stamp the failure. True when a body landed.
+
+    The stamp is not optional bookkeeping: an unstamped failure is
+    re-selected (and silently re-counted) by every later run, so a board
+    that has stopped answering costs a fetch per row forever. Three of the
+    four places that wrote this pair spelled the UPDATE out inline, beside
+    a store that already exported both halves.
+    """
+    if not text:
+        store.mark_desc_checked(conn, job_id)
+        return False
+    store.store_body(conn, job_id, text)
+    return True
 
 
 def group_by_company(rows, key="company_id"):
@@ -302,15 +352,18 @@ def crawl_company(conn, resume, company, max_workers=6, t=None):
     kept = [j for j in jobs if _keep_job(company, j, t)]
     fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
     n_new = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = [ex.submit(_score_job, resume, company, j, t["track"])
-                for j in fresh]
-        for fut in as_completed(futs):
-            try:
-                store.upsert_job(conn, fut.result())
-                n_new += 1
-            except Exception as e:
-                print(f"    [!] scoring error: {e}")
+    for row in fan_out(fresh, lambda j: _score_job(resume, company, j,
+                                                   t["track"]),
+                       "scoring", max_workers):
+        # Kept separate from the scoring failure fan_out reports: a store
+        # write that fails is not a scoring problem, and lumping the two
+        # together is what hid the write-lock starvation in harvest.py for
+        # a day (every locked write read as an unreachable board).
+        try:
+            store.upsert_job(conn, row)
+            n_new += 1
+        except Exception as e:
+            print(f"    [!] store error: {e}")
     return (len(jobs), len(kept), n_new)
 
 
@@ -336,19 +389,13 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     print(f"  self-heal: scoring {len(pending)} newly-described "
           f"job(s) that were previously unscorable...")
     scored = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {ex.submit(score_resume_fit, resume, r["title"],
-                          r.get("description", "")): r for r in pending}
-        for fut in as_completed(futs):
-            r = futs[fut]
-            try:
-                res = fut.result()
-            except Exception as e:
-                print(f"    [!] self-heal scoring error: {e}")
-                continue
-            if res.score is not None:
-                store.update_job_scores(conn, r["job_id"], res.as_columns())
-                scored += 1
+    for r, res in fan_out(pending,
+                          lambda r: score_resume_fit(resume, r["title"],
+                                                     r.get("description", "")),
+                          "self-heal scoring", max_workers, with_item=True):
+        if res.score is not None:
+            store.update_job_scores(conn, r["job_id"], res.as_columns())
+            scored += 1
     return scored
 
 
@@ -368,21 +415,11 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     (retry_days=0 retries everything)."""
     t = _t(t)
     with track_store(t) as conn:
-        cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
-                  if retry_days else "9999")
-        rows = [dict(r) for r in conn.execute(
-            "SELECT job_id, title, url, company_id, desc_checked_at FROM jobs "
-            "WHERE company_id IS NOT NULL "
-            "AND COALESCE(status,'open') != 'closed' "
-            "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
-        recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
-        rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
-        if limit:
-            rows = rows[:int(limit)]
-        print(f"  backfilling {len(rows)} description(s) via company board(s)..."
-              + (f" ({len(recent)} skipped: failed in the last {retry_days}d)"
-                 if recent else ""))
-
+        rows = stale_body_rows(conn, "company_id IS NOT NULL",
+                               columns="job_id, title, url, company_id",
+                               min_len=min_len, retry_days=retry_days,
+                               limit=limit,
+                               label="description(s) via company board(s)")
         n = 0
         for cid, rs in group_by_company(rows).items():
             company = store.get_company(conn, cid)
@@ -391,10 +428,7 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                 # or they are re-selected (and silently re-counted) every run
                 # while never even printing a company line.
                 for r in rs:
-                    conn.execute("UPDATE jobs SET desc_checked_at=? "
-                                 "WHERE job_id=?",
-                                 (datetime.now().isoformat(), r["job_id"]))
-                conn.commit()
+                    save_body(conn, r["job_id"], None)
                 continue
             # Batched board pull for the common case (one fetch per company);
             # boards we can't pull simply yield no title matches, and each row
@@ -411,18 +445,51 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                             "ats": company.get("ats"), "description": ""}
                     company_fetch.hydrate_description(stub)
                     desc = stub.get("description")
-                if not desc:
-                    conn.execute("UPDATE jobs SET desc_checked_at=? "
-                                 "WHERE job_id=?",
-                                 (datetime.now().isoformat(), r["job_id"]))
-                    conn.commit()
-                    continue
-                conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                             (desc[:config.MAX_DESC_CHARS], r["job_id"]))
-                conn.commit()
-                n += 1
-                n_matched += 1
+                if save_body(conn, r["job_id"], desc):
+                    n += 1
+                    n_matched += 1
             print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
+    print(f"  {n} of {len(rows)} description(s) backfilled.")
+    return n
+
+
+def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200,
+                                  t=None, retry_days=3):
+    """The same backfill, for stored Workday rows, via the CXS per-job
+    endpoint rather than a whole-board pull. Only touches rows whose URL is
+    a myworkdayjobs.com board.
+
+    Lived in src/ats/fetchers/workday.py, which made it the one backfill
+    that could not see `track_store`: it opened `store.connect()` with no
+    argument, so under a profile that gives a track its own `db` it
+    backfilled the DEFAULT store while reporting the track's name. Same
+    divergence the roster ops had, same fix.
+    """
+    from src.ats.fetchers.workday import fetch_workday_description
+
+    t = _t(t)
+    with track_store(t) as conn:
+        rows = stale_body_rows(conn, "url LIKE '%myworkdayjobs.com%'",
+                               columns="job_id, url", min_len=min_len,
+                               retry_days=retry_days, limit=limit,
+                               label="Workday description(s) via CXS")
+
+        def _one(r):
+            return r["job_id"], fetch_workday_description(r["url"])
+
+        n, empty = 0, []
+        for jid, text in fan_out(rows, _one, "backfill"):
+            if save_body(conn, jid, text):
+                n += 1
+            else:
+                empty.append(jid)
+    # "0 of 4 backfilled" with no why was undiagnosable from the session
+    # log; name the silent failures (CXS answered but returned no JD text,
+    # usually a posting that closed since it was stored).
+    if empty:
+        print(f"    [!] {len(empty)} fetch(es) returned no JD text "
+              f"(posting gone from CXS?): "
+              + ", ".join(empty[:5]) + (" ..." if len(empty) > 5 else ""))
     print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n
 
@@ -467,24 +534,18 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
             return r["job_id"], res, r.get("description", "")
 
         n = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for fut in as_completed({ex.submit(_one, r): r for r in rows}):
-                try:
-                    jid, res, desc = fut.result()
-                except Exception as e:
-                    print(f"    [!] rescore error: {e}")
-                    continue
-                if res.score is None:
-                    # Unscorable (no real body): clear the stale score so it
-                    # drops from ranking. A described row that merely failed to
-                    # parse keeps its score.
-                    if len((desc or "").strip()) < MIN_DESC_CHARS:
-                        store.update_job_scores(
-                            conn, jid, {"fit_reason": "no description; unscored"})
-                        n += 1
-                    continue
-                store.update_job_scores(conn, jid, res.as_columns())
-                n += 1
+        for jid, res, desc in fan_out(rows, _one, "rescore", max_workers):
+            if res.score is None:
+                # Unscorable (no real body): clear the stale score so it
+                # drops from ranking. A described row that merely failed to
+                # parse keeps its score.
+                if len((desc or "").strip()) < MIN_DESC_CHARS:
+                    store.update_job_scores(
+                        conn, jid, {"fit_reason": "no description; unscored"})
+                    n += 1
+                continue
+            store.update_job_scores(conn, jid, res.as_columns())
+            n += 1
     print(f"  {n} job(s) rescored.")
     return n
 
@@ -596,39 +657,33 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
 
             n_scored = n_crushed = 0
             halted = None
-            with ThreadPoolExecutor(max_workers=max_workers) as ex:
-                for fut in as_completed({ex.submit(_one, r): r for r in todo}):
-                    try:
-                        r, text, res = fut.result()
-                    except Exception as e:
-                        print(f"    [!] verify error: {e}")
-                        continue
-                    if res.score is None:
-                        halted = api_disabled()
-                        if halted:
-                            # One line for the round, not one '[?] kept' per
-                            # finalist; rows still queued never start.
-                            ex.shutdown(wait=False, cancel_futures=True)
-                            break
-                        print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
-                        continue
-                    store.update_job_scores(conn, r["job_id"], res.as_columns())
-                    done_ids.add(r["job_id"])
-                    if text and len(text) > len(r.get("description") or ""):
-                        conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                                     (text[:config.MAX_DESC_CHARS], r["job_id"]))
-                        conn.commit()
-                    old = r.get("resume_fit_score")
-                    move = (f"{old:.2f} -> {res.score:.2f}"
-                            if isinstance(old, float) else f"?    -> {res.score:.2f}")
-                    flag = "  [DEMOTED]" if isinstance(old, float) and \
-                        res.score < old - 0.15 else ""
-                    print(f"    {move}  {r['title'][:44]} ({r['company_name']})"
-                          f"{flag}")
-                    n_done += 1
-                    n_scored += 1
-                    if isinstance(old, float) and res.score < old - 0.25:
-                        n_crushed += 1
+            for r, text, res in fan_out(todo, _one, "verify", max_workers):
+                if res.score is None:
+                    halted = api_disabled()
+                    if halted:
+                        # One line for the round, not one '[?] kept' per
+                        # finalist. Breaking out cancels the rows still
+                        # queued (fan_out does not join on the way out).
+                        break
+                    print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
+                    continue
+                store.update_job_scores(conn, r["job_id"], res.as_columns())
+                done_ids.add(r["job_id"])
+                if text and len(text) > len(r.get("description") or ""):
+                    conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
+                                 (text[:config.MAX_DESC_CHARS], r["job_id"]))
+                    conn.commit()
+                old = r.get("resume_fit_score")
+                move = (f"{old:.2f} -> {res.score:.2f}"
+                        if isinstance(old, float) else f"?    -> {res.score:.2f}")
+                flag = "  [DEMOTED]" if isinstance(old, float) and \
+                    res.score < old - 0.15 else ""
+                print(f"    {move}  {r['title'][:44]} ({r['company_name']})"
+                      f"{flag}")
+                n_done += 1
+                n_scored += 1
+                if isinstance(old, float) and res.score < old - 0.25:
+                    n_crushed += 1
             if halted:
                 print(f"  [!] deep verify halted: Claude API disabled for this run "
                       f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
@@ -716,25 +771,28 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None):
         print(f"  probing {len(rows)} open job(s) not board-verified in "
               f"{stale_days}+ day(s)...")
 
+        def _probe(r):
+            # A probe that RAISES is not a failure to report and skip, it
+            # is an unverifiable row -- the third outcome this op counts.
+            # So it is caught here rather than left to fan_out, which would
+            # drop the row and quietly shrink the denominator.
+            try:
+                return company_fetch.probe_job_open(r["url"])
+            except Exception as e:          # noqa: BLE001 - an outcome
+                return None, f"probe error: {e}"
+
         n_closed = n_live = n_unknown = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futs = {ex.submit(company_fetch.probe_job_open, r["url"]): r
-                    for r in rows}
-            for fut in as_completed(futs):
-                r = futs[fut]
-                try:
-                    is_open, reason = fut.result()
-                except Exception as e:
-                    is_open, reason = None, f"probe error: {e}"
-                label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
-                if is_open is False:
-                    store.set_job_status(conn, r["job_id"], "closed")
-                    n_closed += 1
-                    print(f"    [closed] {label} {reason}")
-                elif is_open:
-                    n_live += 1
-                else:
-                    n_unknown += 1
+        for r, (is_open, reason) in fan_out(rows, _probe, "probe",
+                                            max_workers, with_item=True):
+            label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
+            if is_open is False:
+                store.set_job_status(conn, r["job_id"], "closed")
+                n_closed += 1
+                print(f"    [closed] {label} {reason}")
+            elif is_open:
+                n_live += 1
+            else:
+                n_unknown += 1
     print(f"  {n_closed} closed, {n_live} confirmed live, "
           f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
     return n_closed
@@ -837,13 +895,12 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
                     **res.as_columns()}
 
         scored = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            for fut in as_completed({ex.submit(_score, j): j for j in kept}):
-                try:
-                    store.upsert_job(conn, fut.result())
-                    scored += 1
-                except Exception as e:
-                    print(f"    [!] ingest error: {e}")
+        for row in fan_out(kept, _score, "ingest scoring", max_workers):
+            try:
+                store.upsert_job(conn, row)
+                scored += 1
+            except Exception as e:
+                print(f"    [!] ingest store error: {e}")
         print(f"  ingested {scored} new {source} job(s) ({len(kept)} kept, "
               f"{n_nonlocal} out-of-area dropped, {len(jobs)} raw)")
         return scored
@@ -988,12 +1045,11 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
         ok, _ = PROBE[c["ats"]](c["slug"])
         return c, ok
 
-    dead = []
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        for fut in as_completed({ex.submit(_check, c): c for c in rows}):
-            c, ok = fut.result()
-            if not ok:
-                dead.append(c)
+    # A probe that raises is now reported and skipped rather than killing
+    # the whole prune -- this was the one pool here with no try at all, so
+    # a single unreachable host aborted the pass over every other board.
+    dead = [c for c, ok in fan_out(rows, _check, "board probe", max_workers)
+            if not ok]
     with store.batch(conn):
         for c in dead:
             store.deactivate_company(
