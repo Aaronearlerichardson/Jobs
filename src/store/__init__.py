@@ -33,10 +33,8 @@ sibling.
 """
 
 from .companies import (  # noqa: F401
-    CAPTURE_ATS, MISS_REASONS, _COMPANY_COLS, _INSERT_ONLY_COLS,
-    _NO_BOARD_PREFIXES, _OFFMISSION_MAX_FIT, _OFFMISSION_MIN_JOBS,
-    _SHARED_HOST_RE, _board_prefix, _company_index, _domain, _is_crawlable,
-    _offmission_volume, _split_url, board_key, company_by_board,
+    CAPTURE_ATS, MISS_REASONS, _OFFMISSION_MIN_JOBS, _offmission_volume,
+    board_key, company_by_board,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
     get_company, harvestable_companies, import_companies, mark_harvested,
@@ -45,8 +43,7 @@ from .companies import (  # noqa: F401
     upsert_company,
 )
 from .jobs import (  # noqa: F401
-    TRIAGE_GATES, TRIAGE_OK, _AXIS_TAG, _SCORE_COLS, _TRACK_MATCH_SQL,
-    _norm_title, _norm_url, _track_match_arg, backfill_axis_columns,
+    TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
     job_exists, join_tracks, mark_desc_checked, ranked_jobs, record_triage,
     remote_admitted, store_body, sync_job_statuses, touch_job, track_set,
@@ -55,16 +52,14 @@ from .jobs import (  # noqa: F401
 from .pipeline import (  # noqa: F401
     DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
     APPLIED_DISPOSITIONS, PIPELINE_FIELDS, OUTCOME_REASONS, FIT_BANDS,
-    set_job_status, _resolve_job, set_disposition, get_pipeline,
-    update_pipeline_fields, _fit_band, conversion_report, followups_due,
+    set_job_status, set_disposition, get_pipeline, update_pipeline_fields,
+    conversion_report, followups_due,
 )
 from .review import (  # noqa: F401
-    _name_key, mark_pending, is_confirmed_company, _PENDING_FIELDS,
+    _name_key, mark_pending, is_confirmed_company,
     pending_companies, confirm_company, reject_company, block_name,
     blocked_name_keys,
 )
 from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
-    _SCHEMA, _INDEXES, _MIGRATIONS, _RENAMED_COLUMNS, _DROPPED_COLUMNS,
-    _ensure_columns, _migrate_tags, BUSY_TIMEOUT_S, connect,
-    _BATCHING, _commit, batch,
+    BUSY_TIMEOUT_S, connect, batch, _ensure_columns,
 )

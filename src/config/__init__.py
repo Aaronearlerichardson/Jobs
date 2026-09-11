@@ -21,8 +21,7 @@ while a track runs, and a from-bound copy goes stale.
 """
 
 from .paths import (  # noqa: F401
-    APP_NAME, _DB_NAMES, _platform_data_dir, _looks_like_install,
-    _resolve_data_dir,
+    APP_NAME, _resolve_data_dir,
     SCRIPT_DIR, APP_HOME, DATA_DIR, STORE_DB_PATH, REPORT_DIR,
     MAX_DESC_CHARS,
 )
@@ -35,7 +34,7 @@ from .policy import (  # noqa: F401
 )
 from .profile import (  # noqa: F401
     PROFILE_PATH, PROFILE_EXAMPLE_PATH, PROFILE_SOURCE,
-    _load_profile, _PROFILE, profile_section,
+    _load_profile, profile_section,
     CORE_KEYWORDS, DOMAIN_KEYWORDS, SKILL_KEYWORDS, INCLUDE_KEYWORDS,
     keyword_snapshot, restore_keywords, widen_keywords,
     EXCLUDE_PHRASES, EXCLUDE_TITLE_PHRASES, EXCLUDE_BOILERPLATE_PHRASES,
@@ -73,10 +72,9 @@ from .sources import (  # noqa: F401
     USAJOBS_ENABLED, USAJOBS_KEYWORD, USAJOBS_LOCATION, USAJOBS_RADIUS,
     USAJOBS_SERIES, USAJOBS_RESULTS_PER_PAGE,
     GETRO_ENABLED, GETRO_BOARDS, GETRO_MAX_DETAILS,
-    _DEFAULT_RSS_FEEDS, RSS_FEEDS,
+    RSS_FEEDS,
 )
 from .tracks import (  # noqa: F401
-    _DEFAULT_TRACKS, _DEFAULT_TECH_TITLE_REGEX, _ENGINE_CRAWL_DEFAULTS,
-    ENGINE_ALIASES, _mission_floor, _build_ui_tracks,
+    ENGINE_ALIASES, _build_ui_tracks,
     UI_TRACKS, DEFAULT_TRACK, track_for_engine,
 )

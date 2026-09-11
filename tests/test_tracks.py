@@ -7,6 +7,7 @@ import src.store as store
 import src.ops.maintenance as ops
 import src.crawl.runner as runner
 from src import tags
+from src.config import tracks as track_cfg
 
 
 class TestTrackConfig:
@@ -17,7 +18,7 @@ class TestTrackConfig:
     def test_every_track_names_a_real_engine(self, cfg):
         # Against the registry, not a literal list, so adding an engine
         # doesn't need this test edited.
-        assert all(t["engine"] in cfg._ENGINE_CRAWL_DEFAULTS
+        assert all(t["engine"] in track_cfg._ENGINE_CRAWL_DEFAULTS
                    for t in cfg.UI_TRACKS.values())
 
     def test_retired_engine_names_still_resolve(self, cfg):
