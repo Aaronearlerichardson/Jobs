@@ -180,3 +180,55 @@ def _foreign_board(name, triple):
             f"with the name and can't be verified offline - keeping; worth "
             f"a human glance\n")
     return False
+
+
+# --------------------------------------------------------------------------- #
+#  Fetching a company's candidate pages, with the identity check applied       #
+# --------------------------------------------------------------------------- #
+#
+# Four places scanned a company's candidate URLs looking for something --
+# an ATS signature, a Workday triple, a self-hosted board -- and each one
+# opened with the same six lines: build the candidate list, fetch it
+# through the per-run memo, walk it in priority order, skip the URLs that
+# did not answer, and skip the ones reached only through a risky domain
+# token that the page does not corroborate.
+#
+# They had already come apart. probe_workday built and scanned its own
+# list with neither the corroboration check nor the foreign-board check,
+# so a hit the sniffer rejected was accepted there; the docstring saying
+# "Same guards on both paths now" is the repair, made by hand, that this
+# generator makes structural.
+
+
+def corroborated(url, name, text):
+    """False when `url` reaches `name`'s page only through a risky domain
+    token and the page does nothing to back that up.
+
+    A truncated or generic guess ("galaxy.com" for "Galaxy Diagnostics")
+    can land on a live site belonging to somebody else entirely, and does
+    exactly that when the precise domain times out. The page then has to
+    corroborate the company name before anything read off it is trusted.
+    A URL built from a safe token needs no corroboration.
+    """
+    risky = _risky_token_in_url(url, name)
+    return not risky or _corroborates(text, name, risky)
+
+
+def candidate_pages(name, careers_url="", **kw):
+    """Yield the responses from `name`'s candidate URLs, best first, with
+    the ones that did not answer and the ones that do not corroborate
+    already dropped. `kw` goes to `candidate_urls` (patterns, cap).
+
+    Priority order is the candidate list's, not completion order: the
+    fetch runs in parallel but the walk does not, because the first hit
+    wins and the precise domain must beat the generic guess.
+    """
+    from .fetchpool import _fetch_all, candidate_urls
+    urls = candidate_urls(name, careers_url, **kw)
+    if not urls:
+        return
+    responses = _fetch_all(urls)
+    for url in urls:
+        r = responses.get(url)
+        if r is not None and corroborated(url, name, r.text):
+            yield r

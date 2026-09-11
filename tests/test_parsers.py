@@ -53,13 +53,15 @@ class _FakeResp:
 def _stub_fetch_all(monkeypatch, mapping):
     """Replace fetchpool._fetch_all with a lookup into `mapping` (url -> html),
     so no network call happens; any URL not in `mapping` fetches as None.
-    The sniffer and the Workday probes bind the name at import, so their
-    copies are replaced too."""
+
+    One patch covers every caller now: the sniffer and the Workday probe
+    used to import the name and so needed their own copies replaced, and
+    both go through identity.candidate_pages, which looks it up on
+    fetchpool at call time."""
     def _fake(urls):
         return {u: (_FakeResp(mapping[u], u) if u in mapping else None)
                 for u in urls}
-    for mod in (fetchpool, sniffer, probes):
-        monkeypatch.setattr(mod, "_fetch_all", _fake)
+    monkeypatch.setattr(fetchpool, "_fetch_all", _fake)
 
 
 class TestDeadHostCache:

@@ -20,8 +20,9 @@ from bs4 import BeautifulSoup, SoupStrainer
 from src.config import PROBE_TIMEOUT
 from src.ats.signatures import detect, pack
 from src.net.http import HEADERS, SESSION
-from .fetchpool import ROOT_PATTERNS, _fetch_all, candidate_urls
-from .identity import _corroborates, _foreign_board, _risky_token_in_url
+from . import fetchpool
+from .fetchpool import ROOT_PATTERNS, candidate_urls
+from .identity import _foreign_board, candidate_pages, corroborated
 from .probes import PROBES
 
 # File-only diagnostics (session log DEBUG channel — never printed).
@@ -55,17 +56,8 @@ def _scan_root(name, careers_url=""):
     collision a second way in (network path, so covered by
     tests/test_parsers.py::TestRootScan rather than a doctest here).
     """
-    urls = candidate_urls(name, careers_url, patterns=ROOT_PATTERNS, cap=None)
-    if not urls:
-        return None
-    responses = _fetch_all(urls)
-    for url in urls:
-        r = responses.get(url)
-        if r is None:
-            continue
-        risky_tok = _risky_token_in_url(url, name)
-        if risky_tok and not _corroborates(r.text, name, risky_tok):
-            continue
+    for r in candidate_pages(name, careers_url, patterns=ROOT_PATTERNS,
+                             cap=None):
         hit = detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
             if hit[1] == "workday" and _foreign_board(name, hit[2]):
@@ -104,24 +96,10 @@ def sniff_ats(name, careers_url=""):
     """Raw detection: first fetchable/semi-fetchable ATS found, else a
     custom self-hosted board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}."""
-    urls = candidate_urls(name, careers_url)
-    if not urls:
-        return None
-    responses = _fetch_all(urls)
-    _log.debug("sniff %s: %d candidate URL(s), %d answered", name, len(urls),
-               sum(1 for r in responses.values() if r is not None))
     custom = None
-    for url in urls:
-        r = responses.get(url)
-        if r is None:
-            continue
-        # A hit reached only through a truncated/generic domain guess
-        # ("galaxy.com" for "Galaxy Diagnostics") must corroborate against
-        # the page before it's trusted — otherwise the precise domain
-        # timing out hands the whole result to an unrelated company.
-        risky_tok = _risky_token_in_url(url, name)
-        if risky_tok and not _corroborates(r.text, name, risky_tok):
-            continue
+    n_pages = 0
+    for r in candidate_pages(name, careers_url):
+        n_pages += 1
         hit = detect(r.text, r.url)
         if hit and hit[0] in ("fetchable", "semi"):
             if hit[1] == "workday" and _foreign_board(name, hit[2]):
@@ -137,6 +115,10 @@ def sniff_ats(name, careers_url=""):
             listing = custom_board_listing_url(r.url, r.text)
             if listing:
                 custom = {"ats": "custom", "careers_url": listing}
+    # Counted after the walk rather than before it: "3 answered" was the
+    # old line, and a page that answered but failed the identity check is
+    # not a page this sniff could read anything off.
+    _log.debug("sniff %s: %d usable candidate page(s), no ATS", name, n_pages)
     # Every careers-path candidate missed: a company whose ATS badge sits on
     # the homepage itself (no dedicated /careers page -- see _scan_root)
     # still has one more place to look before this is a miss.
@@ -149,18 +131,8 @@ def sniff_ats(name, careers_url=""):
 def sniff_careers_ats(name, careers_url=""):
     """Pipeline style: prefer coordinates we can CONFIRM with a live count;
     otherwise surface the highest-priority detection as a lead."""
-    urls = candidate_urls(name, careers_url)
-    if not urls:
-        return None
-    responses = _fetch_all(urls)
     lead = None  # first (highest-priority) unconfirmable detection seen
-    for url in urls:
-        r = responses.get(url)
-        if r is None:
-            continue
-        risky_tok = _risky_token_in_url(url, name)
-        if risky_tok and not _corroborates(r.text, name, risky_tok):
-            continue
+    for r in candidate_pages(name, careers_url):
         hit = detect(r.text, r.url)
         if not hit:
             continue
@@ -245,14 +217,18 @@ def diagnose_no_board(name, careers_url=""):
             + candidate_urls(name, careers_url, patterns=ROOT_PATTERNS, cap=None))
     if not urls:
         return "domain-unreachable"
-    responses = _fetch_all(urls)
+    # Through the module, not a from-import: this is the one
+    # place left that fetches candidates without going via
+    # identity.candidate_pages (it needs the URLs that FAILED,
+    # which the generator has already dropped), and a second
+    # binding of the name is a second thing to stub in tests.
+    responses = fetchpool._fetch_all(urls)
     hits = [(u, r) for u, r in responses.items() if r is not None]
     if not hits:
         return "domain-unreachable"
     safe_hits, saw_risky_uncorroborated = [], False
     for url, r in hits:
-        risky_tok = _risky_token_in_url(url, name)
-        if risky_tok and not _corroborates(r.text, name, risky_tok):
+        if not corroborated(url, name, r.text):
             saw_risky_uncorroborated = True
             continue
         safe_hits.append(r)
@@ -302,7 +278,8 @@ class JsSniffer:
         if not page:
             return None
         for url in candidate_urls(name, careers_url):
-            risky_tok = _risky_token_in_url(url, name)
+            # Fetched by the browser, not the pool, so this one cannot use
+            # candidate_pages -- but the identity check is the same rule.
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=20000)
             except Exception:
@@ -314,7 +291,7 @@ class JsSniffer:
                 except Exception:
                     content, hit = "", None
                 if hit and hit[0] in ("fetchable", "semi"):
-                    if risky_tok and not _corroborates(content, name, risky_tok):
+                    if not corroborated(url, name, content):
                         break
                     return pack(hit[1], hit[2], page.url)
                 try:

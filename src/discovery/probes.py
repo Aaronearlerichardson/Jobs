@@ -9,8 +9,8 @@ from src import config
 
 from src.ats.signatures import extract_workday_triple
 from src.net.http import HEADERS, SESSION
-from .fetchpool import _fetch_all, candidate_urls
-from .identity import _corroborates, _foreign_board, _risky_token_in_url
+from .fetchpool import candidate_urls
+from .identity import _foreign_board, candidate_pages
 
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
@@ -291,19 +291,10 @@ def probe_workday(name: str, careers_url: str = ""):
         Used to build and fetch its own candidate list; a hit reached only
         through a truncated domain token, or belonging to a parent
         company's shared tenant, went unchecked here while the sniffer
-        rejected it. Same guards on both paths now.
+        rejected it. Both paths walk identity.candidate_pages now, so the
+        guards cannot come apart again by editing one of them.
     """
-    urls = candidate_urls(name, careers_url)
-    if not urls:
-        return None
-    responses = _fetch_all(urls)
-    for url in urls:
-        r = responses.get(url)
-        if r is None:
-            continue
-        risky_tok = _risky_token_in_url(url, name)
-        if risky_tok and not _corroborates(r.text, name, risky_tok):
-            continue
+    for r in candidate_pages(name, careers_url):
         # Workday login redirects usually land on the wd host -- check
         # the final URL first, then fall through to HTML body.
         triple = extract_workday_triple(r.url) or extract_workday_triple(r.text)
