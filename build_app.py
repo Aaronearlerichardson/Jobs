@@ -92,7 +92,26 @@ DATA_DIRS = [("src/web/static", "src/web/static")]
 # it loads its search-engine backends by walking its own package directory at
 # runtime, so following the import alone leaves the compiled build with the
 # package but none of the engines, and every dork query dies on KeyError('text').
-PACKAGES = ["src", "ddgs", "playwright", "fake_useragent"]
+PACKAGES = ["ddgs", "playwright", "fake_useragent"]
+
+# Modules that must ship even though NO import statement reaches them, so
+# Nuitka cannot see them and neither can `python tools/entrydeps.py`.
+#
+# src.ops.roster holds the composite operation targets, and src/ops/registry.py
+# names them as "src.ops.roster:prune" STRINGS resolved with importlib at call
+# time. That indirection is worth keeping -- making the 21 targets real imports
+# costs 700 ms and 363 extra modules (bs4, lxml, requests) on every CLI
+# invocation, measured -- but it is invisible to every static tool, so the one
+# module it hides is named here instead.
+#
+# Both targets used to say --include-package=src, which covered this by
+# shipping all 95 src modules. It also dragged in src/crawl/page_capture.py
+# (473 lines only capture.py reaches, and capture.py is not compiled) and put
+# --include-package=src in direct contradiction with
+# --nofollow-import-to=src.web below. 93 of 95 modules are reachable by real
+# imports; this is the whole of the other 2, minus the one that should never
+# have shipped.
+INCLUDE_MODULES = ["src.ops.roster"]
 
 # Packages whose non-Python files must ship too. playwright/driver/ holds the
 # node runtime and cli.js that sync_playwright() execs; playwright locates it
@@ -115,7 +134,13 @@ DATA_PACKAGES = ["playwright", "fake_useragent"]
 # all is what makes the difference -- Nuitka would otherwise compile every
 # module it can see through those lazy imports and ship the ~100 MB driver.
 # Roughly a third of the C files and three quarters of the payload.
-HARVEST_SKIP = ["src.web", "flask", "werkzeug", "jinja2", "playwright",
+#
+# Third-party only. "src.web" was listed here too and is gone: harvest.py
+# cannot reach it by any import, deferred ones included
+# (`python tools/entrydeps.py harvest.py --check` says so), and the entry
+# only had to be written down at all because --include-package=src was
+# forcing src.web in for the nofollow to fight back out.
+HARVEST_SKIP = ["flask", "werkzeug", "jinja2", "playwright",
                 "ddgs", "fake_useragent", "primp"]
 
 
@@ -136,8 +161,8 @@ def build_command(name=None):
     # what it is doing without opening a log. The window IS the off switch
     # (close it, or Ctrl+C, which harvest.py already handles cleanly), and
     # it is the same handle the UI gives you.
+    cmd += [f"--include-module={m}" for m in INCLUDE_MODULES]
     if name == "harvest":
-        cmd += ["--include-package=src"]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_SKIP]
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
                 if not src.startswith("src/web/")]
