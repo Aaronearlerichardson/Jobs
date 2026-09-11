@@ -14,7 +14,11 @@
 Meant to sit in the background for the whole session: put a shortcut to
 JobHarvester.exe in the Startup folder (Win+R, `shell:startup`) and it
 starts at log-on, runs a pass, and parks on a timed wait until the next
-one. Parked, it costs no CPU at all -- the thread is not scheduled until
+one. It keeps a console window of its own, like the crawler UI -- that
+window is how you see what it is doing and how you stop it (close it, or
+Ctrl+C). Minimise it if it is in the way; it was built windowless for a
+while and the only thing that achieved was making Task Manager the off
+switch. Parked, it costs no CPU at all -- the thread is not scheduled until
 its deadline -- and the deadline is wall-clock, so a laptop that slept
 through it runs the pass as soon as it wakes. Each pass pulls every board
 with a fetchable ATS that has not been harvested in the last
@@ -194,7 +198,8 @@ def main(argv=None):
                 stalled[0] += summary["stalled"]
             except Exception:
                 # Put the traceback in the session log while it is still
-                # open: with no console it is the only place output goes.
+                # open: the console shows it too, but the window scrolls and
+                # the log is what you still have tomorrow.
                 # A pass that dies must not take the timer down with it;
                 # --once is the interactive case and should fail loudly.
                 print("\n  [!] harvest pass failed:", file=sys.stderr)
@@ -224,4 +229,22 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as e:
+        # Same guard webapp.py carries, for the same reason: this runs as a
+        # console app, and a window opened from Explorer or the Startup
+        # folder closes the instant the process dies. A failure BEFORE the
+        # session log opens has nowhere else to go, so hold the window
+        # open long enough to read it. Only when someone is watching --
+        # under a scheduler or a pipe this must not block forever.
+        print(f"\n  [!] harvest failed to start: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        try:
+            if sys.stdin and sys.stdin.isatty():
+                input("  Press Enter to close...")
+        except EOFError:
+            pass
+        sys.exit(1)

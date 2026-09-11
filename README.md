@@ -709,9 +709,10 @@ drop a shortcut to it in the Startup folder (Win+R, `shell:startup`):
 python build_app.py --target harvest      # JobHarvester.exe
 ```
 
-Launched from Explorer or the Startup folder it shows no console window;
-launched from a terminal it prints as usual. Either way each pass writes its
-own `data/logs/session-*-harvest.log`. A second copy started while one is
+It opens a console window of its own, the same as the crawler UI — that
+window is where you watch a pass and how you stop it (close it, or Ctrl+C).
+Minimise it if it is in the way. Either way each pass writes its own
+`data/logs/session-*-harvest.log`. A second copy started while one is
 running exits at once (lock file in the data directory).
 
 The store runs SQLite in WAL mode so the harvester, the web UI and the

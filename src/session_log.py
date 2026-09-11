@@ -338,13 +338,15 @@ def start(argv, now=None):
     """
     session = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
 
-    # A Windows binary launched with no console (double-clicked, or from
-    # the Startup folder, under --windows-console-mode=attach) starts with
-    # sys.stdout and sys.stderr both None. The tee still needs a stream
-    # behind it -- the first print() would otherwise die on None.write,
-    # and the traceback would have nowhere to go either (JobHarvester.exe
-    # exited in 0s with an empty log, 2026-09-10). Sink to devnull; the
-    # session log is the only output that matters in that mode anyway.
+    # A Windows binary running with no console starts with sys.stdout and
+    # sys.stderr both None. The tee still needs a stream behind it -- the
+    # first print() would otherwise die on None.write, and the traceback
+    # would have nowhere to go either (JobHarvester.exe exited in 0s with
+    # an empty log, 2026-09-10, when it was built
+    # --windows-console-mode=attach). Both binaries are plain console apps
+    # now, so this is no longer a path either of them takes; it stays
+    # because pythonw, a service wrapper, or a rebuild with that flag
+    # would all land here, and the failure it prevents is silent.
     out = sys.stdout if sys.stdout is not None else _null_stream()
     err = sys.stderr if sys.stderr is not None else _null_stream()
     sys.stdout = _Tee(out, session)

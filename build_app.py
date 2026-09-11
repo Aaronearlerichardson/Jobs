@@ -125,13 +125,17 @@ def build_command(name=None):
     cmd = [sys.executable, "-m", "nuitka", entry,
            "--onefile", f"--output-filename={output_name(name)}",
            "--assume-yes-for-downloads"]
-    if name == "harvest" and sys.platform == "win32":
-        # The harvester lives in the Startup folder and loops for the whole
-        # session: launched from Explorer it must not park a console window
-        # on the desktop, launched from a terminal it should still print.
-        # "attach" does exactly that split; output always reaches the
-        # session log either way.
-        cmd.append("--windows-console-mode=attach")
+    # Both targets are plain console apps (Nuitka's default, "force"), so
+    # each gets a window of its own however it was started.
+    #
+    # The harvester was built with --windows-console-mode=attach for a
+    # while: launched from Explorer it showed nothing, launched from a
+    # terminal it printed. Tidier on the desktop, and wrong in practice --
+    # a process that loops for the whole session with no window is a
+    # process you have to go into Task Manager to stop, and you cannot see
+    # what it is doing without opening a log. The window IS the off switch
+    # (close it, or Ctrl+C, which harvest.py already handles cleanly), and
+    # it is the same handle the UI gives you.
     if name == "harvest":
         cmd += ["--include-package=src"]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_SKIP]
