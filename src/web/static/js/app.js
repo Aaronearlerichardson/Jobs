@@ -6,7 +6,8 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
 const state = { jobs: [], pipeline: [], pipelineDue: [], conversion: [],
                 companies: [], pending: [], stats: {},
                 tracks: [], track: null, config: null, names: null,
-                expanded: null, logTotal: 0, wasRunning: false };
+                expanded: null, logTotal: 0, runKey: "", queueSig: "",
+                inflight: new Set() };
 
 const currentTrack = () => state.tracks.find(t => t.id === state.track);
 
@@ -723,20 +724,31 @@ function renderOps() {
     // text, which does not fit an <input>.
     card.querySelectorAll("input[data-a], textarea[data-a]")
       .forEach(i => params[i.dataset.a] = i.value);
-    // Disable on click, not on the next status poll. Until the poll came back
-    // the button stayed live, so a second click fired a second POST and the
-    // server started a second crawl. The poll re-derives disabled state either
-    // way, so this only closes the gap in between.
-    if (b.disabled) return;
+    // Debounce this ONE button's in-flight POST, and nothing else. A second
+    // click before the first answer came back used to start a second crawl;
+    // now it would only add a second queue entry, which is still not what the
+    // click meant. Every other button stays live on purpose: a busy server
+    // queues the request instead of refusing it.
+    const op = b.dataset.op;
+    if (state.inflight.has(op)) return;
+    state.inflight.add(op);
     b.disabled = true;
     try {
-      await post(withTrack(`/api/run/${b.dataset.op}`), params);
-      toast(`started: ${b.dataset.op}`);
-      state.logTotal = 0; $("#oplog").textContent = "";
+      const r = await post(withTrack(`/api/run/${op}`), params);
+      if (r.queued) {
+        flashNote(b, r.duplicate ? "already queued" : `queued #${r.position}`);
+      } else {
+        toast(`started: ${op}`);
+        // Only a real start clears the log: when the request was queued the
+        // log still belongs to the operation that is running right now.
+        state.logTotal = 0; $("#oplog").textContent = "";
+      }
     } catch (e) {
       toast(e.message);
-      b.disabled = false;          // never started; let them retry
     }
+    state.inflight.delete(op);
+    b.disabled = false;
+    await pollOps();   // show the new pill/queue without waiting for the timer
   });
 }
 
@@ -815,38 +827,121 @@ async function resolveNames() {
   const reject = rows.filter(r => r.reject).map(r => r.name);
   if (!names.length) { toast("tick at least one company"); return; }
   try {
-    // Blocklist first: if the run is refused because another op holds the
-    // slot, the junk names are still recorded and never come back.
+    // Blocklist first: the resolve run may only be QUEUED behind another
+    // op, so recording the junk names here is what keeps them out of every
+    // later discovery path, whenever the run itself gets its turn.
     if (reject.length) await post(withTrack("/api/names/block"), { names: reject });
-    await post(withTrack("/api/run/add-names"), { names });
-    toast(`started: resolving ${names.length} name(s)`);
-    state.logTotal = 0; $("#oplog").textContent = "";
+    const r = await post(withTrack("/api/run/add-names"), { names });
+    if (r.queued) {
+      // The picked names are already in the queued entry's params, so the
+      // list is done either way; the note hangs off the pill because the
+      // Resolve button it was clicked on is about to be re-rendered away.
+      flashNote($("#oppill"), r.duplicate ? "already queued" : `queued #${r.position}`);
+      toast(`queued: resolving ${names.length} name(s)`);
+    } else {
+      toast(`started: resolving ${names.length} name(s)`);
+      state.logTotal = 0; $("#oplog").textContent = "";
+    }
     state.names = null;
     renderNames();
+    await pollOps();
   } catch (e) { toast(e.message); }
+}
+
+/* A short-lived note pinned beside the element that was just clicked. The
+   toast is global and one-at-a-time, so clicking three run buttons in a row
+   leaves only the last message on screen; each click deserves its own answer
+   where it happened. */
+function flashNote(anchor, text) {
+  if (!anchor) return;
+  let n = anchor.nextElementSibling;
+  if (!n || !n.classList.contains("qnote")) {
+    n = document.createElement("span");
+    n.className = "qnote";
+    anchor.after(n);
+  }
+  clearTimeout(+n.dataset.timer || 0);
+  n.textContent = text;
+  n.classList.remove("fade");
+  n.dataset.timer = setTimeout(() => {
+    n.classList.add("fade");                      // CSS fades it out, then
+    setTimeout(() => n.remove(), 800);            // it stops taking up room
+  }, 2600);
+}
+
+/* The run queue, drawn from the status payload. Re-rendered only when it
+   actually changed: the poller fires every 1.5s and replacing the markup
+   every time would drop the hover state and re-enable a drop button the
+   user just clicked. */
+function renderQueue(queue) {
+  const box = $("#opqueue");
+  if (!box) return;
+  const q = queue || [];
+  const sig = JSON.stringify(q.map(e => [e.id, e.name, e.position]));
+  if (sig === state.queueSig) return;
+  state.queueSig = sig;
+  box.hidden = !q.length;
+  if (!q.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<span class="qlab">next up:</span>` + q.map(e => `
+    <span class="qitem" title="queued ${esc(e.enqueued_at || "")}">
+      <span class="qpos">#${esc(e.position)}</span> ${esc(e.name)}
+      <button class="qdrop" data-qid="${esc(e.id)}"
+              title="drop this from the run queue">×</button></span>`).join("") +
+    (q.length > 1 ? `<button class="qclear">clear queue</button>` : "");
+  box.querySelectorAll("button[data-qid]").forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try {
+      await api(`/api/run/queue/${encodeURIComponent(b.dataset.qid)}`,
+                { method: "DELETE" });
+    } catch (e) {
+      // 404 means it started (or finished) between the poll and the click.
+      toast("could not drop it: " + e.message);
+      b.disabled = false;
+    }
+    await pollOps();
+  });
+  const clear = box.querySelector(".qclear");
+  if (clear) clear.onclick = async () => {
+    clear.disabled = true;
+    try {
+      const d = await api("/api/run/queue", { method: "DELETE" });
+      toast(`cleared ${d.removed} queued`);
+    } catch (e) { toast("clear failed: " + e.message); clear.disabled = false; }
+    await pollOps();
+  };
 }
 
 async function pollOps() {
   try {
     const s = await api(`/api/run/status?since=${state.logTotal}`);
+    const queue = s.queue || [];
     const pill = $("#oppill");
+    const qtail = queue.length ? ` +${queue.length} queued` : "";
     if (s.running) {
-      pill.textContent = `running: ${s.name}`; pill.className = "pill running";
+      pill.textContent = `running: ${s.name}${qtail}`; pill.className = "pill running";
     } else if (s.error) {
-      pill.textContent = `failed: ${s.name}`; pill.className = "pill err";
+      pill.textContent = `failed: ${s.name}${qtail}`; pill.className = "pill err";
     } else {
-      pill.textContent = s.name ? `idle (last: ${s.name})` : "idle";
+      pill.textContent = (s.name ? `idle (last: ${s.name})` : "idle") + qtail;
       pill.className = "pill";
     }
+    renderQueue(queue);
     $("#opinfo").textContent = s.error || "";
     const allowed = new Set(currentTrack()?.ops || []);
+    // Run buttons stay live while an operation runs: the server queues the
+    // request instead of refusing it. The only thing that disables one is the
+    // track it doesn't belong to, or its own POST still being in flight.
     document.querySelectorAll("button.run[data-op]").forEach(b =>
-      b.disabled = s.running || !allowed.has(b.dataset.op));
+      b.disabled = state.inflight.has(b.dataset.op) || !allowed.has(b.dataset.op));
     // The paste card drives itself (parse -> pick -> resolve), so it has no
     // data-op. Only ever DISABLE here: re-enabling would fight renderNames.
-    if (s.running || !allowed.has("add-names"))
+    if (!allowed.has("add-names"))
       document.querySelectorAll("button.runx, #n-run").forEach(b => b.disabled = true);
-    document.querySelectorAll("#setcards button.run").forEach(b => b.disabled = s.running);
+    // Saving the config restarts the server, which would lose whatever is
+    // running AND whatever is waiting, so it stays refused until the queue is
+    // empty too (the route enforces this; this only greys the button out).
+    document.querySelectorAll("#setcards button.run").forEach(b =>
+      b.disabled = s.running || queue.length > 0);
     if (s.lines.length) {
       const log = $("#oplog");
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
@@ -854,8 +949,14 @@ async function pollOps() {
       state.logTotal = s.total;
       if (atBottom) log.scrollTop = log.scrollHeight;
     }
-    if (state.wasRunning && !s.running) await refreshData();  // op just finished
-    state.wasRunning = s.running;
+    // Refresh on any change of RUN IDENTITY, not just on `running` going
+    // false. With a queue the next entry starts as soon as the last one ends,
+    // so two chained ops can begin and end between two polls and `running` is
+    // never observed false in between; (name, started) still changes, and a
+    // changed key with a non-empty previous key means something finished.
+    const runKey = s.running ? `${s.name}|${s.started || ""}` : "";
+    if (state.runKey && runKey !== state.runKey) await refreshData();
+    state.runKey = runKey;
   } catch (e) { /* server briefly busy — next poll catches up */ }
 }
 

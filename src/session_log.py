@@ -164,9 +164,24 @@ class SessionLog:
         _prune(log_dir)
 
         now = now or datetime.now()
-        self.path = log_dir / f"session-{now:%Y%m%d-%H%M%S}-{_clean(mode)}.log"
-        self._fh = open(self.path, "w", encoding="utf-8", errors="replace",
-                        buffering=1)
+        # One file per RUN, not per second. The name is only second-precise,
+        # and the web UI's run queue hands the runner slot straight to the
+        # next operation, so two runs routinely start inside the same second
+        # (an empty-store sync takes ~50ms) -- opening "w" let the second one
+        # truncate the first one's finished log away. "x" turns the collision
+        # into an error, answered with a -2, -3 ... suffix instead of a lost
+        # log. Suffixed names still match _prune's session-*.log glob.
+        stem = f"session-{now:%Y%m%d-%H%M%S}-{_clean(mode)}"
+        n = 1
+        while True:
+            self.path = log_dir / (f"{stem}.log" if n == 1
+                                   else f"{stem}-{n}.log")
+            try:
+                self._fh = open(self.path, "x", encoding="utf-8",
+                                errors="replace", buffering=1)
+                break
+            except FileExistsError:
+                n += 1
         self._fh.write(f"# job crawler session\n"
                        f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
                        f"# run     : {invocation}\n\n")

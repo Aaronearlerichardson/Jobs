@@ -16,7 +16,9 @@ from src import store
 from src import tags as company_tags
 from src.config import profile_edit
 from src.match import locality
-from src.ops.background import _LOG_LOCK, OPS, TASK, _int, _run_op, _running
+from src.ops.background import (_LOG_LOCK, OPS, TASK, _int, _running,
+                                queue_clear, queue_remove, queue_snapshot,
+                                submit)
 from . import BOOT_ID, STATE, app
 from .server import schedule_restart
 
@@ -46,10 +48,15 @@ def _today():
 
 @app.post("/api/run/<name>")
 def api_run(name):
+    """Start an operation, or put it in the run queue behind the one already
+    running (202 rather than the old 409 — the request is kept, not lost).
+
+    A restart in progress and a track/engine mismatch still refuse outright:
+    neither is something waiting would fix. The restart would drop the queue
+    with the process, and the mismatch is wrong no matter when it runs.
+    """
     if name not in OPS:
         return jsonify(error=f"unknown operation {name!r}"), 404
-    if _running():
-        return jsonify(error=f"'{TASK['name']}' is already running"), 409
     if STATE["restarting"]:
         return jsonify(error="server is restarting"), 409
     track_cfg = _track()
@@ -60,12 +67,26 @@ def api_run(name):
                              f"{track_cfg['engine']!r}"), 409
     params = request.get_json(silent=True) or {}
     params["track"] = track_cfg["id"]
-    # The _running() check above is advisory — it gives a nicer message naming
-    # the running op. This is the authoritative one: it claims the slot under a
-    # lock, so two requests in the same instant can't both start an operation.
-    if not _run_op(name, lambda: OPS[name]["fn"](params)):
-        return jsonify(error=f"'{TASK['name']}' is already running"), 409
-    return jsonify(ok=True, name=name)
+    # submit() claims the slot under a lock, so two requests in the same
+    # instant can't both start an operation: the loser is queued, not run.
+    entry = submit(name, params, lambda: OPS[name]["fn"](params))
+    if entry is None:
+        return jsonify(ok=True, name=name)
+    return jsonify(queued=True, id=entry["id"], name=entry["name"],
+                   position=entry["position"],
+                   duplicate=entry["duplicate"]), 202
+
+
+@app.delete("/api/run/queue/<entry_id>")
+def api_run_queue_remove(entry_id):
+    if not queue_remove(entry_id):
+        return jsonify(error="not waiting in the run queue"), 404
+    return jsonify(removed=True)
+
+
+@app.delete("/api/run/queue")
+def api_run_queue_clear():
+    return jsonify(removed=queue_clear())
 
 
 @app.get("/api/run/status")
@@ -82,9 +103,11 @@ def api_run_status():
         start = max(0, since - offset)
         lines = TASK["log"][start:]
         total = offset + len(TASK["log"])
+    queue = queue_snapshot()
     return jsonify(running=_running(), name=TASK["name"],
                    started=TASK["started"], ended=TASK["ended"],
-                   error=TASK["error"], lines=lines, total=total)
+                   error=TASK["error"], lines=lines, total=total,
+                   queue=queue, queued=len(queue))
 
 
 # --------------------------------------------------------------------------- #
@@ -361,8 +384,9 @@ def api_names_preview():
 
     Step one of the paste flow: resolving is what costs the requests, so the
     names are shown first and only the ticked ones are sent to the op."""
-    if _running():
-        return jsonify(error=f"'{TASK['name']}' is already running"), 409
+    # No busy guard: this only parses text and reads the store, and a run no
+    # longer means the next request is lost (/api/run/<name> queues it), so
+    # refusing a parse would only stop the person preparing the list.
     from src.discovery.paste_ingest import preview_names
     p = request.get_json(silent=True) or {}
     raw = p.get("use_llm")
@@ -378,8 +402,16 @@ def api_names_preview():
 def api_names_block():
     """Blocklist the names a person marked 'not a company', so no discovery
     path spends requests on them again."""
-    if _running():
-        return jsonify(error=f"'{TASK['name']}' is already running"), 409
+    # No busy guard, for two reasons. Correctness: the paste flow blocks the
+    # junk names and THEN queues add-names, so a 409 here dropped the
+    # blocklist while the run it refused for went ahead anyway.
+    # Safety: this is the same single-row blocklist write the review-queue
+    # confirm/reject routes above have always done unguarded while an op
+    # runs -- one INSERT ... ON CONFLICT on its own connection, in WAL mode
+    # (readers never block the writer) with busy_timeout=BUSY_TIMEOUT_S, and
+    # a harvest thread holds the store's process-wide _WRITE_LOCK only for
+    # the length of one batch() block (store/schema.py, e814fac), not for
+    # the whole run.
     p = request.get_json(silent=True) or {}
     reason = (p.get("reason") or "").strip() or "not a company (review)"
     conn = _conn(_track())
@@ -432,9 +464,23 @@ def api_export():
 # --------------------------------------------------------------------------- #
 
 def _config_busy():
-    if _running():
-        return jsonify(error=f"'{TASK['name']}' is running - "
-                             "wait for it to finish before saving config"), 409
+    """Refuse a config save while work is running OR waiting.
+
+    Saving schedules a self-restart (server.py schedule_restart relaunches
+    the process), and the run queue lives in memory: every waiting entry
+    would vanish with the process that holds it, silently. So the queue has
+    to drain or be cleared first, and the message has to say so.
+    """
+    waiting = len(queue_snapshot())
+    running = _running()
+    if running or waiting:
+        what = (f"'{TASK['name']}' is running" if running
+                else "the run queue is not empty")
+        if running and waiting:
+            what += f", with {waiting} more in the run queue"
+        return jsonify(error=f"{what} - saving config restarts the server, "
+                             "so let the run queue drain or clear it "
+                             "first"), 409
     if STATE["restarting"]:
         return jsonify(error="server is restarting"), 409
     return None

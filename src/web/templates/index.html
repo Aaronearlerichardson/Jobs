@@ -76,6 +76,7 @@
       <span class="pill" id="oppill">idle</span>
       <span class="sub" id="opinfo"></span>
     </div>
+    <div id="opqueue" class="opqueue" hidden></div>
     <div id="opcards"></div>
     <div id="oplog"></div>
   </section>
@@ -84,7 +85,8 @@
     <p class="sub" style="margin:0 0 12px">
       Edits are written to <b>profile.toml</b> (a timestamped backup lands in
       <code>config_backups/</code>) and the server restarts itself so every
-      module picks the change up. Saving is blocked while an operation runs.
+      module picks the change up. Saving is blocked while an operation runs or
+      anything is waiting in the run queue — the restart would lose both.
     </p>
     <div id="setcards"></div>
   </section>

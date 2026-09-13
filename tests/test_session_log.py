@@ -177,6 +177,23 @@ class TestRetention:
         assert logs[0].name != "session-20200101-000000-crawl.log"
 
 
+class TestNaming:
+    def test_two_runs_in_the_same_second_get_two_files(self, tmp_path):
+        """The run queue chains operations, so two can start inside the one
+        second the file name is precise to; the second must not truncate the
+        first one's log away."""
+        when = datetime(2026, 8, 28, 9, 30, 0)
+        first = session_log.open_log("sync", "web UI op 'sync'", now=when)
+        first.close()
+        second = session_log.open_log("sync", "web UI op 'sync'", now=when)
+        second.close()
+
+        assert first.path != second.path
+        assert first.path.exists() and second.path.exists()
+        assert "# run     : web UI op 'sync'" in first.path.read_text(
+            encoding="utf-8")
+
+
 class TestWebappOps:
     def test_ui_op_output_lands_as_levelled_records(self, tmp_path):
         from src.ops import background as ops

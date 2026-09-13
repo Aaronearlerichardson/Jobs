@@ -5,6 +5,10 @@ browser copy once defeated."""
 
 import json
 import re
+import threading
+import time
+
+import pytest
 
 from src import web
 
@@ -635,3 +639,307 @@ class TestOpRearmsTheClaudeBreaker:
             time.sleep(0.02)
         time.sleep(0.15)          # let the worker's finally block land
         assert seen["disabled"] is None
+
+
+class TestRunQueue:
+    """A second button press while an operation runs is kept, not lost.
+
+    /api/run/<name> used to answer 409 "already running" and the request was
+    gone: the person had to watch the log and press again the moment it went
+    idle. The single runner slot stays -- two operations writing the same
+    SQLite store is exactly what it exists to prevent -- but everything else
+    waits in a FIFO run queue, and the finishing worker hands the slot to the
+    next entry itself.
+    """
+
+    @staticmethod
+    def _status(client):
+        return json.loads(client.get("/api/run/status").data)
+
+    @classmethod
+    def _wait_for(cls, client, pred, what, timeout=10):
+        """Poll /api/run/status until `pred` holds.
+
+        Polling beats a fixed sleep: the handover happens on the finishing
+        worker's thread, and a sleep long enough to be reliable under
+        full-suite load is long enough to be felt on every run.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            s = cls._status(client)
+            if pred(s):
+                return s
+            time.sleep(0.02)
+        raise AssertionError(f"timed out waiting for {what}: "
+                             f"{cls._status(client)}")
+
+    @pytest.fixture
+    def stub_ops(self, monkeypatch, client):
+        """Controllable stand-in operations, registered in the shared OPS
+        table the routes read.
+
+        Each one blocks until the test releases it, so the queue can be
+        inspected while an operation is genuinely running. They touch no
+        store, no network and no Claude call -- the point under test is the
+        runner, not the work.
+        """
+        from types import SimpleNamespace
+
+        from src.ops import background as ops
+
+        gates, ran = {}, []
+
+        def add(name, boom=False):
+            gate = threading.Event()
+            gates[name] = gate
+
+            def fn(params):
+                ran.append(name)
+                assert gate.wait(10), f"{name!r} was never released"
+                if boom:
+                    raise RuntimeError("op exploded")
+
+            monkeypatch.setitem(ops.OPS, name,
+                                {"label": name, "engine": None, "fn": fn})
+
+        yield SimpleNamespace(add=add, ran=ran,
+                              release=lambda n: gates[n].set())
+        # Leave the runner idle for the next test even when this one failed
+        # half way through a queue: drop what is waiting FIRST, so releasing
+        # the gates cannot chain another op into life, then let whatever is
+        # running finish.
+        ops.queue_clear()
+        for gate in gates.values():
+            gate.set()
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        ops.queue_clear()
+
+    def test_a_second_run_is_queued_rather_than_refused(self, client,
+                                                        stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        started = client.post("/api/run/q-first")
+        assert started.status_code == 200
+        assert json.loads(started.data)["ok"] is True
+        resp = client.post("/api/run/q-second")
+        assert resp.status_code == 202
+        body = json.loads(resp.data)
+        assert body["queued"] is True
+        assert body["duplicate"] is False
+        assert body["name"] == "q-second"
+        assert body["position"] == 1
+        assert body["id"]
+
+    def test_an_identical_request_does_not_queue_twice(self, client,
+                                                       stub_ops):
+        """A double click is one request. Same op, same params after
+        normalisation -- the existing entry comes back instead of a second
+        copy of the same run."""
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        first = json.loads(client.post("/api/run/q-second").data)
+        again = client.post("/api/run/q-second")
+        assert again.status_code == 202
+        body = json.loads(again.data)
+        assert body["duplicate"] is True
+        assert body["id"] == first["id"]
+        assert body["position"] == first["position"] == 1
+        assert len(self._status(client)["queue"]) == 1
+
+    def test_the_same_op_with_other_params_takes_its_own_place(self, client,
+                                                               stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        one = json.loads(client.post("/api/run/q-second", json={}).data)
+        two = json.loads(client.post("/api/run/q-second",
+                                     json={"pages": 2}).data)
+        assert two["duplicate"] is False
+        assert two["id"] != one["id"]
+        assert two["position"] == 2
+
+    def test_queueing_the_op_that_is_already_running_is_allowed(self, client,
+                                                                stub_ops):
+        """Deliberate: a crawl asked for again after a config change is a
+        real second request, not a duplicate of the one in flight."""
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        resp = client.post("/api/run/q-first")
+        assert resp.status_code == 202
+        assert json.loads(resp.data)["name"] == "q-first"
+        assert [e["name"] for e in self._status(client)["queue"]] == ["q-first"]
+
+    def test_status_lists_the_queue_oldest_first(self, client, stub_ops):
+        from datetime import datetime
+
+        for name in ("q-first", "q-second", "q-third"):
+            stub_ops.add(name)
+        for name in ("q-first", "q-second", "q-third"):
+            client.post(f"/api/run/{name}")
+        s = self._status(client)
+        assert s["running"] is True
+        assert s["name"] == "q-first"
+        assert s["queued"] == 2
+        assert [e["name"] for e in s["queue"]] == ["q-second", "q-third"]
+        assert [e["position"] for e in s["queue"]] == [1, 2]
+        for e in s["queue"]:
+            assert set(e) == {"id", "name", "position", "enqueued_at",
+                              "params"}
+            assert e["params"]["track"]          # the route injects it
+            datetime.fromisoformat(e["enqueued_at"])
+
+    def test_the_queue_is_an_empty_list_when_nothing_waits(self, client):
+        """Always present, so the front end never has to guess."""
+        s = self._status(client)
+        assert s["queue"] == []
+        assert s["queued"] == 0
+
+    def test_one_waiting_entry_can_be_dropped(self, client, stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        entry = json.loads(client.post("/api/run/q-second").data)
+        resp = client.delete(f"/api/run/queue/{entry['id']}")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["removed"] is True
+        assert self._status(client)["queue"] == []
+        # Gone is gone: the same id cannot be removed twice, and neither can
+        # an entry that has already been handed the runner slot.
+        assert client.delete(f"/api/run/queue/{entry['id']}").status_code == 404
+
+    def test_the_whole_queue_can_be_cleared(self, client, stub_ops):
+        for name in ("q-first", "q-second", "q-third"):
+            stub_ops.add(name)
+        for name in ("q-first", "q-second", "q-third"):
+            client.post(f"/api/run/{name}")
+        resp = client.delete("/api/run/queue")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["removed"] == 2
+        s = self._status(client)
+        assert s["queued"] == 0
+        assert s["running"] is True, "clearing the queue must not stop the run"
+
+    def test_the_queued_op_runs_when_the_first_one_finishes(self, client,
+                                                            stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        client.post("/api/run/q-second")
+        stub_ops.release("q-first")
+        s = self._wait_for(client, lambda s: s["name"] == "q-second",
+                           "the queued op to be handed the slot")
+        assert s["running"] is True
+        assert s["queue"] == []
+        stub_ops.release("q-second")
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        assert stub_ops.ran == ["q-first", "q-second"]
+        assert self._status(client)["queue"] == []
+
+    def test_a_failed_op_does_not_take_the_queue_down_with_it(self, client,
+                                                              stub_ops):
+        """The worker records the failure and still hands the slot on: one
+        broken crawl must not silently swallow everything behind it."""
+        stub_ops.add("q-boom", boom=True)
+        stub_ops.add("q-second")
+        client.post("/api/run/q-boom")
+        client.post("/api/run/q-second")
+        stub_ops.release("q-boom")
+        self._wait_for(client, lambda s: s["name"] == "q-second",
+                       "the queued op to start after the failure")
+        stub_ops.release("q-second")
+        self._wait_for(client, lambda s: not s["running"],
+                       "the runner to go idle")
+        assert stub_ops.ran == ["q-boom", "q-second"]
+
+    def test_config_save_is_refused_while_the_queue_is_not_empty(self, client,
+                                                                 stub_ops):
+        stub_ops.add("q-first")
+        stub_ops.add("q-second")
+        client.post("/api/run/q-first")
+        client.post("/api/run/q-second")
+        # Invalid TOML on purpose: even if the busy guard let this through,
+        # validation refuses it before anything is written to the profile.
+        resp = client.put("/api/config/raw", json={"toml": "not [valid"})
+        assert resp.status_code == 409
+        assert "run queue" in json.loads(resp.data)["error"]
+
+    def test_config_save_is_refused_by_a_waiting_queue_alone(self, client):
+        """An idle runner is not enough. The queue lives in memory and a save
+        restarts the process (server.py schedule_restart), so every waiting
+        entry would vanish with it."""
+        from src.ops import background as ops
+        assert self._status(client)["running"] is False
+        ops.QUEUE.append({"id": "test-entry", "name": "q-first", "params": {},
+                          "key": "{}", "enqueued_at": "2026-09-11T00:00:00",
+                          "fn": lambda: None})
+        try:
+            resp = client.put("/api/config/raw", json={"toml": "not [valid"})
+            assert resp.status_code == 409
+            assert "run queue" in json.loads(resp.data)["error"]
+        finally:
+            ops.queue_clear()
+
+    # ----------------------------------------------------------------- #
+    #  The paste flow is not an operation and must not wait for one       #
+    # ----------------------------------------------------------------- #
+
+    @staticmethod
+    def _paste_store(tmp_path, monkeypatch):
+        """Point BOTH the track config (what the routes open) and
+        config.STORE_DB_PATH (what preview_names opens for itself) at a
+        throwaway DB, so the suite never touches the real store."""
+        from src import config
+        from src import store
+        db_path = tmp_path / "paste.db"
+        store.connect(db_path).close()
+        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
+                            "db_path", db_path)
+        monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
+        return db_path
+
+    def test_preview_parses_while_an_op_runs(self, client, tmp_path,
+                                             monkeypatch, stub_ops):
+        """Preview resolves nothing and writes nothing -- refusing it while
+        an op held the slot only stopped the person preparing the list."""
+        import src.discovery.paste_ingest as ls
+        self._paste_store(tmp_path, monkeypatch)
+        monkeypatch.setattr(ls, "parse_company_names",
+                            lambda *a, **k: ["Alpaca Health"])
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        assert self._status(client)["running"] is True
+        resp = client.post("/api/names/preview",
+                           json={"text": "x", "use_llm": False})
+        assert resp.status_code == 200
+        assert [r["name"] for r in json.loads(resp.data)] == ["Alpaca Health"]
+        stub_ops.release("q-first")
+
+    def test_block_records_the_junk_names_while_an_op_runs(self, client,
+                                                           tmp_path,
+                                                           monkeypatch,
+                                                           stub_ops):
+        """The UI blocklists the rejected names and THEN queues add-names,
+        so a 409 here lost the blocklist for a run that went ahead anyway.
+        The write itself is one INSERT on its own connection, which is what
+        the review-queue confirm/reject routes have always done mid-run."""
+        from src import store
+        db_path = self._paste_store(tmp_path, monkeypatch)
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        assert self._status(client)["running"] is True
+        resp = client.post("/api/names/block",
+                           json={"names": ["Who You Are", "Job Location"]})
+        assert resp.status_code == 200
+        body = json.loads(resp.data)
+        assert body["blocked"] == 2
+        assert body["keys"] == ["joblocation", "whoyouare"]
+        assert self._status(client)["running"] is True,             "blocking must not disturb the run holding the slot"
+        conn = store.connect(db_path)
+        try:
+            assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
+        finally:
+            conn.close()
+        stub_ops.release("q-first")
