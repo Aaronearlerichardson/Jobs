@@ -38,6 +38,7 @@ from .fetchers import (
     fetch_lever,
     fetch_paylocity,
     fetch_peopleadmin,
+    fetch_phenom,
     fetch_rippling,
     fetch_ultipro,
     fetch_successfactors,
@@ -69,6 +70,7 @@ ATS_REGISTRY = {
                                  fetch_workday(t, p, st, n, gate=is_relevant)), tags.LOCAL, 1.0),
     "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s, gate=is_relevant), tags.LOCAL, 1.0),
     "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
+    "phenom":         (lambda n, s: lambda: fetch_phenom(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole,

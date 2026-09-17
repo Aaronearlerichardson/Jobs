@@ -436,8 +436,8 @@ Return ONLY a JSON object with exactly:
 Return ONLY valid JSON. No markdown, no preamble."""
 
 
-# Résumé-fit scoring moved to src/claude/fit.py (multi-axis rubric + gates).
-# score_resume_fit() below is a thin delegator; the old single-scalar prompt
+# Résumé-fit scoring lives in src/claude/fit.py (multi-axis rubric + gates);
+# callers import score_resume_fit from there. The old single-scalar prompt
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
@@ -517,16 +517,6 @@ def board_is_own(company, board, site="", titles=()):
     if verdict is not None:
         _BOARD_OWNER_CACHE[key] = verdict
     return verdict
-
-
-def score_resume_fit(resume, title, description=""):
-    """Delegate to the multi-axis rubric in src/claude/fit.py; returns a
-    FitResult (`.score`, `.axes`, `.gates`, `.reason`, `.as_columns()`).
-    `resume` is accepted for backward compatibility but the
-    rubric scores against the config profile (strengths, domain ladder, stack),
-    not raw résumé text. Imported lazily to avoid a claude<->fit import cycle."""
-    from src.claude import fit
-    return fit.score_resume_fit(title, description)
 
 
 def score_technical_bar(title, description=""):

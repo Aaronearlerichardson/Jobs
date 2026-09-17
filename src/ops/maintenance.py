@@ -20,7 +20,7 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.fetchers import company as company_fetch
-from src.claude.api import score_resume_fit
+from src.claude.fit import score_resume_fit
 from src.claude.resume import resume_text
 from src.match import gates
 from src.match.filters import is_relevant
@@ -316,7 +316,8 @@ def _keep_job(company, job, t):
 
 def _score_job(resume, company, job, track):
     company_fetch.hydrate_description(job)
-    res = score_resume_fit(resume, job["title"], job.get("description", ""))
+    res = score_resume_fit(job["title"], job.get("description", ""),
+                           location=job.get("location") or "")
     return {
         "job_id": job["id"], "company_id": company["id"], "company_name": company["name"],
         "title": job["title"], "url": job["url"], "location": job["location"],
@@ -373,7 +374,7 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     from src.claude.fit import MIN_DESC_CHARS
     _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
     pending = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, description FROM jobs "
+        "SELECT job_id, title, description, location FROM jobs "
         "WHERE (',' || COALESCE(track,'') || ',') LIKE ? "
         "AND resume_fit_score IS NULL "
         "AND COALESCE(status,'open') != 'closed' "
@@ -387,8 +388,9 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
           f"job(s) that were previously unscorable...")
     scored = 0
     for r, res in fan_out(pending,
-                          lambda r: score_resume_fit(resume, r["title"],
-                                                     r.get("description", "")),
+                          lambda r: score_resume_fit(
+                              r["title"], r.get("description", ""),
+                              location=r.get("location") or ""),
                           "self-heal scoring", max_workers, with_item=True):
         if res.score is not None:
             store.update_job_scores(conn, r["job_id"], res.as_columns())
@@ -573,14 +575,15 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
         if described_only:
             conds.append("length(COALESCE(description,'')) >= ?")
             args.append(MIN_DESC_CHARS)
-        q = "SELECT job_id, title, description FROM jobs"
+        q = "SELECT job_id, title, description, location FROM jobs"
         if conds:
             q += " WHERE " + " AND ".join(conds)
         rows = [dict(r) for r in conn.execute(q, args).fetchall()]
         print(f"  rescoring {len(rows)} job(s) against the current resume...")
 
         def _one(r):
-            res = score_resume_fit(resume, r["title"], r.get("description", ""))
+            res = score_resume_fit(r["title"], r.get("description", ""),
+                                   location=r.get("location") or "")
             return r["job_id"], res, r.get("description", "")
 
         n = 0
@@ -774,19 +777,23 @@ def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
 _SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
 
 
-def _sync_skip_reason(company, jobs, err):
+def _sync_skip_reason(company, jobs, err, snapshot=None):
     """Why this company's board cannot be reconciled, or None when it can.
+    `snapshot` is fetch_all's net.http.snapshot_info() for the board: an
+    INCOMPLETE one (a page failed partway) is a fetch error too.
 
     >>> _sync_skip_reason({"id": 1}, [{"id": "j1"}], None) is None
     True
     >>> _sync_skip_reason({"id": 1}, [], RuntimeError("HTTP 404"))
+    'fetch error'
+    >>> _sync_skip_reason({"id": 1}, [{"id": "j1"}], None, {"incomplete": True})
     'fetch error'
     >>> _sync_skip_reason({"id": 1}, [], None)
     'empty board'
     >>> _sync_skip_reason({"name": "Acme"}, [{"id": "j1"}], None)
     'no roster id'
     """
-    if err is not None:
+    if err is not None or (snapshot or {}).get("incomplete"):
         return "fetch error"
     if not jobs:
         return "empty board"
@@ -822,8 +829,10 @@ def sync_status_all(top_n=15, t=None):
     for when statuses have drifted without paying for a full crawl.
 
     A board that cannot be reconciled is skipped (never closed on a failed
-    fetch) and SAID SO: one "[!]" line per board with the reason, and the
-    reason counts beside the footer's reconciled count."""
+    or partial fetch) and SAID SO: one "[!]" line per board with the
+    reason, and the reason counts beside the footer's reconciled count. A
+    capped board is reconciled, closing a row only on its second miss
+    (store.sync_job_statuses's `capped`)."""
     t = _t(t)
     with track_store(t) as conn:
         companies = store.crawlable_companies(conn, tag=t["store_tag"])
@@ -837,8 +846,8 @@ def sync_status_all(top_n=15, t=None):
         fetched = fetch_all(sources)
         n_closed = n_reopened = n_boards = 0
         skipped = {why: 0 for why in _SYNC_SKIP_REASONS}
-        for c, (jobs, err) in zip(companies, fetched):
-            why = _sync_skip_reason(c, jobs, err)
+        for c, (jobs, err, snapshot) in zip(companies, fetched):
+            why = _sync_skip_reason(c, jobs, err, snapshot)
             if why:
                 # The skip itself is right and stays: fetchers soft-fail to
                 # [], so an error or an empty snapshot is indistinguishable
@@ -857,8 +866,9 @@ def sync_status_all(top_n=15, t=None):
                 print(f"    [!] {(c.get('name') or '?')[:34]:34} "
                       f"not reconciled ({why}){detail}")
                 continue
-            n_re, n_cl = store.sync_job_statuses(conn, c["id"], jobs,
-                                                 track=t["track"])
+            n_re, n_cl = store.sync_job_statuses(
+                conn, c["id"], jobs, track=t["track"],
+                capped=(snapshot or {}).get("capped", False))
             n_boards += 1
             n_closed += n_cl
             n_reopened += n_re
@@ -957,7 +967,6 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
     locality-bound by definition."""
     import hashlib
     t = _t(t)
-    resume = resume_text()
     with track_store(t) as conn:
         kept, n_nonlocal = [], 0
         for j in jobs:
@@ -1004,7 +1013,8 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
         _hydrate_missing_descriptions(conn, kept)
 
         def _score(j):
-            res = score_resume_fit(resume, j["title"], j.get("description", ""))
+            res = score_resume_fit(j["title"], j.get("description", ""),
+                                   location=j.get("location") or "")
             return {"job_id": j["id"], "company_id": j.get("_company_id"),
                     "company_name": j.get("company"),
                     "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),

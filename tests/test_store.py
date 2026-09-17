@@ -295,6 +295,36 @@ class TestClosedLifecycle:
         assert status_of("gh_acme_new")["status"] == "open"
         assert status_of("linkedin_bbb")["status"] == "open"   # external: title match
 
+    def test_a_capped_snapshot_reopens_but_spares_a_first_miss(
+            self, db, company, add_job, status_of):
+        # A board over its page cap serves an unstable window of itself, so
+        # one pass's absence is no evidence: with no earlier harvest to
+        # compare against, nothing closes.
+        snap = self._seed(add_job)
+        store.set_job_status(db, "gh_acme_2", "closed")
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=True) == (1, 0)
+        assert status_of("gh_acme_1")["status"] == "open"
+        assert status_of("gh_acme_2")["status"] == "open"
+
+    def test_a_capped_snapshot_closes_only_a_second_miss(
+            self, db, company, add_job, status_of):
+        # The previous harvest stamped its rows at 09:00. gh_acme_1 was in
+        # that pass (seen 09:00:05); gh_acme_3 was not (seen a day before).
+        # Both are missing again now, and only gh_acme_3 has missed twice.
+        snap = self._seed(add_job)
+        add_job("gh_acme_3", "Data Scientist", 0.6)
+        db.execute("UPDATE jobs SET harvested_at='2026-09-15T09:00:00'")
+        db.execute("UPDATE jobs SET last_seen='2026-09-15T09:00:05' "
+                   "WHERE job_id='gh_acme_1'")
+        db.execute("UPDATE jobs SET last_seen='2026-09-14T09:00:05' "
+                   "WHERE job_id='gh_acme_3'")
+        db.commit()
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=True) == (0, 1)
+        assert status_of("gh_acme_1")["status"] == "open"
+        assert status_of("gh_acme_3")["status"] == "closed"
+
 
 class TestRanking:
     def test_closed_excluded_but_readmittable(self, db, company, add_job):

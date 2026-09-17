@@ -25,7 +25,7 @@ import time
 from urllib.parse import urlparse
 
 from src import config
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
 from src.net.util import cache_dir, default_search_text, norm_posted_date
 from .board import board_jobs, loc_ok
 
@@ -311,6 +311,11 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
 
     Each row carries `_wd` = (tenant, pod, site, externalPath), the
     coordinates `cxs_detail` needs to fetch its body later.
+
+    Reports a capped snapshot (net.http.note_capped) when every page up to
+    `max_pages` came back full, or, on an unscoped pull, when fewer rows
+    came back than the response's own `total`. A scoped pull's `total` is
+    never compared: the rows it drops for locality are not missing.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
@@ -321,6 +326,7 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     out = []
     scope_failed = False   # the scope came back unnarrowed (see below)
     rescues = 0            # detail GETs spent on "N Locations" rows
+    total = None           # the board size page 0 reported
     for page in range(max_pages):
         try:
             r = SESSION.post(api, json={**body_extra, "limit": page_size,
@@ -331,6 +337,10 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
         except Exception as e:
             fetch_failed(f"workday {tenant} p{page}", e)
             break
+        # Only page 0 reports the board's size; later pages answer
+        # "total": 0 (probed live 2026-09-16), which must not replace it.
+        if total is None and isinstance(data.get("total"), (int, float)):
+            total = data["total"]
         if not posts:
             break
         if page == 0 and loc_re is not None and _wd_scope_failed(
@@ -395,6 +405,10 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                                                       or p.get("postedOn"))})
         if len(posts) < page_size:
             break
+    else:
+        note_capped(total if loc_re is None else None)
+    if loc_re is None and (total or 0) > len(out):
+        note_capped(total)
     if rescues >= _WD_RESCUE_CAP:
         print(f"    [!] workday {tenant}: \"N Locations\" detail budget "
               f"({_WD_RESCUE_CAP}) spent; later multi-site rows "

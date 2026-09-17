@@ -49,6 +49,10 @@ _UKG_RE = re.compile(r"recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a
 SEMI_FETCHABLE_PATTERNS = [
     ("icims",           re.compile(r"([a-z0-9-]+)\.icims\.com", re.I)),
     ("successfactors",  re.compile(r"([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
+    # Phenom People: the tenant's own site IS the board, so there is no
+    # vendor host to match. Every page embeds its widget API origin as JSON
+    # instead, and that host is the slug fetchers/phenom.py takes.
+    ("phenom",          re.compile(r'"widgetApiEndpoint"\s*:\s*"https?://([a-z0-9.-]+)/widgets"', re.I)),
 ]
 
 # PeopleAdmin (most public universities). Handled in detect beside ADP and
@@ -202,6 +206,8 @@ def detect(text, final_url=""):
     ('fetchable', 'workday', ('acme', 5, 'External'))
     >>> detect("<a href='https://acme.icims.com/jobs'>Jobs</a>")
     ('semi', 'icims', 'acme')
+    >>> detect('{"widgetApiEndpoint":"https://careers.acme.org/widgets"}')
+    ('semi', 'phenom', 'careers.acme.org')
     >>> detect("via acme.eightfold.ai portal")
     ('lead', 'eightfold', 'acme.eightfold.ai')
 

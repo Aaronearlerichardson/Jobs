@@ -38,7 +38,7 @@ from src import config
 # full tree via _get_soup.
 _ANCHORS_ONLY = SoupStrainer("a")
 
-from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed, note_capped
 from src.match.locality import NC_RE  # profile [locality]: the location gate
 from src.net.util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
 from . import icims, workday
@@ -53,6 +53,7 @@ from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
+from .phenom import fetch_phenom_all
 from .rippling import fetch_rippling
 from .ultipro import fetch_ultipro
 from .workday import fetch_workday_all, wd_local_count  # noqa: F401 (re-export)
@@ -115,8 +116,16 @@ def _adapt(jobs, ats, loc_re=None):
 
 
 def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
-    """SmartRecruiters public postings API. Descriptions hydrated lazily."""
+    """SmartRecruiters public postings API. Descriptions hydrated lazily.
+
+    Reports a capped snapshot (net.http.note_capped) when every page up to
+    `max_pages` came back full, or, on an unscoped pull, when fewer rows
+    came back than the response's own `totalFound`. A scoped pull's
+    `totalFound` is never compared: the rows it drops for locality are not
+    missing.
+    """
     out = []
+    total = None
     for page in range(max_pages):
         try:
             r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
@@ -125,6 +134,8 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
         except Exception as e:
             fetch_failed(f"smartrecruiters {slug}", e)
             break
+        if isinstance(data.get("totalFound"), (int, float)):
+            total = data["totalFound"]
         content = data.get("content", []) or []
         if not content:
             break
@@ -142,6 +153,10 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
                         "posted_at": norm_posted_date(p.get("releasedDate"))})
         if len(content) < 100:
             break
+    else:
+        note_capped(total if loc_re is None else None)
+    if loc_re is None and (total or 0) > len(out):
+        note_capped(total)
     return out
 
 
@@ -205,6 +220,17 @@ def hydrate_description(job):
         if desc:
             job["description"] = desc[:_DESC_MAX]
         if loc and (job.get("location") or "").strip() in ("", icims.LOCAL_LABEL):
+            job["location"] = loc
+    elif job.get("ats") == "phenom" and job.get("url"):
+        # No "_"-prefixed coordinate survives _adapt for this ATS (only
+        # Workday's _wd does), so the detail coordinates are re-derived
+        # from the job's own URL -- same pattern as the paylocity/
+        # rippling branches above.
+        from .phenom import fetch_phenom_description
+        desc, loc = fetch_phenom_description(job["url"])
+        if desc:
+            job["description"] = desc[:_DESC_MAX]
+        if loc:
             job["location"] = loc
     elif job.get("ats") == "wpjson" and job.get("url"):
         # Outbound apply page (an Arcoro/BirdDog portal). Server-rendered;
@@ -707,6 +733,7 @@ FETCHERS = {
     "ultipro":         lambda c, lr: _adapt(fetch_ultipro(c["slug"], loc_re=lr), "ultipro"),
     "hibob":           lambda c, lr: _adapt(fetch_hibob(c["slug"], loc_re=lr), "hibob"),
     "workday":         lambda c, lr: _adapt(fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr), "workday"),
+    "phenom":          lambda c, lr: _adapt(fetch_phenom_all(c.get("slug") or c.get("careers_url"), lr), "phenom"),
     "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
     "icims":           lambda c, lr: _adapt(fetch_icims_all(c["slug"], lr), "icims"),
     "successfactors":  lambda c, lr: _adapt(fetch_successfactors("", c["careers_url"], loc_re=lr), "successfactors"),

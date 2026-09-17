@@ -393,7 +393,7 @@ def touch_job(conn, job_id):
 
 
 def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
-                      external_grace_days=3):
+                      external_grace_days=3, capped=False, now=None):
     """Reconcile ONE company's stored jobs against a live board snapshot
     (`fetched_jobs`: dicts with id/title/url, as returned by
     fetchers.company.fetch_company). Rows matched by job_id, URL, or
@@ -404,7 +404,9 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     Caller contract: only pass a snapshot from a SUCCESSFUL, non-empty fetch
     — fetchers soft-fail to [] (HTTP 404, non-JSON), which is
     indistinguishable from a genuinely emptied board, so an empty snapshot
-    must never close anything (this function no-ops on one).
+    must never close anything (this function no-ops on one). Nor may an
+    INCOMPLETE one (net.http.snapshot_info()): the caller stores what
+    arrived and skips this call.
 
     Matching depends on where the row's job_id came from:
       * BOARD-NATIVE rows — job_id in the snapshot's own id namespace (same
@@ -413,10 +415,8 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         titles across requisitions (Beacon reposts "Algorithm Engineer"
         under a fresh Greenhouse id every cycle), so a title/URL fallback
         would let one live posting shield every dead same-titled req from
-        ever closing. Absent id -> closed immediately. A partial fetch
-        (e.g. Workday pagination dying mid-board) can close rows
-        spuriously, but the next full fetch reopens them (matched rows
-        always flip back).
+        ever closing. Absent id -> closed immediately, UNLESS `capped`
+        (below) says otherwise.
       * EXTERNAL rows (LinkedIn captures, NLx, manual --add, legacy ids
         from a retired fetcher) can never id-match, so they match by
         normalized URL or title instead, and are closed only after
@@ -425,6 +425,23 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         row.
       * When `track` is given, only rows of that track are ever CLOSED
         (matched rows are reopened regardless — they're live on the board).
+
+    `capped=True` marks a snapshot truncated by a page cap
+    (net.http.note_capped). A board over its cap serves an unstable window
+    of itself, so a board-native row then closes only when it was ALSO
+    missing from the previous pass: when its last_seen is older than
+    MAX(jobs.harvested_at) for the company, read before the caller's own
+    upserts. A row the previous pass saw was upserted after that pass took
+    its harvested_at stamp, so its last_seen is not older. With no harvest
+    recorded yet, a capped pass closes nothing. `now` (default: the clock)
+    stamps last_seen and closed_at here.
+
+    Notes:
+        companies.last_harvested_at was tried as the boundary first and
+        rejected: mark_harvested() stamps it moments AFTER this call touches
+        last_seen in the same pass, so every row seen in pass N read as
+        older than pass N's own stamp and closed on its first miss in pass
+        N+1, with no second-strike grace at all.
     """
     if not company_id or not fetched_jobs:
         return (0, 0)
@@ -448,9 +465,17 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     # ids ("custom_<blob>") degrade to a full-id prefix, i.e. those rows only
     # ever close via the grace path — right for the flakiest scraped boards.
     prefixes = {"_".join(i.split("_", 2)[:2]) + "_" for i in ids if "_" in i}
-    now = datetime.now().isoformat()
+    now = (now or datetime.now()).isoformat()
     grace_cutoff = (datetime.now()
                     - timedelta(days=external_grace_days)).isoformat()
+    # The previous pass's boundary (see `capped`). "" when there is none:
+    # every stamp sorts after it, so nothing closes.
+    capped_since = None
+    if capped:
+        row = conn.execute(
+            "SELECT MAX(harvested_at) FROM jobs WHERE company_id=?",
+            (company_id,)).fetchone()
+        capped_since = (row[0] if row else None) or ""
     n_reopened = n_closed = 0
     rows = conn.execute(
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
@@ -476,7 +501,11 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         if (r["status"] or "open") == "closed":
             continue
         seen = r["last_seen"] or r["first_seen"] or ""
-        if board_native or seen < grace_cutoff:   # ISO strings sort by time
+        if board_native:                          # ISO strings sort by time
+            closeable = capped_since is None or seen < capped_since
+        else:
+            closeable = seen < grace_cutoff
+        if closeable:
             conn.execute(
                 "UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?",
                 (now, r["job_id"]))

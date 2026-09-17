@@ -20,8 +20,17 @@ Ctrl+C). Minimise it if it is in the way; it was built windowless for a
 while and the only thing that achieved was making Task Manager the off
 switch. Parked, it costs no CPU at all -- the thread is not scheduled until
 its deadline -- and the deadline is wall-clock, so a laptop that slept
-through it runs the pass as soon as it wakes. Each pass pulls every board
-with a fetchable ATS that has not been harvested in the last
+through it runs the pass as soon as it wakes. That "as soon as it wakes"
+is doing the real work, and it is a limit worth knowing: this is an
+in-process timer, and no process runs while Windows itself is asleep, so
+`--every` cannot WAKE the laptop -- it only notices, once something else
+wakes it, that the deadline has already passed (a pass that starts more
+than 15 minutes late says so; see OVERDUE_THRESHOLD_S). If a pass has to
+happen on time even through sleep, replace `--every` with a Windows Task
+Scheduler trigger with "Wake the computer to run this task" checked, and
+have it invoke `harvest.py --once` on the schedule instead -- the
+scheduler can wake the machine; this script cannot. Each pass pulls every
+board with a fetchable ATS that has not been harvested in the last
 --min-age-hours and stores every posting unscored, then runs the triage
 pass (src/crawl/triage.py): the crawl's gates cheapest-first, bodies only
 for survivors, one Claude fit call only for each hydrated survivor, capped
@@ -51,6 +60,51 @@ DEFAULT_EVERY_HOURS = 12.0
 # waking from a long sleep notices an overdue pass within minutes; a timed
 # wait costs nothing while it lasts, so the chunking is free.
 WAIT_CHUNK_S = 300.0
+# How far a pass may start after its scheduled time before it is worth a
+# [!] warning. Below this is ordinary jitter (another process briefly held
+# the store lock); above it is a laptop that slept through one or more
+# ticks -- the slips actually observed in the field ran 2 h to 17 h.
+OVERDUE_THRESHOLD_S = 15 * 60
+
+
+def next_pass_at(started, every_hours):
+    """The epoch time of the pass after one that started at `started`:
+    `every_hours` after its START, never after its end. run_forever waits
+    for it and main() prints it, so the promise and the wait agree.
+
+    >>> next_pass_at(0.0, 12) / 3600
+    12.0
+    """
+    return started + every_hours * 3600
+
+
+def overdue_warning(scheduled, started, threshold_s=OVERDUE_THRESHOLD_S):
+    """The `[!]` line for a pass that started more than `threshold_s` after
+    it was `scheduled`, or None. The first pass of a run (`scheduled` None)
+    is never late.
+
+    >>> overdue_warning(None, 100.0)
+    >>> overdue_warning(1000.0, 1000.0 + 10 * 60)           # 10 min: too soon to warn
+    >>> overdue_warning(1000.0, 1000.0 + OVERDUE_THRESHOLD_S)   # at the threshold
+    >>> overdue_warning(1000.0, 900.0)                          # early
+    >>> overdue_warning(1000.0, 1000.0 + 20 * 60).startswith(
+    ...     "[!] pass is 20 min late (scheduled ")
+    True
+
+    Lateness reads in whole minutes under an hour and tenths of an hour
+    from one hour up:
+
+    >>> overdue_warning(0.0, 90 * 60).split(" (")[0]
+    '[!] pass is 1.5 h late'
+    >>> overdue_warning(0.0, 17 * 3600 + 20 * 60).split(" (")[0]
+    '[!] pass is 17.3 h late'
+    """
+    if scheduled is None or started - scheduled <= threshold_s:
+        return None
+    late = started - scheduled
+    how = f"{late / 3600:.1f} h" if late >= 3600 else f"{round(late / 60)} min"
+    when = datetime.fromtimestamp(scheduled)
+    return f"[!] pass is {how} late (scheduled {when:%Y-%m-%d %H:%M})"
 
 
 def acquire_lock(path=LOCK_PATH):
@@ -79,9 +133,13 @@ def acquire_lock(path=LOCK_PATH):
 
 def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
                 chunk_s=WAIT_CHUNK_S):
-    """Run `pass_fn` now and then once every `every_hours`, measured from
-    the START of the previous pass (a pass that takes three hours does not
-    push the schedule back). Never returns unless `wait` asks it to.
+    """Run `pass_fn` now and then once every `every_hours`, measured via
+    `next_pass_at` from the START of the previous pass (a pass that takes
+    three hours does not push the schedule back). Never returns unless
+    `wait` asks it to.
+
+    `pass_fn(scheduled)` gets the epoch time its pass was due (None for the
+    first, immediate one), so it can say how late it is (overdue_warning).
 
     `wait(seconds)` parks the thread; it returns True to stop the loop
     (threading.Event.wait semantics -- the default Event is never set, so
@@ -94,8 +152,8 @@ def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
     >>> def wait(s):
     ...     ticks[0] += s
     ...     return False
-    >>> def one_pass():
-    ...     log.append(clock())
+    >>> def one_pass(scheduled):
+    ...     log.append((clock(), scheduled))
     ...     ticks[0] += 3600          # the pass itself takes an hour
     ...     if len(log) == 3:
     ...         raise KeyboardInterrupt
@@ -103,15 +161,33 @@ def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
     ...     run_forever(one_pass, 12, wait=wait, clock=clock)
     ... except KeyboardInterrupt:
     ...     pass
-    >>> [t / 3600 for t in log]
-    [0.0, 12.0, 24.0]
+    >>> [(started / 3600, sched and sched / 3600) for started, sched in log]
+    [(0.0, None), (12.0, 12.0), (24.0, 24.0)]
+
+    A pass that overruns its interval is followed at once, late, and the
+    one after it is due `every_hours` after that late start:
+
+    >>> ticks[0], log[:] = 0.0, []
+    >>> def overrun(scheduled):
+    ...     log.append((clock(), scheduled))
+    ...     ticks[0] += 3600 * (20 if len(log) == 1 else 1)
+    ...     if len(log) == 3:
+    ...         raise KeyboardInterrupt
+    >>> try:
+    ...     run_forever(overrun, 12, wait=wait, clock=clock)
+    ... except KeyboardInterrupt:
+    ...     pass
+    >>> [(started / 3600, sched and sched / 3600) for started, sched in log]
+    [(0.0, None), (20.0, 12.0), (32.0, 32.0)]
     """
     wait = wait or threading.Event().wait
+    scheduled = None
     while True:
         started = clock()
-        pass_fn()
+        pass_fn(scheduled)
+        scheduled = next_pass_at(started, every_hours)
         while True:
-            remaining = started + every_hours * 3600 - clock()
+            remaining = scheduled - clock()
             if remaining <= 0:
                 break
             if wait(min(remaining, chunk_s)):
@@ -183,11 +259,17 @@ def main(argv=None):
 
     stalled = [0]
 
-    def one_pass():
+    def one_pass(scheduled=None):
+        # Captured before session_log.start() so a slow log-file open (or
+        # the [!] print it enables below) is never counted as lateness.
+        started = time.time()
         # A fresh session log per pass, so each shows up in data/logs on
         # its own and retention pruning treats it like any other run.
         session_log.start(["--harvest", *argv])
         try:
+            warning = overdue_warning(scheduled, started)
+            if warning:
+                print(f"  {warning}")
             try:
                 summary = harvest.run(
                     db_path=args.db, only=only, names=args.names,
@@ -207,7 +289,9 @@ def main(argv=None):
                 if args.once:
                     raise
             if not args.once:
-                nxt = datetime.fromtimestamp(time.time() + args.every * 3600)
+                # Same START-of-this-pass anchor run_forever schedules the
+                # next call from, so the promise and the wait always agree.
+                nxt = datetime.fromtimestamp(next_pass_at(started, args.every))
                 print(f"  next pass at {nxt:%Y-%m-%d %H:%M} "
                       f"(every {args.every:g} h; Ctrl+C to stop)")
         finally:

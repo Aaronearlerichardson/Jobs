@@ -24,7 +24,8 @@ import pytest
 from conftest import fake_response
 from src.match.filters import is_relevant
 from src.ats.fetchers import (api, discourse, getro, hibob, jobvite,
-                              peopleadmin, remoteok, remotive, usajobs)
+                              peopleadmin, phenom, remoteok, remotive,
+                              usajobs)
 from src.discovery import apply
 from src.net import http
 
@@ -993,8 +994,9 @@ class TestOneFetcherPerAts:
 
 
 class TestADeadEndpointIsNeverAnException:
-    """Every JSON-pulling fetcher goes through net.http.get_json, so the
-    "a dead source reports and returns empty" contract is ONE contract.
+    """Every JSON-pulling fetcher goes through net.http.get_json, and the
+    scraped ones report through net.http.fetch_failed, so the "a dead
+    source reports and returns empty" contract is ONE contract.
 
     It used to be a per-fetcher test, which meant greenhouse, lever, ashby
     and hibob had one while remoteok, remotive and the Discourse forums did
@@ -1011,6 +1013,7 @@ class TestADeadEndpointIsNeverAnException:
         "remotive": lambda: remotive.fetch_remotive(),
         "discourse": lambda: discourse.fetch_discourse(
             "Forum", "https://forum.test", 1),
+        "phenom": lambda: phenom.fetch_phenom_all("careers.test"),
     }
 
     @pytest.fixture(params=["refused", "http-500"])

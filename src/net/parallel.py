@@ -13,6 +13,7 @@ sources first and keep dedupe deterministic regardless of completion
 from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
                                 as_completed, wait as fut_wait)
 
+from . import http
 from .util import worker_count
 
 # Network-I/O-bound, so this is a concurrency knob, not a CPU one: defaults
@@ -143,28 +144,56 @@ def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
         ex.shutdown(wait=False, cancel_futures=True)
 
 
+def _accounted(thunk):
+    """(jobs, snapshot) for one source, with this pool thread's fetch
+    accounting reset first: a reused thread must not hand one source's
+    failures or cap to the next."""
+    http.reset_fetch_failures()
+    jobs = thunk() or []
+    return jobs, http.snapshot_info()
+
+
 def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):
     """Run every (name, platform, thunk) source concurrently.
 
     Returns a list aligned with `sources`: each element is
-    (jobs, error) where exactly one of the two is meaningful —
-    `error` is None on success, and `jobs` is [] on failure.
+    (jobs, error, snapshot). `error` is None on success; on failure `jobs`
+    is [] and `snapshot` None. `snapshot` is net.http.snapshot_info() for
+    that source's own fetch, so a caller can tell a complete board from an
+    incomplete or capped one. One pool thread serving two sources does not
+    carry the first one's failure into the second:
+
+    >>> from src.net.http import fetch_failed
+    >>> srcs = [("bad", "x", lambda: fetch_failed("bad", "timeout", indent=0)),
+    ...         ("ok", "x", lambda: [1])]
+    >>> [(jobs, snap["incomplete"])
+    ...  for jobs, _, snap in fetch_all(srcs, max_workers=1)]
+    [!] bad: timeout
+    [([], True), ([1], False)]
+
+    A thunk that raises is the `error` arm:
+
+    >>> def boom():
+    ...     raise OSError("refused")
+    >>> fetch_all([("dead", "x", boom)])
+    [([], OSError('refused'), None)]
 
     `on_done(name, platform, jobs, error)` fires on the caller's thread
     as each source completes (completion order), for progress output.
     """
-    results = [([], None)] * len(sources)
+    results = [([], None, None)] * len(sources)
     with ThreadPoolExecutor(max_workers=max_workers,
                             thread_name_prefix="fetch") as pool:
-        futures = {pool.submit(spec[2]): i for i, spec in enumerate(sources)}
+        futures = {pool.submit(_accounted, spec[2]): i
+                   for i, spec in enumerate(sources)}
         for fut in as_completed(futures):
             i = futures[fut]
             name, platform, _ = sources[i]
             try:
-                jobs, err = (fut.result() or []), None
+                (jobs, snap), err = fut.result(), None
             except Exception as e:
-                jobs, err = [], e
-            results[i] = (jobs, err)
+                jobs, err, snap = [], e, None
+            results[i] = (jobs, err, snap)
             if on_done:
                 on_done(name, platform, jobs, err)
     return results

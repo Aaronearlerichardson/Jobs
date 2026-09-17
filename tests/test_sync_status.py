@@ -25,8 +25,9 @@ class TestSyncStatusReportsSkippedBoards:
         otherwise write a real digest file."""
         monkeypatch.setattr(store, "crawlable_companies",
                             lambda conn, tag=None: roster)
+        # An answer is (jobs, err) or (jobs, err, snapshot).
         monkeypatch.setattr(ops, "fetch_all",
-                            lambda sources, *a, **k: [answers[name]
+                            lambda sources, *a, **k: [(*answers[name], None)[:3]
                                                       for name, _ats, _fn
                                                       in sources])
         monkeypatch.setattr(ops, "_ranked", lambda *a, **k: [])
@@ -115,3 +116,36 @@ class TestSyncStatusReportsSkippedBoards:
         assert status == "open"
         assert "0 board(s) reconciled: 0 closed, 0 reopened, 1 skipped " \
                "(1 fetch error)" in capsys.readouterr().out
+
+    def test_a_partial_fetch_is_skipped_like_a_failed_one(
+            self, tmp_path, monkeypatch, capsys, local_track):
+        """A page failed partway and the pager kept what had arrived
+        (2026-09-15: Stryker's page 10 came back as HTML, 200 rows listed,
+        1,037 closed). The rows are real, but a row missing from them is
+        no evidence the posting closed."""
+        dbp = tmp_path / "t.db"
+        conn = store.connect(dbp)
+        cid = store.upsert_company(
+            conn, {"name": "Partial Co", "ats": "greenhouse", "slug": "part"})
+        for n in (1, 2):
+            store.upsert_job(conn, {
+                "job_id": f"gh_part_{n}", "company_id": cid,
+                "company_name": "Partial Co", "title": f"Data Engineer {n}",
+                "url": f"https://part.example/jobs/{n}",
+                "location": "Durham, NC", "track": local_track["track"]})
+        conn.close()
+
+        listed = [{"id": "gh_part_1", "title": "Data Engineer 1",
+                   "url": "https://part.example/jobs/1"}]
+        self._wire(monkeypatch,
+                   [{"id": cid, "name": "Partial Co", "ats": "greenhouse",
+                     "slug": "part"}],
+                   {"Partial Co": (listed, None, {"incomplete": True})})
+        ops.sync_status_all(t={**local_track, "db_path": dbp})
+
+        conn = store.connect(dbp)
+        statuses = dict(conn.execute(
+            "SELECT job_id, COALESCE(status,'open') FROM jobs").fetchall())
+        conn.close()
+        assert statuses == {"gh_part_1": "open", "gh_part_2": "open"}
+        assert "1 skipped (1 fetch error)" in capsys.readouterr().out

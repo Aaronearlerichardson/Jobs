@@ -290,21 +290,28 @@ class Collected(NamedTuple):
     n_seen: int
 
 
-def _gate_company_board(conn, t, c, jobs, commit):
+def _gate_company_board(conn, t, c, jobs, commit, snapshot=None):
     """One store company's board through the gates.
 
     Returns (kept, fresh, watch_hits, n_reopened, n_closed). `fresh` is the
     subset no crawl has handled yet -- a row the harvester stored (no
     track, no score) counts as fresh: it was fetched, never gated.
+
+    `snapshot` is the fetch's net.http.snapshot_info() (see fetch_all): an
+    incomplete fetch closes nothing, and a capped one closes a row only on
+    its second miss (store.sync_job_statuses's `capped`). The rows are
+    gated either way.
     """
     from src.match import gates
     from src.match.locality import geo_mode
     from src.ops import maintenance as ops
 
     n_reopened = n_closed = 0
-    if jobs and c.get("id") and commit:
-        n_reopened, n_closed = store.sync_job_statuses(conn, c["id"], jobs,
-                                                       track=t["track"])
+    snapshot = snapshot or {}
+    if jobs and c.get("id") and commit and not snapshot.get("incomplete"):
+        n_reopened, n_closed = store.sync_job_statuses(
+            conn, c["id"], jobs, track=t["track"],
+            capped=snapshot.get("capped", False))
     # Reuse bodies the background harvester already fetched, so the gates
     # and the scorer below do not pay a detail GET for a posting whose
     # description is sitting in the store.
@@ -412,7 +419,7 @@ def _gate_sources(conn, t, specs, fetched, commit):
     seen_ids = set()
     n_closed = n_reopened = n_seen = 0
 
-    for spec, (jobs, err) in zip(specs, fetched):
+    for spec, (jobs, err, snapshot) in zip(specs, fetched):
         c = spec["company"]
         label = f"{spec['name']} ({spec['platform']})"
         if c is not None and c.get("id") and commit:
@@ -428,7 +435,7 @@ def _gate_sources(conn, t, specs, fetched, commit):
 
         if c is not None:
             kept, fresh, watched, n_re, n_cl = _gate_company_board(
-                conn, t, c, jobs, commit)
+                conn, t, c, jobs, commit, snapshot)
             n_reopened += n_re
             n_closed += n_cl
             n_seen += len(kept) - len(fresh)
@@ -502,12 +509,12 @@ def _score_and_persist(conn, t, got, resume, *, fit, commit, guard_tripped,
                                [:config.MAX_DESC_CHARS]})
 
     if fit and got.matches and resume and not guard_tripped:
-        from src.claude.api import score_resume_fit
+        from src.claude.fit import score_resume_fit
         print(f"  scoring {len(got.matches)} match(es) against resume...")
 
         def _one(j):
-            res = score_resume_fit(resume, j["title"],
-                                   j.get("description", ""))
+            res = score_resume_fit(j["title"], j.get("description", ""),
+                                   location=j.get("location") or "")
             j.update(res.as_columns())
 
         # `ex.map` re-raised the first failure, so one unscorable posting

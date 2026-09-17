@@ -18,8 +18,9 @@ combiner is a weighted geometric mean -- the same imbalance-punishing shape
 store.combined_score() already uses -- times the worst gate multiplier.
 
 Wired into:
-  - api.py:  `score_resume_fit(resume, title, desc)` delegates here and
-    returns the FitResult (resume is ignored; the rubric scores the profile).
+  - crawl/runner.py, crawl/triage.py, ops/maintenance.py: call
+    `score_resume_fit(title, desc, location=...)` here for the FitResult
+    (the rubric scores the profile, not résumé text).
   - src/config/profile.py:  loads the optional `[fit]` profile block (weights / gate
     penalties / domain ladder / stack / region); omit it and the defaults
     below apply.
@@ -344,6 +345,11 @@ def _axes_and_gates_block() -> str:
 Then set any GATES that apply (these are disqualifiers, not deductions):
 - "geo": true if the role is neither remote nor in the candidate's region
   ({_cfg("FIT_REGION", None) or _derived_region()}).
+  A "JOB LOCATION (stored)" line, when present, is the posting's own
+  location field: judge the gate from it together with any location or
+  remote language in the text. A stored location inside the region clears
+  the gate; a stored onsite location outside it, with no remote option in
+  the text, trips it.
 - "embedded": true if the core work is firmware, PCB, analog, or RTOS.
 - "level": true if the role is below the candidate's technical bar (SOP
   execution, coordination, monitoring, manual data entry, analyst-only).
@@ -389,10 +395,6 @@ boilerplate, and it outranks the marketing copy at the top:
   "management", "program-product", "sales-field", "support-ops".
 - "must_haves": the 3-6 load-bearing requirements as short phrases.
 - "candidate_gaps": the must_haves this candidate plainly lacks.
-A "JOB LOCATION (stored)" line, when present, is the posting's own location
-field. Judge the "geo" gate from it together with any location or remote
-language in the text; a stored onsite location outside the candidate's
-region with no remote option in the text trips the gate.
 
 STEP 2 — with that extraction in mind (a candidate missing the spine of the
 job cannot score well however attractive the employer's domain is):
@@ -473,11 +475,38 @@ def clip_desc(text, max_chars=None):
             + text[-(max_chars - head):])
 
 
-def score_resume_fit(title: str, description: str = "", *, max_tokens=300) -> FitResult:
+def _user_turn(title, location, body_label, body):
+    """The per-posting user turn both scorers send: the title, the STORED
+    location (the ATS field, not the JD prose) when there is one, then the
+    posting text under `body_label`.
+
+    >>> _user_turn("Data Scientist", " Raleigh, NC ", "JOB DESCRIPTION", "...")
+    'JOB TITLE: Data Scientist\\nJOB LOCATION (stored): Raleigh, NC\\nJOB DESCRIPTION:\\n...'
+    >>> _user_turn("Data Scientist", None, "FULL JOB POSTING", "...")
+    'JOB TITLE: Data Scientist\\nFULL JOB POSTING:\\n...'
+
+    Notes:
+        The scorers see nothing but this turn, so without the location line
+        a posting whose prose never names a city left the geo gate guessing:
+        the Neuralink ML Engineer (onsite, out of region) passed verify at
+        0.81 with no gate, and a TARGAN Data Scientist stored at a Raleigh
+        office scored 0.07 in the screen on "no location stated" (both
+        2026-09). The value stays out of the system prompt, which prompt
+        caching needs byte-stable; the rule for reading it is in the geo
+        gate of the shared rubric (_axes_and_gates_block).
+    """
+    loc = (location or "").strip()
+    loc_line = f"JOB LOCATION (stored): {loc}\n" if loc else ""
+    return f"JOB TITLE: {title}\n{loc_line}{body_label}:\n{body}"
+
+
+def score_resume_fit(title: str, description: str = "", *, location: str = "",
+                     max_tokens=300) -> FitResult:
     """Score one posting. Returns a None-scored result when the API is
     unavailable OR when there is no real description to assess (callers treat a
     None score as 'don't rank this'), so unscorable rows drop out instead of
-    floating at a fabricated cap."""
+    floating at a fabricated cap. `location` rides in the user turn (see
+    _user_turn)."""
     if call_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
@@ -489,8 +518,7 @@ def score_resume_fit(title: str, description: str = "", *, max_tokens=300) -> Fi
         print(f"    [!] SKIP-SCORE: {len(desc)}/{MIN_DESC_CHARS} char description "
               f"for {title!r} - unscored (check the fetcher/hydration path)")
         return FitResult(score=None, reason="no description; unscored")
-    desc = clip_desc(desc)
-    user = f"JOB TITLE: {title}\nJOB DESCRIPTION:\n{desc}"
+    user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
     r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens)
     if not r or "function" not in r:
         return FitResult(score=None, reason="unscored")
@@ -516,12 +544,7 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     the model's own gate flags: a seat_type of management/program-product
     trips the management gate even if the model forgot to set it.
 
-    `location` is the job's STORED location string (the ATS field, not the
-    JD prose). It rides in the user turn as a JOB LOCATION line so the geo
-    gate has something to fire on: the scorer otherwise sees only title and
-    description, and an onsite Austin/SSF posting whose body never names a
-    city sailed through at 0.81 with no gate (the Neuralink ML Engineer row,
-    2026-09). Empty/None omits the line.
+    `location` rides in the user turn (see _user_turn).
 
     Returns a FitResult whose reason starts with "deep:" and whose `model`
     names the verify model — together the mark verify_top() uses to skip
@@ -536,9 +559,7 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     # Finalists get double the normal text budget: this pass exists precisely
     # to read what the screen's clip may have elided.
     desc = clip_desc(desc, max_chars=2 * _cfg("MAX_DESC_CHARS", 12000))
-    loc = (location or "").strip()
-    loc_line = f"JOB LOCATION (stored): {loc}\n" if loc else ""
-    user = f"JOB TITLE: {title}\n{loc_line}FULL JOB POSTING:\n{desc}"
+    user = _user_turn(title, location, "FULL JOB POSTING", desc)
     # Finalists get the stronger verify model WITH adaptive thinking left on
     # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
     # cover thinking + the JSON on 5-family models, hence the 3000 default.

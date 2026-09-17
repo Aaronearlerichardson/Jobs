@@ -27,6 +27,7 @@ from .jobvite import fetch_jobvite
 from .jsonld import fetch_jsonld_page
 from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
+from .phenom import fetch_phenom
 from .remoteok import fetch_remoteok
 from .remotive import fetch_remotive
 from .rippling import fetch_rippling
@@ -54,6 +55,7 @@ __all__ = [
     "fetch_nlx_company",
     "fetch_paylocity",
     "fetch_peopleadmin",
+    "fetch_phenom",
     "fetch_remoteok",
     "fetch_remotive",
     "fetch_rippling",

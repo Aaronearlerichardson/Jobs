@@ -14,7 +14,7 @@ from urllib.parse import unquote, urljoin
 from bs4 import BeautifulSoup
 
 from src.match.locality import location_snippet
-from src.net.http import HEADERS, SESSION, fetch_failed
+from src.net.http import HEADERS, SESSION, fetch_failed, note_capped
 from src.net.util import stable_id
 from .board import board_jobs
 
@@ -62,13 +62,43 @@ def fetch_kula(company_name, kula_slug, gate=None, loc_re=None):
 # first ",-<2 caps>-" so a comma inside the title can't steal the match.
 _SF_LOC_SLUG_RE = re.compile(r"/job/(.+?),-([A-Z]{2})-")
 
+# The standard SF theme's pagination readout ('Results <b>1 - 25</b> of
+# <b>621</b>'): the board's size. A custom skin may not render it.
+_SF_TOTAL_RE = re.compile(
+    r'class="paginationLabel"[^>]*>.*?of\s*<b>\s*([\d,]+)\s*</b>', re.S)
+
+
+def _sf_total(html_text):
+    """The board's posting count from the page's pagination label, or None
+    when the tenant's theme renders none.
+
+    >>> _sf_total('<span class="paginationLabel">Results <b>1 - 25</b> of <b>1,621</b></span>')
+    1621
+    >>> _sf_total("<html></html>") is None
+    True
+    """
+    m = _SF_TOTAL_RE.search(html_text)
+    return int(m.group(1).replace(",", "")) if m else None
+
 
 def _sf_rows(base_url, label, step, max_pages):
     """Every posting on a SuccessFactors site, paged; a page that adds no
-    new URL ends the walk (the last page repeats on some tenants)."""
+    new URL ends the walk (the last page repeats on some tenants).
+
+    Reports a capped snapshot (net.http.note_capped) when the walk stops
+    short of the board's own total (_sf_total), when it stops on a
+    repeated page with no total to check, and whenever it reads all
+    `max_pages`. An empty page with no total is the board's honest end.
+
+    Notes:
+        A repeated page is not an honest end: some tenants wrap back to
+        earlier rows instead of running dry (Bayer's board stopped at 250
+        of 621 on every pass).
+    """
     seen = set()
     sf_headers = {**HEADERS, "Accept": "text/html"}
     key = re.sub(r"[^a-z0-9]+", "", base_url.lower())[-16:]
+    total = None
     for page in range(max_pages):
         url = f"{base_url.rstrip('/')}/search/?startrow={page * step}"
         try:
@@ -77,10 +107,14 @@ def _sf_rows(base_url, label, step, max_pages):
         except Exception as e:
             fetch_failed(f"SuccessFactors {label} p{page}", e)
             return
+        if total is None:
+            total = _sf_total(r.text)
         soup = BeautifulSoup(r.text, "html.parser")
         anchors = soup.select("a.jobTitle-link") or [
             a for a in soup.find_all("a", href=True) if "/job/" in a["href"]]
         if not anchors:
+            if total is not None and len(seen) < total:
+                note_capped(total)
             return
         new_on_page = 0
         for a in anchors:
@@ -114,8 +148,11 @@ def _sf_rows(base_url, label, step, max_pages):
             yield {"id": f"sf_{key}_{jid}", "title": a.get_text(strip=True),
                    "url": href, "location": loc, "description": ""}
         if new_on_page == 0:
+            if total is None or len(seen) < total:
+                note_capped(total)
             return
         time.sleep(0.3)
+    note_capped(total)
 
 
 def fetch_successfactors(company_name, base_url, gate=None, loc_re=None, step=25,

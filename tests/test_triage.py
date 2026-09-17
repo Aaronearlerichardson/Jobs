@@ -71,7 +71,7 @@ def stubs(monkeypatch):
                 n += 1
         return {"hydrated": n, "unhydrated": len(jobs) - n}
 
-    def score(title, description=""):
+    def score(title, description="", *, location="", max_tokens=300):
         calls["score"].append(title)
         return FitResult(score=0.1 if "weak" in title.lower() else 0.7,
                          reason="stub")

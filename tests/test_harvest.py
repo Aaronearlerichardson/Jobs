@@ -4,6 +4,8 @@ file with the crawl and the web UI."""
 import sqlite3
 import threading
 
+import pytest
+
 from src import store
 from src.match import gates
 from src.crawl import harvest
@@ -310,6 +312,84 @@ def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
     assert harvest.harvest_board(c, db, delay=0)["fetch_errors"] == 1
 
 
+# ── snapshot completeness ───────────────────────────────────────────────────
+
+def test_harvest_board_partial_fetch_stores_rows_but_closes_nothing(
+        tmp_path, monkeypatch):
+    """One page of the board failed while the rest arrived (an HTML error
+    page under HTTP 200 closed 1037 Stryker rows on 2026-09-15). The rows
+    that arrived are stored; the ones that did not prove nothing, so
+    nothing closes."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    store.upsert_job(conn, {"job_id": "gh_acme_old", "company_id": c["id"],
+                            "title": "Still open", "track": "local"})
+
+    def partial(comp):
+        http.fetch_failed("workday acme p10",
+                          "Expecting value: line 1 column 1 (char 0)")
+        return [_job(1), _job(2)]
+
+    monkeypatch.setattr(harvest, "fetch_whole_board", partial)
+    stats = harvest.harvest_board(c, db, delay=0)
+    assert stats["err"] is None
+    assert stats["fetch_errors"] == 1 and stats["incomplete"] is True
+    assert stats["capped"] is False
+    assert stats["closed"] == 0 and stats["reopened"] == 0
+    assert stats["new"] == 2, "the rows that DID arrive are still stored"
+    row = conn.execute(
+        "SELECT status FROM jobs WHERE job_id='gh_acme_old'").fetchone()
+    assert row["status"] == "open"
+
+
+def test_harvest_board_capped_snapshot_closes_on_the_second_miss(
+        tmp_path, monkeypatch):
+    """A board that reports itself capped (net.http.note_capped) closes an
+    absent row only when the previous pass missed it too."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    for jid in ("gh_acme_keep", "gh_acme_flaky"):
+        store.upsert_job(conn, {"job_id": jid, "company_id": c["id"],
+                                "title": "T"})
+    conn.execute(
+        "UPDATE jobs SET last_seen=?, first_seen=? WHERE company_id=?",
+        ("2020-01-01T00:00:00", "2020-01-01T00:00:00", c["id"]))
+    conn.commit()
+
+    pass_n = {"i": 0}
+
+    def capped_fetch(comp):
+        http.note_capped(50)             # server total >> what's returned
+        pass_n["i"] += 1
+        return [_job("flaky")] if pass_n["i"] == 1 else [_job("new")]
+
+    monkeypatch.setattr(harvest, "fetch_whole_board", capped_fetch)
+
+    # Pass 1: the board hands back "flaky" only. No previous harvest is
+    # recorded yet, so "keep" -- absent -- still stays open.
+    s1 = harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    assert s1["capped"] is True and s1["capped_total"] == 50
+    assert s1["closed"] == 0
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE job_id='gh_acme_keep'"
+    ).fetchone()["status"] == "open"
+
+    # Pass 2: neither "flaky" nor "keep" is on the board this time (a
+    # third row, "new", keeps the snapshot non-empty). "flaky" gets its
+    # one free miss (it was seen last pass); "keep" has now missed twice
+    # running and closes.
+    c2 = store.get_company(conn, c["id"])
+    s2 = harvest.harvest_board(c2, db, delay=0, now=harvest.datetime(2026, 1, 2))
+    assert s2["capped"] is True
+    rows = {r["job_id"]: r["status"] for r in conn.execute(
+        "SELECT job_id, status FROM jobs WHERE company_id=?", (c["id"],))}
+    assert rows["gh_acme_flaky"] == "open", "one miss right after being seen"
+    assert rows["gh_acme_keep"] == "closed", "absent two passes running"
+    assert s2["closed"] == 1
+
+
 # ── run ─────────────────────────────────────────────────────────────────────
 
 def test_run_reports_and_skips_fresh_boards(tmp_path, monkeypatch):
@@ -351,6 +431,28 @@ def test_run_abandons_a_stalled_board(tmp_path):
                     stall_s=0.0, poll_s=0.1)
     release.set()
     assert s["stalled"] == 1 and s["ok"] == 0
+
+
+# ── the crawl gets the same completeness guard ──────────────────────────────
+
+@pytest.mark.parametrize("snapshot, closed", [
+    (None, 1),                      # complete: an absent row closes at once
+    ({"incomplete": True}, 0),      # a page failed: nothing closes
+    ({"capped": True}, 0),          # capped, no earlier harvest: first miss
+])
+def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
+                                                        snapshot, closed):
+    """The crawl reads fetch_all's per-source snapshot and gives
+    store.sync_job_statuses the same guard the harvester does."""
+    from src.crawl import runner
+    c = _company(db, "Acme")
+    store.upsert_job(db, {"job_id": "gh_acme_old", "company_id": c["id"],
+                          "title": "Still open", "track": local_track["track"]})
+    *_, n_reopened, n_closed = runner._gate_company_board(
+        db, local_track, c, [_job(1)], commit=True, snapshot=snapshot)
+    assert (n_reopened, n_closed) == (0, closed)
+    assert db.execute("SELECT status FROM jobs WHERE job_id='gh_acme_old'"
+                      ).fetchone()["status"] == ("closed" if closed else "open")
 
 
 # ── the crawl adopts harvested rows ─────────────────────────────────────────
@@ -399,7 +501,8 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
         def as_columns(self):
             return {"resume_fit_score": 0.7, "fit_reason": "ok"}
     monkeypatch.setattr(ops, "score_resume_fit",
-                        lambda resume, title, desc: R())
+                        lambda title, description="", *, location="",
+                        max_tokens=300: R())
     monkeypatch.setattr(ops, "self_heal_unscored", lambda *a, **k: 0)
     runner.run_track(t, fit=True, commit=True, send=False, verify=False,
                      websearch=False)

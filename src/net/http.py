@@ -162,6 +162,58 @@ def fetch_failures():
     return getattr(_FAILED, "n", 0)
 
 
+#: Per-THREAD "the pager stopped before the board's end" marker, beside
+#: _FAILED and for the same reason.
+_CAPPED = threading.local()
+
+
 def reset_fetch_failures():
-    """Start counting this thread's fetch failures from zero."""
+    """Start this thread's fetch accounting from zero: the failure count
+    and the capped marker. One call per fetch attempt, on the thread that
+    runs it (crawl.harvest.harvest_board, net.parallel.fetch_all)."""
     _FAILED.n = 0
+    _CAPPED.hit, _CAPPED.total = False, None
+
+
+def note_capped(total=None):
+    """Record that this thread's snapshot was truncated: the board lists
+    more than the pull returned. `total` is the board size the API
+    reported, None when it reported none.
+
+    A pager calls this, instead of raising, when it stops anywhere but the
+    board's honest end: fewer rows than a known total, every page up to
+    max_pages read with the last one still full, or a repeated page with no
+    total to prove the walk complete. A fetcher that never calls it reads
+    as uncapped.
+
+    >>> reset_fetch_failures(); note_capped(50); snapshot_info()
+    {'fetch_errors': 0, 'incomplete': False, 'capped': True, 'capped_total': 50}
+
+    Notes:
+        A capped snapshot is partial, not failed: its rows are real, but a
+        row missing from it is no evidence the posting closed. See
+        store.sync_job_statuses's `capped` argument.
+    """
+    _CAPPED.hit, _CAPPED.total = True, total
+
+
+def snapshot_info():
+    """This thread's fetch accounting since the last reset, as the callers
+    record it: the failure count, and whether the snapshot is INCOMPLETE (a
+    fetch failed partway) or CAPPED (truncated without an error).
+
+    >>> reset_fetch_failures(); snapshot_info()
+    {'fetch_errors': 0, 'incomplete': False, 'capped': False, 'capped_total': None}
+
+    A failure outranks a cap: an incomplete snapshot closes nothing, so it
+    is never also reported capped.
+
+    >>> _ = fetch_failed("board p3", "timeout", indent=0)
+    [!] board p3: timeout
+    >>> note_capped(50); snapshot_info()
+    {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None}
+    """
+    n = fetch_failures()
+    capped = getattr(_CAPPED, "hit", False) and not n
+    return {"fetch_errors": n, "incomplete": n > 0, "capped": capped,
+            "capped_total": getattr(_CAPPED, "total", None) if capped else None}

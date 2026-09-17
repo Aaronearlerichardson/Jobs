@@ -354,7 +354,8 @@ def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S,
 
 
 def _score_one(job):
-    res = score_resume_fit(job.get("title") or "", job.get("description") or "")
+    res = score_resume_fit(job.get("title") or "", job.get("description") or "",
+                           location=job.get("location") or "")
     return job, res
 
 

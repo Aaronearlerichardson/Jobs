@@ -197,7 +197,8 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     """Fetch, hydrate and store ONE board. Runs on a worker thread and opens
     its own connection (sqlite connections are per-thread). Returns a stats
     dict; a fetch failure is reported, not raised, and leaves the store
-    untouched (nothing is closed on a failed or empty snapshot).
+    untouched (nothing is closed on a failed or empty snapshot; see
+    _store_board for an incomplete or capped one).
 
     `progress()` is called after the listing returns and after every
     hydrated row, which is how the run's watchdog tells a slow board from a
@@ -208,6 +209,9 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     survive its free gates. Turning it on hydrates the whole board here
     (the pre-triage behaviour), which spends the host's detail budget on
     rows a title check would have dropped.
+
+    The stats carry net.http.snapshot_info() for this board's own fetch
+    (fetch_errors, incomplete, capped, capped_total).
     """
     t0 = time.monotonic()
     if delay is None:
@@ -215,6 +219,7 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     stats = {"name": company.get("name"), "ats": company.get("ats"),
              "fetched": 0, "new": 0, "hydrated": 0, "unhydrated": 0,
              "closed": 0, "reopened": 0, "fetch_errors": 0, "err": None,
+             "incomplete": False, "capped": False, "capped_total": None,
              "secs": 0.0}
     # A fetcher does not RAISE on a dead board -- it reports and returns [],
     # which is also what a board with nothing on it returns, so `fetched: 0`
@@ -226,12 +231,13 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
         jobs = fetch_whole_board(company) or []
     except Exception as e:                      # noqa: BLE001 - reported
         stats["fetch_errors"] = http.fetch_failures()
+        stats["incomplete"] = True
         stats["err"] = f"fetch: {type(e).__name__}: {e}"
         stats["secs"] = time.monotonic() - t0
         return stats
     progress()
     stats["fetched"] = len(jobs)
-    stats["fetch_errors"] = http.fetch_failures()
+    stats.update(http.snapshot_info())
 
     try:
         _store_board(db_path, jobs, company, stats, progress,
@@ -250,7 +256,12 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
                  backoff_s, now):
     """Hydrate (optionally) and write one board's snapshot. The write itself
     is ONE transaction (store.batch), which is the whole point: a board is
-    one lock acquisition, not one per posting."""
+    one lock acquisition, not one per posting.
+
+    The rows that arrived are always stored. Closing against the snapshot
+    is what a partial pull cannot be trusted for: an INCOMPLETE one (a
+    fetch failed partway) closes nothing, and a CAPPED one closes a row
+    only on its second miss (store.sync_job_statuses's `capped`)."""
     conn = store.connect(db_path)
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are
@@ -264,14 +275,17 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
                     j["description"] = stored[j["id"]]
         if hydrate:
             _hydrate_rows(jobs, company, stats, progress, delay, backoff_s)
-        stamp = (now or datetime.now()).isoformat()
+        stamp_dt = now or datetime.now()
+        stamp = stamp_dt.isoformat()
         with store.batch(conn):
-            if jobs and company.get("id"):
+            if jobs and company.get("id") and not stats.get("incomplete"):
                 # A full, successful snapshot is the best evidence there is
                 # for what the board lists: close what vanished, revive
-                # returners -- across every track (track=None).
-                re_, cl = store.sync_job_statuses(conn, company["id"], jobs,
-                                                  track=None)
+                # returners -- across every track (track=None), on this
+                # pass's own stamp.
+                re_, cl = store.sync_job_statuses(
+                    conn, company["id"], jobs, track=None,
+                    capped=stats.get("capped", False), now=stamp_dt)
                 stats["reopened"], stats["closed"] = re_, cl
             for j in jobs:
                 if store.upsert_job(conn, _row(j, company, stamp)):
@@ -394,8 +408,20 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
                       + (f" ({s['unhydrated']} bodiless)"
                          if s.get("unhydrated") else "")
                       + f", {s['closed']} closed, {s['secs']:.0f}s")
+            if s.get("incomplete"):
+                status += " [incomplete: 0 closed]"
+            elif s.get("capped"):
+                status += (f" [capped of {s['capped_total']}: 2-strike close]"
+                           if s.get("capped_total") else " [capped: 2-strike close]")
         print(f"  [{done_n[0]:>3}/{len(boards)}] {c['name']} ({c['ats']}): "
               f"{status}")
+        # Churn a two-strike close should have damped, still showing up:
+        # worth a human's attention, not just a debug line.
+        fetched = s.get("fetched") or 0
+        reopened = s.get("reopened") or 0
+        if reopened > max(10, 0.05 * fetched):
+            print(f"    [!] {c['name']} ({c['ats']}): {reopened} reopened "
+                  f"of {fetched} fetched - board churning")
         _log.debug("board %s stats %s", c.get("name"), s)
 
     ex = ThreadPoolExecutor(max_workers=max_workers,
