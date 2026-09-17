@@ -37,13 +37,14 @@ from .companies import (  # noqa: F401
     board_key, company_by_board,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
-    get_company, harvestable_companies, import_companies, mark_harvested,
+    HARVEST_DEAD_AFTER_DAYS, get_company, harvestable_companies,
+    import_companies, mark_harvested,
     miss_counts, miss_family, reactivate_company, recent_miss_names,
     record_crawl_outcome, record_miss, roster_growth, set_company_tag,
     upsert_company,
 )
 from .jobs import (  # noqa: F401
-    TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns,
+    TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
     job_exists, join_tracks, mark_desc_checked, ranked_jobs, record_triage,
     remote_admitted, store_body, sync_job_statuses, touch_job, track_set,

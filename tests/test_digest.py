@@ -57,10 +57,10 @@ def hometown(monkeypatch):
 
 
 @pytest.fixture
-def report_dir(tmp_path, monkeypatch):
-    """Written digests land in tmp, never in the real report directory."""
-    monkeypatch.setattr(config, "REPORT_DIR", tmp_path)
-    return tmp_path
+def report_dir():
+    """Where written digests land: the tmp dir conftest's autouse fixture
+    points config.REPORT_DIR at."""
+    return config.REPORT_DIR
 
 
 def row(job_id, fit=0.9, first_seen=TODAY, **over):

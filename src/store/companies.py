@@ -808,12 +808,141 @@ def harvestable_companies(conn):
     return out
 
 
-def mark_harvested(conn, company_id, n_jobs):
-    """Stamp a successful whole-board pull (and the board's true size)."""
+# The harvester's own dead-board qualifier: a pass whose board answered
+# with an error and returned no jobs (see mark_harvested's `soft_fail`).
+# A generic "fetch-error" miss (src.discovery) means the RESOLUTION
+# attempt raised; this one means a board the roster already trusts kept
+# failing to answer during ordinary harvesting.
+_HARVEST_FETCH_ERROR = "fetch-error:harvest"
+
+# Consecutive calendar days a board may carry _HARVEST_FETCH_ERROR before
+# mark_harvested promotes it to 'board-dead:<ats>' -- the same family
+# src.ops.maintenance.RERESOLVE_FAMILIES retries and harvestable_companies
+# skips (_NO_BOARD_PREFIXES above).
+HARVEST_DEAD_AFTER_DAYS = 3
+
+
+def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
+    """Stamp one harvest pass's outcome for a board, and run the
+    dead-board promotion cycle on its miss_reason.
+
+    `soft_fail` is the caller's own verdict (from the fetch's failure
+    count -- see net.http.snapshot_info/fetch_failed, read by
+    src.crawl.harvest.harvest_board) that this pass's EMPTY result is a
+    board that answered with an error, not a board that genuinely listed
+    nothing. `n_jobs` is always 0 when `soft_fail` is set.
+
+    A normal pass (`soft_fail=False`) always stamps `last_harvested_at`
+    and the board's true size (`total_job_count`), and `last_nonempty_at`
+    too when `n_jobs` is nonzero. A non-empty pass also clears a still-
+    pending _HARVEST_FETCH_ERROR miss -- the board recovered.
+
+    A soft-failed pass (`soft_fail=True`) stamps only `last_harvested_at`:
+    `total_job_count` keeps its last known-good value instead of being
+    zeroed by a fetch hiccup. It records _HARVEST_FETCH_ERROR as the
+    row's miss_reason/miss_at on its FIRST occurrence only -- a miss
+    already on the row (any family, including a repeat
+    _HARVEST_FETCH_ERROR) is left untouched, so neither `miss_at` nor a
+    genuinely different failure is overwritten. A row already carrying
+    _HARVEST_FETCH_ERROR for >= HARVEST_DEAD_AFTER_DAYS days is promoted
+    to 'board-dead:<its ats>' instead (and deactivated, the same as a manually
+    pruned dead board -- see src.ops.maintenance.prune's deactivate_company
+    call -- which is what lets reresolve_misses pick it back up).
+
+    Harvest never touches empty_streak/crawl_state -- those belong to the
+    crawl's own dormancy bookkeeping (record_crawl_outcome).
+
+    Returns the 'board-dead:<ats>' reason string when THIS call is the
+    one that just promoted the row (so the caller can log a WARNING),
+    else None.
+
+    Notes:
+        Promotion sets active=0, which is NOT free of side effects: an
+        active row's board is also what crawlable_companies (the daily
+        crawl's own selection) fetches, since that reads
+        get_companies(active_only=True) same as harvest's own
+        harvestable_companies does. Deactivating a promoted board
+        therefore pulls it out of BOTH: the daily crawl on whatever
+        track(s) watch it, and every later harvest pass (already true
+        of any 'board-dead'/'no-board-found' row via
+        harvestable_companies's _NO_BOARD_PREFIXES check). That is the
+        deliberate trade here, for two reasons: (1) _reresolve_candidates
+        only ever selects `COALESCE(active, 0) = 0` rows -- exactly as
+        record_miss's own inactive-by-construction misses do -- so a
+        promoted row that stayed active would never reach
+        reresolve_misses at all; (2) this mirrors the existing manual
+        path for the same verdict (src.ops.maintenance.prune's
+        deactivate_company on a dead board probe). Three straight days
+        of a board answering with nothing is treated as at least as
+        strong evidence as that single live probe.
+
+        This does NOT extend to the pre-promotion _HARVEST_FETCH_ERROR
+        state: an active row keeps that miss_reason (and stays active,
+        still crawled and still harvested -- harvestable_companies only
+        skips the 'board-dead'/'no-board-found' prefixes) for up to
+        HARVEST_DEAD_AFTER_DAYS, its grace period. One place this DOES leak
+        into is purely cosmetic: store.miss_counts / the web UI's
+        `company_misses` tally count every non-NULL miss_reason
+        regardless of `active`, so an active board mid-grace-period
+        briefly inflates that dashboard number under the 'fetch-error'
+        family -- no code path treats it as unfetchable or unsafe
+        while it is active.
+
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Acme", "ats": "lever",
+    ...                             "slug": "acme", "total_job_count": 9})
+    >>> mark_harvested(conn, cid, 0, soft_fail=True) is None
+    True
+    >>> row = get_company(conn, cid)
+    >>> row["total_job_count"], row["miss_reason"]
+    (9, 'fetch-error:harvest')
+
+    A genuinely empty (no fetch error) pass, by contrast, DOES zero the
+    count and never touches miss_reason:
+
+    >>> cid2 = upsert_company(conn, {"name": "Zeta", "ats": "lever",
+    ...                              "slug": "z", "total_job_count": 5})
+    >>> mark_harvested(conn, cid2, 0)
+    >>> row = get_company(conn, cid2)
+    >>> row["total_job_count"], row["miss_reason"]
+    (0, None)
+    """
+    now_dt = now or datetime.now()
+    stamp = now_dt.isoformat()
+    sets = {"last_harvested_at": stamp}
+    if not soft_fail:
+        sets["total_job_count"] = n_jobs
+        if n_jobs:
+            sets["last_nonempty_at"] = stamp
     conn.execute(
-        "UPDATE companies SET last_harvested_at=?, total_job_count=? "
-        "WHERE id=?", (datetime.now().isoformat(), n_jobs, company_id))
+        f"UPDATE companies SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
+        [*sets.values(), company_id])
+
+    row = conn.execute("SELECT ats, miss_reason, miss_at FROM companies "
+                       "WHERE id=?", (company_id,)).fetchone()
+    cur_reason = row["miss_reason"] if row else None
+    promoted = None
+    if soft_fail:
+        if cur_reason is None:
+            conn.execute(
+                "UPDATE companies SET miss_reason=?, miss_at=? WHERE id=?",
+                (_HARVEST_FETCH_ERROR, stamp, company_id))
+        elif cur_reason == _HARVEST_FETCH_ERROR:
+            cutoff = (now_dt - timedelta(days=HARVEST_DEAD_AFTER_DAYS)
+                      ).isoformat()
+            if (row["miss_at"] or "") <= cutoff:
+                promoted = (f"board-dead:{row['ats']}" if row["ats"]
+                            else "board-dead")
+                conn.execute(
+                    "UPDATE companies SET miss_reason=?, miss_at=?, "
+                    "active=0 WHERE id=?", (promoted, stamp, company_id))
+        # any other family already on the row (no-board-found, ats-
+        # unsupported, ...): leave it alone, per record_miss's contract.
+    elif n_jobs and cur_reason == _HARVEST_FETCH_ERROR:
+        conn.execute("UPDATE companies SET miss_reason=NULL, miss_at=NULL "
+                     "WHERE id=?", (company_id,))
     _commit(conn)
+    return promoted
 
 
 def reactivate_company(conn, company_id):

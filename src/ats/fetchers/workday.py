@@ -26,6 +26,7 @@ from urllib.parse import urlparse
 
 from src import config
 from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
+from src.match.locality import N_LOCATIONS_RE
 from src.net.util import cache_dir, default_search_text, norm_posted_date
 from .board import board_jobs, loc_ok
 
@@ -36,8 +37,8 @@ _CXS_HEADERS = {**JSON_HEADERS, "Content-Type": "application/json"}
 # dropped most multi-city reqs (a Durham+Santa Clara posting, a "Firmware
 # Engineer, Durham" plus one more site). Those rows are rescued via the
 # externalPath location slug and, failing that, the CXS detail's full
-# location list (cached on disk; locations rarely change).
-N_LOCATIONS_RE = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
+# location list (cached on disk; locations rarely change). The pattern,
+# N_LOCATIONS_RE, lives in match.locality beside location_unknown.
 _LOC_CACHE_TTL = 3 * 24 * 3600
 
 # Detail GETs a single board pull may spend expanding "N Locations" rows.
@@ -304,7 +305,10 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     In cases 1 and 2, a row whose locationsText fails loc_re gets two more
     chances: the externalPath location slug, then the CXS detail's full
     location list ("2 Locations" rows). Rescued rows carry the REAL joined
-    location string so downstream geo logic sees the evidence.
+    location string so downstream geo logic sees the evidence. Case 3 never
+    spends a detail GET expanding an "N Locations" row: a whole-board pull
+    keeps every row regardless of where it sits, so a fuller location string
+    would decide nothing and the listed text is kept as-is.
 
     `search_text` defaults to a term derived from the profile's [locality];
     pass "" for an explicitly unnarrowed pull.
@@ -390,11 +394,16 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                         loc = "; ".join(locs)
                 else:
                     continue
-            elif (N_LOCATIONS_RE.match(loc) and path
+            elif (loc_re is not None and N_LOCATIONS_RE.match(loc) and path
                   and rescues < _WD_RESCUE_CAP):
                 # Facet-filtered fetch already vouches this req is in-area,
                 # but "2 Locations" is useless downstream (geo_mode, ranking
-                # location filters): resolve the real list.
+                # location filters): resolve the real list. A whole-board
+                # pull (loc_re=None) has no facet vouching for anything and
+                # does not need locations to list a board, so it skips this
+                # rescue and keeps the listed "N Locations" text as-is --
+                # otherwise every multi-site row on the board spent one of
+                # the budget's 150 GETs for no locality decision at all.
                 rescues += 1
                 locs = _wd_detail_locations(tenant, pod, site, path)
                 if locs:

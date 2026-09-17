@@ -1,5 +1,6 @@
 """call_claude_json failure handling: the unrecoverable-error circuit breaker
-and the transient-status retry ladder. All offline — SESSION.post is stubbed.
+and the transient-status retry ladder, plus the per-call latency record and
+the usage footer every call feeds. All offline — SESSION.post is stubbed.
 
 Why the breaker exists: the 2026-08-31 rescore run hit "credit balance is too
 low" (HTTP 400) and, because every job's call failed independently, hammered
@@ -42,7 +43,8 @@ _OK = _Resp(200, payload={
 @pytest.fixture
 def api(monkeypatch):
     """Stub the HTTP layer; returns the list of responses to serve (popped
-    left-to-right, last one repeats) plus a call counter."""
+    left-to-right, last one repeats; an exception is raised) plus a call
+    counter."""
     calls = []
     responses = []
 
@@ -50,7 +52,10 @@ def api(monkeypatch):
         @staticmethod
         def post(url, **kw):
             calls.append(url)
-            return responses.pop(0) if len(responses) > 1 else responses[0]
+            r = responses.pop(0) if len(responses) > 1 else responses[0]
+            if isinstance(r, Exception):
+                raise r
+            return r
 
     monkeypatch.setattr(claude, "SESSION", _Session)
     monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
@@ -122,65 +127,43 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
     assert capsys.readouterr().out.count("Claude API disabled") == 2
 
 
-class TestCallLatencyLogging:
+@pytest.mark.parametrize("reply, logged", [
+    (_OK, r"\| HTTP 200 in \d+\.\d\ds$"),
+    (_Resp(400, body='{"message":"max_tokens too large"}'),
+     r"^claude call failed: HTTP 400 in \d+\.\d\ds$"),
+    (RuntimeError("connection reset"),
+     r"^claude call failed: RuntimeError in \d+\.\d\ds$"),
+], ids=["ok", "http-400", "exception"])
+def test_every_call_logs_its_outcome_and_elapsed(api, caplog, reply, logged):
     """API latency used to be invisible: call_claude_json posts through its
     own plain SESSION, never net.http's per-request DEBUG trace (robots /
     Crawl-delay do not apply to the API), so a slow or failing call left no
     timing anywhere in the session log."""
-
-    def test_a_successful_call_logs_status_and_elapsed(self, api, caplog):
-        responses, calls = api
-        responses.append(_OK)
-        with caplog.at_level(logging.DEBUG, logger="claude"):
-            claude.call_claude_json("sys", "user", cache=False)
-        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
-        assert any(re.search(r"HTTP 200 in \d+\.\d\ds", m) for m in msgs)
-
-    def test_a_failed_call_logs_status_and_elapsed(self, api, caplog):
-        responses, calls = api
-        responses.append(_Resp(400, body='{"message":"max_tokens too large"}'))
-        with caplog.at_level(logging.DEBUG, logger="claude"):
-            claude.call_claude_json("sys", "user", cache=False)
-        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
-        assert any("claude call failed: HTTP 400" in m for m in msgs)
-
-    def test_an_exception_logs_its_type_and_elapsed(self, api, monkeypatch,
-                                                     caplog):
-        def boom(url, **kw):
-            raise RuntimeError("connection reset")
-        monkeypatch.setattr(claude.SESSION, "post", boom)
-        with caplog.at_level(logging.DEBUG, logger="claude"):
-            claude.call_claude_json("sys", "user", cache=False)
-        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
-        assert any("claude call failed: RuntimeError" in m for m in msgs)
+    responses, _ = api
+    responses.append(reply)
+    with caplog.at_level(logging.DEBUG, logger="claude"):
+        claude.call_claude_json("sys", "user", cache=False)
+    assert any(re.search(logged, r.getMessage())
+               for r in caplog.records if r.name == "claude")
 
 
 class TestUsageReporting:
-    """format_cache_stats(since=...) / report_cache_stats: the spend footer
-    a harvest pass or a web-UI op prints for its own Claude calls, reusing
-    the one cumulative counter (cache_stats()) instead of a second one --
-    and the atexit trailer must not repeat what one of those already
-    printed."""
+    """report_cache_stats: the spend footer a harvest pass or a web-UI op
+    prints for its own Claude calls, reusing the one cumulative counter
+    (cache_stats()) instead of a second one -- and the atexit trailer must
+    not repeat what one of those already printed."""
 
-    def test_format_cache_stats_reports_only_the_delta_since_baseline(
-            self, api):
-        responses, calls = api
-        responses.extend([_OK, _OK])
-        baseline = claude.cache_stats()
-        claude.call_claude_json("sys", "user", cache=False)
-        claude.call_claude_json("sys", "user", cache=False)
-        line = claude.format_cache_stats(since=baseline)
-        assert "2 call(s)" in line
-        assert "input 2 tok" in line
-
-    def test_report_cache_stats_prints_the_delta_once(self, api, capsys):
+    def test_a_baseline_report_prints_only_the_calls_since_it(
+            self, api, capsys):
         responses, calls = api
         responses.append(_OK)
+        claude.call_claude_json("sys", "user", cache=False)
         baseline = claude.cache_stats()
+        claude.call_claude_json("sys", "user", cache=False)
         claude.call_claude_json("sys", "user", cache=False)
         claude.report_cache_stats(baseline)
         printed = capsys.readouterr().out
-        assert "1 call(s)" in printed
+        assert "[claude] 2 call(s) | input 2 tok " in printed
 
     def test_atexit_style_report_does_not_repeat_an_already_reported_pass(
             self, api, capsys):

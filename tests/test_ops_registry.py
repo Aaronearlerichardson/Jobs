@@ -174,9 +174,11 @@ def _args(**given):
     the way run_scraper's parser defaults it, with `given` overriding."""
     base = dict(workers=6, top=15, limit=None, stale_days=2, score_cap=None,
                 described_only=False, verify_all=False, miss_days=None,
+                reresolve_families=None,
                 prune_offmission=False, no_fit=False, preview=False,
                 send=False, no_verify=False, no_websearch=False,
-                confirm_cost=False, samples=5)
+                confirm_cost=False, samples=5, requeue=False,
+                requeue_apply=False)
     base.update(given)
     return SimpleNamespace(**base)
 
@@ -208,7 +210,13 @@ class TestCliDispatch:
 
     def test_triage_forwards_score_cap(self, calls):
         self._handler("triage")(_args(score_cap=50), None)
-        assert calls[0][1] == {"limit": None, "workers": 6, "score_cap": 50}
+        assert calls[0][1] == {"limit": None, "workers": 6, "score_cap": 50,
+                               "requeue": False, "requeue_apply": False}
+
+    def test_triage_forwards_requeue_flags(self, calls):
+        self._handler("triage")(_args(requeue=True, requeue_apply=True), None)
+        assert calls[0][1] == {"limit": None, "workers": 6, "score_cap": None,
+                               "requeue": True, "requeue_apply": True}
 
     def test_every_registry_backed_flag_names_a_registered_op(self, calls):
         for dest, handler in run_scraper._COMMANDS:

@@ -160,6 +160,9 @@ default = true
 #                              # each 0.05 you drop the floor adds boards to
 #                              # every run. `false` turns it off.
 # verify_top = 15              # deep-verify the top N after scoring (0 = skip)
+# verify_floor = 0.25          # the same pass also deep-verifies local/remote
+#                              # rows screened at or above this, within the
+#                              # verify_top budget
 # cost_guard = 0               # max postings scored per run w/o confirm (0 = off)
 # email = false                # email the digest after each crawl
 # digest_min_fit = 0.4         # emailed digest carries only rows first seen

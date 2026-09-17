@@ -69,6 +69,23 @@ def columns(ats, slug=None, careers_url=None, name=None, **extra):
     return out
 
 
+def board_slug(company):
+    """The one string that names this board on its own host, independent of
+    which coordinate column carries it: Workday's `wd_tenant`, or the
+    ordinary `slug` otherwise. '' for a careers_url-keyed board (custom,
+    successfactors, peopleadmin, wpjson, CAPTURE_ATS) that has neither.
+
+    >>> board_slug({"ats": "workday", "wd_tenant": "aah", "slug": None})
+    'aah'
+    >>> board_slug({"ats": "lever", "slug": "dominos"})
+    'dominos'
+    >>> board_slug({"ats": "custom", "slug": None, "wd_tenant": None,
+    ...             "careers_url": "https://x.org/careers"})
+    ''
+    """
+    return company.get("wd_tenant") or company.get("slug") or ""
+
+
 def wd_handle(company, url):
     """The reverse trip: a stored company row plus one job URL back into the
     (tenant, pod, site, path) handle `fetchers.workday.cxs_detail` takes.

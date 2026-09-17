@@ -6,7 +6,8 @@ import threading
 
 import pytest
 
-from src import store
+from src import config, store
+from src.claude import api as claude_api
 from src.match import gates
 from src.crawl import harvest
 from src.net import http
@@ -256,6 +257,22 @@ def test_hydrate_delay_uses_the_registry_pause():
     assert harvest.hydrate_delay("greenhouse") == harvest.HYDRATE_DELAY_S
 
 
+def test_harvest_board_keeps_a_resolved_location_over_a_placeholder(
+        tmp_path, monkeypatch):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme")
+    board = [dict(_job(1), location="2 Locations"),
+             dict(_job(2, desc="body 2"), location="Peoria, IL")]
+    store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": c["id"],
+                            "title": "Engineer 1", "location": "2 Locations"})
+    store.store_body(conn, "gh_acme_1", "body", "Springfield, IL")
+    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
+    harvest.harvest_board(c, db, delay=0)
+    locs = dict(conn.execute("SELECT job_id, location FROM jobs"))
+    assert locs == {"gh_acme_1": "Springfield, IL", "gh_acme_2": "Peoria, IL"}
+
+
 def test_harvest_board_empty_snapshot_closes_nothing(tmp_path, monkeypatch):
     db = tmp_path / "s.db"
     conn = store.connect(db)
@@ -303,6 +320,49 @@ def test_a_dead_board_is_told_apart_from_an_empty_one(tmp_path, monkeypatch):
     assert gone["err"] is None
     # Neither closes anything: an empty snapshot is still not evidence.
     assert quiet["closed"] == gone["closed"] == 0
+
+
+# ── dead-board promotion cycle (mark_harvested's soft_fail, end to end) ─────
+
+def test_harvest_board_soft_failure_keeps_the_count_and_records_a_miss(
+        tmp_path, monkeypatch):
+    """harvest_board's soft_fail verdict (no rows, and the fetch itself
+    reported errors) reaching store.mark_harvested; the rest of the cycle
+    is tests/test_store.py's TestMarkHarvested."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", ats="lever", total_job_count=9)
+    monkeypatch.setattr(harvest, "fetch_whole_board",
+                        lambda comp: http.fetch_failed("Acme board", "500"))
+    harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    row = store.get_company(conn, c["id"])
+    assert row["total_job_count"] == 9, "the last known-good count survives"
+    assert row["last_harvested_at"]
+    assert row["miss_reason"] == "fetch-error:harvest"
+    assert row["miss_at"] == harvest.datetime(2026, 1, 1).isoformat()
+
+
+def test_harvest_board_promotes_to_board_dead_after_three_days(
+        tmp_path, monkeypatch, capsys):
+    from src.store.companies import HARVEST_DEAD_AFTER_DAYS
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", ats="lever")
+    monkeypatch.setattr(harvest, "fetch_whole_board",
+                        lambda comp: http.fetch_failed("x", "500"))
+    harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    c2 = store.get_company(conn, c["id"])
+    harvest.harvest_board(
+        c2, db, delay=0,
+        now=harvest.datetime(2026, 1, 1) + harvest.timedelta(
+            days=HARVEST_DEAD_AFTER_DAYS))
+    row = store.get_company(conn, c["id"])
+    assert row["miss_reason"] == "board-dead:lever"
+    assert row["active"] == 0
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "Acme" in l and "[!]" in l)
+    assert "board-dead:lever" in line
+    assert "Acme" not in [r["name"] for r in store.harvestable_companies(conn)]
 
 
 def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
@@ -439,7 +499,7 @@ def test_run_abandons_a_stalled_board(tmp_path):
 
 
 def test_dead_board_status_line_names_the_last_error_and_warns(
-        tmp_path, monkeypatch, capsys):
+        tmp_path, capsys):
     """The soft-failure status line used to only count fetch errors; it now
     names the LAST one (net.http.snapshot_info's last_error), and the line
     is prefixed "[!] " so session_log logs it at WARNING
@@ -471,39 +531,55 @@ def test_dead_board_status_line_names_the_last_error_and_warns(
     assert (s["ok"], s["err"], s["dead"]) == (1, 0, 1)
 
 
-def test_run_rewrites_every_roster_tracks_digest_after_triage(
-        tmp_path, monkeypatch):
-    """A harvest pass can move rows into a track's ranking with no crawl
-    ever running, so the digest file has to be rewritten here too -- once
-    per track triage.roster_tracks() reads, from the SAME store this pass
-    just wrote (see _rewrite_digests)."""
-    from src.crawl import triage as triage_mod
+def test_harvest_summary_names_boards_whose_name_is_just_their_own_slug(
+        tmp_path, capsys):
+    """Slug-named rows (names.SLUG_NAME_SOURCE) still called by their own
+    slug/tenant are listed largest board first; a renamed one, or one a
+    person or page named, is not."""
+    from src.match.names import SLUG_NAME_SOURCE
     db = tmp_path / "s.db"
-    store.connect(db).close()
-    monkeypatch.setattr(harvest, "_triage", lambda *a, **k: {"pending": 0})
-    fake_tracks = [{"track": "local-tech"}, {"track": "remote-neural"}]
-    monkeypatch.setattr(triage_mod, "roster_tracks", lambda: fake_tracks)
-    written = []
-    monkeypatch.setattr(
-        harvest, "rewrite_digest",
-        lambda conn, t, top_n=5, heading="": written.append(t["track"]))
+    conn = store.connect(db)
+    store.upsert_company(conn, {"name": "Xyz", "ats": "workday",
+                                "wd_tenant": "xyz", "wd_pod": 5,
+                                "wd_site": "Ext", "total_job_count": 5,
+                                "source": SLUG_NAME_SOURCE})
+    store.upsert_company(conn, {"name": "Bigco", "ats": "lever",
+                                "slug": "bigco", "total_job_count": 50,
+                                "source": SLUG_NAME_SOURCE})
+    store.upsert_company(conn, {"name": "Acme Health", "ats": "lever",
+                                "slug": "acme-careers",
+                                "source": SLUG_NAME_SOURCE})
+    store.upsert_company(conn, {"name": "Solo", "ats": "lever",
+                                "slug": "solo", "source": "manual"})
 
-    s = harvest.run(db_path=db, triage=True)
+    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
+        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
+                "closed": 0, "reopened": 0, "secs": 0.0}
 
-    assert written == ["local-tech", "remote-neural"]
-    assert s["triage"] == {"pending": 0}
+    harvest.run(db_path=db, max_workers=2, board_fn=fake_board, triage=False)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines()
+               if "named after their own slug" in l)
+    assert line.strip() == ("2 board(s) still named after their own "
+                            "slug/tenant, largest first: Bigco, Xyz")
 
 
-def test_run_skips_the_digest_rewrite_with_triage_off(tmp_path, monkeypatch):
+def test_harvest_summary_line_is_bare_when_nothing_is_flagged(
+        tmp_path, capsys):
     db = tmp_path / "s.db"
-    store.connect(db).close()
-    written = []
-    monkeypatch.setattr(harvest, "rewrite_digest",
-                        lambda *a, **k: written.append(1))
+    conn = store.connect(db)
+    store.upsert_company(conn, {"name": "Acme Health", "ats": "lever",
+                                "slug": "acme-careers"})
 
-    s = harvest.run(db_path=db, triage=False)
+    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
+        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
+                "closed": 0, "reopened": 0, "secs": 0.0}
 
-    assert written == [] and "triage" not in s
+    harvest.run(db_path=db, max_workers=1, board_fn=fake_board, triage=False)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines()
+               if "named after their own slug" in l)
+    assert line.strip() == "0 board(s) still named after their own slug/tenant"
 
 
 # ── the crawl gets the same completeness guard ──────────────────────────────
@@ -537,7 +613,6 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     from src import config
     from src.crawl import runner
     from src.ops import maintenance as ops
-    monkeypatch.setattr(config, "REPORT_DIR", tmp_path)
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_score=0.9, tags="local")
@@ -584,3 +659,80 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     assert row["resume_fit_score"] == 0.7
     assert t["track"] in store.track_set(row["track"])
     assert not hydrated, "stored description should have been reused"
+
+
+# ── the pass runs verify + the closed-URL probe, before the digest ──────────
+
+class TestHarvestPassRunsVerifyAndClosedProbe:
+    """After triage.run(), _triage now deep-verifies every roster track
+    (bounded by each track's own verify_top/verify_floor) and probes
+    tracked open rows stale 7+ days for closure -- both BEFORE the
+    per-track digest rewrite -- unless the Claude API has no key or this
+    run's breaker has already tripped, in which case verify is skipped
+    with one printed note (the closed-URL probe needs no Claude call, so
+    it always runs)."""
+
+    def _wire(self, monkeypatch, tmp_path, verify_top=5):
+        db = tmp_path / "s.db"
+        conn = store.connect(db)
+        _company(conn, "A")
+        order = []
+        monkeypatch.setattr("src.crawl.triage.run",
+                            lambda **kw: order.append("triage")
+                            or {"pending": 0})
+        monkeypatch.setattr(
+            "src.crawl.triage.roster_tracks",
+            lambda: [{"track": "local-tech", "verify_top": verify_top}])
+        monkeypatch.setattr(harvest, "verify_top",
+                            lambda **kw: order.append(("verify", kw)))
+        monkeypatch.setattr(harvest, "check_closed_jobs",
+                            lambda **kw: order.append(("closed", kw)))
+        monkeypatch.setattr(harvest, "rewrite_digest",
+                            lambda conn, t, **kw: order.append("digest"))
+        return db, order
+
+    @staticmethod
+    def _fake_board(company, db_path, progress=lambda: None, hydrate=False):
+        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
+                "closed": 0, "reopened": 0, "secs": 0.0}
+
+    def _kinds(self, order):
+        return [o[0] if isinstance(o, tuple) else o for o in order]
+
+    def test_order_is_triage_then_verify_then_closed_then_digest(
+            self, tmp_path, monkeypatch):
+        db, order = self._wire(monkeypatch, tmp_path)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(claude_api, "_FATAL_MSG", None)
+        harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board)
+        assert self._kinds(order) == ["triage", "verify", "closed", "digest"]
+        verify_kw = next(o[1] for o in order if isinstance(o, tuple)
+                         and o[0] == "verify")
+        assert verify_kw["t"]["track"] == "local-tech"
+        closed_kw = next(o[1] for o in order if isinstance(o, tuple)
+                         and o[0] == "closed")
+        assert (closed_kw["limit"], closed_kw["stale_days"]) == (
+            harvest.CLOSED_PROBE_LIMIT, harvest.CLOSED_PROBE_STALE_DAYS)
+
+    @pytest.mark.parametrize("key, fatal, why", [
+        ("YOUR_ANTHROPIC_API_KEY_HERE", None, "no ANTHROPIC_API_KEY"),
+        ("test-key", "HTTP 400: 'credit balance'", "credit balance"),
+    ])
+    def test_verify_is_one_skip_line_when_the_api_cannot_answer(
+            self, tmp_path, monkeypatch, capsys, key, fatal, why):
+        db, order = self._wire(monkeypatch, tmp_path)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", key)
+        monkeypatch.setattr(claude_api, "_FATAL_MSG", fatal)
+        harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board)
+        out = capsys.readouterr().out
+        assert out.count("verify skipped") == 1 and why in out
+        assert self._kinds(order) == ["triage", "closed", "digest"]
+
+    def test_both_are_skipped_when_triage_is_off(self, tmp_path, monkeypatch):
+        db, order = self._wire(monkeypatch, tmp_path)
+        monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(claude_api, "_FATAL_MSG", None)
+        s = harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board,
+                        triage=False)
+        assert "triage" not in s
+        assert order == []

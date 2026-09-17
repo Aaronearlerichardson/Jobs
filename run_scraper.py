@@ -139,7 +139,8 @@ _COMMANDS = [
     ("score", _cmd_score),
     ("nlx", _op("nlx", lambda a: {"companies": a.nlx})),
     ("reresolve_misses", _op("reresolve", lambda a: {
-        "limit": a.reresolve_misses, "workers": a.workers, "days": a.miss_days})),
+        "limit": a.reresolve_misses, "workers": a.workers, "days": a.miss_days,
+        "families": a.reresolve_families, "preview": a.preview})),
     ("verify_top", _op("verify", lambda a: {
         "top": a.verify_top, "workers": a.workers, "force": a.verify_all})),
     ("sync_status", _op("sync", lambda a: {"top": a.top})),
@@ -151,7 +152,8 @@ _COMMANDS = [
         "workers": a.workers, "limit": a.limit})),
     ("backfill_axes", _op("backfill-axes", lambda a: {})),
     ("triage", _op("triage", lambda a: {
-        "limit": a.limit, "workers": a.workers, "score_cap": a.score_cap})),
+        "limit": a.limit, "workers": a.workers, "score_cap": a.score_cap,
+        "requeue": a.requeue, "requeue_apply": a.requeue_apply})),
     ("rescore", _op("rescore", lambda a: {
         "workers": a.workers, "described_only": a.described_only})),
 ]
@@ -173,7 +175,8 @@ def main(argv=None):
                     help="Operate on ONE configured track (a [tracks.*] id "
                          "from your profile, or its jobs.track value)")
     ap.add_argument("--preview", action="store_true",
-                    help="Crawl without DB writes or email")
+                    help="Crawl (or --reresolve-misses) without DB "
+                         "writes or email")
     ap.add_argument("--no-fit", action="store_true",
                     help="Crawl without resume-fit scoring (no Claude spend)")
     ap.add_argument("--send", action="store_true",
@@ -206,6 +209,18 @@ def main(argv=None):
                          "--score-cap caps fit calls")
     ap.add_argument("--score-cap", type=int, default=None, metavar="N",
                     help="With --triage: Claude fit calls this pass")
+    ap.add_argument("--requeue", action="store_true",
+                    help="With --triage: report rows an earlier rule "
+                         "mis-judged (an unresolved Workday geo drop, or a "
+                         "surfaced row whose location is not actually "
+                         "local/remote -- src.crawl.triage.requeue_reasons) "
+                         "instead of the normal gate pass. Report-only "
+                         "unless --requeue-apply is also given")
+    ap.add_argument("--requeue-apply", action="store_true",
+                    help="With --triage --requeue: reset the reported "
+                         "rows' track/triage/fit columns so the NEXT plain "
+                         "--triage pass re-judges them; without this flag "
+                         "--requeue only reports and changes nothing")
     ap.add_argument("--rescore", action="store_true",
                     help="Re-score every stored job with the current rubric")
     ap.add_argument("--described-only", action="store_true",
@@ -229,6 +244,11 @@ def main(argv=None):
     ap.add_argument("--miss-days", type=int, default=None, metavar="D",
                     help="With --reresolve-misses: skip misses newer than D "
                          "days")
+    ap.add_argument("--reresolve-families", metavar="FAM[,FAM]",
+                    help="With --reresolve-misses: which families to retry "
+                         "(default no-board-found,board-dead; silent-board "
+                         "= harvested boards that listed nothing in 7+ "
+                         "days)")
     ap.add_argument("--dedup", action="store_true",
                     help="Merge duplicate company rows pointing at one board")
     ap.add_argument("--watch", metavar="COMPANY",

@@ -54,13 +54,15 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import store
-from src.claude.api import cache_stats, report_cache_stats
+from src.claude.api import api_disabled, cache_stats, report_cache_stats
+from src.ats.coords import board_slug
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
-from src.match.locality import geo_mode
+from src.match.locality import geo_mode, location_unknown
+from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
 from src.net import http
 from src.net.util import worker_count
-from src.ops.maintenance import rewrite_digest
+from src.ops.maintenance import check_closed_jobs, rewrite_digest, verify_top
 
 _log = logging.getLogger(__name__)
 
@@ -93,6 +95,13 @@ STALL_S = 900.0
 # A board harvested more recently than this is skipped, which is what makes
 # a restarted (or Task-Scheduler-repeated) run resume where it left off.
 MIN_AGE_HOURS = 6.0
+# The post-triage closed-URL probe (ops.check_closed_jobs): how stale a
+# tracked OPEN row has to be (no board has vouched for it in this many
+# days) before its detail URL is worth a live GET, and how many such probes
+# one pass spends -- the harvester's own per-board caps bound the fetch
+# side, this bounds the probe side the same way.
+CLOSED_PROBE_STALE_DAYS = 7
+CLOSED_PROBE_LIMIT = 100
 
 
 # --------------------------------------------------------------------------- #
@@ -183,6 +192,18 @@ def fetch_whole_board(company):
     return company_fetch.fetch_company(company, None)
 
 
+def _soft_failed(stats):
+    """A board that answered with an error rather than an empty one: no
+    rows, and its own fetch reported failures (net.http.snapshot_info).
+
+    >>> _soft_failed({"fetched": 0, "fetch_errors": 2})
+    True
+    >>> _soft_failed({"fetched": 0, "fetch_errors": 0})
+    False
+    """
+    return not stats.get("fetched") and bool(stats.get("fetch_errors"))
+
+
 def hydrate_delay(ats):
     """Seconds between one board's detail GETs: the ATS registry's
     politeness pause when it has one, else HYDRATE_DELAY_S.
@@ -264,7 +285,11 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
     The rows that arrived are always stored. Closing against the snapshot
     is what a partial pull cannot be trusted for: an INCOMPLETE one (a
     fetch failed partway) closes nothing, and a CAPPED one closes a row
-    only on its second miss (store.sync_job_statuses's `capped`)."""
+    only on its second miss (store.sync_job_statuses's `capped`).
+
+    A soft-failed snapshot (_soft_failed) is recorded as one:
+    store.mark_harvested keeps the last good total_job_count and runs its
+    dead-board cycle."""
     conn = store.connect(db_path)
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are
@@ -291,22 +316,44 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
                     capped=stats.get("capped", False), now=stamp_dt)
                 stats["reopened"], stats["closed"] = re_, cl
             for j in jobs:
-                if store.upsert_job(conn, _row(j, company, stamp)):
+                # A whole-board Workday listing says "N Locations" every
+                # pass; the real list triage resolved stays.
+                if store.upsert_job(
+                        conn, _row(j, company, stamp),
+                        keep_location=location_unknown(j.get("location"))):
                     stats["new"] += 1
+            promoted = None
             if company.get("id"):
-                store.mark_harvested(conn, company["id"], len(jobs))
+                promoted = store.mark_harvested(
+                    conn, company["id"], len(jobs),
+                    soft_fail=_soft_failed(stats), now=stamp_dt)
+        if promoted:
+            print(f"    [!] {company.get('name')}: no jobs for >= "
+                  f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "
+                  f"error - promoted to '{promoted}'")
     finally:
         conn.close()
 
 
 def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
-    """Fetch the body of every bodiless row in `jobs`, in place, within the
-    host's tolerances: the per-run cap, the pause between GETs, and the
-    miss-streak breaker. Fills stats['hydrated'] / stats['unhydrated']."""
-    todo = [j for j in jobs if not j.get("description")]
+    """Resolve every row in `jobs` that still needs a detail call
+    (company_fetch.needs_detail: no body yet, or -- Workday only -- a body
+    already but a location the listing never resolved), in place, within
+    the host's tolerances: the per-run cap, the pause between GETs, and
+    the miss-streak breaker.
+
+    Fills stats['hydrated'] (rows whose detail need was resolved this
+    pass -- a body arrived, or a Workday location-only row's location
+    did) and stats['unhydrated'] (rows that still need one when this pass
+    ends, whether never reached or tried and failed). A Workday location
+    lookup that comes back empty counts as a miss for the breaker exactly
+    like a failed body fetch always has -- needs_detail is what decides
+    "resolved or not" either way, so the two cases share one counter.
+    """
+    todo = [j for j in jobs if company_fetch.needs_detail(j)]
     cap = HYDRATE_CAP.get(company.get("ats"))
     if cap and len(todo) > cap:
-        print(f"    {company.get('name')}: {len(todo)} bodiless row(s), "
+        print(f"    {company.get('name')}: {len(todo)} row(s) needing detail, "
               f"{company.get('ats')} cap is {cap}/run - the rest next run")
         todo = todo[:cap]
     streak = paused = 0
@@ -319,7 +366,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
             except Exception as e:              # noqa: BLE001 - per row
                 _log.debug("hydrate %s failed: %s", j.get("url"), e)
             progress()
-            if j.get("description"):
+            if not company_fetch.needs_detail(j):
                 stats["hydrated"] += 1
                 streak = 0
             else:
@@ -329,7 +376,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
                     left = len(todo) - i - 1
                     print(f"    [!] {company.get('name')}: {streak} more "
                           f"misses after a pause - {left} row(s) left "
-                          f"bodiless for the next run")
+                          f"unresolved for the next run")
                     break
                 paused += 1
                 print(f"    [!] {company.get('name')}: {streak} hydration "
@@ -340,7 +387,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
             elif delay:
                 time.sleep(delay)
     finally:
-        stats["unhydrated"] = sum(1 for j in jobs if not j.get("description"))
+        stats["unhydrated"] = sum(1 for j in jobs if company_fetch.needs_detail(j))
 
 
 # --------------------------------------------------------------------------- #
@@ -381,9 +428,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     if not boards:
         print("  nothing to do")
         if triage:
-            summary["triage"] = _triage(db_path, max_workers, score_cap)
-            _rewrite_digests(db_path)
-            report_cache_stats(claude_baseline)
+            summary["triage"] = _triage(db_path, max_workers, score_cap,
+                                        claude_baseline)
         return summary
 
     t_start = time.monotonic()
@@ -401,21 +447,21 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
 
     def _report(c, s):
         done_n[0] += 1
-        warn = False
+        prefix = ""
         if s["err"]:
             status = s["err"]
-        elif not s["fetched"] and s.get("fetch_errors"):
+        elif _soft_failed(s):
             # The distinction the log could not previously draw: this board
             # answered with an error, it is not merely empty. A soft
             # failure: it names the last error and leaves s["err"] alone.
-            warn = True
+            prefix = "[!] "     # session_log records the line at WARNING
             last = f": {s['last_error']}" if s.get("last_error") else ""
             status = (f"no jobs - {s['fetch_errors']} fetch error(s){last}, "
                       f"{s['secs']:.0f}s")
         else:
             status = (f"{s['fetched']} job(s), {s['new']} new, "
                       f"{s['hydrated']} hydrated"
-                      + (f" ({s['unhydrated']} bodiless)"
+                      + (f" ({s['unhydrated']} unresolved)"
                          if s.get("unhydrated") else "")
                       + f", {s['closed']} closed, {s['secs']:.0f}s")
             if s.get("incomplete"):
@@ -423,8 +469,6 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
             elif s.get("capped"):
                 status += (f" [capped of {s['capped_total']}: 2-strike close]"
                            if s.get("capped_total") else " [capped: 2-strike close]")
-        # "[!]" makes session_log record the line at WARNING.
-        prefix = "[!] " if warn else ""
         print(f"  {prefix}[{done_n[0]:>3}/{len(boards)}] {c['name']} "
               f"({c['ats']}): {status}")
         # Churn a two-strike close should have damped, still showing up:
@@ -460,7 +504,7 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
                 summary["err"] += 1
             else:
                 summary["ok"] += 1
-                if not s["fetched"] and s.get("fetch_errors"):
+                if _soft_failed(s):
                     summary["dead"] += 1
             for k in ("fetched", "new", "hydrated", "closed", "reopened"):
                 summary[k] += s[k]
@@ -497,38 +541,67 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     print(f"  jobs:   {summary['fetched']} fetched, {summary['new']} new, "
           f"{summary['hydrated']} hydrated, {summary['closed']} closed, "
           f"{summary['reopened']} reopened")
+    # Roster hygiene: a board still named after its own slug/tenant
+    # fetches fine, so nothing else in the log names it for renaming.
+    unnamed = sorted(
+        (c for c in boards if c.get("source") == SLUG_NAME_SOURCE
+         and name_is_own_slug(c.get("name"), board_slug(c))),
+        key=lambda c: -(c.get("total_job_count") or 0))
+    print(f"  {len(unnamed)} board(s) still named after their own "
+          f"slug/tenant"
+          + (f", largest first: {', '.join(c['name'] for c in unnamed[:10])}"
+             + (", ..." if len(unnamed) > 10 else "") if unnamed else ""))
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
     if triage:
-        summary["triage"] = _triage(db_path, max_workers, score_cap)
-        _rewrite_digests(db_path)
-        report_cache_stats(claude_baseline)
+        summary["triage"] = _triage(db_path, max_workers, score_cap,
+                                    claude_baseline)
     return summary
 
 
-def _triage(db_path, max_workers, score_cap):
-    """The gate/hydrate/score pass over everything pending in the store --
+def _triage(db_path, max_workers, score_cap, claude_baseline):
+    """The pass's second half; returns triage.run's summary.
+
+    The gate/hydrate/score pass over everything pending in the store --
     this pass's rows and any earlier pass left waiting on a body or over
-    the scoring cap. Imported here: triage imports this module."""
-    from src.crawl import triage
-    kw = {"score_cap": score_cap} if score_cap is not None else {}
-    return triage.run(db_path=db_path, max_workers=max_workers, **kw)
-
-
-def _rewrite_digests(db_path):
-    """Rewrite every roster track's ranked digest from `db_path`, the
-    store this pass harvested and triaged into. Sends no email.
+    the scoring cap -- then, on that same `db_path`: each roster track's
+    deep verify (ops.verify_top, within its verify_top), one closed-URL
+    probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open rows no board
+    has vouched for in CLOSED_PROBE_STALE_DAYS), each roster track's
+    digest (no email), and the Claude spend footer for the calls made
+    since `claude_baseline`. With no API key, or the breaker already
+    tripped, the verify step is one printed line instead.
 
     Notes:
-        Not maintenance.track_store(t): that opens each track's configured
-        store, a different file whenever `db_path` is overridden (tests,
-        `harvest.py --db`); triage.run reads every roster track from the
-        one `db_path` too.
+        triage is imported here because it imports this module. The steps
+        after it use `db_path`, not maintenance.track_store(t): that opens
+        each track's configured store, a different file whenever `db_path`
+        is overridden (tests, `harvest.py --db`), and triage.run reads
+        every roster track from the one `db_path` too. The verify guard
+        sits here so a dead API prints one line, not one per track.
     """
     from src.crawl import triage
+    kw = {"score_cap": score_cap} if score_cap is not None else {}
+    result = triage.run(db_path=db_path, max_workers=max_workers, **kw)
     conn = store.connect(db_path)
     try:
-        for t in triage.roster_tracks():
+        tracks = triage.roster_tracks()
+        no_key = config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE"
+        down = api_disabled()
+        if no_key or down:
+            print(f"\n  [!] verify skipped for {len(tracks)} roster track(s): "
+                  f"{down or 'no ANTHROPIC_API_KEY configured'}")
+        else:
+            for t in tracks:
+                if t.get("verify_top"):
+                    verify_top(top_n=t["verify_top"],
+                              max_workers=max(2, max_workers // 2),
+                              conn=conn, t=t)
+        check_closed_jobs(max_workers=max_workers, limit=CLOSED_PROBE_LIMIT,
+                          stale_days=CLOSED_PROBE_STALE_DAYS, conn=conn)
+        for t in tracks:
             rewrite_digest(conn, t, top_n=5,
                            heading=f"\n  [{t['track']}] digest rewritten:")
     finally:
         conn.close()
+    report_cache_stats(claude_baseline)
+    return result

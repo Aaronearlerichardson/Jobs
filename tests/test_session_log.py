@@ -195,23 +195,25 @@ class TestNaming:
 
 
 class TestWebappOps:
-    def test_ui_op_output_lands_as_levelled_records(self, tmp_path):
+    @staticmethod
+    def _run(tmp_path, name, fn):
+        """Run `fn` as web-UI op `name` to the end; returns (the op's
+        session log text, the browser's copy of its output)."""
         from src.ops import background as ops
+        assert ops._run_op(name, fn) is True
+        while ops._running():
+            time.sleep(0.02)
+        time.sleep(0.15)          # let the worker's finally block land
+        [log] = (tmp_path / "session-logs").glob(f"session-*-webui-{name}.log")
+        return log.read_text(encoding="utf-8"), list(ops.TASK["log"])
 
+    def test_ui_op_output_lands_as_levelled_records(self, tmp_path):
         def _op():
             print("probe-line")
             print("  [!] probe-warning")
             logging.getLogger("discovery").debug("probe debug detail")
 
-        assert ops._run_op("probe", _op) is True
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)          # let the worker's finally block land
-
-        logs = list((tmp_path / "session-logs")
-                    .glob("session-*-webui-probe.log"))
-        assert len(logs) == 1
-        text = logs[0].read_text(encoding="utf-8")
+        text, _ = self._run(tmp_path, "probe", _op)
         assert "# run     : web UI op 'probe'" in text
         assert _record("INFO", "probe-line").search(text)
         assert _record("WARNING", "  [!] probe-warning").search(text)
@@ -225,44 +227,24 @@ class TestWebappOps:
         log -- a total failure deserves ERROR. Writing it to stderr instead
         gets that for free (session_log._level_for's err path), the same
         way run_scraper.py's own pass-failure line already does."""
-        from src.ops import background as ops
-
         def _op():
             raise RuntimeError("op exploded")
 
-        assert ops._run_op("boom", _op) is True
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)          # let the worker's finally block land
-
-        logs = list((tmp_path / "session-logs")
-                    .glob("session-*-webui-boom.log"))
-        assert len(logs) == 1
-        text = logs[0].read_text(encoding="utf-8")
+        text, browser = self._run(tmp_path, "boom", _op)
         assert _record("ERROR", "  [!] operation failed: "
                        "RuntimeError: op exploded").search(text)
-        # Still shows up in the browser's copy of the op log, same as any
-        # other printed line.
-        assert any("operation failed" in l for l in ops.TASK["log"])
+        # Still shows up in the browser's copy, like any printed line.
+        assert any("operation failed" in l for l in browser)
 
     def test_a_successful_op_reports_its_own_claude_spend(self, tmp_path):
         """A long-lived server process never hits the atexit trailer, so an
         op that never reported its own Claude spend would show 0 forever;
         the footer prints here, while the op's own log tee is still open."""
         from src.claude import api as claude_api
-        from src.ops import background as ops
 
         def _op():
             claude_api._record_usage({"input_tokens": 5, "output_tokens": 3})
 
-        assert ops._run_op("spend", _op) is True
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)
-
-        logs = list((tmp_path / "session-logs")
-                    .glob("session-*-webui-spend.log"))
-        assert len(logs) == 1
-        text = logs[0].read_text(encoding="utf-8")
+        text, browser = self._run(tmp_path, "spend", _op)
         assert "[claude] 1 call(s)" in text
-        assert any("[claude] 1 call(s)" in l for l in ops.TASK["log"])
+        assert any("[claude] 1 call(s)" in l for l in browser)

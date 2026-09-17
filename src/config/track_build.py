@@ -63,7 +63,8 @@ def build_tracks(raw, *, data_dir, default_tracks, engine_defaults, aliases):
     ...     "keyword_mode": "extend", "accept_remote": False,
     ...     "sources": {"store": True, "websearch": False},
     ...     "store_tag": None, "require_core_anchor": False, "geo_gate": True,
-    ...     "remote_mission_floor": 0.85, "verify_top": 15, "cost_guard": 0,
+    ...     "remote_mission_floor": 0.85, "verify_top": 15, "verify_floor": 0.25,
+    ...     "cost_guard": 0,
     ...     "email": False, "digest_min_fit": 0.4, "notify": False,
     ...     "exclude_gate": True, "dormant_after": 4, "dormant_days": 7,
     ...     "tech_title_regex": r"\\bengineer\\b"}}
@@ -127,6 +128,8 @@ def build_tracks(raw, *, data_dir, default_tracks, engine_defaults, aliases):
                 t.get("remote_mission_floor",
                       eng_defaults["remote_mission_floor"])),
             "verify_top": int(t.get("verify_top", eng_defaults["verify_top"])),
+            "verify_floor": float(t.get("verify_floor",
+                                        eng_defaults["verify_floor"])),
             "cost_guard": int(t.get("cost_guard", eng_defaults["cost_guard"])),
             "email": bool(t.get("email", eng_defaults["email"])),
             "digest_min_fit": float(t.get("digest_min_fit",

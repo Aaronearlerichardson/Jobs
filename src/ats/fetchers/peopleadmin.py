@@ -10,8 +10,8 @@ So `all_jobs` is asked for first and `search` is only the fallback.
 An entry carries <title>, <link href>, <published>/<updated>, <content> (the
 posting body, as escaped HTML) and <author><name> (the hiring department,
 e.g. "Epidemiology - 463501"). There is no location element and no
-<category>: a tenant is one campus, and where a posting sits on it is
-something only its prose says, when it says it at all.
+<category>: a tenant is one campus. A posting's location is the place its
+title names, else the campus the feed's own <title> names.
 
 Notes:
     Both feeds live under a robots.txt that blanket-disallows `*` — written
@@ -19,6 +19,15 @@ Notes:
     crawler will not fetch a tenant until its host is listed in the
     profile's [policy] robots_exempt_hosts, which is the operator's call to
     make per host, not this module's. See profile.example.toml.
+
+    A posting's detail PAGE does name its place, in a "Position Location"
+    or "Job Location" table row (two tenants live-probed 2026-09-17).
+    It is not read: that is one HTML GET per posting, on the part of the
+    host the robots.txt disallow was written for. The body is not read
+    for a place either: on 2026-09-17 a third of one tenant's stored
+    locations were prose fragments cut from it ("<State> at <City> is
+    seeking two tenure-tr", "... Driver's License", "remote work
+    location, consistent with ...").
 """
 
 import re
@@ -83,9 +92,9 @@ def _parse_feed(xml, host, company_name, gate=None):
     FEED_PATH, a feed whose entries all failed the relevance gate is not.
     """
     soup = BeautifulSoup(xml, "xml")
-    # The feed's own <title> names the institution ("... Chapel Hill: All
-    # Jobs"), and a tenant is one campus, so it stands in for entries whose
-    # text never names a place — which is most of them.
+    # The feed's own <title> names the institution ("<Campus>: All Jobs"),
+    # and a tenant is one campus, so it stands in for entries whose title
+    # names no place, which is most of them.
     campus = location_snippet(_text(soup.find("title")), "")
     key = tenant_key(host)
     entries = soup.find_all("entry")
@@ -116,10 +125,10 @@ def _parse_feed(xml, host, company_name, gate=None):
             "company":     company_name,
             "title":       title,
             "url":         jurl,
-            # "" when neither the posting nor the campus names a place —
+            # "" when neither the title nor the campus names a place --
             # NOT a "See posting" placeholder, which location-scoped
             # callers cannot tell from a real location.
-            "location":    location_snippet(f"{title} {body}", "") or campus,
+            "location":    location_snippet(title, "") or campus,
             "description": desc,
             "posted_at":   norm_posted_date(_text(e.find("published"))
                                             or _text(e.find("updated"))),

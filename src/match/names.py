@@ -76,6 +76,56 @@ def name_key(name):
     return _NONALNUM_RE.sub("", (name or "").lower())
 
 
+# The roster `source` of rows named from their board's slug and nothing
+# else: src.discovery.dork.harvest_urls titles the slug ("aah" -> "Aah")
+# because a search hit carries no employer name.
+SLUG_NAME_SOURCE = "ats_dork"
+
+
+def name_is_own_slug(name, slug):
+    """True when `name` is nothing but its own board's slug/tenant, spelled
+    out -- a roster row named "Xyz" after its Workday tenant "xyz" rather
+    than the employer's real name, which a name taken from the URL leaves
+    behind (src.ats.coords.board_slug reads the slug/tenant off a row).
+
+    Compared via name_key, so case and punctuation never matter, and a
+    slug with the name's words simply joined together still counts as
+    "the same":
+
+    >>> name_is_own_slug("Xyz", "xyz")
+    True
+    >>> name_is_own_slug("Bigco", "bigco")
+    True
+    >>> name_is_own_slug("Acme Health", "acmehealth")
+    True
+
+    A real name that merely CONTAINS its slug, or shares no relation to
+    it, is not:
+
+    >>> name_is_own_slug("Xavier Young Health", "xyz")
+    False
+    >>> name_is_own_slug("Acme Health Systems", "acme")
+    False
+
+    Neither is a name with nothing to compare, either side blank:
+
+    >>> name_is_own_slug("Acme", ""), name_is_own_slug("", "acme")
+    (False, False)
+
+    Notes:
+        On its own this cannot tell a slug-derived name from a real
+        one-word name that happens to equal its slug: on 2026-09-17 it
+        matched 321 of 579 harvestable rows, most of them correctly
+        named. Restricted to SLUG_NAME_SOURCE rows (183) and ordered by
+        board size, the head of the list is the raw tenant codes worth
+        renaming, which is how the HARVEST SUMMARY uses it. A name that
+        is a PREFIX of its slug (a tenant "<name>depot" named "<Name>")
+        is not caught; a prefix rule would flag every truncated name.
+    """
+    key = name_key(name)
+    return bool(key and slug and key == name_key(slug))
+
+
 def name_words(name):
     """The lowercase alphanumeric words of `name`, parentheticals dropped.
 
@@ -152,6 +202,14 @@ _JUNK_CATEGORY_WORDS = frozenset({
     "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
     "group", "team", "company", "companies", "industry", "industries",
 })
+# A single generic word describing a LISTING's own disposition, never an
+# employer's name: a scraped roster entry that kept only a status column
+# ("Retired") reads exactly like this, the same one-word-is-the-whole-name
+# shape as _JUNK_CATEGORY_WORDS, kept apart so the reason names what it saw.
+_JUNK_STATUS_WORDS = frozenset({
+    "retired", "archived", "inactive", "expired", "discontinued",
+    "disabled", "deprecated", "closed",
+})
 _JUNK_LOCATION_RE = re.compile(
     r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
     re.IGNORECASE)
@@ -191,6 +249,16 @@ def junk_name_reason(name):
     'category-only'
     >>> junk_name_reason("Medical Devices")
     'category-only'
+    >>> junk_name_reason("Engineering")
+    'category-only'
+
+    Nor is a listing's own status ("Retired" from a stale roster scrape) --
+    and "Jobs" alone is a section word, not a company either:
+
+    >>> junk_name_reason("Retired")
+    'status-only'
+    >>> junk_name_reason("Jobs")
+    'section-heading'
 
     Location strings and search-result chrome:
 
@@ -249,6 +317,8 @@ def junk_name_reason(name):
         return "section-heading"
     if all(w in _JUNK_CATEGORY_WORDS for w in words):
         return "category-only"
+    if all(w in _JUNK_STATUS_WORDS for w in words):
+        return "status-only"
     m = _TRAILING_NUMBER_RE.match(s)
     if m and len(words) >= 2 and not re.search(r"\d", m.group(1)) \
             and m.group(1).split()[-1].lower() not in {"studio", "area", "channel", "route", "no", "number"}:

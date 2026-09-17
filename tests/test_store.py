@@ -698,6 +698,58 @@ class TestMisses:
         assert store.roster_growth(db, days=7) == 1
 
 
+class TestMarkHarvested:
+    """The dead-board promotion cycle mark_harvested runs on the row's
+    miss_reason. Its doctest has the soft-fail and ordinary-empty passes;
+    tests/test_harvest.py has the wiring through harvest_board."""
+
+    def test_a_nonempty_pass_stamps_last_nonempty_at(self, db, company):
+        store.mark_harvested(db, company, 5)
+        row = store.get_company(db, company)
+        assert row["total_job_count"] == 5 and row["last_nonempty_at"]
+
+    def test_repeat_soft_failure_does_not_move_miss_at(self, db, company):
+        t1, t2 = datetime(2026, 1, 1), datetime(2026, 1, 2)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t1)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t2)
+        assert store.get_company(db, company)["miss_at"] == t1.isoformat()
+
+    def test_a_nonempty_pass_clears_the_harvest_miss(self, db, company):
+        store.mark_harvested(db, company, 0, soft_fail=True)
+        store.mark_harvested(db, company, 3)
+        row = store.get_company(db, company)
+        assert (row["miss_reason"], row["miss_at"]) == (None, None)
+
+    def test_three_days_of_soft_failure_promotes_to_board_dead(self, db,
+                                                                company):
+        t1 = datetime(2026, 1, 1)
+        store.mark_harvested(db, company, 0, soft_fail=True, now=t1)
+        dead_after = store.companies.HARVEST_DEAD_AFTER_DAYS
+        promoted = store.mark_harvested(
+            db, company, 0, soft_fail=True,
+            now=t1 + timedelta(days=dead_after))
+        assert promoted == "board-dead:greenhouse", "named after the row's ats"
+        row = store.get_company(db, company)
+        assert row["miss_reason"] == promoted
+        assert row["active"] == 0, \
+            "so reresolve_misses (active=0 only) can pick it back up"
+
+    def test_promotion_leaves_another_miss_family_untouched(self, db, company):
+        db.execute("UPDATE companies SET miss_reason='ats-unsupported:ukg' "
+                   "WHERE id=?", (company,))
+        assert store.mark_harvested(db, company, 0, soft_fail=True) is None
+        row = store.get_company(db, company)
+        assert row["miss_reason"] == "ats-unsupported:ukg"
+
+    def test_harvest_never_touches_empty_streak_or_crawl_state(self, db,
+                                                                company):
+        db.execute("UPDATE companies SET empty_streak=2, "
+                   "crawl_state='dormant' WHERE id=?", (company,))
+        store.mark_harvested(db, company, 0, soft_fail=True)
+        row = store.get_company(db, company)
+        assert row["empty_streak"] == 2 and row["crawl_state"] == "dormant"
+
+
 class TestUpsertJobUrlRekey:
     """A posting that arrives under a NEW job_id scheme (company ats/tenant
     change, fetcher id-format change) must re-key its existing row, not

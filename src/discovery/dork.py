@@ -21,6 +21,7 @@ from src.ats.fetchers import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
 from src.discovery.resolve.identity import nc_hq_signal
+from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 
 
@@ -225,7 +226,7 @@ def harvest_urls(urls, verbose=True):
         # which is why the activation rule must be the shared one.
         result = score_and_upsert(
             conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
-            source="ats_dork", tags=company_tags.LOCAL)
+            source=SLUG_NAME_SOURCE, tags=company_tags.LOCAL)
         if not result:
             continue
         row, active, pending = result

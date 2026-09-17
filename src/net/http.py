@@ -99,29 +99,41 @@ SESSION = _build_session()
 def get_json(url, label, default=None, **kw):
     """The endpoint's JSON, or `default` -- reported, never raised.
 
-    Eight fetchers wrote this out, two of them having already named it
-    (`api._get_board`, `hnhiring._get_json`). A board that 500s, times out
-    or answers with something that will not parse is a DEAD SOURCE, not an
-    exception for the crawl to handle: the fan-out is running two hundred
-    other boards and one of them being down says nothing about the rest.
-    So this reports and returns, and every caller's failure path is the
-    same shape.
+    Nine fetchers wrote this out, three of them having already named it
+    (`api._get_board`, `hnhiring._get_json`, `company._get_json`). A board
+    that 500s, comes back empty, answers with something that will not
+    parse, or times out is a DEAD SOURCE, not an exception for the crawl to
+    handle: the fan-out is running two hundred other boards and one of them
+    being down says nothing about the rest. So this reports and returns,
+    and every caller's failure path is the same shape.
 
     `label` names the source in the failure line -- it is the only thing a
     session log has to go on when a board stops answering. `default` is
     what the caller wants back: [] for a board listing, None for a detail
-    payload the caller checks.
+    payload the caller checks. The failure reason is one of "HTTP n",
+    "empty response" or "non-JSON response" for an answered request, or
+    the raised exception itself (connection refused, timeout, ...) for one
+    that never got a response.
 
-    No doctest: it would have to pin requests' own error wording, which
-    changes between versions. tests/test_fetcher_parsers.py pins the
-    contract through the fetchers instead.
+    No doctest: the exception-path wording is requests' own, which changes
+    between versions. tests/test_fetcher_parsers.py pins the contract
+    through the fetchers instead.
     """
     try:
         r = SESSION.get(url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
-        r.raise_for_status()
-        return r.json()
     except Exception as e:
         fetch_failed(label, e)
+        return default
+    if r.status_code >= 400:
+        fetch_failed(label, f"HTTP {r.status_code}")
+        return default
+    if not r.content.strip():
+        fetch_failed(label, "empty response")
+        return default
+    try:
+        return r.json()
+    except ValueError:
+        fetch_failed(label, "non-JSON response")
         return default
 
 
@@ -152,9 +164,8 @@ def fetch_failed(label, err, indent=4):
     Returns [] so a soft-failing fetcher can `return fetch_failed(...)`;
     call it as a statement where the failure path breaks or continues.
 
-    Also remembers `label: err` as this thread's LAST failure (see
-    snapshot_info's `last_error`), so a caller that only counted failures
-    before can now name the one it should show.
+    Also remembers `label: err` as this thread's last failure (see
+    snapshot_info's `last_error`).
     """
     _FAILED.n = getattr(_FAILED, "n", 0) + 1
     _FAILED.last = f"{label}: {err}"

@@ -19,6 +19,12 @@ def _use_model(monkeypatch, name):
     monkeypatch.setattr(fit.config, "CLAUDE_VERIFY_MODEL", name)
 
 
+def _track(local_track):
+    """The local track ranked by fit alone, with no mission floors."""
+    return dict(local_track, min_mission=0.0, rank_by="fit",
+                remote_mission_floor=None)
+
+
 class TestFitResultCarriesTheModel:
     def test_as_columns_names_the_model_and_nulls_when_unknown(self):
         cols = fit.FitResult(score=0.5, axes={a: 0.5 for a in fit.AXES},
@@ -92,13 +98,9 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
         n = ops.verify_top(top_n=10, max_workers=1, conn=db, t=t, **kw)
         return n, calls
 
-    def _track(self, local_track):
-        return dict(local_track, min_mission=0.0, rank_by="fit",
-                    remote_mission_floor=None)
-
     def test_default_pass_leaves_current_model_rows_alone(
             self, db, add_job, local_track, monkeypatch):
-        t = self._track(local_track)
+        t = _track(local_track)
         self._seed(add_job, t)
         n, calls = self._run(db, monkeypatch, t)
         assert n == 3 and len(calls) == 3
@@ -111,7 +113,7 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
     def test_force_re_verifies_every_finalist(
             self, db, add_job, local_track, monkeypatch):
-        t = self._track(local_track)
+        t = _track(local_track)
         self._seed(add_job, t)
         n, calls = self._run(db, monkeypatch, t, force=True)
         assert n == 4
@@ -121,7 +123,7 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
     def test_a_second_default_pass_is_free(
             self, db, add_job, local_track, monkeypatch):
-        t = self._track(local_track)
+        t = _track(local_track)
         self._seed(add_job, t)
         self._run(db, monkeypatch, t)
         n, calls = self._run(db, monkeypatch, t)
@@ -152,14 +154,10 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
             add_job(f"gh_acme_{i}", fit=0.9 - i / 100, track=t["track"],
                     description="d" * 400)
 
-    def _track(self, local_track):
-        return dict(local_track, min_mission=0.0, rank_by="fit",
-                    remote_mission_floor=None)
-
     def test_tripped_before_the_pass_skips_it_in_one_line(
             self, db, add_job, local_track, monkeypatch, capsys):
         from src.claude import api
-        t = self._track(local_track)
+        t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
         monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
@@ -178,7 +176,7 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
     def test_tripping_mid_round_halts_without_fetching_the_rest(
             self, db, add_job, local_track, monkeypatch, capsys):
         from src.claude import api
-        t = self._track(local_track)
+        t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
         monkeypatch.setattr(api, "_FATAL_MSG", None)
@@ -198,3 +196,98 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
         assert out.count("deep verify halted") == 1
         assert "round 2/2" not in out
         assert "[?] kept" not in out
+
+
+class TestVerifyFloorCandidates:
+    """verify_top spends the budget its stale top-N rows leave unused on
+    _verify_floor_candidates (whose doctest says who qualifies): the
+    2026-09-09 case, a row the screen put at 0.16 and a deep read at 0.50,
+    was under digest_min_fit and so never near the top."""
+
+    def _fit(self, db, add_job, t, job_id, score, **overrides):
+        """A row triage scored under digest_min_fit, labelled as triage
+        labels one."""
+        add_job(job_id, fit=score, track=t["track"], description="d" * 400,
+                **overrides)
+        store.record_triage(db, job_id, "fit", f"{t['track']}=ok",
+                            tracks=[t["track"]])
+
+    def _fill_top_n(self, add_job, t, n=2):
+        """`n` already-current rows that outscore every candidate, so the
+        top-n slice spends nothing and a candidate is reached only through
+        the floor rule."""
+        for i in range(n):
+            add_job(f"gh_ok_{i}", fit=0.9 + i / 100, track=t["track"],
+                    description="d" * 400, fit_reason="deep: current",
+                    fit_model="m-new")
+
+    def _verify(self, db, monkeypatch, t, score, reason="deep: v", **kw):
+        """verify_top with the verifier answering `score`: (n, calls)."""
+        _use_model(monkeypatch, "m-new")
+        calls = []
+        monkeypatch.setattr(fit, "verify_fit", lambda *a, **k: calls.append(a)
+                            or fit.FitResult(score=score, reason=reason,
+                                             model="m-new"))
+        monkeypatch.setattr(ops, "_live_jd", lambda r: r.get("description") or "")
+        return ops.verify_top(max_workers=1, conn=db, t=t, **kw), calls
+
+    def _row(self, db, job_id):
+        return tuple(db.execute(
+            "SELECT resume_fit_score, triage_status FROM jobs WHERE job_id=?",
+            (job_id,)).fetchone())
+
+    def test_a_candidate_reaching_digest_min_fit_is_relabelled_ok(
+            self, db, add_job, local_track, monkeypatch, local_addr):
+        t = _track(local_track)
+        self._fit(db, add_job, t, "gh_acme_fit", 0.16, location=local_addr)
+        n, _ = self._verify(db, monkeypatch, t, 0.5, top_n=10)
+        assert n == 1
+        # 0.5 clears the track's digest_min_fit (0.4 by default).
+        assert self._row(db, "gh_acme_fit") == (0.5, "ok")
+
+    def test_a_candidate_staying_under_digest_min_fit_keeps_fit(
+            self, db, add_job, local_track, monkeypatch, local_addr):
+        t = _track(local_track)
+        self._fit(db, add_job, t, "gh_acme_weak", 0.16, location=local_addr)
+        self._verify(db, monkeypatch, t, 0.2, top_n=10)
+        assert self._row(db, "gh_acme_weak") == (0.2, "fit")
+
+    def test_a_row_under_the_floor_is_not_a_candidate(
+            self, db, add_job, local_track, monkeypatch, local_addr):
+        t = _track(local_track)
+        self._fill_top_n(add_job, t)
+        self._fit(db, add_job, t, "gh_acme_toolow", 0.1, location=local_addr)
+        assert self._verify(db, monkeypatch, t, 0.9, top_n=2) == (0, [])
+
+    def test_a_candidate_the_current_model_verified_is_skipped(
+            self, db, add_job, local_track, monkeypatch, local_addr, capsys):
+        t = _track(local_track)
+        self._fit(db, add_job, t, "gh_acme_seen", 0.3, location=local_addr,
+                  fit_reason="deep: already", fit_model="m-new")
+        assert self._verify(db, monkeypatch, t, 0.9, top_n=10) == (0, [])
+        assert (f"deep-verify [{t['track']}]: nothing new in the top 10"
+                in capsys.readouterr().out)
+
+    def test_candidates_fill_only_the_slots_the_top_n_left(
+            self, db, add_job, local_track, monkeypatch, local_addr):
+        """The top-2 slice is all current, so both slots go to the two
+        best candidates, and the third waits."""
+        t = _track(local_track)
+        self._fill_top_n(add_job, t, n=3)
+        for job_id, score in (("gh_fit_a", 0.30), ("gh_fit_b", 0.28),
+                              ("gh_fit_c", 0.26)):
+            self._fit(db, add_job, t, job_id, score, location=local_addr)
+        n, _ = self._verify(db, monkeypatch, t, 0.1, top_n=2, rounds=1)
+        verified = {r["job_id"] for r in db.execute(
+            "SELECT job_id FROM jobs WHERE fit_reason='deep: v'")}
+        assert n == 2
+        assert verified == {"gh_fit_a", "gh_fit_b"}
+
+    def test_verified_row_prints_old_new_score_company_title_reason(
+            self, db, add_job, local_track, monkeypatch, capsys):
+        t = _track(local_track)
+        add_job("gh_acme_1", fit=0.6, track=t["track"], description="d" * 400)
+        self._verify(db, monkeypatch, t, 0.7, reason="deep: solid fit",
+                     top_n=10)
+        out = capsys.readouterr().out
+        assert "0.60 -> 0.70, Acme, Data Engineer, solid fit" in out

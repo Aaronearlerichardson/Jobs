@@ -39,9 +39,14 @@ class TestTrackConfig:
     def test_methodology_keys_are_parsed(self, local_track):
         assert all(k in local_track for k in
                    ("keyword_mode", "sources", "store_tag", "require_core_anchor",
-                    "geo_gate", "verify_top", "cost_guard", "email",
-                    "exclude_gate", "tech_title_regex",
+                    "geo_gate", "verify_top", "verify_floor", "cost_guard",
+                    "email", "exclude_gate", "tech_title_regex",
                     "dormant_after", "dormant_days"))
+
+    def test_verify_floor_defaults_and_is_overridable(self, cfg):
+        assert cfg.UI_TRACKS[cfg.DEFAULT_TRACK]["verify_floor"] == 0.25
+        built = cfg._build_ui_tracks({"t": {"verify_floor": 0.4}})
+        assert built["t"]["verify_floor"] == 0.4
 
     def test_dormancy_knobs_are_whole_numbers(self, cfg):
         for t in cfg.UI_TRACKS.values():

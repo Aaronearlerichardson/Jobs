@@ -33,6 +33,10 @@ Crawl-methodology keys, every one overridable in the track's own table:
                       says nothing about the division that is hiring).
                       `false` turns the admission off entirely.
   verify_top          deep-verify the top N after scoring (0 = skip)
+  verify_floor        screen score floor (0..1) for the OTHER rows verify_top
+                      deep-verifies: local/remote triage_status='fit' rows
+                      the screen scored at or above this that the top-N slice
+                      alone never reaches (see ops.verify_top)
   cost_guard          max postings scored per run without confirm (0 = off)
   email               email the digest after a crawl (CLI --send overrides)
   digest_min_fit      minimum resume fit a NEW row needs to make the
@@ -106,7 +110,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": True},
         "store_tag": None, "require_core_anchor": False, "geo_gate": True,
         "remote_mission_floor": 0.85,
-        "verify_top": 15, "cost_guard": 0, "email": False,
+        "verify_top": 15, "verify_floor": 0.25, "cost_guard": 0, "email": False,
         "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": True, "dormant_after": 4, "dormant_days": 7,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
@@ -121,7 +125,7 @@ _ENGINE_CRAWL_DEFAULTS = {
                     "location_scoped": False},
         "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
         "remote_mission_floor": 0.85,
-        "verify_top": 0, "cost_guard": 300, "email": False,
+        "verify_top": 0, "verify_floor": 0.25, "cost_guard": 300, "email": False,
         "digest_min_fit": 0.4, "notify": False,
         "exclude_gate": False, "dormant_after": 4, "dormant_days": 7,
         "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,

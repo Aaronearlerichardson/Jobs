@@ -145,8 +145,8 @@ def _level_for(line, err):
 
 class SessionLog:
     """One session's log file: a logging handler feeding it, plus the
-    line-buffered console mirror. duck-types as a write()-able sink so the
-    webapp's stdout tee can stream into it unchanged.
+    line-buffered console mirror that both tees (_Tee below, and
+    src/ops/background.py's browser tee) stream into through feed().
 
     Notes:
         The handler is attached to the ROOT logger, so any module's
@@ -208,14 +208,6 @@ class SessionLog:
                 noisy.setLevel(logging.WARNING)
 
     # ── console mirror ──────────────────────────────────────────────────
-    def write(self, text):
-        """Sink API for a stdout tee: mirror `text` as console records."""
-        self.feed(text, err=False)
-        return len(text)
-
-    def flush(self):
-        pass                                  # records are emitted per line
-
     def feed(self, text, err=False):
         """Buffer tee'd console output per writing thread; emit one record
         per complete line."""

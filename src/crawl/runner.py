@@ -565,12 +565,11 @@ def _report_ranked(conn, t, got, scored, *, send, top_n, bar):
     """Write (and maybe email) the ranked digest for a company-linked crawl,
     print the watch section and the top N, and return the ranked list.
 
-    The ranking itself, and the write of the digest file it feeds, are
-    `maintenance._write_digest` -- the same call every other digest-writing
-    op (status sync, standalone deep verify) makes, so this crawl's watch
-    hits and triage funnel can never drift from theirs. What stays here is
-    what only a crawl needs: the email, the watch section printed to the
-    console, and a richer top-N than the maintenance ops' one-liner.
+    Notes:
+        The ranking and the digest file are maintenance._write_digest, the
+        writer every digest-writing op shares, so this crawl's watch hits
+        and triage funnel cannot drift from theirs; only the email, the
+        printed watch section and the richer top-N live here.
     """
     from src import digest
     from src.ops import maintenance as ops

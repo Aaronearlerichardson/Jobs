@@ -225,6 +225,32 @@ def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
     _commit(conn)
 
 
+# What record_triage writes besides the body and the scores (_SCORE_COLS):
+# clear_triage resets these and the scores.
+_TRIAGE_COLS = ("track", "triage_status", "triage_detail", "triaged_at",
+                "geo_mode", "remote_eligible", "remote_signal")
+
+
+def clear_triage(conn, job_id):
+    """Undo record_triage on one row, so store.triage_pending selects it
+    again: every column it writes goes back to NULL except the body, and
+    desc_checked_at (the detail retry clock) is left alone.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T"})
+    >>> record_triage(conn, "j", "ok", "y=ok", tracks=["y"],
+    ...               description="body", scores={"resume_fit_score": 0.5})
+    >>> clear_triage(conn, "j")
+    >>> r = conn.execute("SELECT * FROM jobs").fetchone()
+    >>> (r["triage_status"], r["track"], r["resume_fit_score"],
+    ...  r["description"])
+    (None, None, None, 'body')
+    """
+    sets = ", ".join(f"{c}=NULL" for c in (*_TRIAGE_COLS, *_SCORE_COLS))
+    conn.execute(f"UPDATE jobs SET {sets} WHERE job_id=?", (job_id,))
+    _commit(conn)
+
+
 def store_body(conn, job_id, description, location=None):
     """Keep a freshly fetched body (and, when the detail page named one,
     the real location) on a row whose verdict is still open, so the next
@@ -278,11 +304,27 @@ def triage_counts(conn, days=None):
         else len(order))}
 
 
-def upsert_job(conn, j):
+def upsert_job(conn, j, keep_location=False):
     """Insert or refresh a job. Returns True if it was new.
 
     `first_seen` stays stable across re-runs; scores refresh so the stored
-    values always reflect the latest scorer.
+    values always reflect the latest scorer. `keep_location=True` (the
+    caller's listing named no place) keeps a stored location instead of
+    overwriting it; a new row, or one with no location yet, stores what it
+    was given.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
+    ...                       "location": "2 Locations"})
+    >>> store_body(conn, "j", "body", "Springfield, IL; Remote")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
+    ...                       "location": "2 Locations"}, keep_location=True)
+    >>> conn.execute("SELECT location FROM jobs").fetchone()[0]
+    'Springfield, IL; Remote'
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T",
+    ...                       "location": "Peoria, IL"})
+    >>> conn.execute("SELECT location FROM jobs").fetchone()[0]
+    'Peoria, IL'
     """
     now = datetime.now().isoformat()
     new = not job_exists(conn, j["job_id"])
@@ -328,7 +370,9 @@ def upsert_job(conn, j):
              harvested_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
-             title=excluded.title, url=excluded.url, location=excluded.location,
+             title=excluded.title, url=excluded.url,
+             location=CASE WHEN ? AND COALESCE(location, '') != ''
+                           THEN location ELSE excluded.location END,
              track=COALESCE(excluded.track, track),
              geo_mode=COALESCE(excluded.geo_mode, geo_mode),
              remote_eligible=COALESCE(excluded.remote_eligible, remote_eligible),
@@ -357,7 +401,7 @@ def upsert_job(conn, j):
          j.get("fit_domain"), j.get("fit_function"), j.get("fit_stack"),
          j.get("fit_seniority"), j.get("fit_gates"), j.get("fit_model"),
          j.get("posted_at"), now, now, j.get("status", "open"),
-         j.get("harvested_at")),
+         j.get("harvested_at"), bool(keep_location)),
     )
     _commit(conn)
     return new

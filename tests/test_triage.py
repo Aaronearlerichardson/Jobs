@@ -4,6 +4,7 @@ body fetch or a fit score. Offline: the mission scorer, the hydrator and
 the fit scorer are all stubbed."""
 
 import logging
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -22,10 +23,25 @@ def _company(conn, name, **extra):
     return store.get_company(conn, store.company_id_by_name(conn, name))
 
 
-def _harvested(conn, c, jid, title, location, description=""):
+def _wd_company(conn, name="Wd"):
+    """A Workday company, mission-scored so the location tests below never
+    reach the mission scorer."""
+    return _company(conn, name, ats="workday", wd_tenant=name.lower(),
+                    wd_pod=5, wd_site="External",
+                    mission_tier="core-mission", mission_score=0.9)
+
+
+def _wd_url(jid):
+    """A URL coords.wd_handle recognizes as a Workday job page (the
+    company row's own wd_tenant/pod/site win over whatever sits in the
+    URL; only the /job/<path> tail is read from it)."""
+    return f"https://acme.wd5.myworkdayjobs.com/External/job/{jid}"
+
+
+def _harvested(conn, c, jid, title, location, description="", url=None):
     store.upsert_job(conn, {"job_id": jid, "company_id": c["id"],
                             "company_name": c["name"], "title": title,
-                            "url": f"https://x.test/j/{jid}",
+                            "url": f"https://x.test/j/{jid}" if url is None else url,
                             "location": location, "description": description,
                             "harvested_at": "2026-09-10T01:00:00"})
 
@@ -295,9 +311,10 @@ def test_drop_logs_one_debug_record_per_dropped_row(tmp_path, tracks, stubs,
 def test_score_line_printed_per_scored_row(tmp_path, tracks, stubs, local_addr,
                                            capsys):
     """Every row the scorer actually returns a number for gets one printed
-    line, tagged [SURFACED] only when it clears the digest floor -- the
-    audit's other gap: the `claude` DEBUG line carried token counts only,
-    never the score or which row it was for."""
+    line, labeled "surfaced" (not "ok" plus a redundant [SURFACED] tag)
+    only when it clears the digest floor -- the audit's other gap: the
+    `claude` DEBUG line carried token counts only, never the score or
+    which row it was for."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
@@ -307,10 +324,11 @@ def test_score_line_printed_per_scored_row(tmp_path, tracks, stubs, local_addr,
     _run(db, tracks, stubs)
 
     out = capsys.readouterr().out
-    assert (f"score 0.70 ok | Acme | Data Engineer | {local_addr} | stub"
-            "  [SURFACED]\n") in out
+    assert (f"score 0.70 surfaced | Acme | Data Engineer | {local_addr} | "
+            "stub\n") in out
     assert (f"score 0.10 fit | Acme | Weak Data Engineer | {local_addr} | "
             "stub\n") in out
+    assert "SURFACED" not in out
 
 
 def test_waiting_reason_names_a_failed_fetch_then_the_retry_window(
@@ -342,10 +360,7 @@ def test_waiting_reason_names_a_row_with_no_url(tmp_path, tracks, stubs,
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
-    store.upsert_job(conn, {"job_id": "nourl", "company_id": c["id"],
-                            "company_name": c["name"], "title": "Data Engineer",
-                            "url": "", "location": local_addr,
-                            "harvested_at": "2026-09-10T01:00:00"})
+    _harvested(conn, c, "nourl", "Data Engineer", local_addr, url="")
 
     _run(db, tracks, stubs)
 
@@ -362,11 +377,7 @@ def test_waiting_list_is_capped(tmp_path, tracks, stubs, local_addr, capsys):
     for i in range(n):
         c = _company(conn, f"Co{i}", mission_tier="core-mission",
                      mission_score=0.9)
-        store.upsert_job(conn, {"job_id": f"j{i}", "company_id": c["id"],
-                                "company_name": c["name"],
-                                "title": "Data Engineer", "url": "",
-                                "location": local_addr,
-                                "harvested_at": "2026-09-10T01:00:00"})
+        _harvested(conn, c, f"j{i}", "Data Engineer", local_addr, url="")
 
     _run(db, tracks, stubs)
 
@@ -376,10 +387,14 @@ def test_waiting_list_is_capped(tmp_path, tracks, stubs, local_addr, capsys):
 
 
 def test_skip_score_short_body_counted_in_summary(tmp_path, tracks, stubs,
-                                                   local_addr, monkeypatch):
+                                                   local_addr, monkeypatch,
+                                                   capsys):
     """A row that reaches the scorer with a body under fit.MIN_DESC_CHARS is
     refused (SKIP-SCORE), which used to vanish into "left" indistinguishably
-    from a row still waiting on a body. It now has its own summary count."""
+    from a row still waiting on a body. It now has its own summary count --
+    and, since the row still surfaces (unscored) into its track, that count
+    is a QUALIFIER on `surfaced`, not a second, overlapping tally: one row,
+    counted once ("1 surfaced (1 unscored: short body)"), not two."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
@@ -394,9 +409,11 @@ def test_skip_score_short_body_counted_in_summary(tmp_path, tracks, stubs,
 
     s = _run(db, tracks, stubs)
 
-    assert s["skip_score"] == 1
+    assert s["skip_score"] == 1 and s["surfaced"] == 1
     row = _row(conn, "stub")
     assert row["triage_status"] == "ok" and row["resume_fit_score"] is None
+    out = capsys.readouterr().out
+    assert "1 surfaced (1 unscored: short body)" in out
 
 
 # ── several tracks, one row ─────────────────────────────────────────────────
@@ -449,13 +466,21 @@ def test_keyword_focus_is_restored(tmp_path, tracks, stubs, local_addr, cfg):
 
 # ── wiring ──────────────────────────────────────────────────────────────────
 
-def test_harvest_pass_ends_with_triage(tmp_path, monkeypatch):
+def test_harvest_pass_ends_with_triage_then_digests(tmp_path, monkeypatch):
+    """A harvest pass can move rows into a track's ranking with no crawl
+    ever running, so after triage it rewrites every roster track's digest
+    -- from the SAME store the pass wrote -- whether or not any board was
+    due (harvest._triage)."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     _company(conn, "A")
-    seen = []
-    monkeypatch.setattr(triage, "run",
-                        lambda **kw: seen.append(kw) or {"pending": 0})
+    seen, order = [], []
+    monkeypatch.setattr(triage, "run", lambda **kw: seen.append(kw)
+                        or order.append("triage") or {"pending": 0})
+    monkeypatch.setattr(triage, "roster_tracks",
+                        lambda: [{"track": LOCAL}, {"track": SWEEP}])
+    monkeypatch.setattr(harvest, "rewrite_digest",
+                        lambda conn, t, **kw: order.append(t["track"]))
 
     def fake_board(company, db_path, progress=lambda: None, hydrate=False):
         return {"err": None, "fetched": 1, "new": 1, "hydrated": 0,
@@ -465,9 +490,13 @@ def test_harvest_pass_ends_with_triage(tmp_path, monkeypatch):
                     score_cap=7)
     assert s["triage"] == {"pending": 0}
     assert seen[0]["db_path"] == db and seen[0]["score_cap"] == 7
+    assert order == ["triage", LOCAL, SWEEP]
     s = harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
                     triage=False)
-    assert "triage" not in s and len(seen) == 1
+    assert "triage" not in s and len(seen) == 1 and len(order) == 3
+    s = harvest.run(db_path=tmp_path / "empty.db")      # no board due
+    assert s["triage"] == {"pending": 0}
+    assert order[3:] == ["triage", LOCAL, SWEEP]
 
 
 def test_digest_counts_read_the_funnel(tmp_path, tracks, stubs, local_addr):
@@ -479,3 +508,180 @@ def test_digest_counts_read_the_funnel(tmp_path, tracks, stubs, local_addr):
     _run(db, tracks, stubs)
     assert store.triage_counts(conn) == {"ok": 1, "title": 1}
     assert store.triage_counts(conn, days=1) == {"ok": 1, "title": 1}
+
+
+# ── Workday location resolution (unknown-location survivors) ───────────────
+#
+# Workday's "N Locations" listing placeholder (location_unknown) is not a
+# place -- the detail JSON is what names the real list, so the geo gate
+# must wait for it rather than falling straight to the strict body regex.
+
+def test_bodiless_workday_n_locations_resolves_before_geo_gate(
+        tmp_path, tracks, stubs, local_addr, elsewhere):
+    """The listing's placeholder defers; the bodiless hydrate call (the
+    same one that fetches the body) names the real place, and THAT is
+    what the geo gate judges -- local passes, elsewhere drops as geo."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _wd_company(conn)
+    _harvested(conn, c, "near", "Data Engineer", "2 Locations",
+               url=_wd_url("near"))
+    _harvested(conn, c, "far", "Data Engineer", "2 Locations",
+               url=_wd_url("far"))
+
+    def hydrate(company, jobs, **kw):
+        for j in jobs:
+            j["_tried"] = True
+            j["description"] = "python sql pipelines " * 20
+            j["location"] = local_addr if j["id"] == "near" else elsewhere
+        return {"hydrated": len(jobs), "unhydrated": 0}
+
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate, max_workers=2)
+
+    near, far = _row(conn, "near"), _row(conn, "far")
+    assert near["triage_status"] == "ok" and near["location"] == local_addr
+    assert far["triage_status"] == "geo" and far["location"] == elsewhere
+
+
+def test_bodied_workday_n_locations_resolves_via_cached_location_lookup(
+        tmp_path, tracks, stubs, local_addr):
+    """A Workday row that already has a body but still carries the "N
+    Locations" placeholder gets ONLY its location refreshed -- no body
+    refetch (needs_detail's second clause, hydrate_description's cached
+    workday._wd_detail_locations branch)."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _wd_company(conn)
+    _harvested(conn, c, "j", "Data Engineer", "2 Locations",
+               description="python sql pipelines " * 20, url=_wd_url("j"))
+
+    def hydrate(company, jobs, **kw):
+        for j in jobs:
+            j["_tried"] = True
+            j["location"] = local_addr        # simulates a resolved lookup
+        return {"hydrated": 1, "unhydrated": 0}
+
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate, max_workers=2)
+
+    row = _row(conn, "j")
+    assert row["triage_status"] == "ok" and row["location"] == local_addr
+
+
+def test_bodied_workday_location_lookup_failure_defers_then_expires(
+        tmp_path, tracks, stubs):
+    """A cached location lookup that resolves nothing defers the row (a
+    waiting reason, triage_status stays NULL) and is not retried inside
+    RETRY_DAYS; only once that window has passed does the geo gate give
+    up on the lookup and let today's strict body rule decide."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _wd_company(conn)
+    _harvested(conn, c, "j", "Data Engineer", "2 Locations",
+               description="python sql pipelines " * 20, url=_wd_url("j"))
+    calls = []
+
+    def hydrate_fails(company, jobs, **kw):
+        for j in jobs:
+            calls.append(j["id"])
+            j["_tried"] = True          # the lookup ran; it resolved nothing
+        return {"hydrated": 0, "unhydrated": len(jobs)}
+
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2)
+    assert calls == ["j"]
+    row = _row(conn, "j")
+    assert row["triage_status"] is None and row["desc_checked_at"]
+
+    # Inside the retry window: no second lookup attempt.
+    calls.clear()
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2)
+    assert calls == [] and _row(conn, "j")["triage_status"] is None
+
+    # The last attempt is now older than RETRY_DAYS: the geo gate stops
+    # waiting and decides on the body already stored -- no further lookup.
+    old = (datetime.now() - timedelta(days=triage.RETRY_DAYS + 1)).isoformat()
+    conn.execute("UPDATE jobs SET desc_checked_at=? WHERE job_id='j'", (old,))
+    conn.commit()
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2)
+    assert calls == []
+    assert _row(conn, "j")["triage_status"] == "geo"
+
+
+# ── re-queue (rows an earlier rule mis-judged) ──────────────────────────────
+
+def test_requeue_reports_both_reasons_and_touches_nothing_by_default(
+        tmp_path, tracks, stubs, elsewhere):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    wd = _wd_company(conn)
+    _harvested(conn, wd, "unk", "Data Engineer", "2 Locations",
+               url=_wd_url("unk"))
+    store.record_triage(conn, "unk", "geo", f"{LOCAL}=geo")
+    # The same placeholder on a board with no location lookup: re-judging
+    # it would reach the same body-rule verdict, so it is not selected.
+    _harvested(conn, c, "unk2", "Data Engineer", "2 Locations")
+    store.record_triage(conn, "unk2", "geo", f"{LOCAL}=geo")
+    _harvested(conn, c, "far", "Data Engineer", elsewhere,
+               description="an onsite engineering role")
+    store.record_triage(conn, "far", "ok", f"{LOCAL}=ok", tracks=[LOCAL],
+                        scores={"resume_fit_score": 0.7})
+    # A row the CRAWL adopted directly: same location, but no triage_status
+    # at all, so requeue must never touch it.
+    _harvested(conn, c, "adopted", "Data Engineer", elsewhere)
+    store.upsert_job(conn, {"job_id": "adopted", "track": LOCAL})
+
+    # Passed the non-geo track too: its labels stay.
+    _harvested(conn, c, "both", "Data Engineer", elsewhere)
+    store.record_triage(conn, "both", "ok", f"{LOCAL}=ok;{SWEEP}=ok",
+                        tracks=[LOCAL, SWEEP])
+
+    s = triage.requeue_rows(db_path=db, tracks=tracks)
+
+    assert s["counts"] == {"geo:unknown-location": 1, "geo:non-local": 1}
+    assert _row(conn, "both")["triage_status"] == "ok"
+    assert s["requeued"] == 0
+    assert _row(conn, "unk")["triage_status"] == "geo"
+    far_row = _row(conn, "far")
+    assert far_row["triage_status"] == "ok" and far_row["track"] == LOCAL
+    assert _row(conn, "adopted")["triage_status"] is None
+
+
+def test_requeue_apply_clears_track_score_and_triage_fields_then_rejudges(
+        tmp_path, tracks, stubs, elsewhere):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    wd = _wd_company(conn)
+    _harvested(conn, wd, "unk", "Data Engineer", "2 Locations",
+               description="python sql pipelines " * 20, url=_wd_url("unk"))
+    store.record_triage(conn, "unk", "geo", f"{LOCAL}=geo")
+    _harvested(conn, c, "far", "Data Engineer", elsewhere,
+               description="an onsite engineering role")
+    store.record_triage(conn, "far", "ok", f"{LOCAL}=ok", tracks=[LOCAL],
+                        scores={"resume_fit_score": 0.7, "fit_reason": "stub"})
+
+    s = triage.requeue_rows(db_path=db, apply=True, tracks=tracks)
+
+    assert s["requeued"] == 2
+    for jid in ("unk", "far"):
+        row = _row(conn, jid)
+        assert row["triage_status"] is None and row["track"] is None
+        assert row["resume_fit_score"] is None and row["fit_reason"] is None
+        assert row["description"], "the body already fetched is kept"
+    pending = {r["job_id"] for r in store.triage_pending(conn)}
+    assert {"unk", "far"} <= pending
+
+    # A later plain pass is what re-judges it -- requeue_rows never does.
+    # The Workday row now waits on its location lookup (the stub resolves
+    # none) instead of being dropped by the body rule at once.
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=stubs["hydrate_fn"], max_workers=2)
+    assert stubs["hydrate"] == ["unk"]
+    unk = _row(conn, "unk")
+    assert unk["triage_status"] is None and unk["desc_checked_at"]
+    assert _row(conn, "far")["triage_status"] == "geo"

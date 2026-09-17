@@ -38,8 +38,8 @@ from src import config
 # full tree via _get_soup.
 _ANCHORS_ONLY = SoupStrainer("a")
 
-from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed, note_capped
-from src.match.locality import NC_RE  # profile [locality]: the location gate
+from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed, get_json, note_capped
+from src.match.locality import NC_RE, location_unknown  # profile [locality]
 from src.net.util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
 from . import icims, workday
 from .adp_wfn import fetch_adp
@@ -65,29 +65,6 @@ _DESC_MAX = config.MAX_DESC_CHARS
 # Kept for discovery (local_sourcing), which imports the Workday search
 # term under this name.
 _default_search_text = default_search_text
-
-
-def _get_json(url, label, **kw):
-    """GET + parse JSON, treating any fetch exception, HTTP error, empty
-    body, or non-JSON response as a clean miss (returns None, reported via
-    fetch_failed) rather than an exception that surfaces as a cryptic
-    ``Expecting value`` further up the stack."""
-    try:
-        r = SESSION.get(url, headers=HEADERS, **kw)
-    except Exception as e:
-        fetch_failed(label, e)
-        return None
-    if r.status_code != 200:
-        fetch_failed(label, f"HTTP {r.status_code}")
-        return None
-    if not r.content.strip():
-        fetch_failed(label, "empty response")
-        return None
-    try:
-        return r.json()
-    except ValueError:
-        fetch_failed(label, "non-JSON response")
-        return None
 
 
 # --- the shape --------------------------------------------------------------- #
@@ -129,13 +106,13 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
     `totalFound` is never compared: the rows it drops for locality are not
     missing.
 
-    A page `_get_json` cannot read (error status, non-JSON body) ends the
+    A page `get_json` cannot read (error status, non-JSON body) ends the
     walk as a reported failure, never as the board's end.
     """
     out = []
     total = None
     for page in range(max_pages):
-        data = _get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+        data = get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
                          f"?limit=100&offset={page*100}",
                          f"smartrecruiters {slug} p{page}")
         if data is None:
@@ -183,11 +160,49 @@ def fetch_peopleadmin_all(host, loc_re=None):
     return out
 
 
+def needs_detail(job):
+    """True when hydrate_description would fetch anything for `job`: no
+    body yet, or (Workday only) a body already but a location the listing
+    never resolved -- the "<N> Locations" placeholder (or any other
+    location_unknown text). Every OTHER ats's location comes solely from
+    the listing (hydrate_description never revisits it once a body is in),
+    so a bodied non-Workday row never needs a second detail call. Shared
+    by harvest._hydrate_rows and triage._hydrate, which both select rows
+    to fetch by this predicate rather than "no description" alone.
+
+    >>> needs_detail({"description": "", "ats": "greenhouse", "_wd": None})
+    True
+    >>> needs_detail({"description": "d", "ats": "greenhouse", "_wd": None})
+    False
+    >>> wd = ("acme", 5, "Ext", "/job/x")
+    >>> needs_detail({"description": "d", "ats": "workday", "_wd": wd,
+    ...               "location": "2 Locations"})
+    True
+    >>> needs_detail({"description": "d", "ats": "workday", "_wd": wd,
+    ...               "location": "Durham, NC"})
+    False
+    """
+    if not job.get("description"):
+        return True
+    return job.get("ats") == "workday" and bool(job.get("_wd")) \
+        and location_unknown(job.get("location"))
+
+
 def hydrate_description(job):
-    """Fetch a job's real description (in place) for ATSes with a detail call."""
-    if job.get("description"):
+    """Fetch, in place, whatever `needs_detail` says `job` still lacks: a
+    bodiless row's description through its ATS's detail call (for Workday
+    the same JSON also carries the location list), or a bodied Workday
+    row's location alone, from the disk-cached per-req lookup
+    (workday._wd_detail_locations) with no body refetch.
+    """
+    if not needs_detail(job):
         return job
     if job.get("ats") == "workday" and job.get("_wd"):
+        if job.get("description"):
+            locs = workday._wd_detail_locations(*job["_wd"])
+            if locs:
+                job["location"] = "; ".join(locs)
+            return job
         info = workday.cxs_detail(*job["_wd"])
         if info:
             job["description"] = workday.text_from_html(
@@ -195,10 +210,10 @@ def hydrate_description(job):
             # Same JSON carries the req's full location list: upgrade a
             # useless "2 Locations" locationsText to the real thing.
             locs = workday.detail_locations(info)
-            if locs and (not job.get("location")
-                         or workday.N_LOCATIONS_RE.match(job["location"] or "")):
+            if locs and location_unknown(job.get("location")):
                 job["location"] = "; ".join(locs)
-    elif job.get("ats") == "smartrecruiters" and job.get("_sr"):
+        return job
+    if job.get("ats") == "smartrecruiters" and job.get("_sr"):
         slug, pid = job["_sr"]
         try:
             r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}", headers=HEADERS)
@@ -699,7 +714,7 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
     host = re.sub(r"^https?://(www\.)?", "", root)
     out, page = [], 1
     while True:
-        d = _get_json(f"{root}/wp-json/post-filters-archive/get-posts"
+        d = get_json(f"{root}/wp-json/post-filters-archive/get-posts"
                       f"?post_type=career&posts_per_page=100&paged={page}",
                       f"wpjson {host}")
         if not d:

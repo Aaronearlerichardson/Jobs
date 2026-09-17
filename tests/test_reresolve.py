@@ -11,6 +11,10 @@ Offline: the resolver, the mission scorer and the board fetch are all
 stubbed, exactly as the pasted-name tests stub them.
 """
 
+from datetime import datetime, timedelta
+
+import pytest
+
 import src.store as store
 from src import tags
 from src.ats import signatures as ats_signatures
@@ -22,6 +26,19 @@ from src.ops import maintenance as ops
 def _miss(db, name, reason, **fields):
     """One inactive roster row carrying `reason`."""
     store.record_miss(db, name, reason, **fields)
+
+
+def _silent(db, name, harvested_days_ago=1, **fields):
+    """A board added 30 days ago that has listed nothing since and was
+    harvested `harvested_days_ago` days ago: a SILENT_FAMILY row."""
+    now = datetime.now()
+    store.upsert_company(db, {"name": name, "ats": "lever",
+                              "slug": name.lower(), "total_job_count": 0,
+                              **fields})
+    db.execute("UPDATE companies SET created_at=?, last_harvested_at=? "
+               "WHERE name=?",
+               ((now - timedelta(days=30)).isoformat(),
+                (now - timedelta(days=harvested_days_ago)).isoformat(), name))
 
 
 class TestReresolveSelection:
@@ -71,6 +88,23 @@ class TestReresolveSelection:
             "Axoft"]
 
 
+class TestSilentBoardFamily:
+    """SILENT_FAMILY selection is doctested on _silent_board_candidates and
+    _reresolve_candidates; these are the two clauses the doctests leave
+    unstaged."""
+
+    def test_a_row_older_than_the_created_at_column_is_selected(self, db):
+        _silent(db, "Legacy")
+        db.execute("UPDATE companies SET created_at=NULL WHERE name='Legacy'")
+        assert [c["name"] for c in ops._reresolve_candidates(
+            db, families=(ops.SILENT_FAMILY,))] == ["Legacy"]
+
+    def test_a_board_last_harvested_long_ago_is_not_selected(self, db):
+        _silent(db, "Abandoned", harvested_days_ago=30)
+        assert ops._reresolve_candidates(
+            db, families=(ops.SILENT_FAMILY,)) == []
+
+
 class TestReresolveWrites:
     """What a pass writes. The contract with the roster review queue is
     narrow on purpose: board coordinates, a mission score, active=0 and the
@@ -107,6 +141,56 @@ class TestReresolveWrites:
         assert row["mission_tier"] == "adjacent", \
             "the review queue shows the tier, so it has to be scored here"
         assert row["source"] == "directory", "the row's provenance is not ours"
+
+    def test_a_silent_board_retargets_when_the_sniff_finds_a_new_board(
+            self, db, monkeypatch):
+        """A hit on a SILENT_FAMILY row goes through the exact same write
+        as any other family's -- no separate code path."""
+        _silent(db, "Quiet", slug="quiet-old", active=1)
+        self._wire(monkeypatch, ({"name": "Quiet", "ats": "greenhouse",
+                                  "slug": "quiet-new", "careers_url":
+                                  "https://quiet.example/careers",
+                                  "count": 12, "nc": 2, "via": "sniff"}, None))
+
+        written = ops.reresolve_misses(conn=db, max_workers=1, t=self.T,
+                                       families=[ops.SILENT_FAMILY])
+
+        assert len(written) == 1
+        row = dict(db.execute(
+            "SELECT * FROM companies WHERE name='Quiet'").fetchone())
+        assert (row["ats"], row["slug"]) == ("greenhouse", "quiet-new")
+        assert row["active"] == 0, \
+            "retargeted the same way as any other family: reviewed, not crawled"
+        assert tags.PENDING in tags.parse(row["tags"])
+
+    def test_preview_writes_nothing_and_scores_nothing(self, db,
+                                                        monkeypatch):
+        _silent(db, "Quiet", slug="quiet-old", active=1)
+        _miss(db, "Gone", "board-dead:lever", ats="lever", slug="gone")
+        before = [dict(r) for r in db.execute("SELECT * FROM companies")]
+        results = {
+            "Quiet": ({"name": "Quiet", "ats": "greenhouse",
+                       "slug": "quiet-new", "careers_url": None,
+                       "count": 12, "nc": 2, "via": "sniff"}, None),
+            "Gone": (None, "no-board-found:wrong-domain")}
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
+                            lambda name, *a, **k: results[name])
+
+        def no_score(*a, **k):
+            raise AssertionError("a preview never pays for a mission score")
+        monkeypatch.setattr("src.claude.api.score_company_mission", no_score)
+
+        written = ops.reresolve_misses(
+            conn=db, max_workers=1, t=self.T, commit=False,
+            families=ops.RERESOLVE_FAMILIES + (ops.SILENT_FAMILY,))
+
+        assert [b["slug"] for b in written] == ["quiet-new"]
+        assert [dict(r) for r in db.execute(
+            "SELECT * FROM companies")] == before
+
+    def test_an_unknown_family_is_refused(self, db):
+        with pytest.raises(ValueError):
+            ops.reresolve_misses(conn=db, t=self.T, families=["silent"])
 
     def test_stale_coordinates_do_not_survive_a_new_board(self, db, monkeypatch):
         # upsert_company drops None values so it can never erase a stored

@@ -11,7 +11,7 @@ UI and run_scraper.py can run any op against any configured track.
 """
 
 import re
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from src import config
@@ -37,8 +37,11 @@ def _t(t):
 
 
 @contextmanager
-def track_store(t=None):
-    """The track's store, closed on the way out however the block ends.
+def track_store(t=None, conn=None):
+    """The track's store, closed on the way out however the block ends --
+    or `conn` itself, left open, when the caller already holds one (the
+    crawl and the harvest pass hand an op the store they have open, which
+    need not be `t`'s configured file).
 
     Every op here opens the same connection the same way, and each one
     used to spell out its own `conn = store.connect(...)` / `conn.close()`
@@ -51,6 +54,9 @@ def track_store(t=None):
     roster ops resolved None the other way, so the same op run from the
     web UI and from discover.py could reach different stores.
     """
+    if conn is not None:
+        yield conn
+        return
     conn = store.connect(_t(t)["db_path"])
     try:
         yield conn
@@ -191,7 +197,7 @@ def rewrite_digest(conn, t, top_n=15, heading=""):
     status sync and the standalone deep verify both ended with their own
     copy, and the copies had already drifted apart in what they printed.
     """
-    ranked, _pipeline, _followups, _path = _write_digest(conn, t)
+    ranked = _write_digest(conn, t)[0]
     if heading:
         print(heading)
     for j in ranked[:top_n]:
@@ -659,16 +665,63 @@ def _live_jd(row):
     return text if len(text) > len(stored) else stored
 
 
+def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
+    """Track `t`'s open triage_status='fit' rows screened at or above
+    `floor`, located locally (NC_RE) or stored remote_eligible, best screen
+    score first, less `exclude_ids` (the top-N slice): the rows verify_top
+    reaches past its top N.
+
+    >>> conn = store.connect(":memory:")
+    >>> _ = store.upsert_job(conn, {"job_id": "j1", "title": "T",
+    ...                             "track": "local-tech", "location": "Elsewhere",
+    ...                             "resume_fit_score": 0.3, "remote_eligible": 1})
+    >>> store.record_triage(conn, "j1", "fit", "local-tech=ok")
+    >>> _ = store.upsert_job(conn, {"job_id": "j2", "title": "T",
+    ...                             "track": "local-tech", "location": "Elsewhere",
+    ...                             "resume_fit_score": 0.3})
+    >>> store.record_triage(conn, "j2", "fit", "local-tech=ok")
+    >>> [r["job_id"] for r in _verify_floor_candidates(
+    ...     conn, {"track": "local-tech"}, 0.25)]
+    ['j1']
+
+    Notes:
+        A 'fit' row already carries the track label (triage's
+        record_triage merges it for 'fit' and 'ok' alike), so the track
+        LIKE finds it. The location test reads what triage stored, not the
+        ranking's remote_admitted trust rule: this chooses where verify
+        calls go, it does not admit rows to the ranking.
+    """
+    ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM jobs WHERE triage_status = 'fit' "
+        "AND (',' || COALESCE(track,'') || ',') LIKE ? "
+        "AND resume_fit_score >= ? "
+        "AND COALESCE(status,'open') != 'closed' "
+        f"AND (disposition IS NULL OR disposition NOT IN ({ph})) "
+        "ORDER BY resume_fit_score DESC",
+        (f"%,{t['track']},%", floor, *store.RANKING_EXCLUDED_DISPOSITIONS)
+    ).fetchall()]
+    return [r for r in rows if r["job_id"] not in exclude_ids
+            and (NC_RE.search(r.get("location") or "")
+                 or r.get("remote_eligible") == 1)]
+
+
 def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                force=False):
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
-    each of the current top `top_n` jobs not already verified BY THE CURRENT
+    each of the current top `top_n` jobs, PLUS enough triage_status='fit'
+    candidates (_verify_floor_candidates: local/remote, screened at or
+    above the track's `verify_floor`, ordered by screen score descending)
+    to fill the SAME top_n budget when the top-N slice itself has fewer
+    than top_n rows that need it — not already verified BY THE CURRENT
     verify model (fit_reason carrying the 'deep:' marker and fit_model
-    naming fit.verify_model()), re-fetch the freshest full posting text
+    naming fit.verify_model()) — re-fetch the freshest full posting text
     (_live_jd), run fit.verify_fit — which extracts hard requirements before
     re-scoring all axes and gates — and write the verified scores back.
     Demotions can pull new unverified rows into the top, so the pass
-    re-ranks and repeats up to `rounds` times.
+    re-ranks and repeats up to `rounds` times. A 'fit' row whose deep score
+    reaches the track's digest_min_fit is relabelled 'ok'
+    (store.record_triage), as triage would have surfaced it.
 
     Unverifiable rows (dead URL and no stored body, API down) keep their
     first-pass score untouched; once src.claude's breaker has disabled the
@@ -677,7 +730,17 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     fetched for nothing). Costs at most top_n x rounds API calls per
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
-    `force=True` re-verifies every finalist regardless."""
+    `force=True` re-verifies every finalist regardless (candidates are
+    still capped at top_n; force does not widen the round's own budget).
+
+    Notes:
+        The floor candidates exist because digest_min_fit keeps a weak
+        screen score out of the TOP of the ranking, not out of it: an
+        underrated row (2026-09-09: screen 0.16, deep 0.50) can sit where
+        top_n never reaches, however many rounds run. They only take the
+        slots the top-N slice left unspent, so a busy run costs nothing
+        extra.
+    """
     from src.claude.api import api_disabled
     from src.claude.fit import FitResult, verify_fit, verify_model
     t = _t(t)
@@ -691,9 +754,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
             return True
         return (r.get("fit_model") or "") != current
 
-    with ExitStack() as stack:
-        if conn is None:
-            conn = stack.enter_context(track_store(t))
+    with track_store(t, conn) as conn:
         n_done = 0
         for rnd in range(rounds):
             down = api_disabled()
@@ -706,11 +767,25 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                       f"run ({down})")
                 break
             ranked = _ranked(conn, t, limit=top_n)
-            todo = [r for r in ranked if _stale(r)]
+            stale_top = [r for r in ranked if _stale(r)]
+            remaining = top_n - len(stale_top)
+            candidates = []
+            floor = t["verify_floor"]
+            if remaining > 0:
+                seen_ids = {r["job_id"] for r in ranked}
+                floor_rows = _verify_floor_candidates(
+                    conn, t, floor, exclude_ids=seen_ids)
+                candidates = [r for r in floor_rows if _stale(r)][:remaining]
+            todo = stale_top + candidates
             if not todo:
+                if rnd == 0:
+                    print(f"  deep-verify [{t['track']}]: nothing new in the "
+                          f"top {top_n} or at/above {floor:.2f} for {current}")
                 break
-            print(f"  deep-verifying {len(todo)} of the top {len(ranked)} "
-                  f"with {current} (round {rnd + 1}/{rounds}"
+            print(f"  deep-verifying {len(stale_top)} of the top {len(ranked)}"
+                  + (f" and {len(candidates)} floor candidate(s) at/above "
+                     f"{floor:.2f}" if candidates else "")
+                  + f" with {current} (round {rnd + 1}/{rounds}"
                   f"{', forced' if force else ''})...")
 
             def _one(r):
@@ -741,13 +816,23 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                     conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
                                  (text[:config.MAX_DESC_CHARS], r["job_id"]))
                     conn.commit()
+                # A floor candidate that reaches the track's digest_min_fit on
+                # the deep score surfaces exactly as triage would have surfaced
+                # it first-pass; one that doesn't keeps triage_status='fit' —
+                # its corrected score is still recorded above either way.
+                if (r.get("triage_status") == "fit"
+                        and res.score >= t["digest_min_fit"]):
+                    store.record_triage(conn, r["job_id"], store.TRIAGE_OK,
+                                        r.get("triage_detail") or "",
+                                        tracks=[t["track"]])
                 old = r.get("resume_fit_score")
                 move = (f"{old:.2f} -> {res.score:.2f}"
                         if isinstance(old, float) else f"?    -> {res.score:.2f}")
                 flag = "  [DEMOTED]" if isinstance(old, float) and \
                     res.score < old - 0.15 else ""
-                print(f"    {move}  {r['title'][:44]} ({r['company_name']})"
-                      f"{flag}")
+                reason = (res.reason or "").removeprefix("deep: ")[:90]
+                print(f"    {move}, {r['company_name']}, {r['title'][:44]}, "
+                      f"{reason}{flag}")
                 n_done += 1
                 n_scored += 1
                 if isinstance(old, float) and res.score < old - 0.25:
@@ -898,14 +983,19 @@ def sync_status_all(top_n=15, t=None):
         return (n_closed, n_reopened)
 
 
-def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None):
+def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
+                      conn=None):
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410, an ATS "no longer accepting" notice, a past JSON-LD
     validThrough, a Workday CXS miss). Indeterminate probes (bot-gated
-    hosts, JS-only pages) leave the row untouched."""
-    t = _t(t)
-    with track_store(t) as conn:
+    hosts, JS-only pages) leave the row untouched.
+
+    `conn=None` opens the track's own store (`t`, default track when `t` is
+    also None); a caller's own `conn` is used as is (track_store). The
+    query is not scoped by track: a stale OPEN row is stale whichever
+    track ranks it."""
+    with track_store(t, conn) as conn:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
         rows = [dict(r) for r in conn.execute(
             "SELECT job_id, title, company_name, url FROM jobs "
@@ -1241,12 +1331,123 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
 # anyway.
 RERESOLVE_FAMILIES = ("no-board-found", "board-dead")
 
+# A board that is not a resolution failure at all -- ats/slug are set, the
+# harvester keeps fetching it without error -- but that has LISTED nothing
+# in a week or more. total_job_count=0 forever most often means the slug
+# resolves to nothing real (a 200 OK with an empty body, not a 404: Lever
+# and some others answer this way for a retired or mistyped tenant), which
+# a live re-sniff can catch the same way it catches a dead board. Not one
+# of RERESOLVE_FAMILIES because it carries no miss_reason of its own -- see
+# _silent_board_candidates -- so a pass opts into it through
+# reresolve_misses's `families` rather than getting it by default.
+SILENT_FAMILY = "silent-board"
+# How long a board must have listed nothing before it counts as silent
+# (last_nonempty_at, or created_at when it never had one, at least this
+# old), and how recently it must still have been harvested to count as
+# "still being tracked" rather than abandoned.
+SILENT_DAYS = 7
+SILENT_HARVESTED_WITHIN_DAYS = 3
 
-def _reresolve_candidates(conn, days=None, names=None, limit=50):
-    """The inactive rows a re-resolution pass should retry, oldest miss first.
 
-    Only the two retryable miss families are selected, and only rows the
-    crawl is not already using:
+def _silent_board_candidates(conn, now=None):
+    """Harvested boards that have listed nothing in >= SILENT_DAYS days --
+    a resolution that stopped being true, not a resolution failure (those
+    are RERESOLVE_FAMILIES's job). Carries no miss_reason of its own, so
+    this is a separate query rather than another WHERE clause on one: a
+    miss-family row and a silent-board row have almost nothing in common
+    to select on.
+
+    A row qualifies only when ALL of:
+      * it has a real, fetchable board (an `ats`, not the capture-only one)
+      * `miss_reason` is NULL -- one already on a miss-remediation path
+        (including a promoted 'board-dead:<ats>', mark_harvested's own
+        cycle) is that path's to retry, not this one's to re-select;
+      * `total_job_count` is 0;
+      * `last_harvested_at` is within SILENT_HARVESTED_WITHIN_DAYS days --
+        still being actively harvested, not simply a board the run has
+        stopped visiting;
+      * `last_nonempty_at` is NULL or >= SILENT_DAYS days old;
+      * `created_at` is also >= SILENT_DAYS days old, or NULL (the row
+        predates the column) -- so a board harvested for the first time
+        this morning (last_nonempty_at NULL, same as a chronically silent
+        one) is not selected before it has actually had a week.
+
+    Oldest evidence first (last_nonempty_at, falling back to created_at for
+    a board that never had one):
+
+    >>> from src.store import connect, upsert_company
+    >>> from datetime import datetime, timedelta
+    >>> conn = connect(":memory:")
+    >>> old = (datetime.now() - timedelta(days=30)).isoformat()
+    >>> recent = datetime.now().isoformat()
+
+    (last_harvested_at/last_nonempty_at are crawl-scheduling columns
+    upsert_company does not accept -- like mark_harvested, this sets them
+    with a raw UPDATE.)
+
+    >>> cid = upsert_company(conn, {"name": "Stale", "ats": "lever",
+    ...                             "slug": "stale", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=? WHERE id=?", (old, recent, cid))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+
+    A board harvested for the first time this week is not silent yet --
+    even though it too has never had a nonempty pass:
+
+    >>> cid_new = upsert_company(conn, {"name": "New", "ats": "lever",
+    ...                                 "slug": "n", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET last_harvested_at=? "
+    ...                  "WHERE id=?", (recent, cid_new))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+
+    Neither is one that DID list something recently, one no longer being
+    harvested at all, or one already on a miss-remediation path of its
+    own:
+
+    >>> cid2 = upsert_company(conn, {"name": "Fine", "ats": "lever",
+    ...                              "slug": "f", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=?, last_nonempty_at=? "
+    ...                  "WHERE id=?", (old, recent, recent, cid2))
+    >>> cid3 = upsert_company(conn, {"name": "Abandoned", "ats": "lever",
+    ...                              "slug": "ab", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=? WHERE id=?",
+    ...                  (old, cid3))
+    >>> cid4 = upsert_company(conn, {"name": "Erroring", "ats": "lever",
+    ...                              "slug": "e", "total_job_count": 0})
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=?, "
+    ...                  "miss_reason='fetch-error:harvest' WHERE id=?",
+    ...                  (old, recent, cid4))
+    >>> [c["name"] for c in _silent_board_candidates(conn)]
+    ['Stale']
+    """
+    from src.store.companies import CAPTURE_ATS
+
+    now = now or datetime.now()
+    silent_cut = (now - timedelta(days=SILENT_DAYS)).isoformat()
+    harvested_cut = (now - timedelta(days=SILENT_HARVESTED_WITHIN_DAYS)
+                    ).isoformat()
+    return [dict(r) for r in conn.execute(
+        "SELECT * FROM companies WHERE ats IS NOT NULL AND ats != ? "
+        "AND miss_reason IS NULL "
+        "AND COALESCE(total_job_count, 0) = 0 "
+        "AND last_harvested_at IS NOT NULL AND last_harvested_at >= ? "
+        "AND COALESCE(created_at, '') <= ? "
+        "AND (last_nonempty_at IS NULL OR last_nonempty_at <= ?) "
+        "ORDER BY COALESCE(last_nonempty_at, created_at) ASC, name ASC",
+        (CAPTURE_ATS, harvested_cut, silent_cut, silent_cut)).fetchall()]
+
+
+def _reresolve_candidates(conn, days=None, names=None, limit=50,
+                          families=RERESOLVE_FAMILIES):
+    """The rows a re-resolution pass should retry, oldest evidence first.
+
+    Only the requested miss families are selected among rows the crawl is
+    not already using (`active = 0`, same as every miss — see
+    src.store.record_miss):
 
     >>> from src.store import connect, record_miss, upsert_company
     >>> conn = connect(":memory:")
@@ -1284,6 +1485,24 @@ def _reresolve_candidates(conn, days=None, names=None, limit=50):
     ['Emmes']
     >>> _reresolve_candidates(conn, names=["Chiesi", "Guardant"])
     []
+
+    Passing SILENT_FAMILY alongside the miss families ALSO selects
+    harvested boards that have listed nothing in SILENT_DAYS+ days (see
+    _silent_board_candidates) -- these carry no miss_reason of their own,
+    so they are appended after the miss-backlog rows (a bounded run works
+    the classic miss backlog first) rather than interleaved by `miss_at`:
+
+    >>> cid = upsert_company(conn, {"name": "Quiet", "ats": "lever",
+    ...                             "slug": "quiet", "total_job_count": 0})
+    >>> old = (datetime.now() - timedelta(days=30)).isoformat()
+    >>> _ = conn.execute("UPDATE companies SET created_at=?, "
+    ...                  "last_harvested_at=? WHERE name='Quiet'",
+    ...                  (old, datetime.now().isoformat()))
+    >>> [c["name"] for c in _reresolve_candidates(
+    ...     conn, families=RERESOLVE_FAMILIES + (SILENT_FAMILY,))]
+    ['Advarra', 'Emmes', 'Quiet']
+    >>> [c["name"] for c in _reresolve_candidates(conn)]
+    ['Advarra', 'Emmes']
     """
     wanted = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
     cutoff = ((datetime.now() - timedelta(days=int(days))).isoformat()
@@ -1292,21 +1511,25 @@ def _reresolve_candidates(conn, days=None, names=None, limit=50):
         "SELECT * FROM companies WHERE COALESCE(active, 0) = 0 "
         "AND miss_reason IS NOT NULL "
         "ORDER BY COALESCE(miss_at, '') ASC, name ASC").fetchall()]
-    out = []
-    for r in rows:
-        if store.miss_family(r["miss_reason"]) not in RERESOLVE_FAMILIES:
-            continue
-        if wanted and (r["name"] or "").strip().lower() not in wanted:
-            continue
+    rows = [r for r in rows if store.miss_family(r["miss_reason"]) in families]
+    if SILENT_FAMILY in families:
+        rows += _silent_board_candidates(conn)
+
+    def since(r):
         # A NULL miss_at predates the column: unknown age, so old enough.
-        if cutoff and (r.get("miss_at") or "") > cutoff:
-            continue
-        out.append(r)
+        if r["miss_reason"]:
+            return r.get("miss_at") or ""
+        return r.get("last_nonempty_at") or r.get("created_at") or ""
+
+    out = [r for r in rows
+           if (not wanted or (r["name"] or "").strip().lower() in wanted)
+           and not (cutoff and since(r) > cutoff)]
     return out[:int(limit)] if limit else out
 
 
 def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
-                     names=None, t=None):
+                     names=None, t=None, families=RERESOLVE_FAMILIES,
+                     commit=True):
     """Retry the roster rows that died at resolution; queue every hit for
     human review. Returns the rows written.
 
@@ -1316,6 +1539,21 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     the board clears the row's miss (src.store.upsert_company). A repeated
     miss just re-stamps miss_reason/miss_at, which moves the row to the back
     of the queue `_reresolve_candidates` orders by.
+
+    `families` picks what is retried (default RERESOLVE_FAMILIES; an empty
+    value means the default). SILENT_FAMILY adds harvested boards that
+    have listed nothing in SILENT_DAYS+ days (no miss_reason of their own
+    -- see _silent_board_candidates); they are tried after every
+    miss-family row, so `families=(SILENT_FAMILY,)` is how a bounded pass
+    reaches them. A hit on one is written exactly like any other family's.
+    resolve_or_miss only calls a board a hit when a live fetch lists jobs,
+    so the silent coordinates themselves never come back as one; a miss on
+    an inactive row is recorded as usual (record_miss declines on an
+    active row, which then stays a candidate).
+
+    `commit=False` previews the pass: every sniff runs and every line is
+    printed, but nothing is written and no mission score is requested;
+    the would-be retargets are returned.
 
     Notes:
         Deliberately writes nothing else on the row — the roster review
@@ -1337,41 +1575,49 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from src.discovery.resolve.board import resolve_or_miss, resolved
     from src.match.names import junk_name_reason
 
+    families = tuple(families or RERESOLVE_FAMILIES)
+    unknown = set(families) - {*RERESOLVE_FAMILIES, SILENT_FAMILY}
+    if unknown:
+        raise ValueError(f"unknown reresolve families: {sorted(unknown)}")
     t = _t(t)
-    with ExitStack() as stack:
-        if conn is None:
-            conn = stack.enter_context(track_store(t))
-        rows = _reresolve_candidates(conn, days=days, names=names, limit=limit)
+    with track_store(t, conn) as conn:
+        rows = _reresolve_candidates(conn, days=days, names=names, limit=limit,
+                                     families=families)
         # Misses recorded before the paste screen existed include section
         # headings and category nouns ("Required Qualifications",
         # "Proficiency in SQL.", "Oncology"). Re-stamp them into the
         # 'junk-name' family, which no pass retries, instead of paying a
         # sniff, two web searches and a stall slot for each again.
         junk = [(r, junk_name_reason(r["name"])) for r in rows]
+        miss = store.record_miss if commit else (lambda *a, **k: False)
         for r, why in junk:
             if why:
-                store.record_miss(conn, r["name"], f"junk-name:{why}")
-                print(f"    [junk]    {r['name'][:30]:30} {why} - retired "
+                miss(conn, r["name"], f"junk-name:{why}")
+                print(f"    [junk]    {r['name'][:30]:30} {why} - "
+                      f"{'retired' if commit else 'would be retired'} "
                       f"from the retry queue")
         rows = [r for r, why in junk if not why]
         if not rows:
             print("  no re-resolvable misses "
-                  f"(families: {', '.join(RERESOLVE_FAMILIES)}).")
+                  f"(families: {', '.join(families)}).")
             return []
         print(f"  re-resolving {len(rows)} miss(es) "
               f"(careers-page sniff -> slug-probe -> web search; every board "
               f"validated by a live fetch)...")
-        was = {r["name"]: r["miss_reason"] for r in rows}
+        # A silent-board candidate carries no miss_reason of its own (that
+        # is the point of the family), so `was` falls back to naming the
+        # family for the [miss]/[pending] print lines below.
+        was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
         written, still, dups = [], [], []
 
         def _stalled(name):
-            store.record_miss(conn, name, "fetch-error:stalled")
+            miss(conn, name, "fetch-error:stalled")
             still.append((name, "fetch-error:stalled"))
 
         def _consume(fut, name):
             hit, reason = resolved(fut, name)
             if not hit:
-                store.record_miss(conn, name, reason)
+                miss(conn, name, reason)
                 still.append((name, reason))
                 print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
                 return
@@ -1382,8 +1628,15 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
                 # the miss it was, but re-stamp it so a bounded rerun moves
                 # past it instead of paying for the same fetch every night.
                 _report_dup_board(name, dup)
-                store.record_miss(conn, name, was[name])
+                miss(conn, name, was[name])
                 dups.append(name)
+                return
+            if not commit:
+                written.append(board)
+                print(f"    [preview] {name[:30]:30} {hit['ats']:12} "
+                      f"{coords.board_slug(board) or board.get('careers_url') or ''} "
+                      f"nc={hit['nc']:<3} "
+                      f"tot={hit['count']:<4} (was {was[name]})")
                 return
             titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
@@ -1412,10 +1665,12 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
               _consume, _stalled, label=lambda r: r["name"],
               max_workers=max_workers)
         conn.commit()
-        print(f"\n  {len(written)} board(s) re-resolved and queued for review "
-              f"(active=0, tagged {tags.PENDING})"
+        print(f"\n  {len(written)} board(s) "
+              + ("re-resolved and queued for review "
+                 f"(active=0, tagged {tags.PENDING})" if commit
+                 else "would be re-resolved (preview: nothing written)")
               + (f", {len(dups)} already tracked under another name" if dups else "")
               + f", {len(still)} still missing, of {len(rows)} tried.")
-        if written:
+        if written and commit:
             print("  confirm or reject them in the roster review queue.")
         return written

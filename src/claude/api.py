@@ -247,46 +247,38 @@ def cache_stats():
         return dict(_USAGE)
 
 
-def format_cache_stats(since=None):
-    """One-line summary of usage since `since` (a prior cache_stats()
-    snapshot), or cumulative for the process when `since` is omitted.
-    `hit` is the share of the CACHEABLE prefix served from cache — 0% across
-    a whole run with a large system prompt means something is invalidating
-    the prefix (a timestamp in it, a changed model, a changed profile
-    mid-run)."""
-    cur = cache_stats()
-    base = since or {}
-    s = {k: cur[k] - base.get(k, 0) for k in cur}
-    cached = s["cache_read"] + s["cache_write"]
-    hit = (100.0 * s["cache_read"] / cached) if cached else 0.0
-    total_in = cached + s["uncached_input"]
-    return (f"  [claude] {s['calls']} call(s) | input {total_in:,} tok "
-            f"(cache read {s['cache_read']:,}, wrote {s['cache_write']:,}, "
-            f"uncached {s['uncached_input']:,}; {hit:.0f}% of cacheable prefix hit) "
-            f"| output {s['output']:,} tok")
-
-
 # The usage as of the last footer report_cache_stats printed.
 _LAST_REPORTED = dict(_USAGE)
 
 
 def report_cache_stats(baseline=None):
-    """Print the usage footer for the calls made since `baseline` (a prior
-    cache_stats() snapshot), if there were any.
+    """Print the one-line usage footer for the calls made since `baseline`
+    (a prior cache_stats() snapshot), if there were any.
 
     A harvest pass or a web-UI op passes the snapshot it took at its
     start. Omitted (the atexit footer), `baseline` is the last report
     printed, so a CLI one-shot prints its total once and a process whose
     passes already reported prints nothing more.
+
+    `hit` is the share of the CACHEABLE prefix served from cache — 0% across
+    a whole run with a large system prompt means something is invalidating
+    the prefix (a timestamp in it, a changed model, a changed profile
+    mid-run).
     """
     global _LAST_REPORTED
     with _USAGE_LOCK:
-        base = baseline if baseline is not None else _LAST_REPORTED
-        cur = dict(_USAGE)
-        should_print = cur["calls"] > base.get("calls", 0)
-        _LAST_REPORTED = cur
-    if should_print:
-        print(format_cache_stats(since=base))
+        base = _LAST_REPORTED if baseline is None else baseline
+        s = {k: v - base.get(k, 0) for k, v in _USAGE.items()}
+        _LAST_REPORTED = dict(_USAGE)
+    if s["calls"] <= 0:
+        return
+    cached = s["cache_read"] + s["cache_write"]
+    hit = (100.0 * s["cache_read"] / cached) if cached else 0.0
+    total_in = cached + s["uncached_input"]
+    print(f"  [claude] {s['calls']} call(s) | input {total_in:,} tok "
+          f"(cache read {s['cache_read']:,}, wrote {s['cache_write']:,}, "
+          f"uncached {s['uncached_input']:,}; {hit:.0f}% of cacheable prefix hit) "
+          f"| output {s['output']:,} tok")
 
 
 @atexit.register
@@ -353,8 +345,9 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     `cache=False` opts this call out of the system-prompt cache breakpoint
     (see the prompt-caching block above); the default is on everywhere.
 
-    Every call logs one "claude" DEBUG record with its final HTTP status
-    (or failure) and elapsed seconds, retries included.
+    Every call that reaches the API logs a "claude" DEBUG record with its
+    final HTTP status (or why it failed) and the elapsed seconds, retries
+    included.
 
     Notes:
         This session bypasses net.http on purpose (robots and crawl-delay

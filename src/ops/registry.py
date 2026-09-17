@@ -204,7 +204,13 @@ REGISTRY = {
         "engine": None,
         "target": "src.crawl.triage:run",
         "params": [_DB_PATH, _LIMIT, _WORKERS,
-                   Param("score_cap", kind="int")],
+                   Param("score_cap", kind="int"),
+                   # Re-queue mode (src.crawl.triage.requeue_rows): report,
+                   # by default, rows an earlier rule mis-judged; only
+                   # `requeue_apply` too resets them. See run_scraper.py's
+                   # --requeue/--requeue-apply flags for the CLI spelling.
+                   Param("requeue", kind="bool", default=False),
+                   Param("requeue_apply", kind="bool", default=False)],
     },
     "rescore": {
         "label": "Rescore all",
@@ -241,7 +247,10 @@ REGISTRY = {
         "engine": None,
         "target": "src.ops.maintenance:reresolve_misses",
         "params": [Param("limit", kind="int", default=50),
-                   Param("days", kind="int", default=None), _WORKERS, _TRACK],
+                   Param("days", kind="int", default=None),
+                   Param("families", kind="names"),
+                   Param("preview", "commit", "not", False),
+                   _WORKERS, _TRACK],
     },
     "prune": {
         "label": "Prune dead boards",

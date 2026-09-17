@@ -13,7 +13,7 @@ from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup
 
-from src.match.locality import location_snippet
+from src.match.locality import MONTH_ABBRS, location_snippet
 from src.net.http import HEADERS, SESSION, fetch_failed, note_capped
 from src.net.util import stable_id
 from .board import board_jobs
@@ -81,6 +81,33 @@ def _sf_total(html_text):
     return int(m.group(1).replace(",", "")) if m else None
 
 
+# A row's text is a table cell's worth of everything the standard theme
+# renders for it, including the posting date and, on tenants whose theme
+# duplicates the row for its "visible-phone" layout, a second run of the
+# title/location/date. Cut at the first date so neither survives in the
+# stored location -- "Durham, NC, US, 27710 Aug 31, 2026 Durham, NC" (one
+# tenant, 894 open rows), "remote, IT Aug 26, 2026 7637 Europe, remote, I".
+_SF_DATE_TAIL_RE = re.compile(
+    rf"\s+(?:{'|'.join(MONTH_ABBRS)})[a-z]*\.?"
+    r"\s+\d{1,2},\s*\d{4}\b.*$", re.I)
+
+
+def _clean_sf_location(loc):
+    """The place, with a glued-on posting date and whatever follows it
+    (the row's repeated title/location) cut off.
+
+    >>> _clean_sf_location("Durham, NC, US, 27710 Aug 31, 2026 Durham, NC")
+    'Durham, NC, US, 27710'
+    >>> _clean_sf_location("remote, IT Aug 26, 2026 7637 Europe, remote, I")
+    'remote, IT'
+    >>> _clean_sf_location("Remote, United States Sep 9, 2026 Remote, Unit")
+    'Remote, United States'
+    >>> _clean_sf_location("Durham, NC")
+    'Durham, NC'
+    """
+    return _SF_DATE_TAIL_RE.sub("", loc or "").strip(" ,-")
+
+
 def _sf_rows(base_url, label, step, max_pages):
     """Every posting on a SuccessFactors site, paged; a page that adds no
     new URL ends the walk (the last page repeats on some tenants).
@@ -128,15 +155,23 @@ def _sf_rows(base_url, label, step, max_pages):
             seen.add(href)
             new_on_page += 1
             # Location: the /job/ slug names "City,-ST" (boards like OXB's
-            # carry no location text in the row); else the row text, else
-            # the placeholder.
+            # carry no location text in the row); else the standard theme's
+            # own `.jobLocation` cell, which -- unlike the row's flattened
+            # text -- never carries the date or the mobile layout's repeat
+            # of the same fields; else a location-looking phrase out of the
+            # row text, for skins with neither; else the placeholder.
             m = _SF_LOC_SLUG_RE.search(unquote(href))
             if m:
                 loc = f"{m.group(1).replace('-', ' ').strip()}, {m.group(2)}"
             else:
                 row = a.find_parent("tr") or a.find_parent("li") or a.find_parent("div")
-                loc = (location_snippet(row.get_text(" ", strip=True))
-                       if row is not None else "See posting")
+                if row is None:
+                    loc = "See posting"
+                else:
+                    loc_el = row.select_one("[class*='jobLocation']")
+                    raw = (loc_el.get_text(" ", strip=True) if loc_el is not None
+                           else location_snippet(row.get_text(" ", strip=True)))
+                    loc = _clean_sf_location(raw)
             # Numeric requisition id first, slug fallback — and the id token
             # comes from the BOARD URL, not the (sometimes empty) display
             # name, so the profile feed and the company store ingest one
