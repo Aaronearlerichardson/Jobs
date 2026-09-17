@@ -7,6 +7,9 @@ the API with 973 identical requests over five minutes instead of stopping
 after the first.
 """
 
+import logging
+import re
+
 import pytest
 import requests
 
@@ -117,3 +120,94 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
     claude.call_claude_json("sys", "user", cache=False)
     assert len(calls) == 2                       # reached the API again
     assert capsys.readouterr().out.count("Claude API disabled") == 2
+
+
+class TestCallLatencyLogging:
+    """API latency used to be invisible: call_claude_json posts through its
+    own plain SESSION, never net.http's per-request DEBUG trace (robots /
+    Crawl-delay do not apply to the API), so a slow or failing call left no
+    timing anywhere in the session log."""
+
+    def test_a_successful_call_logs_status_and_elapsed(self, api, caplog):
+        responses, calls = api
+        responses.append(_OK)
+        with caplog.at_level(logging.DEBUG, logger="claude"):
+            claude.call_claude_json("sys", "user", cache=False)
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
+        assert any(re.search(r"HTTP 200 in \d+\.\d\ds", m) for m in msgs)
+
+    def test_a_failed_call_logs_status_and_elapsed(self, api, caplog):
+        responses, calls = api
+        responses.append(_Resp(400, body='{"message":"max_tokens too large"}'))
+        with caplog.at_level(logging.DEBUG, logger="claude"):
+            claude.call_claude_json("sys", "user", cache=False)
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
+        assert any("claude call failed: HTTP 400" in m for m in msgs)
+
+    def test_an_exception_logs_its_type_and_elapsed(self, api, monkeypatch,
+                                                     caplog):
+        def boom(url, **kw):
+            raise RuntimeError("connection reset")
+        monkeypatch.setattr(claude.SESSION, "post", boom)
+        with caplog.at_level(logging.DEBUG, logger="claude"):
+            claude.call_claude_json("sys", "user", cache=False)
+        msgs = [r.getMessage() for r in caplog.records if r.name == "claude"]
+        assert any("claude call failed: RuntimeError" in m for m in msgs)
+
+
+class TestUsageReporting:
+    """format_cache_stats(since=...) / report_cache_stats: the spend footer
+    a harvest pass or a web-UI op prints for its own Claude calls, reusing
+    the one cumulative counter (cache_stats()) instead of a second one --
+    and the atexit trailer must not repeat what one of those already
+    printed."""
+
+    def test_format_cache_stats_reports_only_the_delta_since_baseline(
+            self, api):
+        responses, calls = api
+        responses.extend([_OK, _OK])
+        baseline = claude.cache_stats()
+        claude.call_claude_json("sys", "user", cache=False)
+        claude.call_claude_json("sys", "user", cache=False)
+        line = claude.format_cache_stats(since=baseline)
+        assert "2 call(s)" in line
+        assert "input 2 tok" in line
+
+    def test_report_cache_stats_prints_the_delta_once(self, api, capsys):
+        responses, calls = api
+        responses.append(_OK)
+        baseline = claude.cache_stats()
+        claude.call_claude_json("sys", "user", cache=False)
+        claude.report_cache_stats(baseline)
+        printed = capsys.readouterr().out
+        assert "1 call(s)" in printed
+
+    def test_atexit_style_report_does_not_repeat_an_already_reported_pass(
+            self, api, capsys):
+        """A harvest pass (or web op) calls report_cache_stats(baseline)
+        itself; the atexit trailer (report_cache_stats(), no baseline) must
+        then find nothing new to say for a CLI one-shot that already
+        reported everything mid-run."""
+        responses, calls = api
+        responses.append(_OK)
+        baseline = claude.cache_stats()
+        claude.call_claude_json("sys", "user", cache=False)
+        claude.report_cache_stats(baseline)          # the pass's own footer
+        capsys.readouterr()                          # discard it
+        claude.report_cache_stats()                  # what atexit calls
+        assert capsys.readouterr().out == ""
+
+    def test_atexit_style_report_covers_a_one_shot_that_never_reported(
+            self, api, capsys):
+        """A bare script that calls call_claude_json directly, with no
+        harvest pass or web op ever calling report_cache_stats, still gets
+        its whole spend from the atexit trailer -- exactly once."""
+        responses, calls = api
+        responses.append(_OK)
+        claude.report_cache_stats()                  # flush: nothing owed
+        capsys.readouterr()
+        claude.call_claude_json("sys", "user", cache=False)
+        claude.report_cache_stats()                  # what atexit calls
+        printed = capsys.readouterr().out
+        assert printed.count("[claude]") == 1
+        assert "1 call(s)" in printed

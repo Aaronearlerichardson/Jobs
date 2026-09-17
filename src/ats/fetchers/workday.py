@@ -332,6 +332,10 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
             r = SESSION.post(api, json={**body_extra, "limit": page_size,
                                         "offset": page * page_size},
                              headers=_CXS_HEADERS)
+            # A rejected request answers 4xx with a JSON error body (the
+            # hyphenated-tenant 422 _wd_cxs_tenant probes past): parsed as a
+            # page, its missing jobPostings would read as the board's end.
+            r.raise_for_status()
             data = r.json()
             posts = data.get("jobPostings", []) or []
         except Exception as e:

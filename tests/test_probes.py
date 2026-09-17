@@ -11,9 +11,12 @@ ANY slug, so every guessed slug "confirmed" with zero jobs.
 
 import pytest
 
-from conftest import fake_response
+from conftest import fake_response, keep_store_open
 
 from src.discovery.resolve import probes
+from src.ops import maintenance as ops
+from src.ops import roster
+import src.store as store
 
 
 @pytest.fixture
@@ -162,3 +165,44 @@ def test_every_registered_probe_is_callable():
     with nothing behind it fails only in a live discovery run."""
     for ats, probe in probes.PROBES.items():
         assert callable(probe), ats
+
+
+class TestPruneNamesWhatItDeactivates:
+    """ops.prune_dead_boards acts on these probes; its session log must
+    say how many boards it probed and name every company it deactivates."""
+
+    @staticmethod
+    def _company(db, name, ats, slug, **extra):
+        store.upsert_company(db, {"name": name, "ats": ats, "slug": slug,
+                                  **extra})
+
+    def test_the_prune_op_names_each_dead_board_and_sums_up(
+            self, db, monkeypatch, capsys):
+        keep_store_open(monkeypatch, db)
+        self._company(db, "Gone Co", "greenhouse", "gone")
+        self._company(db, "Live Co", "greenhouse", "live")
+        monkeypatch.setattr(probes, "probe_greenhouse",
+                            lambda slug: (slug == "live", 3))
+
+        roster.prune()
+
+        out = capsys.readouterr().out
+        assert "probing 2 board(s) for a dead ATS endpoint" in out
+        [line] = [ln for ln in out.splitlines() if "[dead]" in ln]
+        assert "Gone Co" in line and "greenhouse" in line
+        assert "board 'gone' no longer resolves" in line
+        assert "Live Co" not in out
+        assert "deactivated 1 dead-board compan(ies)." in out
+
+    def test_an_off_mission_deactivation_names_its_score(
+            self, db, monkeypatch, capsys):
+        self._company(db, "Other Co", "lever", "other",
+                      mission_tier="other", mission_score=0.05)
+        monkeypatch.setattr(probes, "probe_lever", lambda slug: (True, 5))
+
+        assert ops.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
+
+        [line] = [ln for ln in capsys.readouterr().out.splitlines()
+                  if "[other]" in ln]
+        assert "Other Co" in line and "lever" in line
+        assert "off-mission (score=0.05)" in line

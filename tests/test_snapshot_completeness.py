@@ -113,6 +113,63 @@ class TestTotalPagedSnapshot:
         assert not http.snapshot_info()["capped"]
 
 
+class TestMidWalkFailureIsCountedNotCapped:
+    """A page that answers with an error after an earlier page succeeded
+    must mark the snapshot INCOMPLETE (net.http.fetch_failures() > 0), not
+    read as the board's own honest end and not as a cap -- snapshot_info's
+    "a failure outranks a cap" rule.
+
+    2026-09-16: both pagers trusted `r.json()` without a status check, so a
+    non-2xx response whose body still parsed as JSON (a 422 from
+    osv-bioventus.wd501 / vhr-unither.wd5 on Workday; the same shape would
+    fool SmartRecruiters too) read as "no more postings" -- an ordinary,
+    unreported end of the walk -- rather than a failure. Page 1's rows must
+    still come back: a mid-walk failure is not a reason to lose what was
+    already read.
+    """
+
+    def test_workday_page2_failure_keeps_page1_and_counts(self, monkeypatch):
+        postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                     "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                    for i in range(20)]
+
+        class _FlakyPager:
+            def post(self, url, json=None, **kw):
+                if (json or {}).get("offset", 0) > 0:
+                    return fake_response(status=422)      # osv-bioventus.wd501's shape
+                return fake_response({"total": 500, "facets": [],
+                                      "jobPostings": postings})
+
+        monkeypatch.setattr(wd, "SESSION", _FlakyPager())
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
+                                    loc_re=None, page_size=20, max_pages=5)
+        assert len(rows) == 20
+        info = http.snapshot_info()
+        assert info["incomplete"] and info["fetch_errors"] > 0
+        assert not info["capped"], "a failure outranks a cap"
+
+    def test_smartrecruiters_page2_failure_keeps_page1_and_counts(self, monkeypatch):
+        content = [{"id": f"r{i}", "name": "Data Engineer",
+                    "location": {"city": "Durham", "region": "NC", "country": "US"},
+                    "releasedDate": "2026-01-01T00:00:00Z"} for i in range(100)]
+
+        class _FlakyPager:
+            def get(self, url, **kw):
+                offset = int(re.search(r"offset=(\d+)", url).group(1))
+                if offset > 0:
+                    return fake_response(status=406)
+                return fake_response({"totalFound": 500, "content": content})
+
+        monkeypatch.setattr(company_fetch, "SESSION", _FlakyPager())
+        rows = company_fetch.fetch_smartrecruiters_all(
+            "acme", loc_re=None, max_pages=5)
+        assert len(rows) == 100
+        info = http.snapshot_info()
+        assert info["incomplete"] and info["fetch_errors"] > 0
+        assert not info["capped"]
+
+
 # --------------------------------------------------------------------------- #
 #  SuccessFactors: no total on some skins, repeated pages on some tenants      #
 # --------------------------------------------------------------------------- #

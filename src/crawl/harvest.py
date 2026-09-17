@@ -54,11 +54,13 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import store
+from src.claude.api import cache_stats, report_cache_stats
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
 from src.match.locality import geo_mode
 from src.net import http
 from src.net.util import worker_count
+from src.ops.maintenance import rewrite_digest
 
 _log = logging.getLogger(__name__)
 
@@ -211,7 +213,8 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     rows a title check would have dropped.
 
     The stats carry net.http.snapshot_info() for this board's own fetch
-    (fetch_errors, incomplete, capped, capped_total).
+    (fetch_errors, incomplete, capped, capped_total, last_error); a soft
+    failure fills last_error, never `err`, which means an exception.
     """
     t0 = time.monotonic()
     if delay is None:
@@ -348,9 +351,9 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
         limit=None, max_workers=DEFAULT_WORKERS, hydrate=False,
         max_hours=None, stall_s=STALL_S, poll_s=30.0,
         board_fn=harvest_board, triage=True, score_cap=None):
-    """Harvest every planned board, then triage what was stored. Returns
-    the summary dict (also printed); the triage summary rides in it under
-    "triage".
+    """Harvest every planned board, then triage what was stored and
+    rewrite every roster track's digest. Returns the summary dict (also
+    printed); the triage summary rides in it under "triage".
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
     the next one, or for `run_scraper.py --triage`); `score_cap` bounds
@@ -359,6 +362,7 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     exists for tests (it is harvest_board's signature).
     """
     db_path = db_path or config.STORE_DB_PATH
+    claude_baseline = cache_stats()     # this pass's own Claude spend footer
     conn = store.connect(db_path)
     boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
                   limit=limit)
@@ -378,6 +382,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
         print("  nothing to do")
         if triage:
             summary["triage"] = _triage(db_path, max_workers, score_cap)
+            _rewrite_digests(db_path)
+            report_cache_stats(claude_baseline)
         return summary
 
     t_start = time.monotonic()
@@ -395,12 +401,16 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
 
     def _report(c, s):
         done_n[0] += 1
+        warn = False
         if s["err"]:
             status = s["err"]
         elif not s["fetched"] and s.get("fetch_errors"):
             # The distinction the log could not previously draw: this board
-            # answered with an error, it is not merely empty.
-            status = (f"no jobs - {s['fetch_errors']} fetch error(s), "
+            # answered with an error, it is not merely empty. A soft
+            # failure: it names the last error and leaves s["err"] alone.
+            warn = True
+            last = f": {s['last_error']}" if s.get("last_error") else ""
+            status = (f"no jobs - {s['fetch_errors']} fetch error(s){last}, "
                       f"{s['secs']:.0f}s")
         else:
             status = (f"{s['fetched']} job(s), {s['new']} new, "
@@ -413,8 +423,10 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
             elif s.get("capped"):
                 status += (f" [capped of {s['capped_total']}: 2-strike close]"
                            if s.get("capped_total") else " [capped: 2-strike close]")
-        print(f"  [{done_n[0]:>3}/{len(boards)}] {c['name']} ({c['ats']}): "
-              f"{status}")
+        # "[!]" makes session_log record the line at WARNING.
+        prefix = "[!] " if warn else ""
+        print(f"  {prefix}[{done_n[0]:>3}/{len(boards)}] {c['name']} "
+              f"({c['ats']}): {status}")
         # Churn a two-strike close should have damped, still showing up:
         # worth a human's attention, not just a debug line.
         fetched = s.get("fetched") or 0
@@ -488,6 +500,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
     if triage:
         summary["triage"] = _triage(db_path, max_workers, score_cap)
+        _rewrite_digests(db_path)
+        report_cache_stats(claude_baseline)
     return summary
 
 
@@ -498,3 +512,23 @@ def _triage(db_path, max_workers, score_cap):
     from src.crawl import triage
     kw = {"score_cap": score_cap} if score_cap is not None else {}
     return triage.run(db_path=db_path, max_workers=max_workers, **kw)
+
+
+def _rewrite_digests(db_path):
+    """Rewrite every roster track's ranked digest from `db_path`, the
+    store this pass harvested and triaged into. Sends no email.
+
+    Notes:
+        Not maintenance.track_store(t): that opens each track's configured
+        store, a different file whenever `db_path` is overridden (tests,
+        `harvest.py --db`); triage.run reads every roster track from the
+        one `db_path` too.
+    """
+    from src.crawl import triage
+    conn = store.connect(db_path)
+    try:
+        for t in triage.roster_tracks():
+            rewrite_digest(conn, t, top_n=5,
+                           heading=f"\n  [{t['track']}] digest rewritten:")
+    finally:
+        conn.close()

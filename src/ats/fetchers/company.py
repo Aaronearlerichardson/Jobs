@@ -68,10 +68,15 @@ _default_search_text = default_search_text
 
 
 def _get_json(url, label, **kw):
-    """GET + parse JSON, treating any HTTP error, empty body, or non-JSON
-    response as a clean miss (returns None) rather than an exception that
-    surfaces as a cryptic ``Expecting value`` further up the stack."""
-    r = SESSION.get(url, headers=HEADERS, **kw)
+    """GET + parse JSON, treating any fetch exception, HTTP error, empty
+    body, or non-JSON response as a clean miss (returns None, reported via
+    fetch_failed) rather than an exception that surfaces as a cryptic
+    ``Expecting value`` further up the stack."""
+    try:
+        r = SESSION.get(url, headers=HEADERS, **kw)
+    except Exception as e:
+        fetch_failed(label, e)
+        return None
     if r.status_code != 200:
         fetch_failed(label, f"HTTP {r.status_code}")
         return None
@@ -123,16 +128,17 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
     came back than the response's own `totalFound`. A scoped pull's
     `totalFound` is never compared: the rows it drops for locality are not
     missing.
+
+    A page `_get_json` cannot read (error status, non-JSON body) ends the
+    walk as a reported failure, never as the board's end.
     """
     out = []
     total = None
     for page in range(max_pages):
-        try:
-            r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
-                             f"?limit=100&offset={page*100}", headers=HEADERS)
-            data = r.json()
-        except Exception as e:
-            fetch_failed(f"smartrecruiters {slug}", e)
+        data = _get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+                         f"?limit=100&offset={page*100}",
+                         f"smartrecruiters {slug} p{page}")
+        if data is None:
             break
         if isinstance(data.get("totalFound"), (int, float)):
             total = data["totalFound"]
@@ -550,18 +556,25 @@ def _location_near(a, loc_re=None):
 
 
 def _get_soup(url):
+    """GET `url` and parse it; None on a fetch exception or non-200
+    status, reported via fetch_failed: this is fetch_custom_careers'
+    board-listing fetch, where a silent 404 (a stale careers_url) read as
+    an empty board. Discovery probes use the silent `_get_anchor_soup`."""
     try:
         r = SESSION.get(url, headers=HEADERS)
-        if r.status_code != 200:
-            return None
-        return BeautifulSoup(r.text, "lxml")
-    except Exception:
+    except Exception as e:
+        fetch_failed(f"custom careers {url}", e)
         return None
+    if r.status_code != 200:
+        fetch_failed(f"custom careers {url}", f"HTTP {r.status_code}")
+        return None
+    return BeautifulSoup(r.text, "lxml")
 
 
 def _get_anchor_soup(url):
     """Like _get_soup but parses only <a> tags, for callers that just count
-    or scan job/openings links (no surrounding-container reads)."""
+    or scan job/openings links (no surrounding-container reads). Silent: a
+    probed page that is not a board is an expected answer."""
     try:
         r = SESSION.get(url, headers=HEADERS)
         if r.status_code != 200:

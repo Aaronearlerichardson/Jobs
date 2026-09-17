@@ -26,11 +26,13 @@ import src.crawl.runner as _runner                  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _session_logs_to_tmp(tmp_path, monkeypatch):
-    """Session logs never land in the real data dir during tests. The
-    webapp op runner opens one per op, and several tests drive it."""
+def _outputs_to_tmp(tmp_path, monkeypatch):
+    """Session logs and digest files never land in the real data dir
+    during tests: the webapp op runner opens a log per op, and a harvest
+    pass rewrites every roster track's digest."""
     monkeypatch.setattr(_session_log, "_log_dir",
                         lambda: tmp_path / "session-logs")
+    monkeypatch.setattr(_config, "REPORT_DIR", tmp_path / "job_reports")
 
 
 # --------------------------------------------------------------------------- #

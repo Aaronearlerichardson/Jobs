@@ -23,9 +23,9 @@ import pytest
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (api, discourse, getro, hibob, jobvite,
-                              peopleadmin, phenom, remoteok, remotive,
-                              usajobs)
+from src.ats.fetchers import (api, company, discourse, getro, hibob, icims,
+                              jobvite, peopleadmin, phenom, remoteok,
+                              remotive, usajobs, workday)
 from src.discovery import apply
 from src.net import http
 
@@ -1014,15 +1014,25 @@ class TestADeadEndpointIsNeverAnException:
         "discourse": lambda: discourse.fetch_discourse(
             "Forum", "https://forum.test", 1),
         "phenom": lambda: phenom.fetch_phenom_all("careers.test"),
+        # 2026-09-16 audit: these four read a non-2xx board-listing
+        # response (or the request exception itself) as an empty board,
+        # with fetch_errors left at 0 -- see icims._search_rows/
+        # _sitemap_rows, company._get_soup, workday.fetch_workday_all's
+        # paging POST, and company.fetch_smartrecruiters_all's paging GET.
+        "icims": lambda: icims.fetch_icims_all("acme"),
+        "custom careers": lambda: company.fetch_custom_careers(
+            "https://acme.test/careers"),
+        "workday": lambda: workday.fetch_workday_all("deadco", 5, "External"),
+        "smartrecruiters": lambda: company.fetch_smartrecruiters_all("acme"),
     }
 
     @pytest.fixture(params=["refused", "http-500"])
     def dead_source(self, request, monkeypatch):
-        """SESSION is one shared object, so patching `get` on it covers
-        every module that imported the name. Patch it at its DEFINITION
-        site (src.net.http): reaching it through a fetcher that re-exports
-        but never calls it makes the test depend on an import that reads
-        as unused."""
+        """SESSION is one shared object, so patching `get` (and `post`, for
+        Workday's POST-based listing) on it covers every module that
+        imported the name. Patch it at its DEFINITION site (src.net.http):
+        reaching it through a fetcher that re-exports but never calls it
+        makes the test depend on an import that reads as unused."""
         if request.param == "refused":
             def _get(*a, **k):
                 raise OSError("connection refused")
@@ -1039,9 +1049,16 @@ class TestADeadEndpointIsNeverAnException:
             def _get(*a, **k):
                 return _Resp()
         monkeypatch.setattr(http.SESSION, "get", _get)
+        monkeypatch.setattr(http.SESSION, "post", _get)
 
     @pytest.mark.parametrize("name", sorted(CALLS))
     def test_reports_and_returns_empty(self, name, dead_source, capsys,
                                        match_everything):
+        http.reset_fetch_failures()
         assert self.CALLS[name]() == []
+        # A dead source must be COUNTED, not just logged: an uncounted
+        # failure and a genuinely empty board are the same [] to a caller
+        # that only checks the return value (see net.http.fetch_failed).
+        assert http.fetch_failures() > 0, (
+            f"{name} returned [] without counting the failure")
         assert "[!]" in capsys.readouterr().out, "a dead source must be reported"

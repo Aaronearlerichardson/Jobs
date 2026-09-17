@@ -563,21 +563,20 @@ def _print_funnel(funnel, bar):
 
 def _report_ranked(conn, t, got, scored, *, send, top_n, bar):
     """Write (and maybe email) the ranked digest for a company-linked crawl,
-    print the watch section and the top N, and return the ranked list."""
-    from src import digest
-    from src.match.locality import NC_RE
+    print the watch section and the top N, and return the ranked list.
 
-    ranked = store.ranked_jobs(
-        conn, track=t["track"],
-        location_re=(NC_RE if t["geo_gate"] else None),
-        rank_by=t["rank_by"], allow_geo_modes={"remote"},
-        min_mission=t["min_mission"],
-        remote_mission_floor=t.get("remote_mission_floor"))
-    pipeline = store.get_pipeline(conn)
-    followups = store.followups_due(conn)
-    digest_path = digest.write_ranked_digest(
-        ranked, t, watch_hits=got.watch_hits, pipeline=pipeline,
-        followups=followups, triage=store.triage_counts(conn, days=7))
+    The ranking itself, and the write of the digest file it feeds, are
+    `maintenance._write_digest` -- the same call every other digest-writing
+    op (status sync, standalone deep verify) makes, so this crawl's watch
+    hits and triage funnel can never drift from theirs. What stays here is
+    what only a crawl needs: the email, the watch section printed to the
+    console, and a richer top-N than the maintenance ops' one-liner.
+    """
+    from src import digest
+    from src.ops import maintenance as ops
+
+    ranked, pipeline, followups, digest_path = ops._write_digest(
+        conn, t, watch_hits=got.watch_hits)
     if send:
         if digest.send_ranked_digest(ranked, t, watch_hits=got.watch_hits,
                                         pipeline=pipeline,

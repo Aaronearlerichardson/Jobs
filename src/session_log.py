@@ -40,9 +40,9 @@ from datetime import datetime
 
 from src import config
 
-# How many session logs to keep. A daily crawl plus ad-hoc maintenance runs
-# stays under this for roughly a month of history.
-KEEP = 60
+# How many session logs to keep: a couple of months of harvest passes (two
+# a day), crawls and web-UI ops. 60 was barely a week by 2026-09-16.
+KEEP = 200
 
 # One record per line: timestamp, level, source logger, message.
 _FMT = "%(asctime)s %(levelname)-8s %(name)s | %(message)s"

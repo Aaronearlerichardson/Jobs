@@ -24,12 +24,15 @@ _TASK_LOCK = threading.Lock()
 
 
 class _Tee(io.TextIOBase):
-    """stdout tee: real console keeps printing; the browser polls the copy,
-    and an optional `sink` SessionLog (see src/session_log.py) gets a
-    third copy as it streams — mirrored there as timestamped, levelled
-    records — so UI-triggered runs are reviewable after the fact just like
-    CLI ones. Swapped in globally while an operation runs so the crawl's
-    many worker-thread print()s are captured too.
+    """stdout/stderr tee: the real stream keeps printing; the browser polls
+    the copy, and an optional `sink` SessionLog (see src/session_log.py)
+    gets a third copy as it streams — mirrored there as timestamped,
+    levelled records — so UI-triggered runs are reviewable after the fact
+    just like CLI ones. Swapped in globally while an operation runs so the
+    crawl's many worker-thread print()s are captured too.
+
+    `err=True` (the stderr tee) records its lines at ERROR, as
+    session_log.start does for a CLI run.
 
     The browser tracks a cursor into the log (`since=<n>` on
     /api/run/status) so a poll only re-sends lines it hasn't seen yet. That
@@ -43,9 +46,10 @@ class _Tee(io.TextIOBase):
     routes.py can translate an absolute cursor back into a list index
     (`since - log_offset`) that stays correct across trims."""
 
-    def __init__(self, orig, sink=None):
+    def __init__(self, orig, sink=None, err=False):
         self.orig = orig
         self.sink = sink
+        self._err = err
         # Partial lines keyed by writing thread: print() issues separate
         # text/newline writes, and one shared buffer let a fetch worker's
         # line fuse into the middle of a progress line in the browser log
@@ -60,7 +64,7 @@ class _Tee(io.TextIOBase):
             pass
         if self.sink is not None:
             try:
-                self.sink.write(s)
+                self.sink.feed(s, err=self._err)
             except Exception:
                 pass
         key = threading.get_ident()
@@ -124,14 +128,16 @@ def _launch(name, fn):
     finishes.
     """
     def worker():
-        orig = sys.stdout
+        orig_out, orig_err = sys.stdout, sys.stderr
         try:
             slog = session_log.open_log(f"webui-{name}",
                                         f"web UI op {name!r}")
         except OSError:
             slog = None              # a full/read-only disk can't block the op
-        tee = _Tee(orig, sink=slog)
-        sys.stdout = tee
+        tee_out = _Tee(orig_out, sink=slog)
+        tee_err = _Tee(orig_err, sink=slog, err=True)
+        sys.stdout, sys.stderr = tee_out, tee_err
+        claude_baseline = claude_api.cache_stats()
         try:
             # Re-arm the unrecoverable-API-error breaker: it is process-
             # lifetime and this server process outlives many operations
@@ -141,16 +147,23 @@ def _launch(name, fn):
             fn()
         except Exception as e:
             TASK["error"] = f"{type(e).__name__}: {e}"
-            print(f"  [!] operation failed: {TASK['error']}")
+            # stderr: the session log records it at ERROR, not WARNING;
+            # the browser shows it like any print.
+            print(f"  [!] operation failed: {TASK['error']}", file=sys.stderr)
         finally:
+            # This op's own Claude spend, while its log is still open: the
+            # server process never reaches the atexit footer.
+            claude_api.report_cache_stats(claude_baseline)
             if slog is not None:
                 slog.close()
             # Only unwind our own layer. Blindly assigning `orig` back would
             # restore a stale stream if anything else swapped stdout while we
             # ran, permanently leaving a tee installed that copies every later
             # print into the op log.
-            if sys.stdout is tee:
-                sys.stdout = orig
+            if sys.stdout is tee_out:
+                sys.stdout = orig_out
+            if sys.stderr is tee_err:
+                sys.stderr = orig_err
             TASK["ended"] = datetime.now().isoformat()
             # Chain the run queue from HERE, in the finishing thread, and
             # only now: stdout is back, so the next op's tee wraps the real

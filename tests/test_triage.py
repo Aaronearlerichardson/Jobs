@@ -3,11 +3,13 @@ through the crawl's gates cheapest-first, and only survivors pay for a
 body fetch or a fit score. Offline: the mission scorer, the hydrator and
 the fit scorer are all stubbed."""
 
+import logging
+
 import pytest
 
 from src import tags
 from src import store
-from src.claude.fit import FitResult
+from src.claude.fit import MIN_DESC_CHARS, FitResult
 from src.crawl import harvest, triage
 
 LOCAL = "local-tech"
@@ -269,6 +271,132 @@ def test_fit_off_stamps_survivors_unscored(tmp_path, tracks, stubs, local_addr):
     assert not stubs["score"]
     assert row["triage_status"] == "ok" and row["resume_fit_score"] is None
     assert store.crawl_seen(conn, "e")     # self-heal scores it later
+
+
+# ── observability: a dropped/scored/waiting row is nameable, not just counted ──
+
+def test_drop_logs_one_debug_record_per_dropped_row(tmp_path, tracks, stubs,
+                                                     local_addr, caplog):
+    """_write_verdicts is the one place that sees every verdict, so it is
+    also the one place that must log every drop -- the 2026-09-16 audit
+    found no record naming a dropped row anywhere in a week of logs."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "nurse", "Registered Nurse", local_addr)
+
+    with caplog.at_level(logging.DEBUG, logger="src.crawl.triage"):
+        _run(db, tracks, stubs)
+
+    assert (f"drop title | Acme | Registered Nurse | {local_addr} | "
+            f"{LOCAL}=title") in caplog.messages
+
+
+def test_score_line_printed_per_scored_row(tmp_path, tracks, stubs, local_addr,
+                                           capsys):
+    """Every row the scorer actually returns a number for gets one printed
+    line, tagged [SURFACED] only when it clears the digest floor -- the
+    audit's other gap: the `claude` DEBUG line carried token counts only,
+    never the score or which row it was for."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "eng", "Data Engineer", local_addr)
+    _harvested(conn, c, "weak", "Weak Data Engineer", local_addr)
+
+    _run(db, tracks, stubs)
+
+    out = capsys.readouterr().out
+    assert (f"score 0.70 ok | Acme | Data Engineer | {local_addr} | stub"
+            "  [SURFACED]\n") in out
+    assert (f"score 0.10 fit | Acme | Weak Data Engineer | {local_addr} | "
+            "stub\n") in out
+
+
+def test_waiting_reason_names_a_failed_fetch_then_the_retry_window(
+        tmp_path, tracks, stubs, local_addr, capsys):
+    """The row this whole feature was written for: a survivor that fails to
+    hydrate names ITSELF and why, instead of the funnel's bare "N still
+    waiting on a body" (see the 2026-09-13 18:42 pass in
+    data/logs/session-20260913-184219-harvest.log, which never even printed
+    a "hydrating" line for its one stuck row)."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "nobody", "Data Engineer", local_addr)
+
+    _run(db, tracks, stubs)
+    out = capsys.readouterr().out
+    assert (f"waiting: Acme | Data Engineer | {local_addr} | "
+            "fetch failed this pass") in out
+
+    # Retried immediately, the fresh desc_checked_at excludes it again --
+    # by design (RETRY_DAYS), and now the reason says so explicitly.
+    _run(db, tracks, stubs)
+    out2 = capsys.readouterr().out
+    assert "waiting: Acme | Data Engineer" in out2 and "retries after" in out2
+
+
+def test_waiting_reason_names_a_row_with_no_url(tmp_path, tracks, stubs,
+                                                local_addr, capsys):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    store.upsert_job(conn, {"job_id": "nourl", "company_id": c["id"],
+                            "company_name": c["name"], "title": "Data Engineer",
+                            "url": "", "location": local_addr,
+                            "harvested_at": "2026-09-10T01:00:00"})
+
+    _run(db, tracks, stubs)
+
+    out = capsys.readouterr().out
+    assert (f"waiting: Acme | Data Engineer | {local_addr} | "
+            "no URL to fetch a body from") in out
+    assert "nourl" not in stubs["hydrate"]
+
+
+def test_waiting_list_is_capped(tmp_path, tracks, stubs, local_addr, capsys):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    n = triage._WAITING_CAP + 5
+    for i in range(n):
+        c = _company(conn, f"Co{i}", mission_tier="core-mission",
+                     mission_score=0.9)
+        store.upsert_job(conn, {"job_id": f"j{i}", "company_id": c["id"],
+                                "company_name": c["name"],
+                                "title": "Data Engineer", "url": "",
+                                "location": local_addr,
+                                "harvested_at": "2026-09-10T01:00:00"})
+
+    _run(db, tracks, stubs)
+
+    out = capsys.readouterr().out
+    assert out.count("waiting: Co") == triage._WAITING_CAP
+    assert "... and 5 more" in out
+
+
+def test_skip_score_short_body_counted_in_summary(tmp_path, tracks, stubs,
+                                                   local_addr, monkeypatch):
+    """A row that reaches the scorer with a body under fit.MIN_DESC_CHARS is
+    refused (SKIP-SCORE), which used to vanish into "left" indistinguishably
+    from a row still waiting on a body. It now has its own summary count."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "stub", "Data Engineer", local_addr,
+              description="too short")
+
+    def score(title, description="", *, location="", max_tokens=300):
+        if len(description) < MIN_DESC_CHARS:
+            return FitResult(score=None, reason="no description; unscored")
+        return FitResult(score=0.7, reason="stub")
+    monkeypatch.setattr(triage, "score_resume_fit", score)
+
+    s = _run(db, tracks, stubs)
+
+    assert s["skip_score"] == 1
+    row = _row(conn, "stub")
+    assert row["triage_status"] == "ok" and row["resume_fit_score"] is None
 
 
 # ── several tracks, one row ─────────────────────────────────────────────────

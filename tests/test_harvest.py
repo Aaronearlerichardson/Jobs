@@ -296,6 +296,11 @@ def test_a_dead_board_is_told_apart_from_an_empty_one(tmp_path, monkeypatch):
     assert quiet["fetched"] == gone["fetched"] == 0
     assert quiet["fetch_errors"] == 0
     assert gone["fetch_errors"] == 1
+    assert quiet["last_error"] is None
+    assert gone["last_error"] == "Lever netherlands: 404 Client Error"
+    # A soft failure never becomes the hard `err` path -- it must not
+    # change the run()-level failed count (see run()'s _report).
+    assert gone["err"] is None
     # Neither closes anything: an empty snapshot is still not evidence.
     assert quiet["closed"] == gone["closed"] == 0
 
@@ -431,6 +436,74 @@ def test_run_abandons_a_stalled_board(tmp_path):
                     stall_s=0.0, poll_s=0.1)
     release.set()
     assert s["stalled"] == 1 and s["ok"] == 0
+
+
+def test_dead_board_status_line_names_the_last_error_and_warns(
+        tmp_path, monkeypatch, capsys):
+    """The soft-failure status line used to only count fetch errors; it now
+    names the LAST one (net.http.snapshot_info's last_error), and the line
+    is prefixed "[!] " so session_log logs it at WARNING
+    (src/session_log.py::_level_for) instead of an ordinary INFO tally."""
+    import logging
+
+    from src.session_log import _level_for
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    _company(conn, "Acme")
+
+    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
+        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
+                "closed": 0, "reopened": 0, "secs": 1.0, "fetch_errors": 1,
+                "last_error": "GET https://x.test/sitemap.xml: 403"}
+
+    s = harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
+                    triage=False)
+    out = capsys.readouterr().out
+    line = next(l for l in out.splitlines() if "Acme" in l)
+
+    assert line.lstrip().startswith("[!]")
+    assert ("no jobs - 1 fetch error(s): "
+            "GET https://x.test/sitemap.xml: 403") in line
+    assert _level_for(line, err=False) == logging.WARNING
+    # Named and warned about, but still an "ok"/"dead" board, not "failed":
+    # `err` staying None throughout is what keeps it out of the exception
+    # count.
+    assert (s["ok"], s["err"], s["dead"]) == (1, 0, 1)
+
+
+def test_run_rewrites_every_roster_tracks_digest_after_triage(
+        tmp_path, monkeypatch):
+    """A harvest pass can move rows into a track's ranking with no crawl
+    ever running, so the digest file has to be rewritten here too -- once
+    per track triage.roster_tracks() reads, from the SAME store this pass
+    just wrote (see _rewrite_digests)."""
+    from src.crawl import triage as triage_mod
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    monkeypatch.setattr(harvest, "_triage", lambda *a, **k: {"pending": 0})
+    fake_tracks = [{"track": "local-tech"}, {"track": "remote-neural"}]
+    monkeypatch.setattr(triage_mod, "roster_tracks", lambda: fake_tracks)
+    written = []
+    monkeypatch.setattr(
+        harvest, "rewrite_digest",
+        lambda conn, t, top_n=5, heading="": written.append(t["track"]))
+
+    s = harvest.run(db_path=db, triage=True)
+
+    assert written == ["local-tech", "remote-neural"]
+    assert s["triage"] == {"pending": 0}
+
+
+def test_run_skips_the_digest_rewrite_with_triage_off(tmp_path, monkeypatch):
+    db = tmp_path / "s.db"
+    store.connect(db).close()
+    written = []
+    monkeypatch.setattr(harvest, "rewrite_digest",
+                        lambda *a, **k: written.append(1))
+
+    s = harvest.run(db_path=db, triage=False)
+
+    assert written == [] and "triage" not in s
 
 
 # ── the crawl gets the same completeness guard ──────────────────────────────

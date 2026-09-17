@@ -151,8 +151,13 @@ def fetch_failed(label, err, indent=4):
 
     Returns [] so a soft-failing fetcher can `return fetch_failed(...)`;
     call it as a statement where the failure path breaks or continues.
+
+    Also remembers `label: err` as this thread's LAST failure (see
+    snapshot_info's `last_error`), so a caller that only counted failures
+    before can now name the one it should show.
     """
     _FAILED.n = getattr(_FAILED, "n", 0) + 1
+    _FAILED.last = f"{label}: {err}"
     sys.stdout.write(f"{' ' * indent}[!] {label}: {err}\n")
     return []
 
@@ -168,10 +173,12 @@ _CAPPED = threading.local()
 
 
 def reset_fetch_failures():
-    """Start this thread's fetch accounting from zero: the failure count
-    and the capped marker. One call per fetch attempt, on the thread that
-    runs it (crawl.harvest.harvest_board, net.parallel.fetch_all)."""
+    """Start this thread's fetch accounting from zero: the failure count,
+    the last-failure message, and the capped marker. One call per fetch
+    attempt, on the thread that runs it (crawl.harvest.harvest_board,
+    net.parallel.fetch_all)."""
     _FAILED.n = 0
+    _FAILED.last = None
     _CAPPED.hit, _CAPPED.total = False, None
 
 
@@ -187,7 +194,7 @@ def note_capped(total=None):
     as uncapped.
 
     >>> reset_fetch_failures(); note_capped(50); snapshot_info()
-    {'fetch_errors': 0, 'incomplete': False, 'capped': True, 'capped_total': 50}
+    {'fetch_errors': 0, 'incomplete': False, 'capped': True, 'capped_total': 50, 'last_error': None}
 
     Notes:
         A capped snapshot is partial, not failed: its rows are real, but a
@@ -199,11 +206,12 @@ def note_capped(total=None):
 
 def snapshot_info():
     """This thread's fetch accounting since the last reset, as the callers
-    record it: the failure count, and whether the snapshot is INCOMPLETE (a
-    fetch failed partway) or CAPPED (truncated without an error).
+    record it: the failure count, whether the snapshot is INCOMPLETE (a
+    fetch failed partway) or CAPPED (truncated without an error), and the
+    LAST failure reported (None when there was none).
 
     >>> reset_fetch_failures(); snapshot_info()
-    {'fetch_errors': 0, 'incomplete': False, 'capped': False, 'capped_total': None}
+    {'fetch_errors': 0, 'incomplete': False, 'capped': False, 'capped_total': None, 'last_error': None}
 
     A failure outranks a cap: an incomplete snapshot closes nothing, so it
     is never also reported capped.
@@ -211,9 +219,10 @@ def snapshot_info():
     >>> _ = fetch_failed("board p3", "timeout", indent=0)
     [!] board p3: timeout
     >>> note_capped(50); snapshot_info()
-    {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None}
+    {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None, 'last_error': 'board p3: timeout'}
     """
     n = fetch_failures()
     capped = getattr(_CAPPED, "hit", False) and not n
     return {"fetch_errors": n, "incomplete": n > 0, "capped": capped,
-            "capped_total": getattr(_CAPPED, "total", None) if capped else None}
+            "capped_total": getattr(_CAPPED, "total", None) if capped else None,
+            "last_error": getattr(_FAILED, "last", None)}

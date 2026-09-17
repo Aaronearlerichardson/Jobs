@@ -145,10 +145,19 @@ def host_tenant(url, default):
 
 
 def _search_rows(tenant, params, located, loc_label):
-    """The posting rows on one search page (see the module doc)."""
+    """The posting rows on one search page (see the module doc).
+
+    Raises on a non-2xx status (a WAF block, a dead tenant) rather than
+    parsing whatever error body came back as an empty page: the search
+    page's own "No Results Found" answers 200, so this never mistakes a
+    real empty result for a fetch failure. `fetch_icims_all`'s try/except
+    is the one place that reports it -- every call site here runs inside
+    that block.
+    """
     found = []
     r = SESSION.get(f"https://{tenant}.icims.com/jobs/search?ss=1&in_iframe=1"
                     + params, headers=ICIMS_HEADERS)
+    r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
     for a in soup.select("a.iCIMS_Anchor, a[href*='/jobs/']"):
         # Row anchors carry a screen-reader label ("Requisition Title",
@@ -174,8 +183,14 @@ def _search_rows(tenant, params, located, loc_label):
 
 def _sitemap_rows(tenant):
     """Every live posting a JS-shell tenant lists in /sitemap.xml; titles
-    from the URL slug, locations resolved per job by the caller."""
+    from the URL slug, locations resolved per job by the caller.
+
+    Raises on a non-2xx status (2026-09-16: icims.com's WAF answers this
+    URL with a 403 on some tenants) instead of regexing an error page and
+    quietly reporting zero postings -- see `_search_rows`.
+    """
     r = SESSION.get(f"https://{tenant}.icims.com/sitemap.xml", headers=ICIMS_HEADERS)
+    r.raise_for_status()
     out = []
     for u in re.findall(r"<loc>([^<]+)</loc>", r.text):
         m = re.search(r"/jobs/(\d+)/([^/]+)/job", u)

@@ -166,6 +166,23 @@ def _ranked(conn, t, limit=None):
         remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
 
 
+def _write_digest(conn, t, watch_hits=None):
+    """Rank the track's open jobs and rewrite its digest file, harvest
+    triage funnel included. Returns (ranked, pipeline, followups,
+    digest_path).
+
+    The one digest writer behind rewrite_digest and the crawl's
+    runner._report_ranked, so their rankings and sections cannot drift.
+    """
+    ranked = _ranked(conn, t)
+    pipeline = store.get_pipeline(conn)
+    followups = store.followups_due(conn)
+    path = digest.write_ranked_digest(
+        ranked, t, watch_hits=watch_hits, pipeline=pipeline,
+        followups=followups, triage=store.triage_counts(conn, days=7))
+    return ranked, pipeline, followups, path
+
+
 def rewrite_digest(conn, t, top_n=15, heading=""):
     """Rewrite the track's ranked digest from the store as it stands now,
     and print the top `top_n` of it. Returns the ranked list.
@@ -174,9 +191,7 @@ def rewrite_digest(conn, t, top_n=15, heading=""):
     status sync and the standalone deep verify both ended with their own
     copy, and the copies had already drifted apart in what they printed.
     """
-    ranked = _ranked(conn, t)
-    digest.write_ranked_digest(ranked, t, pipeline=store.get_pipeline(conn),
-                               followups=store.followups_due(conn))
+    ranked, _pipeline, _followups, _path = _write_digest(conn, t)
     if heading:
         print(heading)
     for j in ranked[:top_n]:
@@ -1150,6 +1165,9 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     Lived in src.store until 2026-09-10; it probes the network and applies
     roster policy, so it is an operation, and the store keeps only the
     write (store.deactivate_company).
+
+    Prints how many boards it probes, then one line per company it
+    deactivates (name, ATS, reason), so a clean run still leaves a trace.
     """
     from src.discovery.resolve.probes import (probe_greenhouse, probe_lever,
                                    probe_ashby, probe_bamboohr)
@@ -1172,6 +1190,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
 
     rows = [c for c in store.get_companies(conn, active_only=True)
             if c.get("ats") in PROBE and c.get("slug")]
+    print(f"  probing {len(rows)} board(s) for a dead ATS endpoint...")
 
     def _check(c):
         ok, _ = PROBE[c["ats"]](c["slug"])
@@ -1187,7 +1206,8 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
             store.deactivate_company(
                 conn, c["id"],
                 note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
-            print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} {c['slug']}")
+            print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} "
+                  f"board '{c['slug']}' no longer resolves")
 
         n_off = 0
         if deactivate_offmission:
@@ -1200,7 +1220,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
             for c in off:
                 store.deactivate_company(conn, c["id"])
                 print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
-                      f"mission_score={c.get('mission_score')}")
+                      f"off-mission (score={c.get('mission_score')})")
             n_off = len(off)
     return len(dead), n_off
 

@@ -247,12 +247,16 @@ def cache_stats():
         return dict(_USAGE)
 
 
-def format_cache_stats():
-    """One-line summary. `hit` is the share of the CACHEABLE prefix served from
-    cache — 0% across a whole run with a large system prompt means something is
-    invalidating the prefix (a timestamp in it, a changed model, a changed
-    profile mid-run)."""
-    s = cache_stats()
+def format_cache_stats(since=None):
+    """One-line summary of usage since `since` (a prior cache_stats()
+    snapshot), or cumulative for the process when `since` is omitted.
+    `hit` is the share of the CACHEABLE prefix served from cache — 0% across
+    a whole run with a large system prompt means something is invalidating
+    the prefix (a timestamp in it, a changed model, a changed profile
+    mid-run)."""
+    cur = cache_stats()
+    base = since or {}
+    s = {k: cur[k] - base.get(k, 0) for k in cur}
     cached = s["cache_read"] + s["cache_write"]
     hit = (100.0 * s["cache_read"] / cached) if cached else 0.0
     total_in = cached + s["uncached_input"]
@@ -262,10 +266,33 @@ def format_cache_stats():
             f"| output {s['output']:,} tok")
 
 
+# The usage as of the last footer report_cache_stats printed.
+_LAST_REPORTED = dict(_USAGE)
+
+
+def report_cache_stats(baseline=None):
+    """Print the usage footer for the calls made since `baseline` (a prior
+    cache_stats() snapshot), if there were any.
+
+    A harvest pass or a web-UI op passes the snapshot it took at its
+    start. Omitted (the atexit footer), `baseline` is the last report
+    printed, so a CLI one-shot prints its total once and a process whose
+    passes already reported prints nothing more.
+    """
+    global _LAST_REPORTED
+    with _USAGE_LOCK:
+        base = baseline if baseline is not None else _LAST_REPORTED
+        cur = dict(_USAGE)
+        should_print = cur["calls"] > base.get("calls", 0)
+        _LAST_REPORTED = cur
+    if should_print:
+        print(format_cache_stats(since=base))
+
+
 @atexit.register
 def _print_cache_stats_at_exit():
-    if _USAGE["calls"] and os.environ.get("CLAUDE_USAGE_SUMMARY", "1") != "0":
-        print(format_cache_stats())
+    if os.environ.get("CLAUDE_USAGE_SUMMARY", "1") != "0":
+        report_cache_stats()
 
 
 # Unrecoverable-API-error circuit breaker. Some failures can never succeed on
@@ -324,7 +351,15 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     max_tokens large enough for thinking + the JSON; the default False
     pins thinking off so small structured calls can't be truncated by it.
     `cache=False` opts this call out of the system-prompt cache breakpoint
-    (see the prompt-caching block above); the default is on everywhere."""
+    (see the prompt-caching block above); the default is on everywhere.
+
+    Every call logs one "claude" DEBUG record with its final HTTP status
+    (or failure) and elapsed seconds, retries included.
+
+    Notes:
+        This session bypasses net.http on purpose (robots and crawl-delay
+        do not apply to the API), so without that record API latency never
+        reached the session log."""
     if config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return {}
@@ -336,6 +371,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
                             use_model, thinking, cache)
     lead = _claim_prefix(use_model, system_prompt) \
         if (cache and _CACHE_ENABLED and system_prompt) else None
+    t0 = time.monotonic()
     try:
         for attempt in range(len(_RETRY_DELAYS) + 1):
             r = SESSION.post(
@@ -362,10 +398,12 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         data = r.json()
         usage = data.get("usage") or {}
         _record_usage(usage)
-        _log.debug("%s: %s in / %s out tokens (cache read: %s)",
+        _log.debug("%s: %s in / %s out tokens (cache read: %s) "
+                   "| HTTP %s in %.2fs",
                    use_model, usage.get("input_tokens"),
                    usage.get("output_tokens"),
-                   usage.get("cache_read_input_tokens", 0))
+                   usage.get("cache_read_input_tokens", 0),
+                   r.status_code, time.monotonic() - t0)
         text = next(
             (b["text"] for b in data.get("content", []) if b.get("type") == "text"),
             "",
@@ -388,6 +426,8 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     except requests.HTTPError as e:
         status = getattr(e.response, "status_code", None)
         body = getattr(e.response, "text", "")[:300]
+        _log.debug("claude call failed: HTTP %s in %.2fs",
+                   status, time.monotonic() - t0)
         if status in (401, 403) or (status == 400
                                     and "credit balance" in body.lower()):
             _trip_fatal(f"HTTP {status}: {body!r}")
@@ -395,9 +435,13 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
             print(f"  [!] Claude API error: {e}  body={body!r}")
         return {}
     except json.JSONDecodeError as e:
+        _log.debug("claude call failed: non-JSON response in %.2fs",
+                   time.monotonic() - t0)
         print(f"  [!] Claude returned non-JSON: {e}")
         return {}
     except Exception as e:
+        _log.debug("claude call failed: %s in %.2fs",
+                   type(e).__name__, time.monotonic() - t0)
         print(f"  [!] Claude call failed: {e}")
         return {}
     finally:
