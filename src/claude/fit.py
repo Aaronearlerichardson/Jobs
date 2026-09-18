@@ -45,6 +45,19 @@ except Exception:                      # importable standalone for calibration
     api_disabled = lambda: None        # noqa: E731
     have_api_key = lambda: False       # noqa: E731
 
+try:
+    # The one place that knows where a posting IS (profile [locality] /
+    # [locations]): is_nc reads a stored location one office-segment at a
+    # time, remote_signal/us_eligible read the remote vocabulary. The gate
+    # override below reuses them rather than growing a second, drifting
+    # copy of the same question inside the scorer. Imported separately from
+    # the block above so a calibration-only import (no profile) still gets
+    # its `config`; src.match imports nothing from src.claude, so this
+    # cannot cycle.
+    from src.match import locality
+except Exception:                      # no profile loaded
+    locality = None
+
 
 # --------------------------------------------------------------------------- #
 #  Rubric taxonomy (defaults; override any of these from profile.toml [fit]).  #
@@ -457,6 +470,150 @@ _CLEARANCE_RE = _clearance_regex()
 def _clearance_required(text):
     return bool(_CLEARANCE_RE.search(text or ""))
 
+
+# --------------------------------------------------------------------------- #
+#  Deterministic gate OVERRIDE (the strip side of the backstop)                #
+# --------------------------------------------------------------------------- #
+#
+# _clearance_required above is the ADD side: a formulaic active-clearance
+# demand the model missed gets the gate anyway. Nothing ever took a gate
+# back OFF, so a gate the profile's own rules say must not fire rode all
+# the way into the stored score. Two shapes were doing real damage:
+#
+#   * clearance: a posting whose only clearance language is ELIGIBILITY
+#     ("must be eligible to obtain a security clearance", "US citizenship
+#     required") gated at 0.45x on reason "no clearance held but
+#     eligibility required" — exactly the case profile.toml's [fit]
+#     gate_penalty comment rules out ("citizenship/eligibility-only
+#     requirements never gate; holding-one-today requirements do").
+#   * geo: a multi-site req whose stored location LISTS the candidate's own
+#     city among the valid offices ("USA - New Jersey - Rahway; USA - North
+#     Carolina - Durham") still tripped the geo gate at 0.20x, as did
+#     remote-eligible rows.
+#
+# Both checks are deterministic and NARROW by construction: they only ever
+# REMOVE a gate, they read the same profile vocabulary the rest of the
+# crawl reads, and they leave the axis scores, the weights, the combiner
+# and the prompts untouched. A gate the evidence still supports survives.
+
+# Every clause that mentions a clearance. Clause, not sentence: an ATS
+# requirements block packs several demands into one line separated by
+# ";" / newlines / bullets, and "must hold an active TS/SCI; must be
+# eligible for a CI polygraph" has to read as two facts, not one.
+# "TS/SCI" and "top secret" count as mentions on their own — a posting can
+# demand one without ever spelling the word "clearance".
+_CLEARANCE_MENTION = r"clearance|ts\s*/?\s*sci|top[-\s]?secret"
+_CLEARANCE_CLAUSE_RE = re.compile(rf"[^.;\n•]*(?:{_CLEARANCE_MENTION})[^.;\n•]*",
+                                  re.I)
+
+# The period inside an abbreviation is not a clause break. Without this,
+# the single commonest eligibility sentence there is — "must be eligible to
+# obtain and maintain a U.S. security clearance" — clause-splits at the "S."
+# and the surviving fragment ("security clearance") carries none of the
+# eligibility language that is the whole point of reading it.
+_ABBREV_DOT_RE = re.compile(r"\b([A-Za-z])\.")
+
+# ELIGIBILITY language: being able to GET one, or being the kind of person
+# who could. The candidate is a US citizen, so none of this is a
+# disqualifier — profile.toml [fit] clearance_verbs says as much.
+_CLEARANCE_ELIGIBLE_RE = re.compile(
+    r"\b(?:eligib\w*|clearable|ability|able|willing\w*|capable|qualify|"
+    r"qualified|obtain\w*|acquir\w*|apply\s+for|sponsor\w*|undergo|"
+    r"subject\s+to|if\s+required|may\s+be\s+required|upon\s+hire|"
+    r"citizen\w*)\b", re.I)
+
+# HOLDING language: the posting wants a clearance you already have. Note
+# what is NOT here — a bare "maintain", which is half of the extremely
+# common eligibility phrase "able to obtain AND MAINTAIN a clearance", and
+# a bare "required", which says nothing about whether it is required today
+# or by the start date.
+_CLEARANCE_HELD_RE = re.compile(
+    r"\b(?:active|current(?:ly)?|existing|present(?:ly)?|already|"
+    r"hold(?:s|ing)?|possess(?:es|ing)?|in\s+hand)\b", re.I)
+
+
+def _clearance_gate_holds(text):
+    """True when a "clearance" gate on this posting stands; False only when
+    the text shows POSITIVE eligibility-only evidence.
+
+    The strip needs evidence, not just absence of evidence: at least one
+    clearance clause must be eligibility-shaped, and NO clearance clause
+    anywhere may carry holding language. So "must be eligible to obtain a
+    security clearance" strips, while a bare "Requires a TS/SCI with
+    polygraph" — no eligibility language at all — keeps the gate rather
+    than betting the candidate's shortlist on a vocabulary gap.
+
+    Any holding word in any clearance clause keeps the gate, even beside
+    eligibility language. That is deliberately conservative: this is a
+    safety net that only ever REMOVES a gate, so an ambiguous posting must
+    fall on the side of keeping it.
+
+    The ADD-side regex is an absolute veto, so the two halves of the
+    backstop can never fight — a text _clearance_required() would gate on
+    is never stripped here.
+
+    >>> _clearance_gate_holds("Must currently hold an active TS/SCI clearance.")
+    True
+    >>> _clearance_gate_holds("Must be eligible to obtain a security clearance.")
+    False
+    >>> _clearance_gate_holds("Eligible to obtain a U.S. security clearance.")
+    False
+    >>> _clearance_gate_holds("Requires a TS/SCI with polygraph.")
+    True
+    >>> _clearance_gate_holds("We build scientific pipelines.")
+    True
+    """
+    text = text or ""
+    if _clearance_required(text):
+        return True
+    clauses = _CLEARANCE_CLAUSE_RE.findall(_ABBREV_DOT_RE.sub(r"\1", text))
+    if not any(_CLEARANCE_ELIGIBLE_RE.search(c) for c in clauses):
+        return True
+    return any(_CLEARANCE_HELD_RE.search(c) for c in clauses)
+
+
+def _geo_gate_holds(location, description=""):
+    """True unless the posting is deterministically somewhere the candidate
+    can work from: a stored location inside the configured locality, or a
+    US-eligible remote posting.
+
+    Reads the STORED location field for the locality half — is_nc judges it
+    per office-segment, which is what makes a multi-site req that lists the
+    candidate's own city among its offices come back local — and both the
+    location and the body for the remote half, which is where "fully
+    remote" is usually written. Deliberately does NOT clear the gate on a
+    place name found loose in the body: every JD in the region's orbit
+    names the region somewhere.
+
+    With no locality vocabulary loaded there is nothing deterministic to
+    say, so the model's gate stands.
+    """
+    if locality is None:
+        return True
+    if locality.is_nc(location):
+        return False
+    if (locality.remote_signal(location, description)
+            and locality.us_eligible(location)):
+        return False
+    return True
+
+
+def apply_gate_overrides(gates, *, location="", description=""):
+    """The tripped gates with any the deterministic checks above refute
+    removed. Additive-free by construction: this only ever returns a subset
+    of `gates`, and it never touches the axis scores or the weights.
+
+    >>> apply_gate_overrides(["level", "geo"], location="Remote - US")
+    ['level']
+    >>> apply_gate_overrides(["clearance"],
+    ...                      description="Must be eligible for a clearance.")
+    []
+    """
+    checks = {"geo": lambda: _geo_gate_holds(location, description),
+              "clearance": lambda: _clearance_gate_holds(description)}
+    return [g for g in gates if g not in checks or checks[g]()]
+
+
 # How much of the tail survives clipping. Corporate JDs put the
 # requirements/qualifications block LAST, after pages of mission boilerplate
 # — a plain head-truncation is what let a TPM posting score 0.69 on its EEG
@@ -539,6 +696,9 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
     # Regex backstop on the FULL pre-clip text (clipping could elide it).
     if _clearance_required(description) and "clearance" not in gates:
         gates.append("clearance")
+    # ...and its strip side, on the same full text plus the stored location.
+    gates = apply_gate_overrides(gates, location=location,
+                                 description=description)
     weights = getattr(config, "FIT_WEIGHTS", None)
     score = combine(axes, gates, weights, _effective_penalties())
     return FitResult(score=score, axes=axes, gates=gates,
@@ -641,6 +801,8 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
         gates.append("management")
     if _clearance_required(description) and "clearance" not in gates:
         gates.append("clearance")
+    gates = apply_gate_overrides(gates, location=location,
+                                 description=description)
     score = combine(axes, gates, getattr(config, "FIT_WEIGHTS", None),
                     _effective_penalties())
     bits = []

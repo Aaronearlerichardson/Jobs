@@ -44,6 +44,143 @@ class TestGates:
         assert not fit._clearance_required("eligible to obtain a clearance")
 
 
+class TestGateOverrides:
+    """The STRIP side of the deterministic backstop.
+
+    _clearance_required only ever ADDED a gate, so a gate the profile's own
+    rules say must not fire (an eligibility-only clearance line; a geo gate
+    on a posting whose stored location lists the candidate's own city, or on
+    a US-remote row) rode all the way into the stored score. These pin that
+    the override removes exactly those and nothing else. Locations come from
+    the profile fixtures, so the assertions hold on any profile.
+    """
+
+    ONSITE = "Onsite role in our main office."
+
+    # --- geo ---------------------------------------------------------------
+
+    def test_a_local_row_loses_the_geo_gate(self, local_addr):
+        assert fit.apply_gate_overrides(["geo"], location=local_addr,
+                                        description=self.ONSITE) == []
+
+    def test_a_multi_site_row_listing_the_local_office_loses_it(
+            self, local_addr, elsewhere):
+        # The Merck shape: "USA - New Jersey - Rahway; USA - North Carolina -
+        # Durham" — the candidate's own city IS one of the valid locations.
+        loc = f"{elsewhere}; {local_addr}"
+        assert fit.apply_gate_overrides(["geo"], location=loc,
+                                        description=self.ONSITE) == []
+
+    def test_a_us_remote_row_loses_the_geo_gate(self):
+        assert fit.apply_gate_overrides(["geo"], location="Remote - US") == []
+
+    def test_a_remote_body_phrase_also_clears_it(self):
+        assert fit.apply_gate_overrides(
+            ["geo"], location="",
+            description="This role is remote, open to US applicants.") == []
+
+    def test_an_out_of_area_onsite_row_keeps_the_geo_gate(self, elsewhere):
+        # Not a no-op: the gate has to survive where it is earned.
+        assert fit.apply_gate_overrides(["geo"], location=elsewhere,
+                                        description=self.ONSITE) == ["geo"]
+
+    def test_a_place_name_loose_in_the_body_does_not_clear_it(
+            self, elsewhere, local_addr):
+        # Every JD in the region's orbit names the region somewhere; only the
+        # STORED location field decides the locality half.
+        assert fit.apply_gate_overrides(
+            ["geo"], location=elsewhere,
+            description=f"Partnered with labs in {local_addr}.") == ["geo"]
+
+    # --- clearance ---------------------------------------------------------
+
+    def test_eligibility_only_language_loses_the_clearance_gate(self):
+        for desc in ("Applicants must be eligible to obtain and maintain a "
+                     "U.S. security clearance.",
+                     "US citizenship required for eligibility; a clearance "
+                     "may be required after hire.",
+                     "- Must be a US citizen able to obtain a security "
+                     "clearance\n- 5 years of Python"):
+            assert fit.apply_gate_overrides(["clearance"],
+                                            description=desc) == [], desc
+
+    def test_an_active_clearance_requirement_keeps_the_gate(self):
+        for desc in ("Must currently hold an active TS/SCI clearance with "
+                     "polygraph.",
+                     "Candidates must possess a current DoD Top Secret "
+                     "clearance.",
+                     "US citizenship required for eligibility; an active "
+                     "clearance is required on day one."):
+            assert fit.apply_gate_overrides(
+                ["clearance"], description=desc) == ["clearance"], desc
+
+    def test_a_held_clearance_beside_eligibility_language_keeps_the_gate(self):
+        # "currently hold" is not caught by _CLEARANCE_RE (it wants "current
+        # <type> clearance"), so the clause reader has to see it.
+        assert fit.apply_gate_overrides(
+            ["clearance"],
+            description="Applicants must be US citizens and must currently "
+                        "hold a Secret clearance.") == ["clearance"]
+
+    def test_no_eligibility_evidence_means_no_strip(self):
+        # The strip needs POSITIVE eligibility evidence. A bare demand with
+        # no eligibility language, and a body with no clearance language at
+        # all, both leave the model's gate standing.
+        assert fit.apply_gate_overrides(
+            ["clearance"],
+            description="Requires a TS/SCI with polygraph.") == ["clearance"]
+        assert fit.apply_gate_overrides(
+            ["clearance"],
+            description="We build neural data pipelines.") == ["clearance"]
+
+    # --- shape -------------------------------------------------------------
+
+    def test_the_override_never_adds_and_never_touches_other_gates(self):
+        assert fit.apply_gate_overrides(
+            ["management", "phd", "geo"], location="Remote - US",
+            description="Eligible to obtain a clearance.") == ["management", "phd"]
+        assert fit.apply_gate_overrides([], location="Remote - US") == []
+
+    # --- wiring ------------------------------------------------------------
+
+    @staticmethod
+    def _ungated(res):
+        return fit.combine(res.axes, [], getattr(fit.config, "FIT_WEIGHTS", None),
+                           fit._effective_penalties())
+
+    def test_score_resume_fit_applies_it(self, monkeypatch, local_addr):
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
+            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
+            "gates": ["geo", "clearance"], "reason": "good lane"})
+        body = ("Build neural data pipelines. " * 20
+                + "Applicants must be eligible to obtain a U.S. security "
+                  "clearance.")
+        res = fit.score_resume_fit("ML Engineer", body, location=local_addr)
+        assert res.gates == []
+        assert res.score == self._ungated(res)
+        assert "gate:" not in res.summary()
+
+    def test_verify_fit_applies_it_without_disarming_its_own_backstops(
+            self, monkeypatch, local_addr):
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
+            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
+            "seat_type": "management", "gates": ["geo"], "reason": "deep"})
+        res = fit.verify_fit("Program Lead", "x " * 200, location=local_addr)
+        assert res.gates == ["management"]      # geo stripped, seat gate kept
+
+    def test_the_add_side_backstop_still_wins(self, monkeypatch, local_addr):
+        # A local posting that really does demand an active clearance keeps
+        # it: the strip must not undo the regex that just added it.
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
+            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
+            "gates": [], "reason": "cleared shop"})
+        body = ("Signal processing work. " * 20
+                + "Must hold an active TS/SCI clearance; eligibility to "
+                  "upgrade is a plus.")
+        res = fit.score_resume_fit("DSP Engineer", body, location=local_addr)
+        assert res.gates == ["clearance"]
+
+
 class TestUnscoredCause:
     """The vocabulary src.ops.maintenance's retry-marker system keys off:
     the two "gave up without a score" reasons score_resume_fit hands back,
