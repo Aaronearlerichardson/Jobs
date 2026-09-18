@@ -659,10 +659,91 @@ def remote_admitted(row, remote_mission_floor):
     return mission is not None and mission >= remote_mission_floor
 
 
+def _collapse_key(r):
+    """Group-by key for 'same opening at the same employer' in
+    ranked_jobs(collapse=True): (company key, normalised title) — reuses
+    _norm_title for the title, and review._name_key -- the key every
+    other name comparison in this package already uses -- for the company
+    name, rather than a second normaliser of either.
+
+    `company_id` is authoritative when a row has one: two companies never
+    share an id, and one company's rows never disagree about it. The tiny
+    minority of rows with NO company_id — LinkedIn captures, jsonld sweep
+    hits, manual --add (see sync_job_statuses) — fall back to the
+    name key (4 of 119,411 rows in the 2026-09-17 live store, none of
+    which collapse either way). Rows with neither an id nor a name key
+    off their own job_id,
+    which never repeats, so a nameless row simply never collapses with
+    anything instead of colliding with every other nameless row:
+
+    >>> _collapse_key({"company_id": 5, "company_name": "Acme",
+    ...                "title": "Data Engineer", "job_id": "x"})
+    (5, 'data engineer')
+    >>> _collapse_key({"company_id": None, "company_name": "Acme Inc.",
+    ...                "title": "Data  Engineer", "job_id": "x"})
+    ('name:acmeinc', 'data engineer')
+    >>> _collapse_key({"company_id": None, "company_name": "",
+    ...                "title": "Data Engineer", "job_id": "j1"})
+    ('job:j1', 'data engineer')
+    """
+    # Deferred, like companies.py's own reach into review.py, so neither
+    # module depends on the other at load time (see review.py's header).
+    from .review import _name_key
+    cid = r.get("company_id")
+    if cid is not None:
+        company_key = cid
+    else:
+        name = _name_key(r.get("company_name"))
+        company_key = f"name:{name}" if name else f"job:{r.get('job_id')}"
+    return (company_key, _norm_title(r.get("title")))
+
+
+def _collapse_same_opening(rows):
+    """Collapse `rows` (already ranked best-first) to one row per
+    (company, normalised title) group: the survivor is the FIRST member of
+    each group, i.e. the best-ranked one, since `rows` arrives pre-sorted.
+    The survivor is stamped with `dup_count` (the group's total size,
+    including itself) and `dup_job_ids` / `dup_urls` (the OTHER members'
+    ids and urls, best-next-first) so a caller can say "(N similar
+    postings)" and link them. Nothing is deleted: this only reshapes what
+    one ranked_jobs() call returns — see dedup_jobs for the store-level
+    collapse of genuine duplicate rows, which this is not.
+
+    >>> best = {"job_id": "b", "company_id": 1, "company_name": "Acme",
+    ...         "title": "Data Engineer", "url": "u/b"}
+    >>> worse = {"job_id": "w", "company_id": 1, "company_name": "Acme",
+    ...          "title": "data engineer", "url": "u/w"}
+    >>> other = {"job_id": "o", "company_id": 2, "company_name": "Beta",
+    ...          "title": "Data Engineer", "url": "u/o"}
+    >>> out = _collapse_same_opening([best, worse, other])
+    >>> [r["job_id"] for r in out]
+    ['b', 'o']
+    >>> out[0]["dup_count"], out[0]["dup_job_ids"], out[0]["dup_urls"]
+    (2, ('w',), ('u/w',))
+    >>> out[1]["dup_count"]
+    1
+    """
+    groups, order = {}, []
+    for r in rows:
+        key = _collapse_key(r)
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(r)
+    out = []
+    for key in order:
+        survivor, *losers = groups[key]
+        survivor["dup_count"] = len(losers) + 1
+        survivor["dup_job_ids"] = tuple(m.get("job_id") for m in losers)
+        survivor["dup_urls"] = tuple(m.get("url") for m in losers)
+        out.append(survivor)
+    return out
+
+
 def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
                 allow_geo_modes=None, min_mission=None,
                 remote_mission_floor=None, include_closed=False,
-                include_dispositioned=False):
+                include_dispositioned=False, collapse=True):
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -701,7 +782,39 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     `include_closed=True`. Jobs the user has dispositioned also leave the
     ranking — applied/interviewing live in the digest's pipeline section,
     rejected/dismissed disappear — except 'saved' (shortlisted), which
-    stays visible."""
+    stays visible.
+
+    `collapse=True` (the default) then folds rows that are the SAME opening
+    at the SAME employer — matched by _collapse_key, i.e. company_id (or a
+    name/job_id fallback) plus the normalised title — down to their
+    best-ranked survivor, stamped with dup_count/dup_job_ids/dup_urls (see
+    _collapse_same_opening). It runs AFTER every filter and the sort above,
+    so the kept row is the best-ranked one, and BEFORE `limit`, so
+    `limit=15` always returns 15 visibly-distinct rows rather than 15 raw
+    rows that a caller then has to re-collapse and re-trim. These are
+    DISTINCT requisitions with distinct URLs (often distinct scores) that
+    stay in the store either way — dedup_jobs (slug/url collisions) is the
+    only thing that deletes rows; this is a query-time view.
+
+    Every caller defaults to the collapsed view; pass `collapse=False` for
+    the raw, one-row-per-posting list — e.g. an audit that needs to see
+    every requisition a group folded together.
+
+    Notes:
+        A generic title ("Research Technician II") collapses across
+        DIFFERENT labs at the SAME employer, because the key has no notion
+        of "different team" finer than company + title — the store does not
+        record one. That is a real, known blind spot (see the 2026-09-17
+        review); it trades a rare false merge of two genuinely different
+        openings for fixing the much larger and more common problem, one
+        board reposting the identical requisition under several ids/urls.
+        dup_job_ids/dup_urls keep every folded row's identity on the
+        survivor precisely so a person can still open and tell them apart.
+
+        The census behind the default: 133 company+title groups covered
+        442 open tracked rows in the 2026-09-17 store, 43 of them one
+        university posting alone, which drowned the digest's and the web
+        UI's top ranks in copies of the same opening."""
     q = """
       SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
@@ -752,6 +865,8 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
                 r.get("resume_fit_score"), r.get("mission_score"))
         return tuple(v if v is not None else -1.0 for v in vals)
     rows.sort(key=_k, reverse=True)
+    if collapse:
+        rows = _collapse_same_opening(rows)
     if limit:
         rows = rows[:int(limit)]
     return rows

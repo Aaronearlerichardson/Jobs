@@ -121,6 +121,86 @@ def test_harvestable_ignores_active_dormant_and_tags_but_not_dead_boards():
     assert names == ["Inactive", "Live", "NoLocal", "Parked", "Pending"]
 
 
+# ── plan: off-mission cadence ────────────────────────────────────────────────
+
+class TestOffmissionCadence:
+    """A board that is BOTH off-mission (mission_tier 'other', or never
+    scored) AND inactive waits config.HARVEST_OFFMISSION_HOURS
+    instead of plan()'s ordinary min_age_hours freshness cutoff -- see
+    harvest._is_offmission_inactive and plan()'s docstring for the
+    --min-age-hours interaction (an explicit override, including 0, always
+    wins for every board)."""
+
+    def _stale_board(self, conn, name, hours_ago, **extra):
+        c = _company(conn, name, ats="lever", **extra)
+        stamp = (harvest.datetime.now()
+                 - harvest.timedelta(hours=hours_ago)).isoformat()
+        conn.execute("UPDATE companies SET last_harvested_at=? WHERE id=?",
+                     (stamp, c["id"]))
+        return c
+
+    def test_offmission_inactive_board_skipped_on_a_6h_pass(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        conn = store.connect(tmp_path / "s.db")
+        self._stale_board(conn, "Dominos", 24, active=0, mission_tier="other")
+        stats = {}
+        assert harvest.plan(conn, stats=stats) == []
+        assert stats["offmission_skipped"] == 1
+
+    def test_offmission_inactive_board_is_due_after_the_long_interval(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        conn = store.connect(tmp_path / "s.db")
+        self._stale_board(conn, "Dominos", 200, active=0, mission_tier="other")
+        assert [c["name"] for c in harvest.plan(conn)] == ["Dominos"]
+
+    def test_active_core_board_is_unaffected_by_the_long_interval(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        conn = store.connect(tmp_path / "s.db")
+        # Older than the ordinary 6h cutoff but well under the 168h one --
+        # if this board were mistakenly treated as off-mission it would
+        # still be skipped, so this also proves the predicate keys off
+        # active/mission_tier, not merely age.
+        self._stale_board(conn, "Acme", 24, active=1, mission_tier="core-mission")
+        assert [c["name"] for c in harvest.plan(conn)] == ["Acme"]
+
+    def test_offmission_board_named_explicitly_still_bypasses_the_interval(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        conn = store.connect(tmp_path / "s.db")
+        self._stale_board(conn, "Dominos", 1, active=0, mission_tier="other")
+        assert [c["name"] for c in harvest.plan(conn, names=["dominos"])] \
+            == ["Dominos"]
+
+    def test_explicit_min_age_hours_zero_forces_everything(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        conn = store.connect(tmp_path / "s.db")
+        self._stale_board(conn, "Dominos", 1, active=0, mission_tier="other")
+        assert [c["name"] for c in harvest.plan(conn, min_age_hours=0)] \
+            == ["Dominos"]
+
+    def test_run_header_names_offmission_boards_deferred_this_pass(
+            self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
+        db = tmp_path / "s.db"
+        conn = store.connect(db)
+        self._stale_board(conn, "Dominos", 24, active=0, mission_tier="other")
+        self._stale_board(conn, "Acme", 24, active=1, mission_tier="core-mission")
+
+        def fake_board(company, db_path, progress=lambda: None, hydrate=True):
+            return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
+                    "closed": 0, "reopened": 0, "secs": 0.0}
+
+        harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
+                   triage=False)
+        out = capsys.readouterr().out
+        header = next(l for l in out.splitlines() if "board(s)" in l)
+        assert "1 off-mission board(s) deferred to 168h" in header
+
+
 # ── harvest_board ───────────────────────────────────────────────────────────
 
 def test_harvest_board_stores_hydrates_and_closes(tmp_path, monkeypatch):

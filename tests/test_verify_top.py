@@ -286,7 +286,8 @@ class TestVerifyFloorCandidates:
     def test_verified_row_prints_old_new_score_company_title_reason(
             self, db, add_job, local_track, monkeypatch, capsys):
         t = _track(local_track)
-        add_job("gh_acme_1", fit=0.6, track=t["track"], description="d" * 400)
+        add_job("gh_acme_1", "Data Engineer", fit=0.6, track=t["track"],
+                description="d" * 400)
         self._verify(db, monkeypatch, t, 0.7, reason="deep: solid fit",
                      top_n=10)
         out = capsys.readouterr().out

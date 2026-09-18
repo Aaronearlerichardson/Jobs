@@ -54,7 +54,8 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import store
-from src.claude.api import api_disabled, cache_stats, report_cache_stats
+from src.claude.api import (api_disabled, cache_stats, have_api_key,
+                            report_cache_stats)
 from src.ats.coords import board_slug
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
@@ -94,6 +95,8 @@ HYDRATE_CAP = {"workday": 100}
 STALL_S = 900.0
 # A board harvested more recently than this is skipped, which is what makes
 # a restarted (or Task-Scheduler-repeated) run resume where it left off.
+# A board that is BOTH off-mission and inactive waits the longer
+# config.HARVEST_OFFMISSION_HOURS instead -- see plan()'s docstring.
 MIN_AGE_HOURS = 6.0
 # The post-triage closed-URL probe (ops.check_closed_jobs): how stale a
 # tracked OPEN row has to be (no board has vouched for it in this many
@@ -108,13 +111,60 @@ CLOSED_PROBE_LIMIT = 100
 #  Planning                                                                    #
 # --------------------------------------------------------------------------- #
 
+def deferred_note(stats):
+    """The ", N off-mission board(s) deferred to Xh" clause for a plan()
+    `stats` dict, and "" when this pass deferred none. run()'s header and
+    harvest.py --list both print it; neither spells it out.
+
+    >>> deferred_note({"offmission_skipped": 0})
+    ''
+    >>> deferred_note({"offmission_skipped": 2})    # doctest: +ELLIPSIS
+    ', 2 off-mission board(s) deferred to ...h'
+    """
+    n = stats.get("offmission_skipped", 0)
+    return (f", {n} off-mission board(s) deferred to "
+            f"{config.HARVEST_OFFMISSION_HOURS:g}h") if n else ""
+
+
 def _ats_rank(ats):
     """Cheap JSON boards first, then the heavyweights."""
     return 0 if ats in LIGHTWEIGHT else 1
 
 
-def plan(conn, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
-         limit=None, now=None):
+def _is_offmission_inactive(c):
+    """True for a board that is BOTH off-mission (mission-scored into a
+    tier the profile marks inactive, or never mission-scored at all) AND
+    itself inactive -- the harvester's own long-interval boards (see
+    config.HARVEST_OFFMISSION_HOURS). A NULL tier reads as
+    off-mission HERE (unlike config.is_active_mission, where an unscored
+    company is treated as active) -- an inactive row nobody has bothered to
+    mission-score is exactly as low-priority to re-harvest often as one
+    scored into the catch-all tier, and this predicate only ever narrows a
+    HARVEST CADENCE, never activation or crawl eligibility.
+
+    >>> _is_offmission_inactive({"mission_tier": "other", "active": 0})
+    True
+    >>> _is_offmission_inactive({"mission_tier": None, "active": 0})
+    True
+    >>> _is_offmission_inactive({"mission_tier": "core-mission", "active": 0})
+    False
+    >>> _is_offmission_inactive({"mission_tier": "other", "active": 1})
+    False
+
+    Notes:
+        A multi-division conglomerate scored into an inactive tier is
+        exempt already: that exemption (config.is_multi_division, applied
+        when the row's `active` was last written) is what keeps it
+        `active`, so the `active` check above is enough and nothing here
+        re-checks is_multi_division.
+    """
+    tier = c.get("mission_tier")
+    return not c.get("active") and (tier is None
+                                     or tier not in config.ACTIVE_MISSION_TIERS)
+
+
+def plan(conn, only=None, names=None, min_age_hours=None,
+         limit=None, now=None, stats=None):
     """The boards this run will pull, in run order.
 
     `only` restricts to a set of ATS names, `names` to company names
@@ -122,6 +172,31 @@ def plan(conn, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     unless named explicitly. Cheapest ATSes first, then smaller boards
     before bigger ones, so an interrupted run has still banked the most
     boards per minute.
+
+    A board that is _is_offmission_inactive waits the longer
+    config.HARVEST_OFFMISSION_HOURS instead of `min_age_hours`. Such a
+    board is still fetched every pass, per the "harvest every board"
+    mandate -- just not every `min_age_hours`.
+
+    `min_age_hours=None` -- the default, and what harvest.py passes when
+    the flag is absent -- means the pass chooses both intervals itself:
+    MIN_AGE_HOURS for every ordinary board, the long one for these. ANY
+    explicit value is a caller override and applies uniformly, off-mission
+    boards included, so `--min-age-hours 0` keeps meaning literally
+    everything. The sentinel is what makes that honest: a plain
+    `min_age_hours=6` is a deliberate "re-check everything that is 6h
+    old", not an accidental repeat of the default, and is obeyed as one.
+
+    `stats`, when given, gets `"offmission_skipped"` set to the number of
+    boards this call left out ONLY because of the long interval -- i.e.
+    boards that would already be due under plain `min_age_hours` freshness
+    -- and `"min_age_hours"` set to the ordinary cutoff this call resolved
+    the sentinel to. Both are what a caller's header line says (run()
+    below, harvest.py --list); neither re-derives the default itself, so
+    the sentinel rule has exactly one writer. The out-parameter shape is
+    this module's own (see _hydrate_rows' `stats`): the return value is
+    the plan, and a second return value would be read by no one who does
+    not already hold the list.
 
     >>> conn = store.connect(":memory:")
     >>> for n, a, t, h in [("Big", "workday", 900, None),
@@ -144,23 +219,73 @@ def plan(conn, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     ['Fresh']
     >>> [c["name"] for c in plan(conn, only={"workday"}, now=now)]
     ['Big']
+
+    An off-mission, inactive board waits the long interval instead of
+    `min_age_hours` -- unless it is named explicitly, or the caller passes
+    a `min_age_hours` other than the default:
+
+    >>> _ = store.upsert_company(conn, {"name": "Stale", "ats": "lever",
+    ...                                 "slug": "stale", "active": 0,
+    ...                                 "mission_tier": "other"})
+    >>> _ = conn.execute("UPDATE companies SET last_harvested_at=? "
+    ...                  "WHERE name=?", ("2026-09-09T12:00:00", "Stale"))
+    >>> stats = {}
+    >>> [c["name"] for c in plan(conn, now=now, stats=stats)
+    ...  if c["name"] == "Stale"]
+    []
+    >>> stats["offmission_skipped"]
+    1
+    >>> [c["name"] for c in plan(conn, min_age_hours=6, now=now)
+    ...  if c["name"] == "Stale"]
+    ['Stale']
+    >>> [c["name"] for c in plan(conn, min_age_hours=0, now=now)
+    ...  if c["name"] == "Stale"]
+    ['Stale']
+    >>> [c["name"] for c in plan(conn, names=["stale"], now=now)]
+    ['Stale']
+
+    Notes:
+        The 2026-09-17 audit counted 289 off-mission inactive boards
+        holding 51,134 stored jobs, against 288 active ones (any tier)
+        holding 47,737 -- so roughly half of every whole-board pass was
+        spent re-fetching rows triage's own mission gate discards on every
+        single run.
     """
     now = now or datetime.now()
+    # The sentinel, per the docstring: only an unset min_age_hours lets the
+    # long interval apply at all.
+    offmission_cutoff = None
+    if min_age_hours is None:
+        min_age_hours = MIN_AGE_HOURS
+        offmission_cutoff = (
+            now - timedelta(hours=config.HARVEST_OFFMISSION_HOURS)
+        ).isoformat()
     cutoff = (now - timedelta(hours=min_age_hours)).isoformat()
     want = {n.strip().lower() for n in names or [] if n.strip()}
     rows = []
+    offmission_skipped = 0
     for c in store.harvestable_companies(conn):
         if only and c.get("ats") not in only:
             continue
         if want:
             if (c.get("name") or "").lower() not in want:
                 continue
-        elif (c.get("last_harvested_at") or "") > cutoff:
-            continue
+        else:
+            last = c.get("last_harvested_at") or ""
+            board_cutoff = cutoff
+            if offmission_cutoff is not None and _is_offmission_inactive(c):
+                board_cutoff = offmission_cutoff
+                if cutoff >= last > offmission_cutoff:
+                    offmission_skipped += 1
+            if last > board_cutoff:
+                continue
         rows.append(c)
     rows.sort(key=lambda c: (_ats_rank(c.get("ats")),
                              c.get("total_job_count") or 0,
                              (c.get("name") or "").lower()))
+    if stats is not None:
+        stats["offmission_skipped"] = offmission_skipped
+        stats["min_age_hours"] = min_age_hours
     return rows[:limit] if limit else rows
 
 
@@ -394,7 +519,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
 #  The run                                                                     #
 # --------------------------------------------------------------------------- #
 
-def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
+def run(db_path=None, only=None, names=None, min_age_hours=None,
         limit=None, max_workers=DEFAULT_WORKERS, hydrate=False,
         max_hours=None, stall_s=STALL_S, poll_s=30.0,
         board_fn=harvest_board, triage=True, score_cap=None):
@@ -407,19 +532,26 @@ def run(db_path=None, only=None, names=None, min_age_hours=MIN_AGE_HOURS,
     that pass's Claude fit calls (triage.SCORE_CAP when None). `poll_s` is
     how often the watchdog looks at the in-flight boards; `board_fn`
     exists for tests (it is harvest_board's signature).
+
+    The header line names how many off-mission, inactive boards `plan`
+    deferred to its longer interval this pass (plan's `stats` output;
+    silent when there are none), so a run that looks small is never a
+    silent drop -- it says which boards it left for later and why.
     """
     db_path = db_path or config.STORE_DB_PATH
     claude_baseline = cache_stats()     # this pass's own Claude spend footer
     conn = store.connect(db_path)
+    plan_stats = {}
     boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
-                  limit=limit)
+                  limit=limit, stats=plan_stats)
     conn.close()
+    age = plan_stats["min_age_hours"]
 
     bar = "=" * 70
     print(f"\n{bar}\n  [HARVEST] whole-board pull - {datetime.now():%Y-%m-%d %H:%M}")
     print(f"  {len(boards)} board(s), {max_workers} at a time, "
           f"hydrate={'on' if hydrate else 'off'}, "
-          f"skip if harvested < {min_age_hours:g}h ago"
+          f"skip if harvested < {age:g}h ago" + deferred_note(plan_stats)
           + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
 
     summary = {"boards": len(boards), "ok": 0, "err": 0, "stalled": 0,
@@ -585,9 +717,8 @@ def _triage(db_path, max_workers, score_cap, claude_baseline):
     conn = store.connect(db_path)
     try:
         tracks = triage.roster_tracks()
-        no_key = config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE"
         down = api_disabled()
-        if no_key or down:
+        if not have_api_key() or down:
             print(f"\n  [!] verify skipped for {len(tracks)} roster track(s): "
                   f"{down or 'no ANTHROPIC_API_KEY configured'}")
         else:

@@ -126,6 +126,19 @@ def is_active_mission(tier, name, include_missions=None):
                  or _self().is_multi_division(name)) else 0
 
 
+# =========================================================================
+#  Background harvester cadence
+# =========================================================================
+
+# How long a board that is BOTH off-mission and itself inactive waits
+# between whole-board harvests, instead of the harvester's ordinary
+# MIN_AGE_HOURS freshness rule. Such a board is still fetched every pass --
+# "harvest every board" stays true -- just on this longer interval; the
+# predicate, the census behind the default and the --min-age-hours
+# interaction all live with the one reader, src.crawl.harvest.plan.
+HARVEST_OFFMISSION_HOURS = float(_pol.get("harvest_offmission_hours", 168))
+
+
 # Honor robots.txt: skip paths a host asks crawlers to leave alone, and
 # obey its Crawl-delay. On by default — it costs one cached request per
 # host, and the endpoints this crawler uses are permissive (Lever, for

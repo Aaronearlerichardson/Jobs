@@ -155,9 +155,30 @@ def _bold(text):
 
 
 def _link(j):
-    """The posting's title linked to its URL."""
+    """The posting's title linked to its URL, plus a "(N similar postings)"
+    note when `j` is a ranked_jobs(collapse=True) survivor standing in for
+    others (store.ranked_jobs' `dup_count` > 1) — the count includes the row
+    itself. The note is plain text, not itself a link.
+
+    >>> _link({"title": "Data Engineer", "url": "https://acme.io/1"})
+    ('[Data Engineer](https://acme.io/1)', "<a href='https://acme.io/1'>Data Engineer</a>")
+    >>> _link({"title": "Data Engineer", "url": "https://acme.io/1",
+    ...        "dup_count": 3})
+    ('[Data Engineer](https://acme.io/1) (3 similar postings)', "<a href='https://acme.io/1'>Data Engineer</a> (3 similar postings)")
+    >>> _link({"title": "Data Engineer", "url": "https://acme.io/1",
+    ...        "dup_count": 1})
+    ('[Data Engineer](https://acme.io/1)', "<a href='https://acme.io/1'>Data Engineer</a>")
+
+    Notes:
+        A large group (43 identical postings at one company in the
+        2026-09-17 store) would make the row unreadable if every member
+        got its own inline link, and each member's job_id/url is still on
+        the survivor (`dup_job_ids`/`dup_urls`) for any caller that wants
+        to enumerate them.
+    """
     title, url = j.get("title"), j.get("url")
-    return f"[{title}]({url})", f"<a href='{url}'>{title}</a>"
+    note = f" ({j['dup_count']} similar postings)" if (j.get("dup_count") or 0) > 1 else ""
+    return f"[{title}]({url}){note}", f"<a href='{url}'>{title}</a>{note}"
 
 
 def _fit(score):

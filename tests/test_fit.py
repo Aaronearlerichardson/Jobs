@@ -44,6 +44,50 @@ class TestGates:
         assert not fit._clearance_required("eligible to obtain a clearance")
 
 
+class TestUnscoredCause:
+    """The vocabulary src.ops.maintenance's retry-marker system keys off:
+    the two "gave up without a score" reasons score_resume_fit hands back,
+    each mapped to what a retry policy needs (does this body just need to
+    GROW, or might the exact same call succeed later)."""
+
+    # The three reasons score_resume_fit itself produces are unscored_cause's
+    # own doctests; what needs a test here is everything around them.
+
+    def test_an_unrecognized_reason_is_not_a_verdict_either(self):
+        assert fit.unscored_cause("some future reason") is None
+
+    def test_a_body_long_enough_to_reach_the_api_never_takes_the_short_path(
+            self, monkeypatch):
+        # self_heal_unscored only calls in here once its OWN query has
+        # already guaranteed length >= MIN_DESC_CHARS; this pins that the
+        # "no description; unscored" branch genuinely cannot ALSO fire in
+        # that case, which is what makes treating a bare "unscored" as the
+        # REFUSED class (rather than needing the exact HTTP-level cause
+        # from src.claude.api) sound.
+        monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {})
+        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        assert res.score is None
+        assert fit.unscored_cause(res.reason) == "refused"
+
+    def test_a_scorer_that_never_asked_is_not_a_refusal(self, monkeypatch):
+        # No key, and a tripped breaker, both make call_claude_json return
+        # {} WITHOUT asking the model. Reporting those as "unscored" would
+        # let ops.maintenance's retry marker hold a perfectly scorable row
+        # for UNSCORED_RETRY_DAYS over one billing hiccup.
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {})
+        monkeypatch.setattr("src.config.ANTHROPIC_API_KEY",
+                            "YOUR_ANTHROPIC_API_KEY_HERE")
+        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        assert (res.score, res.reason) == (None, "scorer unavailable")
+        assert fit.unscored_cause(res.reason) is None
+
+        monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(fit, "api_disabled", lambda: "credit balance")
+        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        assert fit.unscored_cause(res.reason) is None
+
+
 class TestPrompts:
     def test_verify_prompt_extracts_requirements(self):
         prompt = fit.build_verify_prompt()

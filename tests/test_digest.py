@@ -142,6 +142,19 @@ class TestWriteRankedDigest:
         assert "## Apply band" not in text
         assert "## Follow-ups due" not in text
 
+    def test_a_collapsed_row_shows_its_similar_postings_count(
+            self, track, report_dir):
+        # store.ranked_jobs(collapse=True) stamps a survivor with dup_count;
+        # the main table must surface it, same as the apply band would if
+        # the survivor scored inside that band.
+        solo = row("solo", fit=0.9)
+        grouped = row("grouped", fit=0.6, dup_count=3)
+        text = digest.write_ranked_digest(
+            [solo, grouped], track).read_text(encoding="utf-8")
+        assert "[Role grouped](https://acme.io/grouped) (3 similar postings)" in text
+        assert "[Role solo](https://acme.io/solo) (3 similar postings)" not in text
+        assert "(3 similar postings)" not in text[:text.index("Role grouped")]
+
 
 class TestNewRankedRows:
     def test_keeps_only_rows_first_seen_since(self, track):

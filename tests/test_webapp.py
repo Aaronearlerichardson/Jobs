@@ -311,6 +311,37 @@ class TestApplyBandFields:
         assert row["disposition"] is None
 
 
+class TestCollapsedJobFields:
+    """/api/jobs runs through store.ranked_jobs' default collapse=True, same
+    as the digest, so the Jobs tab can show "(N similar postings)" too --
+    the survivor's dup_count/dup_job_ids/dup_urls must reach the JSON."""
+
+    def test_a_duplicate_pair_collapses_with_dup_fields_exposed(
+            self, client, tmp_path, monkeypatch, local_addr):
+        from src import config
+        from src import store
+        t = config.UI_TRACKS[config.DEFAULT_TRACK]
+        db_path = tmp_path / "collapse.db"
+        conn = store.connect(db_path)
+        cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
+                                          "slug": "acme"})
+        for jid, fit in (("c1", 0.9), ("c2", 0.4)):
+            store.upsert_job(conn, {
+                "job_id": jid, "company_id": cid, "company_name": "Acme",
+                "title": "Data Engineer", "url": f"https://acme.io/{jid}",
+                "location": local_addr, "track": t["track"],
+                "resume_fit_score": fit})
+        conn.close()
+        monkeypatch.setitem(t, "db_path", db_path)
+        rows = json.loads(client.get("/api/jobs").data)
+        ids = {r["job_id"] for r in rows}
+        assert ids == {"c1"}                        # c2 folded into c1
+        row = next(r for r in rows if r["job_id"] == "c1")
+        assert row["dup_count"] == 2
+        assert row["dup_job_ids"] == ["c2"]
+        assert row["dup_urls"] == ["https://acme.io/c2"]
+
+
 class TestRemoteAdmissionFields:
     """/api/jobs ships every row and lets the client gate them, so the
     client needs the server's verdict on each: `remote_ok` says a remote row

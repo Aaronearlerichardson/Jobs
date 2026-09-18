@@ -38,10 +38,12 @@ from dataclasses import dataclass, field
 
 try:
     from src import config
-    from src.claude.api import call_claude_json
+    from src.claude.api import api_disabled, call_claude_json, have_api_key
 except Exception:                      # importable standalone for calibration
     config = None
     call_claude_json = None
+    api_disabled = lambda: None        # noqa: E731
+    have_api_key = lambda: False       # noqa: E731
 
 
 # --------------------------------------------------------------------------- #
@@ -521,6 +523,16 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
     user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
     r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens)
     if not r or "function" not in r:
+        # A call that never left the process -- no key, or the breaker
+        # tripped on an expired one / an exhausted balance -- is the
+        # SCORER being down, not a verdict on this posting, and both
+        # return {} exactly like a refusal does. Naming them apart is
+        # what keeps ops.maintenance's retry marker honest: it holds a
+        # "refused" row for UNSCORED_RETRY_DAYS, so one billing hiccup
+        # would otherwise park a whole backlog for a month (see
+        # fit.unscored_cause, which maps only the verdict reasons).
+        if api_disabled() or not have_api_key():
+            return FitResult(score=None, reason="scorer unavailable")
         return FitResult(score=None, reason="unscored")
     axes = {a: _clamp(r.get(a)) for a in AXES}
     gates = _parse_gates(r.get("gates"))
@@ -532,6 +544,60 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
     return FitResult(score=score, axes=axes, gates=gates,
                      reason=str(r.get("reason", "")).strip(),
                      model=_cfg("CLAUDE_MODEL", ""))
+
+
+# The two "gave up without a score" reasons score_resume_fit's own None-score
+# branches hand back, mapped to what a retry policy needs to know: is this
+# body ever going to score on its own (never — it needs to GROW), or might
+# the exact same call succeed later (maybe — ask again after a while, or the
+# instant the body changes)? "scorer unavailable" (no API key/module) is
+# deliberately NOT in this map: it isn't a verdict about the POSTING, it's
+# the whole scorer being offline, so nothing here should mark the row.
+#
+# Notes:
+#     call_claude_json (src/claude/api.py) collapses several distinct HTTP-
+#     level outcomes into the one generic "unscored" reason: a safety
+#     refusal (stop_reason=refusal, no text block at all), adaptive
+#     thinking exhausting max_tokens before any text lands
+#     (stop_reason=max_tokens), a non-JSON reply, and a non-fatal HTTP
+#     error each print their own line there and then return {} the same
+#     way. That collapse happens in a module this one does not own, so
+#     nothing on the FitResult can name the exact HTTP-level cause. It
+#     doesn't need to: a caller that already guarantees a real body before
+#     calling in (score_resume_fit's own MIN_DESC_CHARS check ahead of the
+#     API call means the "no description" branch can't ALSO fire) knows
+#     that any "unscored" reaching it is that API-level catch-all, so this
+#     module treats it as the REFUSED class for retry purposes. Evidence:
+#     data/logs/session-*.log, September 2026 — "Claude returned no text
+#     (stop_reason=refusal)" 17 times for the same 3-7 NC State rows, one
+#     per crawl, because nothing distinguished "just refused" from "never
+#     tried" and the row was re-asked every single pass.
+_UNSCORED_CAUSES = {
+    "no description; unscored": "short",
+    "unscored": "refused",
+}
+
+# The distinct causes above, derived rather than re-listed: the retry
+# marker src.ops.maintenance writes into fit_reason spells one of these,
+# and its parser builds its alternation from this tuple instead of keeping
+# a second copy of the vocabulary in step by hand.
+UNSCORED_CAUSES = tuple(dict.fromkeys(_UNSCORED_CAUSES.values()))
+
+
+def unscored_cause(reason):
+    """"short" | "refused" | None for a None-scored FitResult's `.reason`.
+    None means the failure isn't a verdict on this posting at all (the
+    scorer was offline, or `reason` isn't one score_resume_fit produces)
+    and a caller should leave the row untouched rather than mark it.
+
+    >>> unscored_cause("no description; unscored")
+    'short'
+    >>> unscored_cause("unscored")
+    'refused'
+    >>> unscored_cause("scorer unavailable") is None
+    True
+    """
+    return _UNSCORED_CAUSES.get(reason)
 
 
 def verify_fit(title: str, description: str = "", *, location: str = "",

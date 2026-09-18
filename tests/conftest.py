@@ -111,11 +111,21 @@ def company(db):
 
 @pytest.fixture
 def add_job(db, company, local_addr):
-    """Factory: add_job('gh_acme_1', title=..., fit=0.9, **overrides)."""
-    def _add(job_id, title="Data Engineer", fit=None, track="local-tech",
+    """Factory: add_job('gh_acme_1', title=..., fit=0.9, **overrides).
+
+    The default title carries the job_id, so two rows added at this one
+    company are two DISTINCT openings. They have to be: store.ranked_jobs
+    collapses same-company/same-title rows to one survivor by default, so a
+    shared default title silently cost every ranking-backed test one of its
+    rows. Pass the SAME explicit title to both rows when a test wants that
+    collapse (tests/test_store.py's TestCollapse), or an exact title when it
+    asserts on the rendered string.
+    """
+    def _add(job_id, title=None, fit=None, track="local-tech",
              **overrides):
         row = {"job_id": job_id, "company_id": company, "company_name": "Acme",
-               "title": title, "url": f"https://acme.io/{job_id}",
+               "title": title or f"Data Engineer {job_id}",
+               "url": f"https://acme.io/{job_id}",
                "location": local_addr, "track": track,
                "resume_fit_score": fit}
         row.update(overrides)

@@ -9,6 +9,8 @@ been got wrong before: SmartRecruiters answers 200 with totalFound:0 for
 ANY slug, so every guessed slug "confirmed" with zero jobs.
 """
 
+from datetime import datetime, timedelta
+
 import pytest
 
 from conftest import fake_response, keep_store_open
@@ -17,6 +19,10 @@ from src.discovery.resolve import probes
 from src.ops import maintenance as ops
 from src.ops import roster
 import src.store as store
+
+
+def _iso_days_ago(days):
+    return (datetime.now() - timedelta(days=days)).isoformat()
 
 
 @pytest.fixture
@@ -206,3 +212,254 @@ class TestPruneNamesWhatItDeactivates:
                   if "[other]" in ln]
         assert "Other Co" in line and "lever" in line
         assert "off-mission (score=0.05)" in line
+
+
+class TestSelfHealRetryMarker:
+    """self_heal_unscored must not re-ask Claude about a row forever once it
+    has already refused (2026-09: the same 3-7 NC State rows re-refused on
+    every crawl for weeks). ops._unscored_marker / ops._unscored_due, driven
+    end to end through self_heal_unscored itself."""
+
+    @staticmethod
+    def _stub_refusal(monkeypatch):
+        """Every call_claude_json call behaves like a refusal: no usable
+        JSON, which is what score_resume_fit turns into reason="unscored"."""
+        import src.claude.fit as fit_module
+        calls = []
+        # A configured key, so the empty reply reads as the MODEL saying
+        # nothing rather than as the scorer being offline (which is not a
+        # verdict on the posting and must never mark a row).
+        monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
+        monkeypatch.setattr(fit_module, "call_claude_json",
+                            lambda *a, **k: calls.append(1) or {})
+        return calls
+
+    def test_an_offline_scorer_marks_nothing(self, db, add_job, monkeypatch):
+        # The breaker tripping mid-pass (expired key, exhausted balance)
+        # would otherwise park every unscored row for UNSCORED_RETRY_DAYS.
+        self._stub_refusal(monkeypatch)
+        import src.claude.fit as fit_module
+        monkeypatch.setattr(fit_module, "api_disabled", lambda: "HTTP 401")
+        jid = add_job("j1", description="x" * 300, fit=None)
+
+        assert ops.self_heal_unscored(db, "resume", "local-tech") == 0
+
+        row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
+                              (jid,)).fetchone())
+        assert not (row["fit_reason"] or ""), "an offline scorer judged nothing"
+
+    def test_a_refusal_is_marked_with_cause_and_length(
+            self, db, add_job, monkeypatch):
+        calls = self._stub_refusal(monkeypatch)
+        jid = add_job("j1", description="x" * 300, fit=None)
+
+        n = ops.self_heal_unscored(db, "resume", "local-tech")
+
+        assert n == 0
+        assert len(calls) == 1
+        row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
+                              (jid,)).fetchone())
+        assert row["resume_fit_score"] is None
+        assert row["fit_reason"] == f"unscored:refused:300:{datetime.now().date()}"
+
+    def test_a_fresh_refusal_marker_holds_off_the_next_pass(
+            self, db, add_job, monkeypatch):
+        calls = self._stub_refusal(monkeypatch)
+        add_job("j1", description="x" * 300, fit=None)
+        ops.self_heal_unscored(db, "resume", "local-tech")
+        assert len(calls) == 1
+
+        n = ops.self_heal_unscored(db, "resume", "local-tech")   # same day, same body
+
+        assert n == 0
+        assert len(calls) == 1, "a fresh REFUSED marker must not be re-asked"
+
+    def test_a_30_day_old_refusal_marker_is_retried(
+            self, db, add_job, monkeypatch):
+        calls = self._stub_refusal(monkeypatch)
+        jid = add_job("j1", description="x" * 300, fit=None)
+        db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
+                  (f"unscored:refused:300:{_iso_days_ago(31)[:10]}", jid))
+        db.commit()
+
+        ops.self_heal_unscored(db, "resume", "local-tech")
+
+        assert len(calls) == 1, "30+ days on, the same row is due again"
+
+    def test_a_changed_body_is_retried_the_same_day(
+            self, db, add_job, monkeypatch):
+        calls = self._stub_refusal(monkeypatch)
+        jid = add_job("j1", description="x" * 300, fit=None)
+        db.execute(
+            "UPDATE jobs SET fit_reason=?, description=? WHERE job_id=?",
+            (f"unscored:refused:300:{datetime.now().date()}", "y" * 450, jid))
+        db.commit()
+
+        ops.self_heal_unscored(db, "resume", "local-tech")
+
+        assert len(calls) == 1, "a body that grew is due even on the same day"
+
+    def test_scoring_succeeds_once_due_and_replaces_the_marker(
+            self, db, add_job, monkeypatch):
+        import src.claude.fit as fit_module
+        jid = add_job("j1", description="x" * 300, fit=None)
+        db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
+                  (f"unscored:refused:300:{_iso_days_ago(31)[:10]}", jid))
+        db.commit()
+        monkeypatch.setattr(fit_module, "call_claude_json", lambda *a, **k: {
+            "domain": 0.5, "function": 0.5, "stack": 0.5, "seniority": 0.5,
+            "gates": [], "reason": "fits"})
+
+        n = ops.self_heal_unscored(db, "resume", "local-tech")
+
+        assert n == 1
+        row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
+                              (jid,)).fetchone())
+        assert row["resume_fit_score"] is not None
+        assert not row["fit_reason"].startswith("unscored:")
+
+
+class TestRescoreAllUsesTheSharedUnscoredMarker:
+    """rescore_all's bodyless-row branch shares self_heal_unscored's own
+    vocabulary (ops._unscored_marker) instead of a bare, undated string, so
+    the store has one shape for "nothing to score here" everywhere it
+    appears."""
+
+    def test_a_bodyless_row_gets_the_shared_marker(
+            self, db, add_job, monkeypatch):
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(ops, "resume_text", lambda: "resume")
+        jid = add_job("j1", description="too short", fit=0.4)
+
+        ops.rescore_all()
+
+        row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
+                              (jid,)).fetchone())
+        assert row["resume_fit_score"] is None
+        assert row["fit_reason"].startswith("unscored:short:")
+
+
+class TestDeadBoardClosure:
+    """check_closed_jobs's board-dead sweep: ops._dead_board_open_rows plus
+    the closure loop inside check_closed_jobs itself. Judi Health (47 open
+    rows, miss_reason board-dead:greenhouse since 2026-09-11) is the live
+    case this was written for."""
+
+    @staticmethod
+    def _seed(db, name, ats, miss_reason=None, days_stale=20):
+        # A promoted board-dead company writes miss_reason with a raw
+        # UPDATE (src.store.companies.mark_harvested), not through
+        # record_miss -- record_miss's own "never demote an ACTIVE company"
+        # guard is exactly what the promotion cycle exists to override, so
+        # a plain record_miss call here would silently no-op and the test
+        # would pass for the wrong reason (miss_reason never set at all).
+        cid = store.upsert_company(db, {"name": name, "ats": ats})
+        store.upsert_job(db, {"job_id": f"{name}-j1", "company_id": cid,
+                              "company_name": name, "title": "T",
+                              "track": "local-tech",
+                              "url": f"https://{ats}.example/{name}"})
+        db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
+                  (_iso_days_ago(days_stale), f"{name}-j1"))
+        if miss_reason:
+            db.execute("UPDATE companies SET miss_reason=? WHERE name=?",
+                      (miss_reason, name))
+        db.commit()
+        return f"{name}-j1"
+
+    def test_a_dead_boards_stale_open_row_closes_without_a_probe(
+            self, db, monkeypatch, capsys):
+        jid = self._seed(db, "Judi Health", "greenhouse",
+                         "board-dead:greenhouse", days_stale=20)
+        probed = []
+
+        def _probe(url):
+            probed.append(url)
+            return (None, "n/a")
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open", _probe)
+
+        # stale_days=999 keeps this row OUT of the URL-probe population
+        # entirely (last_seen is only 20 days old) -- proving the closure
+        # is a SEPARATE step, not a side effect of probing.
+        n = ops.check_closed_jobs(conn=db, stale_days=999)
+
+        assert n == 1
+        assert probed == [], "closed by inference; no URL should be fetched"
+        row = db.execute("SELECT status FROM jobs WHERE job_id=?",
+                         (jid,)).fetchone()
+        assert row["status"] == "closed"
+        assert "[dead-board]" in capsys.readouterr().out
+
+    def test_a_quiet_board_with_no_miss_is_never_closed_this_way(
+            self, db, monkeypatch):
+        jid = self._seed(db, "Quiet Co", "lever", miss_reason=None,
+                         days_stale=400)
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open",
+                            lambda url: (None, "n/a"))
+
+        ops.check_closed_jobs(conn=db, stale_days=999)
+
+        row = db.execute("SELECT status FROM jobs WHERE job_id=?",
+                         (jid,)).fetchone()
+        assert row["status"] != "closed"
+
+    def test_a_miss_in_a_different_family_is_never_closed_this_way(
+            self, db, monkeypatch):
+        jid = self._seed(db, "Ats Gap", None, "ats-unsupported:ukg",
+                         days_stale=400)
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open",
+                            lambda url: (None, "n/a"))
+
+        ops.check_closed_jobs(conn=db, stale_days=999)
+
+        row = db.execute("SELECT status FROM jobs WHERE job_id=?",
+                         (jid,)).fetchone()
+        assert row["status"] != "closed"
+
+
+class TestClosedProbeRotation:
+    """check_closed_jobs(limit=N) must eventually reach every stale row
+    instead of re-probing the same N forever: 2026-09-17 evidence was
+    'ORDER BY company_name' never changing, so a live/unverifiable verdict
+    (unlike a closed one) left a row exactly where it was for the next
+    pass to pick again."""
+
+    @staticmethod
+    def _seed(db, n):
+        cid = store.upsert_company(db, {"name": "Acme", "ats": "greenhouse"})
+        for i in range(n):
+            jid = f"j{i:03d}"
+            store.upsert_job(db, {"job_id": jid, "company_id": cid,
+                                  "company_name": "Acme", "title": "T",
+                                  "track": "local-tech",
+                                  "url": f"https://acme.example/{jid}"})
+        db.execute("UPDATE jobs SET last_seen=?", (_iso_days_ago(30),))
+        db.commit()
+
+    def test_250_stale_rows_are_fully_covered_in_three_passes_of_100(
+            self, db, monkeypatch):
+        self._seed(db, 250)
+        # Worst case: every probe is unverifiable, so nothing ever leaves
+        # the WHERE clause by closing -- rotation is the only thing that
+        # can cover the backlog.
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open",
+                            lambda url: (None, "gated"))
+
+        for _ in range(3):
+            ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
+
+        covered = db.execute(
+            "SELECT COUNT(*) AS n FROM jobs "
+            "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
+        assert covered == 250
+
+    def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
+        self._seed(db, 250)
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open",
+                            lambda url: (None, "gated"))
+
+        ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
+
+        covered = db.execute(
+            "SELECT COUNT(*) AS n FROM jobs "
+            "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
+        assert covered == 100

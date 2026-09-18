@@ -20,7 +20,7 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.fetchers import company as company_fetch
-from src.claude.fit import score_resume_fit
+from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
 from src.claude.resume import resume_text
 from src.match import gates
 from src.match.filters import is_relevant
@@ -386,16 +386,120 @@ def crawl_company(conn, resume, company, max_workers=6, t=None):
     return (len(jobs), len(kept), n_new)
 
 
+# How long a REFUSED marker holds off a retry (fit.unscored_cause's
+# "refused" class: the model was asked and gave nothing back). A TOO-SHORT
+# marker ("short") has no day horizon at all -- see _unscored_due -- because
+# the same body can only fail the same way again; only growth changes
+# anything, and growth is free to detect (the row's own description length).
+UNSCORED_RETRY_DAYS = 30
+
+# fit_reason for a row self_heal_unscored (or rescore_all) could not score:
+# "unscored:<cause>:<body length when marked>:<date marked>". Distinct from
+# every OTHER fit_reason shape in the store -- a real score's tag always
+# starts "[dom" (FitResult.summary), a deep-verified one always contains
+# "deep:" (verify_top._stale, web.routes._job_json read that substring) --
+# so this can never be mistaken for either by an existing reader. The cause
+# alternation is fit.UNSCORED_CAUSES itself: fit.unscored_cause decides the
+# vocabulary, this only parses back what _unscored_marker wrote.
+_UNSCORED_MARKER_RE = re.compile(
+    r"^unscored:(" + "|".join(UNSCORED_CAUSES) + r"):(\d+):(\d{4}-\d{2}-\d{2})$")
+
+
+def _unscored_marker(cause, desc_len, when):
+    """The fit_reason marker for `cause` (fit.unscored_cause's "short" or
+    "refused"), carrying what a later pass needs to decide whether another
+    attempt is due: the body's length right now (so a changed body is a
+    cheap length comparison, not a new column) and the date (the REFUSED
+    horizon; unused for "short").
+
+    >>> from datetime import datetime
+    >>> _unscored_marker("refused", 645, datetime(2026, 1, 1))
+    'unscored:refused:645:2026-01-01'
+    """
+    return f"unscored:{cause}:{int(desc_len)}:{when.date().isoformat()}"
+
+
+def _unscored_due(fit_reason, desc_len, now=None):
+    """Whether a row already carrying an _unscored_marker is due for another
+    scoring attempt. No marker at all -- NULL, a real score's tag, or a
+    legacy bare "unscored"/"no description; unscored" from before this
+    marker existed -- is always due: this is what lets the 2026-09 NC State
+    rows (stuck exactly on that legacy bare string) get re-tried once and
+    then, if they refuse again, finally marked.
+
+    >>> _unscored_due(None, 645)
+    True
+    >>> _unscored_due("unscored", 645)
+    True
+
+    A REFUSED row is due once its body's length has moved at all (grown OR
+    shrunk -- either means the posting changed, worth a fresh ask) or once
+    UNSCORED_RETRY_DAYS have passed at the SAME length:
+
+    >>> _unscored_due("unscored:refused:645:2020-01-01", 900)
+    True
+    >>> from datetime import datetime
+    >>> _unscored_due("unscored:refused:645:" + datetime.now().date().isoformat(),
+    ...               645)
+    False
+    >>> _unscored_due("unscored:refused:645:2020-01-01", 645)
+    True
+
+    A TOO-SHORT row is due only once it has grown PAST the scoring
+    threshold -- shrinking, or growing but still short, is not:
+
+    >>> _unscored_due("unscored:short:150:2020-01-01", 150)
+    False
+    >>> _unscored_due("unscored:short:150:2020-01-01", 199)
+    False
+    >>> _unscored_due("unscored:short:150:2020-01-01", 250)
+    True
+    """
+    from src.claude.fit import MIN_DESC_CHARS
+    m = _UNSCORED_MARKER_RE.match(fit_reason or "")
+    if not m:
+        return True
+    cause, marked_len, marked_date = m.group(1), int(m.group(2)), m.group(3)
+    desc_len = int(desc_len)
+    if cause == "short":
+        return desc_len >= MIN_DESC_CHARS
+    if desc_len != marked_len:
+        return True
+    now = now or datetime.now()
+    age_days = (now.date() - datetime.strptime(marked_date, "%Y-%m-%d").date()).days
+    return age_days >= UNSCORED_RETRY_DAYS
+
+
 def self_heal_unscored(conn, resume, track, max_workers=6):
     """Self-heal: the fresh-only crawl loop never revisits an already-stored
     job, so a row that was ingested bodyless (unscorable -> NULL score) would
     stay out of the ranking forever even once its description is recovered.
     Score any NULL-score row that now carries a real body (hydrated by
-    backfill_board_descriptions, or by an earlier run). Returns #scored."""
-    from src.claude.fit import MIN_DESC_CHARS
+    backfill_board_descriptions, or by an earlier run). Returns #scored.
+
+    A row the scorer STILL can't score is no longer left exactly as found:
+    it is stamped with an _unscored_marker (cause from fit.unscored_cause)
+    so it is not re-asked every single crawl. Retry policy lives in
+    _unscored_due: REFUSED waits UNSCORED_RETRY_DAYS or an immediate body
+    change; TOO-SHORT (unreachable through THIS query's own length filter
+    today, but shared with rescore_all's sibling selection below) waits for
+    growth past fit.MIN_DESC_CHARS. desc_checked_at doubles as the marker's
+    clock -- safe because this query's population (body >= MIN_DESC_CHARS)
+    and the description-backfill ops' (body < their own min_len) never
+    overlap, so stamping it here cannot suppress a backfill retry.
+
+    Notes:
+        2026-09 evidence (data/logs/session-*.log): the same 3-7 rows at
+        one university board re-entered this query and re-refused on every
+        crawl for weeks ("Claude returned no text (stop_reason=refusal)",
+        17 occurrences) because a refusal wrote nothing -- NULL score,
+        untouched fit_reason -- so this query could never tell a row that
+        had just failed apart from one that had never been tried.
+    """
+    from src.claude.fit import MIN_DESC_CHARS, unscored_cause
     _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
     pending = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, description, location FROM jobs "
+        "SELECT job_id, title, description, location, fit_reason FROM jobs "
         "WHERE (',' || COALESCE(track,'') || ',') LIKE ? "
         "AND resume_fit_score IS NULL "
         "AND COALESCE(status,'open') != 'closed' "
@@ -405,10 +509,19 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
          MIN_DESC_CHARS)).fetchall()]
     if not pending:
         return 0
-    print(f"  self-heal: scoring {len(pending)} newly-described "
-          f"job(s) that were previously unscorable...")
+    now = datetime.now()
+    due = [r for r in pending if _unscored_due(
+        r.get("fit_reason"), len(r.get("description") or ""), now)]
+    held = len(pending) - len(due)
+    if not due:
+        print(f"  self-heal: {held} previously-unscorable job(s) not yet "
+              f"due for retry.")
+        return 0
+    print(f"  self-heal: scoring {len(due)} newly-described "
+          f"job(s) that were previously unscorable"
+          + (f" ({held} not yet due for retry)" if held else "") + "...")
     scored = 0
-    for r, res in fan_out(pending,
+    for r, res in fan_out(due,
                           lambda r: score_resume_fit(
                               r["title"], r.get("description", ""),
                               location=r.get("location") or ""),
@@ -416,6 +529,18 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
         if res.score is not None:
             store.update_job_scores(conn, r["job_id"], res.as_columns())
             scored += 1
+            continue
+        cause = unscored_cause(res.reason)
+        if cause is None:
+            continue    # scorer offline, or an unrecognized reason: leave as is
+        desc_len = len(r.get("description") or "")
+        store.update_job_scores(conn, r["job_id"],
+                                {"fit_reason": _unscored_marker(cause, desc_len, now)})
+        store.mark_desc_checked(conn, r["job_id"], now)
+        detail = (f"retry in {UNSCORED_RETRY_DAYS}d or when the body changes"
+                  if cause == "refused"
+                  else f"retry once the body grows past {MIN_DESC_CHARS} chars")
+        print(f"    [{cause}] {(r.get('title') or '')[:50]} - {detail}")
     return scored
 
 
@@ -578,7 +703,12 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     ranking; a *described* row that merely fails to parse keeps its score.
 
     Closed and dispositioned-out jobs are always skipped — no Claude API
-    spend on postings that can't surface anyway."""
+    spend on postings that can't surface anyway. A row cleared for having no
+    body is marked with self_heal_unscored's own _unscored_marker (cause
+    "short") rather than a bare string, so the store has one vocabulary for
+    "nothing to score here" everywhere it appears -- this call always runs
+    the clearing itself (a rescore is an explicit, one-off ask), so unlike
+    self_heal_unscored it does not consult _unscored_due first."""
     from src.claude.fit import MIN_DESC_CHARS
     t = _t(t)
     resume = resume_text()
@@ -601,6 +731,7 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
             q += " WHERE " + " AND ".join(conds)
         rows = [dict(r) for r in conn.execute(q, args).fetchall()]
         print(f"  rescoring {len(rows)} job(s) against the current resume...")
+        now = datetime.now()
 
         def _one(r):
             res = score_resume_fit(r["title"], r.get("description", ""),
@@ -615,7 +746,8 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
                 # parse keeps its score.
                 if len((desc or "").strip()) < MIN_DESC_CHARS:
                     store.update_job_scores(
-                        conn, jid, {"fit_reason": "no description; unscored"})
+                        conn, jid, {"fit_reason": _unscored_marker(
+                            "short", len((desc or "").strip()), now)})
                     n += 1
                 continue
             store.update_job_scores(conn, jid, res.as_columns())
@@ -983,25 +1115,153 @@ def sync_status_all(top_n=15, t=None):
         return (n_closed, n_reopened)
 
 
+# How stale an OPEN row at a board-dead company must be before this closes
+# it outright, with no URL probe at all: the company's OWN board fetch has
+# already failed since (store.miss_family(miss_reason) == this family), a
+# stronger signal than any one dead URL. A default kept as a module constant
+# beside the query that reads it -- the precedent is harvest.py's own
+# CLOSED_PROBE_STALE_DAYS/CLOSED_PROBE_LIMIT beside its one call site.
+DEAD_BOARD_CLOSE_DAYS = 14
+
+# The miss-reason family this closes on -- the one of the two
+# RERESOLVE_FAMILIES (built from this name further down the module) that
+# means "a board WAS here": "no-board-found" never had a working board in
+# the first place, so it cannot own OPEN job rows to close.
+_DEAD_BOARD_FAMILY = "board-dead"
+
+
+def _dead_board_open_rows(conn, days):
+    """OPEN rows at a company whose CURRENT miss_reason is in the
+    'board-dead' family (store.miss_family) and whose last board-verified
+    sighting (last_seen, or first_seen for a row a board never re-confirmed)
+    is older than `days`: nobody has vouched for it since the board itself
+    started returning nothing, so these are dead by inference rather than
+    by a URL probe. Ordered by company name, which is how its one caller
+    reports them (group_by_company); nothing bounds this query, so the
+    order is a reporting choice rather than a rotation one.
+
+    A quiet-but-not-missing board (stale rows, but no miss_reason at all,
+    or a miss in some OTHER family such as 'no-local-jobs') is excluded:
+    only a row whose OWN company carries this exact family qualifies.
+
+    A promoted board-dead company (store.companies.mark_harvested's
+    HARVEST_DEAD_AFTER_DAYS cycle, or a manual src.ops.roster.prune) writes
+    miss_reason with a raw UPDATE rather than through record_miss -- the
+    whole point of the promotion is demoting a company record_miss's own
+    "never demote an ACTIVE company" guard would otherwise protect -- so
+    that is what these fixtures do too:
+
+    >>> from src.store import connect, upsert_company, upsert_job
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Judi Health", "ats": "greenhouse"})
+    >>> _ = upsert_job(conn, {"job_id": "j1", "title": "T", "company_id": cid,
+    ...                       "company_name": "Judi Health"})
+    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
+    ...                  "WHERE job_id='j1'")
+    >>> _dead_board_open_rows(conn, 14)
+    []
+    >>> _ = conn.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
+    ...                  "WHERE name='Judi Health'")
+    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
+    ['j1']
+
+    A quiet board that never missed is never touched, however stale:
+
+    >>> cid2 = upsert_company(conn, {"name": "Quiet Co", "ats": "lever"})
+    >>> _ = upsert_job(conn, {"job_id": "j2", "title": "T", "company_id": cid2,
+    ...                       "company_name": "Quiet Co"})
+    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
+    ...                  "WHERE job_id='j2'")
+    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
+    ['j1']
+
+    Nor is a miss in a DIFFERENT family, however dead-sounding the row's own
+    situation looks otherwise:
+
+    >>> cid3 = upsert_company(conn, {"name": "Ats Gap"})
+    >>> _ = upsert_job(conn, {"job_id": "j3", "title": "T", "company_id": cid3,
+    ...                       "company_name": "Ats Gap"})
+    >>> _ = conn.execute("UPDATE jobs SET last_seen='2020-01-01' "
+    ...                  "WHERE job_id='j3'")
+    >>> _ = conn.execute("UPDATE companies SET miss_reason='ats-unsupported:ukg' "
+    ...                  "WHERE name='Ats Gap'")
+    >>> [r['job_id'] for r in _dead_board_open_rows(conn, 14)]
+    ['j1']
+    """
+    cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT j.job_id, j.title, j.company_id, j.company_name, "
+        "c.miss_reason FROM jobs j JOIN companies c ON c.id = j.company_id "
+        "WHERE COALESCE(j.status,'open') != 'closed' "
+        "AND c.miss_reason IS NOT NULL "
+        "AND COALESCE(j.last_seen, j.first_seen, '') < ? "
+        "ORDER BY j.company_name",
+        (cutoff,)).fetchall()]
+    return [r for r in rows
+            if store.miss_family(r["miss_reason"]) == _DEAD_BOARD_FAMILY]
+
+
 def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                       conn=None):
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410, an ATS "no longer accepting" notice, a past JSON-LD
     validThrough, a Workday CXS miss). Indeterminate probes (bot-gated
-    hosts, JS-only pages) leave the row untouched.
+    hosts, JS-only pages) leave the row untouched. THEN, separately, close
+    every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
+    fetch has already failed (store.miss_family == "board-dead") -- no URL
+    probe needed there, the board itself is the witness. Returns how many
+    rows this call closed IN TOTAL, probed and inferred together.
 
     `conn=None` opens the track's own store (`t`, default track when `t` is
-    also None); a caller's own `conn` is used as is (track_store). The
-    query is not scoped by track: a stale OPEN row is stale whichever
-    track ranks it."""
+    also None); a caller's own `conn` is used as is (track_store). Neither
+    query is scoped by track: a stale OPEN row is stale whichever track
+    ranks it.
+
+    Probe rotation: the `limit` rows are the ones this op has gone longest
+    without probing -- ordered by desc_checked_at, never-probed-by-it
+    first -- and every live/unverifiable verdict stamps that column, so
+    successive bounded passes cover the backlog instead of re-probing one
+    head of the queue (tests/test_probes.py's TestClosedProbeRotation). A
+    CLOSED row needs no stamp; leaving the WHERE clause is a stronger exit
+    than any timestamp.
+
+    Notes:
+        `ORDER BY company_name` alone never moved a row: a CONFIRMED-live
+        or UNVERIFIABLE verdict, unlike a closed one, leaves the row
+        exactly where the next bounded pass picks it up again.
+
+        desc_checked_at already means "last non-productive attempt" for
+        the description backfills; reusing it here shares that clock
+        rather than colliding with it -- the probe's own outcome is not a
+        description fetch, it just also means "don't hammer this one again
+        immediately". The price is that a probed row's backfill retry
+        timer restarts too. Measured on the 2026-09-17 store: of the 84
+        rows this op would select, 7 carry a body under fit.MIN_DESC_CHARS
+        (so only those 7 are backfill candidates at all) and NONE are in
+        triage's own pending-hydration set (every one is already tracked
+        and judged) -- and a row the probe just found gated or slow is
+        exactly the one worth leaving alone for the backfill's grace
+        period anyway.
+
+        last_seen is NEVER written here, on any of the three verdicts: it
+        means "a board vouched for this", a direct URL probe is not a
+        board, and this op's own selection ("no board has vouched for it
+        in stale_days") would misfire the moment a probe outcome could
+        satisfy it instead.
+
+        The dead-board half closed 48 rows on 2026-09-17: 47 at one
+        greenhouse board dead since 09-11 (Judi Health), 1 at Hippocratic
+        AI.
+    """
     with track_store(t, conn) as conn:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
         rows = [dict(r) for r in conn.execute(
             "SELECT job_id, title, company_name, url FROM jobs "
             "WHERE COALESCE(status,'open') != 'closed' "
             "AND COALESCE(last_seen, first_seen, '') < ? "
-            "ORDER BY company_name", (cutoff,)).fetchall()]
+            "ORDER BY COALESCE(desc_checked_at, ''), company_name",
+            (cutoff,)).fetchall()]
         if limit:
             rows = rows[:int(limit)]
         print(f"  probing {len(rows)} open job(s) not board-verified in "
@@ -1017,6 +1277,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {e}"
 
+        now = datetime.now()
         n_closed = n_live = n_unknown = 0
         for r, (is_open, reason) in fan_out(rows, _probe, "probe",
                                             max_workers, with_item=True):
@@ -1026,12 +1287,28 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                 n_closed += 1
                 print(f"    [closed] {label} {reason}")
             elif is_open:
+                store.mark_desc_checked(conn, r["job_id"], now)
                 n_live += 1
             else:
+                store.mark_desc_checked(conn, r["job_id"], now)
                 n_unknown += 1
-    print(f"  {n_closed} closed, {n_live} confirmed live, "
-          f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
-    return n_closed
+        print(f"  {n_closed} closed, {n_live} confirmed live, "
+              f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
+
+        dead = group_by_company(_dead_board_open_rows(
+            conn, DEAD_BOARD_CLOSE_DAYS))
+        n_dead = 0
+        for rs in dead.values():
+            for r in rs:
+                store.set_job_status(conn, r["job_id"], "closed")
+            n_dead += len(rs)
+            print(f"    [dead-board] {(rs[0]['company_name'] or '?')[:34]:34} "
+                  f"{len(rs):3} row(s) closed ({rs[0]['miss_reason']})")
+        if dead:
+            print(f"  {n_dead} row(s) closed at {len(dead)} dead-board "
+                  f"compan(ies) not board-verified in "
+                  f"{DEAD_BOARD_CLOSE_DAYS}+ day(s).")
+    return n_closed + n_dead
 
 
 def _hydrate_missing_descriptions(conn, jobs):
@@ -1329,7 +1606,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
 # "no-local-jobs" already IS a live board, "ats-unsupported" needs a fetcher
 # rather than a retry, and "fetch-error" is a transient every pass re-attempts
 # anyway.
-RERESOLVE_FAMILIES = ("no-board-found", "board-dead")
+RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
 
 # A board that is not a resolution failure at all -- ats/slug are set, the
 # harvester keeps fetching it without error -- but that has LISTED nothing

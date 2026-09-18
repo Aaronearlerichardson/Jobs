@@ -319,6 +319,18 @@ def api_disabled():
         return _FATAL_MSG
 
 
+def have_api_key():
+    """Whether an API key is configured at all. call_claude_json returns
+    {} without asking when it is not, exactly as it does for a refusal, so
+    a caller that has to tell "the model said nothing" apart from "we
+    never asked" (src.claude.fit.score_resume_fit) asks here first.
+
+    >>> isinstance(have_api_key(), bool)
+    True
+    """
+    return config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"
+
+
 def reset_breaker():
     """Re-arm the breaker for a NEW run. It is process-lifetime by design
     (one CLI run = one process), but the web UI runs every operation on a
@@ -353,7 +365,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         This session bypasses net.http on purpose (robots and crawl-delay
         do not apply to the API), so without that record API latency never
         reached the session log."""
-    if config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
+    if not have_api_key():
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return {}
     if _FATAL_MSG is not None:

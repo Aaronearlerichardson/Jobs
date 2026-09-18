@@ -205,6 +205,16 @@ remote_requires_watch = false
 multi_division = []
 multi_division_mission_floor = 0.6
 
+# The whole-board harvester (harvest.py) normally re-checks every fetchable
+# board every --min-age-hours (default 6h). A board that is BOTH off-mission
+# (mission-scored into an inactive tier, or never scored at all) AND itself
+# inactive waits this many hours instead -- still fetched every pass, just
+# not every few hours for a mission tier no track will ever surface. Default
+# 168 (weekly). An explicit --min-age-hours on the command line (including
+# 0, "harvest everything now") always overrides this for every board,
+# off-mission or not -- see src/crawl/harvest.py's plan() docstring.
+harvest_offmission_hours = 168
+
 # Honor robots.txt (default true). Turning this off disables the check, not
 # the connection pooling or the per-host Crawl-delay pacing.
 # respect_robots = true

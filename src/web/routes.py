@@ -122,6 +122,11 @@ _JOB_FIELDS = (
     "disposition", "disposition_note", "disposition_at",
     # Application-pipeline tracking (store.PIPELINE_FIELDS + the stamp).
     "applied_at", "followup_at", "contact", "referral", "outcome_reason",
+    # store.ranked_jobs(collapse=True) (the default /api/jobs uses): how many
+    # same-company/same-title postings this row stands in for, and the
+    # job_id/url of each of the others, so the Jobs tab can say "(N similar
+    # postings)" the way the digest does and let a person open them too.
+    "dup_count", "dup_job_ids", "dup_urls",
 )
 
 

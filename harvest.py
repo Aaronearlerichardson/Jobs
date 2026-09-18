@@ -213,7 +213,11 @@ def main(argv=None):
     ap.add_argument("--limit", type=int, help="At most this many boards")
     ap.add_argument("--min-age-hours", type=float, default=None,
                     help="Skip boards harvested more recently than this "
-                         "(default 6)")
+                         "(default 6, or [policy] "
+                         "harvest_offmission_hours for an off-mission, "
+                         "inactive board). Passing this applies ONE "
+                         "cutoff to every board, so 0 means harvest "
+                         "everything now")
     ap.add_argument("--max-hours", type=float,
                     help="Abandon whatever is still running after this long")
     ap.add_argument("--workers", type=int, default=None,
@@ -237,19 +241,23 @@ def main(argv=None):
 
     only = ({s.strip() for s in args.only.split(",") if s.strip()}
             if args.only else None)
-    min_age = (harvest.MIN_AGE_HOURS if args.min_age_hours is None
-               else args.min_age_hours)
+    # None (no flag) leaves both intervals to harvest.plan; a value the
+    # user typed overrides them uniformly. See plan()'s docstring.
+    min_age = args.min_age_hours
 
     if args.list:
         from src import store
         conn = store.connect(args.db)
+        plan_stats = {}
         boards = harvest.plan(conn, only=only, names=args.names,
-                              min_age_hours=min_age, limit=args.limit)
+                              min_age_hours=min_age, limit=args.limit,
+                              stats=plan_stats)
         conn.close()
         for c in boards:
             print(f"  {c['name']}  ({c['ats']}, ~{c.get('total_job_count') or 0}"
                   f" jobs, last harvested {c.get('last_harvested_at') or 'never'})")
-        print(f"  {len(boards)} board(s)")
+        print(f"  {len(boards)} board(s)"
+              + harvest.deferred_note(plan_stats))
         return 0
 
     lock = acquire_lock()

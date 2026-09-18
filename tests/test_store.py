@@ -342,6 +342,93 @@ class TestRanking:
         assert store.combined_score(0.5, None) is None
 
 
+class TestCollapse:
+    """ranked_jobs(collapse=True) (the default) folds postings that are the
+    SAME opening at the SAME employer -- same company, same normalised
+    title -- down to the best-scoring row, stamped with dup_count/
+    dup_job_ids/dup_urls (see store._collapse_same_opening). 133
+    company+title groups covered 442 open tracked rows in the 2026-09-17
+    store; nothing here deletes or merges a row, it only reshapes what one
+    ranked_jobs() call returns."""
+
+    def test_best_scoring_row_survives_with_the_right_dup_count(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data Engineer", fit=0.4)
+        add_job("gh_acme_2", "Data Engineer", fit=0.9)
+        add_job("gh_acme_3", "Data Engineer", fit=0.6)
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_acme_2"]
+        assert rows[0]["dup_count"] == 3
+        assert set(rows[0]["dup_job_ids"]) == {"gh_acme_1", "gh_acme_3"}
+        assert set(rows[0]["dup_urls"]) == {
+            "https://acme.io/gh_acme_1", "https://acme.io/gh_acme_3"}
+
+    def test_different_companies_same_title_never_collapse(
+            self, db, company, add_job):
+        beta = store.upsert_company(db, {"name": "Beta", "ats": "greenhouse",
+                                         "slug": "beta"})
+        add_job("gh_acme_1", "Data Engineer", fit=0.5)
+        add_job("gh_beta_1", "Data Engineer", fit=0.9, company_id=beta,
+                company_name="Beta", url="https://beta.io/gh_beta_1")
+        ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
+        assert ids == {"gh_acme_1", "gh_beta_1"}
+
+    def test_whitespace_and_case_only_title_differences_collapse(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data   Engineer", fit=0.5)
+        add_job("gh_acme_2", "data engineer", fit=0.9)
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_acme_2"]
+        assert rows[0]["dup_count"] == 2
+
+    def test_limit_applies_after_collapsing_not_before(
+            self, db, company, add_job):
+        # Two duplicate pairs plus a singleton: limit=2 must return 2
+        # VISIBLE (post-collapse) rows, not 2 raw rows trimmed first and
+        # then folded down to fewer.
+        add_job("gh_acme_1", "Data Engineer", fit=0.95)
+        add_job("gh_acme_2", "Data Engineer", fit=0.90)
+        add_job("gh_acme_3", "Platform Engineer", fit=0.85)
+        add_job("gh_acme_4", "Platform Engineer", fit=0.80)
+        add_job("gh_acme_5", "ML Engineer", fit=0.50)
+        rows = store.ranked_jobs(db, track="local-tech", limit=2)
+        assert [r["job_id"] for r in rows] == ["gh_acme_1", "gh_acme_3"]
+
+    def test_collapse_false_returns_every_row_uncollapsed(
+            self, db, company, add_job):
+        add_job("gh_acme_1", "Data Engineer", fit=0.9)
+        add_job("gh_acme_2", "Data Engineer", fit=0.4)
+        rows = store.ranked_jobs(db, track="local-tech", collapse=False)
+        assert {r["job_id"] for r in rows} == {"gh_acme_1", "gh_acme_2"}
+        assert all("dup_count" not in r for r in rows)
+
+    def test_null_company_id_falls_back_to_company_name(self, db):
+        # LinkedIn captures / jsonld sweep hits / manual --add carry no
+        # company_id (see sync_job_statuses) but usually do carry a name.
+        store.upsert_job(db, {"job_id": "ext_1", "title": "Data Engineer",
+                              "company_name": "Acme Inc", "track": "local-tech",
+                              "resume_fit_score": 0.5,
+                              "url": "https://a.example/1"})
+        store.upsert_job(db, {"job_id": "ext_2", "title": "data engineer",
+                              "company_name": "ACME INC", "track": "local-tech",
+                              "resume_fit_score": 0.9,
+                              "url": "https://a.example/2"})
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["ext_2"]
+        assert rows[0]["dup_count"] == 2
+
+    def test_rows_with_neither_company_id_nor_name_never_collapse(self, db):
+        # Falling back to a shared blank key would wrongly merge every
+        # nameless row in the store; each keys off its own job_id instead.
+        for jid in ("ext_a", "ext_b"):
+            store.upsert_job(db, {"job_id": jid, "title": "Data Engineer",
+                                  "track": "local-tech",
+                                  "resume_fit_score": 0.5,
+                                  "url": f"https://a.example/{jid}"})
+        ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
+        assert ids == {"ext_a", "ext_b"}
+
+
 class TestRemoteAdmission:
     """A location-scoped ranking rescues out-of-area rows only from
     companies it trusts. The 'watch' tag is one such signal, but it is
