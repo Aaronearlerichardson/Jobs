@@ -64,6 +64,13 @@ class TestTable:
         assert hidden, "expected at least one CLI-only op"
         assert set(registry.ui_ops()) == set(registry.REGISTRY) - hidden
 
+    def test_check_closed_label_names_what_it_actually_does(self):
+        """check_closed_jobs probes stale URLs AND closes every OPEN row at
+        a dead-board company with no URL probe at all (its own docstring's
+        "dead-board half"); "Probe stale URLs" named only the first half."""
+        label = registry.REGISTRY["check-closed"]["label"].lower()
+        assert "probe" in label and "dead" in label
+
 
 class TestPackaging:
     """Every target module has to be INSIDE the compiled UI binary.

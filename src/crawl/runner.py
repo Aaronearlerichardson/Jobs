@@ -298,9 +298,10 @@ def _gate_company_board(conn, t, c, jobs, commit, snapshot=None):
     track, no score) counts as fresh: it was fetched, never gated.
 
     `snapshot` is the fetch's net.http.snapshot_info() (see fetch_all): an
-    incomplete fetch closes nothing, and a capped one closes a row only on
-    its second miss (store.sync_job_statuses's `capped`). The rows are
-    gated either way.
+    incomplete fetch closes nothing, and neither does a capped one --
+    store.sync_job_statuses's `capped` never closes a board-native row, on
+    any miss, because a page-capped pull is an unstable window of the
+    board rather than the board itself. The rows are gated either way.
     """
     from src.match import gates
     from src.match.locality import geo_mode

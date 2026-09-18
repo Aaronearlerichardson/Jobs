@@ -193,7 +193,7 @@ REGISTRY = {
                    Param("force", kind="bool", default=False), _TRACK],
     },
     "check-closed": {
-        "label": "Probe stale URLs",
+        "label": "Close dead jobs (probe + dead-board)",
         "engine": None,
         "target": "src.ops.maintenance:check_closed_jobs",
         "params": [Param("stale_days", kind="int", default=2), _LIMIT,
@@ -251,6 +251,12 @@ REGISTRY = {
                    Param("families", kind="names"),
                    Param("preview", "commit", "not", False),
                    _WORKERS, _TRACK],
+    },
+    "rename-slug-boards": {
+        "label": "Rename slug-named boards",
+        "engine": None,
+        "target": "src.ops.maintenance:rename_slug_boards",
+        "params": [_LIMIT, Param("apply", "commit", "bool", False), _TRACK],
     },
     "prune": {
         "label": "Prune dead boards",

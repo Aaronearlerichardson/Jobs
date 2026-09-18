@@ -63,6 +63,8 @@ def _exclude_tables(track_id):
         "defense_strong": tuple(exc.get("defense_strong", [])),
         "defense_weak": tuple(exc.get("defense_weak", [])),
         "nonclinical": tuple(exc.get("nonclinical", [])),
+        "clinical_titles": tuple(exc.get("clinical_titles", [])),
+        "clinical_markers": tuple(exc.get("clinical_markers", [])),
     }
 
 
@@ -74,7 +76,23 @@ def exclude_reason(title, description="", allow_defense=False, *,
     `allow_defense` skips the defense/military-radar exclusion ONLY —
     role-quality excludes (coordinator/scribe/data-entry) always apply. Set
     for WATCHED companies: watching a defense-adjacent employer means "I
-    want its technical roles anyway"."""
+    want its technical roles anyway".
+
+    clinical_titles/clinical_markers (2026-09-18): a title that names a
+    hands-on clinical-service occupation ("CT Technologist", "Medical Lab
+    Scientist", "Nurse Practitioner...") passes the free tech_title_regex
+    gate on a word the occupation shares with engineering roles by
+    coincidence ("technologist", "scientist", "quality" are all in the
+    engine default) and would otherwise pay for hydration and a Claude fit
+    call for nothing — 88 of 113 scored rows in the 2026-09-18 Duke Health
+    pass, every one 0.00-0.05. clinical_titles is title-only (BOUNDED),
+    like title_tokens, because the occupation is what the title announces;
+    clinical_markers is checked against the fuller `text` (title +
+    description) so a hit anywhere spares the drop — "Research Technician"
+    and "Clinical Data Scientist" keep scoring even though "technician" /
+    "nurse" alone would otherwise match, and a description that names the
+    research/data/engineering angle later still saves a title that looked
+    clinical-only at harvest time."""
     tables = _exclude_tables(track_id)
     title_l = (title or "").lower()
     text = f"{title} {description}".lower()
@@ -89,6 +107,10 @@ def exclude_reason(title, description="", allow_defense=False, *,
     hit = first_hit(tables["title_tokens"], title_l, BOUNDED)
     if hit:
         return f"role-title: {hit.upper()}"
+
+    hit = first_hit(tables["clinical_titles"], title_l, BOUNDED)
+    if hit and not first_hit(tables["clinical_markers"], text, BOUNDED):
+        return f"clinical-service: {hit}"
 
     if not allow_defense and (tables["defense_strong"]
                               or tables["defense_weak"]):

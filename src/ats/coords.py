@@ -15,6 +15,7 @@ store calls it.
 """
 
 from src.ats import signatures
+from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
 
 #: The columns a board's identity occupies in `companies` (core.store).
 BOARD_COLUMNS = ("ats", "slug", "wd_tenant", "wd_pod", "wd_site",
@@ -84,6 +85,41 @@ def board_slug(company):
     ''
     """
     return company.get("wd_tenant") or company.get("slug") or ""
+
+
+def slug_named(company):
+    """True when a roster row is named after nothing but its own board
+    slug/tenant AND was named from that slug in the first place -- the one
+    rule behind the HARVEST SUMMARY's "still named after their own
+    slug/tenant" tally (src.crawl.harvest.run) and the op that repairs
+    those rows (src.ops.maintenance.rename_slug_boards).
+
+    >>> slug_named({"name": "Aah", "ats": "workday", "wd_tenant": "aah",
+    ...             "source": "ats_dork"})
+    True
+    >>> slug_named({"name": "Precision for Medicine", "ats": "greenhouse",
+    ...             "slug": "pfm", "source": "ats_dork"})
+    False
+
+    Both halves are load-bearing. `name_is_own_slug` alone also matches a
+    company legitimately named after a single word that happens to equal
+    its slug, so a row a human (or local_sourcing) named for real is not
+    a candidate:
+
+    >>> slug_named({"name": "Ceribell", "ats": "greenhouse",
+    ...             "slug": "ceribell", "source": "local_sourcing"})
+    False
+
+    Notes:
+        On 2026-09-17 name_is_own_slug alone matched 321 of 579
+        harvestable rows, most of them correctly named; restricted to the
+        rows src.discovery.dork titled from the slug itself
+        (names.SLUG_NAME_SOURCE) it matched 183, which is the list worth
+        renaming. See names.name_is_own_slug for what the name half can
+        and cannot tell.
+    """
+    return (company.get("source") == SLUG_NAME_SOURCE
+            and name_is_own_slug(company.get("name"), board_slug(company)))
 
 
 def wd_handle(company, url):

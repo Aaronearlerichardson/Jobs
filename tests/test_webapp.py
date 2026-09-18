@@ -68,6 +68,17 @@ class TestApi:
             assert resp.status_code == 200, (path, resp.status_code)
             json.loads(resp.data)
 
+    def test_stats_api_key_reflects_have_api_key(self, client, monkeypatch):
+        """The stats card's "api_key" flag now reads
+        src.claude.api.have_api_key() -- one of three call sites that used
+        to spell out `config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"`
+        by hand -- so it must move exactly the way have_api_key does."""
+        from src.web import routes
+        monkeypatch.setattr(routes, "have_api_key", lambda: True)
+        assert json.loads(client.get("/api/stats").data)["api_key"] is True
+        monkeypatch.setattr(routes, "have_api_key", lambda: False)
+        assert json.loads(client.get("/api/stats").data)["api_key"] is False
+
     def test_tracks_expose_ui_defaults(self, client):
         tracks = json.loads(client.get("/api/tracks").data)
         assert tracks

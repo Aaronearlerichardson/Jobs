@@ -36,10 +36,27 @@ class _WDPager:
     (probed 2026-09-16: gilead answered total 490 at offset 0, then 0 at
     offsets 20 and 400), only the first page reports `total`.
     `fail_later`: every page after the first is rejected with a 422 whose
-    body still parses as JSON (osv-bioventus.wd501's shape)."""
+    body still parses as JSON (osv-bioventus.wd501's shape).
 
-    def __init__(self, postings, total, fail_later=False):
-        self.postings, self.total, self.fail_later = postings, total, fail_later
+    `pages` serves EXPLICIT pages (a list of posting lists) by
+    offset // limit instead of slicing one flat list, repeating the LAST
+    page once the walk runs past the end -- Workday's own posting order is
+    unstable enough that a page can hand back postings an EARLIER page
+    already returned (2026-09-18: that duplication, un-deduped, is why
+    live boards showed MORE rows than their own declared total, e.g. "ICON
+    plc: 1200 job(s) ... capped of 840"). One pager with that parameter
+    rather than a second class: only the line that picks the page differs.
+    """
+
+    def __init__(self, postings=None, total=None, fail_later=False,
+                 pages=None):
+        self.postings = postings or []
+        self.total, self.fail_later, self.pages = total, fail_later, pages
+
+    def _page(self, offset, limit):
+        if self.pages is None:
+            return self.postings[offset:offset + limit]
+        return self.pages[min(offset // limit, len(self.pages) - 1)]
 
     def post(self, url, json=None, **kw):
         body = json or {}
@@ -48,7 +65,7 @@ class _WDPager:
             return fake_response({"errorCode": "HTTP_422"}, status=422)
         return fake_response({"total": self.total if offset == 0 else 0,
                               "facets": [],
-                              "jobPostings": self.postings[offset:offset + limit]})
+                              "jobPostings": self._page(offset, limit)})
 
 
 class _SRPager:
@@ -161,6 +178,113 @@ def test_a_whole_board_pull_never_spends_the_locations_rescue(monkeypatch, capsy
     assert len(rows) == 5
     assert all(r["location"] == "3 Locations" for r in rows)
     assert "[!]" not in capsys.readouterr().out
+
+
+class TestWorkdayDedupe:
+    """fetch_workday_all dedupes by posting id WITHIN one pull, the same
+    shape as fetchers/phenom.py's fetch_phenom_all: a seen-id set, and a
+    page that contributes no new id ends the walk early rather than
+    counting as a page toward the cap."""
+
+    def test_a_fully_repeated_page_stops_the_walk_without_capping(
+            self, monkeypatch):
+        page0 = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                  "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                 for i in range(20)]
+        # Every page after the first hands back the SAME 20 postings.
+        monkeypatch.setattr(wd, "SESSION",
+                            _WDPager(total=20, pages=[page0, page0, page0]))
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
+                                    loc_re=None, page_size=20, max_pages=10)
+        assert len(rows) == 20, "deduped: the repeated page added nothing new"
+        assert not http.snapshot_info()["capped"], (
+            "a page that repeats what an earlier one already returned IS "
+            "the board's honest end this pager can detect, not a cap")
+
+    def test_a_partially_repeated_page_only_keeps_the_new_rows(
+            self, monkeypatch):
+        """A page can mix genuinely new postings with ones an earlier page
+        already served (a partial shuffle, not a full wrap-around): only
+        the new ones are kept, and the walk keeps going past it."""
+        page0 = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                  "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                 for i in range(20)]
+        page1 = page0[:10] + [
+            {"title": "Data Engineer", "locationsText": "US, NC, Durham",
+             "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+            for i in range(20, 30)]
+        monkeypatch.setattr(wd, "SESSION",
+                            _WDPager(total=30, pages=[page0, page1]))
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
+                                    loc_re=None, page_size=20, max_pages=10)
+        assert len(rows) == 30, "20 from page 0, 10 NEW ones from page 1"
+        assert not http.snapshot_info()["capped"]
+
+
+def test_capped_total_is_never_smaller_than_the_rows_returned(monkeypatch):
+    """2026-09-18: several live boards showed a capped snapshot SMALLER
+    than the number of rows they had just handed back -- "ICON plc: 1200
+    job(s) ... capped of 840", "Blue Cross Blue Shield: 1200 ... capped of
+    40" -- because the un-deduped pager's row count and Workday's own
+    page-0 `total` disagreed and the total was trusted outright.
+    capped_total must never contradict what the caller can see with its
+    own eyes: it is now the LARGER of the two, never Workday's `total`
+    alone.
+    """
+    postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                for i in range(60)]
+    # The board's own reported total (50) UNDERCOUNTS the 60 distinct
+    # postings three full pages actually return.
+    monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 50))
+    monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+    rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
+                                loc_re=None, page_size=20, max_pages=3)
+    assert len(rows) == 60
+    info = http.snapshot_info()
+    assert info["capped"]
+    assert info["capped_total"] == 60, (
+        "capped_total must never be smaller than the rows just returned")
+
+
+class TestPageBudget:
+    """The Workday/SmartRecruiters page cap is a [policy] setting
+    (config.BOARD_MAX_ROWS) applied through config.board_max_pages, which
+    is gated by the SAME off-mission/inactive predicate the harvester's
+    own long-interval cadence uses (config.is_offmission_inactive) -- see
+    fetchers/company.py's FETCHERS['workday']/['smartrecruiters']."""
+
+    def _wd_company(self, **extra):
+        return {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5,
+                "wd_site": "Site", "active": 1, "mission_tier": "adjacent",
+                **extra}
+
+    def test_a_mission_worth_it_board_reads_past_the_narrow_default(
+            self, monkeypatch):
+        postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                    "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                    for i in range(1300)]     # > the narrow 60-page/1200-row cap
+        monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 1300))
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        monkeypatch.setattr(company_fetch.config, "BOARD_MAX_ROWS", 1400)
+        rows = company_fetch.fetch_company(self._wd_company(), None)
+        assert len(rows) == 1300, "the wider budget read past the old 1,200-row cap"
+
+    def test_an_offmission_inactive_board_keeps_the_narrow_default(
+            self, monkeypatch):
+        postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
+                    "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
+                    for i in range(1300)]
+        monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 1300))
+        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
+        monkeypatch.setattr(company_fetch.config, "BOARD_MAX_ROWS", 1400)
+        company = self._wd_company(active=0, mission_tier="other")
+        rows = company_fetch.fetch_company(company, None)
+        assert len(rows) == 1200, (
+            "a board a track's own mission gate discards anyway keeps the "
+            "narrower, pre-2026-09-18 read")
 
 
 # --------------------------------------------------------------------------- #

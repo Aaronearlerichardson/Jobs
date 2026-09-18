@@ -299,6 +299,28 @@ class TestSelfHealRetryMarker:
 
         assert len(calls) == 1, "a body that grew is due even on the same day"
 
+    def test_padding_whitespace_does_not_look_like_a_changed_body(
+            self, db, add_job, monkeypatch):
+        """The marker's length -- and the length _unscored_due compares it
+        against -- is the STRIPPED body, the same measure
+        score_resume_fit's own MIN_DESC_CHARS check uses. Before this, the
+        length recorded/compared here was the RAW body: added or removed
+        whitespace around an otherwise-unchanged posting looked exactly
+        like "the posting changed" and re-asked Claude about a row that
+        had refused hours earlier."""
+        calls = self._stub_refusal(monkeypatch)
+        body = "x" * 300
+        jid = add_job("j1", description=body, fit=None)
+        db.execute(
+            "UPDATE jobs SET fit_reason=?, description=? WHERE job_id=?",
+            (f"unscored:refused:300:{datetime.now().date()}",
+             "   " + body + "   ", jid))          # same content, padded
+        db.commit()
+
+        ops.self_heal_unscored(db, "resume", "local-tech")
+
+        assert calls == [], "padding whitespace alone must not trigger a retry"
+
     def test_scoring_succeeds_once_due_and_replaces_the_marker(
             self, db, add_job, monkeypatch):
         import src.claude.fit as fit_module

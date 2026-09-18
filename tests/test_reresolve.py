@@ -407,3 +407,125 @@ class TestARaisedResolutionIsReported:
         fut = Future()
         fut.set_result(({"name": "Acme"}, None))
         assert resolved(fut, "Acme") == ({"name": "Acme"}, None)
+
+
+class TestRenameSlugBoards:
+    """A board named after nothing but its own dork-guessed slug
+    ("Centriaautism", "Medelitellc") reads wrong everywhere the digest or
+    the logs name the employer. rename_slug_boards fixes it from the
+    board's OWN listing payload -- Greenhouse's company_name, SmartRecruiters'
+    company.name -- never from the network in these tests."""
+
+    def _slug_co(self, db, name, ats, slug, source="ats_dork", **fields):
+        return store.upsert_company(db, {
+            "name": name, "ats": ats, "slug": slug, "active": 1,
+            "source": source, **fields})
+
+    def _stub_readers(self, monkeypatch, **by_slug):
+        """_EMPLOYER_NAME_READERS replaced with pure lookups -- no HTTP."""
+        monkeypatch.setattr(ops, "_EMPLOYER_NAME_READERS", {
+            "greenhouse": lambda slug: by_slug.get(slug, ""),
+            "smartrecruiters": lambda slug: by_slug.get(slug, "")})
+
+    def test_a_dork_sourced_slug_name_is_renamed_from_the_payload(
+            self, db, monkeypatch):
+        self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
+        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+
+        out = ops.rename_slug_boards(conn=db, commit=True)
+
+        assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
+        row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
+        assert row["name"] == "MedElite Group, LLC."
+
+    def test_preview_writes_nothing(self, db, monkeypatch):
+        self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
+        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+
+        out = ops.rename_slug_boards(conn=db, commit=False)
+
+        assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
+        row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
+        assert row["name"] == "Medelitellc", "preview must never write"
+
+    def test_a_legitimately_named_company_is_never_a_candidate(
+            self, db, monkeypatch):
+        """name_is_own_slug alone also matches a real one-word name that
+        happens to equal its slug ("Ceribell" / slug "ceribell") -- the
+        SLUG_NAME_SOURCE restriction is what keeps this op off rows a
+        human (or local_sourcing) named for real. Confirmed live,
+        2026-09-18: dropping this restriction would have renamed a real
+        neurotech employer, "NeU", to an unrelated company's name because
+        NeU's stored Greenhouse slug no longer points at NeU's own board."""
+        self._slug_co(db, "Ceribell", "greenhouse", "ceribell",
+                      source="local_sourcing")
+        self._stub_readers(monkeypatch, ceribell="Ceribell, Inc")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
+        assert row["name"] == "Ceribell"
+
+    def test_a_name_that_is_not_its_own_slug_is_never_a_candidate(
+            self, db, monkeypatch):
+        self._slug_co(db, "Precision for Medicine", "greenhouse", "pfm")
+        self._stub_readers(monkeypatch, pfm="Precision for Medicine")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+
+    def test_an_empty_payload_answer_is_skipped(self, db, monkeypatch, capsys):
+        self._slug_co(db, "Resultspt", "greenhouse", "resultspt")
+        self._stub_readers(monkeypatch)   # every slug answers ""
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert "no employer name" in capsys.readouterr().out
+
+    def test_a_junk_payload_name_is_rejected_not_written(
+            self, db, monkeypatch, capsys):
+        # A payload can carry garbage too -- the same junk_name_reason
+        # screen a pasted or re-resolved name goes through applies here.
+        self._slug_co(db, "Science37", "greenhouse", "science37")
+        self._stub_readers(monkeypatch, science37="Science 37")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        out = capsys.readouterr().out
+        assert "rejected" in out and "numbered-duplicate" in out
+        row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
+        assert row["name"] == "Science37"
+
+    def test_a_name_matching_what_is_already_stored_is_not_reapplied(
+            self, db, monkeypatch):
+        self._slug_co(db, "Eurofins", "smartrecruiters", "Eurofins")
+        self._stub_readers(monkeypatch, Eurofins="Eurofins")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+
+    def test_a_name_that_would_collide_with_another_company_is_rejected(
+            self, db, monkeypatch, capsys):
+        store.upsert_company(db, {"name": "Cortica", "ats": "greenhouse",
+                                  "slug": "cortica-hq", "active": 1,
+                                  "source": "local_sourcing"})
+        self._slug_co(db, "Corticaneuro", "greenhouse", "corticaneuro")
+        self._stub_readers(monkeypatch, corticaneuro="Cortica")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert "collides" in capsys.readouterr().out
+        row = db.execute(
+            "SELECT name FROM companies WHERE name='Corticaneuro'").fetchone()
+        assert row is not None, "the row must be left exactly as it was"
+
+    def test_an_inactive_board_is_not_a_candidate(self, db, monkeypatch):
+        self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc",
+                      active=0)
+        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+
+        assert ops.rename_slug_boards(conn=db, commit=True) == []
+
+    def test_an_unsupported_ats_is_not_a_candidate(self, db, monkeypatch):
+        # Workday/Lever/Ashby carry no reliable board-level employer field
+        # (see the module comment on _EMPLOYER_NAME_READERS) -- confirmed
+        # live, not merely assumed, so they are not in the reader map at
+        # all rather than silently returning "".
+        store.upsert_company(db, {"name": "Lifestance", "ats": "lever",
+                                  "slug": "lifestance", "active": 1,
+                                  "source": "ats_dork"})
+        assert ops.rename_slug_boards(conn=db, commit=True) == []

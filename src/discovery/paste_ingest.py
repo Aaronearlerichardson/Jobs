@@ -17,7 +17,7 @@ resolve.board.resolve_or_miss, score, queue for review).
 
 import re
 
-from src import config
+from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import drain
 from .local_sourcing import score_and_upsert
@@ -381,7 +381,7 @@ def preview_names(blob, use_llm=None):
     """
     from src.store import connect, recent_miss_names
     if use_llm is None:
-        use_llm = config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"
+        use_llm = have_api_key()
     names = extract_names_llm(blob) if use_llm else []
     if not names:
         names = parse_company_names(blob)

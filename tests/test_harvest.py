@@ -127,7 +127,7 @@ class TestOffmissionCadence:
     """A board that is BOTH off-mission (mission_tier 'other', or never
     scored) AND inactive waits config.HARVEST_OFFMISSION_HOURS
     instead of plan()'s ordinary min_age_hours freshness cutoff -- see
-    harvest._is_offmission_inactive and plan()'s docstring for the
+    config.is_offmission_inactive and plan()'s docstring for the
     --min-age-hours interaction (an explicit override, including 0, always
     wins for every board)."""
 
@@ -488,10 +488,18 @@ def test_harvest_board_partial_fetch_stores_rows_but_closes_nothing(
     assert row["status"] == "open"
 
 
-def test_harvest_board_capped_snapshot_closes_on_the_second_miss(
-        tmp_path, monkeypatch):
-    """A board that reports itself capped (net.http.note_capped) closes an
-    absent row only when the previous pass missed it too."""
+def test_harvest_board_capped_snapshot_never_closes(tmp_path, monkeypatch):
+    """A board that reports itself capped (net.http.note_capped) closes
+    NOTHING here, however many passes running a row has been absent --
+    only ops.check_closed_jobs's URL probe may close a capped board's
+    vanished rows (see store.sync_job_statuses's `capped` paragraph).
+
+    Before 2026-09-18 a board-native row closed on its SECOND consecutive
+    miss under a cap; replaced outright once a live audit found 25
+    Workday/SmartRecruiters boards reading their full page budget on
+    EVERY pass, which made "missed twice" no more trustworthy than
+    "missed once" for those boards.
+    """
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme")
@@ -512,8 +520,9 @@ def test_harvest_board_capped_snapshot_closes_on_the_second_miss(
 
     monkeypatch.setattr(harvest, "fetch_whole_board", capped_fetch)
 
-    # Pass 1: the board hands back "flaky" only. No previous harvest is
-    # recorded yet, so "keep" -- absent -- still stays open.
+    # Pass 1: the board hands back "flaky" only. "keep" -- absent -- stays
+    # open: a capped snapshot's window proves nothing about a row it
+    # didn't include.
     s1 = harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
     assert s1["capped"] is True and s1["capped_total"] == 50
     assert s1["closed"] == 0
@@ -522,17 +531,16 @@ def test_harvest_board_capped_snapshot_closes_on_the_second_miss(
     ).fetchone()["status"] == "open"
 
     # Pass 2: neither "flaky" nor "keep" is on the board this time (a
-    # third row, "new", keeps the snapshot non-empty). "flaky" gets its
-    # one free miss (it was seen last pass); "keep" has now missed twice
-    # running and closes.
+    # third row, "new", keeps the snapshot non-empty) -- STILL capped, so
+    # neither one closes even though "keep" has now missed twice running.
     c2 = store.get_company(conn, c["id"])
     s2 = harvest.harvest_board(c2, db, delay=0, now=harvest.datetime(2026, 1, 2))
     assert s2["capped"] is True
     rows = {r["job_id"]: r["status"] for r in conn.execute(
         "SELECT job_id, status FROM jobs WHERE company_id=?", (c["id"],))}
-    assert rows["gh_acme_flaky"] == "open", "one miss right after being seen"
-    assert rows["gh_acme_keep"] == "closed", "absent two passes running"
-    assert s2["closed"] == 1
+    assert rows["gh_acme_flaky"] == "open"
+    assert rows["gh_acme_keep"] == "open", "still capped: two misses closes nothing now"
+    assert s2["closed"] == 0
 
 
 # ── run ─────────────────────────────────────────────────────────────────────
@@ -667,7 +675,7 @@ def test_harvest_summary_line_is_bare_when_nothing_is_flagged(
 @pytest.mark.parametrize("snapshot, closed", [
     (None, 1),                      # complete: an absent row closes at once
     ({"incomplete": True}, 0),      # a page failed: nothing closes
-    ({"capped": True}, 0),          # capped, no earlier harvest: first miss
+    ({"capped": True}, 0),          # capped: never closes (see store.jobs)
 ])
 def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
                                                         snapshot, closed):

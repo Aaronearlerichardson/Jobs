@@ -14,6 +14,7 @@ from src import config
 from src import digest
 from src import store
 from src import tags as company_tags
+from src.claude.api import have_api_key
 from src.config import profile_edit
 from src.match import locality
 from src.ops.background import (_LOG_LOCK, OPS, TASK, _int, _running,
@@ -589,7 +590,7 @@ def api_stats():
         "pending_review": one("SELECT COUNT(*) FROM companies WHERE "
                               "(','||COALESCE(tags,'')||',') LIKE ?",
                               (f"%,{company_tags.PENDING},%",)),
-        "api_key": config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE",
+        "api_key": have_api_key(),
         "screen_model": config.CLAUDE_MODEL,
         "verify_model": config.CLAUDE_VERIFY_MODEL,
         "db": str(t["db_path"]),

@@ -78,6 +78,36 @@ def strip_html(s):
     return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(s))).strip()
 
 
+def clean_field(text):
+    r"""`text` with every run of whitespace -- a newline, a tab, repeated
+    spaces -- collapsed to one space, and the ends trimmed. None reads as
+    "".
+
+    strip_html's whitespace half, without its markup half: a listing's
+    `title` or `location` is plain text a payload already handed over, and
+    running it through strip_html would silently eat anything shaped like
+    a tag ("Engineer <Level 3>").
+
+    >>> clean_field("Calibration\nTechnician")
+    'Calibration Technician'
+    >>> clean_field("Durham,\tNC")
+    'Durham, NC'
+    >>> clean_field("  Data   Engineer  ")
+    'Data Engineer'
+    >>> clean_field(None)
+    ''
+
+    A value that is nothing BUT whitespace cleans to the empty string, not
+    a string that merely looks empty -- callers that treat "" as "no
+    title"/"no location" (fetchers.board.board_jobs itself; every reader
+    downstream) see it as absent rather than as a title made of blanks:
+
+    >>> clean_field("   \n\t  ")
+    ''
+    """
+    return _SPACE_RE.sub(" ", text or "").strip()
+
+
 def stable_id(*parts) -> str:
     """Deterministic short hash for building job IDs.
 

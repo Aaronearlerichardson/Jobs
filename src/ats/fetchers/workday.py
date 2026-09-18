@@ -292,6 +292,31 @@ def _scoped_body(api, hdr, loc_re, search_text):
     return body, applied, board_total
 
 
+def _wd_capped_total(total, count):
+    """The capped_total to report to net.http.note_capped: never smaller
+    than `count` (the rows this pull actually, post-dedup, returned) --
+    the board's own reported `total` only when it is at least that large,
+    else `count` itself; None stays None (an untrustworthy total, i.e. no
+    total at all, reports as unknown rather than a manufactured number).
+
+    Workday's page-0 `total` can UNDER-report a live board: the 2026-09-18
+    audit found boards like ICON plc showing "1200 job(s) ... capped of
+    840" -- MORE rows returned than the API's own declared total, because
+    the un-deduped pager double-counted postings across pages and nobody
+    had compared the two numbers. store.sync_job_statuses documents
+    `capped_total` as the board's size for a human/log reader; reporting
+    one smaller than the rows just received is worse than reporting none.
+
+    >>> _wd_capped_total(2000, 1200)
+    2000
+    >>> _wd_capped_total(840, 1200)
+    1200
+    >>> _wd_capped_total(None, 1200) is None
+    True
+    """
+    return None if total is None else max(total, count)
+
+
 def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                       page_size=20, max_pages=_WD_MAX_PAGES):
     """List postings (title/location/path only; descriptions come later).
@@ -316,10 +341,25 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     Each row carries `_wd` = (tenant, pod, site, externalPath), the
     coordinates `cxs_detail` needs to fetch its body later.
 
-    Reports a capped snapshot (net.http.note_capped) when every page up to
-    `max_pages` came back full, or, on an unscoped pull, when fewer rows
-    came back than the response's own `total`. A scoped pull's `total` is
-    never compared: the rows it drops for locality are not missing.
+    Deduped by posting id WITHIN this one pull (same shape as
+    fetchers/phenom.py's fetch_phenom_all: a seen-id set, `new_ids == 0`
+    stops the walk early) -- Workday's own posting order is unstable
+    enough that a page can repeat postings a previous page already
+    returned (see _wd_capped_total's docstring for the "more rows than
+    the board's own total" symptom this caused before deduping existed).
+    The id used for dedup is the SAME one the output row carries
+    (`externalPath`'s last segment, or a title hash on the rare row with
+    no path), computed BEFORE any locality rescue, so a row deduplicates
+    identically regardless of which pass rescued its location text.
+
+    Reports a capped snapshot (net.http.note_capped, via _wd_capped_total)
+    when every page up to `max_pages` came back full with no repeat ever
+    seen, or, on an unscoped pull, when fewer DISTINCT rows came back than
+    the response's own `total`. A scoped pull's `total` is never compared:
+    the rows it drops for locality are not missing. A page that repeats
+    only already-seen ids (`new_ids == 0`, not the first page) ends the
+    walk WITHOUT capping: Workday itself just told us it has cycled back,
+    which is the honest end this pager can detect, not a giving-up point.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
@@ -328,6 +368,7 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
         api, _CXS_HEADERS, loc_re, search_text)
 
     out = []
+    seen = set()            # posting ids already returned THIS pull (dedup)
     scope_failed = False   # the scope came back unnarrowed (see below)
     rescues = 0            # detail GETs spent on "N Locations" rows
     total = None           # the board size page 0 reported
@@ -362,9 +403,21 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                   f"unnarrowed ({data.get('total')} of {board_total or '?'} "
                   f"postings) - keeping listed-location matches only, no "
                   f"detail rescue")
+        new_ids = 0
         for p in posts:
             loc = p.get("locationsText", "") or ""
             path = p.get("externalPath", "") or ""
+            # The dedup/output id: computed BEFORE any locality rescue
+            # below (which only ever rewrites `loc`, never `path` or the
+            # title), so a posting keys identically wherever in the pull
+            # it turns up. Counted toward `new_ids` whether or not it
+            # survives the locality filter that follows -- a repeat is a
+            # repeat regardless of where the repeated row sits.
+            pid = path.rsplit("/", 1)[-1] if path else str(abs(hash(p.get("title", ""))))
+            if pid in seen:
+                continue
+            seen.add(pid)
+            new_ids += 1
             if scope_failed:
                 slug_loc = _wd_path_location(path)
                 if loc_ok(loc_re, loc):
@@ -408,20 +461,26 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                 locs = _wd_detail_locations(tenant, pod, site, path)
                 if locs:
                     loc = "; ".join(locs)
-            jid = path.rsplit("/", 1)[-1] if path else str(abs(hash(p.get("title", "") + loc)))
-            out.append({"id": f"wd_{tenant}_{jid}", "title": p.get("title", ""),
+            out.append({"id": f"wd_{tenant}_{pid}", "title": p.get("title", ""),
                         "url": f"{link}{path}" if path else host, "location": loc,
                         "description": "",
                         "_wd": (tenant, pod, site, path),
                         # relative text ("Posted 30+ Days Ago"): approximate
                         "posted_at": norm_posted_date(p.get("postedOnDate")
                                                       or p.get("postedOn"))})
+        if new_ids == 0 and page > 0:
+            # Every id on this page was already seen: Workday has cycled
+            # back over rows an earlier page already returned. That IS the
+            # board's honest end this pager can detect -- not a reason to
+            # cap (see the docstring) -- so it stops here rather than
+            # spending the rest of max_pages re-reading the same rows.
+            break
         if len(posts) < page_size:
             break
     else:
-        note_capped(total if loc_re is None else None)
+        note_capped(_wd_capped_total(total, len(out)) if loc_re is None else None)
     if loc_re is None and (total or 0) > len(out):
-        note_capped(total)
+        note_capped(_wd_capped_total(total, len(out)))
     if rescues >= _WD_RESCUE_CAP:
         print(f"    [!] workday {tenant}: \"N Locations\" detail budget "
               f"({_WD_RESCUE_CAP}) spent; later multi-site rows "

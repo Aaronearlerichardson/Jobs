@@ -20,6 +20,7 @@ import re
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 from conftest import fake_response
 from src.match.filters import is_relevant
@@ -952,6 +953,61 @@ class TestJobvite:
         from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
         assert "jobvite" in ATS_REGISTRY and "jobvite" in LIGHTWEIGHT
         assert "jobvite" in company.FETCHERS
+
+
+class TestFieldHygiene:
+    """A stored title or location never carries a newline, tab or a run of
+    spaces. The two paths clean at one choke point each -- board.board_jobs
+    for the sweep, company._adapt for the whole-board pull -- so these pin
+    the three builders in company.py that reach NEITHER, shaping the
+    adapted dict themselves.
+
+    124 open rows carried such a value on 2026-09-18; in the session log
+    they split triage's one-line DEBUG "drop" record into fragments
+    ("Calibration | local-tech=title" alone on a line).
+    """
+
+    def test_adapt_cleans_before_the_location_filter(self):
+        """The whole-board choke point, and the ORDER that matters: a
+        location wrapped across two lines has to be cleaned before loc_re
+        judges it, or an in-area posting is dropped on text nobody wrote."""
+        rows = [{"id": "wd_x_1", "title": "Data\n  Engineer",
+                 "url": "u", "location": "Durham,\tNC", "description": ""}]
+        out = company._adapt(rows, "workday", re.compile("Durham, NC"))
+        assert [(j["title"], j["location"]) for j in out] == \
+            [("Data Engineer", "Durham, NC")]
+
+    def test_smartrecruiters_cleans_its_own_rows(self, fake_get):
+        fake_get({"totalFound": 1, "content": [
+            {"id": "77", "name": "Clinical\nData Engineer",
+             "location": {"city": "Durham\t", "region": "NC",
+                          "country": "US"}}]})
+        j = company.fetch_smartrecruiters_all("acme")[0]
+        assert j["title"] == "Clinical Data Engineer"
+        assert j["location"] == "Durham, NC, US"
+
+    def test_wpjson_cleans_its_own_rows(self, fake_get):
+        fake_get({"max_num_pages": 1, "posts": [
+            {"ID": 5, "post_title": "Research\nTechnician",
+             "link": {"url": "https://x.test/j/5"},
+             "location": {"city": "Durham\n", "state": "NC"}}]})
+        j = company.fetch_wpjson_careers_all("https://x.test")[0]
+        assert j["title"] == "Research Technician"
+        assert j["location"] == "Durham, NC"
+
+    def test_custom_careers_cleans_its_own_rows(self, monkeypatch):
+        """The custom scraper reads a title out of anchor text, which is
+        where a wrapped template lands most often."""
+        html = ('<html><body><a href="/careers/imaging-scientist-7">Imaging\n   '
+                'Scientist</a></body></html>')
+        monkeypatch.setattr(company, "_get_soup",
+                            lambda *a, **k: BeautifulSoup(html, "html.parser"))
+        monkeypatch.setattr(company, "_location_near",
+                            lambda *a, **k: "Durham,\tNC")
+        out = company.fetch_custom_careers("https://x.test/careers",
+                                   _hop=False)
+        assert [(j["title"], j["location"]) for j in out] == \
+            [("Imaging Scientist", "Durham, NC")]
 
 
 class TestOneFetcherPerAts:

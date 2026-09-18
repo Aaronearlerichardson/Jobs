@@ -295,11 +295,10 @@ class TestClosedLifecycle:
         assert status_of("gh_acme_new")["status"] == "open"
         assert status_of("linkedin_bbb")["status"] == "open"   # external: title match
 
-    def test_a_capped_snapshot_reopens_but_spares_a_first_miss(
+    def test_a_capped_snapshot_reopens_but_never_closes_a_first_miss(
             self, db, company, add_job, status_of):
         # A board over its page cap serves an unstable window of itself, so
-        # one pass's absence is no evidence: with no earlier harvest to
-        # compare against, nothing closes.
+        # one pass's absence is no evidence: nothing closes.
         snap = self._seed(add_job)
         store.set_job_status(db, "gh_acme_2", "closed")
         assert store.sync_job_statuses(db, company, snap, track="local-tech",
@@ -307,11 +306,15 @@ class TestClosedLifecycle:
         assert status_of("gh_acme_1")["status"] == "open"
         assert status_of("gh_acme_2")["status"] == "open"
 
-    def test_a_capped_snapshot_closes_only_a_second_miss(
+    def test_a_capped_snapshot_never_closes_even_a_second_miss(
             self, db, company, add_job, status_of):
-        # The previous harvest stamped its rows at 09:00. gh_acme_1 was in
-        # that pass (seen 09:00:05); gh_acme_3 was not (seen a day before).
-        # Both are missing again now, and only gh_acme_3 has missed twice.
+        # Before 2026-09-18 gh_acme_3 (missed two passes running: seen
+        # 09-14, then absent from a 09-15-harvested snapshot too) would
+        # have closed on its second miss while gh_acme_1 (missed once,
+        # right after being seen) stayed open. Replaced outright: STILL
+        # capped makes a second miss no more trustworthy than a first (a
+        # chronically over-budget board can miss the same row twice by the
+        # draw of which window it read), so neither closes now.
         snap = self._seed(add_job)
         add_job("gh_acme_3", "Data Scientist", 0.6)
         db.execute("UPDATE jobs SET harvested_at='2026-09-15T09:00:00'")
@@ -321,9 +324,21 @@ class TestClosedLifecycle:
                    "WHERE job_id='gh_acme_3'")
         db.commit()
         assert store.sync_job_statuses(db, company, snap, track="local-tech",
-                                       capped=True) == (0, 1)
+                                       capped=True) == (0, 0)
         assert status_of("gh_acme_1")["status"] == "open"
-        assert status_of("gh_acme_3")["status"] == "closed"
+        assert status_of("gh_acme_3")["status"] == "open"
+
+    def test_an_uncapped_snapshot_still_closes_on_the_first_miss(
+            self, db, company, add_job, status_of):
+        # The ordinary rule, unaffected by `capped`: a board-native row
+        # absent from an UNCAPPED, board-authoritative snapshot closes on
+        # this, its first, miss.
+        add_job("gh_acme_vanished", "Data Engineer")
+        snap = [{"id": "gh_acme_other", "title": "Other",
+                "url": "https://acme.io/gh_acme_other"}]
+        assert store.sync_job_statuses(db, company, snap, track="local-tech",
+                                       capped=False) == (0, 1)
+        assert status_of("gh_acme_vanished")["status"] == "closed"
 
 
 class TestRanking:

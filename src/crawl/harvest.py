@@ -56,11 +56,10 @@ from src import config
 from src import store
 from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
-from src.ats.coords import board_slug
+from src.ats.coords import slug_named
 from src.ats.fetchers import company as company_fetch
 from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
 from src.match.locality import geo_mode, location_unknown
-from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
 from src.net import http
 from src.net.util import worker_count
 from src.ops.maintenance import check_closed_jobs, rewrite_digest, verify_top
@@ -131,38 +130,6 @@ def _ats_rank(ats):
     return 0 if ats in LIGHTWEIGHT else 1
 
 
-def _is_offmission_inactive(c):
-    """True for a board that is BOTH off-mission (mission-scored into a
-    tier the profile marks inactive, or never mission-scored at all) AND
-    itself inactive -- the harvester's own long-interval boards (see
-    config.HARVEST_OFFMISSION_HOURS). A NULL tier reads as
-    off-mission HERE (unlike config.is_active_mission, where an unscored
-    company is treated as active) -- an inactive row nobody has bothered to
-    mission-score is exactly as low-priority to re-harvest often as one
-    scored into the catch-all tier, and this predicate only ever narrows a
-    HARVEST CADENCE, never activation or crawl eligibility.
-
-    >>> _is_offmission_inactive({"mission_tier": "other", "active": 0})
-    True
-    >>> _is_offmission_inactive({"mission_tier": None, "active": 0})
-    True
-    >>> _is_offmission_inactive({"mission_tier": "core-mission", "active": 0})
-    False
-    >>> _is_offmission_inactive({"mission_tier": "other", "active": 1})
-    False
-
-    Notes:
-        A multi-division conglomerate scored into an inactive tier is
-        exempt already: that exemption (config.is_multi_division, applied
-        when the row's `active` was last written) is what keeps it
-        `active`, so the `active` check above is enough and nothing here
-        re-checks is_multi_division.
-    """
-    tier = c.get("mission_tier")
-    return not c.get("active") and (tier is None
-                                     or tier not in config.ACTIVE_MISSION_TIERS)
-
-
 def plan(conn, only=None, names=None, min_age_hours=None,
          limit=None, now=None, stats=None):
     """The boards this run will pull, in run order.
@@ -173,10 +140,13 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     before bigger ones, so an interrupted run has still banked the most
     boards per minute.
 
-    A board that is _is_offmission_inactive waits the longer
-    config.HARVEST_OFFMISSION_HOURS instead of `min_age_hours`. Such a
-    board is still fetched every pass, per the "harvest every board"
-    mandate -- just not every `min_age_hours`.
+    A board that is config.is_offmission_inactive -- the one
+    off-mission/inactive rule, shared with the whole-board page budget
+    (config.board_max_pages, read by src.ats.fetchers.company) and
+    defined in config.policy because ats sits BELOW crawl in the import
+    DAG -- waits the longer config.HARVEST_OFFMISSION_HOURS instead of
+    `min_age_hours`. Such a board is still fetched every pass, per the
+    "harvest every board" mandate -- just not every `min_age_hours`.
 
     `min_age_hours=None` -- the default, and what harvest.py passes when
     the flag is absent -- means the pass chooses both intervals itself:
@@ -273,7 +243,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
         else:
             last = c.get("last_harvested_at") or ""
             board_cutoff = cutoff
-            if offmission_cutoff is not None and _is_offmission_inactive(c):
+            if offmission_cutoff is not None and config.is_offmission_inactive(c):
                 board_cutoff = offmission_cutoff
                 if cutoff >= last > offmission_cutoff:
                     offmission_skipped += 1
@@ -409,8 +379,9 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
 
     The rows that arrived are always stored. Closing against the snapshot
     is what a partial pull cannot be trusted for: an INCOMPLETE one (a
-    fetch failed partway) closes nothing, and a CAPPED one closes a row
-    only on its second miss (store.sync_job_statuses's `capped`).
+    fetch failed partway) closes nothing, and neither does a CAPPED one
+    (store.sync_job_statuses's `capped`) -- its vanished rows wait for
+    ops.check_closed_jobs's URL probe instead.
 
     A soft-failed snapshot (_soft_failed) is recorded as one:
     store.mark_harvested keeps the last good total_job_count and runs its
@@ -599,12 +570,15 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
             if s.get("incomplete"):
                 status += " [incomplete: 0 closed]"
             elif s.get("capped"):
-                status += (f" [capped of {s['capped_total']}: 2-strike close]"
-                           if s.get("capped_total") else " [capped: 2-strike close]")
+                # 2026-09-18: a capped snapshot no longer closes anything
+                # here (store.sync_job_statuses) -- ops.check_closed_jobs's
+                # URL probe is the only thing that can, later.
+                status += (f" [capped of {s['capped_total']}: 0 closed]"
+                           if s.get("capped_total") else " [capped: 0 closed]")
         print(f"  {prefix}[{done_n[0]:>3}/{len(boards)}] {c['name']} "
               f"({c['ats']}): {status}")
-        # Churn a two-strike close should have damped, still showing up:
-        # worth a human's attention, not just a debug line.
+        # Churn a board's own board-diff should have damped, still showing
+        # up: worth a human's attention, not just a debug line.
         fetched = s.get("fetched") or 0
         reopened = s.get("reopened") or 0
         if reopened > max(10, 0.05 * fetched):
@@ -675,10 +649,8 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
           f"{summary['reopened']} reopened")
     # Roster hygiene: a board still named after its own slug/tenant
     # fetches fine, so nothing else in the log names it for renaming.
-    unnamed = sorted(
-        (c for c in boards if c.get("source") == SLUG_NAME_SOURCE
-         and name_is_own_slug(c.get("name"), board_slug(c))),
-        key=lambda c: -(c.get("total_job_count") or 0))
+    unnamed = sorted((c for c in boards if slug_named(c)),
+                     key=lambda c: -(c.get("total_job_count") or 0))
     print(f"  {len(unnamed)} board(s) still named after their own "
           f"slug/tenant"
           + (f", largest first: {', '.join(c['name'] for c in unnamed[:10])}"

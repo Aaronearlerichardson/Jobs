@@ -7,6 +7,7 @@ import sys
 import threading
 
 from src import config
+from src.claude.api import have_api_key
 from . import STATE, app
 
 
@@ -144,7 +145,7 @@ def main():
     for line in bootstrap.status_lines():
         print(f"  {line}")
     print(f"  db      : {config.STORE_DB_PATH}")
-    if config.ANTHROPIC_API_KEY == "YOUR_ANTHROPIC_API_KEY_HERE":
+    if not have_api_key():
         print("  [!] ANTHROPIC_API_KEY not set - scoring operations will no-op.")
     print("  Ctrl+C (or close this window) to stop.")
     if auto_open:

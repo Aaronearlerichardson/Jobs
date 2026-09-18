@@ -24,9 +24,32 @@ the listing carries none) and optionally `head` (the text the gate screens
 first; defaults to the title), `posted_at`, `remote_hint`, plus any
 "_"-prefixed keys the module's detail call needs, which are stripped from
 the output. A module yields None for a listing entry it cannot use.
+
+`title` and `location` are run through `net.util.clean_field` before
+anything else sees them (the gates, the store, the session log): a raw
+ATS payload's title or location can carry an embedded newline or tab -- a
+search-row template that wraps onto two lines, a location cell with a
+stray tab between city and state -- and 124 open rows already carry one
+(2026-09-18 audit). Stored verbatim, that character splits triage's one-line DEBUG
+"drop" record into fragments a session-log reader cannot tell from a new
+record ("Calibration | local-tech=title" on its own line).
+
+`clean_field` is applied at each of the two paths' own choke point, not in
+every fetcher module: `board_jobs` here covers the unvetted SWEEP, and
+`fetchers.company._adapt` covers the company-vetted WHOLE-BOARD pull that
+skips this module entirely (including Workday's and iCIMS's, whose listing
+builders feed _adapt directly). The three builders inside company.py that
+shape the adapted dict themselves, and fetchers/peopleadmin.py, which is
+also reached by the sweep, call `clean_field` at their own row builders.
+The aggregator and feed fetchers (jsonld, rssfeed, getro, remotive,
+usajobs, ...) reach neither choke point; no open row from one of them
+carries a bad field today (2026-09-18 audit), so they are left alone
+rather than given a third copy of this rule.
 """
 
 import time
+
+from src.net.util import clean_field
 
 
 def loc_ok(loc_re, text):
@@ -69,6 +92,19 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
 
     >>> calls, "_key" in jobs[0]
     (['1', '2'], False)
+
+    A title or location carrying a newline, tab or repeated space -- a
+    search-row template that wraps onto two lines -- is cleaned before
+    anything (the gate, the location filter, the output) sees it, and a
+    title that is nothing BUT whitespace is dropped like a missing one:
+
+    >>> messy = [{"id": "4", "title": "Data\\nEngineer", "url": "u4",
+    ...           "location": "Durham,\\tNC", "description": ""},
+    ...          {"id": "5", "title": "   ", "url": "u5", "location": "",
+    ...           "description": ""}]
+    >>> jobs = board_jobs(messy, "Acme")
+    >>> [(j["id"], j["title"], j["location"]) for j in jobs]
+    [('4', 'Data Engineer', 'Durham, NC')]
     """
     out, fetched = [], 0
 
@@ -84,11 +120,16 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
         return fetch_description is not None and fetched < max_details
 
     for row in rows:
-        if not row or not row.get("id") or not row.get("title"):
+        if not row or not row.get("id"):
             continue
+        title = clean_field(row.get("title"))
+        if not title:
+            continue
+        row["title"] = title
+        row["location"] = clean_field(row.get("location"))
         if not loc_ok(loc_re, row.get("location", "")):
             continue
-        head = row.pop("head", None) or row["title"]
+        head = clean_field(row.pop("head", None)) or title
         desc = row.get("description") or ""
         if gate is not None:
             if not gate(head) and can_fetch():

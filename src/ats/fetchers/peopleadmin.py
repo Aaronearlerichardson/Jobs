@@ -36,7 +36,7 @@ from bs4 import BeautifulSoup
 
 from src.match.locality import location_snippet
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date, stable_id
+from src.net.util import clean_field, norm_posted_date, stable_id
 
 # Tried in order; the first feed with entries wins.
 FEED_PATHS = ("/postings/all_jobs.atom", "/postings/search.atom")
@@ -95,12 +95,17 @@ def _parse_feed(xml, host, company_name, gate=None):
     # The feed's own <title> names the institution ("<Campus>: All Jobs"),
     # and a tenant is one campus, so it stands in for entries whose title
     # names no place, which is most of them.
-    campus = location_snippet(_text(soup.find("title")), "")
+    campus = clean_field(location_snippet(_text(soup.find("title")), ""))
     key = tenant_key(host)
     entries = soup.find_all("entry")
     jobs = []
     for e in entries:
-        title = _text(e.find("title"))
+        # get_text(strip=True) trims each XML text node's ends but not an
+        # embedded newline/tab INSIDE one -- a feed that wraps its own
+        # <title> onto two lines carries it straight through; clean_field
+        # is the same hygiene board.board_jobs applies to every row that
+        # goes through it, which these rows never do.
+        title = clean_field(_text(e.find("title")))
         link_el = e.find("link")
         jurl = (link_el.get("href") if link_el and link_el.has_attr("href")
                 else _text(e.find("id")))          # the entry id IS the URL
@@ -127,7 +132,10 @@ def _parse_feed(xml, host, company_name, gate=None):
             "url":         jurl,
             # "" when neither the title nor the campus names a place --
             # NOT a "See posting" placeholder, which location-scoped
-            # callers cannot tell from a real location.
+            # callers cannot tell from a real location. `title` is already
+            # clean_field'd above, so a snippet cut from it needs no
+            # second pass; `campus` (the fallback) was cleaned once, up
+            # front, for the same reason.
             "location":    location_snippet(title, "") or campus,
             "description": desc,
             "posted_at":   norm_posted_date(_text(e.find("published"))

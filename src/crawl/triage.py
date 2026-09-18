@@ -85,6 +85,7 @@ from src.match.filters import is_relevant
 from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for)
 from src.net.parallel import fan_out
+from src.net.util import clean_field
 from src.ops import maintenance as ops
 
 _log = logging.getLogger(__name__)
@@ -580,13 +581,25 @@ def _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
     <company> | <title> | <location> | <fit reason>" -- "surfaced" IS the
     OK status here, spelled out rather than "ok" plus a redundant
     "[SURFACED]" tag the way this used to print two names for one fact).
+
+    The drop record's three free-text fields (company, title, location)
+    are run through net.util.clean_field first: 124 open rows already carry a
+    newline or tab in a title or location (2026-09-18 audit), and this is
+    the one line in the whole run that packs five fields onto one bare
+    "|"-joined line with no quoting -- a literal newline in any of them
+    otherwise splits it into two bare fragments a session-log reader
+    cannot tell from a second record ("Calibration | local-tech=title" on
+    its own). Defence in depth: the fetchers clean these at write time
+    (board.board_jobs; the modules that bypass it), but a row already
+    dirty in the store reaches this line however it got there.
     """
     with store.batch(conn):
         for jid, (status, detail, c, r) in decided.items():
             store.record_triage(conn, jid, status, detail, now=stamp)
             summary[status] += 1
-            _log.debug("drop %s | %s | %s | %s | %s", status, c.get("name"),
-                      r.get("title"), r.get("location"), detail)
+            _log.debug("drop %s | %s | %s | %s | %s", status,
+                      clean_field(c.get("name")), clean_field(r.get("title")),
+                      clean_field(r.get("location")), detail)
         for jid, (c, r, surfaced, detail) in final.items():
             if jid in over_cap:
                 summary["left"] += 1

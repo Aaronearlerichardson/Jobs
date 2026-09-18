@@ -68,6 +68,77 @@ class TestExcludeGate:
         empty = gates._exclude_tables("no_such_track_xyz")
         assert empty == {k: () for k in empty}
 
+    # -- clinical_titles / clinical_markers, against WHATEVER the active
+    # profile configures (skips like the rest of this class when it
+    # configures none) -----------------------------------------------------
+    def test_configured_clinical_title_excludes(self, tables, exclude_local):
+        term = next(iter(tables["clinical_titles"]), None)
+        if not term:
+            pytest.skip("track configures no clinical_titles")
+        assert exclude_local(f"Senior {term.title()} II")
+
+    def test_configured_marker_spares_the_configured_title(self, tables,
+                                                            exclude_local):
+        term = next(iter(tables["clinical_titles"]), None)
+        marker = next(iter(tables["clinical_markers"]), None)
+        if not term or not marker:
+            pytest.skip("track configures no clinical_titles/clinical_markers")
+        assert not exclude_local(f"{marker.title()} {term.title()}")
+
+
+class TestClinicalServiceGate:
+    """clinical_titles / clinical_markers ([exclude.<id>], added
+    2026-09-18): a title naming a hands-on clinical-service occupation
+    ("CT Technologist", "Medical Lab Scientist", "Nurse Practitioner...")
+    passes the free tech_title_regex gate on a word it shares with
+    engineering roles by coincidence ("technologist", "scientist",
+    "quality" are all in the engine default) and would otherwise cost a
+    hydration fetch and a Claude fit call for nothing -- 88 of 113 scored
+    rows in the 2026-09-18 Duke Health pass, every one 0.00-0.05.
+
+    A synthetic track (monkeypatched into config.EXCLUDE_BY_TRACK), not
+    the `tables`/`exclude_local` fixtures above -- these tests pin the
+    vocabulary SHAPE itself and must exercise it whether or not the
+    active profile (profile.toml vs. the profile.example.toml CI runs
+    against) happens to configure clinical_titles."""
+
+    @pytest.fixture
+    def clinical_track(self, exclude_vocab):
+        return exclude_vocab(
+            "clinical_test",
+            clinical_titles=["technologist", "technician", "nurse",
+                             "medical lab"],
+            clinical_markers=["research", "data", "engineer"])
+
+    def _exc(self, clinical_track, title, description=""):
+        return gates.exclude_reason(title, description,
+                                    track_id=clinical_track)
+
+    def test_clinical_title_without_a_marker_excludes(self, clinical_track):
+        assert self._exc(clinical_track, "CT Technologist")
+        assert self._exc(clinical_track,
+                         "Medical Lab Scientist - Central Automated Lab")
+        assert self._exc(clinical_track,
+                         "Nurse Practitioner - Palliative Care")
+
+    def test_research_marker_in_title_spares_the_drop(self, clinical_track):
+        # PINS the requirement: a genuine research/data/engineering role
+        # that merely contains a clinical-sounding occupation word must
+        # keep scoring -- the exact titles the 2026-09-18 audit named as
+        # must-not-drop.
+        assert not self._exc(clinical_track, "Research Technician")
+        assert not self._exc(clinical_track, "Research Laboratory Technician")
+
+    def test_marker_in_description_also_spares_the_drop(self, clinical_track):
+        assert not self._exc(clinical_track, "Clinical Lab Technician",
+                             "you will support our research pipeline")
+
+    def test_clinical_title_only_fires_in_the_title(self, clinical_track):
+        # Body prose mentioning the occupation word must not exclude an
+        # unrelated role -- title-only, like title_tokens.
+        assert not self._exc(clinical_track, "Software Engineer",
+                             "you'll work with the technologist team")
+
 
 class TestTechnicalTitle:
     def test_engineer_is_technical(self, local_track):

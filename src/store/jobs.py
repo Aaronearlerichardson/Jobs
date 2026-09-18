@@ -471,21 +471,42 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         (matched rows are reopened regardless — they're live on the board).
 
     `capped=True` marks a snapshot truncated by a page cap
-    (net.http.note_capped). A board over its cap serves an unstable window
-    of itself, so a board-native row then closes only when it was ALSO
-    missing from the previous pass: when its last_seen is older than
-    MAX(jobs.harvested_at) for the company, read before the caller's own
-    upserts. A row the previous pass saw was upserted after that pass took
-    its harvested_at stamp, so its last_seen is not older. With no harvest
-    recorded yet, a capped pass closes nothing. `now` (default: the clock)
-    stamps last_seen and closed_at here.
+    (net.http.note_capped) — the pager (fetchers.workday.fetch_workday_all,
+    fetchers.company.fetch_smartrecruiters_all, ...) exhausted its page
+    budget without reaching a natural end. Such a pull is an unstable
+    WINDOW of the board, not the board itself, so a board-native row
+    absent from it is NEVER closed here — not on the first miss, not on
+    any later one — regardless of `track`. Reopening still happens
+    normally for whatever DOES match, and `now` (default: the clock)
+    still stamps last_seen/closed_at for those rows. Closing a capped
+    board's vanished rows is ops.check_closed_jobs's job instead: it
+    probes each row's own detail URL directly, which is evidence a
+    missing page-window slot is not. External rows are unaffected by
+    `capped` either way — they were never board-native to begin with, and
+    already only close after `external_grace_days`.
 
     Notes:
-        companies.last_harvested_at was tried as the boundary first and
-        rejected: mark_harvested() stamps it moments AFTER this call touches
-        last_seen in the same pass, so every row seen in pass N read as
-        older than pass N's own stamp and closed on its first miss in pass
-        N+1, with no second-strike grace at all.
+        Before 2026-09-18 a capped board-native row closed on its SECOND
+        consecutive miss (comparing last_seen against
+        MAX(jobs.harvested_at) for the company) rather than never. That
+        rule assumed one pass's truncated window was the unlucky
+        exception; a live audit that day found 25 Workday/SmartRecruiters
+        boards reading their full page budget on EVERY pass (not just one
+        unlucky one), so a "second miss" was routinely the same unstable
+        window missing the same row twice, not corroborating evidence —
+        replaced outright, not narrowed, once the page budget itself grew
+        (config.BOARD_MAX_ROWS) to make most of those boards uncapped in
+        the first place.
+
+        companies.last_harvested_at was tried as that two-strike boundary
+        first and rejected: mark_harvested() stamps it moments AFTER this
+        call touches last_seen in the same pass, so every row seen in pass
+        N read as older than pass N's own stamp and closed on its first
+        miss in pass N+1, with no second-strike grace at all.
+        jobs.harvested_at (stamped BEFORE this call, in the same upsert
+        batch) was the boundary that actually shipped — kept as the
+        record of why, now that the two-strike mechanism itself is gone
+        and nothing computes that boundary any more.
     """
     if not company_id or not fetched_jobs:
         return (0, 0)
@@ -512,14 +533,6 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     now = (now or datetime.now()).isoformat()
     grace_cutoff = (datetime.now()
                     - timedelta(days=external_grace_days)).isoformat()
-    # The previous pass's boundary (see `capped`). "" when there is none:
-    # every stamp sorts after it, so nothing closes.
-    capped_since = None
-    if capped:
-        row = conn.execute(
-            "SELECT MAX(harvested_at) FROM jobs WHERE company_id=?",
-            (company_id,)).fetchone()
-        capped_since = (row[0] if row else None) or ""
     n_reopened = n_closed = 0
     rows = conn.execute(
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
@@ -544,10 +557,14 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
             continue
         if (r["status"] or "open") == "closed":
             continue
-        seen = r["last_seen"] or r["first_seen"] or ""
-        if board_native:                          # ISO strings sort by time
-            closeable = capped_since is None or seen < capped_since
+        if board_native:
+            # A capped snapshot's window proves nothing about a row it
+            # didn't include (see the `capped` paragraph above): never
+            # close here. Uncapped, absence from a board-authoritative
+            # snapshot IS the evidence — close on this, its first, miss.
+            closeable = not capped
         else:
+            seen = r["last_seen"] or r["first_seen"] or ""
             closeable = seen < grace_cutoff
         if closeable:
             conn.execute(

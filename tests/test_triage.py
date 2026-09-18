@@ -134,6 +134,42 @@ def test_title_drop_costs_no_fetch_and_no_score(tmp_path, tracks, stubs,
     assert (s["title"], s["surfaced"], s["hydrated"], s["scored"]) == (1, 1, 1, 1)
 
 
+@pytest.fixture
+def clinical_exclude_vocab(exclude_vocab):
+    """gates.exclude_reason's clinical_titles/clinical_markers on the
+    "t_local" track id the `tracks` fixture builds. conftest's
+    exclude_vocab owns the lru_cache dance."""
+    exclude_vocab("t_local", clinical_titles=["technologist", "technician"],
+                  clinical_markers=["research"])
+
+
+def test_clinical_service_title_excluded_before_hydration(
+        tmp_path, tracks, stubs, local_addr, clinical_exclude_vocab):
+    """Same contract as test_title_drop_costs_no_fetch_and_no_score, for
+    the clinical_titles/clinical_markers vocabulary (src/match/gates.py,
+    added 2026-09-18 for the Duke Health hospital-roster false positives):
+    the exclude gate is free-gate phase, so a drop costs no fetch and no
+    Claude call, and a title carrying a research/data/engineering marker
+    is spared and scored as usual."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    local_on = [dict(tracks[0], exclude_gate=True), tracks[1]]
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    _harvested(conn, c, "clin", "CT Technologist", local_addr)
+    _harvested(conn, c, "rsrch", "Research Technician", local_addr)
+
+    s = _run(db, local_on, stubs)
+
+    assert stubs["hydrate"] == ["rsrch"]
+    assert stubs["score"] == ["Research Technician"]
+    clin = _row(conn, "clin")
+    assert clin["triage_status"] == "exclude"
+    assert clin["triage_detail"] == f"{LOCAL}=exclude"
+    assert clin["track"] is None and clin["resume_fit_score"] is None
+    assert store.crawl_seen(conn, "rsrch") and not store.crawl_seen(conn, "clin")
+    assert s["exclude"] == 1
+
+
 def test_geo_drop_before_hydration_unless_trusted(tmp_path, tracks, stubs,
                                                   elsewhere, local_addr):
     db = tmp_path / "s.db"

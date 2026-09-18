@@ -25,6 +25,7 @@ from src.claude.resume import resume_text
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
+from src.net.http import get_json
 from src.net.parallel import drain, fan_out, fetch_all
 
 
@@ -483,10 +484,23 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     _unscored_due: REFUSED waits UNSCORED_RETRY_DAYS or an immediate body
     change; TOO-SHORT (unreachable through THIS query's own length filter
     today, but shared with rescore_all's sibling selection below) waits for
-    growth past fit.MIN_DESC_CHARS. desc_checked_at doubles as the marker's
-    clock -- safe because this query's population (body >= MIN_DESC_CHARS)
-    and the description-backfill ops' (body < their own min_len) never
-    overlap, so stamping it here cannot suppress a backfill retry.
+    growth past fit.MIN_DESC_CHARS. The length recorded in the marker, and
+    compared against on the next pass, is the STRIPPED body -- the same
+    text score_resume_fit itself measures against MIN_DESC_CHARS -- so a
+    body whose padding whitespace changes without its real content
+    changing is never mistaken for "the posting changed" by _unscored_due.
+
+    desc_checked_at is ALSO stamped here on a refusal, but it does not
+    own the retry clock: _unscored_due reads its date from INSIDE the
+    fit_reason marker string, never from this column, so a later stamp by
+    an unrelated op (check_closed_jobs' probe, a description backfill)
+    can never push the REFUSED horizon out or pull it in. The stamp is
+    written anyway only to keep desc_checked_at meaning "something last
+    looked at this row and found nothing new" for a human or another op
+    reading it -- self_heal_unscored's own population (body >=
+    MIN_DESC_CHARS) and the description-backfill ops' (body < their own
+    min_len) never overlap, so this stamp can never suppress a backfill
+    retry either.
 
     Notes:
         2026-09 evidence (data/logs/session-*.log): the same 3-7 rows at
@@ -511,7 +525,7 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
         return 0
     now = datetime.now()
     due = [r for r in pending if _unscored_due(
-        r.get("fit_reason"), len(r.get("description") or ""), now)]
+        r.get("fit_reason"), len((r.get("description") or "").strip()), now)]
     held = len(pending) - len(due)
     if not due:
         print(f"  self-heal: {held} previously-unscorable job(s) not yet "
@@ -533,7 +547,7 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
         cause = unscored_cause(res.reason)
         if cause is None:
             continue    # scorer offline, or an unrecognized reason: leave as is
-        desc_len = len(r.get("description") or "")
+        desc_len = len((r.get("description") or "").strip())
         store.update_job_scores(conn, r["job_id"],
                                 {"fit_reason": _unscored_marker(cause, desc_len, now)})
         store.mark_desc_checked(conn, r["job_id"], now)
@@ -1063,8 +1077,12 @@ def sync_status_all(top_n=15, t=None):
     A board that cannot be reconciled is skipped (never closed on a failed
     or partial fetch) and SAID SO: one "[!]" line per board with the
     reason, and the reason counts beside the footer's reconciled count. A
-    capped board is reconciled, closing a row only on its second miss
-    (store.sync_job_statuses's `capped`)."""
+    capped board IS reconciled (reopening still happens for whatever
+    matches), but a board-native row missing from a capped snapshot is
+    NEVER closed here, on any miss (store.sync_job_statuses's `capped`) --
+    that snapshot is an unstable window, not the board, and closing what
+    it drops is check_closed_jobs's job, which probes the row's own URL
+    instead of trusting one page-capped pull."""
     t = _t(t)
     with track_store(t) as conn:
         companies = store.crawlable_companies(conn, tag=t["store_tag"])
@@ -1951,3 +1969,207 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         if written and commit:
             print("  confirm or reject them in the roster review queue.")
         return written
+
+
+# --------------------------------------------------------------------------- #
+#  Employer-name repair: a board still named after its own slug/tenant        #
+# --------------------------------------------------------------------------- #
+#
+# 51 boards read the digest and the logs under their bare slug/tenant
+# ("Lifestance", "Centriaautism", "Abbvie", "Akumincorp", ...) rather than
+# the employer's real name (2026-09-18 audit). Two ATSes carry that real
+# name in the SAME listing call every ordinary board pull already makes,
+# with no per-posting detail fetch and no per-row drift:
+#
+#   * Greenhouse -- every job object in the boards-api listing carries
+#     `company_name` (confirmed live, 2026-09-18: tenant "centriaautism"
+#     answers "Centria Autism", "medelitellc" answers "MedElite Group,
+#     LLC."). fetchers.api._greenhouse_row never reads it -- it builds the
+#     row's title/location/description and drops the rest of the object.
+#   * SmartRecruiters -- every posting carries `company.name` (confirmed
+#     live: "AbbVie", "Eurofins"). fetchers.company.fetch_smartrecruiters_all
+#     never reads it either.
+#
+# Workday, Lever and Ashby were checked the same way and do NOT qualify:
+#   * Workday's CXS job-DETAIL JSON (not the listing) carries a top-level
+#     `hiringOrganization.name` -- but live-checked against the "aah"
+#     tenant (Advocate Aurora Health) it answered "136 Aurora Medical
+#     Center Grafton LLC" for one req: the POSTING's legal entity, not the
+#     board's brand, and it varies row to row. Using it would rename the
+#     board WRONG, not just fail to rename it -- and reading it needs a
+#     per-posting detail GET the other two do not, since a board-native
+#     name has to be the same on every row to be worth writing once.
+#   * Lever's and Ashby's public postings APIs carry no employer field at
+#     all, structured or otherwise (confirmed live against "kitware" and
+#     "brainco"/"alpacahealth" -- the name appears only inside description
+#     HTML). There is no existing parsing of it to reuse, so it is not
+#     read at all rather than screen-scraped freshly for this one op.
+
+
+def _employer_name_greenhouse(slug):
+    """The employer name Greenhouse's OWN board carries for `slug` (a
+    posting's `company_name`), or "" on any failure or an empty board.
+
+    `content=false` is the same lightweight listing shape
+    src.discovery.resolve.probes._nc_count_greenhouse already uses for a
+    metadata-only read -- this needs one field off one posting, not every
+    posting's full JD."""
+    data = get_json(
+        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
+        f"Greenhouse {slug} (employer-name check)", default={})
+    jobs = (data or {}).get("jobs") or []
+    return (jobs[0].get("company_name") or "").strip() if jobs else ""
+
+
+def _employer_name_smartrecruiters(slug):
+    """The employer name SmartRecruiters' OWN board carries for `slug` (a
+    posting's `company.name`), or "" on any failure or an empty board.
+
+    `limit=1` is the same shape src.discovery.resolve.probes
+    .probe_smartrecruiters already uses -- one posting is enough to name
+    the board."""
+    data = get_json(
+        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1",
+        f"SmartRecruiters {slug} (employer-name check)", default={})
+    content = (data or {}).get("content") or []
+    return ((content[0].get("company") or {}).get("name") or "").strip() \
+        if content else ""
+
+
+# ats -> the reader above for it. Only an ATS with a reliable, BOARD-level
+# (not per-posting) employer field in its own listing payload qualifies --
+# see the module comment above for why Workday/Lever/Ashby are not here.
+_EMPLOYER_NAME_READERS = {"greenhouse": _employer_name_greenhouse,
+                          "smartrecruiters": _employer_name_smartrecruiters}
+
+
+def _slug_named_boards(conn):
+    """The active companies on a supported ATS (_EMPLOYER_NAME_READERS)
+    that src.ats.coords.slug_named calls slug-named -- the same rule, and
+    the same one definition of it, the HARVEST SUMMARY's own tally
+    applies. Biggest board first -- the boards a wrong name embarrasses
+    most in the digest and the logs.
+
+    Notes:
+        slug_named's SLUG_NAME_SOURCE half is what keeps this op off rows
+        a human (or local_sourcing) named for real, and it live-caught a
+        THIRD failure mode past both of its screens: company id 70, stored
+        as "NeU" (source "discovery:bciwiki:companies", a real neurotech
+        employer, not slug-derived) with slug "neu" -- but the "neu"
+        Greenhouse tenant today answers a totally unrelated company's
+        postings ("Fora"), i.e. the stored slug no longer names NeU's own
+        board at all. A source-restricted candidate list never reaches
+        that row; that stale coordinate is a separate, pre-existing roster
+        problem (a dead/reassigned Greenhouse tenant) for reresolve_misses
+        or a human to catch, not this op to paper over by renaming NeU to
+        Fora.
+    """
+    ph = ",".join("?" for _ in _EMPLOYER_NAME_READERS)
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT id, name, ats, slug, source, total_job_count FROM companies "
+        f"WHERE COALESCE(active,0)=1 AND ats IN ({ph})",
+        tuple(_EMPLOYER_NAME_READERS)).fetchall()]
+    rows = [r for r in rows if coords.slug_named(r)]
+    rows.sort(key=lambda r: -(r.get("total_job_count") or 0))
+    return rows
+
+
+def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
+    """PREVIEW (default) or APPLY a rename of every active, dork-sourced
+    Greenhouse/SmartRecruiters board whose stored name is nothing but its
+    own board slug (_slug_named_boards) to the employer name the board's
+    OWN listing payload carries (_EMPLOYER_NAME_READERS). One GET per
+    candidate board, no detail fetch, no whole-board pull.
+
+    Same preview/apply shape as reresolve_misses: `commit=False` (the
+    default -- this NEVER renames silently) fetches every candidate's real
+    name and prints one line each; nothing is written. `commit=True` is
+    the only thing that writes, one line per rename actually made.
+
+    A fetched name is rejected -- reported, never written, in EITHER mode
+    -- when:
+      * the board answered empty or errored (_EMPLOYER_NAME_READERS -> "");
+      * src.match.names.junk_name_reason flags it -- the SAME screen a
+        pasted or re-resolved name is run through, so a malformed payload
+        naming a section heading rather than an employer can never
+        overwrite a roster row;
+      * it is BYTE-IDENTICAL to what is already stored -- nothing to fix.
+        This is deliberately NOT a name_key comparison: name_key strips
+        spaces, so it cannot tell "Centria Autism" (what the payload
+        carries) from "Centriaautism" (the slug-derived name stored) --
+        the exact improvement this op exists to make. An earlier version
+        used name_is_own_slug(new_name, slug) here and, live-checked
+        against the 22 real candidates on 2026-09-18, wrongly skipped 8 of
+        14 genuine renames as "nothing to fix" (Axsome Therapeutics,
+        Shields Health Solutions, Garner Health, Beam Therapeutics,
+        Formation Bio, American Institutes for Research, MapLight
+        Therapeutics, Eliot Community Human Services) because each one's
+        name_key happens to equal its own slug's, spaces and all;
+      * it collides (src.match.names.name_key) with a DIFFERENT company
+        already on the roster -- `companies.name` is UNIQUE, and this op
+        renames one row, it does not merge two.
+
+    `limit` caps how many candidates this ONE pass checks (biggest board
+    first -- see _slug_named_boards).
+
+    Returns [(company_id, old_name, new_name)]: renamed rows (commit=True)
+    or the rows that WOULD be renamed (commit=False).
+
+    Notes:
+        Workday, Lever and Ashby boards named after their own slug are not
+        covered and still need a human rename -- see the module comment
+        above (Workday's own per-posting hiringOrganization field is the
+        wrong grain and was confirmed live to produce a WRONG name, not
+        merely a missing one; Lever and Ashby carry no employer field in
+        their public postings API at all).
+    """
+    from src.match.names import junk_name_reason, name_key
+
+    t = _t(t)
+    with track_store(t, conn) as conn:
+        rows = _slug_named_boards(conn)
+        if limit:
+            rows = rows[:int(limit)]
+        if not rows:
+            print("  no active Greenhouse/SmartRecruiters board is still "
+                  "named after its own slug.")
+            return []
+        print(f"  checking {len(rows)} slug-named board's own payload for "
+              f"its employer name...")
+        existing = {name_key(r["name"]): r["name"]
+                   for r in conn.execute("SELECT name FROM companies")}
+        out = []
+        for c in rows:
+            new_name = _EMPLOYER_NAME_READERS[c["ats"]](c["slug"])
+            label = f"{c['name'][:30]:30} {c['ats']:15}"
+            if not new_name:
+                print(f"    [skip]      {label} board answered no employer name")
+                continue
+            why = junk_name_reason(new_name)
+            if why:
+                print(f"    [skip]      {label} payload name {new_name!r} "
+                      f"rejected ({why})")
+                continue
+            if new_name == c["name"]:
+                print(f"    [skip]      {label} payload's name matches what "
+                      f"is already stored -- nothing to fix")
+                continue
+            key = name_key(new_name)
+            if key in existing and existing[key] != c["name"]:
+                print(f"    [skip]      {label} {new_name!r} collides with "
+                      f"existing company {existing[key]!r}")
+                continue
+            print(f"    [{'renamed' if commit else 'preview'}]    {label} "
+                  f"-> {new_name!r}")
+            out.append((c["id"], c["name"], new_name))
+            if commit:
+                conn.execute("UPDATE companies SET name=? WHERE id=?",
+                            (new_name, c["id"]))
+                existing[key] = new_name
+        if commit and out:
+            conn.commit()
+        print(f"\n  {len(out)} board(s) "
+              + ("renamed" if commit
+                 else "would be renamed (preview: nothing written)")
+              + f" of {len(rows)} checked.")
+        return out

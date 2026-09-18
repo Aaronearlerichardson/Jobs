@@ -1009,9 +1009,12 @@ class TestPastedNamePreview:
 
     def test_the_model_reads_the_paste_when_a_key_is_configured(
             self, monkeypatch, db):
+        # preview_names(use_llm=None) resolves the default through
+        # src.claude.api.have_api_key now, not its own inline
+        # ANTHROPIC_API_KEY-vs-placeholder comparison (one of three such
+        # copies folded into that shared helper).
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(paste_ingest.config, "ANTHROPIC_API_KEY",
-                            "sk-ant-test")
+        monkeypatch.setattr(paste_ingest, "have_api_key", lambda: True)
         monkeypatch.setattr(paste_ingest, "extract_names_llm",
                             lambda *a, **k: ["Model Named Co"])
         assert [r["name"] for r in paste_ingest.preview_names("x")] \
@@ -1019,8 +1022,7 @@ class TestPastedNamePreview:
 
     def test_no_key_means_the_regex_parser(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(paste_ingest.config, "ANTHROPIC_API_KEY",
-                            "YOUR_ANTHROPIC_API_KEY_HERE")
+        monkeypatch.setattr(paste_ingest, "have_api_key", lambda: False)
         monkeypatch.setattr(paste_ingest, "extract_names_llm",
                             lambda *a, **k: (_ for _ in ()).throw(
                                 AssertionError("called with no API key")))

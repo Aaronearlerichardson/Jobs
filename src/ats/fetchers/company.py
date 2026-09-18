@@ -40,7 +40,8 @@ _ANCHORS_ONLY = SoupStrainer("a")
 
 from src.net.http import HEADERS, JSON_HEADERS, SESSION, fetch_failed, get_json, note_capped
 from src.match.locality import NC_RE, location_unknown  # profile [locality]
-from src.net.util import LOC_TEXT_RE, cache_dir, default_search_text, norm_posted_date
+from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
+                          default_search_text, norm_posted_date)
 from . import icims, workday
 from .adp_wfn import fetch_adp
 from .api import fetch_ashby, fetch_greenhouse, fetch_lever
@@ -74,7 +75,7 @@ _JOB_KEYS = ("id", "title", "url", "location", "description", "posted_at",
 
 
 def _adapt(jobs, ats, loc_re=None):
-    """A fetcher module's job dicts in the company-fetch shape: `ats`
+    r"""A fetcher module's job dicts in the company-fetch shape: `ats`
     named, `company` dropped (the store row supplies it), the description
     capped at the JD budget, `_wd` kept where the module set it.
 
@@ -84,10 +85,28 @@ def _adapt(jobs, ats, loc_re=None):
     >>> _adapt([{"id": "x_1", "company": "Acme", "title": "T", "url": "u",
     ...          "location": "Durham, NC", "description": "d", "posted_at": "2026-01-02"}], "x")
     [{'id': 'x_1', 'title': 'T', 'url': 'u', 'location': 'Durham, NC', 'description': 'd', 'posted_at': '2026-01-02', 'ats': 'x', '_wd': None}]
+
+    `title` and `location` are `net.util.clean_field`-ed here, BEFORE `loc_re`
+    sees the location: this is the whole-board path's one choke point, the
+    way `board.board_jobs` is the sweep path's, so no fetcher module routed
+    through it can store an embedded newline or tab (see board.py's module
+    docstring for what that corrupts). A location split across two lines
+    also has to be cleaned before it is matched, or the filter decides on
+    text no human wrote:
+
+    >>> _adapt([{"id": "x_2", "title": "Data\nEngineer", "url": "u",
+    ...          "location": "Durham,\tNC", "description": ""}], "x")[0]["location"]
+    'Durham, NC'
+
+    The three builders in this module that shape the adapted dict
+    themselves (SmartRecruiters, "custom" careers pages, wpjson) never
+    reach here, and call `clean_field` at their own row builders instead.
     """
     out = []
     for j in jobs:
-        if not loc_ok(loc_re, j.get("location", "")):
+        j["title"] = clean_field(j.get("title"))
+        j["location"] = clean_field(j.get("location"))
+        if not loc_ok(loc_re, j["location"]):
             continue
         job = {k: j[k] for k in _JOB_KEYS if k in j}
         job["description"] = (j.get("description") or "")[:_DESC_MAX]
@@ -97,7 +116,14 @@ def _adapt(jobs, ats, loc_re=None):
     return out
 
 
-def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
+# Pages a whole-board SmartRecruiters pull reads by default (x page size
+# 100 = the pre-2026-09-18 1,000-row cap). FETCHERS' "smartrecruiters"
+# entry below raises this for a mission-worth-it board via
+# config.board_max_pages -- see src.config.policy.BOARD_MAX_ROWS.
+_SR_MAX_PAGES = 10
+
+
+def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=_SR_MAX_PAGES):
     """SmartRecruiters public postings API. Descriptions hydrated lazily.
 
     Reports a capped snapshot (net.http.note_capped) when every page up to
@@ -124,12 +150,18 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=10):
             break
         for p in content:
             loc = p.get("location", {}) or {}
-            loc_s = ", ".join(x for x in (loc.get("city"), loc.get("region"),
-                                          loc.get("country")) if x)
+            # Each COMPONENT cleaned before the join, not the joined
+            # string: a trailing tab on "city" would otherwise survive the
+            # collapse as a space before the comma ("Durham , NC"), and a
+            # component that is only whitespace would contribute a bare ", ".
+            loc_s = ", ".join(x for x in (clean_field(loc.get("city")),
+                                          clean_field(loc.get("region")),
+                                          clean_field(loc.get("country"))) if x)
             if not loc_ok(loc_re, loc_s):
                 continue
             pid = p.get("id")
-            out.append({"id": f"sr_{slug}_{pid}", "title": p.get("name", ""),
+            out.append({"id": f"sr_{slug}_{pid}",
+                        "title": clean_field(p.get("name")),
                         "url": f"https://jobs.smartrecruiters.com/{slug}/{pid}",
                         "location": loc_s, "description": "", "ats": "smartrecruiters",
                         "_wd": None, "_sr": (slug, pid),
@@ -618,7 +650,7 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
             return fetch_custom_careers(op, loc_re, _hop=False)
     out, seen = [], set()
     for a, href, title in links:
-        loc = _location_near(a, loc_re)
+        loc = clean_field(_location_near(a, loc_re))
         if not loc_ok(loc_re, loc):
             continue
         url = href if href.startswith("http") else root + href
@@ -626,7 +658,8 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
             continue
         seen.add(url)
         out.append({"id": f"custom_{re.sub(r'[^a-z0-9]+', '-', url.lower())[-48:]}",
-                    "title": title[:90], "url": url, "location": loc[:70],
+                    "title": clean_field(title)[:90], "url": url,
+                    "location": loc[:70],
                     "description": "", "ats": "custom", "_wd": None})
     return out
 
@@ -721,13 +754,14 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
             break
         for p in d.get("posts", []) or []:
             loc_d = p.get("location") or {}
-            loc = ", ".join(x for x in (loc_d.get("city"), loc_d.get("state"))
+            loc = ", ".join(x for x in (clean_field(loc_d.get("city")),
+                                        clean_field(loc_d.get("state")))
                             if x) or "See posting"
             if not loc_ok(loc_re, loc):
                 continue
             url = ((p.get("link") or {}).get("url")) or p.get("permalink") or ""
             out.append({"id": f"wpjson_{host}_{p.get('ID')}",
-                        "title": p.get("post_title") or "Unknown",
+                        "title": clean_field(p.get("post_title")) or "Unknown",
                         "url": url, "location": loc, "description": "",
                         "posted_at": norm_posted_date((p.get("post_date") or "")[:10]),
                         "ats": "wpjson", "_wd": None})
@@ -760,9 +794,18 @@ FETCHERS = {
     "rippling":        lambda c, lr: _adapt(fetch_rippling(c["slug"], loc_re=lr, **_WHOLE_BOARD), "rippling"),
     "ultipro":         lambda c, lr: _adapt(fetch_ultipro(c["slug"], loc_re=lr), "ultipro"),
     "hibob":           lambda c, lr: _adapt(fetch_hibob(c["slug"], loc_re=lr), "hibob"),
-    "workday":         lambda c, lr: _adapt(fetch_workday_all(c["wd_tenant"], c["wd_pod"], c["wd_site"], lr), "workday"),
+    # Page budget: config.board_max_pages raises it for a mission-worth-it
+    # board (config.BOARD_MAX_ROWS), else keeps the fetcher's own narrower
+    # default (workday._WD_MAX_PAGES / _SR_MAX_PAGES) for one
+    # config.is_offmission_inactive -- see policy.board_max_pages.
+    "workday":         lambda c, lr: _adapt(fetch_workday_all(
+                           c["wd_tenant"], c["wd_pod"], c["wd_site"], lr,
+                           max_pages=config.board_max_pages(
+                               c, 20, workday._WD_MAX_PAGES)), "workday"),
     "phenom":          lambda c, lr: _adapt(fetch_phenom_all(c.get("slug") or c.get("careers_url"), lr), "phenom"),
-    "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(c["slug"], lr),
+    "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(
+                           c["slug"], lr,
+                           max_pages=config.board_max_pages(c, 100, _SR_MAX_PAGES)),
     "icims":           lambda c, lr: _adapt(fetch_icims_all(c["slug"], lr), "icims"),
     "successfactors":  lambda c, lr: _adapt(fetch_successfactors("", c["careers_url"], loc_re=lr), "successfactors"),
     "peopleadmin":     lambda c, lr: fetch_peopleadmin_all(c["careers_url"], lr),

@@ -144,6 +144,41 @@ class TestActivationRule:
             assert new == old(tier, name), (i, tier, name)
 
 
+class TestOffmissionInactiveIsNotTheActivationRule:
+    """`config.is_offmission_inactive` sits beside `is_active_mission` in
+    config/policy.py and reads the same ACTIVE_MISSION_TIERS, one word
+    apart. They answer different questions, and the difference is
+    deliberate -- pinned here because nothing else says which is which:
+
+      * is_active_mission decides `active`. An UNSCORED company (tier
+        None) is active: scoring was unavailable, so the row is not
+        punished for it.
+      * is_offmission_inactive only ever narrows a CADENCE
+        (harvest.plan's HARVEST_OFFMISSION_HOURS) or a BUDGET
+        (config.board_max_pages). An unscored row reads as off-mission
+        there: nobody has bothered to score it, so it does not earn the
+        frequent, wide read.
+    """
+
+    def test_an_unscored_row_is_active_but_still_off_mission(self):
+        assert is_active_mission(None, "Nowhere Robotics") == 1
+        assert config.is_offmission_inactive({"mission_tier": None,
+                                              "active": 0}) is True
+
+    @pytest.mark.parametrize("tier", ALL_TIERS)
+    def test_a_row_the_roster_calls_active_is_never_off_mission(self, tier):
+        """Whatever the tier: the activation decision is already recorded
+        in `active` (multi-division exemptions included), and this
+        predicate never re-litigates it."""
+        assert not config.is_offmission_inactive({"mission_tier": tier,
+                                                  "active": 1})
+
+    def test_an_active_tier_is_never_off_mission(self):
+        for tier in ACTIVE_MISSION_TIERS:
+            assert not config.is_offmission_inactive({"mission_tier": tier,
+                                                      "active": 0})
+
+
 # --------------------------------------------------------------------------- #
 #  2. Nobody re-implements the rule inline
 # --------------------------------------------------------------------------- #

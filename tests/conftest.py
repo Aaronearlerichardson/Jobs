@@ -90,6 +90,34 @@ def pristine_keywords(cfg):
     cfg.restore_keywords(saved, cfg)
 
 
+@pytest.fixture
+def exclude_vocab(monkeypatch):
+    """Factory: `exclude_vocab("t_x", clinical_titles=[...], ...)` gives
+    track "t_x" that [exclude.<track>] vocabulary for one test and returns
+    the track id.
+
+    A synthetic table rather than the active profile's, so a test can pin
+    the SHAPE of a vocabulary whether or not profile.toml (or the
+    profile.example.toml CI runs against) happens to configure it.
+
+    `gates._exclude_tables` is lru_cache-backed, so the cache is cleared on
+    BOTH sides: on the way in so the profile's own table for that id is not
+    already memoized, and on the way out so a later test sharing the id
+    does not read this one's vocabulary. Defined here because two files
+    configure one this way and the cache half is the easy half to forget.
+    """
+    import src.match.gates as gates
+
+    def _configure(track_id, **tables):
+        monkeypatch.setitem(gates.config.EXCLUDE_BY_TRACK, track_id, tables)
+        gates._exclude_tables.cache_clear()
+        return track_id
+
+    gates._exclude_tables.cache_clear()
+    yield _configure
+    gates._exclude_tables.cache_clear()
+
+
 # --------------------------------------------------------------------------- #
 #  Store
 # --------------------------------------------------------------------------- #

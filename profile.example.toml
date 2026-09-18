@@ -74,6 +74,21 @@ defense_strong = ["weapons", "munitions", "electronic warfare"]
 defense_weak = ["defense", "military", "combat"]
 # Off-topic industries to drop even when they use your keywords.
 nonclinical = ["blockchain", "cryptocurrency", "sportsbook"]
+# Hands-on clinical-service occupations (title only) that pass the free
+# title gate on a word they share with engineering roles by coincidence
+# ("technologist", "scientist", "quality" are all in the engine default
+# tech_title_regex) but are not what you want scored — a hospital roster
+# can be almost entirely these. Adjust to your own field's non-targets.
+clinical_titles = ["technologist", "technician", "nurse", "therapist",
+                   "sonographer", "phlebotomist", "medical lab",
+                   "medical laboratory"]
+# A research/data/engineering word anywhere in the title OR description
+# spares a clinical_titles hit, so "Research Technician" and "Clinical
+# Data Scientist" still get scored even though "technician"/"nurse" alone
+# would otherwise match.
+clinical_markers = ["research", "data", "engineer", "engineering",
+                    "software", "informatics", "bioinformatics",
+                    "biostatistics", "computational", "algorithm"]
 
 [locations]
 onsite = ["san francisco", "sf", "bay area", "oakland", "berkeley"]
@@ -214,6 +229,18 @@ multi_division_mission_floor = 0.6
 # 0, "harvest everything now") always overrides this for every board,
 # off-mission or not -- see src/crawl/harvest.py's plan() docstring.
 harvest_offmission_hours = 168
+
+# Rows a mission-worth-it Workday or SmartRecruiters whole-board pull
+# reads before giving up. Default 3000, which carries headroom above the
+# biggest board measured live -- see src/config/policy.py's BOARD_MAX_ROWS
+# for that measurement and board_max_pages for the page arithmetic. A board
+# that is BOTH off-mission and itself inactive (the SAME rule
+# harvest_offmission_hours above uses) keeps its fetcher's own narrower
+# default instead: one a track's own mission gate discards on every triage
+# pass never earns the wider, slower read. Every board is still read every
+# pass either way; this only changes how MUCH of the biggest ones a
+# mission-worth-it pass sees.
+# board_max_rows = 3000
 
 # Honor robots.txt (default true). Turning this off disables the check, not
 # the connection pooling or the per-host Crawl-delay pacing.
