@@ -175,3 +175,31 @@ def from_hit(hit, name=None, **extra):
     """
     return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"),
                    name=name, **extra)
+
+
+def board_context(board):
+    """A board's address, worded for the mission scorer to read when no
+    posting could be sampled from it (the caller prefers real titles).
+    `board` is a resolver hit or a store row. '' when it has no address at
+    all.
+
+    The address is often the one fact that names the employer: a display
+    name like "Studycast" says nothing, `ats.rippling.com/core-sound-imaging`
+    says Core Sound Imaging.
+
+    >>> board_context({"ats": "rippling", "slug": "core-sound-imaging",
+    ...                "careers_url": "https://ats.rippling.com/core-sound-imaging/jobs"})
+    '(no open postings could be read) careers board: https://ats.rippling.com/core-sound-imaging/jobs'
+    >>> board_context({"ats": "bamboohr", "slug": "npi"})
+    '(no open postings could be read) careers board: bamboohr "npi"'
+    >>> board_context({"ats": "workday", "slug": ("aah", 5, "Ext")})
+    '(no open postings could be read) careers board: workday "aah"'
+    >>> board_context({"ats": "custom"})
+    ''
+    """
+    slug = board_slug(board)
+    if isinstance(slug, tuple):        # a hit's Workday (tenant, pod, site)
+        slug = slug[0]
+    address = board.get("careers_url") or (
+        f'{board.get("ats")} "{slug}"' if slug else "")
+    return f"(no open postings could be read) careers board: {address}" if address else ""

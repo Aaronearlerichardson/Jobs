@@ -90,6 +90,24 @@ def fake_get_text(monkeypatch):
 
 
 @pytest.fixture
+def requested(monkeypatch):
+    """Serve one JSON payload to every GET and log the URLs asked for. The
+    log is the assertion where a test cares what a fetcher SPENT: bamboohr,
+    rippling and paylocity make one detail GET per kept row unless told
+    not to, and that shows up as a second URL."""
+    def _install(payload):
+        urls = []
+
+        def _get(url, *a, **k):
+            urls.append(url)
+            return fake_response(payload)
+
+        monkeypatch.setattr(http.SESSION, "get", _get)
+        return urls
+    return _install
+
+
+@pytest.fixture
 def usajobs_creds(monkeypatch):
     """Credentials the USAJOBS fetcher will accept. Nothing real: the
     session is stubbed, so these never leave the process."""
@@ -1047,6 +1065,115 @@ class TestOneFetcherPerAts:
         nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
                                         re.compile("nowhere-at-all"))
         assert everything and nowhere == []
+
+
+class TestTitleSampling:
+    """The mission scorer's title sample (company.sample_titles) is read
+    through the same per-ATS fetchers as every other pull, at listing cost.
+
+    It used to be hand-written requests for four ATS families and nothing
+    for the other sixteen, so a company on one of them was mission-scored
+    from its name alone: "Studycast", the cloud-PACS product of a Raleigh
+    medical-imaging vendor (Rippling board core-sound-imaging), came back
+    `other` / 0.05 as a study-education platform.
+    """
+
+    RIPPLING = [{"uuid": f"0000000{i}-0000-0000-0000-000000000000",
+                 "name": name, "workLocation": {"label": "Raleigh, NC"}}
+                for i, name in enumerate(["PACS Support Engineer",
+                                          "Imaging Software Developer",
+                                          "PACS Support Engineer"])]
+
+    def test_every_sampler_is_a_company_dispatch(self):
+        assert set(company._TITLE_SAMPLERS) <= set(company.FETCHERS)
+
+    def test_a_rippling_board_is_sampled_at_listing_cost(self, requested):
+        urls = requested(self.RIPPLING)
+        titles = company.sample_titles(
+            {"ats": "rippling", "slug": "core-sound-imaging"})
+        assert titles == ["PACS Support Engineer", "Imaging Software Developer"]
+        assert len(urls) == 1 and "core-sound-imaging" in urls[0]
+
+    def test_a_bamboohr_board_is_sampled_at_listing_cost(self, requested):
+        urls = requested({"result": [
+            {"id": 7, "jobOpeningName": "Field Service Engineer",
+             "location": {"city": "Cary", "state": "NC"}}]})
+        assert company.sample_titles({"ats": "bamboohr", "slug": "acme"}) == \
+            ["Field Service Engineer"]
+        assert [u.rsplit("/", 1)[-1] for u in urls] == ["list"]
+
+    def test_a_one_request_family_samples_through_its_company_fetcher(
+            self, fake_get):
+        fake_get(load("hibob_board.json"))
+        row = {"ats": "hibob", "slug": "acme"}
+        whole = [j["title"] for j in company.fetch_company(row)]
+        assert whole and company.sample_titles(row, n=50) == whole
+        assert company.sample_titles(row, n=1) == whole[:1]
+
+    def test_titles_are_distinct_and_capped(self, requested):
+        requested(self.RIPPLING)
+        row = {"ats": "rippling", "slug": "core-sound-imaging"}
+        assert company.sample_titles(row, n=2) == [
+            "PACS Support Engineer", "Imaging Software Developer"]
+        assert company.sample_titles(row, n=1) == ["PACS Support Engineer"]
+
+    @pytest.mark.parametrize("row", [
+        {"ats": "rippling", "slug": "gone"},
+        {"ats": "bamboohr", "slug": "gone"},
+        {"ats": "custom", "careers_url": None},   # nothing to fetch
+        {"ats": "no-such-ats"},                   # nothing that could
+    ])
+    def test_an_unreadable_board_samples_empty_and_never_raises(
+            self, row, monkeypatch, capsys):
+        def _refused(*a, **k):
+            raise OSError("connection refused")
+        monkeypatch.setattr(http.SESSION, "get", _refused)
+        http.reset_fetch_failures()
+        assert company.sample_titles(row) == []
+
+
+class TestMissionContext:
+    """What the mission scorer is TOLD about a board: its live titles, else
+    the board's own address. Every scoring call site asks
+    local_sourcing.mission_context, so none sends a bare name."""
+
+    BOARD = {"name": "Studycast", "ats": "rippling", "slug": "core-sound-imaging",
+             "careers_url": "https://ats.rippling.com/core-sound-imaging/jobs"}
+
+    def test_live_titles_are_the_context(self, monkeypatch):
+        from src.discovery import local_sourcing
+        monkeypatch.setattr(local_sourcing, "_sample_titles",
+                            lambda h: ["PACS Engineer", "", "Sales Lead"])
+        assert local_sourcing.mission_context(self.BOARD) == \
+            "PACS Engineer | Sales Lead"
+
+    def test_no_titles_means_the_board_address(self, monkeypatch):
+        from src.discovery import local_sourcing
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        ctx = local_sourcing.mission_context(self.BOARD)
+        assert "core-sound-imaging" in ctx and "no open postings" in ctx
+
+    def test_a_board_with_no_address_stays_empty(self, monkeypatch):
+        from src.discovery import local_sourcing
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        assert local_sourcing.mission_context({"ats": "custom"}) == ""
+
+    def test_the_scorer_is_sent_the_context_for_an_unsampled_family(
+            self, requested, monkeypatch):
+        """Through the real sampler: a Rippling board (no branch of its own
+        before 2026-09-18) reaches the scorer with its titles, and once its
+        board is empty, with its address."""
+        from src.discovery import local_sourcing
+        sent = []
+        monkeypatch.setattr(
+            "src.claude.api.score_company_mission",
+            lambda name, context="": sent.append(context) or ("adjacent", .5, ""))
+        requested(TestTitleSampling.RIPPLING)
+        local_sourcing._score_hit(self.BOARD)
+        assert sent[-1] == "PACS Support Engineer | Imaging Software Developer"
+        requested([])
+        local_sourcing._score_hit(self.BOARD)
+        assert "core-sound-imaging" in sent[-1]
 
 
 class TestADeadEndpointIsNeverAnException:

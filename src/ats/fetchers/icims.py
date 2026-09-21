@@ -204,13 +204,15 @@ def _sitemap_rows(tenant):
 
 
 def fetch_icims_all(tenant, loc_re=None, loc_label=LOCAL_LABEL,
-                    search_location=LOCAL_LABEL):
+                    search_location=LOCAL_LABEL, meta_cap=_META_CAP):
     """Every posting on the tenant's board that passes `loc_re`, located as
     the module doc describes. Returns [] on any failure.
 
     `search_location` narrows the board server-side even when `loc_re` is
     None; pass None (or "") for a whole-board pull. Rows a resolved detail
     page supplied a description for carry it; the rest are hydrated later.
+    `meta_cap` bounds the detail GETs that locate an unlocated row; 0
+    leaves such rows unlocated and reads the listing only.
     """
     out = []
     try:
@@ -239,7 +241,7 @@ def fetch_icims_all(tenant, loc_re=None, loc_label=LOCAL_LABEL,
         # apply the location filter against what the posting really says.
         n_meta = 0
         for j in out:
-            if not j["location"] and n_meta < _META_CAP:
+            if not j["location"] and n_meta < meta_cap:
                 loc, desc = job_meta(j["url"])
                 n_meta += 1
                 if loc:

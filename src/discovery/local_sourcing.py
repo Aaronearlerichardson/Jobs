@@ -33,6 +33,7 @@ from datetime import datetime
 from src import config
 from src import tags as company_tags
 from src.ats import coords
+from src.ats.fetchers import company as company_fetch
 from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain, fan_out
@@ -346,8 +347,17 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 
 
 def _sample_titles(hit, n=6):
-    """Fetch a few job titles from a confirmed board for mission context."""
-    ats, slug = hit["ats"], hit["slug"]
+    """A few job titles from a confirmed board, for mission context. `hit`
+    is a resolver hit or a store row.
+
+    Greenhouse, Lever, Ashby and Workday are asked for less than their
+    whole-board fetchers pull (no descriptions, `limit=n`), so they keep the
+    requests below; every other family samples through its own fetcher
+    (fetchers.company.sample_titles). [] when nothing could be read.
+    """
+    # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
+    board = hit if "wd_tenant" in hit else coords.from_hit(hit)
+    ats, slug = board["ats"], board["slug"]
     try:
         if ats == "greenhouse":
             r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
@@ -368,7 +378,7 @@ def _sample_titles(hit, n=6):
             return [j.get("title", "") for j in
                     data.get("jobs", data.get("jobPostings", []))[:n]]
         if ats == "workday":
-            t, p, s = slug
+            t, p, s = board["wd_tenant"], board["wd_pod"], board["wd_site"]
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
             r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
                                          "searchText": _wd_search_text()},
@@ -376,7 +386,27 @@ def _sample_titles(hit, n=6):
             return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
     except Exception:
         return []
-    return []
+    return company_fetch.sample_titles(board, n)
+
+
+def mission_context(board):
+    """The free-text context `src.claude.score_company_mission` is given for
+    a resolved board or roster row (a hit or a store row): a few live posting
+    titles, else the board's own address (coords.board_context) -- '' only
+    for a board with neither. Every mission-scoring call site builds its
+    context here, so no path scores an employer on its name alone while its
+    board could have said more.
+
+    Notes:
+        A name alone is a poor signal. "Studycast", scored on its name with
+        nothing else, came back `other` / 0.05 ("Study/education platform");
+        its Rippling board is core-sound-imaging, a medical-imaging vendor's
+        cloud PACS. Boards that list no postings at all are common: 73 of
+        the 237 boards on the sixteen families that had no sampler were empty
+        on 2026-09-18 (26 of 31 JazzHR boards).
+    """
+    titles = " | ".join(t for t in _sample_titles(board) if t)
+    return titles or coords.board_context(board)
 
 
 def _board_already_tracked(conn, row):
@@ -403,12 +433,11 @@ def _report_dup_board(name, existing):
 
 
 def _score_hit(hit):
-    """(tier, score, reason) for a resolved board: a few live job titles
-    (_sample_titles) as domain context for src.claude.score_company_mission.
-    Pure network I/O, safe to run off the main thread."""
+    """(tier, score, reason) for a resolved board: its mission_context as
+    the domain context for src.claude.score_company_mission. Pure network
+    I/O, safe to run off the main thread."""
     from src.claude.api import score_company_mission
-    titles = _sample_titles(hit)
-    return score_company_mission(hit["name"], " | ".join(t for t in titles if t))
+    return score_company_mission(hit["name"], mission_context(hit))
 
 
 def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
@@ -596,7 +625,6 @@ def add_board(name, url, capture=False):
         [policy] robots_exempt_hosts.
     """
     from src.claude.api import score_company_mission
-    from src.ats.fetchers import company as company_fetch
     from src.store import (CAPTURE_ATS, connect, is_confirmed_company,
                             mark_pending, upsert_company)
     from src.ats.signatures import detect, pack
@@ -629,30 +657,21 @@ def add_board(name, url, capture=False):
         return None
 
     ats = found["ats"]
-    if ats == "workday":
-        t, pd, site = found["triple"]
-        comp = {"ats": "workday", "wd_tenant": t, "wd_pod": pd, "wd_site": site}
-        slug = (t, pd, site)
-    else:
-        comp = {"ats": ats, "slug": found.get("slug"),
-                "careers_url": found.get("careers_url") or url}
-        slug = found.get("slug") or url
-    try:
-        nc = len(company_fetch.fetch_company(comp, company_fetch.NC_RE))
-    except Exception:
-        nc = 0
-
-    sample_hit = {"ats": ats, "slug": slug}
-    titles = _sample_titles(sample_hit)
-    tier, score, reason = score_company_mission(name, " | ".join(t for t in titles if t))
-
-    conn = connect()
-    # `slug` above is the Workday triple, or the URL as a fallback label for
-    # the mission sample; the COORDINATE for every other platform is the
-    # sniffed one.
+    # `slug` is the Workday triple, or the URL as a fallback label for the
+    # printout below; the COORDINATE for every other platform is the sniffed
+    # one.
+    slug = tuple(found["triple"]) if ats == "workday" else found.get("slug") or url
     board = coords.columns(
         ats, slug if ats == "workday" else found.get("slug"),
         found.get("careers_url") or url, name=name)
+    try:
+        nc = len(company_fetch.fetch_company(board, company_fetch.NC_RE))
+    except Exception:
+        nc = 0
+
+    tier, score, reason = score_company_mission(name, mission_context(board))
+
+    conn = connect()
     dup = _board_already_tracked(conn, board)
     if dup:
         _report_dup_board(name, dup)
@@ -707,11 +726,7 @@ def score_missions(max_workers=6, rescore_all=False):
     print(f"  mission-scoring {len(cos)} compan(ies)...")
 
     def _one(c):
-        hit = {"ats": c["ats"],
-               "slug": ((c.get("wd_tenant"), c.get("wd_pod"), c.get("wd_site"))
-                        if c["ats"] == "workday" else c.get("slug"))}
-        titles = _sample_titles(hit)
-        return c, score_company_mission(c["name"], " | ".join(t for t in titles if t))
+        return c, score_company_mission(c["name"], mission_context(c))
 
     n = 0
     def _scored(fut, name):

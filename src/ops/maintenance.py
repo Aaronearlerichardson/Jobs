@@ -1488,7 +1488,7 @@ def add_manual_job(url, title, company, location, description="",
         employer name lands on a same-named stranger's board.
     """
     from src.claude.api import is_active_mission, score_company_mission
-    from src.discovery.local_sourcing import _sample_titles
+    from src.discovery.local_sourcing import mission_context
     from src.discovery.resolve.board import resolve_or_miss
 
     t = _t(t)
@@ -1525,9 +1525,8 @@ def add_manual_job(url, title, company, location, description="",
             # as the probe-first resolver's nc=0 hit was.
             board, miss = resolve_or_miss(name)
         if board:
-            titles = _sample_titles(board)
             tier, score, reason = score_company_mission(
-                name, " | ".join(x for x in titles if x))
+                name, mission_context(board))
             active = is_active_mission(tier, name)
             store.upsert_company(conn, coords.from_hit(
                 board, name=name,
@@ -1897,7 +1896,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     from src.claude.api import score_company_mission
     from src.discovery.local_sourcing import (_board_already_tracked,
                                               _report_dup_board,
-                                              _sample_titles)
+                                              mission_context)
     from src.discovery.resolve.board import resolve_or_miss, resolved
     from src.match.names import junk_name_reason
 
@@ -1964,9 +1963,8 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
                       f"nc={hit['nc']:<3} "
                       f"tot={hit['count']:<4} (was {was[name]})")
                 return
-            titles = _sample_titles(hit)
             tier, score, reason = score_company_mission(
-                name, " | ".join(x for x in titles if x))
+                name, mission_context(hit))
             # upsert_company drops None values so it can never erase a
             # stored one — which would leave the dead board's slug beside
             # the new Workday triple. Clear the coordinate columns first.

@@ -828,3 +828,67 @@ def fetch_company(company, loc_re=None):
 # (ats_dork, local_sourcing) to sample a board's local postings.
 def fetch_company_nc(company):
     return fetch_company(company, NC_RE)
+
+
+# --- title sampling ------------------------------------------------------------ #
+
+# ats -> (store row, n) -> job dicts, for the families whose FETCHERS entry
+# pays a request per posting or per page. A title sample wants the first
+# listing and nothing else, so these are the same fetchers with the detail
+# budget at zero and the pager at one page (or `n` postings, where the
+# listing IS the postings). An ATS not named here answers a listing in one
+# request and samples through FETCHERS unchanged.
+_TITLE_SAMPLERS = {
+    "bamboohr":        lambda c, n: fetch_bamboohr(c["slug"], max_details=0),
+    "adp":             lambda c, n: fetch_adp(*c["slug"].split("|", 1),
+                                              max_details=0, max_pages=1),
+    "paylocity":       lambda c, n: fetch_paylocity(c["slug"], max_details=0),
+    "rippling":        lambda c, n: fetch_rippling(c["slug"], max_details=0),
+    "jobvite":         lambda c, n: fetch_jobvite(c["slug"], max_details=0),
+    "jazzhr":          lambda c, n: fetch_jazzhr("", c["slug"], max_jobs=n),
+    "icims":           lambda c, n: fetch_icims_all(c["slug"], meta_cap=0),
+    "phenom":          lambda c, n: fetch_phenom_all(
+                           c.get("slug") or c.get("careers_url"), max_pages=1),
+    "successfactors":  lambda c, n: fetch_successfactors(
+                           "", c["careers_url"], max_pages=1),
+    "smartrecruiters": lambda c, n: fetch_smartrecruiters_all(c["slug"], max_pages=1),
+    "workday":         lambda c, n: fetch_workday_all(
+                           c["wd_tenant"], c["wd_pod"], c["wd_site"], max_pages=1),
+}
+
+
+def sample_titles(company, n=6):
+    """Up to `n` distinct posting titles from a store row's board, in board
+    order: what the mission scorer is shown of an employer it has only a
+    name for. [] when the board is unreadable, empty, or of an ATS with no
+    fetcher; never raises.
+
+    `company` carries the store's board columns (`src.ats.coords.columns`;
+    `from_hit` turns a resolver hit into them). The pull is listing-only: no
+    description, detail or location-rescue request is spent on a sample.
+
+    Notes:
+        Until 2026-09-18 the sampler lived in src.discovery.local_sourcing
+        with hand-written requests for four ATS families and fell through to
+        [] for the other sixteen, 35% of the roster's boards: a company on
+        one was mission-scored from its name alone. "Studycast" (Rippling
+        board core-sound-imaging, a medical-imaging vendor's PACS product)
+        came back `other` / 0.05 as a study-education platform.
+    """
+    ats = company.get("ats")
+    try:
+        if ats in _TITLE_SAMPLERS:
+            jobs = _TITLE_SAMPLERS[ats](company, n)
+        else:
+            jobs = fetch_company(company)
+    except Exception:
+        return []
+    titles, seen = [], set()
+    for j in jobs:
+        title = clean_field(j.get("title"))
+        if title and title.lower() not in seen:
+            seen.add(title.lower())
+            titles.append(title)
+            if len(titles) >= n:
+                break
+    return titles

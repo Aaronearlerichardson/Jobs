@@ -109,6 +109,26 @@ def _run(db, tracks, stubs, **kw):
                       hydrate_fn=stubs["hydrate_fn"], max_workers=2, **kw)
 
 
+# ── mission context ─────────────────────────────────────────────────────────
+
+def test_mission_is_scored_on_titles_else_on_the_board_address(tmp_path):
+    conn = store.connect(tmp_path / "s.db")
+    sent = []
+
+    def scorer(name, context=""):
+        sent.append(context)
+        return "adjacent", 0.5, "stub"
+
+    c = _company(conn, "Studycast", ats="rippling", slug="core-sound-imaging",
+                 careers_url="https://ats.rippling.com/core-sound-imaging/jobs")
+    triage.ensure_mission(conn, c, ["PACS Engineer", None, "Sales Lead"], scorer)
+    assert sent == ["PACS Engineer | Sales Lead"]
+
+    d = _company(conn, "Nameless", ats="bamboohr", slug="npi")
+    triage.ensure_mission(conn, d, [], scorer)
+    assert 'bamboohr "npi"' in sent[-1]
+
+
 # ── free gates first ────────────────────────────────────────────────────────
 
 def test_title_drop_costs_no_fetch_and_no_score(tmp_path, tracks, stubs,

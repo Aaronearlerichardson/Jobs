@@ -168,8 +168,9 @@ def ensure_mission(conn, company, titles=(), scorer=score_company_mission):
         return None, None                       # one attempt per pass
     company["_mission_tried"] = True
     try:
-        tier, score, reason = scorer(company.get("name") or "",
-                                     " | ".join(t for t in titles if t)[:1500])
+        context = (" | ".join(t for t in titles if t)
+                   or coords.board_context(company))
+        tier, score, reason = scorer(company.get("name") or "", context[:1500])
     except Exception as e:                      # noqa: BLE001 - reported
         print(f"    [!] mission score failed for {company.get('name')}: {e}")
         return None, None
