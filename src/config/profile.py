@@ -108,35 +108,45 @@ INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 _FOCUSED_LISTS = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
                   "INCLUDE_KEYWORDS")
 
+#: What `widen_keywords` empties. EXCLUDE_* are not part of the keyword
+#: FOCUS (a track swap leaves them alone), but they are part of "the
+#: profile is not judging this posting", so widening clears them too.
+_WIDENED_EMPTY = ("DOMAIN_KEYWORDS", "SKILL_KEYWORDS", "EXCLUDE_PHRASES",
+                  "EXCLUDE_TITLE_PHRASES")
+
+#: Every list the snapshot helpers below carry, in order: the focus lists,
+#: then whatever else a widening clears. Derived from the two tuples above
+#: rather than written out a third time -- the EXCLUDE_* lists were emptied
+#: by every widening and put back by none, because the save/restore kept
+#: its own copy of the names.
+_SNAPSHOT_LISTS = _FOCUSED_LISTS + tuple(
+    n for n in _WIDENED_EMPTY if n not in _FOCUSED_LISTS)
+
 
 def keyword_snapshot(cfg=None):
-    """The shared keyword lists and ACCEPT_REMOTE as they stand now.
+    """The shared keyword and exclude lists and ACCEPT_REMOTE as they stand
+    now.
 
-    `src.crawl.runner.apply_keyword_focus` rewrites all five IN PLACE --
-    that is the contract src/match/filters.py depends on, having bound the
-    list objects at import -- so anything that applies a track's focus has
-    to put them back. Four places did, each with its own copy of the same
-    five-line save and five-line restore: the crawl's triage pass, the web
-    UI's operation runner, and the test suite's keyword fixture.
+    Two things rewrite them IN PLACE -- that is the contract
+    src/match/filters.py depends on, having bound the list objects at
+    import -- so anything that runs either has to put them back:
+    `src.crawl.runner.apply_keyword_focus` (the four keyword lists and
+    ACCEPT_REMOTE) and `widen_keywords` (those, plus the EXCLUDE_* lists).
+    Four places did, each with its own copy of the same five-line save and
+    five-line restore: the crawl's triage pass, the web UI's operation
+    runner, and the test suite's keyword fixture.
     """
     cfg = _self() if cfg is None else cfg
-    return (*(list(getattr(cfg, n)) for n in _FOCUSED_LISTS),
+    return (*(list(getattr(cfg, n)) for n in _SNAPSHOT_LISTS),
             bool(getattr(cfg, "ACCEPT_REMOTE", False)))
 
 
 def restore_keywords(snapshot, cfg=None):
     """Put a `keyword_snapshot` back, in place."""
     cfg = _self() if cfg is None else cfg
-    for name, saved in zip(_FOCUSED_LISTS, snapshot):
+    for name, saved in zip(_SNAPSHOT_LISTS, snapshot):
         getattr(cfg, name)[:] = saved
     cfg.ACCEPT_REMOTE = snapshot[-1]
-
-
-#: What `widen_keywords` empties. EXCLUDE_* are not part of the keyword
-#: FOCUS (a track swap leaves them alone), but they are part of "the
-#: profile is not judging this posting", so widening clears them too.
-_WIDENED_EMPTY = ("DOMAIN_KEYWORDS", "SKILL_KEYWORDS", "EXCLUDE_PHRASES",
-                  "EXCLUDE_TITLE_PHRASES")
 
 
 def widen_keywords(cfg=None):
@@ -156,7 +166,8 @@ def widen_keywords(cfg=None):
     originals. Pair it with `keyword_snapshot` / `restore_keywords` if the
     process has anything to do afterwards -- three copies of this lived in
     two canaries and a test fixture, and the test fixture's copy was the
-    one that forgot ACCEPT_REMOTE.
+    one that forgot ACCEPT_REMOTE. The snapshot carries the EXCLUDE_* lists
+    this clears too, so a widen and a restore leave the profile as it was.
     """
     cfg = _self() if cfg is None else cfg
     cfg.CORE_KEYWORDS[:] = [""]

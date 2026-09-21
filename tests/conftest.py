@@ -77,17 +77,40 @@ def elsewhere():
     pytest.skip("every candidate 'elsewhere' matches this profile's locality")
 
 
+#: What `pristine_keywords` promises to hand back. Spelled out here rather
+#: than read off the snapshot helpers' own tuples: the check below has to be
+#: independent of the code it checks, or it can only ever agree with it.
+_KEYWORD_LISTS = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
+                  "INCLUDE_KEYWORDS", "EXCLUDE_PHRASES",
+                  "EXCLUDE_TITLE_PHRASES")
+
+
+def _keyword_state(cfg):
+    return {**{n: list(getattr(cfg, n)) for n in _KEYWORD_LISTS},
+            "ACCEPT_REMOTE": bool(cfg.ACCEPT_REMOTE)}
+
+
 @pytest.fixture
 def pristine_keywords(cfg):
-    """Snapshot/restore config's shared keyword lists.
+    """Snapshot/restore config's shared keyword and exclude lists.
 
-    `runner.apply_keyword_focus` mutates them IN PLACE (that's the contract
-    filters.py depends on), so any test that applies a track's focus would
-    leak into the next one without this.
+    `runner.apply_keyword_focus` mutates the keyword lists IN PLACE (that's
+    the contract filters.py depends on) and `cfg.widen_keywords` empties the
+    exclude lists too, so any test that does either would leak into the
+    next one without this.
+
+    Verified on the way out, so a list the restore fails to put back fails
+    the test that changed it. It used to fail nothing: a widening emptied
+    EXCLUDE_TITLE_PHRASES for the rest of the session, and the only symptom
+    was a later, unrelated test quietly skipping.
     """
     saved = cfg.keyword_snapshot(cfg)
+    before = _keyword_state(cfg)
     yield
     cfg.restore_keywords(saved, cfg)
+    after = _keyword_state(cfg)
+    leaked = sorted(n for n, was in before.items() if after[n] != was)
+    assert not leaked, f"pristine_keywords did not put back: {leaked}"
 
 
 @pytest.fixture

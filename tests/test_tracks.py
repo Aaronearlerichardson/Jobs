@@ -3,6 +3,8 @@ keyword focus, and source assembly through the one crawl pipeline."""
 
 from datetime import datetime, timedelta
 
+import pytest
+
 import src.store as store
 import src.ops.maintenance as ops
 import src.crawl.runner as runner
@@ -152,6 +154,54 @@ class TestKeywordFocus:
         anchor = cfg.CORE_KEYWORDS[0]
         assert runner.core_anchor(f"Senior {anchor} Engineer") == anchor
         assert runner.core_anchor("Bakery Assistant", "we sell bread") is None
+
+
+class TestWidenAndRestore:
+    """widen_keywords turns the relevance filter off in place; the snapshot
+    helpers are the way back, so the snapshot has to carry everything a
+    widening clears. It carried the keyword tiers but not the EXCLUDE_*
+    lists, and every test file that ran after tests/test_fetcher_parsers.py
+    saw an empty EXCLUDE_TITLE_PHRASES."""
+
+    @pytest.fixture
+    def seeded_excludes(self, cfg):
+        """Non-empty EXCLUDE_* lists whatever the profile ships (an empty
+        list round-trips trivially), put back by plain slice assignment:
+        the code under test can't be trusted to clean up after its own
+        failure."""
+        saved = (list(cfg.EXCLUDE_PHRASES), list(cfg.EXCLUDE_TITLE_PHRASES))
+        cfg.EXCLUDE_PHRASES[:] = ["seed phrase"]
+        cfg.EXCLUDE_TITLE_PHRASES[:] = ["seed title"]
+        yield
+        cfg.EXCLUDE_PHRASES[:] = saved[0]
+        cfg.EXCLUDE_TITLE_PHRASES[:] = saved[1]
+
+    def test_round_trip_restores_the_exclude_lists(self, cfg, seeded_excludes,
+                                                   pristine_keywords):
+        phrases, titles = cfg.EXCLUDE_PHRASES, cfg.EXCLUDE_TITLE_PHRASES
+        saved = cfg.keyword_snapshot(cfg)
+        cfg.widen_keywords(cfg)
+        assert phrases == [] and titles == [], "the widening no longer clears them"
+        cfg.restore_keywords(saved, cfg)
+        assert phrases == ["seed phrase"]
+        assert titles == ["seed title"]
+        assert cfg.EXCLUDE_PHRASES is phrases, \
+            "rebinding breaks filters.py's import-time reference"
+        assert cfg.EXCLUDE_TITLE_PHRASES is titles
+
+    def test_round_trip_restores_the_tiers_and_remote(self, cfg,
+                                                      pristine_keywords):
+        cfg.ACCEPT_REMOTE = False           # widen sets it; start from off
+        tiers = {n: list(getattr(cfg, n)) for n in
+                 ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
+                  "INCLUDE_KEYWORDS")}
+        saved = cfg.keyword_snapshot(cfg)
+        cfg.widen_keywords(cfg)
+        assert cfg.ACCEPT_REMOTE is True
+        assert cfg.CORE_KEYWORDS == [""]
+        cfg.restore_keywords(saved, cfg)
+        assert cfg.ACCEPT_REMOTE is False
+        assert {n: list(getattr(cfg, n)) for n in tiers} == tiers
 
 
 class TestSourceAssembly:
