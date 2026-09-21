@@ -256,6 +256,46 @@ def test_multi_division_company_waits_for_the_body(tmp_path, tracks, stubs,
     assert stubs["hydrate"] == ["rel"]
 
 
+def test_watching_a_multi_division_company_admits_its_remote_rows(
+        tmp_path, tracks, stubs, local_addr, monkeypatch):
+    """The two gates a conglomerate's remote row meets are independent, and
+    only ONE of them answers to the watch tag.
+
+    A multi-division employer scores "other" overall (that is what the
+    [policy] multi_division exemption exists for), so it is never
+    mission-trusted and its REMOTE rows are geo-dropped however relevant
+    they are. The `watch` tag on the company row is what admits them --
+    the same tag, and the same code path, as any other watched company.
+    The division keyword gate is NOT lifted by it: that one is keyed off
+    [policy] multi_division, and an off-division posting still drops.
+    """
+    from src import config
+    monkeypatch.setattr(config, "is_multi_division",
+                        lambda name: (name or "").lower().startswith("megacorp"))
+    monkeypatch.setattr(triage, "is_relevant",
+                        lambda title, desc="": "pipelines" in desc)
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    plain = _company(conn, "Megacorp", mission_tier="other",
+                     mission_score=0.25)
+    watched = _company(conn, "Megacorp Watched", mission_tier="other",
+                       mission_score=0.25, tags=tags.WATCH)
+    _harvested(conn, plain, "prem", "Data Engineer", "Remote - US")
+    _harvested(conn, watched, "wrem", "Data Engineer", "Remote - US")
+    _harvested(conn, watched, "woff", "Data Engineer", "Remote - US",
+               description="sells ad space " * 20)
+    _harvested(conn, watched, "wloc", "Data Engineer", local_addr)
+
+    _run(db, tracks, stubs)
+
+    assert _row(conn, "prem")["triage_status"] == "geo"
+    assert _row(conn, "wrem")["triage_status"] == "ok"
+    assert _row(conn, "wrem")["remote_eligible"] == 1
+    assert _row(conn, "wloc")["triage_status"] == "ok"
+    assert _row(conn, "woff")["triage_status"] == "division", \
+        "the watch tag admits the row's geography, not its division"
+
+
 # ── hydration and scoring only for survivors ────────────────────────────────
 
 def test_bodiless_survivor_stays_pending(tmp_path, tracks, stubs, local_addr):

@@ -1,8 +1,13 @@
 """Posting gates (src/match/gates.py): the exclude tables and the technical-title
-regex, both resolved per track from configuration rather than code."""
+regex, both resolved per track from configuration rather than code.
+
+The profile-wide title gate (src/match/filters._excluded) is here too: it is
+the other half of "does this TITLE disqualify the posting", and the two gates
+are only separable once you know which one dropped a row."""
 
 import pytest
 
+import src.match.filters as filters
 import src.match.gates as gates
 
 
@@ -166,3 +171,116 @@ class TestTechnicalTitle:
     def test_empty_title_is_never_technical(self, local_track):
         assert not gates.is_technical_role("", local_track)
         assert not gates.is_technical_role(None, local_track)
+
+
+class TestTitleExemptPhrases:
+    """[exclude].title_exempt_phrases, the profile-wide title gate's
+    exception list (src/match/filters._excluded).
+
+    A title phrase is a WORD and a job title is not: "manager" is there to
+    drop the people-managing titles, and it was also dropping every
+    Clinical/Scientific/Research/Laboratory Data Manager -- an
+    individual-contributor data role, and one of the titles this search is
+    for. The exemption blanks the exempt phrase out of the title and then
+    runs the ordinary title walk over what is left, so the OTHER phrases
+    still apply to the same title.
+
+    The vocabulary is injected rather than read off the active profile:
+    the suite has to pass on profile.example.toml (what CI checks out) and
+    on a real profile.toml alike. The last test is the exception -- it
+    asks whether the LOADED profile actually carries the exemption that
+    this mechanism was added for.
+    """
+
+    @pytest.fixture
+    def vocab(self, cfg):
+        """Factory: `vocab(["manager"], ["data manager"])` sets the
+        profile-wide exclude lists for one test.
+
+        In place, never rebound: src.match.filters bound these list objects
+        at import (the same contract `pristine_keywords` exists for), so a
+        rebind here would leave the gate reading the originals. EXCLUDE_
+        PHRASES is emptied too -- this class is about the TITLE half, and a
+        profile whose body phrases happen to hit the fixture titles would
+        otherwise decide the assertion.
+        """
+        saved = (list(cfg.EXCLUDE_PHRASES), list(cfg.EXCLUDE_TITLE_PHRASES),
+                 list(cfg.EXCLUDE_TITLE_EXEMPT_PHRASES))
+
+        def _set(title_phrases, exempt, phrases=()):
+            cfg.EXCLUDE_PHRASES[:] = list(phrases)
+            cfg.EXCLUDE_TITLE_PHRASES[:] = title_phrases
+            cfg.EXCLUDE_TITLE_EXEMPT_PHRASES[:] = exempt
+        yield _set
+        cfg.EXCLUDE_PHRASES[:] = saved[0]
+        cfg.EXCLUDE_TITLE_PHRASES[:] = saved[1]
+        cfg.EXCLUDE_TITLE_EXEMPT_PHRASES[:] = saved[2]
+
+    @staticmethod
+    def _excluded(title):
+        # _excluded's `text` is the already-scrubbed title+body; these
+        # fixtures have no body, so the title IS the text.
+        return filters._excluded(title, title.lower())
+
+    @pytest.fixture
+    def manager_vocab(self, vocab):
+        vocab(["manager"], ["data manager"])
+
+    def test_qualified_data_manager_titles_survive(self, manager_vocab):
+        for qualifier in ("Clinical", "Scientific", "Research", "Laboratory"):
+            assert not self._excluded(f"{qualifier} Data Manager"), qualifier
+
+    def test_a_bare_data_manager_survives(self, manager_vocab):
+        # The profile's own candidate asks for this title by name, so the
+        # exemption is the phrase itself, not a qualifier-plus-phrase.
+        assert not self._excluded("Data Manager")
+        assert not self._excluded("Senior Data Manager II")
+
+    def test_people_managing_titles_are_still_excluded(self, manager_vocab):
+        assert self._excluded("Engineering Manager")
+        assert self._excluded("Program Manager")
+        assert self._excluded("Manager, Data Engineering")
+        assert self._excluded("Manager")
+
+    def test_case_does_not_matter_on_either_side(self, vocab):
+        vocab(["MANAGER"], ["Data Manager"])
+        assert not self._excluded("clinical data manager")
+        assert self._excluded("engineering MANAGER")
+
+    def test_the_other_title_phrases_still_judge_an_exempt_title(self, vocab):
+        # Blanking the exempt phrase, rather than skipping the gate, is what
+        # keeps this true: only "data manager" is spared, not the title.
+        vocab(["manager", "intern"], ["data manager"])
+        assert self._excluded("Data Manager Intern")
+        assert not self._excluded("Clinical Data Manager")
+
+    def test_body_phrases_are_untouched_by_a_title_exemption(self, vocab):
+        vocab(["manager"], ["data manager"], phrases=["phd required"])
+        assert filters._excluded("Clinical Data Manager",
+                                 "clinical data manager. phd required.")
+
+    def test_no_exemptions_configured_changes_nothing(self, vocab):
+        vocab(["manager"], [])
+        assert self._excluded("Clinical Data Manager")
+
+    def test_the_loaded_profile_spares_a_clinical_data_manager(self, cfg,
+                                                               vocab):
+        """The bug this was written for, against whatever profile is
+        loaded: a profile that excludes "manager" has to exempt the
+        data-manager titles, or it drops a role it also lists as a target.
+
+        The vocabulary is read from the profile TABLE and installed through
+        the same fixture as the rest of the class, not read off the config
+        globals: a widened run (config.widen_keywords, which
+        restore_keywords does not put back) empties those globals, and this
+        assertion would then pass by having nothing to exclude.
+        """
+        exc = cfg.profile_section("exclude")
+        title_phrases = list(exc.get("title_phrases", []))
+        if not any("manager" in p.lower() for p in title_phrases):
+            pytest.skip("profile does not exclude 'manager' titles")
+        vocab(title_phrases, list(exc.get("title_exempt_phrases", [])))
+
+        assert not self._excluded("Clinical Data Manager")
+        assert not self._excluded("Scientific Data Manager")
+        assert self._excluded("Engineering Manager")

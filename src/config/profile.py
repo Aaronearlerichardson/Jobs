@@ -175,6 +175,11 @@ def _self():
 
 EXCLUDE_PHRASES       = list(_exc.get("phrases", []))
 EXCLUDE_TITLE_PHRASES = list(_exc.get("title_phrases", []))
+# Titles a title_phrase must NOT drop: blanked out of the title before the
+# title_phrases walk (src/match/filters._excluded), so "manager" can keep
+# dropping Program/Engineering Manager while "Clinical Data Manager" —
+# an individual-contributor data role — survives.
+EXCLUDE_TITLE_EXEMPT_PHRASES = list(_exc.get("title_exempt_phrases", []))
 # Regex fragments (ORed together in src/match/filters.scrub_boilerplate) for
 # benefits/EEO/infra-health idioms that contain domain-looking words without
 # meaning them.

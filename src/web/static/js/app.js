@@ -973,6 +973,7 @@ const FIELD_HELP = {
   skill: "Weak terms — tools and methods. Only counts when a domain term also appears.",
   phrases: "Drops a posting if the phrase appears anywhere in it.",
   title_phrases: "Drops a posting only if the phrase is in the job TITLE.",
+  title_exempt_phrases: "Titles that survive a title phrase above — the phrase is blanked out of the title first (e.g. keep “Clinical Data Manager” while “manager” still drops the rest).",
   boilerplate_phrases: "Regex patterns blanked out before matching, so benefits/EEO wording can't trigger your keywords.",
   role_phrases: "Job kinds you never want, matched anywhere in the posting.",
   title_tokens: "Short abbreviations that only make sense in a title (e.g. CRA).",

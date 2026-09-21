@@ -279,6 +279,47 @@ def mark_desc_checked(conn, job_id, now=None):
     _commit(conn)
 
 
+def record_probe_outcome(conn, job_id, verified, now=None):
+    """Stamp one closure probe that left the row OPEN and return the row's
+    new probe_streak: 0 when the probe `verified` the posting is still
+    live, one more than before when it could not tell either way.
+
+    The stamp is the same desc_checked_at mark_desc_checked writes -- it is
+    what rotates check_closed_jobs' bounded passes through the backlog --
+    so a probe writes one row, not two:
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "j", "title": "T"})
+    >>> record_probe_outcome(conn, "j", verified=False)
+    1
+    >>> record_probe_outcome(conn, "j", verified=False)
+    2
+    >>> conn.execute("SELECT desc_checked_at IS NOT NULL FROM jobs"
+    ...              ).fetchone()[0]
+    1
+
+    A probe that finds the posting live resets the streak, so only an
+    UNBROKEN run of unverifiable answers ever reaches the give-up count:
+
+    >>> record_probe_outcome(conn, "j", verified=True)
+    0
+
+    Notes:
+        The companies-side precedent is record_crawl_outcome's
+        empty_streak, which counts fruitless crawls of a board the same way
+        and parks it dormant. This one never changes a job's status: a row
+        nobody can verify is not a row anybody has shown to be closed.
+    """
+    streak = 0 if verified else (conn.execute(
+        "SELECT COALESCE(probe_streak, 0) FROM jobs WHERE job_id=?",
+        (job_id,)).fetchone() or [0])[0] + 1
+    conn.execute(
+        "UPDATE jobs SET desc_checked_at=?, probe_streak=? WHERE job_id=?",
+        ((now or datetime.now()).isoformat(), streak, job_id))
+    _commit(conn)
+    return streak
+
+
 def triage_counts(conn, days=None):
     """{verdict: n} over triaged rows, optionally only those judged in the
     last `days` days -- the per-gate funnel the digest shows.
@@ -431,8 +472,9 @@ def touch_job(conn, job_id):
     clock (see sync_job_statuses), or the next board sync could re-close a
     posting the user just saw live."""
     conn.execute(
-        "UPDATE jobs SET status='open', closed_at=NULL, last_seen=? "
-        "WHERE job_id=?", (datetime.now().isoformat(), job_id))
+        "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
+        "probe_streak=0 WHERE job_id=?",
+        (datetime.now().isoformat(), job_id))
     conn.commit()
 
 
@@ -550,7 +592,8 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
                  or posted.get(_norm_title(r["title"])))
             conn.execute(
                 "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
-                "posted_at=COALESCE(posted_at, ?) WHERE job_id=?",
+                "posted_at=COALESCE(posted_at, ?), probe_streak=0 "
+                "WHERE job_id=?",
                 (now, p, r["job_id"]))
             continue
         if track is not None and track not in track_set(r["track"]):

@@ -173,6 +173,14 @@ _MIGRATIONS = {
         # re-fetched the same boards to fail on the same rows ("0 of 18
         # backfilled" three runs in a row, 2026-08-28 session logs).
         "desc_checked_at":  "TEXT",
+        # Consecutive closure probes that could NOT verify the row either
+        # way (bot-gated host, JS-only page, an ATS with no closure signal,
+        # a probe that raised). The companies-side empty_streak, one level
+        # down: src.ops.maintenance.check_closed_jobs stops selecting a row
+        # at CLOSED_PROBE_GIVE_UP, and any live sighting -- a probe that
+        # confirms it open, a board that lists it again -- resets it to 0.
+        # NULL reads as 0, so existing rows need no backfill.
+        "probe_streak":     "INTEGER",
         # Application-pipeline tracking (see update_pipeline_fields,
         # conversion_report, followups_due). applied_at is stamped the FIRST
         # time a row is marked applied and never again: a later

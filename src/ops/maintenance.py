@@ -1147,6 +1147,19 @@ DEAD_BOARD_CLOSE_DAYS = 14
 # the first place, so it cannot own OPEN job rows to close.
 _DEAD_BOARD_FAMILY = "board-dead"
 
+# Consecutive UNVERIFIABLE closure probes (jobs.probe_streak) after which
+# check_closed_jobs stops selecting a row at all. Some rows can never be
+# answered by a URL probe -- a bot-gated host, a JS-only detail page, an ATS
+# with no closure signal, a row whose company has no resolved board -- and
+# every pass spent re-probing one is a pass not spent on the rows a probe
+# CAN answer. Ten is deliberately generous: a probe failing ten times
+# running is a property of the endpoint, not a bad afternoon, and the row is
+# only parked from PROBING -- it stays open, keeps its rank, and still
+# closes the moment its board stops listing it (store.sync_job_statuses) or
+# its board dies (_dead_board_open_rows below). Any live sighting clears the
+# streak (store.record_probe_outcome, touch_job, sync_job_statuses).
+CLOSED_PROBE_GIVE_UP = 10
+
 
 def _dead_board_open_rows(conn, days):
     """OPEN rows at a company whose CURRENT miss_reason is in the
@@ -1244,6 +1257,15 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     CLOSED row needs no stamp; leaving the WHERE clause is a stronger exit
     than any timestamp.
 
+    Probe give-up: a row whose last CLOSED_PROBE_GIVE_UP probes were all
+    unverifiable leaves the selection for good (jobs.probe_streak, written
+    by store.record_probe_outcome) -- some URLs can never answer this
+    question, and re-asking them forever is what crowded out the rows that
+    can. Such a row is NOT closed and NOT deleted: it stays open, and a
+    live sighting (a probe that confirms it, a board that lists it again)
+    resets the streak and puts it back in the queue.
+    tests/test_probes.py's TestClosedProbeGiveUp pins both halves.
+
     Notes:
         `ORDER BY company_name` alone never moved a row: a CONFIRMED-live
         or UNVERIFIABLE verdict, unlike a closed one, leaves the row
@@ -1278,8 +1300,9 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             "SELECT job_id, title, company_name, url FROM jobs "
             "WHERE COALESCE(status,'open') != 'closed' "
             "AND COALESCE(last_seen, first_seen, '') < ? "
+            "AND COALESCE(probe_streak, 0) < ? "
             "ORDER BY COALESCE(desc_checked_at, ''), company_name",
-            (cutoff,)).fetchall()]
+            (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()]
         if limit:
             rows = rows[:int(limit)]
         print(f"  probing {len(rows)} open job(s) not board-verified in "
@@ -1296,7 +1319,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                 return None, f"probe error: {e}"
 
         now = datetime.now()
-        n_closed = n_live = n_unknown = 0
+        n_closed = n_live = n_unknown = n_parked = 0
         for r, (is_open, reason) in fan_out(rows, _probe, "probe",
                                             max_workers, with_item=True):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
@@ -1305,13 +1328,21 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                 n_closed += 1
                 print(f"    [closed] {label} {reason}")
             elif is_open:
-                store.mark_desc_checked(conn, r["job_id"], now)
+                store.record_probe_outcome(conn, r["job_id"], True, now)
                 n_live += 1
             else:
-                store.mark_desc_checked(conn, r["job_id"], now)
+                streak = store.record_probe_outcome(conn, r["job_id"], False,
+                                                    now)
                 n_unknown += 1
+                if streak >= CLOSED_PROBE_GIVE_UP:
+                    n_parked += 1
+                    print(f"    [give-up] {label} {streak} unverifiable "
+                          f"probes; not probing again ({reason})")
         print(f"  {n_closed} closed, {n_live} confirmed live, "
               f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
+        if n_parked:
+            print(f"  {n_parked} row(s) hit {CLOSED_PROBE_GIVE_UP} "
+                  f"unverifiable probes and left the probe queue.")
 
         dead = group_by_company(_dead_board_open_rows(
             conn, DEAD_BOARD_CLOSE_DAYS))

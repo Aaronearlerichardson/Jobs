@@ -747,7 +747,7 @@ Everything personal lives in `profile.toml` on your machine;
 | Section | Controls |
 |---|---|
 | `[keywords]` | `core` / `domain` / `skill` relevance tiers (plus `[keywords.<track>]` overrides) |
-| `[exclude]` | `phrases` (title+body), `title_phrases` (title only), boilerplate scrubbing |
+| `[exclude]` | `phrases` (title+body), `title_phrases` (title only), `title_exempt_phrases` (titles a `title_phrases` entry must not drop), boilerplate scrubbing |
 | `[locations]` | `onsite` / `remote` terms, `accept_remote`, remote-eligibility vocabulary |
 | `[tracks.<id>]` | the searches you switch between: engine, DB, sources, gates, scoring budget, UI defaults |
 | `[policy]` | `multi_division` conglomerates + ranking floor |

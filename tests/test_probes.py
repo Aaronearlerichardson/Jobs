@@ -485,3 +485,120 @@ class TestClosedProbeRotation:
             "SELECT COUNT(*) AS n FROM jobs "
             "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
         assert covered == 100
+
+
+class TestClosedProbeGiveUp:
+    """Rotation alone still re-probes a row that can NEVER be verified --
+    a bot-gated host, a JS-only detail page, an ATS with no closure signal,
+    a company with no resolved board at all -- for as long as it stays
+    open. ops.CLOSED_PROBE_GIVE_UP consecutive unverifiable answers
+    (jobs.probe_streak) take it out of the selection instead, without
+    closing it."""
+
+    @staticmethod
+    def _seed(db, job_id="j1"):
+        cid = store.upsert_company(db, {"name": "Acme", "ats": "greenhouse"})
+        store.upsert_job(db, {"job_id": job_id, "company_id": cid,
+                              "company_name": "Acme", "title": "T",
+                              "track": "local-tech",
+                              "url": f"https://acme.example/{job_id}"})
+        db.execute("UPDATE jobs SET last_seen=?", (_iso_days_ago(30),))
+        db.commit()
+        return job_id
+
+    @staticmethod
+    def _answer(monkeypatch, verdict):
+        """Serve one probe verdict and record every URL probed."""
+        probed = []
+
+        def _probe(url):
+            probed.append(url)
+            return verdict
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open", _probe)
+        return probed
+
+    def _run(self, db, n):
+        for _ in range(n):
+            ops.check_closed_jobs(conn=db, stale_days=1)
+
+    def _streak(self, db, job_id="j1"):
+        return db.execute("SELECT COALESCE(probe_streak, 0) AS s FROM jobs "
+                          "WHERE job_id=?", (job_id,)).fetchone()["s"]
+
+    def test_ten_unverifiable_probes_drop_the_row_from_the_selection(
+            self, db, monkeypatch):
+        jid = self._seed(db)
+        probed = self._answer(monkeypatch, (None, "gated"))
+
+        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
+        assert len(probed) == ops.CLOSED_PROBE_GIVE_UP
+        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP
+
+        self._run(db, 3)                      # three further passes
+
+        assert len(probed) == ops.CLOSED_PROBE_GIVE_UP, \
+            "a given-up row must never be selected again"
+        row = db.execute("SELECT status FROM jobs WHERE job_id=?",
+                         (jid,)).fetchone()
+        assert (row["status"] or "open") == "open", \
+            "unverifiable is not closed: the row stays open, just unprobed"
+
+    def test_three_unverifiable_probes_leave_the_row_in_the_queue(
+            self, db, monkeypatch):
+        self._seed(db)
+        probed = self._answer(monkeypatch, (None, "gated"))
+
+        self._run(db, 3)
+        assert self._streak(db) == 3
+
+        self._run(db, 1)
+
+        assert len(probed) == 4, "3 < CLOSED_PROBE_GIVE_UP: still selected"
+
+    def test_a_confirmed_live_probe_resets_the_streak(self, db, monkeypatch):
+        self._seed(db)
+        self._answer(monkeypatch, (None, "gated"))
+        self._run(db, ops.CLOSED_PROBE_GIVE_UP - 1)
+        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP - 1
+
+        probed = self._answer(monkeypatch, (True, "200"))
+        self._run(db, 1)
+
+        assert self._streak(db) == 0
+        assert len(probed) == 1
+        # ...and the row is still in the queue afterwards.
+        self._answer(monkeypatch, (None, "gated"))
+        self._run(db, 1)
+        assert self._streak(db) == 1
+
+    def test_a_board_sighting_puts_a_given_up_row_back_in_the_queue(
+            self, db, monkeypatch):
+        jid = self._seed(db)
+        self._answer(monkeypatch, (None, "gated"))
+        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
+        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP
+
+        # The board lists it again: store.touch_job is the sighting, and
+        # the probe history behind it is stale.
+        store.touch_job(db, jid)
+
+        assert self._streak(db) == 0
+
+    def test_a_given_up_row_still_closes_when_its_board_dies(
+            self, db, monkeypatch):
+        """The give-up rule parks the URL PROBE, not the row: every other
+        closure path still reaches it."""
+        jid = self._seed(db)
+        self._answer(monkeypatch, (None, "gated"))
+        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
+        db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
+                   (_iso_days_ago(ops.DEAD_BOARD_CLOSE_DAYS + 6), jid))
+        db.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
+                   "WHERE name='Acme'")
+        db.commit()
+
+        ops.check_closed_jobs(conn=db, stale_days=1)
+
+        row = db.execute("SELECT status FROM jobs WHERE job_id=?",
+                         (jid,)).fetchone()
+        assert row["status"] == "closed"

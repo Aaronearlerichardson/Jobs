@@ -21,6 +21,7 @@ from src.config import (
     CORE_KEYWORDS,
     DOMAIN_KEYWORDS,
     EXCLUDE_PHRASES,
+    EXCLUDE_TITLE_EXEMPT_PHRASES,
     EXCLUDE_TITLE_PHRASES,
     INCLUDE_KEYWORDS,
     SKILL_KEYWORDS,
@@ -160,8 +161,40 @@ def _kw_in(text, keywords):
     return any(token_in(k, text, SHORT_KEYWORD) for k in keywords)
 
 
+def blank_phrases(text, phrases):
+    """`text` with every one of `phrases` replaced by a space.
+
+    The same move `scrub_boilerplate` makes on a posting body, over a list
+    from the profile rather than a compiled regex: blank the wording that
+    must not be read, then run the ordinary matcher over what is left.
+
+    >>> blank_phrases("clinical data manager", ["data manager"])
+    'clinical  '
+    >>> blank_phrases("engineering manager", ["data manager"])
+    'engineering manager'
+
+    Matching is case-insensitive on the PHRASE side only -- every caller
+    lowercases its text once up front, the same contract `token_in` keeps:
+
+    >>> blank_phrases("scientific data manager", ["Data Manager"])
+    'scientific  '
+
+    Blank and whitespace-only phrases are ignored, so an empty chip left in
+    the profile editor cannot blank the whole string:
+
+    >>> blank_phrases("program manager", ["", "   ", None])
+    'program manager'
+    """
+    for phrase in phrases:
+        p = (phrase or "").strip().lower()
+        if p:
+            text = text.replace(p, " ")
+    return text
+
+
 def _excluded(title, text):
-    """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only.
+    """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only,
+    over a title EXCLUDE_TITLE_EXEMPT_PHRASES has been blanked out of.
 
     The profile-wide exclusion gate. Its per-track sibling is
     gates.exclude_reason, and the two are deliberately NOT one function --
@@ -173,11 +206,22 @@ def _excluded(title, text):
     to match anywhere, and `text` has already been through
     scrub_boilerplate. The per-track tables are single terms and get
     boundaries instead.
+
+    Notes:
+        The exemption pass (2026-09-18) exists because a title phrase is a
+        WORD and a job title is not: "manager" in [exclude].title_phrases
+        is meant to drop the people-managing titles (Program Manager,
+        Engineering Manager), and it was also dropping every
+        Clinical/Scientific/Research Data Manager -- an individual-
+        contributor data role this profile's own candidate has held and
+        asks for by name. Blanking the exempt phrase rather than skipping
+        the gate keeps the OTHER title phrases live on the same title: a
+        "Data Manager Intern" still loses to "intern".
     """
     if first_hit(EXCLUDE_PHRASES, text, SUBSTRING):
         return True
-    return bool(first_hit(EXCLUDE_TITLE_PHRASES, (title or "").lower(),
-                          SUBSTRING))
+    title_l = blank_phrases((title or "").lower(), EXCLUDE_TITLE_EXEMPT_PHRASES)
+    return bool(first_hit(EXCLUDE_TITLE_PHRASES, title_l, SUBSTRING))
 
 
 # DOMAIN+SKILL pairing only reads the posting head. Specific CORE terms

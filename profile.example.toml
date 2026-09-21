@@ -52,6 +52,11 @@ skill = ["rust", "go", "kubernetes", "postgres"]
 [exclude]
 phrases = ["phd required", "must have a phd", "clearance required"]
 title_phrases = ["manager", "director", "intern"]
+# Titles a `title_phrases` entry must NOT drop: each phrase is blanked out of
+# the title before the title_phrases walk. "manager" alone would drop
+# "Clinical Data Manager", an individual-contributor data role; the rest of
+# the title is still judged, so "Data Manager Intern" still loses to "intern".
+title_exempt_phrases = ["data manager"]
 # Regex fragments (ORed together) scrubbed from text before keyword/exclusion
 # matching — for boilerplate that contains domain-looking words without
 # meaning them (benefits sections, EEO statements, "system health" prose).
