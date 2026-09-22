@@ -145,6 +145,72 @@ class TestClinicalServiceGate:
                              "you'll work with the technologist team")
 
 
+class TestSiliconTitleTokens:
+    """Chip-design titles ([exclude.<id>].title_tokens, 2026-09-18).
+
+    "Senior ASIC Design Engineer", "Mask Design Engineer" and "Memory
+    Controller Verification Engineer" all pass the broad technical-title
+    regex, and at a multi-division employer only the division gate can
+    refuse them -- a gate that needs a body, so each one spends a detail GET
+    out of the board's hydration budget before it drops (NVIDIA's waiting
+    list, 2026-09-18). Dropping them at the FREE gate is worth it only if
+    the tokens cannot fire on the neurotech-device vocabulary this search is
+    for, which is what the second half of this class pins.
+
+    Synthetic vocabulary, like TestClinicalServiceGate: the shape has to be
+    exercised whether or not the loaded profile configures it. The last test
+    is the exception -- it asks the LOADED profile the same question.
+    """
+
+    #: Titles that must survive a silicon vocabulary however it is written:
+    #: neurotech device work, and the medical-device senses of the words
+    #: silicon shares with it.
+    DEVICE_TITLES = [
+        "Firmware Engineer, Implant Embedded Systems",
+        "Embedded Software Engineer", "FPGA Engineer",
+        "Signal Processing Engineer", "Senior DSP Engineer",
+        "Packaging Engineer II", "Software Verification Engineer",
+        "Design Verification Engineer, Combination Products",
+        "Basic Research Scientist",          # `\\basic\\b` must not fire here
+    ]
+
+    @pytest.fixture
+    def silicon_track(self, exclude_vocab):
+        return exclude_vocab("silicon_test", title_tokens=[
+            "asic", "vlsi", "rtl", "dft", "physical design", "mask design",
+            "analog ic", "layout engineer", "memory controller",
+            "semiconductor"])
+
+    @pytest.mark.parametrize("title", [
+        "Senior ASIC Design Engineer", "Mask Design Engineer",
+        "Memory Controller Verification Engineer",
+        "Principal Physical Design Engineer", "RTL Design Engineer",
+        "Analog IC Layout Engineer", "Senior VLSI CAD Software Engineer",
+        "Senior DFT Engineer", "Semiconductor Process Development Engineer",
+    ])
+    def test_chip_titles_drop_before_any_fetch(self, silicon_track, title):
+        assert gates.exclude_reason(title, track_id=silicon_track)
+
+    @pytest.mark.parametrize("title", DEVICE_TITLES)
+    def test_neurotech_device_titles_survive(self, silicon_track, title):
+        assert gates.exclude_reason(title, track_id=silicon_track) is None
+
+    def test_a_silicon_token_never_fires_from_the_body(self, silicon_track):
+        # Title-only, like every other title_token: a posting that merely
+        # mentions the neighbouring team must not drop.
+        assert gates.exclude_reason(
+            "Data Engineer", "you will sit beside the ASIC group",
+            track_id=silicon_track) is None
+
+    @pytest.mark.parametrize("title", DEVICE_TITLES)
+    def test_the_loaded_profile_spares_the_device_vocabulary(self, local_track,
+                                                             title):
+        if not gates.exclude_reason("Senior ASIC Design Engineer",
+                                    track_id=local_track["id"]):
+            pytest.skip("profile configures no silicon title tokens")
+        assert gates.exclude_reason(title, track_id=local_track["id"]) is None
+
+
 class TestTechnicalTitle:
     def test_engineer_is_technical(self, local_track):
         assert gates.is_technical_role("Quality Engineer", local_track)
@@ -171,6 +237,51 @@ class TestTechnicalTitle:
     def test_empty_title_is_never_technical(self, local_track):
         assert not gates.is_technical_role("", local_track)
         assert not gates.is_technical_role(None, local_track)
+
+
+class TestFieldOccupationTitles:
+    """A field name wrapped in `\\b` matches the field and nothing built on
+    it: "bioinformatics" cannot match "Bioinformatician", because the
+    occupation noun is a SUFFIX on the stem and there is no word boundary
+    between them. Duke Health's "Bioinformatician II" (Durham, 2026-09-11)
+    was dropped at the free title gate on every configured track that way,
+    and so was every Biostatistician, Statistician, Informaticist and
+    Epidemiologist in the store -- 85 distinct stored titles, all on-lane.
+    The fix is stems (`bioinformatic\\w*`), here and in any track's own
+    `tech_title_regex`.
+    """
+
+    #: field name -> occupation nouns built on the same stem.
+    FIELDS = [
+        ("Bioinformatics", ["Bioinformatician II", "Bioinformaticist"]),
+        ("Biostatistics", ["Biostatistician", "Senior Biostatistician II"]),
+        ("Statistics", ["Statistician", "Statistical Programmer"]),
+        ("Informatics", ["Clinical Informaticist", "Informaticist"]),
+        ("Epidemiology", ["Epidemiologist", "Senior Epidemiologist, RWE"]),
+    ]
+
+    @pytest.mark.parametrize("title", [t for _, occ in FIELDS for t in occ])
+    def test_the_audit_titles_pass_the_default_gate(self, title, local_track):
+        assert gates.is_technical_role(title, local_track)
+
+    @pytest.mark.parametrize("field,occupations", FIELDS)
+    def test_every_track_admitting_a_field_admits_its_occupations(
+            self, cfg, field, occupations):
+        """Profile-agnostic: a track that does not admit the field at all is
+        not in this business, but one that does must not stop at the noun."""
+        for t in cfg.UI_TRACKS.values():
+            if not gates.is_technical_role(field, t):
+                continue
+            for occ in occupations:
+                assert gates.is_technical_role(occ, t), f"{t['id']}: {occ}"
+
+    @pytest.mark.parametrize("title", [
+        "Registered Nurse", "Patient Access Representative",
+        "Sales Account Executive", "Warehouse Associate",
+        "Staffing Coordinator", "Barista",
+    ])
+    def test_the_stems_do_not_admit_off_lane_titles(self, title, local_track):
+        assert not gates.is_technical_role(title, local_track)
 
 
 class TestTitleExemptPhrases:

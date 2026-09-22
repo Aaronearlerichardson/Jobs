@@ -43,6 +43,14 @@ _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
 _UKG_RE = re.compile(r"recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a-fA-F\-]{36})", re.I)
 
+# Infor CloudSuite HCM candidate boards. Handled in detect beside ADP and UKG
+# because the coordinate is a PAIR: one tenant host can serve several HR
+# organizations, and `csk.HROrganization` is what scopes a board, so the slug
+# fetchers/infor.py takes is "<host>|<org>". The /hcm/Jobs path is required —
+# the same host family also serves the signed-in employee app.
+_INFOR_RE = re.compile(r"([a-z0-9-]+\.inforcloudsuite\.com)/hcm/Jobs\b", re.I)
+_INFOR_ORG_RE = re.compile(r"csk\.HROrganization=([A-Za-z0-9_-]+)", re.I)
+
 # Semi-fetchable: no probe/confirm path, but the local track has best-effort
 # scrapers (fetchers/company.py), so sniff_ats surfaces them as coordinates
 # while sniff_careers_ats treats them as leads.
@@ -208,6 +216,9 @@ def detect(text, final_url=""):
     ('semi', 'icims', 'acme')
     >>> detect('{"widgetApiEndpoint":"https://careers.acme.org/widgets"}')
     ('semi', 'phenom', 'careers.acme.org')
+    >>> detect("", "https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/page/"
+    ...            "JobsHomePage?csk.JobBoard=EXTERNAL&csk.HROrganization=42")
+    ('fetchable', 'infor', 'css-acme-prd.inforcloudsuite.com|42')
     >>> detect("via acme.eightfold.ai portal")
     ('lead', 'eightfold', 'acme.eightfold.ai')
 
@@ -234,6 +245,13 @@ def detect(text, final_url=""):
     ukg = _UKG_RE.search(blob)
     if ukg:
         return "fetchable", "ultipro", f"{ukg.group(1)}|{ukg.group(2)}"
+    # Infor CloudSuite HCM: slug is HOST|ORG. A board URL without the org id
+    # names no board, so it is not a detection.
+    infor = _INFOR_RE.search(blob)
+    if infor:
+        org = _INFOR_ORG_RE.search(html.unescape(blob))
+        if org:
+            return "fetchable", "infor", f"{infor.group(1).lower()}|{org.group(1)}"
     # PeopleAdmin: only the HOSTED tenants carry a signature. A university
     # serving the same software from its own hostname (jobs.ncsu.edu) is
     # indistinguishable from any other careers page here and still has to be

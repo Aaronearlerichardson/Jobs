@@ -22,6 +22,20 @@ from .jsonld import _job_from_posting, extract_jsonld, is_jobposting
 _APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
 
 
+def board_url(subdomain):
+    """Where one JazzHR board lives.
+
+    >>> board_url("acme")
+    'https://acme.applytojob.com'
+
+    Notes:
+        The per-posting closure probe (fetchers/company.py) builds the
+        slug-free ``/apply/<id>`` URL on top of this, so the host is
+        written once.
+    """
+    return f"https://{subdomain}.applytojob.com"
+
+
 def _rows(subdomain, urls, label, per_job_delay):
     """One row per JobPosting found on each posting page."""
     for url in urls:
@@ -39,7 +53,7 @@ def _rows(subdomain, urls, label, per_job_delay):
 
 def fetch_jazzhr(company_name, subdomain, gate=None, loc_re=None, max_jobs=60,
                  per_job_delay=0.3):
-    base = f"https://{subdomain}.applytojob.com"
+    base = board_url(subdomain)
     label = company_name or subdomain
     try:
         r = SESSION.get(base + "/", headers=HEADERS)

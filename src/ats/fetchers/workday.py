@@ -51,6 +51,18 @@ _WD_RESCUE_CAP = 150
 # the scope never narrowed.
 _WD_MAX_PAGES = 60
 
+# Workday's OWN ceiling, on the `total` its listing API reports and on the
+# rows it will serve: a board with more reqs than this answers "total": 2000
+# and stops there, whatever the pager's own page budget is. So a pull that
+# reaches the ceiling has seen a WINDOW of the board, not the board, and
+# must report itself capped (net.http.note_capped) or the board diff closes
+# every live req that sat past it. The one place this number is written: the
+# 2026-09-18 pass had Abbott and NVIDIA each return exactly 2000 rows at a
+# reported total of exactly 2000, neither tagged capped, and
+# store.sync_job_statuses then closed 70 and 10 live reqs. A board UNDER the
+# ceiling is genuinely complete and stays uncapped (Aah, 1,995 that day).
+WD_TOTAL_CEILING = 2000
+
 
 def text_from_html(raw):
     """Strip a Workday jobDescription HTML blob to readable plain text."""
@@ -317,6 +329,28 @@ def _wd_capped_total(total, count):
     return None if total is None else max(total, count)
 
 
+def _wd_at_ceiling(total, count):
+    """Whether this pull reached WD_TOTAL_CEILING -- the API reported the
+    ceiling as the board's `total`, or the walk returned that many distinct
+    rows. Either way the board may hold more than was served, so the
+    snapshot is a window and a row missing from it is no evidence the
+    posting closed.
+
+    Checked ON TOP of the "fewer rows than the reported total" rule below,
+    which cannot see this case at all: at the ceiling the two numbers AGREE
+    (2000 rows fetched, 2000 reported) and the pull reads as complete.
+
+    >>> _wd_at_ceiling(2000, 2000), _wd_at_ceiling(2000, 1200)
+    (True, True)
+    >>> _wd_at_ceiling(1995, 1995), _wd_at_ceiling(None, 12)
+    (False, False)
+    >>> _wd_at_ceiling(None, 2000)          # no total, but the rows say so
+    True
+    """
+    return (isinstance(total, (int, float)) and total >= WD_TOTAL_CEILING) \
+        or count >= WD_TOTAL_CEILING
+
+
 def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
                       page_size=20, max_pages=_WD_MAX_PAGES):
     """List postings (title/location/path only; descriptions come later).
@@ -354,12 +388,14 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
 
     Reports a capped snapshot (net.http.note_capped, via _wd_capped_total)
     when every page up to `max_pages` came back full with no repeat ever
-    seen, or, on an unscoped pull, when fewer DISTINCT rows came back than
-    the response's own `total`. A scoped pull's `total` is never compared:
-    the rows it drops for locality are not missing. A page that repeats
-    only already-seen ids (`new_ids == 0`, not the first page) ends the
-    walk WITHOUT capping: Workday itself just told us it has cycled back,
-    which is the honest end this pager can detect, not a giving-up point.
+    seen; when the pull reached Workday's own WD_TOTAL_CEILING, scoped or
+    not (_wd_at_ceiling); or, on an unscoped pull, when fewer DISTINCT rows
+    came back than the response's own `total`. Apart from the ceiling, a
+    scoped pull's `total` is never compared: the rows it drops for locality
+    are not missing. A page that repeats only already-seen ids (`new_ids ==
+    0`, not the first page) ends the walk WITHOUT capping: Workday itself
+    just told us it has cycled back, which is the honest end this pager can
+    detect, not a giving-up point.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
@@ -479,7 +515,11 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
             break
     else:
         note_capped(_wd_capped_total(total, len(out)) if loc_re is None else None)
-    if loc_re is None and (total or 0) > len(out):
+    if _wd_at_ceiling(total, len(out)) \
+            or (loc_re is None and (total or 0) > len(out)):
+        # The ceiling rule applies to a scoped pull too: Workday truncated
+        # what it served, which the "rows it drops for locality are not
+        # missing" exemption below says nothing about.
         note_capped(_wd_capped_total(total, len(out)))
     if rescues >= _WD_RESCUE_CAP:
         print(f"    [!] workday {tenant}: \"N Locations\" detail budget "

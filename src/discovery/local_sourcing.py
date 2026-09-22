@@ -38,7 +38,7 @@ from src.match.names import name_key
 from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import resolve_or_miss
+from .resolve.board import resolve_or_miss, resolved
 from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
 from .resolve.websearch_board import _websearch_board
 
@@ -862,7 +862,8 @@ def resolve_leads(max_workers=8,
     print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
           f"fallback; every board validated by a live fetch)...")
 
-    resolved, probe_only = [], []
+    # Not `resolved`: that name is board.resolved(), called in _consume below.
+    resolved_rows, probe_only = [], []
     by_name = {c["name"]: c for c in leads}
 
     def _stalled(name):
@@ -888,7 +889,7 @@ def resolve_leads(max_workers=8,
         if not result:
             return
         row, active, pending = result
-        resolved.append(row)
+        resolved_rows.append(row)
         if hit.get("via") == "probe":
             probe_only.append(c["name"])
         tier, score = row["mission_tier"], row["mission_score"]
@@ -903,14 +904,14 @@ def resolve_leads(max_workers=8,
           _consume, _stalled, label=lambda c: c["name"],
           max_workers=max_workers)
     conn.close()
-    queued = sum(1 for r in resolved
+    queued = sum(1 for r in resolved_rows
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
-    print(f"\n  {len(resolved)} board(s) resolved, "
+    print(f"\n  {len(resolved_rows)} board(s) resolved, "
           f"{queued} awaiting review, "
-          f"{sum(r['active'] for r in resolved)} activated, "
-          f"{len(leads) - len(resolved)} miss(es).")
+          f"{sum(r['active'] for r in resolved_rows)} activated, "
+          f"{len(leads) - len(resolved_rows)} miss(es).")
     if probe_only:
         print(f"  [verify] {len(probe_only)} resolved by name-guess, not the "
               f"company's own site — sanity-check for collisions: "
               f"{', '.join(probe_only[:6])}{'...' if len(probe_only) > 6 else ''}")
-    return resolved
+    return resolved_rows

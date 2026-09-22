@@ -425,6 +425,39 @@ def _free_gates(conn, companies, groups, tracks, mission_scorer, cutoff):
     return decided, survivors
 
 
+def _hydrate_order(survivors):
+    """Sort key for one board's hydration batch: rows some track has already
+    decided OK first, then rows whose TITLE alone already reads relevant
+    (match.filters.is_relevant), then the rest.
+
+    >>> key = _hydrate_order({"a": (None, None, OK), "b": (None, None, DEFER)})
+    >>> key({"id": "a", "title": "T"})[0], key({"id": "b", "title": "T"})[0]
+    (False, True)
+
+    This only decides who goes FIRST -- an off-lane row is still hydrated if
+    the per-host budget reaches it, and the free exclude gate
+    ([exclude.<track>] title_tokens) is what keeps it from being fetched at
+    all. Relevance is judged on the GLOBAL keyword lists: hydration runs
+    outside _keyword_focus, and an ordering need not agree with any one
+    track. Exercised end to end by tests/test_triage.py::
+    test_hydration_spends_the_board_budget_on_relevant_titles_first.
+
+    Notes:
+        The per-host detail budget (harvest._hydrate_rows' cap and
+        miss-streak breaker) used to be spent in arrival order within the
+        decided/undecided split. At a multi-division employer only the
+        division gate can refuse a chip-design seat, and that gate needs a
+        body, so the budget went on rows guaranteed to drop: NVIDIA's
+        waiting list on 2026-09-18 opened with "Senior ASIC Design
+        Engineer", "Mask Design Engineer", "Memory Controller Verification
+        Engineer".
+    """
+    def key(job):
+        return (survivors[job["id"]][2] != OK,
+                not is_relevant(job.get("title") or "", ""))
+    return key
+
+
 def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
              hydrate_fn, cutoff):
     """Phase 2: resolve every survivor company_fetch.needs_detail still
@@ -432,9 +465,11 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
     location the listing never named (see needs_detail/hydrate_description).
 
     One worker per company (hydration is per host), rows already fully
-    decided on some track first, so a board's per-host cap is spent on the
-    surest material. A row whose detail fetch failed recently is not
-    retried (`cutoff`, the same RETRY_DAYS boundary _geo_verdict uses).
+    decided on some track first and, within that, rows whose TITLE already
+    reads as relevant (match.filters.is_relevant) -- so a board's per-host
+    cap is spent on the surest material. A row whose detail fetch failed
+    recently is not retried (`cutoff`, the same RETRY_DAYS boundary
+    _geo_verdict uses).
 
     Returns {job_id: reason} for every survivor this pass leaves still
     needing detail (skipped, or tried and failed): _body_gates names them.
@@ -462,8 +497,9 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
         todo.setdefault(c["id"], []).append(job)
     if not todo:
         return waiting
-    for cid, js in todo.items():
-        js.sort(key=lambda j: survivors[j["id"]][2] != OK)
+    order = _hydrate_order(survivors)
+    for js in todo.values():
+        js.sort(key=order)
     n_todo = sum(len(js) for js in todo.values())
     print(f"  hydrating {n_todo} row(s) needing detail across "
           f"{len(todo)} board(s), {max_workers} at a time...")

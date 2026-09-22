@@ -85,14 +85,23 @@ _DEFAULT_TRACKS = {
 # never costs an API call. Deliberately broad and field-neutral — it is a
 # cheap "is this a technical seat at all?" filter, not your search. Narrow it
 # (or widen it for a non-engineering field) per track with `tech_title_regex`.
+#
+# The -informatic-/-statistic-/-epidemiolog- families are STEMS + `\w*`, not
+# whole words: the occupation noun is a suffix on the field name, so
+# "bioinformatics" wrapped in `\b` could never match "Bioinformatician" (Duke
+# Health's "Bioinformatician II", Durham, dropped on every track 2026-09-11).
+# `bioinformatic\w*` / `biostatistic\w*` are listed beside the unprefixed
+# stems because the leading `\b` cannot fall inside "bioinformatician".
 _DEFAULT_TECH_TITLE_REGEX = (
     r"\b("
     r"engineer|engineering|developer|develop|software|programmer|programming|"
     r"architect|devops|sre|reliability|infrastructure|platform|security|"
-    r"data|database|analyst|analytics|statistician|quantitative|"
+    r"data|database|analyst|analytics|quantitative|"
     r"scientist|science|sciences|scientific|research|researcher|"
     r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
-    r"simulation|computational|informatics|bioinformatics|biostatistics|"
+    r"simulation|computational|"
+    r"informatic\w*|bioinformatic\w*|statistic\w*|biostatistic\w*|"
+    r"epidemiolog\w*|"
     r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
     r"quality|validation|verification|qa|test|r&d|python"
     r")\b"

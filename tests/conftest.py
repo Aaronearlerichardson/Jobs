@@ -239,9 +239,9 @@ def keep_store_open(monkeypatch, db):
     return db
 
 
-def fake_response(payload=None, *, text=None, status=200, content=None):
+def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     """A stand-in for a requests Response: `status_code`,
-    `raise_for_status()`, `json()`, `text`, `content`.
+    `raise_for_status()`, `json()`, `text`, `content`, `url`.
 
     Thirteen of these were defined across five test files, each with its
     own idea of which two or three attributes mattered and what
@@ -252,13 +252,19 @@ def fake_response(payload=None, *, text=None, status=200, content=None):
     `payload` is what json() returns; `text` defaults to that payload as
     JSON, so a stub serves both the JSON and the scrape paths. `status`
     >= 400 makes raise_for_status raise, which is what net.http.get_json
-    turns into a reported miss.
+    turns into a reported miss. `url` is the FINAL url a redirect-following
+    GET reports (what company.probe_job_open's greenhouse redirect check
+    and sniffer.candidate_pages read); it is always present, so no caller
+    has to bolt one on.
     """
     body = text if text is not None else (
         json.dumps(payload) if payload is not None else "")
 
+    final_url = url
+
     class _Response:
         status_code = status
+        url = final_url
 
         def raise_for_status(self):
             if status >= 400:

@@ -249,6 +249,51 @@ def test_capped_total_is_never_smaller_than_the_rows_returned(monkeypatch):
         "capped_total must never be smaller than the rows just returned")
 
 
+class TestWorkdayTotalCeiling:
+    """Workday caps its OWN reported `total`, and what it will serve, at
+    wd.WD_TOTAL_CEILING. At the ceiling the rows returned and the reported
+    total AGREE, so the "fewer rows than the total" rule reads the pull as
+    complete and the board diff closes everything that sat past it --
+    2026-09-18: Abbott and NVIDIA each fetched exactly 2000 rows at a
+    reported total of exactly 2000, neither was tagged capped, and 70 and 10
+    live reqs were closed. A board UNDER the ceiling is genuinely complete
+    and must stay uncapped, or nothing on it would ever close again.
+    """
+
+    def _pages_for(self, n):
+        return n // 20 + 5
+
+    def test_a_board_at_the_ceiling_is_capped(self, monkeypatch):
+        n = wd.WD_TOTAL_CEILING
+        rows = _pull_workday(monkeypatch, n, n, False, self._pages_for(n))
+        assert len(rows) == n
+        info = http.snapshot_info()
+        assert info["capped"], "rows == the reported total AT the ceiling"
+        assert info["capped_total"] == n
+
+    def test_the_ceiling_is_read_off_the_rows_when_no_total_is_reported(
+            self, monkeypatch):
+        """The row count alone reaches the ceiling, so the pull caps itself
+        even though page 0 declared no usable total."""
+        n = wd.WD_TOTAL_CEILING
+        rows = _pull_workday(monkeypatch, n, None, False, self._pages_for(n))
+        assert len(rows) == n
+        info = http.snapshot_info()
+        assert info["capped"]
+        assert info["capped_total"] == n, "falls back to the rows returned"
+
+    def test_a_board_just_under_the_ceiling_is_not_capped(self, monkeypatch):
+        n = wd.WD_TOTAL_CEILING - 5
+        rows = _pull_workday(monkeypatch, n, n, False, self._pages_for(n))
+        assert len(rows) == n
+        assert not http.snapshot_info()["capped"], (
+            "a genuinely complete board must keep closing its vanished rows")
+
+    def test_a_small_board_is_untouched_by_the_rule(self, monkeypatch):
+        assert len(_pull_workday(monkeypatch, 12, 12, False, 5)) == 12
+        assert not http.snapshot_info()["capped"]
+
+
 class TestPageBudget:
     """The Workday/SmartRecruiters page cap is a [policy] setting
     (config.BOARD_MAX_ROWS) applied through config.board_max_pages, which

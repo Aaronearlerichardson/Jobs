@@ -385,6 +385,51 @@ def test_fit_off_stamps_survivors_unscored(tmp_path, tracks, stubs, local_addr):
     assert store.crawl_seen(conn, "e")     # self-heal scores it later
 
 
+def test_hydration_spends_the_board_budget_on_relevant_titles_first(
+        tmp_path, tracks, stubs, local_addr, monkeypatch):
+    """The per-host detail budget is finite, so the order it is spent in is
+    the whole question. A multi-division board's off-lane rows (chip design
+    at NVIDIA, 2026-09-18) pass the title gate and can only be refused by
+    the division gate, which needs a body -- so they were consuming the
+    budget ahead of rows that would surface. Relevance is consulted through
+    the module's own `is_relevant`, stubbed here so the assertion does not
+    depend on which keywords the loaded profile configures."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    for jid, title in (("chip", "Mask Design Engineer"),
+                       ("ctrl", "Memory Controller Verification Engineer"),
+                       ("eng", "Data Engineer")):
+        _harvested(conn, c, jid, title, local_addr)
+    monkeypatch.setattr(triage, "is_relevant",
+                        lambda title, desc="": "data" in (title or "").lower())
+    order = []
+
+    def hydrate(company, jobs, **kw):
+        order.extend(j["id"] for j in jobs)
+        for j in jobs:
+            j["_tried"] = True
+            j["description"] = "python sql pipelines " * 20
+        return {"hydrated": len(jobs), "unhydrated": 0}
+
+    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+               hydrate_fn=hydrate, max_workers=2)
+
+    assert order[0] == "eng", f"hydrated in arrival order: {order}"
+
+
+def test_a_decided_row_still_outranks_a_relevant_undecided_one():
+    """Relevance orders WITHIN the existing decided-first rule, it does not
+    replace it: a row some track has already passed is still hydrated
+    before one no gate could rule on."""
+    survivors = {"ok_row": (None, None, triage.OK),
+                 "defer_row": (None, None, triage.DEFER)}
+    key = triage._hydrate_order(survivors)
+    batch = [{"id": "defer_row", "title": "Data Engineer"},
+             {"id": "ok_row", "title": "Mask Design Engineer"}]
+    assert [j["id"] for j in sorted(batch, key=key)] == ["ok_row", "defer_row"]
+
+
 # ── observability: a dropped/scored/waiting row is nameable, not just counted ──
 
 def test_drop_logs_one_debug_record_per_dropped_row(tmp_path, tracks, stubs,

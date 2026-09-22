@@ -1,0 +1,83 @@
+{
+ "resourceId": "JobPosting[JobPostingSet](9999,207651,1)",
+ "busClassName": "JobPosting",
+ "name": "JobPosting",
+ "representativeText": "Job Posting",
+ "formUrl": "https://css-unchealthunc-prd.inforcloudsuite.com/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D%289999%2C207651%2C1%29.JobPostingDisplay?pagesize=1&csk.JobBoard=EXTERNAL&csk.HROrganization=9999",
+ "fields": {
+  "PostingDateRange_prd_End": {
+   "size": 8,
+   "mutable": true,
+   "value": "00000000"
+  },
+  "_op_PositionDescription_spc_translation_cp_": {
+   "disableFieldHistory": true,
+   "size": 0,
+   "mutable": true,
+   "value": "<p>Summary: redacted prose.</p><p><strong>Responsibilities</strong></p><ul><li>Build &amp; maintain analytic data models.</li><li>Partner with clinical teams.</li></ul><p>Education: redacted prose.</p>",
+   "isRichText": true
+  },
+  "JobBoard": {
+   "size": 20,
+   "mutable": true,
+   "stateValues": [
+    {
+     "label": "Owned - External Job Board",
+     "value": "EXTERNAL"
+    }
+   ],
+   "value": "EXTERNAL",
+   "fireInitialValue": true
+  },
+  "HROrganization": {
+   "size": 4,
+   "mutable": false,
+   "stateValues": [
+    {
+     "label": "UNC HEALTH",
+     "value": "9999"
+    }
+   ],
+   "value": "9999",
+   "required": true,
+   "fireInitialValue": true
+  },
+  "_op_JobRequisitionLocationCategoryWorkType_spc_translation_cp_": {
+   "disableFieldHistory": true,
+   "size": 180,
+   "mutable": true,
+   "value": "US:NC:Morrisville | Professional - Non-Clinical | Full Time"
+  },
+  "_op_Description_spc_translation_cp_": {
+   "disableFieldHistory": true,
+   "size": 100,
+   "mutable": true,
+   "value": "Statistician/Data Scientist - ISD Analytics"
+  },
+  "IsHotJob": {
+   "disableFieldHistory": true,
+   "size": -1,
+   "mutable": false,
+   "value": false
+  },
+  "JobRequisition": {
+   "size": 9,
+   "mutable": false,
+   "value": 207651,
+   "required": true
+  },
+  "JobPosting": {
+   "symbolicKey": true,
+   "size": 4,
+   "mutable": false,
+   "value": 1
+  },
+  "_op_DisplayDuration_spc_translation_cp_": {
+   "disableFieldHistory": true,
+   "size": 250,
+   "mutable": true,
+   "value": "Posted 6 months ago"
+  }
+ },
+ "status": "COMPLETED"
+}

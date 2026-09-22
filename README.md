@@ -377,7 +377,7 @@ Employers this is for, and what their saved pages carry (checked 2026-09-02):
 
 | Employer | Careers page | What a saved page carries |
 |---|---|---|
-| UNC Health | `jobs.unchealthcare.org` | HTTP 403 (Cloudflare "Just a moment") to any plain fetch; vendor unconfirmed. Postings are `/jobs/<8-digit id>-<slug>`, search at `/search/jobs` and `/search/jobs/in/<city>` — path shapes the generic job-link sweep matches. Save a results page; the results markup itself has not been inspected. |
+| ~~UNC Health~~ | `jobs.unchealthcare.org` | **No longer a capture target (2026-09-21).** The advertised site is still Cloudflare-challenged (HTTP 403 `cf-mitigated: challenge`), but the **Infor CloudSuite HCM** board underneath it answers plain JSON with no auth, and `src/ats/fetchers/infor.py` fetches it. Its requisition ids are NOT the `jobs.unchealthcare.org/jobs/<id>-<slug>` ids, so never mint URLs against that host. |
 | Guardant Health | `guardanthealth.com/careers/jobs/` | WordPress page; the table is filled in the browser by a theme script that proxies the company's **Workday** tenant. Saved, it is a `srJobListTable` with one row per posting linking the Workday job URL. Once you see the `*.myworkdayjobs.com` URL in a saved page, `--add-board` that instead and the Workday fetcher takes over. |
 | Emmes | `careers.emmes.com/uscareers/jobs` | **iCIMS Attract (Jibe)**: a plain fetch gets the search shell, the browser fills the list from the site's JSON API. Postings link `/uscareers/jobs/<id>/<slug>/job`; the sibling host matches the roster's `emmes.com` row by domain. |
 | Clinipace | `clinipace.com` → `caidya.com/careers/` | The domain now redirects to Caidya, whose careers page links a **Taleo Business Edition** board (`phe.tbe.taleo.net/.../jobSearch?org=CLINIPACE`). Update the row's `careers_url` to the Taleo board before saving pages from it (a shared ATS host is matched on its tenant path). |
@@ -917,7 +917,7 @@ identically to a dead one.
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
 | `src/ats/registry.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `src/ats/fetchers/` | board fetchers (11 ATSes incl. Jobvite + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
+| `src/ats/fetchers/` | board fetchers (17 ATSes incl. Jobvite, Phenom and Infor CloudSuite HCM + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
 | `src/ats/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
 | `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `src/discovery/` | sourcing: where company names come from (seeds, directories, pasted pages, search dorking), local sourcing and the pipeline; `apply.py` upserts into the store |

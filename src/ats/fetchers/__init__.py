@@ -22,6 +22,7 @@ from .hibob import fetch_hibob
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims
+from .infor import fetch_infor
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .jsonld import fetch_jsonld_page
@@ -47,6 +48,7 @@ __all__ = [
     "fetch_hibob",
     "fetch_hnhiring",
     "fetch_icims",
+    "fetch_infor",
     "fetch_jazzhr",
     "fetch_jobvite",
     "fetch_jsonld_page",

@@ -1,12 +1,20 @@
-"""The (ok, count) contract every ATS slug probe answers.
+"""The (ok, count) contract every ATS slug probe answers, and the
+three-valued verdict the per-JOB closure probe answers.
 
-The twelve probes used to be twelve hand-written request-and-swallow
+The twelve slug probes used to be twelve hand-written request-and-swallow
 blocks; they are built from two helpers now (probes._api_probe /
 _parser_probe). What matters per ATS is the `require_jobs` decision -- is
 a 200 proof of a board, or must it list something -- and that decision is
 what these pin, because it is invisible in the table otherwise and it has
 been got wrong before: SmartRecruiters answers 200 with totalFound:0 for
 ANY slug, so every guessed slug "confirmed" with zero jobs.
+
+The job probe (company_fetch.probe_job_open, driven by
+ops.check_closed_jobs) has the same shape of hidden decision, one per ATS
+family: which answer counts as PROOF the posting is gone. Getting it
+wrong in either direction is silent -- too strict and the op closes
+nothing (2026-09-21: 1 closed, 0 live, 36 unverifiable of 37), too loose
+and it closes live postings off a 403.
 """
 
 from datetime import datetime, timedelta
@@ -15,7 +23,10 @@ import pytest
 
 from conftest import fake_response, keep_store_open
 
+from src.ats.fetchers import company as company_fetch
+from src.ats.fetchers.icims import ICIMS_HEADERS
 from src.discovery.resolve import probes
+from src.net.http import HEADERS
 from src.ops import maintenance as ops
 from src.ops import roster
 import src.store as store
@@ -23,6 +34,43 @@ import src.store as store
 
 def _iso_days_ago(days):
     return (datetime.now() - timedelta(days=days)).isoformat()
+
+
+def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
+               days_stale=30, harvested=None, miss_reason=None, **company):
+    """One company and its OPEN job rows, none of them seen for
+    `days_stale` days -- the population check_closed_jobs selects from.
+    Returns the job ids, in order.
+
+    `urls` seeds one row per URL (what the per-family reporting needs);
+    otherwise `n` rows get a synthetic URL each. `harvested` fills
+    companies.last_harvested_at, which the selection reads.
+
+    Notes:
+        Five classes below had written this out, each with its own id and
+        URL convention. `miss_reason` and `last_harvested_at` go in by raw
+        UPDATE, the way src.store.companies.mark_harvested does:
+        record_miss's "never demote an ACTIVE company" guard is exactly
+        what the promotion cycle overrides, so a record_miss call here
+        would silently no-op and the test would pass having set nothing.
+        `slug` is not seeded because store.harvestable_companies -- the
+        rule under test -- never reads one.
+    """
+    cid = store.upsert_company(db, {"name": name, "ats": ats, **company})
+    ids = []
+    for i, url in enumerate([None] * n if urls is None else urls):
+        jid = f"{name}-j{i}"
+        store.upsert_job(db, {"job_id": jid, "company_id": cid,
+                              "company_name": name, "title": "T",
+                              "track": "local-tech",
+                              "url": url or f"https://acme.example/{jid}"})
+        ids.append(jid)
+    db.execute("UPDATE jobs SET last_seen=? WHERE company_id=?",
+               (_iso_days_ago(days_stale), cid))
+    db.execute("UPDATE companies SET last_harvested_at=?, miss_reason=? "
+               "WHERE id=?", (harvested, miss_reason, cid))
+    db.commit()
+    return ids
 
 
 @pytest.fixture
@@ -367,31 +415,10 @@ class TestDeadBoardClosure:
     rows, miss_reason board-dead:greenhouse since 2026-09-11) is the live
     case this was written for."""
 
-    @staticmethod
-    def _seed(db, name, ats, miss_reason=None, days_stale=20):
-        # A promoted board-dead company writes miss_reason with a raw
-        # UPDATE (src.store.companies.mark_harvested), not through
-        # record_miss -- record_miss's own "never demote an ACTIVE company"
-        # guard is exactly what the promotion cycle exists to override, so
-        # a plain record_miss call here would silently no-op and the test
-        # would pass for the wrong reason (miss_reason never set at all).
-        cid = store.upsert_company(db, {"name": name, "ats": ats})
-        store.upsert_job(db, {"job_id": f"{name}-j1", "company_id": cid,
-                              "company_name": name, "title": "T",
-                              "track": "local-tech",
-                              "url": f"https://{ats}.example/{name}"})
-        db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
-                  (_iso_days_ago(days_stale), f"{name}-j1"))
-        if miss_reason:
-            db.execute("UPDATE companies SET miss_reason=? WHERE name=?",
-                      (miss_reason, name))
-        db.commit()
-        return f"{name}-j1"
-
     def test_a_dead_boards_stale_open_row_closes_without_a_probe(
             self, db, monkeypatch, capsys):
-        jid = self._seed(db, "Judi Health", "greenhouse",
-                         "board-dead:greenhouse", days_stale=20)
+        [jid] = seed_stale(db, "Judi Health", ats="greenhouse",
+                           miss_reason="board-dead:greenhouse", days_stale=20)
         probed = []
 
         def _probe(url):
@@ -413,8 +440,8 @@ class TestDeadBoardClosure:
 
     def test_a_quiet_board_with_no_miss_is_never_closed_this_way(
             self, db, monkeypatch):
-        jid = self._seed(db, "Quiet Co", "lever", miss_reason=None,
-                         days_stale=400)
+        [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
+                           days_stale=400)
         monkeypatch.setattr(ops.company_fetch, "probe_job_open",
                             lambda url: (None, "n/a"))
 
@@ -426,8 +453,8 @@ class TestDeadBoardClosure:
 
     def test_a_miss_in_a_different_family_is_never_closed_this_way(
             self, db, monkeypatch):
-        jid = self._seed(db, "Ats Gap", None, "ats-unsupported:ukg",
-                         days_stale=400)
+        [jid] = seed_stale(db, "Ats Gap", ats=None,
+                           miss_reason="ats-unsupported:ukg", days_stale=400)
         monkeypatch.setattr(ops.company_fetch, "probe_job_open",
                             lambda url: (None, "n/a"))
 
@@ -445,21 +472,9 @@ class TestClosedProbeRotation:
     (unlike a closed one) left a row exactly where it was for the next
     pass to pick again."""
 
-    @staticmethod
-    def _seed(db, n):
-        cid = store.upsert_company(db, {"name": "Acme", "ats": "greenhouse"})
-        for i in range(n):
-            jid = f"j{i:03d}"
-            store.upsert_job(db, {"job_id": jid, "company_id": cid,
-                                  "company_name": "Acme", "title": "T",
-                                  "track": "local-tech",
-                                  "url": f"https://acme.example/{jid}"})
-        db.execute("UPDATE jobs SET last_seen=?", (_iso_days_ago(30),))
-        db.commit()
-
     def test_250_stale_rows_are_fully_covered_in_three_passes_of_100(
             self, db, monkeypatch):
-        self._seed(db, 250)
+        seed_stale(db, n=250)
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
@@ -475,7 +490,7 @@ class TestClosedProbeRotation:
         assert covered == 250
 
     def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
-        self._seed(db, 250)
+        seed_stale(db, n=250)
         monkeypatch.setattr(ops.company_fetch, "probe_job_open",
                             lambda url: (None, "gated"))
 
@@ -496,17 +511,6 @@ class TestClosedProbeGiveUp:
     closing it."""
 
     @staticmethod
-    def _seed(db, job_id="j1"):
-        cid = store.upsert_company(db, {"name": "Acme", "ats": "greenhouse"})
-        store.upsert_job(db, {"job_id": job_id, "company_id": cid,
-                              "company_name": "Acme", "title": "T",
-                              "track": "local-tech",
-                              "url": f"https://acme.example/{job_id}"})
-        db.execute("UPDATE jobs SET last_seen=?", (_iso_days_ago(30),))
-        db.commit()
-        return job_id
-
-    @staticmethod
     def _answer(monkeypatch, verdict):
         """Serve one probe verdict and record every URL probed."""
         probed = []
@@ -521,13 +525,13 @@ class TestClosedProbeGiveUp:
         for _ in range(n):
             ops.check_closed_jobs(conn=db, stale_days=1)
 
-    def _streak(self, db, job_id="j1"):
+    def _streak(self, db, job_id="Acme-j0"):
         return db.execute("SELECT COALESCE(probe_streak, 0) AS s FROM jobs "
                           "WHERE job_id=?", (job_id,)).fetchone()["s"]
 
     def test_ten_unverifiable_probes_drop_the_row_from_the_selection(
             self, db, monkeypatch):
-        jid = self._seed(db)
+        [jid] = seed_stale(db)
         probed = self._answer(monkeypatch, (None, "gated"))
 
         self._run(db, ops.CLOSED_PROBE_GIVE_UP)
@@ -545,7 +549,7 @@ class TestClosedProbeGiveUp:
 
     def test_three_unverifiable_probes_leave_the_row_in_the_queue(
             self, db, monkeypatch):
-        self._seed(db)
+        seed_stale(db)
         probed = self._answer(monkeypatch, (None, "gated"))
 
         self._run(db, 3)
@@ -556,7 +560,7 @@ class TestClosedProbeGiveUp:
         assert len(probed) == 4, "3 < CLOSED_PROBE_GIVE_UP: still selected"
 
     def test_a_confirmed_live_probe_resets_the_streak(self, db, monkeypatch):
-        self._seed(db)
+        seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
         self._run(db, ops.CLOSED_PROBE_GIVE_UP - 1)
         assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP - 1
@@ -573,7 +577,7 @@ class TestClosedProbeGiveUp:
 
     def test_a_board_sighting_puts_a_given_up_row_back_in_the_queue(
             self, db, monkeypatch):
-        jid = self._seed(db)
+        [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
         self._run(db, ops.CLOSED_PROBE_GIVE_UP)
         assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP
@@ -588,7 +592,7 @@ class TestClosedProbeGiveUp:
             self, db, monkeypatch):
         """The give-up rule parks the URL PROBE, not the row: every other
         closure path still reaches it."""
-        jid = self._seed(db)
+        [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
         self._run(db, ops.CLOSED_PROBE_GIVE_UP)
         db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
@@ -602,3 +606,351 @@ class TestClosedProbeGiveUp:
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
         assert row["status"] == "closed"
+
+
+# --- the per-JOB closure probe -------------------------------------------- #
+
+LEVER_JOB = "https://jobs.lever.co/acme/2e1a8d40-0f2b-4c7e-9a11-5b6c7d8e9f01"
+GH_JOB = "https://job-boards.greenhouse.io/acme/jobs/4277627009"
+ASHBY_JOB = "https://jobs.ashbyhq.com/acme/f21013b3-0152-49d9-accb-3a46d33c8a82"
+SR_JOB = "https://jobs.smartrecruiters.com/Acme/3743990014860306"
+BAMBOO_JOB = "https://acme.bamboohr.com/careers/29"
+JAZZ_JOB = "https://acme.applytojob.com/apply/8LvYWTHbW7/Data-Engineer"
+ICIMS_JOB = "https://careers-acme.icims.com/jobs/42423/data-engineer/job?in_iframe=1"
+INFOR_JOB = ("https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/form/"
+             "JobPosting%5BJobPostingSet%5D%2842%2C207651%2C1%29"
+             ".JobPostingDisplay?pagesize=1&csk.JobBoard=EXTERNAL"
+             "&csk.HROrganization=42")
+
+#: The endpoint each family is expected to ask, keyed by job URL. A probe
+#: that stopped calling its API would otherwise pass the closure tests by
+#: falling through to the page.
+FAMILY_API = {
+    LEVER_JOB: "api.lever.co/v0/postings/acme/2e1a8d40",
+    GH_JOB: "boards-api.greenhouse.io/v1/boards/acme/jobs/4277627009",
+    ASHBY_JOB: "api.ashbyhq.com/posting-api/job-board/acme",
+    SR_JOB: "api.smartrecruiters.com/v1/companies/Acme/postings/3743990014860306",
+    BAMBOO_JOB: "acme.bamboohr.com/careers/29/detail",
+    JAZZ_JOB: "acme.applytojob.com/apply/8LvYWTHbW7",
+    INFOR_JOB: ".JobPostingDisplay?pageop=load",
+}
+
+
+@pytest.fixture
+def probe_http(monkeypatch):
+    """Route company_fetch's probe requests by URL fragment, recording
+    every (url, headers) pair. An unrouted URL fails the test loudly
+    rather than reaching the network."""
+    seen = []
+    monkeypatch.setattr(company_fetch, "_ASHBY_BOARDS", {})   # per-pass memo
+
+    def _install(routes):
+        def _get(url, **kw):
+            seen.append((url, kw.get("headers") or {}))
+            for frag, resp in routes.items():
+                if frag in url:
+                    if isinstance(resp, Exception):
+                        raise resp
+                    return resp
+            raise AssertionError(f"probe reached an unrouted URL: {url}")
+        monkeypatch.setattr(company_fetch.SESSION, "get", _get)
+        return seen
+    return _install
+
+
+class TestProbeIsDecisivePerFamily:
+    """Lever, Greenhouse, Ashby, BambooHR, JazzHR and SmartRecruiters all
+    serve a PULLED posting's own page as a plain HTTP 200 with no closure
+    marker, so a page-only probe can neither close such a row nor confirm
+    it -- 36 of 37 probes were "unverifiable" on 2026-09-21. Each family
+    is asked its own public endpoint instead, and what these pin is which
+    answer there counts as proof."""
+
+    def test_a_404_from_the_lever_api_closes(self, probe_http):
+        seen = probe_http({FAMILY_API[LEVER_JOB]: fake_response(status=404)})
+        assert company_fetch.probe_job_open(LEVER_JOB)[0] is False
+        assert len(seen) == 1, "the page must not be fetched as well"
+
+    def test_a_200_from_the_lever_api_confirms_live(self, probe_http):
+        probe_http({FAMILY_API[LEVER_JOB]: fake_response({"text": "Eng"})})
+        assert company_fetch.probe_job_open(LEVER_JOB)[0] is True
+
+    def test_a_404_from_the_greenhouse_api_closes(self, probe_http):
+        probe_http({FAMILY_API[GH_JOB]: fake_response(status=404)})
+        assert company_fetch.probe_job_open(GH_JOB)[0] is False
+
+    def test_a_404_from_the_bamboohr_detail_endpoint_closes(self, probe_http):
+        probe_http({FAMILY_API[BAMBOO_JOB]: fake_response(status=404)})
+        assert company_fetch.probe_job_open(BAMBOO_JOB)[0] is False
+
+    def test_a_410_from_the_jazzhr_apply_url_closes(self, probe_http):
+        probe_http({FAMILY_API[JAZZ_JOB]: fake_response(status=410)})
+        assert company_fetch.probe_job_open(JAZZ_JOB)[0] is False
+
+    def test_an_id_missing_from_a_non_empty_ashby_board_closes(self, probe_http):
+        probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
+            {"jobs": [{"id": "aaaaaaaa-0000-0000-0000-000000000000"}]})})
+        assert company_fetch.probe_job_open(ASHBY_JOB)[0] is False
+
+    def test_an_id_the_ashby_board_still_lists_is_live(self, probe_http):
+        probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
+            {"jobs": [{"id": "f21013b3-0152-49d9-accb-3a46d33c8a82"}]})})
+        assert company_fetch.probe_job_open(ASHBY_JOB)[0] is True
+
+    def test_an_empty_ashby_board_proves_nothing(self, probe_http):
+        """A fetcher soft-fails to [], so an empty listing is
+        indistinguishable from a board that did not answer -- the same
+        reason store.sync_job_statuses refuses to close on one."""
+        probe_http({FAMILY_API[ASHBY_JOB]: fake_response({"jobs": []}),
+                    "jobs.ashbyhq.com": fake_response(url=ASHBY_JOB)})
+        assert company_fetch.probe_job_open(ASHBY_JOB)[0] is None
+
+    def test_one_ashby_board_fetch_serves_every_row_on_it(self, probe_http):
+        """A company with many stale rows must not re-fetch its board once
+        per row."""
+        seen = probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
+            {"jobs": [{"id": "aaaaaaaa-0000-0000-0000-000000000000"}]})})
+        for _ in range(4):
+            company_fetch.probe_job_open(ASHBY_JOB)
+        assert len(seen) == 1
+
+    def test_smartrecruiters_closes_on_the_active_flag(self, probe_http):
+        """SmartRecruiters keeps serving a pulled posting at HTTP 200, so
+        the status code says nothing and `active` says everything."""
+        probe_http({FAMILY_API[SR_JOB]: fake_response(
+            {"id": "3743990014860306", "active": False})})
+        assert company_fetch.probe_job_open(SR_JOB)[0] is False
+
+    def test_an_active_smartrecruiters_posting_is_live(self, probe_http):
+        probe_http({FAMILY_API[SR_JOB]: fake_response(
+            {"id": "3743990014860306", "active": True,
+             "postingUrl": "https://jobs.smartrecruiters.com/Acme/"
+                           "3743990014860306-data-engineer"})})
+        assert company_fetch.probe_job_open(SR_JOB)[0] is True
+
+    def test_a_smartrecruiters_repost_is_not_a_verdict_on_this_row(
+            self, probe_http):
+        """A reposted requisition answers active=true under its
+        SUCCESSOR's id (carried in postingUrl); that says the successor is
+        live, not this row, so neither verdict is earned."""
+        probe_http({FAMILY_API[SR_JOB]: fake_response(
+            {"id": "3743990014860306", "active": True,
+             "postingUrl": "https://jobs.smartrecruiters.com/Acme/"
+                           "3743990015521846-data-engineer"}),
+            "jobs.smartrecruiters.com/Acme/3743990014860306":
+                fake_response(url=SR_JOB)})
+        assert company_fetch.probe_job_open(SR_JOB)[0] is None
+
+    @staticmethod
+    def _infor(end=None, **extra):
+        """An Infor detail-form answer. The host returns HTTP 200 for a
+        pulled posting as readily as for a live one, so every one of these
+        is a 200 and only the BODY differs."""
+        if end is None:
+            return fake_response(extra)
+        return fake_response({"fields": {"PostingDateRange_prd_End":
+                                         {"value": end}}, **extra})
+
+    def test_a_deleted_infor_record_closes(self, probe_http):
+        """A pulled posting usually loses its record: the body says so
+        while the status line still says 200."""
+        seen = probe_http({FAMILY_API[INFOR_JOB]: self._infor(
+            status="DOES_NOT_EXIST", statusCode=404)})
+        is_open, reason = company_fetch.probe_job_open(INFOR_JOB)
+        assert is_open is False
+        assert reason == "infor api: posting record gone"
+        assert len(seen) == 1, "the page must not be fetched as well"
+
+    def test_a_past_infor_posting_end_date_closes(self, probe_http):
+        """The other half: the record survives the pull, with its posting
+        window now closed (verified live -- every unlisted requisition that
+        still had a record carried a years-stale end date)."""
+        probe_http({FAMILY_API[INFOR_JOB]: self._infor(end="20220630")})
+        is_open, reason = company_fetch.probe_job_open(INFOR_JOB)
+        assert is_open is False
+        assert reason == "infor api: posting ended 2022-06-30"
+
+    def test_an_open_ended_infor_posting_is_live(self, probe_http):
+        probe_http({FAMILY_API[INFOR_JOB]: self._infor(end="00000000")})
+        assert company_fetch.probe_job_open(INFOR_JOB)[0] is True
+
+    def test_an_infor_end_date_still_ahead_is_live(self, probe_http):
+        """A posting that names a closing date is open until that date --
+        closing it on the date's mere presence would close live rows."""
+        ahead = (datetime.now() + timedelta(days=30)).strftime("%Y%m%d")
+        probe_http({FAMILY_API[INFOR_JOB]: self._infor(end=ahead)})
+        assert company_fetch.probe_job_open(INFOR_JOB)[0] is True
+
+    def test_an_infor_body_with_no_record_proves_nothing(self, probe_http):
+        """Neither a record nor a DOES_NOT_EXIST verdict: unverifiable. The
+        page fall-through cannot help either -- an Infor job URL serves the
+        same JS shell whether the posting is live or long gone."""
+        probe_http({FAMILY_API[INFOR_JOB]: self._infor(),
+                    INFOR_JOB.split("?")[0]: fake_response(url=INFOR_JOB)})
+        assert company_fetch.probe_job_open(INFOR_JOB)[0] is None
+
+    def test_icims_sends_the_headers_its_waf_accepts(self, probe_http):
+        """iCIMS's WAF 405s the crawler's default Chrome-like UA (see
+        fetchers/icims.ICIMS_HEADERS); 17 of the 36 unverifiable probes on
+        2026-09-21 were that, not a dead posting."""
+        seen = probe_http({"careers-acme.icims.com": fake_response(url=ICIMS_JOB)})
+        company_fetch.probe_job_open(ICIMS_JOB)
+        [(_, sent)] = seen
+        assert sent["User-Agent"] == ICIMS_HEADERS["User-Agent"]
+        assert sent["User-Agent"] != HEADERS["User-Agent"]
+
+    def test_a_pulled_icims_posting_answers_410(self, probe_http):
+        probe_http({"careers-acme.icims.com": fake_response(status=410, url=ICIMS_JOB)})
+        assert company_fetch.probe_job_open(ICIMS_JOB)[0] is False
+
+    def test_every_family_reports_the_endpoint_it_asked(self, probe_http):
+        """The reason string is what the pass summary tallies, so it names
+        the family that answered rather than a bare status."""
+        for url, api in FAMILY_API.items():
+            probe_http({api: fake_response(status=404)})
+            reason = company_fetch.probe_job_open(url)[1]
+            assert company_fetch.probe_family(url) in reason, url
+
+
+class TestOnlyPositiveEvidenceCloses:
+    """A host that refuses to answer has said nothing about the posting.
+    Every one of these leaves the row OPEN and unverifiable."""
+
+    @pytest.mark.parametrize("status", [403, 405, 429, 500, 503])
+    @pytest.mark.parametrize("url", sorted(FAMILY_API))
+    def test_a_refusal_never_closes(self, probe_http, url, status):
+        # The page fall-through gets the same refusal: neither layer may
+        # turn one into a closure.
+        probe_http({FAMILY_API[url]: fake_response(status=status),
+                    url.split("?")[0]: fake_response(status=status, url=url)})
+        assert company_fetch.probe_job_open(url)[0] is None
+
+    @pytest.mark.parametrize("url", sorted(FAMILY_API))
+    def test_a_timeout_never_closes(self, probe_http, url):
+        probe_http({FAMILY_API[url]: OSError("read timed out"),
+                    url.split("?")[0]: OSError("read timed out")})
+        assert company_fetch.probe_job_open(url)[0] is None
+
+    def test_an_icims_405_is_unverifiable_not_closed(self, probe_http):
+        probe_http({"careers-acme.icims.com": fake_response(status=405, url=ICIMS_JOB)})
+        assert company_fetch.probe_job_open(ICIMS_JOB)[0] is None
+
+    def test_a_bot_gated_host_is_never_fetched_at_all(self, probe_http):
+        seen = probe_http({})
+        assert company_fetch.probe_job_open(
+            "https://www.linkedin.com/jobs/view/123")[0] is None
+        assert seen == []
+
+    def test_the_greenhouse_redirect_check_survives_an_unanswerable_api(
+            self, probe_http):
+        """Greenhouse sends a pulled job's URL back to the board root. That
+        evidence predates the API branch and must still be reached when the
+        API cannot answer."""
+        probe_http({FAMILY_API[GH_JOB]: fake_response(status=429),
+                    "job-boards.greenhouse.io/acme/jobs":
+                        fake_response(url="https://job-boards.greenhouse.io/acme"
+                                  "?error=true")})
+        is_open, reason = company_fetch.probe_job_open(GH_JOB)
+        assert is_open is False
+        assert reason == "greenhouse redirect off job page"
+
+
+class TestProbeSelectionFollowsTheHarvestCadence:
+    """A row is worth a GET when its own board WAS walked and no longer
+    listed it, or when no board snapshot has ever ruled on it. A board on
+    the long config.HARVEST_OFFMISSION_HOURS cadence (168h, against a
+    7-day CLOSED_PROBE_STALE_DAYS) puts every one of its rows over the
+    staleness line just before each walk; probing those says nothing the
+    imminent walk will not say better."""
+
+    @staticmethod
+    def _probed(monkeypatch):
+        urls = []
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open",
+                            lambda url: urls.append(url) or (None, "gated"))
+        return urls
+
+    def test_a_board_walked_inside_the_window_still_has_its_rows_probed(
+            self, db, monkeypatch):
+        # Walked two days ago and the row has been unseen for thirty: the
+        # walk happened and did not list it.
+        [jid] = seed_stale(db, "Walked", harvested=_iso_days_ago(2))
+        urls = self._probed(monkeypatch)
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        assert urls == [f"https://acme.example/{jid}"]
+
+    def test_a_board_whose_next_walk_is_not_due_yet_contributes_nothing(
+            self, db, monkeypatch, capsys):
+        # Off-mission and inactive, so it waits 168h; last walked just
+        # past the 7-day staleness line, i.e. due but not yet run.
+        seed_stale(db, "Deferred", harvested=_iso_days_ago(8),
+                   active=0, mission_tier="other")
+        urls = self._probed(monkeypatch)
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        assert urls == []
+        assert "1 skipped: board not walked since" in capsys.readouterr().out
+
+    def test_a_company_with_no_board_is_always_probed(self, db, monkeypatch):
+        [jid] = seed_stale(db, "No Board", ats=None, harvested=None)
+        urls = self._probed(monkeypatch)
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        assert urls == [f"https://acme.example/{jid}"]
+
+    def test_a_board_the_harvester_skips_is_always_probed(self, db, monkeypatch):
+        """'no-board-found' keeps a company out of
+        store.harvestable_companies, so its rows can never be answered by
+        a board diff however recently the ats column was filled in."""
+        [jid] = seed_stale(db, "Unresolved", harvested=_iso_days_ago(90),
+                           miss_reason="no-board-found")
+        urls = self._probed(monkeypatch)
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        assert urls == [f"https://acme.example/{jid}"]
+
+
+class TestProbeOutcomesAreReportedPerFamily:
+    """"36 unverifiable" named nothing an audit could act on. The summary
+    breaks the pass down by ATS family (by host for what no family claims)
+    with the reasons behind each."""
+
+    def test_each_family_gets_a_line_with_its_counts_and_reasons(
+            self, db, monkeypatch, capsys):
+        seed_stale(db, harvested=_iso_days_ago(1),
+                   urls=[LEVER_JOB, LEVER_JOB + "x", ICIMS_JOB,
+                         "https://www.linkedin.com/jobs/view/1"])
+        verdicts = {LEVER_JOB: (True, "lever api: posting live"),
+                    LEVER_JOB + "x": (False, "lever api HTTP 404"),
+                    ICIMS_JOB: (None, "HTTP 405"),
+                    "https://www.linkedin.com/jobs/view/1":
+                        (None, "bot-gated aggregator host")}
+        monkeypatch.setattr(ops.company_fetch, "probe_job_open", verdicts.get)
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        out = capsys.readouterr().out
+        assert "1 closed, 1 confirmed live, 2 unverifiable" in out
+        assert "lever            1 live, 1 closed" in out
+        assert "icims            1 unverifiable [HTTP 405]" in out
+        assert "www.linkedin.com 1 unverifiable [bot-gated aggregator host]" in out
+
+    def test_a_quoted_page_phrase_is_detail_not_a_reason_of_its_own(
+            self, db, monkeypatch, capsys):
+        """Two rows closed by the same kind of notice must tally as one
+        reason, not as two singletons named after their own wording."""
+        seed_stale(db, harvested=_iso_days_ago(1),
+                   urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
+        monkeypatch.setattr(
+            ops.company_fetch, "probe_job_open",
+            lambda url: (False, f"page says {url[-12:]!r}"))
+
+        ops.check_closed_jobs(conn=db, stale_days=7)
+
+        assert "icims            2 closed [page says ... x2]" in \
+            capsys.readouterr().out

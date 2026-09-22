@@ -11,6 +11,7 @@ UI and run_scraper.py can run any op against any configured track.
 """
 
 import re
+from collections import Counter, defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 
@@ -770,11 +771,6 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     return n
 
 
-# Greenhouse job-page URL -> (board slug, job id), for the boards-API detail
-# fetch in _live_jd (works for boards. and job-boards.greenhouse.io).
-_GH_JOB_URL_RE = re.compile(r"greenhouse\.io/([^/?#]+)/jobs/(\d+)")
-
-
 def _live_jd(row):
     """Freshest full JD text for one stored job row, preferring a live
     detail fetch (Workday CXS, Greenhouse boards API, then the generic
@@ -788,7 +784,12 @@ def _live_jd(row):
             from src.ats.fetchers.workday import fetch_workday_description
             text = fetch_workday_description(url) or ""
         else:
-            m = _GH_JOB_URL_RE.search(url)
+            # Greenhouse job-page URL -> (board slug, job id), and the
+            # boards-API root: one definition each, in the module that owns
+            # the platform (works for boards. and job-boards.greenhouse.io).
+            from src.ats.fetchers.api import (GREENHOUSE_API,
+                                              GREENHOUSE_JOB_URL_RE)
+            m = GREENHOUSE_JOB_URL_RE.search(url)
             if m:
                 import html as _html
 
@@ -796,8 +797,8 @@ def _live_jd(row):
 
                 from src.net.http import HEADERS, SESSION
                 r = SESSION.get(
-                    f"https://boards-api.greenhouse.io/v1/boards/{m.group(1)}"
-                    f"/jobs/{m.group(2)}?content=true",
+                    f"{GREENHOUSE_API}/{m.group(1)}/jobs/{m.group(2)}"
+                    f"?content=true",
                     timeout=20, headers=HEADERS)
                 if r.status_code == 200:
                     text = BeautifulSoup(
@@ -1160,6 +1161,52 @@ _DEAD_BOARD_FAMILY = "board-dead"
 # streak (store.record_probe_outcome, touch_job, sync_job_statuses).
 CLOSED_PROBE_GIVE_UP = 10
 
+#: A quoted page phrase is per-row detail, not a reason of its own -- one
+#: tally bucket per KIND of answer.
+_PROBE_DETAIL_RE = re.compile(r"'[^']*'")
+
+
+def _probe_label(url):
+    """The bucket one probe outcome is reported under: the ATS family the
+    probe recognized, else the URL's own host (which is what distinguishes
+    the bot-gated aggregators and the self-hosted boards from each other).
+
+    >>> _probe_label("https://jobs.lever.co/acme/2e1a8d40-0f2b-4c7e-9a11-5b6c7d8e9f01")
+    'lever'
+    >>> _probe_label("https://www.linkedin.com/jobs/view/4435444961/")
+    'www.linkedin.com'
+    >>> _probe_label("")
+    '?'
+    """
+    fam = company_fetch.probe_family(url)
+    if fam and fam != "gated":
+        return fam
+    return re.sub(r"^https?://", "", url or "").split("/")[0].lower() or "?"
+
+
+def _probe_tally_lines(counts, reasons):
+    """The per-family outcome lines for a probe pass's summary, so the next
+    audit reads "icims: 17 closed [icims api HTTP 410 x17]" instead of one
+    undifferentiated "36 unverifiable". Sorted by how much of the pass each
+    family accounted for.
+
+    >>> t = {"lever": Counter(live=12, closed=3),
+    ...      "www.linkedin.com": Counter(unverifiable=2)}
+    >>> r = {"lever": Counter({"lever api: posting live": 12}),
+    ...      "www.linkedin.com": Counter({"bot-gated aggregator host": 2})}
+    >>> for ln in _probe_tally_lines(t, r): print(ln)
+        lever            12 live, 3 closed [lever api: posting live x12]
+        www.linkedin.com 2 unverifiable [bot-gated aggregator host x2]
+    """
+    out = []
+    for label in sorted(counts, key=lambda k: (-sum(counts[k].values()), k)):
+        got = ", ".join(f"{counts[label][k]} {k}" for k in
+                        ("live", "closed", "unverifiable") if counts[label][k])
+        why = ", ".join(f"{r} x{n}" if n > 1 else r
+                        for r, n in reasons[label].most_common(3))
+        out.append(f"    {label:<16} {got}" + (f" [{why}]" if why else ""))
+    return out
+
 
 def _dead_board_open_rows(conn, days):
     """OPEN rows at a company whose CURRENT miss_reason is in the
@@ -1236,8 +1283,10 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                       conn=None):
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
-    (HTTP 404/410, an ATS "no longer accepting" notice, a past JSON-LD
-    validThrough, a Workday CXS miss). Indeterminate probes (bot-gated
+    (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
+    accepting" notice, a past JSON-LD validThrough, a Workday CXS miss, an
+    id absent from a non-empty board listing -- see
+    fetchers.company.probe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
     fetch has already failed (store.miss_family == "board-dead") -- no URL
@@ -1248,6 +1297,24 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     also None); a caller's own `conn` is used as is (track_store). Neither
     query is scoped by track: a stale OPEN row is stale whichever track
     ranks it.
+
+    Selection: a stale row is only worth a GET when its own board would
+    have vouched for it and did not -- i.e. when the harvester walks that
+    board (store.harvestable_companies) and last walked it INSIDE the same
+    `stale_days` window, so the walk happened after the row's last
+    sighting and no longer listed it -- or when no board snapshot has ever
+    ruled on the row at all (no company, no ATS, a no-board/dead-board
+    miss, or a board the harvester has yet to walk once). What that leaves
+    out is the board whose next walk is simply not due: on the longer
+    config.HARVEST_OFFMISSION_HOURS cadence (168h, against a 7-day
+    CLOSED_PROBE_STALE_DAYS) every one of its rows goes "not
+    board-verified in 7+ days" by arithmetic just before each walk, and
+    probing them says nothing the imminent walk will not say better.
+
+    Reporting: outcomes are tallied per ATS family (per host for what no
+    family claims) and printed under the summary line, because "36
+    unverifiable" named nothing an audit could act on and "icims: 17
+    closed [icims api HTTP 410 x17]" names all of it.
 
     Probe rotation: the `limit` rows are the ones this op has gone longest
     without probing -- ordered by desc_checked_at, never-probed-by-it
@@ -1297,16 +1364,29 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     with track_store(t, conn) as conn:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
         rows = [dict(r) for r in conn.execute(
-            "SELECT job_id, title, company_name, url FROM jobs "
+            "SELECT job_id, title, company_name, company_id, url FROM jobs "
             "WHERE COALESCE(status,'open') != 'closed' "
             "AND COALESCE(last_seen, first_seen, '') < ? "
             "AND COALESCE(probe_streak, 0) < ? "
             "ORDER BY COALESCE(desc_checked_at, ''), company_name",
             (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()]
+        # The harvester's OWN view of which boards it walks and when
+        # (store.harvestable_companies, companies.last_harvested_at), not a
+        # second copy of that rule.
+        walked = {c["id"]: (c.get("last_harvested_at") or "")
+                  for c in store.harvestable_companies(conn)}
+        n_rows = len(rows)
+        # "" covers both "no board the harvester walks" and "walked none
+        # yet": either way no board snapshot has ever ruled on the row.
+        rows = [r for r in rows if not walked.get(r["company_id"])
+                or walked[r["company_id"]] > cutoff]
+        n_deferred = n_rows - len(rows)
         if limit:
             rows = rows[:int(limit)]
         print(f"  probing {len(rows)} open job(s) not board-verified in "
-              f"{stale_days}+ day(s)...")
+              f"{stale_days}+ day(s)"
+              + (f" ({n_deferred} skipped: board not walked since)"
+                 if n_deferred else "") + "...")
 
         def _probe(r):
             # A probe that RAISES is not a failure to report and skip, it
@@ -1316,30 +1396,38 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             try:
                 return company_fetch.probe_job_open(r["url"])
             except Exception as e:          # noqa: BLE001 - an outcome
-                return None, f"probe error: {e}"
+                return None, f"probe error: {type(e).__name__}"
 
         now = datetime.now()
         n_closed = n_live = n_unknown = n_parked = 0
+        counts, reasons = defaultdict(Counter), defaultdict(Counter)
         for r, (is_open, reason) in fan_out(rows, _probe, "probe",
                                             max_workers, with_item=True):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
+            bucket = _probe_label(r["url"])
+            reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1
             if is_open is False:
                 store.set_job_status(conn, r["job_id"], "closed")
                 n_closed += 1
+                counts[bucket]["closed"] += 1
                 print(f"    [closed] {label} {reason}")
             elif is_open:
                 store.record_probe_outcome(conn, r["job_id"], True, now)
                 n_live += 1
+                counts[bucket]["live"] += 1
             else:
                 streak = store.record_probe_outcome(conn, r["job_id"], False,
                                                     now)
                 n_unknown += 1
+                counts[bucket]["unverifiable"] += 1
                 if streak >= CLOSED_PROBE_GIVE_UP:
                     n_parked += 1
                     print(f"    [give-up] {label} {streak} unverifiable "
                           f"probes; not probing again ({reason})")
         print(f"  {n_closed} closed, {n_live} confirmed live, "
               f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
+        for line in _probe_tally_lines(counts, reasons):
+            print(line)
         if n_parked:
             print(f"  {n_parked} row(s) hit {CLOSED_PROBE_GIVE_UP} "
                   f"unverifiable probes and left the probe queue.")

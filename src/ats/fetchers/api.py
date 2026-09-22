@@ -9,11 +9,25 @@ the secondary list, and the location regex and the geo logic downstream
 must see them all.
 """
 
+import re
+
 from bs4 import BeautifulSoup
 
 from src.net.http import get_json
 from src.net.util import norm_posted_date
 from .board import board_jobs
+
+#: The public API root each platform answers on, and the Greenhouse job-page
+#: URL shape. Public, and read from here rather than re-derived, because the
+#: per-posting closure probe (fetchers/company.py) and
+#: ops.maintenance._live_jd address the same three APIs for one posting
+#: instead of the whole board -- a second copy of a root or of the URL shape
+#: is a silent "unverifiable", never an error.
+GREENHOUSE_API = "https://boards-api.greenhouse.io/v1/boards"
+LEVER_API = "https://api.lever.co/v0/postings"
+ASHBY_API = "https://api.ashbyhq.com/posting-api/job-board"
+GREENHOUSE_JOB_URL_RE = re.compile(r"greenhouse\.io/(?:embed/job_app\?for=)?"
+                                   r"([A-Za-z0-9_.-]+)/jobs/(\d+)")
 
 
 def merge_locations(primary, extras):
@@ -62,7 +76,7 @@ def _greenhouse_row(slug, j):
 
 
 def fetch_greenhouse(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
+    data = _get_board(f"{GREENHOUSE_API}/{slug}/jobs?content=true",
                       f"Greenhouse {company_name or slug}")
     if not isinstance(data, dict):
         return []
@@ -86,7 +100,7 @@ def _lever_row(slug, j):
 
 
 def fetch_lever(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"https://api.lever.co/v0/postings/{slug}?mode=json",
+    data = _get_board(f"{LEVER_API}/{slug}?mode=json",
                       f"Lever {company_name or slug}")
     if not isinstance(data, list):
         return []
@@ -116,7 +130,7 @@ def _ashby_row(slug, j):
 
 
 def fetch_ashby(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
+    data = _get_board(f"{ASHBY_API}/{slug}",
                       f"Ashby {company_name or slug}")
     if not isinstance(data, dict):
         return []

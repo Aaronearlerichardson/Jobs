@@ -1,7 +1,8 @@
 """UKG Pro (UltiPro) recruiting job-board fetcher.
 
-UKG Pro boards live at ``recruiting2.ultipro.com/<CODE>/JobBoard/<GUID>/`` (a
-client-rendered SPA) and expose a public JSON search API:
+UKG Pro boards live at ``recruiting2.ultipro.com/<CODE>/JobBoard/<GUID>/`` or
+``recruiting.ultipro.com/...`` (a client-rendered SPA) and expose a public JSON
+search API:
 
     POST recruiting2.ultipro.com/<CODE>/JobBoard/<GUID>/JobBoardView/LoadSearchResults
       body {"opportunitySearch": {"Top", "Skip", "QueryString", "OrderBy": [], "Filters": []}}
@@ -14,6 +15,12 @@ Notes:
     parse_board posts through a bare requests.Session rather than the shared
     PoliteSession (as it has since the fetcher was added), so it names its
     timeout explicitly instead of inheriting the session default.
+
+    The slug does not record which host serves the board (the detector in
+    src.ats.signatures accepts both), and a board answers only on its own:
+    the other returns 404. parse_board tries ``recruiting2`` first, falls
+    back to ``recruiting`` on a 404, and remembers the winner per slug for
+    the rest of the process so job URLs are built on the host that worked.
 """
 
 import time
@@ -27,21 +34,36 @@ from .board import board_jobs
 _JSON = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
 
 
-def _api(slug):
+#: Subdomains a board may be served from, in the order they are tried.
+_HOSTS = ("recruiting2", "recruiting")
+
+#: slug -> the subdomain that last answered it (learned by parse_board).
+_HOST_OF = {}
+
+
+def _base(slug, host=None):
+    """The board's root URL on `host`, default the one known to serve it."""
     code, _, guid = slug.partition("|")
-    return f"https://recruiting2.ultipro.com/{code}/JobBoard/{guid}/JobBoardView/LoadSearchResults"
+    return f"https://{host or _HOST_OF.get(slug, _HOSTS[0])}.ultipro.com/{code}/JobBoard/{guid}"
 
 
 def parse_board(slug, page_size=100, max_pages=10, timeout=DEFAULT_TIMEOUT):
     """Return the raw opportunity list for one board slug (``CODE|GUID``)."""
-    url = _api(slug)
     out = []
+    # The host that answered last time goes first; a 404 falls through to the other.
+    hosts = sorted(_HOSTS, key=lambda h: h != _HOST_OF.get(slug))
     with requests.Session() as s:
         for page in range(max_pages):
             body = {"opportunitySearch": {"Top": page_size, "Skip": page * page_size,
                                           "QueryString": "", "OrderBy": [], "Filters": []}}
-            r = s.post(url, json=body, timeout=timeout, headers=_JSON)
+            for host in hosts:
+                r = s.post(f"{_base(slug, host)}/JobBoardView/LoadSearchResults",
+                           json=body, timeout=timeout, headers=_JSON)
+                if r.status_code != 404:
+                    break
             r.raise_for_status()
+            _HOST_OF[slug] = host
+            hosts = [host]      # later pages stay on the host that answered
             opps = r.json().get("opportunities", []) or []
             if not opps:
                 break
@@ -69,9 +91,7 @@ def _desc(opp):
 
 
 def _detail_url(slug, oid):
-    code, _, guid = slug.partition("|")
-    return (f"https://recruiting2.ultipro.com/{code}/JobBoard/{guid}"
-            f"/OpportunityDetail?opportunityId={oid}")
+    return f"{_base(slug)}/OpportunityDetail?opportunityId={oid}"
 
 
 def _row(slug, code, o):

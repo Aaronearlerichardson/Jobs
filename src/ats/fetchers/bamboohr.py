@@ -33,9 +33,24 @@ def _is_remote(job):
     return bool(job.get("isRemote")) or str(job.get("locationType")) == "1"
 
 
-def _fetch_description(base, jid, timeout=None):
+def detail_url(subdomain, jid):
+    """One posting's JSON detail endpoint.
+
+    >>> detail_url("acme", 29)
+    'https://acme.bamboohr.com/careers/29/detail'
+
+    Notes:
+        Also what the per-posting closure probe asks
+        (fetchers/company.py): this endpoint 404s once a posting is pulled
+        while the posting's own page keeps answering 200, so the two must
+        address it the same way.
+    """
+    return f"https://{subdomain}.bamboohr.com/careers/{jid}/detail"
+
+
+def _fetch_description(subdomain, jid, timeout=None):
     try:
-        r = SESSION.get(f"{base}/careers/{jid}/detail",
+        r = SESSION.get(detail_url(subdomain, jid),
                          timeout=timeout, headers=JSON_HEADERS)
         r.raise_for_status()
         opening = (r.json().get("result") or {}).get("jobOpening") or {}
@@ -71,5 +86,5 @@ def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
         return fetch_failed(f"BambooHR {company_name or subdomain}", e)
     return board_jobs((_row(base, subdomain, e) for e in entries), company_name,
                       gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: _fetch_description(base, row["_jid"]),
+                      fetch_description=lambda row: _fetch_description(subdomain, row["_jid"]),
                       max_details=max_details, detail_delay=detail_delay)

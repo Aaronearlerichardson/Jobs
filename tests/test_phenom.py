@@ -56,9 +56,8 @@ def phenom_pages(monkeypatch):
             calls.append({"url": url, "params": dict(params or {})})
             if params and "from" in params:
                 return fake_response(text=pages.get(params["from"], ""))
-            r = fake_response(text="", status=200 if root_ok else 404)
-            r.url = base
-            return r
+            return fake_response(text="", status=200 if root_ok else 404,
+                                 url=base)
 
         monkeypatch.setattr(phenom.SESSION, "get", _get)
         return calls
@@ -219,8 +218,7 @@ def test_sniff_ats_recognizes_a_phenom_board(monkeypatch):
     root = "https://www.example-health.org/careers"
     page = fake_response(text='<html><script>var ddo = {"widgetApiEndpoint":'
                               '"https://careers.example-health.org/widgets"};'
-                              '</script></html>')
-    page.url = root
+                              '</script></html>', url=root)
     monkeypatch.setattr(sniffer, "candidate_pages",
                         lambda name, careers_url, **kw: iter([page]))
     assert sniffer.sniff_ats("Example Health") == {
