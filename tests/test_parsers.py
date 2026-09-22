@@ -1370,3 +1370,149 @@ class TestValidateCandidateResolutionOrder:
 
         assert not c.confirmed
         assert c.ats_lead == "eightfold @ acme"
+
+
+class TestApplyToStoreFetchability:
+    """What `discover-term --apply` calls fetchable.
+
+    The resolver legitimately returns a `custom` hit -- a real careers page
+    on no known platform, keyed on its URL (resolve.board._mk("custom",
+    None, ...)). apply_to_store gated on src.ats.registry.ATS_REGISTRY,
+    which schedules ONE crawl loop (iter_store_sources' lightweight sweep)
+    and omits `custom` on purpose, so every such candidate was reported
+    confirmed and then dropped with "no fetcher for ATS 'custom'". The
+    dispatch table fetch_company actually uses --
+    fetchers.company.FETCHERS -- has carried `custom` all along, and
+    local_sourcing's own custom hits store through it.
+
+    Offline: the store is the in-memory `db`, titles and the mission call
+    are stubbed exactly as TestScoreAndUpsert stubs them.
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, db, tier="core-mission"):
+        import src.claude.api as claude
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h, n=6: [])
+        monkeypatch.setattr(claude, "score_company_mission",
+                            lambda name, *a, **k: (tier, 0.9, "stub"))
+
+    @staticmethod
+    def _candidate(name, ats, slug, careers_url, nc=3, count=8):
+        return pipeline.Candidate(
+            name=name, ats=ats, slug_guess=slug, careers_url=careers_url,
+            notes="", confirmed=True, job_count=count, nc=nc, via="sniff")
+
+    @staticmethod
+    def _apply(*cands):
+        from src.discovery import apply_to_store
+        return apply_to_store({"term": "neurotech", "companies": list(cands)})
+
+    def test_a_resolved_custom_board_reaches_the_roster(self, monkeypatch, db):
+        """The whole path: the resolver sniffs a self-hosted careers page,
+        and the candidate it produces lands in the review queue with its URL
+        as the board's coordinate -- the same row local_sourcing writes for
+        the same hit."""
+        import src.store as store
+        from src import tags
+        TestValidateCandidateResolutionOrder._wire(
+            monkeypatch,
+            sniff={"ats": "custom",
+                   "careers_url": "https://beta.example/careers"},
+            boards={("custom", None): (5, 2)})
+        self._wire(monkeypatch, db)
+        c = TestValidateCandidateResolutionOrder._candidate("Beta Custom")
+        pipeline.validate_candidate(c, delay=0)
+        assert (c.confirmed, c.ats, c.slug_guess) == (True, "custom", None)
+
+        lines = self._apply(c)
+
+        assert not any("[skip]" in ln for ln in lines), lines
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["name"], stored["ats"]) == ("Beta Custom", "custom")
+        # A self-hosted board has no handle: the URL IS the coordinate.
+        assert stored["slug"] is None
+        assert store.board_key(stored) == ("custom",
+                                           "https://beta.example/careers")
+        assert stored["mission_tier"] == "core-mission"
+        assert (stored["local_job_count"], stored["total_job_count"]) == (2, 5)
+        assert {tags.LOCAL, tags.PENDING} <= set(stored["tags"].split(","))
+
+    def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db):
+        """Not just "no longer skipped": once the reviewer confirms it, the
+        row is one the harvester picks up and fetch_company dispatches."""
+        import src.store as store
+        self._wire(monkeypatch, db)
+
+        self._apply(self._candidate("Beta Custom", "custom", None,
+                                    "https://beta.example/careers", nc=2))
+
+        store.confirm_company(db, store.company_id_by_name(db, "Beta Custom"))
+        row = store.get_companies(db, active_only=False)[0]
+        assert [c["name"] for c in store.harvestable_companies(db)] \
+            == ["Beta Custom"]
+        assert [c["name"] for c in store.crawlable_companies(db)] \
+            == ["Beta Custom"]
+        # src.crawl.harvest.fetch_whole_board and the local track
+        # (src.crawl.runner) both dispatch a roster row here.
+        seen = []
+        monkeypatch.setattr(company_fetch, "fetch_custom_careers",
+                            lambda url, loc_re=None, **k: seen.append(url) or [])
+        company_fetch.fetch_company(row, None)
+        assert seen == ["https://beta.example/careers"]
+
+    def test_a_confirmed_board_follows_is_active_mission(self, monkeypatch, db):
+        """An off-mission tier parks the row rather than dropping it -- the
+        custom candidate gets the same verdict every other add gets."""
+        import src.store as store
+        store.upsert_company(db, {"name": "Beta Custom", "ats": "custom",
+                                  "careers_url": "https://beta.example/careers",
+                                  "active": 1})
+        self._wire(monkeypatch, db, tier="other")
+
+        self._apply(self._candidate("Beta Custom", "custom", None,
+                                    "https://beta.example/careers", nc=2))
+
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["mission_tier"], stored["active"]) == ("other", 0)
+
+    def test_a_slug_keyed_board_with_no_slug_is_still_skipped(
+            self, monkeypatch, db):
+        """`custom` is keyed on its URL; greenhouse is not. A careers URL
+        does not stand in for the handle its fetcher needs."""
+        import src.store as store
+        self._wire(monkeypatch, db)
+
+        lines = self._apply(self._candidate(
+            "Delta Labs", "greenhouse", None, "https://delta.example/careers"))
+
+        assert any("malformed slug" in ln for ln in lines), lines
+        assert store.get_companies(db, active_only=False) == []
+
+    def test_an_ats_with_no_fetcher_is_still_skipped(self, monkeypatch, db):
+        """The gate still exists, it just reads the right table: a platform
+        the sniffer can NAME but nothing can fetch stays out of the roster."""
+        import src.store as store
+        self._wire(monkeypatch, db)
+        assert "eightfold" not in company_fetch.FETCHERS
+
+        lines = self._apply(self._candidate(
+            "Gamma Devices", "eightfold", "gamma",
+            "https://gamma.example/careers"))
+
+        assert any("no fetcher for ATS 'eightfold'" in ln for ln in lines)
+        assert store.get_companies(db, active_only=False) == []
+
+    def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):
+        """The ordinary case the gate was written for, pinned: a greenhouse
+        candidate still stores with its slug and the registry's seed tag."""
+        import src.store as store
+        from src import tags
+        self._wire(monkeypatch, db)
+
+        self._apply(self._candidate("Alpha Bio", "greenhouse", "alphabio",
+                                    "https://alpha.example/careers"))
+
+        stored = store.get_companies(db, active_only=False)[0]
+        assert (stored["ats"], stored["slug"]) == ("greenhouse", "alphabio")
+        assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))

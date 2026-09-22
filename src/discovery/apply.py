@@ -14,7 +14,8 @@ used to reach the roster without ever having been an employer.
 
 from src import store
 from src import tags
-from src.ats.registry import ATS_REGISTRY, seed_tag_for
+from src.ats import coords
+from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 
 
@@ -22,18 +23,28 @@ def _candidate_hit(c):
     """A confirmed Candidate as the resolver-shaped hit dict the store write
     path takes, or None when its coordinates are malformed. Workday's
     't|p|s' string goes back to the (tenant, pod, site) triple src.ats.coords
-    spells out as columns."""
+    spells out as columns.
+
+    What counts as coordinates is ``src.store.board_key``, the store's own
+    rule for which column identifies a board -- the slug for most families,
+    the triple for Workday, and the careers URL for the ones keyed on it
+    (custom, successfactors, peopleadmin, wpjson). Requiring a slug here
+    instead rejected a self-hosted `custom` board, whose only coordinate IS
+    its URL, as a malformed one (src.discovery.resolve.board returns exactly
+    that for a real careers page on no known platform).
+    """
     slug = (c.slug_guess or "").strip() or None
     if c.ats == "workday":
         parts = (slug or "").split("|")
         if len(parts) != 3 or not parts[1].isdigit():
             return None
         slug = (parts[0], int(parts[1]), parts[2])
-    elif not slug:
-        return None
-    return {"name": c.name, "ats": c.ats, "slug": slug,
-            "careers_url": c.careers_url or None,
-            "count": c.job_count, "nc": c.nc}
+    hit = {"name": c.name, "ats": c.ats, "slug": slug,
+           "careers_url": c.careers_url or None,
+           "count": c.job_count, "nc": c.nc}
+    # The same coordinates score_and_upsert will write, asked of the same
+    # function company_by_board dedups on: no board, no row.
+    return hit if store.board_key(coords.from_hit(hit)) else None
 
 
 def apply_to_store(result, dry_run: bool = False) -> list[str]:
@@ -59,6 +70,7 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
     # Deferred: the write path pulls in the fetchers and the mission scorer,
     # and src.discovery.__init__ imports this module on every `import
     # src.discovery` -- including the ones that only want the report.
+    from src.ats.fetchers import company as company_fetch
     from .local_sourcing import score_and_upsert
 
     term = result["term"]
@@ -69,7 +81,16 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
     conn = store.connect()
     added, skipped, summary = 0, 0, []
     for c in confirmed:
-        if c.ats not in ATS_REGISTRY:
+        # "Can this row be fetched" is fetchers.company.FETCHERS, the table
+        # fetch_company dispatches on and the one every other caller of the
+        # write path trusts (local_sourcing._hit_from_detection stores a
+        # custom board through it without asking anything else). NOT
+        # src.ats.registry.ATS_REGISTRY: that table schedules ONE crawl loop
+        # -- iter_store_sources' lightweight sweep -- and deliberately omits
+        # the families it does not schedule, `custom` among them. Gating
+        # here on it reported a confirmed self-hosted careers page and then
+        # threw it away.
+        if c.ats not in company_fetch.FETCHERS:
             summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
             skipped += 1
             continue
