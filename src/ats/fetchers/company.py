@@ -21,7 +21,7 @@ those same platforms is fetchers/probe.py.
 """
 
 import re
-from urllib.parse import unquote, urljoin
+from urllib.parse import unquote, urldefrag, urljoin
 
 from bs4 import BeautifulSoup, SoupStrainer
 
@@ -497,7 +497,9 @@ def _openings_link(soup, page_url):
         return None
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        absu = urljoin(page_url, href)
+        # Defragmented, so an "#open-positions" link reads as this page and
+        # the callers' no-self-hop check refuses it.
+        absu = urldefrag(urljoin(page_url, href)).url
         if host_of(absu) != host:
             continue  # off-domain: skip
         if _OFFSITE_RE.search(absu):
