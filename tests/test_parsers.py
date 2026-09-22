@@ -1157,8 +1157,11 @@ class TestScoreAndUpsert:
         store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
                                   "slug": "alpaca", "active": 1})
         self._wire(monkeypatch)
+        # No job count: a row that has produced jobs keeps `active`
+        # whatever discovery scores it (_productive_row).
+        hit = {**self._HIT, "count": None}
         _, active, pending = local_sourcing.score_and_upsert(
-            db, self._HIT, source="paste", include_missions=("adjacent",))
+            db, hit, source="paste", include_missions=("adjacent",))
         assert (active, pending) == (1, False)
         assert [c["name"] for c in store.crawlable_companies(db)] \
             == ["Alpaca Health"]
@@ -1166,7 +1169,7 @@ class TestScoreAndUpsert:
         # The activation rule is src.claude.is_active_mission, and it is
         # what a confirmed row's `active` follows.
         _, active, _ = local_sourcing.score_and_upsert(
-            db, self._HIT, source="paste", include_missions=())
+            db, hit, source="paste", include_missions=())
         assert active == 0
         assert store.crawlable_companies(db) == []
 

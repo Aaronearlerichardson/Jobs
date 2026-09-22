@@ -121,6 +121,32 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
         # now carries the current model AND was re-read this run.
         assert len(calls) == 4
 
+    def test_past_the_head_rows_under_the_floor_are_not_verified(
+            self, db, add_job, local_track, monkeypatch):
+        """2026-09-22: top-200 runs spent ~20 Opus calls on rows stored at
+        0.19-0.24. The first VERIFY_HEAD ranks are checked whatever their
+        fit; past them a stale row needs verify_floor (0.25)."""
+        t = _track(local_track)
+        for i in range(ops.VERIFY_HEAD):
+            add_job(f"gh_head_{i}", fit=0.9 - i / 100, track=t["track"],
+                    description="d" * 400, fit_reason="deep: current",
+                    fit_model="m-new")
+        add_job("gh_acme_above", fit=0.3, track=t["track"],
+                description="d" * 400)
+        add_job("gh_acme_below", fit=0.2, track=t["track"],
+                description="d" * 400)
+        _use_model(monkeypatch, "m-new")
+        seen = []
+        monkeypatch.setattr(fit, "verify_fit", lambda title, text, **k:
+                            seen.append(text) or fit.FitResult(
+                                score=0.3, reason="deep: v", model="m-new"))
+        monkeypatch.setattr(ops, "_live_jd", lambda r: r["job_id"])
+        ops.verify_top(top_n=30, max_workers=1, conn=db, t=t, rounds=1)
+        assert seen == ["gh_acme_above"]
+        ops.verify_top(top_n=30, max_workers=1, conn=db, t=t, rounds=1,
+                       force=True)
+        assert "gh_acme_below" in seen
+
     def test_a_second_default_pass_is_free(
             self, db, add_job, local_track, monkeypatch):
         t = _track(local_track)

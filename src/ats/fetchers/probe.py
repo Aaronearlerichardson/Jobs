@@ -16,12 +16,18 @@ a bot gate -- is "unverifiable", because a caller acts on a False by
 closing the posting.
 """
 
+import logging
 import re
 import time
+from urllib.parse import urlsplit
+
+import requests
 
 from src.net.http import HEADERS, JSON_HEADERS, SESSION
 from . import bamboohr, icims, infor, jazzhr, workday
 from .api import ASHBY_API, GREENHOUSE_API, GREENHOUSE_JOB_URL_RE, LEVER_API
+
+_log = logging.getLogger(__name__)
 
 # Standard "this posting is gone" notices across ATS templates. Curated and
 # phrase-anchored (never a bare "closed"/"expired") so an open JD that merely
@@ -194,6 +200,25 @@ def _probe_ashby(m):
     return False, "ashby api: board no longer lists it"
 
 
+# A job-detail host that refuses connections refuses every row on it: the
+# 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on one host. After
+# _HOST_TRIPS of them in a pass (the Ashby memo's window), its remaining rows
+# are skipped unasked.
+_HOST_TRIPS = 3
+_DEAD_HOSTS = {}        # host -> (expires_at, connection failures)
+
+
+def _host_dead(host):
+    hit = _DEAD_HOSTS.get(host)
+    return bool(hit) and hit[0] > time.time() and hit[1] >= _HOST_TRIPS
+
+
+def _note_connection_failure(host):
+    hit = _DEAD_HOSTS.get(host)
+    _DEAD_HOSTS[host] = ((hit[0], hit[1] + 1) if hit and hit[0] > time.time()
+                         else (time.time() + _ASHBY_BOARD_TTL, 1))
+
+
 def _infor_verdict(r):
     """Infor answers HTTP 200 for a pulled posting as readily as for a live
     one, so the verdict is in the body (fetchers/infor.posting_state)."""
@@ -263,6 +288,15 @@ def probe_job_open(url):
     """
     if not url:
         return None, "no url"
+    # Some feed rows were stored with CR/LF/tabs inside the URL (BioSpace:
+    # "https://jobs.biospace.com \r\n\t/job/..."), which requests rejects
+    # before reaching the network. Stripping it here heals those rows
+    # without a migration; store.upsert_job (_url_no_ws, same rule) keeps
+    # new ones clean. Lone spaces stay: Duke Health ids carry real ones.
+    clean = re.sub(r"\s*[\r\n\t]\s*", "", url).strip()
+    if clean != url:
+        _log.debug("probe url had embedded whitespace: %s", clean)
+        url = clean
     if _GATED_HOST_RE.search(url):
         return None, "bot-gated aggregator host"
 
@@ -301,9 +335,14 @@ def probe_job_open(url):
         if is_open is not None:
             return is_open, fallback
 
+    host = urlsplit(url).hostname or ""
+    if _host_dead(host):
+        return None, "host unreachable this pass: skipped"
     try:
         r = SESSION.get(url, headers=_page_headers(url), allow_redirects=True)
     except Exception as e:
+        if isinstance(e, requests.ConnectionError):
+            _note_connection_failure(host)
         return None, fallback or f"fetch error: {type(e).__name__}"
     if r.status_code in (404, 410):
         return False, f"HTTP {r.status_code}"

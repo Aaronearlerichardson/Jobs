@@ -869,12 +869,21 @@ def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
                  or r.get("remote_eligible") == 1)]
 
 
+# Ranks verify_top checks whatever their stored fit; past this, a stale row
+# needs the track's verify_floor too. 2026-09-22 top-200 run: ~20 of 43 Opus
+# calls went to rows stored at 0.19-0.24 that stayed under 0.35 after the
+# deep read (Tempus 0.19 -> 0.18, several NVIDIA 0.20-0.22).
+VERIFY_HEAD = 25
+
+
 def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                force=False):
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
-    each of the current top `top_n` jobs, PLUS enough triage_status='fit'
-    candidates (_verify_floor_candidates: local/remote, screened at or
-    above the track's `verify_floor`, ordered by screen score descending)
+    each of the current top `top_n` jobs (past rank VERIFY_HEAD, only those
+    stored at or above the track's `verify_floor`), PLUS enough
+    triage_status='fit' candidates (_verify_floor_candidates: local/remote,
+    screened at or above the track's `verify_floor`, ordered by screen
+    score descending)
     to fill the SAME top_n budget when the top-N slice itself has fewer
     than top_n rows that need it — not already verified BY THE CURRENT
     verify model (fit_reason carrying the 'deep:' marker and fit_model
@@ -893,8 +902,9 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     fetched for nothing). Costs at most top_n x rounds API calls per
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
-    `force=True` re-verifies every finalist regardless (candidates are
-    still capped at top_n; force does not widen the round's own budget).
+    `force=True` re-verifies every finalist regardless, floor or not
+    (candidates are still capped at top_n; force does not widen the
+    round's own budget).
 
     Notes:
         The floor candidates exist because digest_min_fit keeps a weak
@@ -931,10 +941,17 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                       f"run ({down})")
                 break
             ranked = _ranked(conn, t, limit=top_n)
-            stale_top = [r for r in ranked if _stale(r)]
+            floor = t["verify_floor"]
+            stale_all = [(i, r) for i, r in enumerate(ranked) if _stale(r)]
+            stale_top = [r for i, r in stale_all
+                         if force or i < VERIFY_HEAD
+                         or (r.get("resume_fit_score") or 0) >= floor]
+            if len(stale_top) < len(stale_all):
+                print(f"  {len(stale_all) - len(stale_top)} stale row(s) ranked "
+                      f"{VERIFY_HEAD}-{len(ranked)} below the {floor:.2f} floor "
+                      f"left unverified")
             remaining = top_n - len(stale_top)
             candidates = []
-            floor = t["verify_floor"]
             if remaining > 0:
                 seen_ids = {r["job_id"] for r in ranked}
                 floor_rows = _verify_floor_candidates(

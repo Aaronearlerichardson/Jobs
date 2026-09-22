@@ -27,8 +27,7 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 """
 
 import time
-from contextlib import ExitStack
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from src import config
 from src import tags as company_tags
@@ -141,7 +140,7 @@ def _js_workday_pass(hits, max_workers):
         return
     if not missed:
         return
-    from .resolve.probes import WorkdayJsProbe
+    from .resolve.probes import JS_PROBE_BUDGET_S, WorkdayJsProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
     # exactly one page load; the serial design existed for sync-
     # Playwright's thread affinity, not politeness. Each probe instance
@@ -149,32 +148,51 @@ def _js_workday_pass(hits, max_workers):
     # + K caller threads = K-way parallelism with the thread-safety model
     # untouched. K is memory-bound (one headless Chromium each), so it is
     # capped low and separate from the HTTP worker count.
+    #
+    # A pool rather than a fixed `i % k` browser per name: the fixed split
+    # queued two names on one browser while another sat idle, and the
+    # per-probe budget would then have counted that queue wait.
     k = min(4, len(missed))
     print(f"  JS-probing {len(missed)} major(s) with no static board "
           f"({k} parallel browser(s))...")
-    with ExitStack() as stack:
-        probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(k)]
+    with WorkdayJsProbePool(k) as pool:
 
-        def _js_one(i, name):
-            wd = probes[i % k].probe(name)
-            if not (wd and wd.get("validated")):
-                return None
-            nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
-            return {"name": name, "ats": "workday",
-                    "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                    "count": wd["count"], "nc": nc}
+        def _js_one(name):
+            t0 = time.monotonic()
+            wd = pool.probe(name)
+            dt = time.monotonic() - t0
+            if wd and wd.get("validated"):
+                nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
+                return {"name": name, "ats": "workday",
+                        "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
+                        "count": wd["count"], "nc": nc}
+            # probe() answers None both for "no link on any page" and for a
+            # scrape it abandoned at the budget; only the clock tells them
+            # apart.
+            if wd:
+                reason = "not validated"
+            elif not pool.launched:
+                reason = "no browser"
+            elif dt >= JS_PROBE_BUDGET_S:
+                reason = "budget exceeded"
+            else:
+                reason = "no workday link"
+            return {"name": name, "reason": reason, "elapsed": dt}
 
-        # `i` picks the browser, so the items are (index, name) pairs.
+        # Every name prints a line: 2026-09-22 printed 4 [JS-OK] for 38
+        # majors, and the other 34 (and a 338s stall) left no trace.
         # on_error keeps this pass's own wording rather than fan_out's.
-        for h in fan_out(list(enumerate(missed)), lambda im: _js_one(*im),
-                         "JS probe", k,
-                         on_error=lambda im, e: print(
-                             f"    [!] JS probe failed for {im[1]!r}: {e}")):
-            if h:
+        for h in fan_out(missed, _js_one, "JS probe", k,
+                         on_error=lambda n, e: print(
+                             f"    [!] JS probe failed for {n!r}: {e}")):
+            if "nc" in h:
                 hits.append(h)
                 t, p, s = h["slug"]
                 print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
                       f"nc={h['nc']}/{h['count']}")
+            else:
+                print(f"    [JS-MISS] {h['name']:28} {h['reason']}  "
+                      f"{h['elapsed']:.0f}s")
 
 
 def _sniff_pass(names, hits, misses, max_workers):
@@ -423,6 +441,20 @@ def _report_dup_board(name, existing):
           f"as '{existing.get('name')}' - already tracked, not added")
 
 
+def _productive_row(conn, name):
+    """The roster row named `name` if it is active and has produced jobs (a
+    nonzero total, or a non-empty crawl in the last 14 days), else None."""
+    row = conn.execute("SELECT * FROM companies WHERE name=?",
+                       (name,)).fetchone()
+    if not row or not row["active"]:
+        return None
+    since = (datetime.now() - timedelta(days=14)).isoformat()
+    if ((row["total_job_count"] or 0) > 0
+            or (row["last_nonempty_at"] or "") >= since):
+        return dict(row)
+    return None
+
+
 def _score_hit(hit):
     """(tier, score, reason) for a resolved board: its mission_context as
     the domain context for src.claude.score_company_mission. Pure network
@@ -446,6 +478,24 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     duplicate costs no LLM request; a caller that scored in a worker pool
     first (populate_companies) passes the result as `scored`.
 
+    A name whose roster row is active and has produced jobs
+    (_productive_row) keeps its board, `active` and mission verdict: the
+    same board only refreshes the counts, and a different one is printed,
+    noted on the row, and returns None. Neither pays for a score.
+
+    >>> from src.store import connect, upsert_company
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
+    ...     "wd_tenant": "fortrea", "wd_pod": 1, "wd_site": "Fortrea",
+    ...     "active": 1, "total_job_count": 350})
+    >>> score_and_upsert(conn, {"name": "Fortrea", "ats": "phenom",
+    ...     "slug": "careers.fortrea.com", "nc": 24, "count": 24},
+    ...     "local_sourcing")  # doctest: +ELLIPSIS
+        [keep] Fortrea: existing workday board retained; alternate phenom ...
+    >>> conn.execute("SELECT ats, slug, wd_tenant, active, total_job_count, "
+    ...              "notes FROM companies").fetchone()[:]
+    ('workday', None, 'fortrea', 1, 350, 'alt board: phenom careers.fortrea.com')
+
     The row is inactive and tagged pending-review unless the store has
     already confirmed the name (src.store.is_confirmed_company). `tags`
     defaults to the local scope tag when the board has local jobs; a caller
@@ -467,13 +517,36 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
         cover.
     """
     from src.claude.api import is_active_mission
-    from src.store import is_confirmed_company, mark_pending, upsert_company
+    from src.store import (board_key, is_confirmed_company, mark_pending,
+                           upsert_company)
 
     name = hit["name"]
     row = coords.from_hit(hit, name=name)
     dup = _board_already_tracked(conn, row)
     if dup:
         _report_dup_board(name, dup)
+        return None
+    # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
+    # name-keyed upsert below re-pointed its Workday row (353 relevant jobs
+    # an hour earlier) at it; the next crawl read 27 jobs and counted every
+    # one as new. Discovery may not re-point or switch off a board that
+    # works -- the alternate goes in `notes` for a person to judge.
+    kept = _productive_row(conn, name)
+    if kept:
+        if board_key(kept) == board_key(row):
+            upsert_company(conn, {"name": name,
+                                  "local_job_count": hit.get("nc") or 0,
+                                  "total_job_count": hit.get("count")})
+            return kept, kept["active"], False
+        key = board_key(row)
+        alt = ("/".join(str(p) for p in key[1:]) if key
+               else row.get("careers_url") or "?")
+        print(f"    [keep] {name}: existing {kept['ats']} board retained; "
+              f"alternate {row['ats']} board {alt} noted")
+        note = f"alt board: {row['ats']} {alt}"
+        if note not in (kept["notes"] or ""):
+            upsert_company(conn, {"name": name, "notes": "; ".join(
+                filter(None, (kept["notes"], note)))})
         return None
     tier, score, reason = scored if scored is not None else _score_hit(hit)
     # Shared activation rule (src.claude.is_active_mission): active tiers,

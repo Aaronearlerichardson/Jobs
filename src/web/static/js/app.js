@@ -6,7 +6,7 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
 const state = { jobs: [], pipeline: [], pipelineDue: [], conversion: [],
                 companies: [], pending: [], stats: {},
                 tracks: [], track: null, config: null, names: null,
-                expanded: null, logTotal: 0, runKey: "", queueSig: "",
+                expanded: null, logTotal: 0, cursorTask: "", runKey: "", queueSig: "",
                 inflight: new Set() };
 
 const currentTrack = () => state.tracks.find(t => t.id === state.track);
@@ -741,7 +741,7 @@ function renderOps() {
         toast(`started: ${op}`);
         // Only a real start clears the log: when the request was queued the
         // log still belongs to the operation that is running right now.
-        state.logTotal = 0; $("#oplog").textContent = "";
+        state.logTotal = 0; state.cursorTask = ""; $("#oplog").textContent = "";
       }
     } catch (e) {
       toast(e.message);
@@ -840,7 +840,7 @@ async function resolveNames() {
       toast(`queued: resolving ${names.length} name(s)`);
     } else {
       toast(`started: resolving ${names.length} name(s)`);
-      state.logTotal = 0; $("#oplog").textContent = "";
+      state.logTotal = 0; state.cursorTask = ""; $("#oplog").textContent = "";
     }
     state.names = null;
     renderNames();
@@ -942,7 +942,18 @@ async function pollOps() {
     // empty too (the route enforces this; this only greys the button out).
     document.querySelectorAll("#setcards button.run").forEach(b =>
       b.disabled = s.running || queue.length > 0);
-    if (s.lines.length) {
+    // The server empties its log whenever an op starts, including a queued op
+    // the finished worker hands off to with no request from here. Our cursor
+    // still counts the previous op's lines, so since= points past the end of
+    // the new log and every poll came back empty: queued ops never showed.
+    // A changed (name, started) means these lines were cut at a stale cursor;
+    // drop them and read the new op from line 0 on the next poll.
+    const taskKey = `${s.name}|${s.started || ""}`;
+    const stale = state.cursorTask && taskKey !== state.cursorTask;
+    state.cursorTask = taskKey;
+    if (stale) {
+      state.logTotal = 0; $("#oplog").textContent = "";
+    } else if (s.lines.length) {
       const log = $("#oplog");
       const atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
       log.textContent += s.lines.join("\n") + "\n";

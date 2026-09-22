@@ -13,7 +13,7 @@ requests rather than roster rows -- which is why the shape filters
 import re
 
 from src import config
-from src.match.names import name_key
+from src.match.names import junk_name_reason, name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
 
@@ -281,11 +281,19 @@ def gather_names(extra=None):
     sources.append(brainstormed)
     sources.append(extra or [])
 
-    names, seen = [], set()
+    # Every name gathered here that fails to resolve is stored as a miss and
+    # retried by reresolve, so junk ("2nd", "8 benefits") is screened out
+    # before it can cost a resolve cycle now and on every pass after.
+    names, seen, junk = [], set(), 0
     for src in sources:
         for n in src:
             k = name_key(n)
             if k and k not in seen:
                 seen.add(k)
-                names.append(n.strip())
+                if junk_name_reason(n):
+                    junk += 1
+                else:
+                    names.append(n.strip())
+    if junk:
+        print(f"    {junk} junk-shaped candidate name(s) dropped")
     return names

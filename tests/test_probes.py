@@ -17,9 +17,11 @@ nothing (2026-09-21: 1 closed, 0 live, 36 unverifiable of 37), too loose
 and it closes live postings off a 403.
 """
 
+import time
 from datetime import datetime, timedelta
 
 import pytest
+import requests
 
 from conftest import fake_response, iso_days_ago, keep_store_open
 
@@ -215,6 +217,31 @@ def test_every_registered_probe_is_callable():
     name in it with nothing behind it fails only in a live discovery run."""
     for ats, probe in probes.PROBES.items():
         assert callable(probe), ats
+
+
+def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
+    """discover-local 2026-09-22 sat 338s silent in the JS pass: one name's
+    scrape has to give up, and not hand its hung page to the next name."""
+    class HungPage:
+        url = ""
+
+        def goto(self, *_a, **_k):
+            time.sleep(1)
+
+        def content(self):
+            return ""
+
+        def wait_for_load_state(self, *_a, **_k):
+            pass
+
+    monkeypatch.setattr(probes, "JS_PROBE_BUDGET_S", 0.1)
+    with probes.WorkdayJsProbe() as js:
+        monkeypatch.setattr(js, "_ensure_page", HungPage)
+        stuck = js._executor
+        t0 = time.monotonic()
+        assert js.probe("Acme") is None
+        assert time.monotonic() - t0 < 0.5
+        assert js._executor is not stuck and js._page is None
 
 
 class TestPruneNamesWhatItDeactivates:
@@ -639,6 +666,7 @@ def probe_http(monkeypatch):
     rather than reaching the network."""
     seen = []
     monkeypatch.setattr(job_probe, "_ASHBY_BOARDS", {})   # per-pass memo
+    monkeypatch.setattr(job_probe, "_DEAD_HOSTS", {})     # per-pass breaker
 
     def _install(routes):
         def _get(url, **kw):
@@ -849,6 +877,24 @@ class TestOnlyPositiveEvidenceCloses:
         is_open, reason = job_probe.probe_job_open(GH_JOB)
         assert is_open is False
         assert reason == "greenhouse redirect off job page"
+
+
+class TestAnUnreachableUrlCostsLittle:
+    """The 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on
+    BioSpace rows whose stored URLs carried CR/LF/tab runs."""
+
+    def test_embedded_whitespace_is_stripped_before_the_get(self, probe_http):
+        seen = probe_http({"jobs.biospace.com/job/1/": fake_response(status=404)})
+        assert job_probe.probe_job_open(
+            "https://jobs.biospace.com \r\n\t/job/1/\r\n\r\n")[0] is False
+        assert seen[0][0] == "https://jobs.biospace.com/job/1/"
+
+    def test_a_refusing_host_is_asked_three_times_per_pass(self, probe_http):
+        seen = probe_http({"dead.example": requests.ConnectionError()})
+        reasons = [job_probe.probe_job_open(f"https://dead.example/job/{i}")[1]
+                   for i in range(20)]
+        assert len(seen) == 3
+        assert reasons[-1] == "host unreachable this pass: skipped"
 
 
 class TestProbeSelectionFollowsTheHarvestCadence:

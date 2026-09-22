@@ -436,6 +436,39 @@ def test_harvest_board_promotes_to_board_dead_after_three_days(
     assert "Acme" not in [r["name"] for r in store.harvestable_companies(conn)]
 
 
+@pytest.mark.parametrize("ats, dead", [("greenhouse", True),
+                                       ("workday", False)])
+def test_harvest_board_buries_a_second_definitive_404(tmp_path, monkeypatch,
+                                                      ats, dead):
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", ats=ats)
+    monkeypatch.setattr(harvest, "fetch_whole_board",
+                        lambda comp: http.fetch_failed("Acme", "HTTP 404"))
+    harvest.harvest_board(c, db, delay=0)
+    harvest.harvest_board(store.get_company(conn, c["id"]), db, delay=0)
+    row = store.get_company(conn, c["id"])
+    assert (row["miss_reason"], row["active"]) == (
+        ("board-dead:greenhouse", 0) if dead else ("fetch-error:harvest", 1))
+
+
+@pytest.mark.parametrize("ats, dead", [("greenhouse", True),
+                                       ("workday", False)])
+def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
+    from src.crawl import runner
+    c = _company(db, "Acme", ats=ats)
+    snap = {"fetch_errors": 1, "incomplete": True, "capped": False,
+            "capped_total": None, "last_error": "Acme: HTTP 404"}
+    for _ in range(2):
+        spec = {"company": store.get_company(db, c["id"]), "name": "Acme",
+                "platform": ats}
+        runner._gate_sources(db, local_track, [spec], [([], None, snap)],
+                             commit=True)
+    row = store.get_company(db, c["id"])
+    assert (row["miss_reason"], row["active"]) == (
+        ("board-dead:greenhouse", 0) if dead else (None, 1))
+
+
 def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
                                                              monkeypatch):
     """The count is per-thread, and a worker thread runs one board."""

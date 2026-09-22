@@ -45,9 +45,19 @@ RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 # fine. First sighting switches ddgs's client to config.SEARCH_DNS_FALLBACK
 # (primp accepts a `dns_resolver` list that ddgs does not expose) and retries;
 # if that is refused too, or no fallback is configured, the breaker trips
-# and every later query in the process returns [] at once instead of
-# burning RETRIES x RETRY_PAUSE per name. `reset_resolver()` re-arms both.
-_RESOLVER_DOWN = False
+# and later queries return [] at once instead of burning RETRIES x
+# RETRY_PAUSE per name. The trip is timed, not permanent: the 2026-09-22
+# reresolve lost 24 of its 45 misses to a host DNS hiccup that had long
+# cleared, because the breaker stayed shut for the rest of the run. After
+# each window one query goes through as a probe; a refused probe doubles
+# the window (capped). `reset_resolver()` re-arms the breaker and the DNS
+# override.
+RESOLVER_WINDOW = 90.0          # seconds of skipping after the first trip
+RESOLVER_WINDOW_CAP = 600.0
+_RESOLVER_DOWN_UNTIL = 0.0      # time.monotonic() deadline of the window
+_RESOLVER_BACKOFF = 0.0         # current window; 0 = breaker closed
+_RESOLVER_PROBING = False       # a probe is in flight; others keep skipping
+_RESOLVER_LOCK = threading.Lock()
 _RESOLVER_OVERRIDE = None       # (module, original Client) while installed
 _RESOLVER_MARKERS = ("dns error", "query refused")
 
@@ -188,19 +198,63 @@ def _install_resolver(query):
 
 
 def _trip_resolver(query, exc):
-    global _RESOLVER_DOWN
-    if not _RESOLVER_DOWN:
-        _RESOLVER_DOWN = True
-        print(f"  [!] web search unreachable: the search library's resolver "
-              f"was refused ({type(exc).__name__} on {query[:40]!r}). "
-              f"Skipping web search for the rest of this run.")
+    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
+    with _RESOLVER_LOCK:
+        prev = _RESOLVER_BACKOFF
+        if prev and not _RESOLVER_PROBING:
+            return      # a query already in flight when the breaker tripped
+        _RESOLVER_BACKOFF = (min(prev * 2, RESOLVER_WINDOW_CAP) if prev
+                             else RESOLVER_WINDOW)
+        _RESOLVER_DOWN_UNTIL = time.monotonic() + _RESOLVER_BACKOFF
+        _RESOLVER_PROBING = False
+    if prev:
+        print(f"  [!] web search still unreachable after {prev:.0f}s, "
+              f"backing off {_RESOLVER_BACKOFF:.0f}s")
+        return
+    # Which path failed matters: on 2026-09-22 the fallback servers were
+    # installed and refused too, which points at the host, not ddgs.
+    via = ("the SEARCH_DNS_FALLBACK override ("
+           + ", ".join(s for s in config.SEARCH_DNS_FALLBACK if s) + ")"
+           if _RESOLVER_OVERRIDE is not None else "its own default resolver")
+    print(f"  [!] web search unreachable: the search library's resolver "
+          f"was refused via {via} ({type(exc).__name__} on {query[:40]!r}). "
+          f"Skipping web search for {_RESOLVER_BACKOFF:.0f}s, then probing.")
+
+
+def _resolver_gate():
+    """None (skip) while the breaker window is open, True for the one caller
+    that becomes the probe after it expires, else False. The probe holds
+    the rest off until it reports."""
+    global _RESOLVER_PROBING
+    with _RESOLVER_LOCK:
+        if not _RESOLVER_BACKOFF:
+            return False
+        if _RESOLVER_PROBING or time.monotonic() < _RESOLVER_DOWN_UNTIL:
+            return None
+        _RESOLVER_PROBING = True
+        return True
+
+
+def _probe_passed():
+    """The probe got past name resolution (a hit, an empty or a throttle all
+    count): close the breaker."""
+    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
+    with _RESOLVER_LOCK:
+        if not _RESOLVER_PROBING:
+            return      # the probe was refused and re-tripped
+        _RESOLVER_DOWN_UNTIL = _RESOLVER_BACKOFF = 0.0
+        _RESOLVER_PROBING = False
+    print("  web search resolver recovered")
 
 
 def reset_resolver():
     """Re-arm the resolver breaker and drop the DNS override (tests, or a
     long-lived process after the network changed)."""
-    global _RESOLVER_DOWN, _RESOLVER_OVERRIDE
-    _RESOLVER_DOWN = False
+    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
+    global _RESOLVER_OVERRIDE
+    with _RESOLVER_LOCK:
+        _RESOLVER_DOWN_UNTIL = _RESOLVER_BACKOFF = 0.0
+        _RESOLVER_PROBING = False
     if _RESOLVER_OVERRIDE is not None:
         hc, orig = _RESOLVER_OVERRIDE
         hc.primp.Client = orig
@@ -249,7 +303,8 @@ def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
     if cached is not None:
         _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
         return cached
-    if _RESOLVER_DOWN:
+    probe = _resolver_gate()
+    if probe is None:
         _log.debug("ddg skipped, resolver breaker tripped: %s", query)
         return []
     DDGS = _ddgs_class()
@@ -260,6 +315,8 @@ def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
 
     def _run():
         box["v"] = _query(DDGS, query, max_results, page, budget, retries)
+        if probe:
+            _probe_passed()
 
     th = threading.Thread(target=_run, daemon=True)
     th.start()

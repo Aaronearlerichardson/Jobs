@@ -46,6 +46,7 @@ STALL_S is abandoned rather than allowed to wedge the run.
 """
 
 import logging
+import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
@@ -104,6 +105,14 @@ MIN_AGE_HOURS = 6.0
 # side, this bounds the probe side the same way.
 CLOSED_PROBE_STALE_DAYS = 7
 CLOSED_PROBE_LIMIT = 100
+# ATS families whose public boards API answers 404 only for a board that
+# does not exist, so a second one is a verdict, not a blip. Greenhouse
+# harvard and cognitotherapeutics 404'd in the 2026-09-22 harvest AND in
+# both web-UI crawls after it, each a live GET the three-day grace
+# (store.HARVEST_DEAD_AFTER_DAYS) would have kept spending. Workday is out:
+# its tenants 404 transiently. The crawl (src.crawl.runner) reads this too.
+DEFINITIVE_404_ATS = frozenset({"greenhouse", "lever", "ashby"})
+_HTTP_404 = re.compile(r"\bHTTP 404\b")
 
 
 # --------------------------------------------------------------------------- #
@@ -299,6 +308,24 @@ def _soft_failed(stats):
     return not stats.get("fetched") and bool(stats.get("fetch_errors"))
 
 
+def bury_404_board(conn, company, error):
+    """Mark `company` 'board-dead:<ats>' and deactivate it when `error` is
+    an HTTP 404 from a DEFINITIVE_404_ATS listing; the caller has already
+    seen the board fail once before. Returns the reason written, else None.
+
+    Deactivated exactly as mark_harvested's promotion is, which is what
+    lets reresolve_misses re-check it."""
+    ats = company.get("ats")
+    if ats not in DEFINITIVE_404_ATS or not _HTTP_404.search(error or ""):
+        return None
+    reason = f"board-dead:{ats}"
+    store.deactivate_company(conn, company["id"])
+    store.record_miss(conn, company["name"], reason)
+    print(f"    [!] {company['name']} ({ats}): listing endpoint 404 twice - "
+          f"board-dead, deactivated (reresolve re-checks it)")
+    return reason
+
+
 def hydrate_delay(ats):
     """Seconds between one board's detail GETs: the ATS registry's
     politeness pause when it has one, else HYDRATE_DELAY_S.
@@ -423,6 +450,11 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
                 promoted = store.mark_harvested(
                     conn, company["id"], len(jobs),
                     soft_fail=_soft_failed(stats), now=stamp_dt)
+                # `company` is the pre-pass row: a fetch-error miss already
+                # on it means this is the second failing pass in a row.
+                if (not promoted and _soft_failed(stats)
+                        and company.get("miss_reason") == "fetch-error:harvest"):
+                    bury_404_board(conn, company, stats.get("last_error"))
         if promoted:
             print(f"    [!] {company.get('name')}: no jobs for >= "
                   f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "

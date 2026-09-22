@@ -6,8 +6,9 @@ that answered "Query Refused" for every engine while the crawler's own
 requests resolved fine (2026-09-02 add-names run: nine failures, each
 retried with backoff). The client now switches ddgs to the configured
 public resolvers on the first refusal and retries; if that is refused
-too, or nothing is configured, a breaker skips web search for the rest
-of the process.
+too, or nothing is configured, a breaker skips web search for a window,
+then lets one probe through (2026-09-22 reresolve: a permanent breaker
+left 24 names unsearched after a transient host DNS hiccup).
 
 Offline: the DDGS class and ddgs's HTTP-client module are both faked.
 """
@@ -118,6 +119,22 @@ class TestResolverFallback:
         assert wired.primp.Client is wired.original # nothing installed
         out, made = _search(monkeypatch, [[{"href": "https://never/"}]], q="beta")
         assert out == [] and made == []
+
+    def test_an_expired_window_lets_one_probe_through(
+            self, monkeypatch, wired, capsys):
+        _search(monkeypatch, [REFUSED, REFUSED])
+        monkeypatch.setattr(ddg, "_RESOLVER_DOWN_UNTIL", 0.0)
+        out, made = _search(monkeypatch, [REFUSED], q="beta")
+        assert out == [] and len(made) == 1         # probed, refused again
+        assert ddg._RESOLVER_BACKOFF == 2 * ddg.RESOLVER_WINDOW
+        assert "backing off 180s" in capsys.readouterr().out
+        monkeypatch.setattr(ddg, "_RESOLVER_DOWN_UNTIL", 0.0)
+        hit = [{"href": "https://gamma.example/"}]
+        out, _ = _search(monkeypatch, [hit], q="gamma")
+        assert out == hit
+        assert "recovered" in capsys.readouterr().out
+        out, made = _search(monkeypatch, [hit], q="delta")
+        assert out == hit and len(made) == 1        # breaker closed again
 
     def test_reset_restores_the_original_client(self, monkeypatch, wired):
         _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])

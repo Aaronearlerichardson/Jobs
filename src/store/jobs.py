@@ -404,8 +404,9 @@ def upsert_job(conn, j, keep_location=False):
     'Peoria, IL'
     """
     now = datetime.now().isoformat()
+    url = _url_no_ws(j.get("url"))
     new = not job_exists(conn, j["job_id"])
-    if new and j.get("url"):
+    if new and url:
         # Same posting arriving under a NEW id scheme — a company's ats/
         # tenant changed (Keebler custom_* -> rippling_*) or a fetcher's id
         # format did (Duke sf__<slug> -> sf_<tenant>_<num>). Re-key the
@@ -416,7 +417,7 @@ def upsert_job(conn, j, keep_location=False):
         # rows.
         prev = conn.execute(
             "SELECT job_id, title FROM jobs WHERE url=?",
-            (j["url"],)).fetchone()
+            (url,)).fetchone()
         if (prev is not None
                 and (prev["title"] or "").strip().lower()
                 == (j.get("title") or "").strip().lower()):
@@ -471,7 +472,7 @@ def upsert_job(conn, j, keep_location=False):
                             THEN closed_at ELSE NULL END,
              harvested_at=COALESCE(excluded.harvested_at, harvested_at)""",
         (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
-         j.get("url"), j.get("location"), track, j.get("geo_mode"),
+         url, j.get("location"), track, j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("anchor_signal"),
          j.get("description"),
          j.get("resume_fit_score"), j.get("fit_reason"),
@@ -498,6 +499,18 @@ def _norm_url(u):
     u = re.sub(r"^https?://", "", u)
     return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
+
+def _url_no_ws(u):
+    """`u` trimmed, minus any whitespace run holding a line break or tab:
+    225 BioSpace rows stored "https://jobs.biospace.com \\r\\n\\t/job/..."
+    and every probe of them died in requests before reaching the network.
+    A lone space is kept -- Duke Health's Phenom ids ("job/DPC VCT 03")
+    carry real ones, which requests percent-encodes.
+
+    >>> _url_no_ws("https://h.com \\r\\n\\t/job/DPC 1/\\r\\n")
+    'https://h.com/job/DPC 1/'
+    """
+    return re.sub(r"\s*[\r\n\t]\s*", "", u).strip() if u else u
 
 
 def touch_job(conn, job_id):

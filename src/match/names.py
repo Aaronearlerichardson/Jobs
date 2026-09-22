@@ -214,8 +214,21 @@ _JUNK_STATUS_WORDS = frozenset({
 _JUNK_LOCATION_RE = re.compile(
     r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
     re.IGNORECASE)
-_JUNK_PREFIX_RE = re.compile(r"^\s*(?:\d+\+?\s*results?|\d+\s+jobs?)\b",
-                             re.IGNORECASE)
+# A count glued to what it counts, or to a match grade: LinkedIn chrome
+# ("1 benefit", "8 benefits", "25Low Match", "3 days ago") that the
+# 2026-09-22 reresolve spent full resolve cycles on. "Day" alone is not
+# chrome ("3 Day Blinds"), so only "days ago" counts.
+_JUNK_PREFIX_RE = re.compile(
+    r"^\s*\d+\+?\s*(?:results?|jobs?|benefits?|match(?:es)?|days?\s+ago|"
+    r"(?:low|medium|high|good|strong)\s+match)\b",
+    re.IGNORECASE)
+# "2nd", "12": a stray list index or ordinal. Digits WITH letters are
+# names ("3M", "23andMe", "Q2"), so only a bare number is rejected.
+_NUMBER_ONLY_RE = re.compile(r"^\d+(?:st|nd|rd|th)?$", re.IGNORECASE)
+# A person's name with credential suffixes (", MSHR, PHR"): a recruiter's
+# byline off a pasted posting. Two or more are required, since one is a
+# legal form or a state ("Acme, LLC", "Durham, NC").
+_CREDENTIALS_RE = re.compile(r"(?:,\s*[A-Z]{2,5}){2,}\s*$")
 _TRAILING_NUMBER_RE = re.compile(r"^(.*\S)\s+\d{1,2}$")
 _LEGAL_ABBREV_RE = re.compile(
     r"\b(?:inc|co|corp|ltd|llc|plc|sa|ag|gmbh|bv|nv|jr|sr)\.$", re.IGNORECASE)
@@ -267,6 +280,16 @@ def junk_name_reason(name):
     'location-string'
     >>> junk_name_reason("99+ results")
     'listing-chrome'
+    >>> [junk_name_reason(n) for n in ("1 benefit", "8 benefits",
+    ...     "25Low Match", "3 days ago")]
+    ['listing-chrome', 'listing-chrome', 'listing-chrome', 'listing-chrome']
+
+    A bare number or ordinal, and a person's name with credentials:
+
+    >>> junk_name_reason("2nd"), junk_name_reason("12")
+    ('number-only', 'number-only')
+    >>> junk_name_reason("Jane Q Public, MSHR, PHR")
+    'person-credentials'
 
     A numbered copy of a name ("Fairwai 1", "Luna Physical Therapy 1") is a
     scraper's duplicate marker, not a second employer:
@@ -291,12 +314,19 @@ def junk_name_reason(name):
     ...     "SAS Institute", "Cala Health, Inc.", "3M", "Studio 54",
     ...     "Duke University", "Blue Cross NC", "Q2 Solutions", "IBM")]
     ['', '', '', '', '', '', '', '', '', '']
+    >>> [junk_name_reason(n) for n in ("23andMe", "Bio-Techne", "3 Day Blinds",
+    ...     "10x Genomics", "Acme, LLC")]
+    ['', '', '', '', '']
     """
     s = (name or "").strip()
     if not s:
         return "empty"
     if _JUNK_PREFIX_RE.match(s):
         return "listing-chrome"
+    if _NUMBER_ONLY_RE.match(s):
+        return "number-only"
+    if _CREDENTIALS_RE.search(s):
+        return "person-credentials"
     if _JUNK_LOCATION_RE.search(s):
         return "location-string"
     words = name_words(s)

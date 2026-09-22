@@ -1,5 +1,6 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+import logging
 import queue
 import re
 import threading
@@ -12,6 +13,9 @@ from src.match.names import slug_guesses
 from src.net.http import HEADERS, SESSION
 from .fetchpool import candidate_urls
 from .identity import _foreign_board, candidate_pages
+
+# File-only diagnostics (session log DEBUG channel — never printed).
+_log = logging.getLogger("src.discovery.resolve.probes")
 
 # Whether the headless browser is usable is a PROCESS fact, not a per-probe
 # one. The JS pass runs several WorkdayJsProbe instances in parallel, each with
@@ -351,6 +355,12 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from src.config import BROWSER_UA
 
+# Wall-clock cap on one name's scrape. candidate_urls yields up to 12 pages
+# and each can spend 20s in goto plus 6s waiting for networkidle, so one
+# name could hold a browser for five minutes: discover-local 2026-09-22 sat
+# 338s with no output inside the JS pass.
+JS_PROBE_BUDGET_S = 60
+
 
 class WorkdayJsProbe:
     """
@@ -402,26 +412,32 @@ class WorkdayJsProbe:
             _report_js_disabled("playwright not installed")
             self._enabled = False
             return None
+        # Held locally: a launch that outlives the budget finishes after
+        # _recycle swapped in a fresh stack, and must not hand its page
+        # (bound to this abandoned thread) to the new one.
+        stack = self._stack
         try:
-            pw = self._stack.enter_context(sync_playwright())
+            pw = stack.enter_context(sync_playwright())
             browser, _channel = launch_chromium(pw, headless=True)
-            self._stack.callback(browser.close)
+            stack.callback(browser.close)
             context = browser.new_context(
                 user_agent=BROWSER_UA,
                 viewport={"width": 1920, "height": 1080},
                 locale="en-US",
                 timezone_id="America/New_York",
             )
-            self._stack.callback(context.close)
-            self._page = context.new_page()
-            self._launched = True
-            _clear_js_disabled()
+            stack.callback(context.close)
+            page = context.new_page()
         except Exception as e:
             _report_js_disabled(f"browser launch failed: {_js_launch_hint(e)}")
             self._enabled = False
-            self._stack.close()
+            stack.close()
             return None
-        return self._page
+        if stack is self._stack:
+            self._page = page
+            self._launched = True
+        _clear_js_disabled()
+        return page
 
     @staticmethod
     def _scan(page, url: str):
@@ -466,12 +482,16 @@ class WorkdayJsProbe:
 
     # ── public API ───────────────────────────────────────────────────────
 
-    def _probe_impl(self, name: str, careers_url: str = ""):
+    def _probe_impl(self, name, careers_url, deadline):
         """Runs entirely on the browser-owning thread."""
         page = self._ensure_page()
         if page is None:
             return None
         for url in candidate_urls(name, careers_url):
+            if time.monotonic() > deadline:
+                # The caller gave up and recycled; stop loading pages so
+                # this abandoned thread reaches its queued close.
+                return None
             triple = self._scan(page, url)
             if not triple:
                 continue
@@ -502,14 +522,43 @@ class WorkdayJsProbe:
         """
         if not self._enabled:
             return None
+        t0 = time.monotonic()
+        fut = self._executor.submit(
+            self._probe_impl, name, careers_url, t0 + JS_PROBE_BUDGET_S,
+        )
         try:
-            return self._executor.submit(
-                self._probe_impl, name, careers_url,
-            ).result()
+            meta = fut.result(timeout=JS_PROBE_BUDGET_S)
+            outcome = ("no workday link" if meta is None
+                       else "hit" if meta["validated"] else "not validated")
         except Exception as e:
-            # A browser-thread crash shouldn't poison the rest of discovery.
-            print(f"    [js] probe for {name!r} errored: {e}")
-            return None
+            meta = None
+            if fut.done():
+                # A browser-thread crash shouldn't poison the rest of discovery.
+                print(f"    [js] probe for {name!r} errored: {e}")
+                outcome = f"errored: {e}"
+            else:
+                self._recycle()
+                outcome = "budget exceeded"
+        _log.debug("js probe %s: %s in %.1fs", name, outcome,
+                   time.monotonic() - t0)
+        return meta
+
+    def _recycle(self):
+        """Abandon a browser thread stuck past the budget; start clean.
+
+        A hung Playwright call cannot be interrupted from here, and the
+        browser must be closed on the thread that built it, so the close
+        queues behind the hung call and a fresh thread takes the next name.
+        """
+        old, stack = self._executor, self._stack
+        old.submit(stack.close)
+        old.shutdown(wait=False)
+        self._executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="workday-js",
+        )
+        self._stack = ExitStack()
+        self._page = None
+        self._launched = False
 
     def _close_impl(self):
         self._stack.close()

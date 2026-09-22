@@ -419,6 +419,8 @@ def _gate_sources(conn, t, specs, fetched, commit):
     be deterministic: the first source to surface a posting keeps it, and
     build_sources puts priority companies first on purpose.
     """
+    from src.crawl.harvest import bury_404_board
+
     to_score, matches, watch_hits, funnel = [], [], [], []
     seen_ids = set()
     n_closed = n_reopened = n_seen = 0
@@ -433,6 +435,12 @@ def _gate_sources(conn, t, specs, fetched, commit):
             store.record_crawl_outcome(conn, c["id"], len(jobs or []), err,
                                        dormant_after=t["dormant_after"],
                                        dormant_days=t["dormant_days"])
+            # A fetcher reports a 404 and returns [] rather than raising, so
+            # the error is usually the snapshot's, not `err`. `c` is the
+            # pre-crawl row: a streak already on it is the earlier empty.
+            if not jobs and (c.get("empty_streak") or 0) >= 1:
+                bury_404_board(conn, c, str(err) if err is not None
+                               else (snapshot or {}).get("last_error"))
         if err is not None:
             funnel.append((label, 0, 0, 0, 0, "ERR"))
             continue
