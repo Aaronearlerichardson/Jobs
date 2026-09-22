@@ -149,8 +149,8 @@ def _coords_from_urls(urls):
     """Roster-shaped board coordinates for the employer, read off its
     apply links, or None when none of them names a known ATS."""
     for url in urls:
-        hit = detect("", url or "")
-        if not hit or hit[0] not in ("fetchable", "semi"):
+        hit = detect("", url or "", leads=False)
+        if not hit:
             continue
         packed = pack(hit[1], hit[2], url)
         row = {"ats": packed["ats"], "careers_url": packed.get("careers_url")}

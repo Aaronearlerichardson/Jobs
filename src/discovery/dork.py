@@ -160,12 +160,12 @@ def extract_boards_from_urls(urls):
     """
     out, seen = [], set()
     for u in urls:
-        hit = detect("", u)
+        hit = detect("", u, leads=False)
         # A lead (Taleo, Eightfold, ...) has no fetchable coordinates, and a
         # hosted PeopleAdmin tenant is keyed on its careers_url rather than
         # its slug (src.store.board_key): an (ats, slug) handle for one
         # would mint a row with no board identity.
-        if not hit or hit[0] == "lead" or hit[1] == "peopleadmin":
+        if not hit or hit[1] == "peopleadmin":
             continue
         _, ats, slug = hit
         key = (ats, str(slug))

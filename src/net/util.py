@@ -229,6 +229,22 @@ def host_of(url):
         return ""
 
 
+def origin_of(url):
+    """`url`'s `scheme://netloc`, host case and port kept; "" when it
+    names no host.
+
+    >>> origin_of("https://Jobs.Example.com:8443/careers?x=1")
+    'https://Jobs.Example.com:8443'
+    >>> origin_of("careers/jobs"), origin_of("http://[::1"), origin_of(None)
+    ('', '', '')
+    """
+    try:
+        p = urlsplit(url or "")
+    except ValueError:
+        return ""
+    return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+
+
 def stable_id(*parts) -> str:
     """Deterministic short hash for building job IDs.
 

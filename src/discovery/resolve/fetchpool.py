@@ -12,7 +12,6 @@ lock), and
 """
 
 import logging
-import re
 import socket
 import threading
 import time
@@ -25,7 +24,7 @@ from src.ats.signatures import FETCHABLE_HOST_RE
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net.http import HEADERS, SESSION, HostBreaker
-from src.net.util import host_of
+from src.net.util import host_of, origin_of
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.fetchpool")
@@ -108,10 +107,10 @@ def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
     if careers_url and not FETCHABLE_HOST_RE.search(careers_url):
         if patterns is _URL_PATTERNS:
             urls.append(careers_url)
-        base_m = re.match(r"(https?://[^/]+)", careers_url)
-        if base_m:
+        base = origin_of(careers_url)
+        if base:
             for path in dict.fromkeys(p for _, p in patterns):
-                urls.append(base_m.group(1) + path)
+                urls.append(base + path)
     toks = domain_tokens(name)
     for host, path in patterns:
         for tok in toks:

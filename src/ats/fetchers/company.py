@@ -21,7 +21,7 @@ those same platforms is fetchers/probe.py.
 """
 
 import re
-from urllib.parse import unquote
+from urllib.parse import unquote, urljoin
 
 from bs4 import BeautifulSoup, SoupStrainer
 
@@ -39,8 +39,9 @@ _ANCHORS_ONLY = SoupStrainer("a")
 from src.net.http import HEADERS, SESSION, fetch_failed, get_json, note_capped
 from src.match.locality import NC_RE, location_unknown  # profile [locality]
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
-                          default_search_text, hashed_cache_path,
-                          json_cache_get, json_cache_put, norm_posted_date)
+                          default_search_text, hashed_cache_path, host_of,
+                          json_cache_get, json_cache_put, norm_posted_date,
+                          origin_of)
 from . import icims, workday
 from .adp_wfn import fetch_adp
 from .api import fetch_ashby, fetch_greenhouse, fetch_lever
@@ -452,10 +453,6 @@ _NAV_TEXT_RE = re.compile(
 _OPENINGS_HREF_RE = re.compile(
     r"/(open-positions|open-roles|career-opportunities|current-openings|"
     r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
-# scheme+host extractor and the openings link-text cue, precompiled once
-# rather than rebuilt per anchor (the host check was an rf-string with
-# re.escape(host), a fresh pattern per distinct host that thrashed re's cache).
-_SCHEME_HOST_RE = re.compile(r"https?://([^/]+)")
 _OPENINGS_TEXT_RE = re.compile(
     r"(current|open|view|see|all).{0,12}(opening|position|role|job)", re.I)
 
@@ -492,20 +489,16 @@ _OFFSITE_RE = re.compile(
     r"paylocity|bamboohr|jobvite|google\.com|builtin", re.I)
 
 
-def _openings_link(soup, root):
+def _openings_link(soup, page_url):
     """A SAME-HOST 'see current openings' link to follow one hop, or None.
     Won't follow off to an aggregator or an ATS: those aren't a custom board."""
-    host = _SCHEME_HOST_RE.match(root).group(1)
+    host = host_of(page_url)
+    if not host:
+        return None
     for a in soup.find_all("a", href=True):
         href = a["href"]
-        if href.startswith("http"):
-            absu = href
-        elif href.startswith("/"):
-            absu = root + href
-        else:
-            absu = root + "/" + href
-        hm = _SCHEME_HOST_RE.match(absu)
-        if not hm or hm.group(1) != host:
+        absu = urljoin(page_url, href)
+        if host_of(absu) != host:
             continue  # off-domain: skip
         if _OFFSITE_RE.search(absu):
             continue
@@ -572,13 +565,12 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
     follows a 'careers -> openings' link one hop when the landing page has no
     postings.
     """
-    root = re.match(r"https?://[^/]+", careers_url).group(0)
     soup = _get_soup(careers_url)
     if soup is None:
         return []
     links = find_job_links(soup)
     if len(links) < 3 and _hop:
-        op = _openings_link(soup, root)
+        op = _openings_link(soup, careers_url)
         if op and op.rstrip("/") != careers_url.rstrip("/"):
             return fetch_custom_careers(op, loc_re, _hop=False)
     out, seen = [], set()
@@ -586,7 +578,7 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
         loc = clean_field(_location_near(a, loc_re))
         if not loc_ok(loc_re, loc):
             continue
-        url = href if href.startswith("http") else root + href
+        url = urljoin(careers_url, href)
         if url in seen:
             continue
         seen.add(url)
@@ -634,7 +626,6 @@ def custom_board_listing_url(page_url, html=None):
     cached = _board_cache_get(page_url)
     if cached is not None:
         return cached[0]
-    root = re.match(r"https?://[^/]+", page_url).group(0)
     # Only job/openings anchors are inspected here, so parse <a> tags only.
     soup = (BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY)
             if html is not None else _get_anchor_soup(page_url))
@@ -644,7 +635,7 @@ def custom_board_listing_url(page_url, html=None):
     if len(find_job_links(soup)) >= 3:
         result = page_url
     else:
-        op = _openings_link(soup, root)
+        op = _openings_link(soup, page_url)
         if op and op.rstrip("/") != page_url.rstrip("/"):
             s2 = _get_anchor_soup(op)
             if s2 and len(find_job_links(s2)) >= 3:
@@ -663,10 +654,9 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
     The stored URL is the posting's outbound apply link (an Arcoro/BirdDog
     portal page, server-rendered); hydrate_description's "wpjson" branch
     pulls the JD text from it."""
-    m = re.match(r"https?://[^/]+", base_url or "")
-    if not m:
+    root = origin_of(base_url)
+    if not root:
         return []
-    root = m.group(0)
     host = re.sub(r"^https?://(www\.)?", "", root)
     out, page = [], 1
     while True:

@@ -209,13 +209,14 @@ def extract_workday_triple(text):
 
 # ─── Detection ───────────────────────────────────────────────────────────
 
-def detect(text, final_url=""):
+def detect(text, final_url="", leads=True):
     """Scan text + final URL for an ATS signature.
 
     Returns (kind, ats, slug) where kind is "fetchable" | "semi" | "lead",
     or None. Workday first (triple, highest confidence), then ADP (two
     params, generic host), UKG/UltiPro and PeopleAdmin (host-shaped), then
-    the single-capture platforms in table order.
+    the single-capture platforms in table order. `leads=False` answers only
+    with a board the crawl can fetch.
 
     >>> detect("", "https://boards.greenhouse.io/acmebio/jobs/1")
     ('fetchable', 'greenhouse', 'acmebio')
@@ -232,6 +233,8 @@ def detect(text, final_url=""):
     ('fetchable', 'workable', 'acme-aps')
     >>> detect("via acme.eightfold.ai portal")
     ('lead', 'eightfold', 'acme.eightfold.ai')
+    >>> detect("via acme.eightfold.ai portal", leads=False) is None
+    True
 
     A URL that names a POSTING but not the board it belongs to names no
     board at all -- Workable's slug-less short link is the shape:
@@ -278,7 +281,7 @@ def detect(text, final_url=""):
         return "semi", "peopleadmin", pa.group(1)
     for kind, patterns in (("fetchable", ATS_LINK_PATTERNS),
                            ("semi", SEMI_FETCHABLE_PATTERNS),
-                           ("lead", ATS_LEAD_PATTERNS)):
+                           ("lead", ATS_LEAD_PATTERNS if leads else ())):
         for ats, rx in patterns:
             m = rx.search(blob)
             if not m:

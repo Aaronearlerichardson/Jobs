@@ -15,11 +15,12 @@ layers hit, results are merged and de-duplicated by job id.
 
 import json
 import re
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
 from src import config
-from src.net.util import stable_id, strip_html
+from src.net.util import host_of, stable_id, strip_html
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
 _LI_CURRENT_RE = re.compile(r"currentJobId=(\d+)")
@@ -374,13 +375,10 @@ def _card_location(a, title=""):
 
 def parse_generic(soup, page_url=""):
     from src.ats.fetchers.company import find_job_links
-    root_m = re.match(r"https?://([^/]+)", page_url or "")
-    root = root_m.group(0) if root_m else ""
-    page_host = root_m.group(1) if root_m else ""
     jobs, seen = [], set()
 
     def _emit(a, href, title):
-        url = href if href.startswith("http") else root + href
+        url = urljoin(page_url or "", href)
         key = url.split("?")[0].rstrip("/")
         if key in seen:
             return
@@ -395,8 +393,7 @@ def parse_generic(soup, page_url=""):
 
     for a in soup.find_all("a", href=True):
         href = a["href"].split("?")[0]
-        hm = re.match(r"https?://([^/]+)", href)
-        host = hm.group(1) if hm else page_host
+        host = host_of(urljoin(page_url or "", href))
         if _JOB_ID_PATH_RE.search(href):
             pass
         elif not _ID_TAIL_RE.search(href) or (

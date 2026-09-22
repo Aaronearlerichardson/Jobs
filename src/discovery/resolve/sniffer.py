@@ -58,8 +58,8 @@ def _scan_root(name, careers_url=""):
     """
     for r in candidate_pages(name, careers_url, patterns=ROOT_PATTERNS,
                              cap=None):
-        hit = detect(r.text, r.url)
-        if hit and hit[0] in ("fetchable", "semi"):
+        hit = detect(r.text, r.url, leads=False)
+        if hit:
             if hit[1] == "workday" and _foreign_board(name, hit[2]):
                 continue
             return pack(hit[1], hit[2], r.url)
@@ -100,10 +100,10 @@ def sniff_ats(name, careers_url=""):
     n_pages = 0
     for r in candidate_pages(name, careers_url):
         n_pages += 1
-        hit = detect(r.text, r.url)
-        if hit and hit[0] in ("fetchable", "semi"):
+        hit = detect(r.text, r.url, leads=False)
+        if hit:
             if hit[1] == "workday" and _foreign_board(name, hit[2]):
-                hit = None      # keep scanning; the custom fallback may
+                hit = None     # keep scanning; the custom fallback may
             else:               # still capture the company's OWN listings
                 _log.debug("sniff %s: %s %r found on %s",
                            name, hit[1], hit[2], r.url)
@@ -284,10 +284,10 @@ class JsSniffer:
             for _ in range(2):
                 try:
                     content = page.content()
-                    hit = detect(content, page.url)
+                    hit = detect(content, page.url, leads=False)
                 except Exception:
                     content, hit = "", None
-                if hit and hit[0] in ("fetchable", "semi"):
+                if hit:
                     if not corroborated(url, name, content):
                         break
                     return pack(hit[1], hit[2], page.url)

@@ -703,8 +703,8 @@ def add_board(name, url, capture=False):
               f"capture.py --watch")
         return {"ats": CAPTURE_ATS, "careers_url": url}
 
-    hit = detect("", url)
-    if hit and hit[0] in ("fetchable", "semi"):
+    hit = detect("", url, leads=False)
+    if hit:
         found = pack(hit[1], hit[2], url)
     else:
         found = sniff_ats(name, careers_url=url)

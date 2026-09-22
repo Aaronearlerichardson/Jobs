@@ -55,7 +55,7 @@ from urllib.robotparser import RobotFileParser
 
 from src import config
 from .http import HEADERS
-from .util import host_of
+from .util import host_of, origin_of
 
 # How long a parsed robots.txt stays good before we re-fetch it.
 CACHE_TTL_SECONDS = 3600
@@ -217,11 +217,6 @@ class RobotsCache:
 
     # -- internals --------------------------------------------------------
 
-    @staticmethod
-    def _origin(url):
-        p = urlparse(url)
-        return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else None
-
     def _fetch(self, origin):
         """Fetch + parse one host's robots.txt. Never raises."""
         # Imported here: http.py builds the session that this module is
@@ -264,7 +259,7 @@ class RobotsCache:
         return rules if rules and (time.time() - rules.fetched_at) < self.ttl else None
 
     def _rules(self, url):
-        origin = self._origin(url)
+        origin = origin_of(url)
         if not origin:
             return None
         rules = self._fresh(origin)

@@ -41,9 +41,6 @@ class TestSniffer:
                "&ccid=19000101_000003")
         assert ats_signatures.detect(url)[1] == "adp"
 
-    def test_detects_lead_platform(self):
-        assert ats_signatures.detect("via acme.eightfold.ai portal")[0] == "lead"
-
     def test_probes_cover_sniffable_atses(self):
         from src.discovery.resolve.probes import PROBES
         assert {"greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr",

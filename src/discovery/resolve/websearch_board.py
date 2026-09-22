@@ -113,8 +113,8 @@ def _websearch_board(name, max_results=8):
         # page context, so an unrelated board (nc.wd108 for "Novamed") is
         # otherwise indistinguishable from a real hit.
         for u in urls:
-            hit = detect("", u)
-            if hit and hit[0] in ("fetchable", "semi") and _slug_matches_name(hit[2], name):
+            hit = detect("", u, leads=False)
+            if hit and _slug_matches_name(hit[2], name):
                 return pack(hit[1], hit[2], u)
         # Pass 2: fetch the top real (non-aggregator) results and sniff for
         # an embedded ATS or a self-hosted board with genuine job links.
@@ -127,14 +127,14 @@ def _websearch_board(name, max_results=8):
             except Exception:
                 continue
             own = _host_matches_name(r.url, name)
-            hit = detect(r.text, r.url)
+            hit = detect(r.text, r.url, leads=False)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
             # An own-page Workday embed can still be a parent conglomerate's
             # shared board (seqirus.com links to CSL's 'csl' tenant), which
             # would attribute every sibling company's jobs to this one —
             # same guard as the sniffer.
-            if hit and hit[0] in ("fetchable", "semi") and (own or _slug_matches_name(hit[2], name)):
+            if hit and (own or _slug_matches_name(hit[2], name)):
                 if not (hit[1] == "workday" and _foreign_board(name, hit[2])):
                     return pack(hit[1], hit[2], r.url)
             # Custom self-hosted board: only on the company's OWN domain —
