@@ -119,7 +119,7 @@ def _job_row(base, j):
 def fetch_phenom_all(host_or_url, loc_re=None, page_size=_PAGE_SIZE,
                      max_pages=_MAX_PAGES):
     """List every posting on a Phenom board (title/location/reqId only;
-    descriptions hydrate lazily -- see `fetch_phenom_description`).
+    descriptions hydrate lazily -- see `fetchers.company.hydrate_description`).
 
     `loc_re`, when given, is a POST-filter over each row's listed
     location: the refineSearch listing has no server-side locality scope
@@ -173,7 +173,7 @@ def fetch_phenom_all(host_or_url, loc_re=None, page_size=_PAGE_SIZE,
     return out
 
 
-def _detail_job(base, req_id):
+def detail(base, req_id):
     """The `jobDetail.data.job` object for one posting, or {} on failure."""
     try:
         r = SESSION.get(f"{base}/job/{req_id}", headers=HEADERS)
@@ -185,11 +185,11 @@ def _detail_job(base, req_id):
         return {}
 
 
-def _detail_description(job_detail):
+def detail_description(job_detail):
     return text_from_html(job_detail.get("description") or "")
 
 
-def _detail_location(job_detail):
+def detail_location(job_detail):
     loc = _job_location(job_detail)
     if loc:
         return loc
@@ -197,24 +197,6 @@ def _detail_location(job_detail):
             job_detail.get("standardised_multi_location") or []
             if l.get("standardisedMapQueryLocation")]
     return "; ".join(locs)
-
-
-def fetch_phenom_description(job_url):
-    """(description_text, location) for one stored Phenom job URL, both
-    "" on failure. Used by `fetchers/company.py`'s hydrate_description.
-
-    >>> fetch_phenom_description("https://example.org/")   # not a job URL
-    ('', '')
-
-    Notes:
-        Structurally identical to `infor.fetch_infor_description`,
-        deliberately -- see the note there.
-    """
-    ref = job_ref_from_url(job_url)
-    if not ref:
-        return "", ""
-    job = _detail_job(*ref)
-    return _detail_description(job), _detail_location(job)
 
 
 def fetch_phenom(host_or_url, company_name="", gate=None, loc_re=None,
@@ -225,5 +207,5 @@ def fetch_phenom(host_or_url, company_name="", gate=None, loc_re=None,
     rows = fetch_phenom_all(host_or_url, loc_re=loc_re)
     return board_jobs(
         rows, company_name, gate=gate,
-        fetch_description=lambda row: _detail_description(_detail_job(*row["_phenom"])),
+        fetch_description=lambda row: detail_description(detail(*row["_phenom"])),
         max_details=max_details, detail_delay=detail_delay)

@@ -219,33 +219,19 @@ class TestLocation:
 class TestDetail:
     """The per-posting detail form: the only place a description lives."""
 
-    def test_reads_a_recorded_detail_form(self, infor_board):
-        infor_board({}, detail=load("infor_job_detail.json"))
-        url = infor.job_url(HOST, ORG, 207651, 1)
-        desc, loc = infor.fetch_infor_description(url)
-        assert "analytic data models" in desc
-        assert "<p>" not in desc and "&amp;" not in desc      # HTML stripped
-        assert loc == "Morrisville, NC, US"                   # off the subtitle
-
     def test_the_detail_call_addresses_the_record_by_its_encoded_triple(
             self, infor_board):
         calls = infor_board({}, detail=load("infor_job_detail.json"))
-        infor.fetch_infor_description(infor.job_url(HOST, ORG, 207651, 1))
+        infor.detail(HOST, ORG, 207651, 1)
         assert calls[0].url.startswith(
             f"https://{HOST}/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
             f"%28{ORG}%2C207651%2C1%29.JobPostingDisplay?")
         assert "dependentForm=true" in calls[0].url
 
-    def test_a_url_this_module_did_not_build_is_not_fetched(self, infor_board):
-        calls = infor_board({})
-        assert infor.fetch_infor_description("https://example.org/jobs/1") == ("", "")
-        assert calls == []
-
     def test_a_dead_detail_endpoint_is_never_an_exception(self, infor_board):
         infor_board({}, detail=None, status=500)
         http.reset_fetch_failures()
-        assert infor.fetch_infor_description(
-            infor.job_url(HOST, ORG, 1, 1)) == ("", "")
+        assert infor.detail(HOST, ORG, 1, 1) == {}
         assert http.snapshot_info()["fetch_errors"] == 1
 
 
@@ -294,7 +280,8 @@ class TestCompanyDispatch:
                "description": "", "location": ""}
         out = company.hydrate_description(job)
         assert "analytic data models" in out["description"]
-        assert out["location"] == "Morrisville, NC, US"
+        assert "<p>" not in out["description"] and "&amp;" not in out["description"]
+        assert out["location"] == "Morrisville, NC, US"       # off the subtitle
 
     def test_hydration_keeps_a_location_the_listing_already_named(
             self, infor_board):

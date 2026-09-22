@@ -219,7 +219,7 @@ def _next_url(host, data_view):
 
 def fetch_infor_all(slug, loc_re=None, page_size=_PAGE_SIZE, max_pages=_MAX_PAGES):
     """List every posting on one Infor board (title/location/key only;
-    descriptions hydrate lazily -- see `fetch_infor_description`).
+    descriptions hydrate lazily -- see `fetchers.company.hydrate_description`).
 
     Pages by following the server's own `nextPageUrl` (see module doc) and
     dedupes by record key, so a cursor that repeats a page ends the walk
@@ -268,43 +268,21 @@ def fetch_infor_all(slug, loc_re=None, page_size=_PAGE_SIZE, max_pages=_MAX_PAGE
     return out
 
 
-def _detail_fields(host, org, req, posting):
+def detail(host, org, req, posting):
     """The `fields` object of one posting's detail form, or {}."""
     payload = get_json(detail_url(host, org, req, posting),
                        f"infor {host} job {req}", headers=JSON_HEADERS)
     return (payload or {}).get("fields") or {}
 
 
-def _detail_description(fields):
+def detail_description(fields):
     return text_from_html(_val(fields, _DESC_FIELD))
 
 
-def _detail_location(fields):
+def detail_location(fields):
     """The location out of the detail form's "<place> | <category> | <work
     type>" subtitle, normalized like a listing row's."""
     return location_str(str(_val(fields, _SUBTITLE_FIELD)).split("|")[0].strip())
-
-
-def fetch_infor_description(url):
-    """(description_text, location) for one stored job URL, both "" on
-    failure. The hydrate-from-URL entry point (see `job_ref_from_url`).
-
-    >>> fetch_infor_description("https://example.org/")   # not a job URL
-    ('', '')
-
-    Notes:
-        NEAR-MISS, DELIBERATE (2026-09-22 clone scan): structurally
-        identical to `phenom.fetch_phenom_description`, and stays so. The
-        shape IS the contract `company.hydrate_description` calls an ATS
-        by -- URL in, (description, location) out -- and all four
-        operations inside are this platform's own, so a shared helper
-        would take four callables to save three lines.
-    """
-    ref = job_ref_from_url(url)
-    if not ref:
-        return "", ""
-    fields = _detail_fields(*ref)
-    return _detail_description(fields), _detail_location(fields)
 
 
 def posting_state(payload, today=None):
@@ -366,6 +344,6 @@ def fetch_infor(slug, company_name="", gate=None, loc_re=None, max_details=40,
     rows = fetch_infor_all(slug, loc_re=loc_re)
     return board_jobs(
         rows, company_name, gate=gate,
-        fetch_description=lambda row: _detail_description(
-            _detail_fields(*row["_infor"])),
+        fetch_description=lambda row: detail_description(
+            detail(*row["_infor"])),
         max_details=max_details, detail_delay=detail_delay)

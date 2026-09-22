@@ -42,7 +42,7 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           default_search_text, hashed_cache_path, host_of,
                           json_cache_get, json_cache_put, norm_posted_date,
                           origin_of, text_from_html)
-from . import icims, workday
+from . import icims, infor, phenom, workday
 from .adp_wfn import fetch_adp
 from .api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
@@ -227,6 +227,18 @@ def needs_detail(job):
         and location_unknown(job.get("location"))
 
 
+def _hydrate_from_url(platform, url):
+    """(description, location), "" each on a miss, for a stored job URL
+    on a platform whose detail call needs only what the URL names: the
+    module supplies job_ref_from_url, detail, detail_description and
+    detail_location (phenom, infor)."""
+    ref = platform.job_ref_from_url(url)
+    if not ref:
+        return "", ""
+    payload = platform.detail(*ref)
+    return platform.detail_description(payload), platform.detail_location(payload)
+
+
 def hydrate_description(job):
     """Fetch, in place, whatever `needs_detail` says `job` still lacks: a
     bodiless row's description through its ATS's detail call (for Workday
@@ -296,8 +308,7 @@ def hydrate_description(job):
         # Workday's _wd does), so the detail coordinates are re-derived
         # from the job's own URL -- same pattern as the paylocity/
         # rippling branches above.
-        from .phenom import fetch_phenom_description
-        desc, loc = fetch_phenom_description(job["url"])
+        desc, loc = _hydrate_from_url(phenom, job["url"])
         if desc:
             job["description"] = desc[:_DESC_MAX]
         if loc:
@@ -305,8 +316,7 @@ def hydrate_description(job):
     elif job.get("ats") == "infor" and job.get("url"):
         # Same URL-only round trip as the phenom branch; the generic
         # fallback below cannot help here, the stored URL being a JS shell.
-        from .infor import fetch_infor_description
-        desc, loc = fetch_infor_description(job["url"])
+        desc, loc = _hydrate_from_url(infor, job["url"])
         if desc:
             job["description"] = desc[:_DESC_MAX]
         if loc and location_unknown(job.get("location")):
