@@ -32,7 +32,6 @@ are not data — the technical-title regex, the exclude gate, digest
 rendering — but never the methodology.
 """
 
-import re
 from datetime import datetime
 from typing import NamedTuple
 
@@ -43,6 +42,7 @@ from src.claude.resume import resume_text
 from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
 from src.match.locality import remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
+from src.net.util import strip_html
 
 # Rough per-posting cost for the cost_guard message: ~700 input tokens
 # (cached system prompt) + ~120 output at a blended per-token rate.
@@ -233,8 +233,11 @@ def build_sources(cfg, t, include_websearch=None):
 
 
 def _short(text, n):
-    text = re.sub(r"<[^>]+>", " ", text or "")
-    text = re.sub(r"\s+", " ", text).strip()
+    """`text` as one line of readable prose, truncated to `n` characters —
+    the console blurb under a sampled match. The markup half is
+    net.util.strip_html, which also unescapes entities (a JD blurb reading
+    "R&amp;D" was the reason to stop rolling this by hand)."""
+    text = strip_html(text)
     return text if len(text) <= n else text[: n - 1] + "..."
 
 

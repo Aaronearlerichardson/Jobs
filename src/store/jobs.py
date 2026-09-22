@@ -18,7 +18,8 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import tags
-from .schema import _commit, batch, connect  # noqa: F401  (doctests connect)
+from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
+                     connect, dedup_groups, sql)
 
 
 def combined_score(fit, mission):
@@ -89,13 +90,56 @@ def join_tracks(tracks):
     return ",".join(sorted(t for t in tracks if t)) or None
 
 
-# SQL fragment + arg for "this row belongs to track ?" — the comma-delimited
-# LIKE that get_companies already uses for tags.
-_TRACK_MATCH_SQL = "(',' || COALESCE(j.track,'') || ',') LIKE ?"
+def open_in_track_clause(track=None, *, alias="", include_closed=False,
+                         include_dispositioned=False):
+    """The baseline "a job that could still surface" filter, as
+    (conditions, args) for any query over the jobs table.
 
+    Three things always travel together wherever this population is asked
+    for -- track membership (the comma-delimited LIKE that get_companies
+    already uses for tags), "not closed", and "not a posting the person has
+    already ruled on" (RANKING_EXCLUDED_DISPOSITIONS) -- and ranked_jobs,
+    the self-heal pass, the bulk rescore and the deep-verify floor had each
+    spelled all three out again.
 
-def _track_match_arg(track):
-    return f"%,{track},%"
+    `conditions` is a list to AND together; the caller appends its own
+    conditions AFTER these and its own args after `args`, so the ``?``
+    order lines up. `alias` is the jobs-table alias the query uses (""
+    for an unaliased ``FROM jobs``, "j" for ``FROM jobs j``).
+
+    >>> conds, args = open_in_track_clause("local", alias="j")
+    >>> conds[0]
+    "(',' || COALESCE(j.track,'') || ',') LIKE ?"
+    >>> args[0]
+    '%,local,%'
+
+    No track means every track, and either flag drops its condition --
+    which is how ranked_jobs' `include_closed` / `include_dispositioned`
+    are spelled:
+
+    >>> open_in_track_clause(include_closed=True, include_dispositioned=True)
+    ([], [])
+    >>> conds, _ = open_in_track_clause(include_dispositioned=True)
+    >>> conds
+    ["COALESCE(status,'open') != 'closed'"]
+    """
+    p = f"{alias}." if alias else ""
+    conds, args = [], []
+    if track:
+        conds.append(f"(',' || COALESCE({p}track,'') || ',') LIKE ?")
+        args.append(f"%,{track},%")
+    if not include_closed:
+        conds.append(f"COALESCE({p}status,'open') != 'closed'")
+    if not include_dispositioned:
+        # Deferred, like pipeline.py's one reach back here, so neither
+        # module depends on the other at load time (same rule as
+        # companies/review). Ranking hides what a person ruled on.
+        from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
+        ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
+        conds.append(f"({p}disposition IS NULL OR "
+                     f"{p}disposition NOT IN ({ph}))")
+        args += list(RANKING_EXCLUDED_DISPOSITIONS)
+    return conds, args
 
 
 # --------------------------------------------------------------------------- #
@@ -198,31 +242,24 @@ def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
     ...  r["description"], r["resume_fit_score"])
     ('ok', 'y=ok', ['x', 'y'], 'body', 0.5)
     """
-    sets = ["triage_status=?", "triage_detail=?", "triaged_at=?"]
-    args = [status, detail, (now or datetime.now()).isoformat()]
+    sets = {"triage_status": status, "triage_detail": detail,
+            "triaged_at": (now or datetime.now()).isoformat()}
     if tracks:
         prev = conn.execute("SELECT track FROM jobs WHERE job_id=?",
                             (job_id,)).fetchone()
         merged = track_set(prev["track"] if prev else None) | set(tracks)
-        sets.append("track=?")
-        args.append(join_tracks(merged))
+        sets["track"] = join_tracks(merged)
     if description:
-        sets.append("description=COALESCE(NULLIF(description,''), ?)")
-        args.append(description[:config.MAX_DESC_CHARS])
+        sets["description"] = sql("COALESCE(NULLIF(description,''), ?)",
+                                  description[:config.MAX_DESC_CHARS])
     if geo_mode:
-        sets.append("geo_mode=COALESCE(geo_mode, ?)")
-        args.append(geo_mode)
+        sets["geo_mode"] = sql("COALESCE(geo_mode, ?)", geo_mode)
     if remote_signal:
-        sets.append("remote_eligible=1")
-        sets.append("remote_signal=COALESCE(remote_signal, ?)")
-        args.append(remote_signal)
+        sets["remote_eligible"] = sql("1")
+        sets["remote_signal"] = sql("COALESCE(remote_signal, ?)", remote_signal)
     if scores:
-        for c in _SCORE_COLS:
-            sets.append(f"{c}=?")
-            args.append(scores.get(c))
-    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?",
-                 [*args, job_id])
-    _commit(conn)
+        sets.update((c, scores.get(c)) for c in _SCORE_COLS)
+    apply_update(conn, "jobs", "job_id", job_id, sets)
 
 
 # What record_triage writes besides the body and the scores (_SCORE_COLS):
@@ -475,7 +512,7 @@ def touch_job(conn, job_id):
         "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
         "probe_streak=0 WHERE job_id=?",
         (datetime.now().isoformat(), job_id))
-    conn.commit()
+    _commit(conn)
 
 
 def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
@@ -631,7 +668,7 @@ def update_job_scores(conn, job_id, cols):
     sets = ", ".join(f"{c}=?" for c in _SCORE_COLS)
     conn.execute(f"UPDATE jobs SET {sets} WHERE job_id=?",
                  [cols.get(c) for c in _SCORE_COLS] + [job_id])
-    conn.commit()
+    _commit(conn)
 
 
 # Matches the fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
@@ -663,7 +700,7 @@ def backfill_axis_columns(conn):
              (gates.replace("+", ",") if gates else None), r["job_id"]),
         )
         n += 1
-    conn.commit()
+    _commit(conn)
     print(f"  {n} of {len(rows)} row(s) backfilled from fit_reason tags.")
     return n
 
@@ -879,20 +916,9 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
       SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags
       FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
     """
-    conds, args = [], []
-    if track:
-        conds.append(_TRACK_MATCH_SQL)
-        args.append(_track_match_arg(track))
-    if not include_closed:
-        conds.append("COALESCE(j.status,'open') != 'closed'")
-    if not include_dispositioned:
-        # Deferred, like pipeline.py's one reach back here, so neither
-        # module depends on the other at load time (same rule as
-        # companies/review). Ranking hides what a person ruled on.
-        from .pipeline import RANKING_EXCLUDED_DISPOSITIONS
-        ph = ",".join("?" for _ in RANKING_EXCLUDED_DISPOSITIONS)
-        conds.append(f"(j.disposition IS NULL OR j.disposition NOT IN ({ph}))")
-        args += list(RANKING_EXCLUDED_DISPOSITIONS)
+    conds, args = open_in_track_clause(
+        track, alias="j", include_closed=include_closed,
+        include_dispositioned=include_dispositioned)
     if conds:
         q += " WHERE " + " AND ".join(conds)
     rows = [dict(r) for r in conn.execute(q, args).fetchall()]
@@ -965,27 +991,16 @@ def dedup_jobs(conn):
         if key[1] and key[2]:
             groups[key].append(dict(r))
 
-    def keep_rank(r):
-        return (r.get("disposition") is not None,
-                (r.get("status") or "open") == "open",
-                # earliest first: ISO strings sort by time, so negate via
-                # tuple ordering by sorting descending on the inverse
-                "" if not r.get("first_seen") else r["first_seen"])
+    def keep_first(r):
+        # Survivor first: a dispositioned row, then an open one, then the
+        # EARLIEST first_seen (ISO strings sort by time, and a row with
+        # none sorts before every dated one, as it always has).
+        return (r.get("disposition") is None,
+                (r.get("status") or "open") != "open",
+                r.get("first_seen") or "")
 
-    deleted = 0
-    for key, members in groups.items():
-        if len(members) < 2:
-            continue
-        # Highest disposition/open rank wins; among equals the EARLIEST
-        # first_seen (min) wins, so sort ascending on first_seen and
-        # descending on the two flags.
-        members.sort(key=lambda r: (not keep_rank(r)[0], not keep_rank(r)[1],
-                                    keep_rank(r)[2]))
-        keep, losers = members[0], members[1:]
-        for l in losers:
-            conn.execute("DELETE FROM jobs WHERE job_id=?", (l["job_id"],))
-        deleted += len(losers)
-        print(f"    {(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
-              f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}")
-    conn.commit()
-    return deleted
+    return dedup_groups(
+        conn, "jobs", "job_id", groups, rank=keep_first,
+        describe=lambda keep, losers: (
+            f"{(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
+            f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}"))

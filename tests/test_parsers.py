@@ -14,12 +14,14 @@ import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
 from conftest import fake_response, keep_store_open
+import src.discovery.pipeline as pipeline
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
 import src.discovery.resolve.probes as probes
 import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
 import src.ats.fetchers.company as company_fetch
+import src.ats.fetchers.probe as job_probe
 from src.net.util import norm_posted_date
 
 
@@ -405,15 +407,15 @@ class TestAgeTag:
 class TestClosedProbeGuards:
     def test_gated_host_is_indeterminate(self):
         # Bot-gated hosts must never be read as "job closed".
-        assert company_fetch.probe_job_open(
+        assert job_probe.probe_job_open(
             "https://www.linkedin.com/jobs/view/123")[0] is None
 
     def test_closed_marker_matches(self):
-        assert company_fetch._CLOSED_TEXT_RE.search(
+        assert job_probe._CLOSED_TEXT_RE.search(
             "This position is no longer available")
 
     def test_closed_loop_jd_does_not_trip_the_marker(self):
-        assert not company_fetch._CLOSED_TEXT_RE.search(
+        assert not job_probe._CLOSED_TEXT_RE.search(
             "develop closed-loop neurostimulation")
 
 
@@ -1250,3 +1252,121 @@ class TestScoreMissionsHonoursTheReviewQueue:
         assert tags.has(rows["Queued Co"]["tags"], tags.PENDING)
         assert rows["Queued Co"]["mission_tier"] == "adjacent"
         assert rows["Failed Call Co"]["active"] == 1
+
+
+class TestValidateCandidateResolutionOrder:
+    """The order discovery resolves a candidate in, pinned.
+
+    src.discovery.pipeline.validate_candidate used to carry its OWN
+    probe-first resolver: slug variants of the name against every ATS
+    before anything looked at the company's site. That is the order that
+    mapped "Ripple Neuro" onto the payments company's board (2026-08-28)
+    and a stranger's board onto two roster rows (2026-09-18, 2026-09-21).
+    It calls resolve.board.resolve_board_sniff_first now, and nothing here
+    may reintroduce a probe that outranks the careers-page sniff.
+
+    Offline: sniff_ats, probe_company, _websearch_board and _validate_board
+    are all faked.
+    """
+
+    @staticmethod
+    def _wire(monkeypatch, *, sniff=None, probe=None, boards=None):
+        monkeypatch.setattr(sniffer, "sniff_ats",
+                            lambda name, careers_url="": sniff)
+        monkeypatch.setattr(resolve_board, "probe_company",
+                            lambda name, try_workday=True: probe)
+        monkeypatch.setattr(resolve_board, "_websearch_board",
+                            lambda name, max_results=8: None)
+        monkeypatch.setattr(
+            resolve_board, "_validate_board",
+            lambda comp: (boards or {}).get(
+                (comp["ats"], comp.get("slug")), (0, 0)))
+        monkeypatch.setattr(pipeline, "sniff_careers_ats",
+                            lambda name, careers_url="": None)
+
+    @staticmethod
+    def _candidate(name, ats="unknown"):
+        return pipeline.Candidate(name=name, ats=ats, slug_guess=None,
+                                  careers_url="", notes="")
+
+    def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
+        """The company's own page names greenhouse/raya-health-inc; the
+        name's first word confirms on an unrelated 120-job Lever board.
+        The page wins, and the stranger's board is never taken."""
+        self._wire(
+            monkeypatch,
+            sniff={"ats": "greenhouse", "slug": "raya-health-inc",
+                   "careers_url": "https://rayahealth.example/careers"},
+            probe={"name": "Raya Health", "ats": "lever", "slug": "raya",
+                   "count": 120, "nc": 9},
+            boards={("greenhouse", "raya-health-inc"): (7, 3),
+                    ("lever", "raya"): (120, 9)})
+        c = self._candidate("Raya Health")
+
+        pipeline.validate_candidate(c, delay=0)
+
+        assert (c.confirmed, c.ats, c.slug_guess) == (
+            True, "greenhouse", "raya-health-inc")
+        assert c.via == "sniff"
+
+    def test_a_probe_only_hit_is_confirmed_but_flagged(self, monkeypatch):
+        """Nothing readable on the company's site: the name-guessed slug is
+        the only evidence, so it confirms -- carrying a [VERIFY] note, which
+        is what a human reading the report acts on."""
+        self._wire(monkeypatch,
+                   probe={"name": "Zeta Labs", "ats": "greenhouse",
+                          "slug": "zetalabs", "count": 12, "nc": 4},
+                   boards={("greenhouse", "zetalabs"): (12, 4)})
+        c = self._candidate("Zeta Labs")
+
+        pipeline.validate_candidate(c, delay=0)
+
+        assert (c.confirmed, c.ats, c.via) == (True, "greenhouse", "probe")
+        assert "name-guessed slug" in pipeline.verify_note(c)
+
+    def test_an_empty_board_does_not_confirm(self, monkeypatch):
+        """Every hit is validated by a live fetch, so a slug guess landing
+        on a board with no postings is a MISS -- the probe's own 200 used to
+        be enough."""
+        self._wire(monkeypatch,
+                   probe={"name": "Nova Health", "ats": "greenhouse",
+                          "slug": "novahealth", "count": 0, "nc": 0},
+                   boards={})
+        c = self._candidate("Nova Health")
+
+        pipeline.validate_candidate(c, delay=0)
+
+        assert not c.confirmed
+
+    def test_a_workday_triple_is_carried_as_one_string(self, monkeypatch):
+        """apply_to_store and the report read one handle string off the
+        candidate; Workday's triple is '|'-joined for them and parsed back
+        by apply._candidate_hit."""
+        from src.discovery.apply import _candidate_hit
+        self._wire(monkeypatch,
+                   sniff={"ats": "workday", "triple": ("dsupply", 5, "External"),
+                          "careers_url": "https://ds.example/careers"},
+                   boards={("workday", None): (61, 12)})
+        c = self._candidate("Direct Supply")
+
+        pipeline.validate_candidate(c, delay=0)
+
+        assert c.slug_guess == "dsupply|5|External"
+        assert _candidate_hit(c)["slug"] == ("dsupply", 5, "External")
+
+    def test_an_unfetchable_ats_is_reported_as_a_lead(self, monkeypatch):
+        """Nothing resolves, but the careers page names a platform we can
+        RECOGNIZE and not fetch -- reported so the user can add it by hand,
+        not filed as a dead miss."""
+        self._wire(monkeypatch, boards={})
+        monkeypatch.setattr(
+            pipeline, "sniff_careers_ats",
+            lambda name, careers_url="": {
+                "confirmed": False, "ats": "eightfold", "slug": "acme",
+                "source_url": "https://acme.example/careers"})
+        c = self._candidate("Acme Devices")
+
+        pipeline.validate_candidate(c, delay=0)
+
+        assert not c.confirmed
+        assert c.ats_lead == "eightfold @ acme"

@@ -175,17 +175,17 @@ contract, so do not assert one:
 ```
 
 **Order-sensitive output — say so, then assert it literally.** In
-`slug_variants` the order *is* the probe order, so it is part of the
+`slug_guesses` the order *is* the probe order, so it is part of the
 contract and the docstring says as much before pinning it.
 
 **Long output — one item per line.** Never let a repr wrap; a wrapped line is
 unreadable and doctest will not match it anyway:
 
 ```python
-    >>> for slug in slug_variants("Bio-Signal Technologies, Inc.", None):
-    ...     print(slug)
-    bio-signal-technologies-inc
-    bio-signaltechnologiesinc
+    >>> for u in candidate_urls("Merakris Therapeutics")[:4]:
+    ...     print(u)
+    https://www.merakristherapeutics.com/careers
+    https://www.merakris.com/careers
     ...
 ```
 

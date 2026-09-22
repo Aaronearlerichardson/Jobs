@@ -9,17 +9,17 @@ the secondary list, and the location regex and the geo logic downstream
 must see them all.
 """
 
+import html
 import re
 
-from bs4 import BeautifulSoup
-
-from src.net.http import get_json
-from src.net.util import norm_posted_date
+from src.config import PROBE_TIMEOUT
+from src.net.http import HEADERS, SESSION, get_json
+from src.net.util import norm_posted_date, text_from_html
 from .board import board_jobs
 
 #: The public API root each platform answers on, and the Greenhouse job-page
 #: URL shape. Public, and read from here rather than re-derived, because the
-#: per-posting closure probe (fetchers/company.py) and
+#: per-posting closure probe (fetchers/probe.py) and
 #: ops.maintenance._live_jd address the same three APIs for one posting
 #: instead of the whole board -- a second copy of a root or of the URL shape
 #: is a silent "unverifiable", never an error.
@@ -57,6 +57,121 @@ def merge_locations(primary, extras):
 _get_board = get_json
 
 
+# --------------------------------------------------------------------------- #
+#  The cheap whole-board read: title + location, no descriptions              #
+# --------------------------------------------------------------------------- #
+#
+# Discovery asks these same three boards three more questions, none of which
+# wants a crawl: does this guessed slug name a real board (resolve.probes),
+# how many of its postings are in your locality (the check that rejects a
+# slug collision), and what is it hiring for (the mission scorer's context).
+# Each was written out per platform per question -- nine request-and-parse
+# blocks carrying three copies of each payload shape. A private copy of a
+# shape fails SILENTLY: reading Workday's "jobPostings" off an Ashby board
+# yields an empty list, not an error, and that one scored every Ashby
+# company on its name alone.
+
+#: The whole-board URL per platform; `{}` takes the handle. Descriptions are
+#: excluded where the API allows it -- none of the three callers reads one.
+BOARD_URLS = {
+    "greenhouse": GREENHOUSE_API + "/{}/jobs?content=false",
+    "lever":      LEVER_API + "/{}?mode=json",
+    "ashby":      ASHBY_API + "/{}",
+}
+
+#: Per platform: the posting list in the payload, then a posting's title and
+#: its location.
+_BOARD_SHAPE = {
+    "greenhouse": (lambda d: d.get("jobs", []) if isinstance(d, dict) else [],
+                   lambda j: j.get("title", ""),
+                   lambda j: (j.get("location") or {}).get("name", "")),
+    "lever":      (lambda d: d if isinstance(d, list) else [],
+                   lambda j: j.get("text", ""),
+                   lambda j: (j.get("categories") or {}).get("location", "")),
+    # The posting API says "jobs"; only the embed payload says "jobPostings".
+    "ashby":      (lambda d: d.get("jobs", d.get("jobPostings", []))
+                   if isinstance(d, dict) else [],
+                   lambda j: j.get("title", ""),
+                   lambda j: j.get("location", "")),
+}
+
+
+def board_rows(ats, data):
+    """The postings in a whole-board payload from `ats`.
+
+    >>> board_rows("greenhouse", {"jobs": [{"title": "Scientist"}]})
+    [{'title': 'Scientist'}]
+    >>> board_rows("lever", [{"text": "Scientist"}])
+    [{'text': 'Scientist'}]
+    >>> board_rows("ashby", {"jobPostings": [{"title": "Scientist"}]})
+    [{'title': 'Scientist'}]
+
+    A payload of the wrong shape, and a platform with no whole-board JSON
+    endpoint, are both "no postings" rather than an exception -- every
+    caller is speculative and has to carry on:
+
+    >>> board_rows("greenhouse", None)
+    []
+    >>> board_rows("workday", {"jobs": [{"title": "Scientist"}]})
+    []
+    """
+    shape = _BOARD_SHAPE.get(ats)
+    if not shape:
+        return []
+    try:
+        return list(shape[0](data) or [])
+    except Exception:
+        return []
+
+
+def board_summary(ats, handle, timeout=None):
+    """``[(title, location), ...]`` for every posting on one board, or [] on
+    any HTTP/JSON failure and on a platform outside BOARD_URLS.
+
+    Quiet by design -- no `net.http.fetch_failed` line. Every caller reads a
+    GUESSED handle (a slug probe, the locality count that rejects a
+    collision, the mission scorer's title sample), so a miss is the expected
+    answer rather than a dead source worth logging.
+    """
+    if ats not in BOARD_URLS:
+        return []
+    _rows, title_of, loc_of = _BOARD_SHAPE[ats]
+    try:
+        r = SESSION.get(BOARD_URLS[ats].format(handle),
+                        timeout=timeout or PROBE_TIMEOUT, headers=HEADERS)
+        if r.status_code != 200:
+            return []
+        data = r.json()
+    except Exception:
+        return []
+    return [(title_of(j) or "", loc_of(j) or "") for j in board_rows(ats, data)]
+
+
+def _greenhouse_body(content):
+    """Greenhouse `content` as readable text.
+
+    Unescaped BEFORE the shared stripper runs, because Greenhouse serves
+    the body ESCAPED: `content` is a JSON string holding "&lt;p&gt;...",
+    so a stripper handed it directly finds no markup to strip and the
+    unescape at the end of its own pass hands back the tags as TEXT. That
+    is how 19,367 of the 19,413 stored Greenhouse descriptions came to
+    carry literal <div>/<p>/<li> markup in the body the keyword gates,
+    the fit prompt and the digest all read (2026-09-22 store audit).
+
+    >>> _greenhouse_body("&lt;p&gt;Build EEG&amp;nbsp;pipelines&lt;/p&gt;")
+    'Build EEG\\xa0pipelines'
+
+    A board that answers with ordinary HTML is unharmed -- unescaping
+    markup that is already markup changes nothing:
+
+    >>> _greenhouse_body("<p>Build EEG pipelines</p>")
+    'Build EEG pipelines'
+    >>> _greenhouse_body("")
+    ''
+    """
+    return text_from_html(html.unescape(content or ""))
+
+
 def _greenhouse_row(slug, j):
     title = j.get("title", "")
     loc = merge_locations((j.get("location") or {}).get("name", ""),
@@ -65,8 +180,7 @@ def _greenhouse_row(slug, j):
     offices = " ".join((o.get("name") or "") for o in j.get("offices", []) or [])
     row = {"id": f"gh_{slug}_{j.get('id', '')}", "title": title,
            "url": j.get("absolute_url", ""), "location": loc or "Unknown",
-           "description": BeautifulSoup(j.get("content", "") or "",
-                                        "html.parser").get_text(" "),
+           "description": _greenhouse_body(j.get("content", "") or ""),
            "posted_at": norm_posted_date(j.get("first_published")
                                          or j.get("updated_at")),
            "head": f"{title} {dept}"}

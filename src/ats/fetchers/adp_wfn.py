@@ -16,9 +16,8 @@ store slug is ``"<cid>|<ccid>"``.
 
 import time
 
-from bs4 import BeautifulSoup
-
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed, get_json
+from src.net.util import text_from_html
 from .board import board_jobs
 
 _API = ("https://workforcenow.adp.com/mascsr/default/careercenter/public"
@@ -37,24 +36,28 @@ def _location_str(req):
     return "; ".join(names) or "Unknown"
 
 
-def _fetch_description(item_id, cid, ccid, timeout=None):
-    try:
-        r = SESSION.get(
-            f"{_API}/{item_id}",
-            params={"cid": cid, "ccId": ccid, "locale": "en_US"},
-            timeout=timeout, headers=JSON_HEADERS,
-        )
-        r.raise_for_status()
-        data = r.json()
-        req = (data.get("jobRequisitions") or [data])[0] \
-            if isinstance(data.get("jobRequisitions"), list) else data
-        html = (req.get("requisitionDescription")
-                or req.get("description") or "")
-        if isinstance(html, list):
-            html = " ".join(str(x) for x in html)
-        return BeautifulSoup(str(html), "html.parser").get_text(" ")
-    except Exception:
+def _fetch_description(item_id, cid, ccid, label="", timeout=None):
+    """One requisition's JD as text, "" when the detail call fails.
+
+    Through net.http.get_json rather than a private try/except, so a
+    detail endpoint that 500s, times out or answers with something
+    unparseable is REPORTED and counted (net.http.fetch_failed) instead of
+    returning "" like a posting that genuinely carries no body -- the
+    difference the snapshot's `incomplete` flag is made of.
+    """
+    data = get_json(f"{_API}/{item_id}", f"ADP {label or cid[:8]} job {item_id}",
+                    params={"cid": cid, "ccId": ccid, "locale": "en_US"},
+                    timeout=timeout, headers=JSON_HEADERS)
+    if not isinstance(data, dict):
         return ""
+    reqs = data.get("jobRequisitions")
+    req = reqs[0] if isinstance(reqs, list) and reqs else data
+    if not isinstance(req, dict):
+        return ""
+    body = req.get("requisitionDescription") or req.get("description") or ""
+    if isinstance(body, list):
+        body = " ".join(str(x) for x in body)
+    return text_from_html(str(body))
 
 
 def _row(cid, ccid, req):
@@ -95,8 +98,9 @@ def _rows(cid, ccid, label, page_size, max_pages):
 
 def fetch_adp(cid, ccid, company_name="", gate=None, loc_re=None, page_size=50,
               max_pages=10, max_details=60, detail_delay=0.2):
-    return board_jobs(_rows(cid, ccid, company_name or cid[:8], page_size, max_pages),
+    label = company_name or cid[:8]
+    return board_jobs(_rows(cid, ccid, label, page_size, max_pages),
                       company_name, gate=gate, loc_re=loc_re,
                       fetch_description=lambda row: _fetch_description(
-                          row["_item_id"], cid, ccid),
+                          row["_item_id"], cid, ccid, label),
                       max_details=max_details, detail_delay=detail_delay)

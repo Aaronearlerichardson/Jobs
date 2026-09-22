@@ -19,7 +19,7 @@ import re
 from bs4 import BeautifulSoup
 
 from src import config
-from src.net.util import stable_id
+from src.net.util import stable_id, strip_html
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
 _LI_CURRENT_RE = re.compile(r"currentJobId=(\d+)")
@@ -299,7 +299,7 @@ def parse_jsonld(soup, page_url=""):
                      (jp.get("title") or jp.get("name") or ""),
                      org.get("name", "") if isinstance(org, dict) else str(org),
                      url, location,
-                     re.sub(r"<[^>]+>", " ", jp.get("description") or ""),
+                     strip_html(jp.get("description")),
                      company_url=org_site)
             if j:
                 jobs.append(j)

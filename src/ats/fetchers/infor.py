@@ -49,8 +49,8 @@ import time
 from urllib.parse import quote
 
 from src.net.http import JSON_HEADERS, fetch_failed, get_json, note_capped
+from src.net.util import text_from_html          # shared HTML->text stripper
 from .board import board_jobs, loc_ok
-from .workday import text_from_html      # shared HTML->text stripper
 
 #: The candidate-facing board. Infor names the internal one INTERNAL; only
 #: the external board is public, so it is a constant rather than a coordinate.
@@ -68,7 +68,7 @@ _CODE_RE = re.compile(r"^[A-Za-z]{2}$")
 _YMD_RE = re.compile(r"^(\d{4})(\d{2})(\d{2})$")
 #: This module's own job URLs only: the record triple is URL-encoded into
 #: the path segment ahead of ".JobPostingDisplay". Public because
-#: `fetchers/company.py`'s closure probe keys its family table on the same
+#: `fetchers/probe.py`'s closure probe keys its family table on the same
 #: regex it passes to the family's check -- one definition, no drift.
 JOB_URL_RE = re.compile(
     r"^https?://([^/]+)/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
@@ -88,17 +88,6 @@ def board_coords(slug):
     host, _, org = (slug or "").partition("|")
     host = re.sub(r"^https?://", "", host.strip()).split("/")[0]
     return host, org.strip()
-
-
-def board_url(slug):
-    """The board's own home page -- a roster row's `careers_url`.
-
-    >>> board_url("css-acme-prd.inforcloudsuite.com|9999")
-    'https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/page/JobsHomePage?csk.JobBoard=EXTERNAL&csk.HROrganization=9999'
-    """
-    host, org = board_coords(slug)
-    return (f"https://{host}/hcm/Jobs/page/JobsHomePage"
-            f"?csk.JobBoard={_JOB_BOARD}&csk.HROrganization={org}")
 
 
 def _record_path(host, org, req, posting):
@@ -312,7 +301,7 @@ def fetch_infor_description(url):
 
 def posting_state(payload, today=None):
     """(is_open, reason) for one detail-form payload -- the evidence behind
-    `fetchers/company.py`'s closure probe. None means "nothing was proved".
+    `fetchers/probe.py`'s closure probe. None means "nothing was proved".
 
     The endpoint answers HTTP 200 whatever the posting's fate, so the
     status code is never the witness. Verified live on 2026-09-21 against

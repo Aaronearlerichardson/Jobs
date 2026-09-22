@@ -304,13 +304,10 @@ def _credentials():
         crawl with no federal key must still run every other source, so
         this degrades exactly like a dead board.
     """
-    key = (getattr(config, "USAJOBS_API_KEY", "") or "").strip()
-    email = (getattr(config, "USAJOBS_EMAIL", "") or "").strip()
-    if not key or not email:
-        print("  [!] USAJOBS skipped: set USAJOBS_API_KEY and USAJOBS_EMAIL "
-              "(free key: https://developer.usajobs.gov/apirequest/).")
-        return None
-    return key, email
+    return config.require_creds(
+        "USAJOBS", "https://developer.usajobs.gov/apirequest/",
+        USAJOBS_API_KEY=getattr(config, "USAJOBS_API_KEY", ""),
+        USAJOBS_EMAIL=getattr(config, "USAJOBS_EMAIL", ""))
 
 
 def fetch_usajobs(keyword=None, location=None, radius=None, series=None,

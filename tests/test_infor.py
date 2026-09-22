@@ -329,8 +329,3 @@ def test_detect_reads_a_board_url_as_host_and_org():
     assert detect("", f"https://{HOST}/hcm/Jobs/page/JobsHomePage") is None
     assert detect(f'<a href="{url.replace("&", "&amp;")}">Jobs</a>') == \
         ("fetchable", "infor", SLUG)
-
-
-def test_the_board_home_url_round_trips_the_slug():
-    assert infor.board_coords(SLUG) == (HOST, ORG)
-    assert detect("", infor.board_url(SLUG)) == ("fetchable", "infor", SLUG)

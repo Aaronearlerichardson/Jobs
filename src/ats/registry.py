@@ -43,6 +43,7 @@ from .fetchers import (
     fetch_rippling,
     fetch_ultipro,
     fetch_successfactors,
+    fetch_workable,
     fetch_workday,
 )
 
@@ -73,6 +74,12 @@ ATS_REGISTRY = {
     "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
     "phenom":         (lambda n, s: lambda: fetch_phenom(s, n, gate=is_relevant), tags.LOCAL, 1.0),
     "infor":          (lambda n, s: lambda: fetch_infor(s, n, gate=is_relevant), tags.LOCAL, 1.0),
+    # Workable's LISTING is as cheap as any board in LIGHTWEIGHT (one JSON
+    # GET, whole board, no paging), but the listing carries no description:
+    # a body costs one detail GET per posting, so it seeds LOCAL and stays
+    # out of the unvetted sweep until a board is worth that per-posting
+    # spend. Flip it to SWEEP + LIGHTWEIGHT if the sweep should carry it.
+    "workable":       (lambda n, s: lambda: fetch_workable(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole,

@@ -326,6 +326,78 @@ def _commit(conn):
         conn.commit()
 
 
+class sql:
+    """A SET right-hand side that is an SQL EXPRESSION, not a value.
+
+    ``apply_update({"applied_at": sql("COALESCE(applied_at, ?)", now)})``
+    writes ``applied_at=COALESCE(applied_at, ?)`` and passes `now`. The
+    partial updates that keep a first-known value (the apply date, a
+    posting's first body, its first geo verdict) need this; everything
+    else passes a plain value.
+    """
+
+    __slots__ = ("expr", "args")
+
+    def __init__(self, expr, *args):
+        self.expr, self.args = expr, args
+
+
+def apply_update(conn, table, id_col, id_val, fields):
+    """Write just the columns `fields` names on one row; return rows changed.
+
+    Five writers -- the crawl-outcome stamp, the harvest stamp, the triage
+    verdict, a disposition, the pipeline fields -- each build a SET clause
+    from whichever columns this particular call decided to touch, and each
+    had written the same three lines: join ``col=?``, splat the values plus
+    the id, commit. Two of them built it out of parallel `sets`/`args`
+    LISTS, which is the same thing with the column-to-value pairing left
+    for the reader to check by eye.
+
+    An empty `fields` writes nothing (and does not commit): "no columns to
+    change" is a normal outcome for a caller whose arguments were all None.
+
+    >>> conn = connect(":memory:")
+    >>> _ = conn.execute("INSERT INTO companies (name, active) VALUES ('A', 1)")
+    >>> cid = conn.execute("SELECT id FROM companies").fetchone()["id"]
+    >>> apply_update(conn, "companies", "id", cid,
+    ...              {"crawl_state": "dormant", "empty_streak": 3})
+    1
+    >>> dict(conn.execute("SELECT crawl_state, empty_streak "
+    ...                   "FROM companies").fetchone())
+    {'crawl_state': 'dormant', 'empty_streak': 3}
+    >>> apply_update(conn, "companies", "id", cid, {})
+    0
+
+    An `sql` value puts an expression on the right-hand side, so a column
+    that must keep its FIRST value can say so:
+
+    >>> _ = apply_update(conn, "companies", "id", cid,
+    ...                  {"notes": sql("COALESCE(notes, ?)", "first")})
+    >>> _ = apply_update(conn, "companies", "id", cid,
+    ...                  {"notes": sql("COALESCE(notes, ?)", "second")})
+    >>> conn.execute("SELECT notes FROM companies").fetchone()["notes"]
+    'first'
+
+    Notes:
+        Commits through `_commit`, so a caller inside a batch() block joins
+        that transaction instead of ending it early.
+    """
+    sets, args = [], []
+    for col, val in fields.items():
+        if isinstance(val, sql):
+            sets.append(f"{col}={val.expr}")
+            args.extend(val.args)
+        else:
+            sets.append(f"{col}=?")
+            args.append(val)
+    if not sets:
+        return 0
+    cur = conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE {id_col}=?",
+                       [*args, id_val])
+    _commit(conn)
+    return cur.rowcount
+
+
 #: Held for the duration of every batch() block in this process.
 #
 # SQLite grants exactly one writer at a time, so eleven harvest threads
@@ -391,3 +463,53 @@ class batch:
         finally:
             _WRITE_LOCK.release()
         return False
+
+
+def dedup_groups(conn, table, id_col, groups, rank, describe, merge=None):
+    """Keep one row per group, delete the rest, say so. Returns rows deleted.
+
+    The two dedup passes (companies that turned out to share a board, jobs
+    that turned out to be one posting) disagree about everything that
+    matters -- how rows group, which survivor wins, what has to move off a
+    loser before it goes -- and agreed, line for line, about the part that
+    does not: skip the singletons, sort, split keep/losers, delete by id,
+    count, print one line. That skeleton lives here; the judgment stays
+    with each caller.
+
+    `groups` maps any key to a list of row dicts. `rank` is a sort key
+    where the SURVIVOR sorts FIRST. `describe(keep, losers)` returns the
+    line to print under the pass's own indent. `merge(keep, losers)`, when
+    given, runs BEFORE the delete -- the hook for carrying a loser's rows
+    or tags over to the survivor.
+
+    >>> conn = connect(":memory:")
+    >>> for n in ("Acme", "Acme Inc", "Solo"):
+    ...     _ = conn.execute("INSERT INTO companies (name) VALUES (?)", (n,))
+    >>> rows = [dict(r) for r in conn.execute("SELECT id, name FROM companies")]
+    >>> groups = {"acme": rows[:2], "solo": rows[2:]}
+    >>> dedup_groups(conn, "companies", "id", groups,
+    ...              rank=lambda r: len(r["name"]),
+    ...              describe=lambda k, l: f"{k['name']} <- {len(l)}")
+        Acme <- 1
+    1
+    >>> [r["name"] for r in conn.execute("SELECT name FROM companies "
+    ...                                  "ORDER BY name")]
+    ['Acme', 'Solo']
+
+    Notes:
+        Commits through `_commit`, like every other writer here.
+    """
+    deleted = 0
+    for members in groups.values():
+        if len(members) < 2:
+            continue
+        members.sort(key=rank)
+        keep, losers = members[0], members[1:]
+        if merge is not None:
+            merge(keep, losers)
+        conn.executemany(f"DELETE FROM {table} WHERE {id_col}=?",
+                         [(l[id_col],) for l in losers])
+        deleted += len(losers)
+        print(f"    {describe(keep, losers)}")
+    _commit(conn)
+    return deleted

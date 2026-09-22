@@ -253,7 +253,7 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     JSON, so a stub serves both the JSON and the scrape paths. `status`
     >= 400 makes raise_for_status raise, which is what net.http.get_json
     turns into a reported miss. `url` is the FINAL url a redirect-following
-    GET reports (what company.probe_job_open's greenhouse redirect check
+    GET reports (what probe.probe_job_open's greenhouse redirect check
     and sniffer.candidate_pages read); it is always present, so no caller
     has to bolt one on.
     """

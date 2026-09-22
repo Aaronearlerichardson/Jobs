@@ -23,10 +23,8 @@ Morrisville NC pharma company whose careers page links out to HiBob with no
 other detectable ATS signature on the page itself).
 """
 
-from bs4 import BeautifulSoup
-
-from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.util import norm_posted_date, text_from_html
 from .board import board_jobs
 
 _API = "https://{tenant}.careers.hibob.com/api/job-ad"
@@ -36,7 +34,7 @@ def parse_board(tenant, timeout=None):
     """Return the raw ``jobAdDetails`` list for one tenant subdomain."""
     root = f"https://{tenant}.careers.hibob.com/"
     r = SESSION.get(_API.format(tenant=tenant), timeout=timeout,
-                     headers={**HEADERS, "Accept": "application/json", "Referer": root})
+                     headers={**JSON_HEADERS, "Referer": root})
     r.raise_for_status()
     data = r.json()
     return data.get("jobAdDetails", []) or [] if isinstance(data, dict) else []
@@ -61,8 +59,7 @@ def _row(tenant, j):
     row = {"id": f"hibob_{tenant}_{jid[:12]}", "title": title,
            "url": f"https://{tenant}.careers.hibob.com/jobs",
            "location": location_str(j),
-           "description": BeautifulSoup(j.get("description") or "",
-                                        "html.parser").get_text(" ", strip=True),
+           "description": text_from_html(j.get("description") or ""),
            "posted_at": norm_posted_date(j.get("publishedAt")),
            "head": f"{title} {_dept(j)}"}
     if str(j.get("workspaceType", "")).lower() == "remote":

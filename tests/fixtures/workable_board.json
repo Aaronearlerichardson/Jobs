@@ -1,0 +1,122 @@
+{
+ "name": "Eupry",
+ "description": null,
+ "jobs": [
+  {
+   "title": "Field Engineer",
+   "shortcode": "D68529D654",
+   "code": "",
+   "employment_type": "Full-time",
+   "telecommuting": false,
+   "department": "Customer Support",
+   "url": "https://apply.workable.com/j/D68529D654",
+   "shortlink": "https://apply.workable.com/j/D68529D654",
+   "application_url": "https://apply.workable.com/j/D68529D654/apply",
+   "published_on": "2026-05-06",
+   "created_at": "2026-05-06",
+   "country": "United States",
+   "city": "Raleigh",
+   "state": "North Carolina",
+   "education": "Unspecified",
+   "experience": "Associate",
+   "function": "Engineering",
+   "industry": "Medical Devices",
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Raleigh",
+     "region": "North Carolina",
+     "hidden": false
+    }
+   ]
+  },
+  {
+   "title": "Junior Customer Support",
+   "shortcode": "B0E8AAAACC",
+   "code": "",
+   "employment_type": "Full-time",
+   "telecommuting": false,
+   "department": "Customer Support",
+   "url": "https://apply.workable.com/j/B0E8AAAACC",
+   "shortlink": "https://apply.workable.com/j/B0E8AAAACC",
+   "application_url": "https://apply.workable.com/j/B0E8AAAACC/apply",
+   "published_on": "2026-05-06",
+   "created_at": "2026-05-06",
+   "country": "United States",
+   "city": "Raleigh",
+   "state": "North Carolina",
+   "education": "Unspecified",
+   "experience": "Entry level",
+   "function": "",
+   "industry": "Medical Devices",
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Raleigh",
+     "region": "North Carolina",
+     "hidden": false
+    }
+   ]
+  },
+  {
+   "title": "US Office Support and Operations Intern",
+   "shortcode": "0B3277D217",
+   "code": "",
+   "employment_type": "Part-time",
+   "telecommuting": false,
+   "department": "Customer Support",
+   "url": "https://apply.workable.com/j/0B3277D217",
+   "shortlink": "https://apply.workable.com/j/0B3277D217",
+   "application_url": "https://apply.workable.com/j/0B3277D217/apply",
+   "published_on": "2026-07-14",
+   "created_at": "2026-07-13",
+   "country": "United States",
+   "city": "Raleigh",
+   "state": "North Carolina",
+   "education": "Unspecified",
+   "experience": "Entry level",
+   "function": "",
+   "industry": "Medical Devices",
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Raleigh",
+     "region": "North Carolina",
+     "hidden": false
+    }
+   ]
+  },
+  {
+   "title": "Validation Team Manager (Raleigh, NC)",
+   "shortcode": "1134627B02",
+   "code": "",
+   "employment_type": "Full-time",
+   "telecommuting": false,
+   "department": "Validation",
+   "url": "https://apply.workable.com/j/1134627B02",
+   "shortlink": "https://apply.workable.com/j/1134627B02",
+   "application_url": "https://apply.workable.com/j/1134627B02/apply",
+   "published_on": "2026-06-02",
+   "created_at": "2026-06-02",
+   "country": "United States",
+   "city": "Raleigh",
+   "state": "North Carolina",
+   "education": "Bachelor's Degree",
+   "experience": "Mid-Senior level",
+   "function": "Engineering",
+   "industry": "Medical Devices",
+   "locations": [
+    {
+     "country": "United States",
+     "countryCode": "US",
+     "city": "Raleigh",
+     "region": "North Carolina",
+     "hidden": false
+    }
+   ]
+  }
+ ]
+}

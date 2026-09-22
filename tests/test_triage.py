@@ -261,7 +261,8 @@ def test_multi_division_company_waits_for_the_body(tmp_path, tracks, stubs,
     monkeypatch.setattr(config, "is_multi_division",
                         lambda name: (name or "").lower() == "megacorp")
     monkeypatch.setattr(triage, "is_relevant",
-                        lambda title, desc="": "pipelines" in desc)
+                        lambda title, desc="", *, watch_titles=False:
+                        "pipelines" in desc)
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Megacorp", mission_tier="other", mission_score=0.05)
@@ -287,13 +288,18 @@ def test_watching_a_multi_division_company_admits_its_remote_rows(
     they are. The `watch` tag on the company row is what admits them --
     the same tag, and the same code path, as any other watched company.
     The division keyword gate is NOT lifted by it: that one is keyed off
-    [policy] multi_division, and an off-division posting still drops.
+    [policy] multi_division, and an off-division posting still drops. The
+    watch tag only WIDENS its vocabulary, by the titles [policy]
+    watch_division_titles names -- see
+    test_a_watched_conglomerates_own_engineering_titles_pass_the_division_gate
+    below, whose stub (unlike this one) honours the `watch_titles` flag.
     """
     from src import config
     monkeypatch.setattr(config, "is_multi_division",
                         lambda name: (name or "").lower().startswith("megacorp"))
     monkeypatch.setattr(triage, "is_relevant",
-                        lambda title, desc="": "pipelines" in desc)
+                        lambda title, desc="", *, watch_titles=False:
+                        "pipelines" in desc)
     db = tmp_path / "s.db"
     conn = store.connect(db)
     plain = _company(conn, "Megacorp", mission_tier="other",
@@ -314,6 +320,94 @@ def test_watching_a_multi_division_company_admits_its_remote_rows(
     assert _row(conn, "wloc")["triage_status"] == "ok"
     assert _row(conn, "woff")["triage_status"] == "division", \
         "the watch tag admits the row's geography, not its division"
+
+
+@pytest.fixture
+def division_vocab(cfg, pristine_keywords, monkeypatch):
+    """A conglomerate whose division gate runs on a KNOWN vocabulary.
+
+    The two tests below exercise the REAL `filters.is_relevant` rather than
+    a stub -- the rule itself is what they are about -- so the loaded
+    profile must not be what decides the answer. The keyword tiers are
+    narrowed to one unmistakable in-field term, the [exclude] title phrase
+    that matters here is pinned, and [policy] watch_division_titles is set
+    to a two-entry stand-in for the real list. `pristine_keywords` puts the
+    profile's own lists back (and fails the test if it cannot).
+    """
+    for name, terms in (("CORE_KEYWORDS", ["electrophysiology"]),
+                        ("DOMAIN_KEYWORDS", ["electrophysiology"]),
+                        ("SKILL_KEYWORDS", ["electrophysiology"]),
+                        ("INCLUDE_KEYWORDS", ["electrophysiology"]),
+                        ("EXCLUDE_PHRASES", []),
+                        ("EXCLUDE_TITLE_PHRASES", ["manager"])):
+        getattr(cfg, name)[:] = terms
+    monkeypatch.setattr(cfg, "WATCH_DIVISION_TITLES",
+                        ("software engineer", "solutions architect"))
+    monkeypatch.setattr(cfg, "is_multi_division",
+                        lambda name: (name or "").lower().startswith("megacorp"))
+
+
+#: A posting body from the division that is actually worth watching: plain
+#: infrastructure engineering, carrying none of the profile's field
+#: vocabulary. This is the text the division gate used to refuse.
+_PLAIN_ENG_BODY = "kubernetes golang cluster scheduling telemetry " * 20
+
+
+def test_a_watched_conglomerates_own_engineering_titles_pass_the_division_gate(
+        tmp_path, tracks, stubs, local_addr, division_vocab):
+    """[policy] watch_division_titles, the division gate's escape hatch.
+
+    A conglomerate's postings are asked for the profile's health/bio
+    vocabulary because a corporate mission score says nothing about the
+    division that is hiring. At a WATCHED one that is the wrong question:
+    the watch tag already says "show me this employer's technical roles",
+    and the division worth watching is a plain engineering org. NVIDIA's
+    "Software Engineer - AI Research Clusters" (Durham, NC) is the real
+    case -- applied to off LinkedIn, dropped here.
+
+    Widened, not lifted: a title the list does not name still drops, and
+    the [exclude] gate inside is_relevant still runs first.
+    """
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Megacorp Watched", mission_tier="other",
+                 mission_score=0.25, tags=tags.WATCH)
+    for jid, title in (("sw", "Senior Software Engineer, AI Research Clusters"),
+                       ("sa", "Senior Solutions Architect, AI Factory"),
+                       ("asic", "Senior ASIC Design Engineer"),
+                       ("mgr", "Senior Manager, Software Engineering")):
+        _harvested(conn, c, jid, title, local_addr,
+                   description=_PLAIN_ENG_BODY)
+
+    _run(db, tracks, stubs)
+
+    assert _row(conn, "sw")["triage_status"] == "ok"
+    assert _row(conn, "sa")["triage_status"] == "ok"
+    assert _row(conn, "asic")["triage_status"] == "division", \
+        "the silicon seats the list does not name are still refused"
+    assert _row(conn, "mgr")["triage_status"] == "division", \
+        "an [exclude] title phrase still beats watch_division_titles"
+
+
+def test_an_unwatched_conglomerate_keeps_the_narrow_division_gate(
+        tmp_path, tracks, stubs, local_addr, division_vocab):
+    """The widening is keyed off the `watch` tag, not off multi_division:
+    the same title at a conglomerate nobody watches drops exactly as it did
+    before (SAS Institute, GRAIL, Labcorp, Google/Microsoft/Meta -- 2,114
+    open rows, none of which moved in the 2026-09-22 differential)."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Megacorp", mission_tier="other", mission_score=0.25)
+    _harvested(conn, c, "sw", "Senior Software Engineer, AI Research Clusters",
+               local_addr, description=_PLAIN_ENG_BODY)
+    _harvested(conn, c, "rel", "Senior Electrophysiology Engineer", local_addr,
+               description=_PLAIN_ENG_BODY)
+
+    _run(db, tracks, stubs)
+
+    assert _row(conn, "sw")["triage_status"] == "division"
+    assert _row(conn, "rel")["triage_status"] == "ok", \
+        "the field vocabulary still admits an unwatched conglomerate's row"
 
 
 # ── hydration and scoring only for survivors ────────────────────────────────

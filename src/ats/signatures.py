@@ -38,6 +38,15 @@ ATS_LINK_PATTERNS = [
     # Jobvite: tenant slug of jobs.jobvite.com/<tenant> (server-rendered
     # listing + JSON-LD job pages — see fetchers/jobvite.py).
     ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)", re.I)),
+    # Workable: the account slug in apply.workable.com/<slug> — the board
+    # page and the tenant-path posting page (/<slug>/j/<shortcode>) both
+    # lead with it, and the widget API a site embeds carries it one path
+    # deeper (public JSON API — see fetchers/workable.py). The slug-less
+    # short link (apply.workable.com/j/<shortcode>) names no account; its
+    # one-character "slug" is under detect's length floor, so it is not a
+    # detection.
+    ("workable", re.compile(r"apply\.workable\.com/(?:api/v\d+/widget/accounts/)?"
+                            r"([a-z0-9][a-z0-9_-]*)", re.I)),
 ]
 _ADP_CID_RE  = re.compile(r"[?&]cid=([0-9a-f-]{8,})", re.I)
 _ADP_CCID_RE = re.compile(r"[?&]ccid=([0-9A-Za-z_]+)", re.I)
@@ -78,13 +87,13 @@ _PEOPLEADMIN_RE = re.compile(r"([a-z0-9-]+)\.peopleadmin\.com", re.I)
 ATS_LEAD_PATTERNS = [
     ("eightfold",       re.compile(r"([a-z0-9-]+\.eightfold\.ai)", re.I)),
     ("dayforce",        re.compile(r"(dayforcehcm\.com/[a-zA-Z-]+/[a-zA-Z0-9_-]+)", re.I)),
-    ("workable",        re.compile(r"(apply\.workable\.com/[a-z0-9-]+)", re.I)),
     ("recruitee",       re.compile(r"([a-z0-9-]+\.recruitee\.com)", re.I)),
     ("teamtailor",      re.compile(r"([a-z0-9-]+\.teamtailor\.com)", re.I)),
     ("taleo",           re.compile(r"([a-z0-9-]+\.taleo\.net)", re.I)),
     ("ukg",             re.compile(r"([a-z0-9-]+\.ultipro\.com)", re.I)),
-    # NOTE: Paylocity moved up to ATS_LINK_PATTERNS (now fetchable via the
-    # paylocity fetcher) — it must stay a confirmable path, not a lead.
+    # NOTE: Paylocity and Workable moved up to ATS_LINK_PATTERNS (now
+    # fetchable via their own fetchers) — both must stay confirmable paths,
+    # not leads.
     ("paycom",          re.compile(r"(paycomonline\.net/[A-Za-z0-9/_-]+)", re.I)),
     ("breezy",          re.compile(r"([a-z0-9-]+\.breezy\.hr)", re.I)),
     ("gohire",          re.compile(r"([a-z0-9-]+\.gohire\.io)", re.I)),
@@ -219,8 +228,16 @@ def detect(text, final_url=""):
     >>> detect("", "https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/page/"
     ...            "JobsHomePage?csk.JobBoard=EXTERNAL&csk.HROrganization=42")
     ('fetchable', 'infor', 'css-acme-prd.inforcloudsuite.com|42')
+    >>> detect("", "https://apply.workable.com/acme-aps/j/D68529D654/")
+    ('fetchable', 'workable', 'acme-aps')
     >>> detect("via acme.eightfold.ai portal")
     ('lead', 'eightfold', 'acme.eightfold.ai')
+
+    A URL that names a POSTING but not the board it belongs to names no
+    board at all -- Workable's slug-less short link is the shape:
+
+    >>> detect("", "https://apply.workable.com/j/D68529D654") is None
+    True
 
     A vendor's own site or an embed path is not a board (BAD_SLUGS):
 

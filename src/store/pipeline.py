@@ -12,6 +12,8 @@ inside the function.
 
 from datetime import datetime
 
+from .schema import apply_update, sql
+
 
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
 # in ranking; the rest leave the ranking: applied/interviewing move to the
@@ -46,11 +48,10 @@ FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
 
 def set_job_status(conn, job_id, status):
     """Mark one job 'open' or 'closed' directly (closed_at maintained)."""
-    conn.execute(
-        "UPDATE jobs SET status=?, closed_at=? WHERE job_id=?",
-        (status, datetime.now().isoformat() if status == "closed" else None,
-         job_id))
-    conn.commit()
+    apply_update(conn, "jobs", "job_id", job_id, {
+        "status": status,
+        "closed_at": datetime.now().isoformat() if status == "closed" else None,
+    })
 
 
 def _resolve_job(conn, ref):
@@ -97,19 +98,16 @@ def set_disposition(conn, ref, disposition, note=None):
         return None, f"{ref!r} is ambiguous ({len(matches)} matches):\n{opts}"
     row = matches[0]
     now = datetime.now().isoformat()
-    sets = ["disposition=?", "disposition_note=?", "disposition_at=?"]
-    args = [None if clearing else d, None if clearing else note,
-            None if clearing else now]
+    sets = {"disposition": None if clearing else d,
+            "disposition_note": None if clearing else note,
+            "disposition_at": None if clearing else now}
     if d == "applied":
         # COALESCE, not an assignment: the FIRST apply owns the date. Without
         # it, re-marking a row that came back 'rejected' and then 'applied'
         # again — or any later edit — would silently reset the clock every
         # elapsed-time question is measured against.
-        sets.append("applied_at=COALESCE(applied_at, ?)")
-        args.append(now)
-    conn.execute(f"UPDATE jobs SET {', '.join(sets)} WHERE job_id=?",
-                 [*args, row["job_id"]])
-    conn.commit()
+        sets["applied_at"] = sql("COALESCE(applied_at, ?)", now)
+    apply_update(conn, "jobs", "job_id", row["job_id"], sets)
     return row, None
 
 
@@ -154,11 +152,7 @@ def update_pipeline_fields(conn, job_id, **fields):
             return None, (f"unknown outcome_reason {v!r} — use one of "
                           f"{', '.join(OUTCOME_REASONS)}")
         sets[k] = v
-    if sets:
-        conn.execute(
-            f"UPDATE jobs SET {', '.join(f'{k}=?' for k in sets)} "
-            f"WHERE job_id=?", [*sets.values(), job_id])
-        conn.commit()
+    apply_update(conn, "jobs", "job_id", job_id, sets)
     return dict(conn.execute("SELECT * FROM jobs WHERE job_id=?",
                              (job_id,)).fetchone()), None
 

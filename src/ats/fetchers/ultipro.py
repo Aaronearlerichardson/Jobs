@@ -26,12 +26,12 @@ Notes:
 import time
 
 import requests
-from bs4 import BeautifulSoup
 
-from src.net.http import DEFAULT_TIMEOUT, HEADERS, fetch_failed
+from src.net.http import DEFAULT_TIMEOUT, JSON_HEADERS, fetch_failed
+from src.net.util import text_from_html
 from .board import board_jobs
 
-_JSON = {**HEADERS, "Accept": "application/json", "Content-Type": "application/json"}
+_JSON = {**JSON_HEADERS, "Content-Type": "application/json"}
 
 
 #: Subdomains a board may be served from, in the order they are tried.
@@ -87,7 +87,7 @@ def location_str(opp):
 
 
 def _desc(opp):
-    return BeautifulSoup(opp.get("BriefDescription") or "", "html.parser").get_text(" ", strip=True)
+    return text_from_html(opp.get("BriefDescription") or "")
 
 
 def _detail_url(slug, oid):

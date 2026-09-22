@@ -38,10 +38,8 @@ import re
 import time
 from urllib.parse import urlparse
 
-from bs4 import BeautifulSoup
-
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date
+from src.net.util import norm_posted_date, strip_html, text_from_html
 
 # Job pages beyond this many are left for the next crawl. Newest first, so
 # the cap trims the stalest postings, not the freshest.
@@ -147,10 +145,6 @@ def parse_sitemap(xml, origin=""):
     return jobs, children
 
 
-def _text(html):
-    return BeautifulSoup(html or "", "html.parser").get_text(" ", strip=True)
-
-
 def _current_job(page_html):
     """The ``currentJob`` record embedded in a job page, or None."""
     m = _NEXT_DATA_RE.search(page_html or "")
@@ -179,7 +173,10 @@ def parse_job_page(page_html, board_url, page_url=""):
     if not job:
         return None
     jid = job.get("id")
-    title = _text(job.get("title"))
+    # strip_html for the one-line fields, text_from_html for the body: the
+    # embedded record carries HTML in both, and a title is not a place for
+    # the paragraph breaks a JD needs (src/net/util.py owns both).
+    title = strip_html(job.get("title"))
     if not jid or not title:
         return None
     if (job.get("status") not in (None, "active")
@@ -188,22 +185,22 @@ def parse_job_page(page_html, board_url, page_url=""):
     org = job.get("organization") if isinstance(job.get("organization"), dict) else {}
     locations = []
     for loc in job.get("locations") or []:
-        name = _text(loc.get("name") if isinstance(loc, dict) else loc)
+        name = strip_html(loc.get("name") if isinstance(loc, dict) else loc)
         if name and name not in locations:
             locations.append(name)
     host = board_host(board_url)
     return {
         "id":          f"getro_{jid}",
-        "company":     _text(org.get("name")) or host,
+        "company":     strip_html(org.get("name")) or host,
         "title":       title,
         "url":         job.get("url") or page_url,
         "location":    "; ".join(locations),
-        "description": _text(job.get("description")),
+        "description": text_from_html(job.get("description")),
         "posted_at":   norm_posted_date(job.get("postedAt")),
         "via":         f"getro:{host}",
         # What attribute_employers needs to find (or queue) the employer.
         "_employer": {
-            "name":     _text(org.get("name")),
+            "name":     strip_html(org.get("name")),
             "domain":   (org.get("domain") or "").strip().lower(),
             "slug":     org.get("slug") or "",
             "board":    host,

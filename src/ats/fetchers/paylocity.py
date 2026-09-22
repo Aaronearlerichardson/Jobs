@@ -20,6 +20,7 @@ import re
 from bs4 import BeautifulSoup
 
 from src.net.http import HEADERS, SESSION, fetch_failed
+from src.net.util import text_from_html
 from .board import board_jobs
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
@@ -49,22 +50,30 @@ def location_str(job):
     return (jl.get("Country") or "Unknown")
 
 
-def fetch_description(job_id, timeout=None):
-    """Full JD text for one posting, from its server-rendered detail page."""
+def fetch_description(job_id, label="", timeout=None):
+    """Full JD text for one posting, from its server-rendered detail page.
+
+    A detail page that fails is REPORTED (net.http.fetch_failed) rather
+    than swallowed into "": a posting with no body and a board whose
+    detail pages are down look the same downstream otherwise. The parse
+    itself stays local — this is HTML, not the JSON net.http.get_json
+    serves the other three detail fetchers.
+    """
     try:
         r = SESSION.get(_DETAIL.format(jid=job_id), timeout=timeout, headers=HEADERS)
         r.raise_for_status()
-        el = BeautifulSoup(r.text, "html.parser").select_one(
-            ".job-preview-details, [class*=job-preview]")
-        if not el:
-            return ""
-        text = el.get_text(" ", strip=True)
-        # Strip the "Apply <title> <location> Apply Description" chrome that
-        # leads every detail page, keeping the JD body.
-        body = re.sub(r"^.*?\bDescription\b", "", text, count=1).strip()
-        return body or text
-    except Exception:
+    except Exception as e:
+        fetch_failed(f"Paylocity {label or 'board'} job {job_id}", e)
         return ""
+    el = BeautifulSoup(r.text, "html.parser").select_one(
+        ".job-preview-details, [class*=job-preview]")
+    if not el:
+        return ""
+    text = el.get_text(" ", strip=True)
+    # Strip the "Apply <title> <location> Apply Description" chrome that
+    # leads every detail page, keeping the JD body.
+    body = re.sub(r"^.*?\bDescription\b", "", text, count=1).strip()
+    return body or text
 
 
 def _row(guid, j):
@@ -74,7 +83,10 @@ def _row(guid, j):
         return None
     row = {"id": f"paylocity_{guid[:8]}_{jid}", "title": title,
            "url": _DETAIL.format(jid=jid), "location": location_str(j),
-           "description": re.sub(r"<[^>]+>", " ", j.get("Description") or ""),
+           # Through the shared stripper: this line used to drop tags with
+           # a bare regex and never unescape, so a listing-supplied body
+           # reached the store with literal "&amp;"/"&nbsp;" in it.
+           "description": text_from_html(j.get("Description") or ""),
            "_jid": jid}
     if j.get("IsRemote"):
         row["remote_hint"] = "paylocity:isRemote"
@@ -83,11 +95,13 @@ def _row(guid, j):
 
 def fetch_paylocity(guid, company_name="", gate=None, loc_re=None, max_details=40,
                     detail_delay=0.2):
+    label = company_name or guid[:8]
     try:
         raw = parse_board(guid)
     except Exception as e:
-        return fetch_failed(f"Paylocity {company_name or guid[:8]}", e)
+        return fetch_failed(f"Paylocity {label}", e)
     return board_jobs((_row(guid, j) for j in raw), company_name,
                       gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: fetch_description(row["_jid"]),
+                      fetch_description=lambda row: fetch_description(
+                          row["_jid"], label),
                       max_details=max_details, detail_delay=detail_delay)

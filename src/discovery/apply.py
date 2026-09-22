@@ -3,16 +3,14 @@
 Replaces the original config.py source-rewriter: discovery used to regex-edit
 Python source (insert entries into GREENHOUSE_COMPANIES etc.), and a separate
 --import-seeds step copied them into the store. The store IS the roster now —
-candidates upsert straight into the companies table, deduped by name (upsert)
-and by ats+slug (a second name for the same board is skipped).
+candidates upsert straight into the companies table through the same
+mission-scoring write path every other automated add uses
+(src.discovery.local_sourcing.score_and_upsert).
 
-Mission fields are left NULL — `python discover.py --score-missions` owns
-those. New rows land in the REVIEW QUEUE (src.store.mark_pending): a
-candidate the model suggested and a slug guess confirmed is exactly the kind
-of name that used to reach the roster without ever having been an employer.
+New rows land in the REVIEW QUEUE (src.store.mark_pending): a candidate the
+model suggested and a resolver confirmed is exactly the kind of name that
+used to reach the roster without ever having been an employer.
 """
-
-from datetime import datetime
 
 from src import store
 from src import tags
@@ -20,71 +18,83 @@ from src.ats.registry import ATS_REGISTRY, seed_tag_for
 from src.ats.signatures import detect, pack
 
 
-def _slug_fields(ats, slug):
-    """Map a candidate slug to store columns. Workday slugs are 't|p|s'."""
-    if ats == "workday":
+def _candidate_hit(c):
+    """A confirmed Candidate as the resolver-shaped hit dict the store write
+    path takes, or None when its coordinates are malformed. Workday's
+    't|p|s' string goes back to the (tenant, pod, site) triple src.ats.coords
+    spells out as columns."""
+    slug = (c.slug_guess or "").strip() or None
+    if c.ats == "workday":
         parts = (slug or "").split("|")
         if len(parts) != 3 or not parts[1].isdigit():
             return None
-        return {"wd_tenant": parts[0], "wd_pod": int(parts[1]), "wd_site": parts[2]}
-    return {"slug": slug}
-
-
-def _board_key(row):
-    """Identity of a board for cross-name dedup: (ats, normalized slug)."""
-    if row.get("ats") == "workday":
-        return ("workday", f"{row.get('wd_tenant')}|{row.get('wd_pod')}|{row.get('wd_site')}")
-    return (row.get("ats"), row.get("slug"))
+        slug = (parts[0], int(parts[1]), parts[2])
+    elif not slug:
+        return None
+    return {"name": c.name, "ats": c.ats, "slug": slug,
+            "careers_url": c.careers_url or None,
+            "count": c.job_count, "nc": c.nc}
 
 
 def apply_to_store(result, dry_run: bool = False) -> list[str]:
-    """Upsert confirmed candidates into the companies table; return summary
-    lines. `dry_run=True` reports without writing."""
+    """Mission-score confirmed candidates and write them to the companies
+    table; return summary lines. `dry_run=True` reports without writing —
+    and without paying for a mission call.
+
+    The write is local_sourcing.score_and_upsert, the one path behind every
+    automated add: it mission-scores the board, activates it only if the tier
+    says so (src.claude.is_active_mission), refuses a board the roster
+    already holds under another name, and queues anything the store has not
+    confirmed for review.
+
+    Notes:
+        This used to build the row here instead, with ``active=1``
+        unconditionally and the mission columns left NULL for a later
+        ``--score-missions`` pass. So a `discover-term` / `--from-bciwiki`
+        candidate was the one discovery product that skipped the mission
+        gate: confirming its review row put an unscored company on the
+        roster, ACTIVE, and it stayed crawled until somebody remembered to
+        run the backfill.
+    """
+    # Deferred: the write path pulls in the fetchers and the mission scorer,
+    # and src.discovery.__init__ imports this module on every `import
+    # src.discovery` -- including the ones that only want the report.
+    from .local_sourcing import score_and_upsert
+
     term = result["term"]
     confirmed = [c for c in result["companies"] if c.confirmed]
     if not confirmed:
         return [f"  (no confirmed candidates for '{term}')"]
 
     conn = store.connect()
-    existing = store.get_companies(conn, active_only=False)
-    have_names = {(c["name"] or "").lower() for c in existing}
-    have_boards = {_board_key(c) for c in existing if c.get("ats")}
-
     added, skipped, summary = 0, 0, []
     for c in confirmed:
-        ats = c.ats
-        if ats not in ATS_REGISTRY:
-            summary.append(f"    [skip] {c.name}: no fetcher for ATS '{ats}'")
+        if c.ats not in ATS_REGISTRY:
+            summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
             skipped += 1
             continue
-        fields = _slug_fields(ats, (c.slug_guess or "").strip())
-        if not fields or not any(fields.values()):
+        hit = _candidate_hit(c)
+        if hit is None:
             summary.append(f"    [skip] {c.name}: malformed slug {c.slug_guess!r}")
             skipped += 1
             continue
-        row = {"name": c.name, "ats": ats, **fields,
-               "careers_url": c.careers_url or None,
-               "total_job_count": c.job_count,
-               "tags": seed_tag_for(ats), "source": f"discovery:{term[:60]}",
-               "notes": (c.notes or None), "active": 1,
-               "last_probed": datetime.now().isoformat()}
-        key = _board_key(row)
-        is_new_name = (c.name or "").lower() not in have_names
-        if is_new_name and key in have_boards:
-            summary.append(f"    [dup ] {c.name}: board {key[0]}:{key[1]} "
-                           f"already registered under another name")
+        if dry_run:
+            added += 1
+            summary.append(f"    + {c.name:32} {c.ats:12} (unscored preview)")
+            continue
+        written = score_and_upsert(
+            conn, hit, source=f"discovery:{term[:60]}",
+            tags=seed_tag_for(c.ats), extra={"notes": c.notes or None})
+        if not written:
+            # Already on the roster under another name -- score_and_upsert
+            # printed which one.
             skipped += 1
             continue
-        pending = not store.is_confirmed_company(conn, c.name)
-        if pending:
-            row = store.mark_pending(row)
-        if not dry_run:
-            store.upsert_company(conn, row)
-        have_names.add((c.name or "").lower())
-        have_boards.add(key)
+        row, active, pending = written
         added += 1
-        summary.append(f"    + {c.name:32} {ats:12} "
-                       f"{'[review]' if pending else '(refresh)'}")
+        state = "[review]" if pending else ("active" if active else "off-mission")
+        summary.append(f"    + {c.name:32} {c.ats:12} "
+                       f"{str(row.get('mission_tier')):16} {state}")
 
     conn.close()
     verb = "would queue/refresh" if dry_run else "queued/refreshed"
@@ -93,12 +103,7 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
     if added and not dry_run:
         summary.append("  Confirm the [review] rows in the web UI's Review "
                        "section before they are crawled")
-        summary.append("  Mission scores pending -> python discover.py --score-missions")
     return summary
-
-
-# Back-compat alias: discover.py historically imported apply_to_config.
-apply_to_config = apply_to_store
 
 
 # --------------------------------------------------------------------------- #

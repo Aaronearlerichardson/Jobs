@@ -490,6 +490,15 @@ Return ONLY valid JSON. No markdown, no preamble."""
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
+def _valid_tier(raw):
+    """A model's `mission` field as one of `_MISSION_TIERS`, or None when it
+    named something outside the profile's vocabulary. Shape validation on a
+    field NAME -- it never touches a numeric score. Both scorers below asked
+    this question, spelled the same way, twice."""
+    tier = str(raw).strip().lower()
+    return tier if tier in _MISSION_TIERS else None
+
+
 def score_company_mission(name, context=""):
     """Return (mission_tier|None, score|None, reason) for an employer."""
     # Deterministic bullseye anchor (profile [mission].bullseye_regex), checked
@@ -505,13 +514,9 @@ def score_company_mission(name, context=""):
     result = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120)
     if not result or "mission" not in result:
         return None, None, ""
-    tier = str(result.get("mission", "")).strip().lower()
-    if tier not in _MISSION_TIERS:
-        tier = None
-    try:
-        score = max(0.0, min(1.0, float(result.get("score"))))
-    except (TypeError, ValueError):
-        score = None
+    from src.claude.fit import clamp_unit
+    tier = _valid_tier(result.get("mission", ""))
+    score = clamp_unit(result.get("score"), default=None)
     reason = str(result.get("reason", "")).strip()
     return tier, score, reason
 
@@ -543,9 +548,9 @@ def board_is_own(company, board, site="", titles=()):
 
     Notes:
         Consulted only for collision-prone resolutions — a Workday tenant
-        sharing no token with the name (src.discovery.resolve.sniffer._foreign_board),
-        or a first-word/generic slug probe hit (src.discovery.pipeline) — so
-        this costs a call on the rare suspect, not per resolve. The
+        sharing no token with the name
+        (src.discovery.resolve.identity._foreign_board) — so this costs a
+        call on the rare suspect, not per resolve. The
         asymmetric default matters: a wrong "keep" mislabels one company
         until a human looks, a wrong "reject" silently loses a real board
         forever. `titles` (sample postings from the board) is the decisive
@@ -576,18 +581,14 @@ def score_technical_bar(title, description=""):
     Falls back to ``(None, "", None)`` when the API key is unset or the call
     fails, so callers can degrade to a heuristic without crashing.
     """
-    from src.claude.fit import clip_desc
+    from src.claude.fit import clamp_unit, clip_desc
     desc = clip_desc(description or "")
     user = f"TITLE: {title}\n\nDESCRIPTION:\n{desc or '(no description provided)'}"
     result = call_claude_json(_TECH_BAR_SCORE_SYSTEM, user, max_tokens=120)
     if not result or "score" not in result:
         return None, "", None
-    try:
-        score = float(result["score"])
-    except (TypeError, ValueError):
+    score = clamp_unit(result["score"], default=None)
+    if score is None:
         return None, "", None
-    score = max(0.0, min(1.0, score))
-    mission = str(result.get("mission", "")).strip().lower()
-    if mission not in _MISSION_TIERS:
-        mission = None
-    return score, str(result.get("reason", "")).strip(), mission
+    return (score, str(result.get("reason", "")).strip(),
+            _valid_tier(result.get("mission", "")))

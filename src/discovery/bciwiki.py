@@ -7,7 +7,8 @@ on-topic list of exactly the employers this crawler targets — far broader
 and more relevant than Claude's 15-per-query discovery guesses.
 
 So we use it the way the rest of discovery works: harvest names here, then
-run them through validate_candidate (slug probe + careers-page ATS sniff)
+run them through validate_candidate, which hands each name to the shared
+resolver (careers-page sniff, then slug probe, every hit live-validated).
 """
 
 
@@ -17,7 +18,8 @@ from src.net.http import SESSION, HEADERS
 API_URL = "https://bciwiki.org/api.php"
 
 # Category -> the ats hint we hand each candidate. Companies/labs/orgs all
-# go in as "unknown" so the universal probe + sniffer sweep every platform.
+# go in as "unknown": the resolver reads the ATS off the company's own
+# careers page rather than taking a hint for it.
 CATEGORIES = {
     "companies": "Companies",
     "labs":      "Labs",

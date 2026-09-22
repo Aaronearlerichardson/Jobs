@@ -225,6 +225,17 @@ remote_requires_watch = false
 multi_division = []
 multi_division_mission_floor = 0.6
 
+# Titles that pass the DIVISION gate at a conglomerate above that your roster
+# ALSO carries a `watch` tag for. That gate asks a conglomerate's postings for
+# the [keywords] vocabulary, because a corporate mission score says nothing
+# about the division that is hiring -- but at an employer you have explicitly
+# watched, the division worth watching is often a plain engineering org whose
+# postings never use those words. List the ROLE titles you would take there.
+# Matched against the title only, on word boundaries, like the [exclude.*]
+# title_tokens; the [exclude] phrases still run first. Empty = the division
+# gate behaves identically for watched and unwatched conglomerates.
+# watch_division_titles = ["software engineer", "data engineer"]
+
 # The whole-board harvester (harvest.py) normally re-checks every fetchable
 # board every --min-age-hours (default 6h). A board that is BOTH off-mission
 # (mission-scored into an inactive tier, or never scored at all) AND itself

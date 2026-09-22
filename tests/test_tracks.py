@@ -10,6 +10,7 @@ import src.ops.maintenance as ops
 import src.crawl.runner as runner
 from src import tags
 from src.config import tracks as track_cfg
+from tests.test_triage import division_vocab, _PLAIN_ENG_BODY  # noqa: F401 (fixture)
 
 
 class TestTrackConfig:
@@ -73,8 +74,8 @@ class TestRemoteAdmissionGates:
     survive the geo gate — otherwise the ranking would admit rows the crawl
     never fetched."""
 
-    def _co(self, mission=None, tag=""):
-        return {"id": 1, "name": "Acme", "ats": "greenhouse", "slug": "acme",
+    def _co(self, mission=None, tag="", name="Acme"):
+        return {"id": 1, "name": name, "ats": "greenhouse", "slug": "acme",
                 "mission_score": mission, "tags": tag}
 
     def _job(self, location, title="Data Engineer"):
@@ -121,6 +122,26 @@ class TestRemoteAdmissionGates:
     def test_watch_tag_admits_remote(self, local_track):
         assert ops._keep_job(self._co(tag="watch"), self._job("Remote - US"),
                              self._track(local_track))
+
+    def test_multi_division_watch_tag_widens_the_crawl_paths_division_gate(
+            self, local_track, division_vocab):
+        # _keep_job is the CRAWL path's division gate; src.crawl.triage has
+        # its own copy (tested in test_triage.py against the same fixture).
+        # The two used to disagree about the same posting at the same
+        # watched conglomerate -- this pins that they now agree.
+        job = self._job("Remote - US",
+                        title="Senior Software Engineer, AI Research Clusters")
+        job["description"] = _PLAIN_ENG_BODY
+        assert ops._keep_job(self._co(tag="watch", name="Megacorp Watched"),
+                             job, self._track(local_track))
+
+    def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(
+            self, local_track, division_vocab):
+        job = self._job("Remote - US",
+                        title="Senior Software Engineer, AI Research Clusters")
+        job["description"] = _PLAIN_ENG_BODY
+        assert not ops._keep_job(self._co(tag="", name="Megacorp Watched"),
+                                 job, self._track(local_track))
 
 
 class TestKeywordFocus:

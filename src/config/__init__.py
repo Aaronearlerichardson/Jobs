@@ -28,6 +28,7 @@ from .paths import (  # noqa: F401
 from .policy import (  # noqa: F401
     USER_AGENT, PROBE_TIMEOUT, FETCH_TIMEOUT, BROWSER_UA,
     MULTI_DIVISION_COMPANIES, MULTI_DIVISION_MISSION_FLOOR, is_multi_division,
+    WATCH_DIVISION_TITLES,
     ACTIVE_MISSION_TIERS, is_active_mission, HARVEST_OFFMISSION_HOURS,
     is_offmission_inactive, BOARD_MAX_ROWS, board_max_pages,
     RESPECT_ROBOTS, ROBOTS_EXEMPT_HOSTS, SEARCH_DNS_FALLBACK,
@@ -61,7 +62,7 @@ from .profile import (  # noqa: F401
     DISCOVERY_PRIORITY_COMPANIES,
 )
 from .secrets import (  # noqa: F401
-    env,
+    env, require_creds,
     GMAIL_ADDRESS, GMAIL_APP_PASSWORD,
     ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_VERIFY_MODEL,
     CAREERONESTOP_USER_ID, CAREERONESTOP_TOKEN,

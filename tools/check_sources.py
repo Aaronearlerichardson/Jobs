@@ -422,7 +422,7 @@ def probe_gated():
     automatically, and capture.py is the intended route (you browse them
     yourself, signed in as you, and the parser reads the page your browser
     already loaded)."""
-    from src.ats.fetchers.company import _GATED_HOST_RE
+    from src.ats.fetchers.probe import _GATED_HOST_RE
     hosts = _GATED_HOST_RE.pattern.replace("\\.", ".").split("|")
     return [{"section": "gated", "name": h.strip(), "status": SKIPPED,
              "detail": "never fetched by policy — use capture.py",

@@ -53,8 +53,58 @@ def worker_count(env_var, floor=4):
     return max((os.cpu_count() or 9) - 1, floor)
 
 
-_TAG_RE   = re.compile(r"<[^>]+>")
-_SPACE_RE = re.compile(r"\s+")
+_TAG_RE    = re.compile(r"<[^>]+>")
+_SPACE_RE  = re.compile(r"\s+")
+_SCRIPT_RE = re.compile(r"(?is)<(script|style).*?</\1>")
+_BLOCK_RE  = re.compile(r"(?i)<(/p|/li|/h[1-6]|br\s*/?|/div)\s*>")
+_HSPACE_RE = re.compile(r"[ \t]+")
+_BLANKS_RE = re.compile(r"\n\s*\n+")
+
+
+def text_from_html(raw):
+    r"""An HTML job description as readable text, paragraph breaks kept.
+
+    The stripper every ATS description goes through. Nine fetchers had
+    written their own (four on BeautifulSoup's ``get_text(" ")``, four on
+    ``get_text(" ", strip=True)``, one on a bare tag regex with NO entity
+    unescaping, so literal "&amp;"/"&nbsp;" reached the store), and a
+    description that reads differently per platform is a gate that reads
+    differently per platform: the keyword filters, the fit prompt and the
+    digest all match on this text.
+
+    Three things `strip_html` does not do, and a JD body needs:
+
+      * script/style blocks go with their CONTENT, not just their tags --
+        a careers page's embedded JSON (Getro's whole ``__NEXT_DATA__``
+        record, a JSON-LD blob) would otherwise land in the body as text;
+      * a block END tag becomes a newline, so bullets and paragraphs stay
+        apart instead of running together into one wall of words;
+      * only spaces/tabs collapse, so those newlines survive.
+
+    >>> text_from_html("<h2>Role</h2><ul><li>EEG  work</li><li>ML</li></ul>")
+    'Role\n EEG work\n ML'
+    >>> text_from_html("<p>Hello&nbsp;&amp; welcome</p><script>x=1</script>")
+    'Hello\xa0& welcome'
+    >>> text_from_html(None)
+    ''
+
+    Notes:
+        Entities are unescaped LAST, the opposite of strip_html's order:
+        a JD that writes "travel: &lt;20%" means the text "<20%", and
+        unescaping first would let the tag regex eat from there to the
+        next ">". A board whose API hands back ESCAPED markup (Greenhouse
+        `content`) therefore has to unescape at the call site, before the
+        markup is markup -- see fetchers/api.py.
+    """
+    if not raw:
+        return ""
+    txt = _SCRIPT_RE.sub(" ", raw)
+    txt = _BLOCK_RE.sub("\n", txt)
+    txt = _TAG_RE.sub(" ", txt)
+    txt = html.unescape(txt)
+    txt = _HSPACE_RE.sub(" ", txt)
+    txt = _BLANKS_RE.sub("\n\n", txt)
+    return txt.strip()
 
 
 def strip_html(s):

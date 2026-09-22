@@ -15,11 +15,13 @@ from src import digest
 from src import store
 from src import tags as company_tags
 from src.claude.api import have_api_key
+from src.claude.fit import is_deep_verified
 from src.config import profile_edit
 from src.match import locality
 from src.ops.background import (_LOG_LOCK, OPS, TASK, _int, _running,
                                 queue_clear, queue_remove, queue_snapshot,
                                 submit)
+from src.ops.maintenance import track_store
 from . import BOOT_ID, STATE, app
 from .server import schedule_restart
 
@@ -33,10 +35,6 @@ def _track():
            or (request.get_json(silent=True) or {}).get("track")
            or config.DEFAULT_TRACK)
     return config.UI_TRACKS.get(tid) or config.UI_TRACKS[config.DEFAULT_TRACK]
-
-
-def _conn(track_cfg=None):
-    return store.connect(track_cfg["db_path"] if track_cfg else None)
 
 
 def _today():
@@ -151,12 +149,11 @@ def _job_json(r, today, rank=None, remote_floor=None):
     d = {k: r.get(k) for k in _JOB_FIELDS}
     d["rank"] = rank
     d["age"] = digest.age_tag(r, today)
-    d["verified"] = "deep:" in (r.get("fit_reason") or "")
+    d["verified"] = is_deep_verified(r.get("fit_reason"))
     d["geo_bucket"] = _geo_tag(r)
     d["relocation_required"] = d["geo_bucket"] == "relocation"
     d["us_ok"] = locality.us_eligible(r.get("location") or "")
-    d["watched"] = "watch" in {t.strip() for t in
-                               (r.get("company_tags") or "").split(",")}
+    d["watched"] = company_tags.has(r.get("company_tags"), company_tags.WATCH)
     # Whether a REMOTE row here is worth showing in a location-scoped track.
     # The same rule ranked_jobs applies server-side, re-run per row because
     # /api/jobs deliberately ships everything and gates on the client.
@@ -167,18 +164,17 @@ def _job_json(r, today, rank=None, remote_floor=None):
 @app.get("/api/jobs")
 def api_jobs():
     t = _track()
-    conn = _conn(t)
-    # No server-side geo gate (location_re=None): every row in the track
-    # comes back stamped with a live geo_bucket, and the CLIENT decides what
-    # to show ("willing to relocate" checkbox, remote-requires-watch rule).
-    # The digest/CLI callers of ranked_jobs keep their own geo gates — this
-    # is a UI-only widening.
-    rows = store.ranked_jobs(
-        conn, track=t["track"], location_re=None,
-        rank_by=t["rank_by"], min_mission=t["min_mission"],
-        include_closed=request.args.get("closed") == "1",
-        include_dispositioned=request.args.get("dispositioned") == "1")
-    conn.close()
+    with track_store(t) as conn:
+        # No server-side geo gate (location_re=None): every row in the track
+        # comes back stamped with a live geo_bucket, and the CLIENT decides
+        # what to show ("willing to relocate" checkbox, remote-requires-watch
+        # rule). The digest/CLI callers of ranked_jobs keep their own geo
+        # gates — this is a UI-only widening.
+        rows = store.ranked_jobs(
+            conn, track=t["track"], location_re=None,
+            rank_by=t["rank_by"], min_mission=t["min_mission"],
+            include_closed=request.args.get("closed") == "1",
+            include_dispositioned=request.args.get("dispositioned") == "1")
     today = _today()
     floor = t.get("remote_mission_floor")
     return jsonify([_job_json(r, today, i + 1, remote_floor=floor)
@@ -202,9 +198,9 @@ def api_tracks():
 
 @app.get("/api/job/<job_id>")
 def api_job(job_id):
-    conn = _conn(_track())
-    row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (job_id,)).fetchone()
-    conn.close()
+    with track_store(_track()) as conn:
+        row = conn.execute("SELECT * FROM jobs WHERE job_id=?",
+                           (job_id,)).fetchone()
     if not row:
         return jsonify(error="not found"), 404
     d = dict(row)
@@ -215,10 +211,10 @@ def api_job(job_id):
 @app.post("/api/job/<job_id>/disposition")
 def api_disposition(job_id):
     p = request.get_json(silent=True) or {}
-    conn = _conn(_track())
-    row, err = store.set_disposition(conn, job_id, p.get("disposition", ""),
-                                     note=(p.get("note") or "").strip() or None)
-    conn.close()
+    with track_store(_track()) as conn:
+        row, err = store.set_disposition(
+            conn, job_id, p.get("disposition", ""),
+            note=(p.get("note") or "").strip() or None)
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job_id=row["job_id"])
@@ -235,9 +231,8 @@ def api_pipeline_fields(job_id):
     p = request.get_json(silent=True) or {}
     fields = {k: p[k] for k in store.PIPELINE_FIELDS if k in p}
     t = _track()
-    conn = _conn(t)
-    row, err = store.update_pipeline_fields(conn, job_id, **fields)
-    conn.close()
+    with track_store(t) as conn:
+        row, err = store.update_pipeline_fields(conn, job_id, **fields)
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job=_job_json(
@@ -247,13 +242,12 @@ def api_pipeline_fields(job_id):
 @app.get("/api/pipeline")
 def api_pipeline():
     t = _track()
-    conn = _conn(t)
     today = _today()
     floor = t.get("remote_mission_floor")
-    rows = [_job_json(r, today, remote_floor=floor)
-            for r in store.get_pipeline(conn)]
-    due = [j["job_id"] for j in store.followups_due(conn, today)]
-    conn.close()
+    with track_store(t) as conn:
+        rows = [_job_json(r, today, remote_floor=floor)
+                for r in store.get_pipeline(conn)]
+        due = [j["job_id"] for j in store.followups_due(conn, today)]
     return jsonify(rows=rows, followups_due=due)
 
 
@@ -261,34 +255,32 @@ def api_pipeline():
 def api_conversion():
     """Applications per fit band x geo_mode, with the interview rate — the
     Pipeline tab's answer to "which kind of job is actually converting?"."""
-    conn = _conn(_track())
-    report = store.conversion_report(conn)
-    conn.close()
+    with track_store(_track()) as conn:
+        report = store.conversion_report(conn)
     return jsonify(report)
 
 
 @app.get("/api/companies")
 def api_companies():
-    conn = _conn(_track())
-    comps = store.get_companies(conn, active_only=False)
-    # Open-job count AND best résumé fit per company in one pass: the roster
-    # suggests watching a company that has already produced a good-fit job,
-    # which is how a hand-maintained watch list is meant to grow.
-    stats = {r[0]: (r[1], r[2]) for r in conn.execute(
-        "SELECT company_id, COUNT(*), MAX(resume_fit_score) FROM jobs "
-        "WHERE COALESCE(status,'open')!='closed' AND company_id IS NOT NULL "
-        "GROUP BY company_id").fetchall()}
-    conn.close()
+    with track_store(_track()) as conn:
+        comps = store.get_companies(conn, active_only=False)
+        # Open-job count AND best résumé fit per company in one pass: the
+        # roster suggests watching a company that has already produced a
+        # good-fit job, which is how a hand-maintained watch list grows.
+        stats = {r[0]: (r[1], r[2]) for r in conn.execute(
+            "SELECT company_id, COUNT(*), MAX(resume_fit_score) FROM jobs "
+            "WHERE COALESCE(status,'open')!='closed' AND company_id IS NOT NULL "
+            "GROUP BY company_id").fetchall()}
     out = []
     for c in comps:
-        tags = {t for t in (c.get("tags") or "").split(",") if t}
+        tags = company_tags.parse(c.get("tags"))
         n_open, best_fit = stats.get(c["id"], (0, None))
         out.append({
             "id": c["id"], "name": c["name"], "ats": c.get("ats"),
             "mission_tier": c.get("mission_tier"),
             "mission_score": c.get("mission_score"),
             "active": bool(c.get("active")), "tags": sorted(tags),
-            "watched": "watch" in tags, "open_jobs": n_open,
+            "watched": company_tags.WATCH in tags, "open_jobs": n_open,
             "best_fit": best_fit,
             # Crawl cadence, so the roster shows WHY a company stopped
             # producing rows instead of looking silently broken.
@@ -302,13 +294,12 @@ def api_companies():
 @app.post("/api/company/<int:cid>/watch")
 def api_watch(cid):
     on = bool((request.get_json(silent=True) or {}).get("on"))
-    conn = _conn(_track())
-    row = conn.execute("SELECT name FROM companies WHERE id=?", (cid,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify(error="not found"), 404
-    store.set_company_tag(conn, row["name"], "watch", add=on)
-    conn.close()
+    with track_store(_track()) as conn:
+        row = conn.execute("SELECT name FROM companies WHERE id=?",
+                           (cid,)).fetchone()
+        if not row:
+            return jsonify(error="not found"), 404
+        store.set_company_tag(conn, row["name"], "watch", add=on)
     return jsonify(ok=True, watched=on)
 
 
@@ -317,23 +308,21 @@ def api_reactivate(cid):
     """Undormant a company: crawl it every run again. The manual override
     for a board the dormancy rules retired too eagerly (a slug that was
     briefly broken, a team that has only just started hiring)."""
-    conn = _conn(_track())
-    row = conn.execute("SELECT id FROM companies WHERE id=?", (cid,)).fetchone()
-    if not row:
-        conn.close()
-        return jsonify(error="not found"), 404
-    store.reactivate_company(conn, cid)
-    conn.close()
+    with track_store(_track()) as conn:
+        row = conn.execute("SELECT id FROM companies WHERE id=?",
+                           (cid,)).fetchone()
+        if not row:
+            return jsonify(error="not found"), 404
+        store.reactivate_company(conn, cid)
     return jsonify(ok=True, crawl_state="active")
 
 
 @app.post("/api/company/<int:cid>/active")
 def api_active(cid):
     on = 1 if (request.get_json(silent=True) or {}).get("on") else 0
-    conn = _conn(_track())
-    conn.execute("UPDATE companies SET active=? WHERE id=?", (on, cid))
-    conn.commit()
-    conn.close()
+    with track_store(_track()) as conn:
+        conn.execute("UPDATE companies SET active=? WHERE id=?", (on, cid))
+        conn.commit()
     return jsonify(ok=True, active=bool(on))
 
 
@@ -347,9 +336,8 @@ def api_active(cid):
 
 @app.get("/api/pending")
 def api_pending():
-    conn = _conn(_track())
-    rows = store.pending_companies(conn)
-    conn.close()
+    with track_store(_track()) as conn:
+        rows = store.pending_companies(conn)
     return jsonify(rows)
 
 
@@ -358,16 +346,14 @@ def api_confirm(cid):
     """Accept a review candidate: the pending tag comes off and the shared
     mission rule decides whether it is crawled."""
     from src.claude.api import is_active_mission
-    conn = _conn(_track())
-    pending = store.get_company(conn, cid)
-    if not pending:
-        conn.close()
-        return jsonify(error="not found"), 404
-    # The activation verdict is decided here and handed to the store, so
-    # the persistence layer never has to reach into the Claude module.
-    active = is_active_mission(pending.get("mission_tier"), pending["name"])
-    row = store.confirm_company(conn, cid, active=active)
-    conn.close()
+    with track_store(_track()) as conn:
+        pending = store.get_company(conn, cid)
+        if not pending:
+            return jsonify(error="not found"), 404
+        # The activation verdict is decided here and handed to the store, so
+        # the persistence layer never has to reach into the Claude module.
+        active = is_active_mission(pending.get("mission_tier"), pending["name"])
+        row = store.confirm_company(conn, cid, active=active)
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
 
@@ -376,9 +362,8 @@ def api_reject(cid):
     """Throw a review candidate away: the row and its jobs go, and the name
     is blocklisted so discovery stops re-finding it."""
     reason = ((request.get_json(silent=True) or {}).get("reason") or "").strip()
-    conn = _conn(_track())
-    name = store.reject_company(conn, cid, reason or "rejected in review")
-    conn.close()
+    with track_store(_track()) as conn:
+        name = store.reject_company(conn, cid, reason or "rejected in review")
     if not name:
         return jsonify(error="not found"), 404
     return jsonify(ok=True, name=name)
@@ -420,10 +405,9 @@ def api_names_block():
     # the whole run.
     p = request.get_json(silent=True) or {}
     reason = (p.get("reason") or "").strip() or "not a company (review)"
-    conn = _conn(_track())
-    keys = {k for k in (store.block_name(conn, n, reason)
-                        for n in (p.get("names") or [])) if k}
-    conn.close()
+    with track_store(_track()) as conn:
+        keys = {k for k in (store.block_name(conn, n, reason)
+                            for n in (p.get("names") or [])) if k}
     return jsonify(ok=True, blocked=len(keys), keys=sorted(keys))
 
 
@@ -439,9 +423,8 @@ def api_import():
         f.save(t)
         tmp = t.name
     try:
-        conn = _conn(_track())
-        n = store.import_companies(conn, tmp)
-        conn.close()
+        with track_store(_track()) as conn:
+            n = store.import_companies(conn, tmp)
     except Exception as e:
         return jsonify(error=f"import failed: {e}"), 400
     finally:
@@ -454,10 +437,9 @@ def api_import():
 
 @app.get("/api/export/companies")
 def api_export():
-    conn = _conn(_track())
-    rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM companies ORDER BY name").fetchall()]
-    conn.close()
+    with track_store(_track()) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM companies ORDER BY name").fetchall()]
     for r in rows:
         r.pop("id", None)
     buf = io.BytesIO(json.dumps(rows, indent=1, ensure_ascii=False).encode("utf-8"))
@@ -548,59 +530,59 @@ def api_config_put_raw():
 @app.get("/api/stats")
 def api_stats():
     t = _track()
-    conn = _conn(t)
-
-    def one(q, args=()):
-        return conn.execute(q, args).fetchone()[0]
-
     today = _today()
-    stats = {
-        "open": one("SELECT COUNT(*) FROM jobs WHERE COALESCE(status,'open')!='closed'"),
-        "closed": one("SELECT COUNT(*) FROM jobs WHERE status='closed'"),
-        "new_today": one("SELECT COUNT(*) FROM jobs WHERE substr(first_seen,1,10)=? "
-                         "AND COALESCE(status,'open')!='closed'", (today,)),
-        "dated": one("SELECT COUNT(posted_at) FROM jobs "
-                     "WHERE COALESCE(status,'open')!='closed'"),
-        "pipeline": one("SELECT COUNT(*) FROM jobs "
-                        "WHERE disposition IN ('applied','interviewing')"),
-        "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
-        # Applications that went out in the last 7 days: the volume the
-        # apply band exists to raise. applied_at is stamped once, on the
-        # first 'applied', so a row since moved to interviewing/rejected
-        # still counts toward the week it went out in.
-        "applied_7d": one("SELECT COUNT(*) FROM jobs "
-                          "WHERE substr(applied_at,1,10) >= ?",
-                          ((datetime.now() - timedelta(days=7))
-                           .strftime("%Y-%m-%d"),)),
-        # Companies actually crawled every run: a dormant row is still
-        # active, but only comes round weekly, so counting it here
-        # overstated the roster by roughly 60%.
-        "companies_active": one("SELECT COUNT(*) FROM companies WHERE "
-                                "active=1 AND "
-                                "COALESCE(crawl_state,'active')='active'"),
-        # Roster GROWTH, from companies.created_at. last_probed cannot answer
-        # this: a bulk mission re-score rewrites it on every row.
-        "companies_new_7d": store.roster_growth(conn, days=7),
-        # Candidates that failed to become crawlable companies, per reason
-        # family — the worklist behind a roster that stopped growing.
-        "company_misses": dict(store.miss_counts(conn)),
-        "watched": one("SELECT COUNT(*) FROM companies WHERE "
-                       "(','||COALESCE(tags,'')||',') LIKE '%,watch,%'"),
-        # Roster candidates waiting on a human — the Review tab's badge.
-        "pending_review": one("SELECT COUNT(*) FROM companies WHERE "
-                              "(','||COALESCE(tags,'')||',') LIKE ?",
-                              (f"%,{company_tags.PENDING},%",)),
-        "api_key": have_api_key(),
-        "screen_model": config.CLAUDE_MODEL,
-        "verify_model": config.CLAUDE_VERIFY_MODEL,
-        "db": str(t["db_path"]),
-        # Where the Settings tab writes. Shown in the header because the two
-        # can diverge (a per-user data dir vs. a profile beside the code).
-        "profile": str(config.PROFILE_PATH),
-        "track": t["id"],
-        "boot_id": BOOT_ID,
-    }
-    conn.close()
+    with track_store(t) as conn:
+
+        def one(q, args=()):
+            return conn.execute(q, args).fetchone()[0]
+
+        stats = {
+            "open": one("SELECT COUNT(*) FROM jobs WHERE COALESCE(status,'open')!='closed'"),
+            "closed": one("SELECT COUNT(*) FROM jobs WHERE status='closed'"),
+            "new_today": one("SELECT COUNT(*) FROM jobs WHERE substr(first_seen,1,10)=? "
+                             "AND COALESCE(status,'open')!='closed'", (today,)),
+            "dated": one("SELECT COUNT(posted_at) FROM jobs "
+                         "WHERE COALESCE(status,'open')!='closed'"),
+            "pipeline": one("SELECT COUNT(*) FROM jobs "
+                            "WHERE disposition IN ('applied','interviewing')"),
+            "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),
+            # Applications that went out in the last 7 days: the volume the
+            # apply band exists to raise. applied_at is stamped once, on the
+            # first 'applied', so a row since moved to interviewing/rejected
+            # still counts toward the week it went out in.
+            "applied_7d": one("SELECT COUNT(*) FROM jobs "
+                              "WHERE substr(applied_at,1,10) >= ?",
+                              ((datetime.now() - timedelta(days=7))
+                               .strftime("%Y-%m-%d"),)),
+            # Companies actually crawled every run: a dormant row is still
+            # active, but only comes round weekly, so counting it here
+            # overstated the roster by roughly 60%.
+            "companies_active": one("SELECT COUNT(*) FROM companies WHERE "
+                                    "active=1 AND "
+                                    "COALESCE(crawl_state,'active')='active'"),
+            # Roster GROWTH, from companies.created_at. last_probed cannot
+            # answer this: a bulk mission re-score rewrites it on every row.
+            "companies_new_7d": store.roster_growth(conn, days=7),
+            # Candidates that failed to become crawlable companies, per reason
+            # family — the worklist behind a roster that stopped growing.
+            "company_misses": dict(store.miss_counts(conn)),
+            "watched": one("SELECT COUNT(*) FROM companies WHERE "
+                           "(','||COALESCE(tags,'')||',') LIKE '%,watch,%'"),
+            # Roster candidates waiting on a human — the Review tab's badge.
+            "pending_review": one("SELECT COUNT(*) FROM companies WHERE "
+                                  "(','||COALESCE(tags,'')||',') LIKE ?",
+                                  (f"%,{company_tags.PENDING},%",)),
+            "api_key": have_api_key(),
+            "screen_model": config.CLAUDE_MODEL,
+            "verify_model": config.CLAUDE_VERIFY_MODEL,
+            "db": str(t["db_path"]),
+            # Where the Settings tab writes. Shown in the header because the
+            # two can diverge (a per-user data dir vs. a profile beside the
+            # code).
+            "profile": str(config.PROFILE_PATH),
+            "track": t["id"],
+            "boot_id": BOOT_ID,
+        }
     return jsonify(stats)
 
 

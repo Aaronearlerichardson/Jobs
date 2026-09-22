@@ -15,9 +15,8 @@ Replaces the old ``custom`` treatment of Rippling boards, whose static HTML
 scrape returned nothing because the board is client-rendered.
 """
 
-from bs4 import BeautifulSoup
-
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed, get_json
+from src.net.util import text_from_html
 from .board import board_jobs
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
@@ -41,22 +40,25 @@ def location_str(job):
     return "Unknown"
 
 
-def fetch_description(slug, uuid, timeout=None):
+def fetch_description(slug, uuid, label="", timeout=None):
     """Full JD text for one posting. Rippling's description is a
     ``{company, role}`` HTML dict — 'role' is the actual JD (put first);
-    'company' is the shared boilerplate."""
-    try:
-        r = SESSION.get(f"{_API.format(slug=slug)}/{uuid}", timeout=timeout, headers=JSON_HEADERS)
-        r.raise_for_status()
-        d = r.json().get("description")
-    except Exception:
+    'company' is the shared boilerplate.
+
+    Through net.http.get_json: a detail endpoint that fails is reported
+    and counted, not silently indistinguishable from a body-less posting
+    (see adp_wfn._fetch_description)."""
+    data = get_json(f"{_API.format(slug=slug)}/{uuid}",
+                    f"Rippling {label or slug} job {uuid[:12]}",
+                    timeout=timeout, headers=JSON_HEADERS)
+    if not isinstance(data, dict):
         return ""
+    d = data.get("description")
     if isinstance(d, dict):
         parts = [d.get("role"), d.get("company")]
     else:
         parts = [d]
-    html = " ".join(p for p in parts if isinstance(p, str) and p)
-    return BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
+    return text_from_html(" ".join(p for p in parts if isinstance(p, str) and p))
 
 
 def _dept(job):
@@ -83,5 +85,6 @@ def fetch_rippling(slug, company_name="", gate=None, loc_re=None, max_details=40
         return fetch_failed(f"Rippling {company_name or slug}", e)
     return board_jobs((_row(slug, j) for j in raw), company_name,
                       gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: fetch_description(slug, row["_uuid"]),
+                      fetch_description=lambda row: fetch_description(
+                          slug, row["_uuid"], company_name),
                       max_details=max_details, detail_delay=detail_delay)

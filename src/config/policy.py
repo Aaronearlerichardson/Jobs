@@ -55,6 +55,29 @@ MULTI_DIVISION_COMPANIES = {s.strip().lower()
                             for s in _pol.get("multi_division", [])}
 MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.6))
 
+# TITLE vocabulary that passes the division keyword gate at a conglomerate
+# the roster ALSO carries a `watch` tag for. The division gate
+# (src.match.filters.is_relevant, called by src.crawl.triage.row_verdict
+# and src.ops.maintenance._keep_job) asks a conglomerate's postings for the
+# profile's own health/bio/science vocabulary, because a corporate mission
+# score says nothing about the division that is hiring. At a WATCHED
+# conglomerate that question is the wrong one: the watch tag already means
+# "I want this employer's technical roles", and its aligned division is a
+# plain engineering org whose postings never use that vocabulary.
+#
+# Matched against the TITLE only, with word boundaries (filters.BOUNDED) --
+# the same scope and matcher as the per-track [exclude.<id>] title_tokens,
+# and for the same reason: every posting BODY at such an employer mentions
+# AI, GPUs and software somewhere, so a body-scoped list would admit its
+# sales and marketing boards wholesale. The profile-wide [exclude] gate
+# still runs first, so a title this list would otherwise admit still loses
+# to an [exclude] phrase ("Senior Manager, Software Engineering" is still a
+# "manager"). Empty (the default) leaves the division gate exactly as it
+# was for every company.
+WATCH_DIVISION_TITLES = tuple(s.strip().lower()
+                              for s in _pol.get("watch_division_titles", [])
+                              if s.strip())
+
 
 def is_multi_division(name):
     """True if `name` is a known multi-division conglomerate (profile policy).

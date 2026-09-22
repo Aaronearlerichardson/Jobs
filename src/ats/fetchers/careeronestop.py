@@ -33,14 +33,13 @@ _API = "https://api.careeronestop.org/v2/jobsearch"
 
 
 def _creds():
-    uid = (config.CAREERONESTOP_USER_ID or "").strip()
-    tok = (config.CAREERONESTOP_TOKEN or "").strip()
-    if not uid or not tok:
-        print("  [!] CareerOneStop credentials missing.\n"
-              "      Register (free): https://www.careeronestop.org/Developers/WebAPI/registration.aspx\n"
-              "      then set CAREERONESTOP_USER_ID and CAREERONESTOP_TOKEN env vars.")
-        return None
-    return uid, tok
+    """(user id, token) from config, or None with one line out — see
+    config.require_creds, which both keyed sources share."""
+    return config.require_creds(
+        "CareerOneStop",
+        "https://www.careeronestop.org/Developers/WebAPI/registration.aspx",
+        CAREERONESTOP_USER_ID=getattr(config, "CAREERONESTOP_USER_ID", ""),
+        CAREERONESTOP_TOKEN=getattr(config, "CAREERONESTOP_TOKEN", ""))
 
 
 _CORP_SUFFIXES = {"inc", "incorporated", "corp", "corporation", "llc", "ltd",

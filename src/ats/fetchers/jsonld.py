@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 
 from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
-from src.net.util import stable_id
+from src.net.util import stable_id, text_from_html
 
 _JOB_URL_HINTS = re.compile(
     r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
@@ -100,8 +100,7 @@ def _normalize_location(jp):
 
 
 def _normalize_description(jp):
-    desc = jp.get("description", "") or ""
-    return BeautifulSoup(desc, "html.parser").get_text(" ")
+    return text_from_html(jp.get("description", "") or "")
 
 
 def _job_from_posting(jp, company_name, source_url):

@@ -38,7 +38,14 @@ Gates, per configured track, in order:
                trusted company.
   5. exclude   the track's [exclude.<id>] tables (src.match.gates).
   6. division  multi-division companies only: src.match.filters.is_relevant on
-               the body (needs one).
+               the body (needs one). A WATCHED conglomerate also passes on a
+               [policy] watch_division_titles TITLE (is_relevant's
+               watch_titles tier): the watch tag already says "I want this
+               employer's technical roles", and its aligned division is a
+               plain engineering org whose postings never carry the
+               profile's health/bio vocabulary. The [exclude] gate inside
+               is_relevant still applies, so this widens the division
+               vocabulary rather than lifting the gate.
   --- hydrate survivors (the harvester's per-host caps and pauses) ---
   gates 3-6 again, now with a body
   7. fit       Claude fit score (src.claude.fit); the verdict is 'fit' when the
@@ -285,7 +292,8 @@ def row_verdict(company, job, t, cutoff):
     if config.is_multi_division(company.get("name")):
         if not has_body:
             deferred = True
-        elif not is_relevant(title, desc):
+        elif not is_relevant(title, desc,
+                             watch_titles=ops._is_watched(company)):
             return "division"
     return DEFER if deferred else OK
 

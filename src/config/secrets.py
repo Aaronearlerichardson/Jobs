@@ -30,6 +30,43 @@ def env(name, default=""):
     return (os.environ.get(name) or "").strip() or default
 
 
+def require_creds(source, register_url, **values):
+    """The named credentials in the order given, or None with one line out.
+
+    Every keyed source here needs SEVERAL env-backed values at once (a user
+    id AND a token; an API key AND the address it was registered to) and is
+    OPT-IN: no key means the source sits out, like a board that is down, and
+    the rest of the crawl runs. Each fetcher had written that rule out with
+    its own wording, its own indent and its own idea of what to say -- and
+    with `env`'s blank-is-unset rule re-implemented by hand, so a variable
+    exported as "   " read as configured in one of them.
+
+    `values` maps ENV VAR NAME -> the value the caller read from config (not
+    read here: the fetchers take theirs off the config module so a test can
+    monkeypatch it).
+
+    >>> require_creds("ExampleJobs", "https://example.org/apikey",
+    ...               EXAMPLE_KEY="  k  ", EXAMPLE_EMAIL="me@example.org")
+    ('k', 'me@example.org')
+
+    One blank value is enough to skip the source, and the line names every
+    variable it wanted plus where to register:
+
+    >>> require_creds("ExampleJobs", "https://example.org/apikey",
+    ...               EXAMPLE_KEY="", EXAMPLE_EMAIL="me@example.org") is None
+      [!] ExampleJobs skipped: set EXAMPLE_KEY and EXAMPLE_EMAIL
+          (free, register at https://example.org/apikey).
+    True
+    """
+    got = tuple((v or "").strip() for v in values.values())
+    if all(got):
+        return got
+    names = " and ".join(values)
+    print(f"  [!] {source} skipped: set {names}\n"
+          f"      (free, register at {register_url}).")
+    return None
+
+
 # Digest email is opt-in and OFF until you set both of these — there is no
 # built-in address. Blank GMAIL_ADDRESS simply disables emailing (src/digest/render.py).
 GMAIL_ADDRESS      = env("GMAIL_ADDRESS")

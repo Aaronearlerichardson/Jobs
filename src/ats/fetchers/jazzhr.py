@@ -29,7 +29,7 @@ def board_url(subdomain):
     'https://acme.applytojob.com'
 
     Notes:
-        The per-posting closure probe (fetchers/company.py) builds the
+        The per-posting closure probe (fetchers/probe.py) builds the
         slug-free ``/apply/<id>`` URL on top of this, so the host is
         written once.
     """

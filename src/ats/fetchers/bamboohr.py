@@ -14,9 +14,8 @@ The listing carries no description, so each kept row costs one detail
 call (see fetchers/board.py for the order of filters and the budget).
 """
 
-from bs4 import BeautifulSoup
-
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed, get_json
+from src.net.util import text_from_html
 from .board import board_jobs
 
 
@@ -41,23 +40,27 @@ def detail_url(subdomain, jid):
 
     Notes:
         Also what the per-posting closure probe asks
-        (fetchers/company.py): this endpoint 404s once a posting is pulled
+        (fetchers/probe.py): this endpoint 404s once a posting is pulled
         while the posting's own page keeps answering 200, so the two must
         address it the same way.
     """
     return f"https://{subdomain}.bamboohr.com/careers/{jid}/detail"
 
 
-def _fetch_description(subdomain, jid, timeout=None):
-    try:
-        r = SESSION.get(detail_url(subdomain, jid),
-                         timeout=timeout, headers=JSON_HEADERS)
-        r.raise_for_status()
-        opening = (r.json().get("result") or {}).get("jobOpening") or {}
-        html = opening.get("description") or ""
-        return BeautifulSoup(html, "html.parser").get_text(" ")
-    except Exception:
+def _fetch_description(subdomain, jid, label="", timeout=None):
+    """One posting's JD as text, "" when the detail call fails.
+
+    Through net.http.get_json: a detail endpoint that fails is reported
+    and counted, not silently indistinguishable from a body-less posting
+    (see adp_wfn._fetch_description).
+    """
+    data = get_json(detail_url(subdomain, jid),
+                    f"BambooHR {label or subdomain} job {jid}",
+                    timeout=timeout, headers=JSON_HEADERS)
+    if not isinstance(data, dict):
         return ""
+    opening = (data.get("result") or {}).get("jobOpening") or {}
+    return text_from_html(opening.get("description") or "")
 
 
 def _row(base, subdomain, entry):
@@ -86,5 +89,6 @@ def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
         return fetch_failed(f"BambooHR {company_name or subdomain}", e)
     return board_jobs((_row(base, subdomain, e) for e in entries), company_name,
                       gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: _fetch_description(subdomain, row["_jid"]),
+                      fetch_description=lambda row: _fetch_description(
+                          subdomain, row["_jid"], company_name),
                       max_details=max_details, detail_delay=detail_delay)

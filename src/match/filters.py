@@ -11,6 +11,10 @@ Relevance model (tiered):
   1. CORE match  -> standalone signal, relevant.
   2. DOMAIN + SKILL match -> adjacent medical/bio domain where your
      transferable skills apply. Relevant.
+  3. `watch_titles=True` only -- a [policy] watch_division_titles TITLE.
+     The division gate's escape hatch for a WATCHED conglomerate, whose
+     aligned division is a plain engineering org. Off by default, so
+     nothing outside that one gate can reach it.
 """
 
 import re
@@ -272,7 +276,36 @@ def scrub_boilerplate(text):
     return _BOILERPLATE_RE.sub(" ", text or "")
 
 
-def is_relevant(title, description=""):
+def watch_division_title(title):
+    """The config.WATCH_DIVISION_TITLES entry `title` carries, or None —
+    profile [policy] watch_division_titles, matched BOUNDED against the
+    title alone. See that constant for the scope argument; this is only the
+    walk, and it goes through `first_hit` like every other vocabulary gate
+    in this package.
+
+    Read through the config PACKAGE, not a module-level import, so a test
+    that narrows the list (monkeypatch.setattr(config, ...)) reaches it —
+    the same rule the rest of config's callers keep.
+    """
+    return first_hit(getattr(config, "WATCH_DIVISION_TITLES", ()) or (),
+                     (title or "").lower(), BOUNDED)
+
+
+def is_relevant(title, description="", *, watch_titles=False):
+    """Whether a posting is in-field, under the tiered model at the top of
+    this module.
+
+    `watch_titles=True` adds tier 3 — the WATCHED-conglomerate title
+    escape hatch. Only the two DIVISION gates pass it (src.crawl.triage's
+    and src.ops.maintenance._keep_job's, which ask the same question of the
+    same posting on the harvest and crawl paths), and only for a company
+    carrying the `watch` tag; every other caller (the hydration ordering,
+    the discovery filters) gets the unchanged two-tier answer.
+
+    The [exclude] gate above it is NOT bypassed: a watched conglomerate's
+    "Senior Manager, Software Engineering" still loses to the profile's
+    "manager" title phrase, the same as anywhere else.
+    """
     text = scrub_boilerplate((title + " " + description).lower())
     if _excluded(title, text):
         return False
@@ -290,4 +323,8 @@ def is_relevant(title, description=""):
     # Tier 2 x Tier 3: adjacent medical/bio domain + transferable skill.
     # Head-only scan — see _PAIR_SCAN_CHARS.
     head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
-    return _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS)
+    if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
+        return True
+
+    # Tier 3: the watched conglomerate's own engineering vocabulary.
+    return bool(watch_titles and watch_division_title(title))

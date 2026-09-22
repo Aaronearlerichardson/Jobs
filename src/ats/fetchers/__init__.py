@@ -36,6 +36,7 @@ from .rssfeed import fetch_rss
 from .ultipro import fetch_ultipro
 from .usajobs import fetch_usajobs
 from .websearch import fetch_websearch
+from .workable import fetch_workable
 from .workday import fetch_workday
 
 __all__ = [
@@ -66,5 +67,6 @@ __all__ = [
     "fetch_successfactors",
     "fetch_usajobs",
     "fetch_websearch",
+    "fetch_workable",
     "fetch_workday",
 ]

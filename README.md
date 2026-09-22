@@ -169,13 +169,13 @@ The store's `companies` table **is** the roster. Ways to add to it:
 
 | Command | What it does |
 |---|---|
-| `python discover.py "climate tech startups"` | An LLM suggests employers; slugs probed against Greenhouse/Lever/Ashby/Kula/JazzHR/BambooHR/SmartRecruiters; careers pages sniffed; Workday resolved via headless browser. `--apply` upserts confirmed boards **into the store**. |
+| `python discover.py "climate tech startups"` | An LLM suggests employers; each name goes through the shared resolver — the company's own careers page sniffed first, a name-guessed slug probed second, a web search third, every hit validated by a live fetch — plus a headless-browser pass for JS-only Workday sites. Confirmed boards are mission-scored and upserted **into the store**. |
 | `python discover.py --from-keywords` | Same, once per keyword in your profile. |
 | `python discover.py --local` | Local sourcing: profile seeds + directory scrapes + **web-search name harvesting** → probe → locality-verify → mission-score into the store. |
 | `python discover.py --dork` | Mine search-indexed board URLs (`site:jobs.lever.co "<your city>"`) built from your locality + keywords. |
 | `python discover.py --resolve-leads` | Resolve company leads left by page capture: slug probe → careers sniff → Workday probe → web-search fallback. Idempotent. |
 | `python discover.py --add-board "NVIDIA" URL` | You already know the board: paste its ATS or careers URL. Coordinates extracted, locality-verified, queued for review. |
-| `python discover.py --score-missions` | Tier any active company with a board but no mission yet (run after `--apply`/`--local`). `--rescore-missions` re-scores everything. |
+| `python discover.py --score-missions` | Tier any company with a board but no mission yet — a backfill for rows imported with `--import-companies` or left unscored by a failed pass. `--rescore-missions` re-scores everything. |
 | `python discover.py --from-bciwiki` | Bulk-import a public industry directory (bciwiki.org's ~700 brain-computer-interface companies). A worked example of the pattern; only useful if that's your field. |
 
 Every one of those paths writes **review candidates**, not roster members:
@@ -192,11 +192,16 @@ command-line only — they run for many minutes for a handful of boards, which
 is not worth holding the web UI's single operation slot. The UI keeps the
 targeted paths: paste a page, add one board, add one job.
 
-After `--apply` or `--local`, run `--score-missions` — the apply step
-deliberately leaves mission NULL so scoring happens in one pass.
+Every path mission-scores what it resolves, so a review row already shows
+its tier and confirming it applies the mission rule. `--score-missions` is
+the backfill for rows that arrived without one (`--import-companies`, an
+older seed import, a pass whose scoring call failed).
 
-Slug probing can confirm the wrong company (a proteomics "Seer" vs a medical
-one) — such hits carry `VERIFY:` notes through reports. Eyeball them.
+Resolution starts at the company's OWN careers page precisely because a
+name-guessed slug can confirm the wrong company (a proteomics "Seer" vs a
+medical one, a stranger's Paylocity board vs yours). A hit found by slug
+guess or web search rather than by the company's own site carries a
+`VERIFY:` note through the reports. Eyeball those.
 
 ### Sharing / backing up the roster
 
@@ -318,7 +323,7 @@ Sites that require a login (LinkedIn, Indeed, metacareers) are **never fetched
 by this tool**. Instead, *you* browse them yourself, signed in as yourself,
 and the crawler parses the page your own browser already loaded. No automation
 touches those sites or your account — and their hosts are on an explicit skip
-list (`_GATED_HOST_RE` in `src/ats/fetchers/company.py`), so even a stale link
+list (`_GATED_HOST_RE` in `src/ats/fetchers/probe.py`), so even a stale link
 there is reported "unverifiable" rather than fetched.
 
 ```bash

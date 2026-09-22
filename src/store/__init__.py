@@ -46,8 +46,8 @@ from .companies import (  # noqa: F401
 from .jobs import (  # noqa: F401
     TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
-    job_exists, join_tracks, mark_desc_checked, ranked_jobs,
-    record_probe_outcome, record_triage,
+    job_exists, join_tracks, mark_desc_checked, open_in_track_clause,
+    ranked_jobs, record_probe_outcome, record_triage,
     remote_admitted, store_body, sync_job_statuses, touch_job, track_set,
     triage_counts, triage_pending, update_job_scores, upsert_job,
 )

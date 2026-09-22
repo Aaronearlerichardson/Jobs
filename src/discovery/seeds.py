@@ -4,9 +4,10 @@ Curated seed companies merged into discovery results.
 The LLM that suggests employers for a discovery term has blind spots — it
 reliably misses the mid-size employers that anchor a specific region or
 niche, however obvious they are to someone who lives there. Seeds are your
-override: names you KNOW belong in the roster, probed exactly like suggested
-ones (validate_candidate sweeps every ATS when ats='unknown'), so you never
-need to know a company's ATS to seed it.
+override: names you KNOW belong in the roster, resolved exactly like
+suggested ones (validate_candidate hands the NAME to the shared resolver,
+which finds the ATS itself), so you never need to know a company's ATS to
+seed it.
 
 Everything here is configuration, not code — it lives in your profile:
 
@@ -67,7 +68,7 @@ def seed_candidates_for(term: str) -> list[dict]:
     return [
         {
             "name":        s["name"],
-            "ats":         "unknown",     # probed against every ATS
+            "ats":         "unknown",     # the resolver finds the ATS
             "slug_guess":  None,
             "careers_url": "",
             "notes":       f"[seed] {s['notes']}".strip(),

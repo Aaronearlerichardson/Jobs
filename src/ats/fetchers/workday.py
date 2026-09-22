@@ -18,7 +18,6 @@ that could not reach `track_store`, and so ran against the default DB.
 """
 
 import hashlib
-import html
 import json
 import re
 import time
@@ -27,7 +26,8 @@ from urllib.parse import urlparse
 from src import config
 from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
 from src.match.locality import N_LOCATIONS_RE
-from src.net.util import cache_dir, default_search_text, norm_posted_date
+from src.net.util import (cache_dir, default_search_text, norm_posted_date,
+                          text_from_html)
 from .board import board_jobs, loc_ok
 
 _CXS_HEADERS = {**JSON_HEADERS, "Content-Type": "application/json"}
@@ -62,19 +62,6 @@ _WD_MAX_PAGES = 60
 # store.sync_job_statuses then closed 70 and 10 live reqs. A board UNDER the
 # ceiling is genuinely complete and stays uncapped (Aah, 1,995 that day).
 WD_TOTAL_CEILING = 2000
-
-
-def text_from_html(raw):
-    """Strip a Workday jobDescription HTML blob to readable plain text."""
-    if not raw:
-        return ""
-    txt = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
-    txt = re.sub(r"(?i)<(/p|/li|/h[1-6]|br\s*/?|/div)\s*>", "\n", txt)
-    txt = re.sub(r"<[^>]+>", " ", txt)
-    txt = html.unescape(txt)
-    txt = re.sub(r"[ \t]+", " ", txt)
-    txt = re.sub(r"\n\s*\n+", "\n\n", txt)
-    return txt.strip()
 
 
 # --- the CXS tenant id ----------------------------------------------------- #

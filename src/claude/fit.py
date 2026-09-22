@@ -691,7 +691,7 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
         if api_disabled() or not have_api_key():
             return FitResult(score=None, reason="scorer unavailable")
         return FitResult(score=None, reason="unscored")
-    axes = {a: _clamp(r.get(a)) for a in AXES}
+    axes = {a: clamp_unit(r.get(a)) for a in AXES}
     gates = _parse_gates(r.get("gates"))
     # Regex backstop on the FULL pre-clip text (clipping could elide it).
     if _clearance_required(description) and "clearance" not in gates:
@@ -760,6 +760,12 @@ def unscored_cause(reason):
     return _UNSCORED_CAUSES.get(reason)
 
 
+# The tag verify_fit writes at the head of a deep-pass fit_reason, and the
+# only thing any reader outside this module asks of it -- see
+# is_deep_verified below, which is how they should ask.
+DEEP_MARKER = "deep:"
+
+
 def verify_fit(title: str, description: str = "", *, location: str = "",
                max_tokens=8000) -> FitResult:
     """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
@@ -794,7 +800,7 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
                          model=vmodel, thinking=True)
     if not r or "function" not in r:
         return FitResult(score=None, reason="unverified")
-    axes = {a: _clamp(r.get(a)) for a in AXES}
+    axes = {a: clamp_unit(r.get(a)) for a in AXES}
     gates = _parse_gates(r.get("gates"))
     seat = str(r.get("seat_type") or "").strip().lower()
     if seat in ("management", "program-product") and "management" not in gates:
@@ -814,11 +820,32 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     gaps = [str(g).strip() for g in (r.get("candidate_gaps") or []) if str(g).strip()]
     if gaps:
         bits.append("gaps: " + "; ".join(gaps[:3]))
-    reason = "deep: " + str(r.get("reason", "")).strip()
+    reason = f"{DEEP_MARKER} " + str(r.get("reason", "")).strip()
     if bits:
         reason += f" [{' | '.join(bits)}]"
     return FitResult(score=score, axes=axes, gates=gates, reason=reason,
                      model=vmodel)
+
+
+def is_deep_verified(fit_reason) -> bool:
+    """Whether a stored `fit_reason` carries verify_fit's DEEP_MARKER, i.e.
+    this row's score came from the deep pass and not the screen.
+
+    The marker was a bare string tested by substring in two unrelated
+    modules -- the verify pass's own staleness check and the web UI's
+    "verified" badge -- neither of which could see where it is written:
+
+    >>> is_deep_verified("deep: strong overlap [3+yrs]")
+    True
+    >>> is_deep_verified("[dom 0.8] adjacent domain")
+    False
+
+    A row that was never scored has no marker:
+
+    >>> is_deep_verified(None), is_deep_verified("")
+    (False, False)
+    """
+    return DEEP_MARKER in (fit_reason or "")
 
 
 def verify_model() -> str:
@@ -829,11 +856,23 @@ def verify_model() -> str:
     return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
 
 
-def _clamp(x):
+def clamp_unit(x, default=0.0):
+    """A model's numeric field as a float in [0, 1], or `default` when it is
+    missing or not a number.
+
+    Three copies of this try/float/clamp/except had grown -- the two axis
+    readers here and the two scorers in src/claude/api.py -- differing only
+    in what they fall back to, so the fallback is the parameter:
+
+    >>> clamp_unit("0.5"), clamp_unit(1.7), clamp_unit(-2)
+    (0.5, 1.0, 0.0)
+    >>> clamp_unit(None), clamp_unit("abc", default=None)
+    (0.0, None)
+    """
     try:
         return max(0.0, min(1.0, float(x)))
     except (TypeError, ValueError):
-        return 0.0
+        return default
 
 
 def _parse_gates(raw):

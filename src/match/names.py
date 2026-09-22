@@ -21,10 +21,12 @@ COMPANY_SUFFIXES = frozenset({
     "health", "holdings",
 })
 
-# Generic single words that collide with an unrelated board or domain when a
-# multi-word name is truncated to one of them: "Bio-Signal Technologies" ->
-# the bare slug "signal" hits some unrelated Lever board; "galaxy.com" for
-# "Galaxy Diagnostics" is a fintech.
+# Generic single words that collide with an unrelated DOMAIN when a
+# multi-word name is truncated to one of them: "galaxy.com" for "Galaxy
+# Diagnostics" is a fintech. Read only by risky_domain_tokens now -- the
+# matching slug rule is gone, because slug_guesses never emits a bare first
+# word in the first place ("Bio-Signal Technologies" -> "signal" used to hit
+# an unrelated Lever board).
 GENERIC_WORDS = frozenset({
     "signal", "neuro", "neural", "brain", "medical", "health", "data",
     "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
@@ -164,9 +166,8 @@ def strip_suffixes(name):
     Notes:
         "Therapeutics" and "Biosciences" count as suffixes here even though
         they are part of the legal name. That is deliberate: ATS slugs are
-        far more often the head word than the full name, and
-        pipeline.slug_variants keeps the unstripped form as a candidate
-        anyway.
+        far more often the head word than the full name, and slug_guesses
+        keeps the unstripped form as a candidate anyway.
     """
     s = _SUFFIX_RE.sub("", strip_parentheticals(name))
     s = re.sub(r"[,\.]+", " ", s)

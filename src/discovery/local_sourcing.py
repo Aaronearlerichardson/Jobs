@@ -355,28 +355,19 @@ def _sample_titles(hit, n=6):
     requests below; every other family samples through its own fetcher
     (fetchers.company.sample_titles). [] when nothing could be read.
     """
+    from src.ats.fetchers import api as board_api
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
     board = hit if "wd_tenant" in hit else coords.from_hit(hit)
     ats, slug = board["ats"], board["slug"]
     try:
-        if ats == "greenhouse":
-            r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-            return [j.get("title", "") for j in r.json().get("jobs", [])[:n]]
-        if ats == "lever":
-            r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-            return [j.get("text", "") for j in r.json()[:n]]
-        if ats == "ashby":
-            r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                             timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-            # Ashby's posting API says "jobs"; only Workday (below) says
-            # "jobPostings". Reading the wrong one here handed the mission
-            # scorer an empty title list, so every Ashby company was scored
-            # on its name alone.
-            data = r.json()
-            return [j.get("title", "") for j in
-                    data.get("jobs", data.get("jobPostings", []))[:n]]
+        # The three JSON-API boards: one read, one payload shape, owned by
+        # the fetcher (api.board_summary). A private copy of the Ashby shape
+        # here once asked for Workday's "jobPostings" key, which is an empty
+        # title list rather than an error -- so every Ashby company was
+        # mission-scored on its name alone.
+        if ats in board_api.BOARD_URLS:
+            return [title for title, _loc in
+                    board_api.board_summary(ats, slug)[:n]]
         if ats == "workday":
             t, p, s = board["wd_tenant"], board["wd_pod"], board["wd_site"]
             api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
@@ -441,7 +432,7 @@ def _score_hit(hit):
 
 
 def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
-                     scored=None):
+                     scored=None, extra=None):
     """Mission-score a resolved board and write it to the store as a review
     candidate -- the one write path behind every automated add surface.
 
@@ -459,7 +450,8 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     already confirmed the name (src.store.is_confirmed_company). `tags`
     defaults to the local scope tag when the board has local jobs; a caller
     with another reason to call the company local (ats_dork's HQ signal)
-    passes it explicitly.
+    passes it explicitly. `extra` is further columns the caller owns and the
+    resolver has no opinion about (apply_to_store's [VERIFY] notes).
 
     Notes:
         This sequence was spelled out at four sites (populate_companies,
@@ -496,6 +488,8 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
         "source": source, "active": active,
         "last_probed": datetime.now().isoformat(),
     })
+    if extra:
+        row.update(extra)
     # Nothing an automated pass finds joins the roster by itself: a name
     # the store has never confirmed lands in the review queue
     # (src.store.mark_pending) for a person to accept or reject.
@@ -748,7 +742,7 @@ def score_missions(max_workers=6, rescore_all=False):
         revived = False
         if (tier is not None and tier not in ACTIVE_MISSION_TIERS
                 and not config.is_multi_division(c["name"])
-                and "watch" not in (c.get("tags") or "").split(",")):
+                and not company_tags.has(c.get("tags"), company_tags.WATCH)):
             update["active"] = 0
         # NOT src.claude.is_active_mission: this is the REACTIVATION
         # half, and it deliberately does not revive on `tier is None`.

@@ -165,18 +165,23 @@ def _parser_probe(module):
     return probe
 
 
+# URL and payload shape both come from the fetcher that owns them
+# (src.ats.fetchers.api): the same three boards are read here for a slug
+# probe, below for a locality count, and in local_sourcing for a title
+# sample. A private copy of either is a silent empty board, never an error.
+# Reached through _board_api() so importing probes.py still does not pull in
+# the fetchers package (see _parser_probe).
 probe_greenhouse = _api_probe(
-    "https://boards-api.greenhouse.io/v1/boards/{}/jobs",
-    lambda r, h: len(r.json().get("jobs", [])))
+    lambda h: _board_api().BOARD_URLS["greenhouse"].format(h),
+    lambda r, h: len(_board_api().board_rows("greenhouse", r.json())))
 
 probe_lever = _api_probe(
-    "https://api.lever.co/v0/postings/{}?mode=json",
-    lambda r, h: len(d) if isinstance(d := r.json(), list) else 0)
+    lambda h: _board_api().BOARD_URLS["lever"].format(h),
+    lambda r, h: len(_board_api().board_rows("lever", r.json())))
 
 probe_ashby = _api_probe(
-    "https://api.ashbyhq.com/posting-api/job-board/{}",
-    # Posting API key is "jobs" (not the embed payload's "jobPostings").
-    lambda r, h: len((j := r.json()).get("jobs", j.get("jobPostings", []))))
+    lambda h: _board_api().BOARD_URLS["ashby"].format(h),
+    lambda r, h: len(_board_api().board_rows("ashby", r.json())))
 
 # Kula serves a full HTML page (no JSON API) and throttles under probe
 # bursts -- a confirmed-live board can 4xx/timeout once during a parallel
@@ -207,12 +212,14 @@ probe_jobvite = _api_probe(
     lambda r, h: len(_jobvite().parse_listing(r.text, h)),
     require_jobs=True, timeout=10)
 
-#: Paylocity by company GUID, UKG Pro (UltiPro) by 'CODE|GUID', Rippling
-#: and HiBob by slug/tenant -- all four through the fetcher's parser.
+#: Paylocity by company GUID, UKG Pro (UltiPro) by 'CODE|GUID', Rippling,
+#: HiBob and Workable by slug/tenant -- all five through the fetcher's
+#: parser.
 probe_paylocity = _parser_probe("paylocity")
 probe_rippling = _parser_probe("rippling")
 probe_ultipro = _parser_probe("ultipro")
 probe_hibob = _parser_probe("hibob")
+probe_workable = _parser_probe("workable")
 
 _JAZZHR_APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/")
 
@@ -220,6 +227,14 @@ _JAZZHR_APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/")
 def _jobvite():
     from src.ats.fetchers import jobvite
     return jobvite
+
+
+def _board_api():
+    """The Greenhouse/Lever/Ashby fetcher — it owns their API roots and the
+    shape of their whole-board payloads. Lazy for the same reason
+    _parser_probe is."""
+    from src.ats.fetchers import api
+    return api
 
 
 PROBES = {
@@ -235,6 +250,13 @@ PROBES = {
     "ultipro":    probe_ultipro,
     "hibob":      probe_hibob,
     "jobvite":    probe_jobvite,
+    # An account slug is NOT the company name -- Eupry publishes under
+    # "eupry-aps" while a separate, empty "eupry" account also answers 200
+    # -- so a guessed slug only confirms here because _parser_probe demands
+    # jobs > 0. A board found by slug guess still deserves the identity
+    # look every ``via='probe'`` hit gets (pipeline._flag_for_verification,
+    # local_sourcing.resolve_leads's "probe-only: verify" line).
+    "workable":   probe_workable,
 }
 
 
@@ -247,7 +269,7 @@ PROBES = {
 # triple against the CXS search API to get a live job count.
 #
 # Because the signature differs from the other probes, this one is NOT
-# in PROBES — pipeline.validate_candidate calls it explicitly as a fallback.
+# in PROBES — probe_company calls it explicitly as its last step.
 
 
 def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
@@ -582,35 +604,11 @@ def _wd_search_text():
     return _default_search_text()
 
 
-def _nc_count_greenhouse(slug):
-    try:
-        r = SESSION.get(f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        return sum(1 for j in r.json().get("jobs", [])
-                   if _has_nc(j.get("location", {}).get("name", "")))
-    except Exception:
-        return 0
-
-
-def _nc_count_lever(slug):
-    try:
-        r = SESSION.get(f"https://api.lever.co/v0/postings/{slug}?mode=json",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        return sum(1 for j in r.json()
-                   if _has_nc(j.get("categories", {}).get("location", "")))
-    except Exception:
-        return 0
-
-
-def _nc_count_ashby(slug):
-    try:
-        r = SESSION.get(f"https://api.ashbyhq.com/posting-api/job-board/{slug}",
-                         timeout=config.PROBE_TIMEOUT, headers=HEADERS)
-        data = r.json()
-        return sum(1 for j in data.get("jobs", data.get("jobPostings", []))
-                   if _has_nc(j.get("location", "")))
-    except Exception:
-        return 0
+def _nc_count(ats, slug):
+    """Postings on a JSON-API board that are in your [locality] — the count
+    that rejects a slug guess landing on somebody else's board."""
+    return sum(1 for _title, loc in _board_api().board_summary(ats, slug)
+               if _has_nc(loc))
 
 
 def _nc_count_workday(tenant, pod, site):
@@ -635,13 +633,13 @@ def probe_company(name, try_workday=True):
     """
     hit = None
     for slug in slug_guesses(name):
-        for ats, fn, nc_fn in (("greenhouse", probe_greenhouse, _nc_count_greenhouse),
-                               ("lever", probe_lever, _nc_count_lever),
-                               ("ashby", probe_ashby, _nc_count_ashby)):
+        for ats, fn in (("greenhouse", probe_greenhouse),
+                        ("lever", probe_lever),
+                        ("ashby", probe_ashby)):
             ok, count = fn(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
-                       "count": count, "nc": nc_fn(slug)}
+                       "count": count, "nc": _nc_count(ats, slug)}
                 break
         if hit:
             break

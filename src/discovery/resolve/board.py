@@ -49,17 +49,22 @@ def _validate_board(comp):
     return len(allj), nc
 
 
-def resolve_board_sniff_first(name, careers_url=""):
+def resolve_board_sniff_first(name, careers_url="", websearch=True):
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
 
-    The only resolver the interactive paths use. It replaced a probe-first
-    one that guessed slugs from the name before looking at the company's own
-    site, which false-positived onto same-named but unrelated boards ('Oxford
+    The only resolver there is. It replaced a probe-first one that guessed
+    slugs from the name before looking at the company's own site, which
+    false-positived onto same-named but unrelated boards ('Oxford
     Biomedica' -> a different Oxford Workday tenant; 'Raya Health' -> the Raya
     dating app on Lever). Sniffing the company's OWN careers page can't
     collide that way, so it goes first; a probe-only hit is tagged
     ``via='probe'`` so the caller can flag it for a human sanity-check.
+
+    ``websearch=False`` drops step 3 for a BULK pass. The search backend
+    rate-limits hard (see src.net.ddg and local_sourcing._websearch_pass,
+    which caps it for the same reason), so a directory sweep of hundreds of
+    names would spend most of its wall clock inside its backoff.
 
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
     a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
@@ -110,7 +115,7 @@ def resolve_board_sniff_first(name, careers_url=""):
     #    'Core Sound Imaging' -> studycast). _websearch_board already validates
     #    slug/own-domain against the name, so it's not collision-flagged.
     #    Best-effort: degrades to a miss when the search backend is rate-limited.
-    w = _websearch_board(name)
+    w = _websearch_board(name) if websearch else None
     if w:
         if w["ats"] == "workday":
             hit = _mk("workday", w["triple"], w.get("careers_url"), "websearch")

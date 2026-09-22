@@ -18,7 +18,8 @@ Never imports store/__init__ at load time (that module imports this one).
 import re
 from datetime import datetime, timedelta
 
-from .schema import _commit, batch, connect  # noqa: F401  (doctests connect)
+from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
+                     connect, dedup_groups)
 
 # --------------------------------------------------------------------------- #
 #  Companies                                                                   #
@@ -88,7 +89,7 @@ def upsert_company(conn, c):
     if c.get("ats"):
         conn.execute("UPDATE companies SET miss_reason=NULL, miss_at=NULL "
                      "WHERE name=? AND miss_reason IS NOT NULL", (c["name"],))
-    conn.commit()
+    _commit(conn)
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
     return row["id"] if row else None
 
@@ -182,7 +183,7 @@ def record_miss(conn, name, reason, **fields):
     # record itself ("board-dead" knows which board died), so put them back.
     conn.execute("UPDATE companies SET miss_reason=?, miss_at=? WHERE name=?",
                  (reason, now, name))
-    conn.commit()
+    _commit(conn)
     return True
 
 
@@ -482,18 +483,13 @@ def dedup_companies(conn):
     jobcount = {cid: n for cid, n in conn.execute(
         "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
 
-    def keep_rank(r):
-        # Prefer a scored row, then active, then most-referenced, then the
-        # shortest (most canonical) name.
-        return (r.get("mission_tier") is not None, r.get("active") or 0,
-                jobcount.get(r["id"], 0), -len(r.get("name") or ""))
+    def keep_first(r):
+        # Survivor first: a scored row, then active, then most-referenced,
+        # then the shortest (most canonical) name.
+        return (r.get("mission_tier") is None, -(r.get("active") or 0),
+                -jobcount.get(r["id"], 0), len(r.get("name") or ""))
 
-    merged = 0
-    for k, members in groups.items():
-        if len(members) < 2:
-            continue
-        members.sort(key=keep_rank, reverse=True)
-        keep, losers = members[0], members[1:]
+    def carry_over(keep, losers):
         tags = set(t for t in (keep.get("tags") or "").split(",") if t)
         for l in losers:
             tags |= set(t for t in (l.get("tags") or "").split(",") if t)
@@ -506,13 +502,16 @@ def dedup_companies(conn):
             conn.execute("UPDATE jobs SET company_id=?, company_name=? "
                          "WHERE company_id=?",
                          (keep["id"], keep["name"], l["id"]))
-            conn.execute("DELETE FROM companies WHERE id=?", (l["id"],))
-        active = 1 if any(m.get("active") for m in members) else (keep.get("active") or 0)
-        conn.execute("UPDATE companies SET tags=?, active=? WHERE id=?",
-                     (",".join(sorted(tags)) or None, active, keep["id"]))
-        merged += len(losers)
-        print(f"    {keep['name'][:30]:30} <- merged {len(losers)}: "
-              + ", ".join(l["name"][:20] for l in losers))
+        active = 1 if any(m.get("active") for m in [keep, *losers]) \
+            else (keep.get("active") or 0)
+        apply_update(conn, "companies", "id", keep["id"],
+                     {"tags": ",".join(sorted(tags)) or None, "active": active})
+
+    merged = dedup_groups(
+        conn, "companies", "id", groups, rank=keep_first, merge=carry_over,
+        describe=lambda keep, losers: (
+            f"{keep['name'][:30]:30} <- merged {len(losers)}: "
+            + ", ".join(l["name"][:20] for l in losers)))
     # Realign every linked job with its company's current name — this
     # catches rows renamed by earlier (name-blind) merges and rows whose
     # ingest path spelled the company its own way ("BD (Becton Dickinson)"
@@ -525,7 +524,7 @@ def dedup_companies(conn):
     ).rowcount
     if realigned:
         print(f"    {realigned} job row(s) renamed to their company's name")
-    conn.commit()
+    _commit(conn)
     return merged
 
 
@@ -571,7 +570,7 @@ def set_company_tag(conn, name, tag, add=True):
     (tags.add if add else tags.discard)(tag)
     val = ",".join(sorted(tags)) or None
     conn.execute("UPDATE companies SET tags=? WHERE id=?", (val, row["id"]))
-    conn.commit()
+    _commit(conn)
     return val or ""
 
 
@@ -711,10 +710,7 @@ def record_crawl_outcome(conn, company_id, n_jobs, err=None,
                                      ).isoformat()
 
     sets["crawl_state"] = state
-    conn.execute(
-        f"UPDATE companies SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
-        [*sets.values(), company_id])
-    conn.commit()
+    apply_update(conn, "companies", "id", company_id, sets)
     return state
 
 
@@ -914,34 +910,28 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
         sets["total_job_count"] = n_jobs
         if n_jobs:
             sets["last_nonempty_at"] = stamp
-    conn.execute(
-        f"UPDATE companies SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
-        [*sets.values(), company_id])
+    apply_update(conn, "companies", "id", company_id, sets)
 
     row = conn.execute("SELECT ats, miss_reason, miss_at FROM companies "
                        "WHERE id=?", (company_id,)).fetchone()
     cur_reason = row["miss_reason"] if row else None
     promoted = None
+    miss = {}
     if soft_fail:
         if cur_reason is None:
-            conn.execute(
-                "UPDATE companies SET miss_reason=?, miss_at=? WHERE id=?",
-                (_HARVEST_FETCH_ERROR, stamp, company_id))
+            miss = {"miss_reason": _HARVEST_FETCH_ERROR, "miss_at": stamp}
         elif cur_reason == _HARVEST_FETCH_ERROR:
             cutoff = (now_dt - timedelta(days=HARVEST_DEAD_AFTER_DAYS)
                       ).isoformat()
             if (row["miss_at"] or "") <= cutoff:
                 promoted = (f"board-dead:{row['ats']}" if row["ats"]
                             else "board-dead")
-                conn.execute(
-                    "UPDATE companies SET miss_reason=?, miss_at=?, "
-                    "active=0 WHERE id=?", (promoted, stamp, company_id))
+                miss = {"miss_reason": promoted, "miss_at": stamp, "active": 0}
         # any other family already on the row (no-board-found, ats-
         # unsupported, ...): leave it alone, per record_miss's contract.
     elif n_jobs and cur_reason == _HARVEST_FETCH_ERROR:
-        conn.execute("UPDATE companies SET miss_reason=NULL, miss_at=NULL "
-                     "WHERE id=?", (company_id,))
-    _commit(conn)
+        miss = {"miss_reason": None, "miss_at": None}
+    apply_update(conn, "companies", "id", company_id, miss)
     return promoted
 
 
@@ -951,7 +941,7 @@ def reactivate_company(conn, company_id):
     conn.execute(
         "UPDATE companies SET crawl_state='active', empty_streak=0, "
         "next_crawl_at=NULL WHERE id=?", (company_id,))
-    conn.commit()
+    _commit(conn)
 
 
 def deactivate_company(conn, company_id, note=None):

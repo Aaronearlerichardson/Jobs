@@ -21,6 +21,7 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.fetchers import company as company_fetch
+from src.ats.fetchers import probe
 from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
 from src.claude.resume import resume_text
 from src.match import gates
@@ -310,7 +311,13 @@ def _keep_job(company, job, t):
         # like "Research Scientist" say nothing about the division). Hydrate
         # first; only locality-filtered jobs at conglomerates pay the GET.
         company_fetch.hydrate_description(job)
-        if not is_relevant(title, job.get("description", "")):
+        # Same widening src.crawl.triage's division gate applies: a WATCHED
+        # conglomerate's own engineering vocabulary ([policy]
+        # watch_division_titles) counts as in-field here too. Without it the
+        # crawl path and the triage path disagreed about the same posting at
+        # the same company, and one silently dropped what the other kept.
+        if not is_relevant(title, job.get("description", ""),
+                           watch_titles=_is_watched(company)):
             return False
     if t["exclude_gate"] and gates.exclude_reason(
             title, job.get("description", ""),
@@ -337,19 +344,42 @@ def _keep_job(company, job, t):
     return True
 
 
-def _score_job(resume, company, job, track):
-    company_fetch.hydrate_description(job)
+def _scored_row(job, *, company_id, company_name, track, status=None):
+    """Score one fetched posting and shape it into a jobs-table row.
+
+    The crawl path and the external-ingest path build the same row and had
+    written it out twice; they differ only in where the company link comes
+    from (a roster row vs. a name already resolved to an id) and in
+    `status`, which ingest stamps "open" and the crawl leaves to the
+    store's own default. That difference is a parameter here rather than a
+    silent divergence -- the two copies had already drifted apart on it.
+
+    `job` is a fetcher's dict: `id` and `title` are required (nothing can
+    be scored without them), the rest is read defensively.
+    """
     res = score_resume_fit(job["title"], job.get("description", ""),
                            location=job.get("location") or "")
-    return {
-        "job_id": job["id"], "company_id": company["id"], "company_name": company["name"],
-        "title": job["title"], "url": job["url"], "location": job["location"],
+    row = {
+        "job_id": job["id"], "company_id": company_id,
+        "company_name": company_name,
+        "title": job.get("title"), "url": job.get("url"),
+        "location": job.get("location"),
         "track": track,
-        "geo_mode": geo_mode(job["location"], job.get("description", "")) or "onsite",
+        "geo_mode": geo_mode(job.get("location") or "",
+                             job.get("description", "")) or "onsite",
         "description": (job.get("description", "") or "")[:config.MAX_DESC_CHARS],
         "posted_at": job.get("posted_at"),
         **res.as_columns(),
     }
+    if status is not None:
+        row["status"] = status
+    return row
+
+
+def _score_job(resume, company, job, track):
+    company_fetch.hydrate_description(job)
+    return _scored_row(job, company_id=company["id"],
+                       company_name=company["name"], track=track)
 
 
 def crawl_company(conn, resume, company, max_workers=6, t=None):
@@ -512,16 +542,13 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
         had just failed apart from one that had never been tried.
     """
     from src.claude.fit import MIN_DESC_CHARS, unscored_cause
-    _ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
+    conds, args = store.open_in_track_clause(track)
+    conds += ["resume_fit_score IS NULL",
+              "length(COALESCE(description,'')) >= ?"]
+    args.append(MIN_DESC_CHARS)
     pending = [dict(r) for r in conn.execute(
         "SELECT job_id, title, description, location, fit_reason FROM jobs "
-        "WHERE (',' || COALESCE(track,'') || ',') LIKE ? "
-        "AND resume_fit_score IS NULL "
-        "AND COALESCE(status,'open') != 'closed' "
-        f"AND (disposition IS NULL OR disposition NOT IN ({_ph})) "
-        "AND length(COALESCE(description,'')) >= ?",
-        (f"%,{track},%", *store.RANKING_EXCLUDED_DISPOSITIONS,
-         MIN_DESC_CHARS)).fetchall()]
+        "WHERE " + " AND ".join(conds), args).fetchall()]
     if not pending:
         return 0
     now = datetime.now()
@@ -731,13 +758,7 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
         print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
         return 0
     with track_store(t) as conn:
-        ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
-        conds = ["COALESCE(status,'open') != 'closed'",
-                 f"(disposition IS NULL OR disposition NOT IN ({ph}))"]
-        args = list(store.RANKING_EXCLUDED_DISPOSITIONS)
-        if track:
-            conds.append("(',' || COALESCE(track,'') || ',') LIKE ?")
-            args.append(f"%,{track},%")
+        conds, args = store.open_in_track_clause(track)
         if described_only:
             conds.append("length(COALESCE(description,'')) >= ?")
             args.append(MIN_DESC_CHARS)
@@ -838,16 +859,12 @@ def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
         ranking's remote_admitted trust rule: this chooses where verify
         calls go, it does not admit rows to the ranking.
     """
-    ph = ",".join("?" for _ in store.RANKING_EXCLUDED_DISPOSITIONS)
+    conds, args = store.open_in_track_clause(t["track"])
+    conds += ["triage_status = 'fit'", "resume_fit_score >= ?"]
+    args.append(floor)
     rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM jobs WHERE triage_status = 'fit' "
-        "AND (',' || COALESCE(track,'') || ',') LIKE ? "
-        "AND resume_fit_score >= ? "
-        "AND COALESCE(status,'open') != 'closed' "
-        f"AND (disposition IS NULL OR disposition NOT IN ({ph})) "
-        "ORDER BY resume_fit_score DESC",
-        (f"%,{t['track']},%", floor, *store.RANKING_EXCLUDED_DISPOSITIONS)
-    ).fetchall()]
+        "SELECT * FROM jobs WHERE " + " AND ".join(conds)
+        + " ORDER BY resume_fit_score DESC", args).fetchall()]
     return [r for r in rows if r["job_id"] not in exclude_ids
             and (NC_RE.search(r.get("location") or "")
                  or r.get("remote_eligible") == 1)]
@@ -889,7 +906,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
         extra.
     """
     from src.claude.api import api_disabled
-    from src.claude.fit import FitResult, verify_fit, verify_model
+    from src.claude.fit import (DEEP_MARKER, FitResult, is_deep_verified,
+                                verify_fit, verify_model)
     t = _t(t)
     current = verify_model()
     done_ids = set()   # verified THIS run: never stale again, even under force
@@ -897,7 +915,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     def _stale(r):
         if r["job_id"] in done_ids:
             return False
-        if force or "deep:" not in (r.get("fit_reason") or ""):
+        if force or not is_deep_verified(r.get("fit_reason")):
             return True
         return (r.get("fit_model") or "") != current
 
@@ -977,7 +995,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                         if isinstance(old, float) else f"?    -> {res.score:.2f}")
                 flag = "  [DEMOTED]" if isinstance(old, float) and \
                     res.score < old - 0.15 else ""
-                reason = (res.reason or "").removeprefix("deep: ")[:90]
+                reason = (res.reason or "").removeprefix(f"{DEEP_MARKER} ")[:90]
                 print(f"    {move}, {r['company_name']}, {r['title'][:44]}, "
                       f"{reason}{flag}")
                 n_done += 1
@@ -1178,7 +1196,7 @@ def _probe_label(url):
     >>> _probe_label("")
     '?'
     """
-    fam = company_fetch.probe_family(url)
+    fam = probe.probe_family(url)
     if fam and fam != "gated":
         return fam
     return re.sub(r"^https?://", "", url or "").split("/")[0].lower() or "?"
@@ -1286,7 +1304,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
     accepting" notice, a past JSON-LD validThrough, a Workday CXS miss, an
     id absent from a non-empty board listing -- see
-    fetchers.company.probe_job_open). Indeterminate probes (bot-gated
+    fetchers.probe.probe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
     fetch has already failed (store.miss_family == "board-dead") -- no URL
@@ -1394,7 +1412,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             # So it is caught here rather than left to fan_out, which would
             # drop the row and quietly shrink the denominator.
             try:
-                return company_fetch.probe_job_open(r["url"])
+                return probe.probe_job_open(r["url"])
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {type(e).__name__}"
 
@@ -1532,17 +1550,9 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
         _hydrate_missing_descriptions(conn, kept)
 
         def _score(j):
-            res = score_resume_fit(j["title"], j.get("description", ""),
-                                   location=j.get("location") or "")
-            return {"job_id": j["id"], "company_id": j.get("_company_id"),
-                    "company_name": j.get("company"),
-                    "title": j.get("title"), "url": j.get("url"), "location": j.get("location"),
-                    "track": t["track"],
-                    "geo_mode": geo_mode(j.get("location", ""), j.get("description", "")) or "onsite",
-                    "description": (j.get("description", "") or "")[:config.MAX_DESC_CHARS],
-                    "posted_at": j.get("posted_at"),
-                    "status": "open",
-                    **res.as_columns()}
+            return _scored_row(j, company_id=j.get("_company_id"),
+                               company_name=j.get("company"),
+                               track=t["track"], status="open")
 
         scored = 0
         for row in fan_out(kept, _score, "ingest scoring", max_workers):
@@ -1603,8 +1613,12 @@ def add_manual_job(url, title, company, location, description="",
     # 1) Company: resolve a board if we don't already have one for it, so
     #    the job links to a real company row.
     with track_store(t) as conn:
-        existing = next((c for c in store.get_companies(conn, active_only=False)
-                         if (c["name"] or "").lower() == name.lower()), None)
+        # The same indexed lookup step 2's ingest uses to LINK the job to a
+        # company row. Both halves had to agree: scanning the roster in
+        # Python picked the best-scored row while the ingest picked the
+        # lowest id, so a store holding two case-variant rows for one name
+        # could register/crawl one of them and file the job under the other.
+        existing = store.get_company(conn, store.company_id_by_name(conn, name))
         board, miss = None, None
         if not existing or not existing.get("ats"):
             print(f"  resolving board for {name!r}...")
@@ -1645,8 +1659,7 @@ def add_manual_job(url, title, company, location, description="",
     #    (freshly resolved OR already in the roster), unless --no-board.
     n_other = 0
     with track_store(t) as conn:
-        row = next((c for c in store.get_companies(conn, active_only=False)
-                    if (c["name"] or "").lower() == name.lower()), None)
+        row = store.get_company(conn, store.company_id_by_name(conn, name))
         has_board = bool(row and row.get("ats"))
         if pull_board and has_board:
             _, _, n_other = crawl_company(conn, resume_text(), row, max_workers, t=t)
@@ -2128,9 +2141,8 @@ def _employer_name_greenhouse(slug):
     posting's `company_name`), or "" on any failure or an empty board.
 
     `content=false` is the same lightweight listing shape
-    src.discovery.resolve.probes._nc_count_greenhouse already uses for a
-    metadata-only read -- this needs one field off one posting, not every
-    posting's full JD."""
+    src.ats.fetchers.api.BOARD_URLS already uses for a metadata-only read --
+    this needs one field off one posting, not every posting's full JD."""
     data = get_json(
         f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
         f"Greenhouse {slug} (employer-name check)", default={})

@@ -27,9 +27,8 @@ import json
 import re
 
 from src.net.http import HEADERS, SESSION, fetch_failed, note_capped
-from src.net.util import norm_posted_date
+from src.net.util import norm_posted_date, text_from_html
 from .board import board_jobs, loc_ok
-from .workday import text_from_html  # shared HTML->text stripper
 
 _PAGE_SIZE = 500                 # server-enforced cap on `size`
 _MAX_PAGES = 40                  # safety valve; real boards stop long before this
