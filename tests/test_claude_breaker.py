@@ -1,6 +1,6 @@
 """call_claude_json failure handling: the unrecoverable-error circuit breaker
 and the transient-status retry ladder, plus the per-call latency record and
-the usage footer every call feeds. All offline — SESSION.post is stubbed.
+the usage footer every call feeds. All offline — SESSION is stubbed.
 
 Why the breaker exists: the 2026-08-31 rescore run hit "credit balance is too
 low" (HTTP 400) and, because every job's call failed independently, hammered
@@ -12,52 +12,27 @@ import logging
 import re
 
 import pytest
-import requests
 
+from conftest import fake_response
 import src.claude.api as claude
 
 
-class _Resp:
-    def __init__(self, status_code, body="", headers=None, payload=None):
-        self.status_code = status_code
-        self.text = body
-        self.headers = headers or {}
-        self._payload = payload or {}
+_BILLING = ('{"message":"Your credit balance is too low to access the '
+            'Anthropic API."}')
+_TOO_LARGE = '{"message":"max_tokens too large"}'
 
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            err = requests.HTTPError(f"{self.status_code} error")
-            err.response = self
-            raise err
-
-    def json(self):
-        return self._payload
-
-
-_OK = _Resp(200, payload={
+_OK = fake_response({
     "content": [{"type": "text", "text": '{"ok": true}'}],
     "usage": {"input_tokens": 1, "output_tokens": 1},
 })
 
 
 @pytest.fixture
-def api(monkeypatch):
-    """Stub the HTTP layer; returns the list of responses to serve (popped
-    left-to-right, last one repeats; an exception is raised) plus a call
-    counter."""
-    calls = []
+def api(monkeypatch, serve):
+    """Stub the API's own session; returns the list of responses to serve
+    (see conftest.serve) and the request log."""
     responses = []
-
-    class _Session:
-        @staticmethod
-        def post(url, **kw):
-            calls.append(url)
-            r = responses.pop(0) if len(responses) > 1 else responses[0]
-            if isinstance(r, Exception):
-                raise r
-            return r
-
-    monkeypatch.setattr(claude, "SESSION", _Session)
+    calls = serve(responses, session=claude.SESSION)
     monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude, "_FATAL_MSG", None)
     monkeypatch.setattr(claude.time, "sleep", lambda s: None)
@@ -66,8 +41,7 @@ def api(monkeypatch):
 
 def test_billing_400_trips_breaker(api):
     responses, calls = api
-    responses.append(_Resp(400, body='{"message":"Your credit balance is '
-                                     'too low to access the Anthropic API."}'))
+    responses.append(fake_response(status=400, text=_BILLING))
     assert claude.call_claude_json("sys", "user", cache=False) == {}
     assert len(calls) == 1
     # Breaker is tripped: later calls fail fast without touching the API.
@@ -77,7 +51,8 @@ def test_billing_400_trips_breaker(api):
 
 def test_auth_401_trips_breaker(api):
     responses, calls = api
-    responses.append(_Resp(401, body='{"message":"invalid x-api-key"}'))
+    responses.append(
+        fake_response(status=401, text='{"message":"invalid x-api-key"}'))
     claude.call_claude_json("sys", "user", cache=False)
     claude.call_claude_json("sys", "user", cache=False)
     assert len(calls) == 1
@@ -85,7 +60,7 @@ def test_auth_401_trips_breaker(api):
 
 def test_ordinary_400_does_not_trip_breaker(api):
     responses, calls = api
-    responses.append(_Resp(400, body='{"message":"max_tokens too large"}'))
+    responses.append(fake_response(status=400, text=_TOO_LARGE))
     assert claude.call_claude_json("sys", "user", cache=False) == {}
     assert claude.call_claude_json("sys", "user", cache=False) == {}
     assert len(calls) == 2
@@ -93,14 +68,14 @@ def test_ordinary_400_does_not_trip_breaker(api):
 
 def test_transient_500_retries_then_succeeds(api):
     responses, calls = api
-    responses.extend([_Resp(500, body="overloaded"), _OK])
+    responses.extend([fake_response(status=500, text="overloaded"), _OK])
     assert claude.call_claude_json("sys", "user", cache=False) == {"ok": True}
     assert len(calls) == 2
 
 
 def test_persistent_500_gives_up_without_tripping(api):
     responses, calls = api
-    responses.append(_Resp(500, body="overloaded"))
+    responses.append(fake_response(status=500, text="overloaded"))
     assert claude.call_claude_json("sys", "user", cache=False) == {}
     assert len(calls) == 1 + len(claude._RETRY_DELAYS)
     # 5xx is transient — the next call must still reach the API.
@@ -116,8 +91,7 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
     without a server restart, and a still-dead API fails once and explains
     itself again."""
     responses, calls = api
-    responses.append(_Resp(400, body='{"message":"Your credit balance is '
-                                     'too low to access the Anthropic API."}'))
+    responses.append(fake_response(status=400, text=_BILLING))
     claude.call_claude_json("sys", "user", cache=False)
     assert claude.api_disabled() and len(calls) == 1
     claude.reset_breaker()
@@ -129,7 +103,7 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
 
 @pytest.mark.parametrize("reply, logged", [
     (_OK, r"\| HTTP 200 in \d+\.\d\ds$"),
-    (_Resp(400, body='{"message":"max_tokens too large"}'),
+    (fake_response(status=400, text=_TOO_LARGE),
      r"^claude call failed: HTTP 400 in \d+\.\d\ds$"),
     (RuntimeError("connection reset"),
      r"^claude call failed: RuntimeError in \d+\.\d\ds$"),

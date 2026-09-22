@@ -57,22 +57,13 @@ def _board(jobs, name="Eupry"):
 
 
 @pytest.fixture
-def workable_board(monkeypatch):
-    """Stub `http.SESSION.get` for one account: the widget payload under the
-    listing URL, and one detail payload for any per-posting GET. Records
-    every call."""
-    def _install(board=None, detail=None, status=200, detail_status=200):
-        calls = []
-
-        def _get(url, params=None, headers=None, **kw):
-            calls.append({"url": url, "headers": dict(headers or {})})
-            if url.startswith(JOB_API_ROOT):
-                return fake_response(detail, status=detail_status)
-            return fake_response(board, status=status)
-
-        monkeypatch.setattr(http.SESSION, "get", _get)
-        return calls
-    return _install
+def workable_board(serve):
+    """`serve` one account: the widget payload under the listing URL, and
+    one detail payload for any per-posting GET."""
+    return lambda board=None, detail=None, status=200, detail_status=200: serve(
+        lambda url, **kw: (fake_response(detail, status=detail_status)
+                           if url.startswith(JOB_API_ROOT)
+                           else fake_response(board, status=status)))
 
 
 class TestListing:
@@ -124,8 +115,8 @@ class TestListing:
         http.reset_fetch_failures()
         jobs = workable.fetch_workable(SLUG, "Eupry", max_details=0)
         assert len(jobs) == 4
-        assert [c["url"] for c in calls] == [WIDGET_URL]
-        assert calls[0]["headers"].get("Accept") == "application/json"
+        assert [c.url for c in calls] == [WIDGET_URL]
+        assert calls[0].headers.get("Accept") == "application/json"
         assert jobs[0]["company"] == "Eupry"
         assert "_shortcode" not in jobs[0]      # module key never escapes
         assert not http.snapshot_info()["capped"]
@@ -250,7 +241,7 @@ class TestDetail:
         assert "vacation days" not in desc
         # HTML stripped, entities unescaped.
         assert "<p>" not in desc and "&amp;" not in desc and "&" in desc
-        assert calls[0]["url"] == f"{JOB_API_ROOT}D68529D654"
+        assert calls[0].url == f"{JOB_API_ROOT}D68529D654"
 
     def test_a_dead_detail_endpoint_is_an_empty_body_never_an_exception(
             self, workable_board):
@@ -280,7 +271,7 @@ class TestDetail:
             loc_re=re.compile(r"North Carolina"), detail_delay=0)
         assert [j["id"] for j in jobs] == ["workable_eupry-aps_AAAA111111"]
         assert "wireless monitoring" in jobs[0]["description"]
-        details = [c["url"] for c in calls if c["url"].startswith(JOB_API_ROOT)]
+        details = [c.url for c in calls if c.url.startswith(JOB_API_ROOT)]
         assert details == [f"{JOB_API_ROOT}AAAA111111",
                            f"{JOB_API_ROOT}BBBB222222"]
 
@@ -290,7 +281,7 @@ class TestDetail:
         jobs = workable.fetch_workable(SLUG, "Eupry", max_details=2,
                                        detail_delay=0)
         assert len(jobs) == 4
-        assert sum(c["url"].startswith(JOB_API_ROOT) for c in calls) == 2
+        assert sum(c.url.startswith(JOB_API_ROOT) for c in calls) == 2
         assert [bool(j["description"]) for j in jobs] == [True, True, False, False]
 
 
@@ -450,4 +441,4 @@ class TestCompanyDispatch:
                                detail=load("workable_job_detail.json"))
         titles = company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)
         assert titles == ["Field Engineer", "Junior Customer Support"]
-        assert [c["url"] for c in calls] == [WIDGET_URL]   # no detail spend
+        assert [c.url for c in calls] == [WIDGET_URL]   # no detail spend

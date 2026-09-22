@@ -13,11 +13,13 @@ requests from it.
 import logging
 import sys
 import threading
+import time
 
 from requests import Session
 from requests.adapters import HTTPAdapter
 
 from src.config import FETCH_TIMEOUT, USER_AGENT
+from src.net.util import host_of
 
 # File-only request trace (src/session_log.py installs the handler; there
 # is no console handler, so this never reaches the terminal). One record
@@ -237,3 +239,48 @@ def snapshot_info():
     return {"fetch_errors": n, "incomplete": n > 0, "capped": capped,
             "capped_total": getattr(_CAPPED, "total", None) if capped else None,
             "last_error": getattr(_FAILED, "last", None)}
+
+
+class HostBreaker:
+    """Hosts that keep refusing connections, skipped for a while.
+
+    `trip(url)` records one refusal from the host of `url`; `dead(url)` is
+    True once `trips` refusals have landed, each within `ttl` seconds of
+    the one before, and stays True until `ttl` passes without another.
+    Any URL on the host answers, whatever its path, case or port:
+
+    >>> b = HostBreaker(ttl=60, trips=2)
+    >>> b.trip("https://a.example/jobs/1"); b.dead("https://a.example/")
+    False
+    >>> b.trip("https://A.example:443/x"); b.dead("https://a.example/careers")
+    True
+    >>> b.dead("https://b.example/")
+    False
+
+    Once `ttl` has passed, the host is asked again:
+
+    >>> b = HostBreaker(ttl=0); b.trip("https://a.example/")
+    >>> b.dead("https://a.example/")
+    False
+    """
+
+    def __init__(self, ttl, trips=1):
+        self.ttl, self.trips = ttl, trips
+        self._hits = {}     # host -> (last refusal, refusals in a row)
+        self._lock = threading.Lock()
+
+    def trip(self, url):
+        host, now = host_of(url), time.time()
+        if host:
+            with self._lock:
+                last, n = self._hits.get(host, (0.0, 0))
+                self._hits[host] = (now, n + 1 if now - last < self.ttl else 1)
+
+    def dead(self, url):
+        host = host_of(url)
+        with self._lock:
+            hit = self._hits.get(host)
+            if hit and time.time() - hit[0] >= self.ttl:
+                del self._hits[host]
+                return False
+            return bool(hit) and hit[1] >= self.trips

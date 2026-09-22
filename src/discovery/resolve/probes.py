@@ -1,8 +1,8 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+import importlib
 import logging
 import queue
-import re
 import threading
 import time
 
@@ -161,31 +161,32 @@ def _parser_probe(module):
     """
     def probe(handle):
         try:
-            mod = __import__(f"src.ats.fetchers.{module}", fromlist=["parse_board"])
-            jobs = mod.parse_board(handle)
+            jobs = _fetcher(module).parse_board(handle)
             return (len(jobs) > 0, len(jobs))
         except Exception:
             return (False, 0)
     return probe
 
 
-# URL and payload shape both come from the fetcher that owns them
-# (src.ats.fetchers.api): the same three boards are read here for a slug
-# probe, below for a locality count, and in local_sourcing for a title
-# sample. A private copy of either is a silent empty board, never an error.
-# Reached through _board_api() so importing probes.py still does not pull in
-# the fetchers package (see _parser_probe).
-probe_greenhouse = _api_probe(
-    lambda h: _board_api().BOARD_URLS["greenhouse"].format(h),
-    lambda r, h: len(_board_api().board_rows("greenhouse", r.json())))
+def _fetcher(module):
+    """src.ats.fetchers.<module>, imported at probe time for the reason
+    _parser_probe gives."""
+    return importlib.import_module(f"src.ats.fetchers.{module}")
 
-probe_lever = _api_probe(
-    lambda h: _board_api().BOARD_URLS["lever"].format(h),
-    lambda r, h: len(_board_api().board_rows("lever", r.json())))
 
-probe_ashby = _api_probe(
-    lambda h: _board_api().BOARD_URLS["ashby"].format(h),
-    lambda r, h: len(_board_api().board_rows("ashby", r.json())))
+def _board_probe(ats):
+    """A Greenhouse/Lever/Ashby probe. URL and payload shape both come from
+    src.ats.fetchers.api, which also serves the locality count below and
+    local_sourcing's title sample: a private copy of either is a silent
+    empty board, never an error."""
+    return _api_probe(
+        lambda h: _fetcher("api").BOARD_URLS[ats].format(h),
+        lambda r, h: len(_fetcher("api").board_rows(ats, r.json())))
+
+
+probe_greenhouse = _board_probe("greenhouse")
+probe_lever = _board_probe("lever")
+probe_ashby = _board_probe("ashby")
 
 # Kula serves a full HTML page (no JSON API) and throttles under probe
 # bursts -- a confirmed-live board can 4xx/timeout once during a parallel
@@ -196,24 +197,26 @@ probe_kula = _api_probe(
     "https://careers.kula.ai/{}", None,
     accept=lambda r: len(r.text) > 1000, retries=1)
 
+# The fetcher's own posting-link pattern: every board also links
+# /apply/confirm/, which a looser pattern counted as two postings.
 probe_jazzhr = _api_probe(
-    "https://{}.applytojob.com/",
-    lambda r, h: len(_JAZZHR_APPLY_RE.findall(r.text)),
+    lambda h: f"{_fetcher('jazzhr').board_url(h)}/",
+    lambda r, h: len(_fetcher("jazzhr").APPLY_RE.findall(r.text)),
     require_jobs=True)
 
 probe_bamboohr = _api_probe(
-    "https://{}.bamboohr.com/careers/list",
+    lambda h: f"{_fetcher('bamboohr').board_url(h)}/careers/list",
     lambda r, h: len(r.json().get("result", []) or []),
     headers={"Accept": "application/json"})
 
 probe_smartrecruiters = _api_probe(
-    "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1",
+    lambda h: f"{_fetcher('company').SMARTRECRUITERS_API.format(h)}?limit=1",
     lambda r, h: int(r.json().get("totalFound", 0) or 0),
     require_jobs=True)
 
 probe_jobvite = _api_probe(
-    lambda h: f"{_jobvite().BASE}/{h}/search?p=0",
-    lambda r, h: len(_jobvite().parse_listing(r.text, h)),
+    lambda h: f"{_fetcher('jobvite').BASE}/{h}/search?p=0",
+    lambda r, h: len(_fetcher("jobvite").parse_listing(r.text, h)),
     require_jobs=True, timeout=10)
 
 #: Paylocity by company GUID, UKG Pro (UltiPro) by 'CODE|GUID', Rippling,
@@ -224,21 +227,6 @@ probe_rippling = _parser_probe("rippling")
 probe_ultipro = _parser_probe("ultipro")
 probe_hibob = _parser_probe("hibob")
 probe_workable = _parser_probe("workable")
-
-_JAZZHR_APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/")
-
-
-def _jobvite():
-    from src.ats.fetchers import jobvite
-    return jobvite
-
-
-def _board_api():
-    """The Greenhouse/Lever/Ashby fetcher — it owns their API roots and the
-    shape of their whole-board payloads. Lazy for the same reason
-    _parser_probe is."""
-    from src.ats.fetchers import api
-    return api
 
 
 PROBES = {
@@ -657,7 +645,7 @@ def _wd_search_text():
 def _nc_count(ats, slug):
     """Postings on a JSON-API board that are in your [locality] — the count
     that rejects a slug guess landing on somebody else's board."""
-    return sum(1 for _title, loc in _board_api().board_summary(ats, slug)
+    return sum(1 for _title, loc in _fetcher("api").board_summary(ats, slug)
                if _has_nc(loc))
 
 

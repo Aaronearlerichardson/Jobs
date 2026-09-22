@@ -36,10 +36,9 @@ Notes:
 import json
 import re
 import time
-from urllib.parse import urlparse
 
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date, strip_html, text_from_html
+from src.net.util import host_of, norm_posted_date, strip_html, text_from_html
 
 # Job pages beyond this many are left for the next crawl. Newest first, so
 # the cap trims the stalest postings, not the freshest.
@@ -73,7 +72,7 @@ def board_host(board_url):
         return ""
     if "://" not in value:
         value = "https://" + value
-    return (urlparse(value).hostname or "").lower()
+    return host_of(value)
 
 
 def board_origin(board_url):

@@ -55,6 +55,7 @@ from urllib.robotparser import RobotFileParser
 
 from src import config
 from .http import HEADERS
+from .util import host_of
 
 # How long a parsed robots.txt stays good before we re-fetch it.
 CACHE_TTL_SECONDS = 3600
@@ -306,7 +307,7 @@ class RobotsCache:
         False
         >>> config.ROBOTS_EXEMPT_HOSTS = _saved
         """
-        host = (urlparse(url).hostname or "").lower()
+        host = host_of(url)
         if not host:
             return False
         for entry in getattr(config, "ROBOTS_EXEMPT_HOSTS", ()):

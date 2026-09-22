@@ -8,7 +8,7 @@ This is a reader, not a fetcher: it shares nothing with the whole-board
 pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
 per-ATS endpoint builders it asks -- `bamboohr.detail_url`,
 `jazzhr.board_url`, `infor.detail_url`/`posting_state`, Workday's CXS URL
-helpers and `api.py`'s board APIs.
+helpers, `api.py`'s board APIs and `company.SMARTRECRUITERS_API`.
 
 One rule runs through every branch: a row is closed ONLY on positive
 evidence. Every refusal a host can make -- 403, 405, 429, 5xx, a timeout,
@@ -18,16 +18,15 @@ closing the posting.
 
 import logging
 import re
-import threading
 import time
-from urllib.parse import urlsplit
 
 import requests
 
-from src.net.http import HEADERS, JSON_HEADERS, SESSION
+from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
 from . import bamboohr, icims, infor, jazzhr, workday
 from .api import ASHBY_API, GREENHOUSE_API, GREENHOUSE_JOB_URL_RE, LEVER_API
+from .company import SMARTRECRUITERS_API
 
 _log = logging.getLogger(__name__)
 
@@ -204,23 +203,9 @@ def _probe_ashby(m):
 
 # A job-detail host that refuses connections refuses every row on it: the
 # 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on one host. After
-# _HOST_TRIPS of them in a pass (the Ashby memo's window), its remaining rows
-# are skipped unasked.
-_HOST_TRIPS = 3
-_DEAD_HOSTS = {}        # host -> (expires_at, connection failures)
-_DEAD_HOSTS_LOCK = threading.Lock()     # probes run under fan_out
-
-
-def _host_dead(host):
-    hit = _DEAD_HOSTS.get(host)
-    return bool(hit) and hit[0] > time.time() and hit[1] >= _HOST_TRIPS
-
-
-def _note_connection_failure(host):
-    with _DEAD_HOSTS_LOCK:
-        hit = _DEAD_HOSTS.get(host)
-        _DEAD_HOSTS[host] = ((hit[0], hit[1] + 1) if hit and hit[0] > time.time()
-                             else (time.time() + _ASHBY_BOARD_TTL, 1))
+# three in a row, within the Ashby memo's window, its remaining rows are
+# skipped unasked. Three, not discovery's one: these hosts answered before.
+_DEAD_HOSTS = HostBreaker(ttl=_ASHBY_BOARD_TTL, trips=3)
 
 
 def _infor_verdict(r):
@@ -242,12 +227,9 @@ _FAMILY_PROBE = {
     "ashby":           _probe_ashby,
     "bamboohr":        _probe_bamboohr,
     "jazzhr":          _probe_jazzhr,
-    # SmartRecruiters has no fetcher module of its own -- this module is
-    # where its endpoints live (fetch_smartrecruiters_all above).
     "smartrecruiters": lambda m: _endpoint_verdict(
-        f"https://api.smartrecruiters.com/v1/companies/{m.group(1)}"
-        f"/postings/{m.group(2)}", "smartrecruiters",
-        live=_smartrecruiters_verdict),
+        f"{SMARTRECRUITERS_API.format(m.group(1))}/{m.group(2)}",
+        "smartrecruiters", live=_smartrecruiters_verdict),
     "infor": lambda m: _endpoint_verdict(
         infor.detail_url(*m.groups()), "infor", live=_infor_verdict),
 }
@@ -335,14 +317,13 @@ def probe_job_open(url):
         if is_open is not None:
             return is_open, fallback
 
-    host = urlsplit(url).hostname or ""
-    if _host_dead(host):
+    if _DEAD_HOSTS.dead(url):
         return None, "host unreachable this pass: skipped"
     try:
         r = SESSION.get(url, headers=_page_headers(url), allow_redirects=True)
     except Exception as e:
         if isinstance(e, requests.ConnectionError):
-            _note_connection_failure(host)
+            _DEAD_HOSTS.trip(url)
         return None, fallback or f"fetch error: {type(e).__name__}"
     if r.status_code in (404, 410):
         return False, f"HTTP {r.status_code}"

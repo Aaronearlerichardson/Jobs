@@ -6,7 +6,8 @@ both walk the same candidate list for a name, and the stages of one name's
 resolution -- careers sniff, root scan, lead sniff, diagnosis, Workday probe
 -- each rebuild that list and fetch it again. Everything they share sits
 here so neither imports the other: the URL generator, the dead-host memo,
-the DNS verdict cache and the bounded page memo, all behind one lock, and
+the DNS verdict cache and the bounded page memo (the last two behind one
+lock), and
 `_fetch_all`, the concurrent fetch that consults them.
 """
 
@@ -23,7 +24,8 @@ import requests
 from src.ats.signatures import FETCHABLE_HOST_RE
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
-from src.net.http import HEADERS, SESSION
+from src.net.http import HEADERS, SESSION, HostBreaker
+from src.net.util import host_of
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.fetchpool")
@@ -132,32 +134,9 @@ def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
 # run. A refused connection says nothing path-specific: skip the host for a
 # while. HTTP errors and READ timeouts are not cached — a slow or 404ing
 # host may still answer another path.
-_DEAD_HOSTS = {}
 _DEAD_HOST_TTL = 15 * 60
-_DEAD_HOSTS_LOCK = threading.Lock()
-
-
-def _host_of(url):
-    m = re.match(r"https?://([^/]+)", url or "")
-    return m.group(1).lower() if m else ""
-
-
-def _dead_host(url):
-    """The host of `url` if a connection to it was refused within the TTL."""
-    host = _host_of(url)
-    with _DEAD_HOSTS_LOCK:
-        t = _DEAD_HOSTS.get(host)
-        if t is not None and time.time() - t < _DEAD_HOST_TTL:
-            return host
-        _DEAD_HOSTS.pop(host, None)
-    return ""
-
-
-def _mark_dead_host(url):
-    host = _host_of(url)
-    if host:
-        with _DEAD_HOSTS_LOCK:
-            _DEAD_HOSTS[host] = time.time()
+_DEAD_HOSTS = HostBreaker(ttl=_DEAD_HOST_TTL)
+_CACHE_LOCK = threading.Lock()      # _PAGE_MEMO and _DNS_CACHE
 
 
 # Per-URL outcome memo, url -> (time recorded, Response or None). The
@@ -173,7 +152,7 @@ _PAGE_MEMO_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _memo_get(url):
-    with _DEAD_HOSTS_LOCK:
+    with _CACHE_LOCK:
         hit = _PAGE_MEMO.get(url)
         if hit is None:
             return False, None
@@ -186,7 +165,7 @@ def _memo_get(url):
 def _memo_put(url, resp):
     if resp is not None and len(resp.content or b"") > _PAGE_MEMO_MAX_BYTES:
         return
-    with _DEAD_HOSTS_LOCK:
+    with _CACHE_LOCK:
         if len(_PAGE_MEMO) >= _PAGE_MEMO_CAP:
             oldest = min(_PAGE_MEMO, key=lambda u: _PAGE_MEMO[u][0])
             del _PAGE_MEMO[oldest]
@@ -202,7 +181,7 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
     known, resp = _memo_get(url)
     if known:
         return resp
-    if _dead_host(url):
+    if _DEAD_HOSTS.dead(url):
         _log.debug("skip %s: host refused a connection earlier this run", url)
         return None
     try:
@@ -211,7 +190,7 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
     except requests.exceptions.ConnectionError:
         # requests' ConnectionError covers DNS failure, SSLError and
         # ConnectTimeout; ReadTimeout is a Timeout, not a ConnectionError.
-        _mark_dead_host(url)
+        _DEAD_HOSTS.trip(url)
         return None
     except Exception:
         return None
@@ -235,7 +214,7 @@ def _resolves(host):
     """Whether `host` has an address, cached per run. A failure marks the
     host dead for _fetch_page (see _DEAD_HOSTS); a success is remembered so
     the next stage's rebuilt candidate list does not ask again."""
-    with _DEAD_HOSTS_LOCK:
+    with _CACHE_LOCK:
         hit = _DNS_CACHE.get(host)
         if hit is not None and time.time() - hit[0] < _DEAD_HOST_TTL:
             return hit[1]
@@ -244,10 +223,10 @@ def _resolves(host):
         ok = True
     except OSError:
         ok = False
-    with _DEAD_HOSTS_LOCK:
+    with _CACHE_LOCK:
         _DNS_CACHE[host] = (time.time(), ok)
     if not ok:
-        _mark_dead_host(f"https://{host}/")
+        _DEAD_HOSTS.trip(f"https://{host}/")
         _log.debug("skip host %s: does not resolve", host)
     return ok
 
@@ -260,11 +239,11 @@ def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
     thread is left to finish on its own."""
     hosts = {}
     for u in urls:
-        h = _host_of(u)
+        h = host_of(u)
         if h:
             hosts.setdefault(h, []).append(u)
-    todo = [h for h in hosts if not _dead_host(f"https://{h}/")]
-    with _DEAD_HOSTS_LOCK:
+    todo = [h for h in hosts if not _DEAD_HOSTS.dead(f"https://{h}/")]
+    with _CACHE_LOCK:
         todo = [h for h in todo
                 if not (_DNS_CACHE.get(h) and
                         time.time() - _DNS_CACHE[h][0] < _DEAD_HOST_TTL)]
@@ -279,7 +258,7 @@ def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
                        futs[f], timeout)
         ex.shutdown(wait=False, cancel_futures=True)
     return [u for u in urls
-            if _host_of(u) not in slow and not _dead_host(u)]
+            if host_of(u) not in slow and not _DEAD_HOSTS.dead(u)]
 
 
 def _fetch_all(urls):

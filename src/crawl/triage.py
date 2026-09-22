@@ -247,7 +247,7 @@ def _geo_verdict(company, job, t, has_body, cutoff):
     loc = job.get("location") or ""
     desc = job.get("description") or ""
     floor = t.get("remote_mission_floor")
-    trusted = ops._is_watched(company) or ops._mission_trusted(company, floor)
+    trusted = tags.has(company, tags.WATCH) or ops._mission_trusted(company, floor)
     if is_nc(loc):
         return OK
     if trusted and (remote_signal(loc) or job.get("remote_hint")):
@@ -286,14 +286,14 @@ def row_verdict(company, job, t, cutoff):
             return "geo"
         deferred = deferred or v == DEFER
     if t["exclude_gate"] and gates.exclude_reason(
-            title, desc, allow_defense=ops._is_watched(company),
+            title, desc, allow_defense=tags.has(company, tags.WATCH),
             track_id=t["id"]):
         return "exclude"
     if config.is_multi_division(company.get("name")):
         if not has_body:
             deferred = True
         elif not is_relevant(title, desc,
-                             watch_titles=ops._is_watched(company)):
+                             watch_titles=tags.has(company, tags.WATCH)):
             return "division"
     return DEFER if deferred else OK
 

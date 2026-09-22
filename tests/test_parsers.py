@@ -5,6 +5,7 @@ closed-posting probe guards. No network."""
 from datetime import datetime, timedelta
 
 import pytest
+import requests
 from bs4 import BeautifulSoup
 
 import src.digest.render as digest
@@ -49,12 +50,6 @@ class TestSniffer:
                 "smartrecruiters"} <= set(PROBES)
 
 
-class _FakeResp:
-    def __init__(self, text, url):
-        self.text = text
-        self.url = url
-
-
 def _stub_fetch_all(monkeypatch, mapping):
     """Replace fetchpool._fetch_all with a lookup into `mapping` (url -> html),
     so no network call happens; any URL not in `mapping` fetches as None.
@@ -64,7 +59,7 @@ def _stub_fetch_all(monkeypatch, mapping):
     both go through identity.candidate_pages, which looks it up on
     fetchpool at call time."""
     def _fake(urls):
-        return {u: (_FakeResp(mapping[u], u) if u in mapping else None)
+        return {u: (fake_response(text=mapping[u], url=u) if u in mapping else None)
                 for u in urls}
     monkeypatch.setattr(fetchpool, "_fetch_all", _fake)
 
@@ -75,44 +70,21 @@ class TestDeadHostCache:
     the miss path rebuilds it a few more times, so one dead host cost seven
     identical GETs per name in the 2026-09-01 add-names run."""
 
-    def _session(self, monkeypatch, exc):
-        calls = []
-
-        class _S:
-            def get(self, url, **kw):
-                calls.append(url)
-                raise exc
-
-        monkeypatch.setattr(fetchpool, "SESSION", _S())
-        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
-        return calls
-
-    def test_refused_host_is_not_retried_on_other_paths(self, monkeypatch):
-        import requests
-        calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
+    def test_refused_host_is_not_retried_on_other_paths(self, serve):
+        calls = serve(requests.exceptions.ConnectionError("dns"))
         assert fetchpool._fetch_page("https://www.dead.example/") is None
         assert fetchpool._fetch_page("https://www.dead.example/careers") is None
         assert fetchpool._fetch_page("https://www.other.example/careers") is None
         assert calls == ["https://www.dead.example/",
                          "https://www.other.example/careers"]
 
-    def test_read_timeout_is_not_a_dead_host(self, monkeypatch):
+    def test_read_timeout_is_not_a_dead_host(self, serve):
         # A slow host may still answer another path; only refused
         # connections (DNS, TLS, connect timeout) are remembered.
-        import requests
-        calls = self._session(monkeypatch, requests.exceptions.ReadTimeout("slow"))
+        calls = serve(requests.exceptions.ReadTimeout("slow"))
         fetchpool._fetch_page("https://www.slow.example/")
         fetchpool._fetch_page("https://www.slow.example/careers")
         assert len(calls) == 2
-
-    def test_entry_expires(self, monkeypatch):
-        import time
-        import requests
-        calls = self._session(monkeypatch, requests.exceptions.ConnectionError("dns"))
-        fetchpool._DEAD_HOSTS["www.dead.example"] = time.time() - fetchpool._DEAD_HOST_TTL - 1
-        fetchpool._fetch_page("https://www.dead.example/careers")
-        assert calls == ["https://www.dead.example/careers"]
 
 
 class TestPageMemo:
@@ -121,47 +93,36 @@ class TestPageMemo:
     fetched up to seven times per name (sgs.com, intertek.com, a 403ing
     infosys.com in the 2026-09-01 add-names runs)."""
 
-    def _session(self, monkeypatch, status=200, body="x" * 400):
-        calls = []
-        resp = fake_response(text=body, status=status)
+    def _session(self, serve, status=200, body="x" * 400):
+        return serve(fake_response(text=body, status=status))
 
-        class _S:
-            def get(self, url, **kw):
-                calls.append(url)
-                return resp
-
-        monkeypatch.setattr(fetchpool, "SESSION", _S())
-        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
-        return calls
-
-    def test_live_page_is_fetched_once_per_run(self, monkeypatch):
-        calls = self._session(monkeypatch)
+    def test_live_page_is_fetched_once_per_run(self, serve):
+        calls = self._session(serve)
         a = fetchpool._fetch_page("https://www.sgs.com/")
         b = fetchpool._fetch_page("https://www.sgs.com/")
         assert a is b and a is not None
         assert calls == ["https://www.sgs.com/"]
 
-    def test_misses_are_memoized_too(self, monkeypatch):
-        calls = self._session(monkeypatch, status=403)
+    def test_misses_are_memoized_too(self, serve):
+        calls = self._session(serve, status=403)
         assert fetchpool._fetch_page("https://www.infosys.com/") is None
         assert fetchpool._fetch_page("https://www.infosys.com/") is None
         assert len(calls) == 1
 
-    def test_distinct_urls_still_fetch(self, monkeypatch):
-        calls = self._session(monkeypatch)
+    def test_distinct_urls_still_fetch(self, serve):
+        calls = self._session(serve)
         fetchpool._fetch_page("https://www.sgs.com/")
         fetchpool._fetch_page("https://www.sgs.com/careers")
         assert len(calls) == 2
 
-    def test_oversized_bodies_are_not_hoarded(self, monkeypatch):
-        calls = self._session(monkeypatch, body="x" * (fetchpool._PAGE_MEMO_MAX_BYTES + 1))
+    def test_oversized_bodies_are_not_hoarded(self, serve):
+        calls = self._session(serve, body="x" * (fetchpool._PAGE_MEMO_MAX_BYTES + 1))
         fetchpool._fetch_page("https://big.example/")
         fetchpool._fetch_page("https://big.example/")
         assert len(calls) == 2 and fetchpool._PAGE_MEMO == {}
 
-    def test_cap_evicts_the_oldest_entry(self, monkeypatch):
-        calls = self._session(monkeypatch)
+    def test_cap_evicts_the_oldest_entry(self, serve, monkeypatch):
+        calls = self._session(serve)
         monkeypatch.setattr(fetchpool, "_PAGE_MEMO_CAP", 2)
         for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
             fetchpool._fetch_page(u)
@@ -173,40 +134,25 @@ class TestJobPageMeta:
     """URL-only manual adds read their title (and JD) off the posting page;
     nine empty-title rows sat in the 2026-09-01 store because nothing did."""
 
-    def _serve(self, monkeypatch, html):
-        resp = fake_response(text=html)
-        class _S:
-            def get(self, *a, **k):
-                return resp
-
-        monkeypatch.setattr(company_fetch, "SESSION", _S())
-
-    def test_jsonld_title_and_description(self, monkeypatch):
+    def test_jsonld_title_and_description(self, serve):
         body = " ".join(["word"] * 60)
-        self._serve(monkeypatch,
-                    '<script type="application/ld+json">{"@type": "JobPosting", '
-                    '"title": "Sr Vision Software Engineer", '
-                    '"description": "' + body + '"}</script>')
+        serve('<script type="application/ld+json">{"@type": "JobPosting", '
+              '"title": "Sr Vision Software Engineer", '
+              '"description": "' + body + '"}</script>')
         title, desc = company_fetch.job_page_meta("https://x.example/jobs/1")
         assert title == "Sr Vision Software Engineer"
         assert desc.startswith("word word")
 
-    def test_title_falls_back_to_og_title_then_html_title(self, monkeypatch):
-        self._serve(monkeypatch,
-                    '<html><head><meta property="og:title" content="Data Engineer II">'
-                    '<title>Data Engineer II | Acme Careers</title></head></html>')
+    def test_title_falls_back_to_og_title_then_html_title(self, serve):
+        serve('<html><head><meta property="og:title" content="Data Engineer II">'
+              '<title>Data Engineer II | Acme Careers</title></head></html>')
         assert company_fetch.job_page_meta("https://x.example/j")[0] == "Data Engineer II"
-        self._serve(monkeypatch,
-                    '<html><head><title> Data  Engineer II | Acme Careers</title>'
-                    '</head></html>')
+        serve('<html><head><title> Data  Engineer II | Acme Careers</title>'
+              '</head></html>')
         assert company_fetch.job_page_meta("https://x.example/j")[0] == "Data Engineer II"
 
-    def test_fetch_failure_is_a_double_miss(self, monkeypatch):
-        class _S:
-            def get(self, *a, **k):
-                raise RuntimeError("down")
-
-        monkeypatch.setattr(company_fetch, "SESSION", _S())
+    def test_fetch_failure_is_a_double_miss(self, serve):
+        serve(RuntimeError("down"))
         assert company_fetch.job_page_meta("https://x.example/j") == ("", "")
 
 

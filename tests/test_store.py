@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from conftest import iso_days_ago
 
 from src import config
+from src import tags
 import src.match.locality as locality
 import src.store as store
 
@@ -56,7 +57,7 @@ class TestCompanies:
         assert store.set_company_tag(db, "w", "watch") == "watch"   # case-insensitive
         row = store.get_companies(db, active_only=False)[0]
         import src.ops.maintenance as ops
-        assert ops._is_watched(row) and ops._whole_board(row)
+        assert tags.has(row, tags.WATCH) and ops._whole_board(row)
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
         assert store.set_company_tag(db, "Nope", "watch") is None
 

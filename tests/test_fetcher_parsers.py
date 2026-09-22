@@ -54,60 +54,6 @@ def match_everything(cfg, pristine_keywords):
 
 
 @pytest.fixture
-def fake_get(monkeypatch):
-    """Serve a fixture instead of the network."""
-    def _install(payload, status=200):
-        monkeypatch.setattr(http.SESSION, "get",
-                            lambda *a, **k: fake_response(payload,
-                                                          status=status))
-    return _install
-
-
-@pytest.fixture
-def fake_get_text(monkeypatch):
-    """Serve text bodies per URL, and record which URLs were asked for.
-
-    `routes` maps a URL fragment to the body to return, or to an int HTTP
-    status to fail with; an unmatched URL is a 404. Routing by fragment is
-    what makes a fetcher's feed PREFERENCE observable — a fetcher that
-    tries two paths has to be judged on which one it asked for first.
-    """
-    def _install(routes):
-        calls = []
-
-        def _get(url, *a, **k):
-            calls.append(url)
-            for fragment, body in routes.items():
-                if fragment in url:
-                    return (fake_response(text="", status=body)
-                            if isinstance(body, int)
-                            else fake_response(text=body))
-            return fake_response(text="", status=404)
-
-        monkeypatch.setattr(peopleadmin.SESSION, "get", _get)
-        return calls
-    return _install
-
-
-@pytest.fixture
-def requested(monkeypatch):
-    """Serve one JSON payload to every GET and log the URLs asked for. The
-    log is the assertion where a test cares what a fetcher SPENT: bamboohr,
-    rippling and paylocity make one detail GET per kept row unless told
-    not to, and that shows up as a second URL."""
-    def _install(payload):
-        urls = []
-
-        def _get(url, *a, **k):
-            urls.append(url)
-            return fake_response(payload)
-
-        monkeypatch.setattr(http.SESSION, "get", _get)
-        return urls
-    return _install
-
-
-@pytest.fixture
 def usajobs_creds(monkeypatch):
     """Credentials the USAJOBS fetcher will accept. Nothing real: the
     session is stubbed, so these never leave the process."""
@@ -116,33 +62,18 @@ def usajobs_creds(monkeypatch):
 
 
 @pytest.fixture
-def usajobs_pages(monkeypatch):
-    """Serve a SEQUENCE of fixture pages and record each request.
-
-    Returns the (initially empty) call log, so a test can both drive
-    pagination and assert on the params and headers that were sent. Pages
-    past the end of the list repeat the last one — a test that asserts a
-    stop condition should fail by hanging on its own page cap, not by
-    raising IndexError from the stub.
-    """
-    def _install(payloads, status=200):
-        calls = []
-
-        def _get(url, **kwargs):
-            calls.append({"url": url, "params": kwargs.get("params") or {},
-                          "headers": kwargs.get("headers") or {}})
-            return fake_response(
-                payloads[min(len(calls) - 1, len(payloads) - 1)],
-                status=status)
-
-        monkeypatch.setattr(usajobs.SESSION, "get", _get)
-        return calls
-    return _install
+def usajobs_pages(serve):
+    """`serve` a SEQUENCE of fixture pages, all at `status`, and return the
+    request log. Pages past the end repeat the last one -- a test that
+    asserts a stop condition should fail by hanging on its own page cap,
+    not by raising IndexError from the stub."""
+    return lambda payloads, status=200: serve(
+        [fake_response(p, status=status) for p in payloads])
 
 
 class TestGreenhouse:
-    def test_parses_postings(self, fake_get, match_everything):
-        fake_get(load("greenhouse_board.json"))
+    def test_parses_postings(self, serve, match_everything):
+        serve(fake_response(load("greenhouse_board.json")))
         jobs = api.fetch_greenhouse("databricks", "Databricks")
         assert jobs
         j = jobs[0]
@@ -150,30 +81,30 @@ class TestGreenhouse:
         assert j["title"] and j["url"].startswith("http")
         assert j["company"] == "Databricks"
 
-    def test_location_falls_back_when_absent(self, fake_get, match_everything):
+    def test_location_falls_back_when_absent(self, serve, match_everything):
         payload = load("greenhouse_board.json")
         payload["jobs"][0]["location"] = {}
         payload["jobs"][0]["offices"] = []
-        fake_get(payload)
+        serve(fake_response(payload))
         assert api.fetch_greenhouse("x", "X")[0]["location"] == "Unknown"
 
-    def test_offices_join_the_location(self, fake_get, match_everything):
+    def test_offices_join_the_location(self, serve, match_everything):
         """A multi-location posting shows one city (or "Remote") up front
         and the rest under offices; the location regex must see them all."""
         payload = load("greenhouse_board.json")
         payload["jobs"][0]["location"] = {"name": "Remote"}
         payload["jobs"][0]["offices"] = [{"name": "Durham, NC"}, {"name": "Remote"}]
-        fake_get(payload)
+        serve(fake_response(payload))
         assert api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
 
-    def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
-        fake_get(["not", "a", "dict"])
+    def test_unexpected_shape_returns_empty(self, serve, match_everything):
+        serve(fake_response(["not", "a", "dict"]))
         assert api.fetch_greenhouse("x", "X") == []
 
 
 class TestLever:
-    def test_parses_postings(self, fake_get, match_everything):
-        fake_get(load("lever_board.json"))
+    def test_parses_postings(self, serve, match_everything):
+        serve(fake_response(load("lever_board.json")))
         jobs = api.fetch_lever("veeva", "Veeva")
         assert jobs
         j = jobs[0]
@@ -183,7 +114,7 @@ class TestLever:
 
 
 class TestAshby:
-    def test_reads_the_jobs_key(self, fake_get, match_everything):
+    def test_reads_the_jobs_key(self, serve, match_everything):
         """Regression: the payload key is `jobs`, not `jobPostings`.
 
         Reading the wrong key returned [] for every Ashby board — silently,
@@ -191,40 +122,40 @@ class TestAshby:
         that from 'nothing matched'."""
         payload = load("ashby_board.json")
         assert "jobs" in payload and "jobPostings" not in payload
-        fake_get(payload)
+        serve(fake_response(payload))
         jobs = api.fetch_ashby("vanta", "Vanta")
         assert jobs, "Ashby parsed zero postings from a non-empty board"
 
-    def test_parses_postings(self, fake_get, match_everything):
-        fake_get(load("ashby_board.json"))
+    def test_parses_postings(self, serve, match_everything):
+        serve(fake_response(load("ashby_board.json")))
         j = api.fetch_ashby("vanta", "Vanta")[0]
         assert j["id"].startswith("ashby_vanta_")
         assert j["title"] and j["url"].startswith("http")
         assert j["location"]
 
-    def test_department_and_team_both_feed_relevance(self, fake_get,
+    def test_department_and_team_both_feed_relevance(self, serve,
                                                      match_everything):
         # `department`/`team` are the real keys; `departmentName` never
         # existed, so department text was invisible to the keyword gate.
         payload = load("ashby_board.json")
         assert any({"department", "team"} & set(j) for j in payload["jobs"])
 
-    def test_remote_hint_from_structured_fields(self, fake_get, match_everything):
+    def test_remote_hint_from_structured_fields(self, serve, match_everything):
         payload = load("ashby_board.json")
         payload["jobs"][0]["isRemote"] = False
         payload["jobs"][0]["workplaceType"] = "Remote"
-        fake_get(payload)
+        serve(fake_response(payload))
         assert api.fetch_ashby("v", "V")[0].get("remote_hint") == "ashby:isRemote"
 
-    def test_posted_at_is_captured(self, fake_get, match_everything):
-        fake_get(load("ashby_board.json"))
+    def test_posted_at_is_captured(self, serve, match_everything):
+        serve(fake_response(load("ashby_board.json")))
         jobs = api.fetch_ashby("vanta", "Vanta")
         assert any(j.get("posted_at") for j in jobs)
 
 
 class TestHibob:
-    def test_parses_postings(self, fake_get, match_everything):
-        fake_get(load("hibob_board.json"))
+    def test_parses_postings(self, serve, match_everything):
+        serve(fake_response(load("hibob_board.json")))
         jobs = hibob.fetch_hibob("liquidia", "Liquidia")
         assert jobs
         j = jobs[0]
@@ -232,29 +163,29 @@ class TestHibob:
         assert j["title"] and j["url"] == "https://liquidia.careers.hibob.com/jobs"
         assert j["company"] == "Liquidia"
 
-    def test_description_html_is_stripped(self, fake_get, match_everything):
-        fake_get(load("hibob_board.json"))
+    def test_description_html_is_stripped(self, serve, match_everything):
+        serve(fake_response(load("hibob_board.json")))
         jobs = hibob.fetch_hibob("liquidia", "Liquidia")
         assert all("<" not in j["description"] for j in jobs)
 
-    def test_location_combines_site_and_workspace_type(self, fake_get,
+    def test_location_combines_site_and_workspace_type(self, serve,
                                                         match_everything):
-        fake_get(load("hibob_board.json"))
+        serve(fake_response(load("hibob_board.json")))
         jobs = hibob.fetch_hibob("liquidia", "Liquidia")
         assert jobs[0]["location"] == "USA - Hybrid"
 
-    def test_remote_hint_from_workspace_type(self, fake_get, match_everything):
-        fake_get(load("hibob_board.json"))
+    def test_remote_hint_from_workspace_type(self, serve, match_everything):
+        serve(fake_response(load("hibob_board.json")))
         jobs = hibob.fetch_hibob("liquidia", "Liquidia")
         remote = [j for j in jobs if j["location"].endswith("Remote")]
         assert remote and remote[0].get("remote_hint") == "hibob:workspaceType"
 
-    def test_http_error_returns_empty(self, fake_get, match_everything):
-        fake_get({}, status=401)
+    def test_http_error_returns_empty(self, serve, match_everything):
+        serve(fake_response({}, status=401))
         assert hibob.fetch_hibob("x", "X") == []
 
-    def test_unexpected_shape_returns_empty(self, fake_get, match_everything):
-        fake_get(["not", "a", "dict"])
+    def test_unexpected_shape_returns_empty(self, serve, match_everything):
+        serve(fake_response(["not", "a", "dict"]))
         assert hibob.fetch_hibob("x", "X") == []
 
 
@@ -286,8 +217,8 @@ class TestPeopleAdmin:
         monkeypatch.setattr(peopleadmin, "location_snippet",
                             lambda text, default="See posting": default)
 
-    def test_parses_the_unc_feed(self, fake_get_text, match_everything):
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+    def test_parses_the_unc_feed(self, serve, match_everything):
+        serve({"all_jobs.atom": load_text(self.UNC)})
         jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
         assert len(jobs) == 7
         j = jobs[0]
@@ -296,65 +227,65 @@ class TestPeopleAdmin:
         assert j["company"] == "UNC"
         assert j["posted_at"] == "2026-07-28"
 
-    def test_parses_the_nc_state_feed(self, fake_get_text, match_everything):
+    def test_parses_the_nc_state_feed(self, serve, match_everything):
         """NC State serves PeopleAdmin from its own hostname, and the
         fetcher is handed the feed URL rather than a bare host."""
-        fake_get_text({"all_jobs.atom": load_text(self.NCSU)})
+        serve({"all_jobs.atom": load_text(self.NCSU)})
         jobs = peopleadmin.fetch_peopleadmin(
             "https://jobs.ncsu.edu/postings/all_jobs.atom", "NC State")
         assert len(jobs) == 8
         assert all(j["url"].startswith("https://jobs.ncsu.edu/postings/")
                    for j in jobs)
 
-    def test_job_ids_are_namespaced_by_tenant_host(self, fake_get_text,
+    def test_job_ids_are_namespaced_by_tenant_host(self, serve,
                                                    match_everything):
         """Two tenants, two namespaces — `jobs.ncsu.edu` and any other
         `jobs.<school>.edu` would collide on a first-label key."""
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+        serve({"all_jobs.atom": load_text(self.UNC)})
         unc = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        fake_get_text({"all_jobs.atom": load_text(self.NCSU)})
+        serve({"all_jobs.atom": load_text(self.NCSU)})
         ncsu = peopleadmin.fetch_peopleadmin("jobs.ncsu.edu", "NC State")
         assert unc[0]["id"] == "pa_unc_peopleadmin_com_323091"
         assert ncsu[0]["id"] == "pa_jobs_ncsu_edu_230936"
         assert not {j["id"] for j in unc} & {j["id"] for j in ncsu}
 
-    def test_prefers_all_jobs_over_search(self, fake_get_text,
+    def test_prefers_all_jobs_over_search(self, serve,
                                           match_everything):
-        calls = fake_get_text({"all_jobs.atom": load_text(self.UNC),
+        calls = serve({"all_jobs.atom": load_text(self.UNC),
                                "search.atom": load_text(self.NCSU)})
         jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
         assert calls == ["https://unc.peopleadmin.com/postings/all_jobs.atom"]
         assert all("unc.peopleadmin.com" in j["url"] for j in jobs)
 
-    def test_falls_back_to_search_when_all_jobs_errors(self, fake_get_text,
+    def test_falls_back_to_search_when_all_jobs_errors(self, serve,
                                                        match_everything):
-        calls = fake_get_text({"all_jobs.atom": 404,
+        calls = serve({"all_jobs.atom": 404,
                                "search.atom": load_text(self.UNC)})
         jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
         assert len(jobs) == 7
         assert calls[-1].endswith("/postings/search.atom")
 
-    def test_falls_back_when_all_jobs_is_empty(self, fake_get_text,
+    def test_falls_back_when_all_jobs_is_empty(self, serve,
                                                match_everything):
         """An empty feed is a miss, not an answer: a tenant that publishes
         `all_jobs.atom` with nothing in it still has a saved search."""
-        calls = fake_get_text({"all_jobs.atom": self.EMPTY,
+        calls = serve({"all_jobs.atom": self.EMPTY,
                                "search.atom": load_text(self.UNC)})
         assert len(peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")) == 7
         assert len(calls) == 2
 
-    def test_http_error_returns_empty_not_raises(self, fake_get_text,
+    def test_http_error_returns_empty_not_raises(self, serve,
                                                  match_everything):
-        fake_get_text({"": 503})
+        serve({"": 503})
         assert peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC") == []
 
     def test_description_carries_department_and_position_type(
-            self, fake_get_text, match_everything):
+            self, serve, match_everything):
         """`<author><name>` is the hiring department and the only structured
         text an entry has; position type lives in the body prose. Both have
         to reach the description, because that is all the keyword and title
         gates get to read."""
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+        serve({"all_jobs.atom": load_text(self.UNC)})
         jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
         assert jobs[0]["description"].startswith(
             "Surgery - Surgical Oncology - 414020")
@@ -363,30 +294,30 @@ class TestPeopleAdmin:
         assert all("<" not in j["description"] for j in jobs)
 
     def test_location_is_empty_when_nothing_names_a_place(
-            self, fake_get_text, match_everything, unlocated):
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+            self, serve, match_everything, unlocated):
+        serve({"all_jobs.atom": load_text(self.UNC)})
         jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
         assert jobs and all(j["location"] == "" for j in jobs)
 
     def test_unlocated_postings_survive_a_location_filter(
-            self, fake_get_text, match_everything, unlocated):
+            self, serve, match_everything, unlocated):
         """The whole board, through a filter that matches none of it."""
         from src.ats.fetchers import company
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+        serve({"all_jobs.atom": load_text(self.UNC)})
         jobs = company.fetch_peopleadmin_all("unc.peopleadmin.com",
                                              re.compile("nowhere-at-all"))
         assert len(jobs) == 7
         assert jobs[0]["ats"] == "peopleadmin"
         assert jobs[0]["posted_at"] == "2026-07-28"
 
-    def test_located_postings_are_still_filtered(self, fake_get_text,
+    def test_located_postings_are_still_filtered(self, serve,
                                                  match_everything, monkeypatch):
         """Skipping the gate is about MISSING locations, not about opting
         PeopleAdmin out of location filtering."""
         from src.ats.fetchers import company
         monkeypatch.setattr(peopleadmin, "location_snippet",
                             lambda text, default="See posting": "Chapel Hill, NC")
-        fake_get_text({"all_jobs.atom": load_text(self.UNC)})
+        serve({"all_jobs.atom": load_text(self.UNC)})
         assert company.fetch_peopleadmin_all(
             "unc.peopleadmin.com", re.compile("Raleigh")) == []
         assert len(company.fetch_peopleadmin_all(
@@ -473,7 +404,7 @@ class TestUsajobs:
         jobs = usajobs.fetch_usajobs()
         assert [j["id"] for j in jobs] == [
             "usajobs_830216800", "usajobs_830216801", "usajobs_830216802"]
-        assert [c["params"]["Page"] for c in calls] == [1, 2]
+        assert [c.params["Page"] for c in calls] == [1, 2]
 
     def test_stops_on_an_empty_page(self, usajobs_creds, usajobs_pages,
                                     match_everything):
@@ -489,7 +420,7 @@ class TestUsajobs:
         calls = usajobs_pages([load("usajobs_search.json")])
         usajobs.fetch_usajobs(keyword="data", location="Durham, NC",
                               radius=25, series=["2210", "1550"])
-        params = calls[0]["params"]
+        params = calls[0].params
         assert params["JobCategoryCode"] == "2210;1550"
         assert params["LocationName"] == "Durham, NC"
         assert params["Radius"] == 25
@@ -501,7 +432,7 @@ class TestUsajobs:
         as User-Agent; the shared session's browser UA would be rejected."""
         calls = usajobs_pages([load("usajobs_search.json")])
         usajobs.fetch_usajobs()
-        headers = calls[0]["headers"]
+        headers = calls[0].headers
         assert headers["Authorization-Key"] == "test-key"
         assert headers["User-Agent"] == "someone@example.org"
         assert headers["Host"] == "data.usajobs.gov"
@@ -527,10 +458,8 @@ class TestUsajobs:
         assert usajobs.fetch_usajobs() == []
 
     def test_request_exception_returns_empty(self, usajobs_creds,
-                                             monkeypatch, match_everything):
-        def _boom(*a, **k):
-            raise RuntimeError("connection reset")
-        monkeypatch.setattr(usajobs.SESSION, "get", _boom)
+                                             serve, match_everything):
+        serve(RuntimeError("connection reset"))
         assert usajobs.fetch_usajobs() == []
 
     def test_unexpected_shape_returns_empty(self, usajobs_creds,
@@ -555,18 +484,18 @@ class TestRelevanceGate:
         cfg.INCLUDE_KEYWORDS[:] = ["quantum basket weaving"]
 
     def test_irrelevant_postings_are_dropped_by_the_gate(
-            self, fake_get, nothing_matches):
-        fake_get(load("greenhouse_board.json"))
+            self, serve, nothing_matches):
+        serve(fake_response(load("greenhouse_board.json")))
         assert api.fetch_greenhouse("databricks", "Databricks",
                                         gate=is_relevant) == []
 
-    def test_no_gate_keeps_everything(self, fake_get, nothing_matches):
-        fake_get(load("greenhouse_board.json"))
+    def test_no_gate_keeps_everything(self, serve, nothing_matches):
+        serve(fake_response(load("greenhouse_board.json")))
         assert api.fetch_greenhouse("databricks", "Databricks")
 
-    def test_the_registry_thunk_is_gated(self, fake_get, nothing_matches):
+    def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
         from src.ats.registry import ATS_REGISTRY
-        fake_get(load("greenhouse_board.json"))
+        serve(fake_response(load("greenhouse_board.json")))
         thunk = ATS_REGISTRY["greenhouse"][0]("Databricks", "databricks")
         assert thunk() == []
 
@@ -613,13 +542,9 @@ class TestAshbyKeyAcrossCallSites:
     ]}
 
     @pytest.fixture
-    def ashby_board(self, monkeypatch):
+    def ashby_board(self, serve):
         """Serve BOARD to every module that reads the Ashby posting API."""
-        # One shared session object behind every module (src.net.http.SESSION).
-        from src.discovery.resolve import probes
-        monkeypatch.setattr(
-            probes.SESSION, "get",
-            lambda *a, **k: fake_response(TestAshbyKeyAcrossCallSites.BOARD))
+        serve(fake_response(TestAshbyKeyAcrossCallSites.BOARD))
 
     def test_probe_reports_the_real_total(self, ashby_board):
         from src.discovery.resolve.probes import probe_ashby
@@ -647,15 +572,12 @@ class TestAshbyKeyAcrossCallSites:
         assert jobs[0]["location"] == "Morrisville, North Carolina"
         assert jobs[0]["ats"] == "ashby" and jobs[0]["posted_at"] == "2026-05-28"
 
-    def test_workday_branch_still_reads_job_postings(self, monkeypatch):
+    def test_workday_branch_still_reads_job_postings(self, serve):
         """Workday really does return `jobPostings`. The two branches sit in
         one function, so a careless sweep would break Workday while fixing
         Ashby — this pins the other direction."""
         from src.discovery import local_sourcing
-        monkeypatch.setattr(
-            local_sourcing.SESSION, "post",
-            lambda *a, **k: fake_response(
-                {"jobPostings": [{"title": "Clinical Trial Liaison"}]}))
+        serve(fake_response({"jobPostings": [{"title": "Clinical Trial Liaison"}]}))
         titles = local_sourcing._sample_titles(
             {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
         assert titles == ["Clinical Trial Liaison"]
@@ -673,11 +595,11 @@ class TestGetro:
     IDS = ("91000001", "91000002", "91000003", "91000004")
 
     @pytest.fixture
-    def board(self, fake_get_text):
+    def board(self, serve):
         routes = {"sitemap.xml": load_text("getro_sitemap.xml")}
         for jid in self.IDS:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
-        return fake_get_text(routes)
+        return serve(routes)
 
     def test_parses_the_board_newest_first(self, board, match_everything):
         jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
@@ -724,13 +646,13 @@ class TestGetro:
         assert [j["id"] for j in jobs] == ["getro_91000002"]
         assert not any("91000001" in u or "91000004" in u for u in board)
 
-    def test_a_challenged_board_returns_empty(self, fake_get_text,
+    def test_a_challenged_board_returns_empty(self, serve,
                                               match_everything):
         # Cloudflare's "Just a moment..." answers the sitemap with a 403.
-        fake_get_text({"sitemap.xml": 403})
+        serve({"sitemap.xml": 403})
         assert getro.fetch_getro_all(self.BOARD, detail_delay=0) == []
 
-    def test_a_sitemap_index_is_followed(self, fake_get_text, match_everything):
+    def test_a_sitemap_index_is_followed(self, serve, match_everything):
         index = ('<sitemapindex><sitemap><loc>'
                  'https://jobs.example-network.org/sitemaps/jobs-1.xml'
                  '</loc></sitemap></sitemapindex>')
@@ -738,16 +660,16 @@ class TestGetro:
                   "sitemaps/jobs-1.xml": load_text("getro_sitemap.xml")}
         for jid in self.IDS:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
-        fake_get_text(routes)
+        serve(routes)
         assert len(getro.fetch_getro_all(self.BOARD, detail_delay=0)) == 3
 
-    def test_a_page_without_the_record_is_skipped(self, fake_get_text,
+    def test_a_page_without_the_record_is_skipped(self, serve,
                                                    match_everything):
         routes = {"sitemap.xml": load_text("getro_sitemap.xml"),
                   "/jobs/91000001-": "<html><body>moved</body></html>"}
         for jid in self.IDS[1:]:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
-        fake_get_text(routes)
+        serve(routes)
         ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert ids == ["getro_91000002", "getro_91000004"]
 
@@ -869,32 +791,8 @@ class TestJobvite:
     """
 
     @pytest.fixture
-    def site(self, monkeypatch):
-        """Route by URL INCLUDING the query string, so the page number a
-        fetcher asked for is observable (fake_get_text drops params)."""
-        def _install(routes):
-            calls = []
-
-            def _get(url, *a, **k):
-                params = k.get("params") or {}
-                full = url + ("?" + "&".join(f"{kk}={vv}" for kk, vv
-                                             in params.items())
-                              if params else "")
-                calls.append(full)
-                for fragment, body in routes.items():
-                    if fragment in full:
-                        return (fake_response(text="", status=body)
-                                if isinstance(body, int)
-                                else fake_response(text=body))
-                return fake_response(text="", status=404)
-
-            monkeypatch.setattr(jobvite.SESSION, "get", _get)
-            return calls
-        return _install
-
-    @pytest.fixture
-    def acme(self, site):
-        return site({"search?p=0": load_text("jobvite_search_p0.html"),
+    def acme(self, serve):
+        return serve({"search?p=0": load_text("jobvite_search_p0.html"),
                      "search?p=1": load_text("jobvite_search_p1.html"),
                      "search?p=2": load_text("jobvite_search_empty.html"),
                      "/job/": load_text("jobvite_job.html")})
@@ -939,14 +837,14 @@ class TestJobvite:
             gate=lambda t, d="": "python" in f"{t} {d}".lower())
         assert "Lab Assistant (Temp)" in [j["title"] for j in jobs]
 
-    def test_a_dead_search_falls_back_to_the_jobs_page(self, site,
+    def test_a_dead_search_falls_back_to_the_jobs_page(self, serve,
                                                         match_everything):
-        site({"search?p=0": 500, "/acme/jobs": load_text("jobvite_search_p0.html")})
+        serve({"search?p=0": 500, "/acme/jobs": load_text("jobvite_search_p0.html")})
         jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
         assert len(jobs) == 3
 
-    def test_nothing_reachable_returns_empty(self, site, match_everything):
-        site({})
+    def test_nothing_reachable_returns_empty(self, serve, match_everything):
+        serve({})
         assert jobvite.fetch_jobvite("acme", "Acme Labs") == []
 
     def test_any_page_of_the_site_names_the_tenant(self, acme, match_everything):
@@ -995,20 +893,20 @@ class TestFieldHygiene:
         assert [(j["title"], j["location"]) for j in out] == \
             [("Data Engineer", "Durham, NC")]
 
-    def test_smartrecruiters_cleans_its_own_rows(self, fake_get):
-        fake_get({"totalFound": 1, "content": [
+    def test_smartrecruiters_cleans_its_own_rows(self, serve):
+        serve(fake_response({"totalFound": 1, "content": [
             {"id": "77", "name": "Clinical\nData Engineer",
              "location": {"city": "Durham\t", "region": "NC",
-                          "country": "US"}}]})
+                          "country": "US"}}]}))
         j = company.fetch_smartrecruiters_all("acme")[0]
         assert j["title"] == "Clinical Data Engineer"
         assert j["location"] == "Durham, NC, US"
 
-    def test_wpjson_cleans_its_own_rows(self, fake_get):
-        fake_get({"max_num_pages": 1, "posts": [
+    def test_wpjson_cleans_its_own_rows(self, serve):
+        serve(fake_response({"max_num_pages": 1, "posts": [
             {"ID": 5, "post_title": "Research\nTechnician",
              "link": {"url": "https://x.test/j/5"},
-             "location": {"city": "Durham\n", "state": "NC"}}]})
+             "location": {"city": "Durham\n", "state": "NC"}}]}))
         j = company.fetch_wpjson_careers_all("https://x.test")[0]
         assert j["title"] == "Research Technician"
         assert j["location"] == "Durham, NC"
@@ -1047,20 +945,20 @@ class TestOneFetcherPerAts:
         for ats, (_mk, tag, _pause) in ATS_REGISTRY.items():
             assert tag == (tags.SWEEP if ats in LIGHTWEIGHT else tags.LOCAL), ats
 
-    def test_the_dispatch_table_adapts_the_module_fetcher(self, fake_get,
+    def test_the_dispatch_table_adapts_the_module_fetcher(self, serve,
                                                           match_everything):
         from src.ats.fetchers import company
-        fake_get(load("greenhouse_board.json"))
+        serve(fake_response(load("greenhouse_board.json")))
         module = api.fetch_greenhouse("databricks", "Databricks")
         vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
         assert [j["id"] for j in vetted] == [j["id"] for j in module]
         assert all(j["ats"] == "greenhouse" and j["_wd"] is None
                    and "company" not in j for j in vetted)
 
-    def test_the_location_regex_filters_the_listing(self, fake_get,
+    def test_the_location_regex_filters_the_listing(self, serve,
                                                     match_everything):
         from src.ats.fetchers import company
-        fake_get(load("greenhouse_board.json"))
+        serve(fake_response(load("greenhouse_board.json")))
         everything = company.fetch_company({"ats": "greenhouse", "slug": "x"})
         nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
                                         re.compile("nowhere-at-all"))
@@ -1087,31 +985,31 @@ class TestTitleSampling:
     def test_every_sampler_is_a_company_dispatch(self):
         assert set(company._TITLE_SAMPLERS) <= set(company.FETCHERS)
 
-    def test_a_rippling_board_is_sampled_at_listing_cost(self, requested):
-        urls = requested(self.RIPPLING)
+    def test_a_rippling_board_is_sampled_at_listing_cost(self, serve):
+        urls = serve(fake_response(self.RIPPLING))
         titles = company.sample_titles(
             {"ats": "rippling", "slug": "core-sound-imaging"})
         assert titles == ["PACS Support Engineer", "Imaging Software Developer"]
         assert len(urls) == 1 and "core-sound-imaging" in urls[0]
 
-    def test_a_bamboohr_board_is_sampled_at_listing_cost(self, requested):
-        urls = requested({"result": [
+    def test_a_bamboohr_board_is_sampled_at_listing_cost(self, serve):
+        urls = serve(fake_response({"result": [
             {"id": 7, "jobOpeningName": "Field Service Engineer",
-             "location": {"city": "Cary", "state": "NC"}}]})
+             "location": {"city": "Cary", "state": "NC"}}]}))
         assert company.sample_titles({"ats": "bamboohr", "slug": "acme"}) == \
             ["Field Service Engineer"]
         assert [u.rsplit("/", 1)[-1] for u in urls] == ["list"]
 
     def test_a_one_request_family_samples_through_its_company_fetcher(
-            self, fake_get):
-        fake_get(load("hibob_board.json"))
+            self, serve):
+        serve(fake_response(load("hibob_board.json")))
         row = {"ats": "hibob", "slug": "acme"}
         whole = [j["title"] for j in company.fetch_company(row)]
         assert whole and company.sample_titles(row, n=50) == whole
         assert company.sample_titles(row, n=1) == whole[:1]
 
-    def test_titles_are_distinct_and_capped(self, requested):
-        requested(self.RIPPLING)
+    def test_titles_are_distinct_and_capped(self, serve):
+        serve(fake_response(self.RIPPLING))
         row = {"ats": "rippling", "slug": "core-sound-imaging"}
         assert company.sample_titles(row, n=2) == [
             "PACS Support Engineer", "Imaging Software Developer"]
@@ -1124,10 +1022,8 @@ class TestTitleSampling:
         {"ats": "no-such-ats"},                   # nothing that could
     ])
     def test_an_unreadable_board_samples_empty_and_never_raises(
-            self, row, monkeypatch, capsys):
-        def _refused(*a, **k):
-            raise OSError("connection refused")
-        monkeypatch.setattr(http.SESSION, "get", _refused)
+            self, row, serve, capsys):
+        serve(OSError("connection refused"))
         http.reset_fetch_failures()
         assert company.sample_titles(row) == []
 
@@ -1159,7 +1055,7 @@ class TestMissionContext:
         assert local_sourcing.mission_context({"ats": "custom"}) == ""
 
     def test_the_scorer_is_sent_the_context_for_an_unsampled_family(
-            self, requested, monkeypatch):
+            self, serve, monkeypatch):
         """Through the real sampler: a Rippling board (no branch of its own
         before 2026-09-18) reaches the scorer with its titles, and once its
         board is empty, with its address."""
@@ -1168,10 +1064,10 @@ class TestMissionContext:
         monkeypatch.setattr(
             "src.claude.api.score_company_mission",
             lambda name, context="": sent.append(context) or ("adjacent", .5, ""))
-        requested(TestTitleSampling.RIPPLING)
+        serve(fake_response(TestTitleSampling.RIPPLING))
         local_sourcing._score_hit(self.BOARD)
         assert sent[-1] == "PACS Support Engineer | Imaging Software Developer"
-        requested([])
+        serve(fake_response([]))
         local_sourcing._score_hit(self.BOARD)
         assert "core-sound-imaging" in sent[-1]
 
@@ -1210,29 +1106,9 @@ class TestADeadEndpointIsNeverAnException:
     }
 
     @pytest.fixture(params=["refused", "http-500"])
-    def dead_source(self, request, monkeypatch):
-        """SESSION is one shared object, so patching `get` (and `post`, for
-        Workday's POST-based listing) on it covers every module that
-        imported the name. Patch it at its DEFINITION site (src.net.http):
-        reaching it through a fetcher that re-exports but never calls it
-        makes the test depend on an import that reads as unused."""
-        if request.param == "refused":
-            def _get(*a, **k):
-                raise OSError("connection refused")
-        else:
-            class _Resp:
-                status_code = 500
-
-                def raise_for_status(self):
-                    raise RuntimeError("500 Server Error")
-
-                def json(self):
-                    raise AssertionError("json() must not be reached")
-
-            def _get(*a, **k):
-                return _Resp()
-        monkeypatch.setattr(http.SESSION, "get", _get)
-        monkeypatch.setattr(http.SESSION, "post", _get)
+    def dead_source(self, request, serve):
+        serve(OSError("connection refused") if request.param == "refused"
+              else fake_response(status=500))
 
     @pytest.mark.parametrize("name", sorted(CALLS))
     def test_reports_and_returns_empty(self, name, dead_source, capsys,

@@ -7,6 +7,7 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 from src import config
 
@@ -211,6 +212,21 @@ def clean_url(u):
         spaces, which is why only runs with a break or tab go.
     """
     return _URL_BREAK_RE.sub("", u).strip() if u else u
+
+
+def host_of(url):
+    """The host `url` names, lowercased, without port or credentials;
+    "" when it names none.
+
+    >>> host_of("https://user@Jobs.Example.com:8443/careers?x=1")
+    'jobs.example.com'
+    >>> host_of("careers"), host_of("http://[::1"), host_of(None)
+    ('', '', '')
+    """
+    try:
+        return urlsplit(url or "").hostname or ""
+    except ValueError:
+        return ""
 
 
 def stable_id(*parts) -> str:

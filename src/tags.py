@@ -117,7 +117,8 @@ def join(tags):
 
 
 def has(raw, tag):
-    """True if a company's stored `tags` includes `tag`, legacy names too.
+    """True if a company's stored `tags` -- the column, or the whole row --
+    includes `tag`, legacy names too.
 
     Either side may be legacy — a stored `nc_local` answers to `local`, and
     a caller still asking for `nc_local` gets the row stored as `local`:
@@ -131,9 +132,13 @@ def has(raw, tag):
     >>> has("local", "sweep")
     False
 
-    A NULL tags column is simply no tokens:
+    A NULL tags column is simply no tokens, and so is a missing row:
 
     >>> has(None, "local")
     False
+    >>> has({"name": "Acme", "tags": "watch"}, "watch"), has({}, "watch")
+    (True, False)
     """
+    if isinstance(raw, dict):
+        raw = raw.get("tags")
     return canonical(tag) in parse(raw)

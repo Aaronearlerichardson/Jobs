@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
+import requests
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:                      # importable as `pytest tests`
@@ -24,6 +25,9 @@ from src import config as _config                           # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
 import src.crawl.runner as _runner                  # noqa: E402
+import src.ats.fetchers.probe as _job_probe         # noqa: E402
+import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
+from src.net import http as _http                   # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -34,6 +38,19 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
     monkeypatch.setattr(_session_log, "_log_dir",
                         lambda: tmp_path / "session-logs")
     monkeypatch.setattr(_config, "REPORT_DIR", tmp_path / "job_reports")
+
+
+@pytest.fixture(autouse=True)
+def _fresh_run_state(monkeypatch):
+    """Per-run memos start empty in every test: both dead-host breakers,
+    discovery's page memo and DNS cache, and the closure probe's Ashby
+    board memo."""
+    for mod in (_fetchpool, _job_probe):
+        old = mod._DEAD_HOSTS
+        monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
+    monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
+    monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
+    monkeypatch.setattr(_job_probe, "_ASHBY_BOARDS", {})
 
 
 # --------------------------------------------------------------------------- #
@@ -303,7 +320,8 @@ def keep_store_open(monkeypatch, db):
 
 def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     """A stand-in for a requests Response: `status_code`,
-    `raise_for_status()`, `json()`, `text`, `content`, `url`.
+    `raise_for_status()`, `json()`, `text`, `content`, `url`,
+    `headers` (empty).
 
     Thirteen of these were defined across five test files, each with its
     own idea of which two or three attributes mattered and what
@@ -312,12 +330,13 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     should have caught it passes because a DIFFERENT stub has it.
 
     `payload` is what json() returns; `text` defaults to that payload as
-    JSON, so a stub serves both the JSON and the scrape paths. `status`
-    >= 400 makes raise_for_status raise, which is what net.http.get_json
-    turns into a reported miss. `url` is the FINAL url a redirect-following
-    GET reports (what probe.probe_job_open's greenhouse redirect check
-    and sniffer.candidate_pages read); it is always present, so no caller
-    has to bolt one on.
+    JSON, so a stub serves both the JSON and the scrape paths. `status` >=
+    400 makes raise_for_status raise requests.HTTPError carrying this
+    response, as requests does (claude.api reads its status and body). `url`
+    is the FINAL url a redirect-following GET reports (what
+    probe.probe_job_open's greenhouse redirect check and
+    sniffer.candidate_pages read); it is always present, so no caller has to
+    bolt one on.
     """
     body = text if text is not None else (
         json.dumps(payload) if payload is not None else "")
@@ -327,10 +346,11 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     class _Response:
         status_code = status
         url = final_url
+        headers = {}
 
         def raise_for_status(self):
             if status >= 400:
-                raise RuntimeError(f"{status} Error")
+                raise requests.HTTPError(f"{status} Error", response=self)
 
         def json(self):
             if payload is None:
@@ -346,3 +366,67 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
             return body.encode() if content is None else content
 
     return _Response()
+
+
+class Request(str):
+    """One request a `serve`d session answered: equal to its URL with any
+    `params` appended as a query string. `.url` is the URL alone; `.method`,
+    `.params`, `.headers` and `.kw` are what was sent."""
+
+
+@pytest.fixture
+def serve(monkeypatch):
+    """Answer SESSION's GETs and POSTs from the test, never the network:
+    `serve(reply)` installs `reply` and returns the log of `Request`s.
+
+    `reply` is a response (fake_response); an Exception, raised; a str
+    body or an int status; a callable(url, **kw) returning any of these; a
+    {fragment: reply} dict, routed on the first fragment found in the URL
+    and its query (none found is a 404, or an AssertionError with
+    `strict=True`); or a list served front first, its last item repeating
+    -- the caller's own list, so a test may append after installing.
+
+    Patches net.http.SESSION, the one every fetcher shares; `session=`
+    names another (claude.api keeps its own).
+    """
+    def _resolve(reply, url, full, kw, strict):
+        if isinstance(reply, list):
+            reply = reply.pop(0) if len(reply) > 1 else reply[0]
+            return _resolve(reply, url, full, kw, strict)
+        if isinstance(reply, dict):
+            for fragment, routed in reply.items():
+                if fragment in full:
+                    return _resolve(routed, url, full, kw, strict)
+            if strict:
+                raise AssertionError(f"request to an unrouted URL: {full}")
+            return fake_response(text="", status=404)
+        if isinstance(reply, BaseException):
+            raise reply
+        if isinstance(reply, str):
+            return fake_response(text=reply)
+        if isinstance(reply, int):
+            return fake_response(text="", status=reply)
+        if callable(reply):
+            return _resolve(reply(url, **kw), url, full, kw, strict)
+        return reply
+
+    def _install(reply, session=None, strict=False):
+        log = []
+
+        def _method(name):
+            def _call(url, *args, **kw):
+                params = dict(kw.get("params") or {})
+                full = url + ("?" + "&".join(f"{k}={v}" for k, v in params.items())
+                              if params else "")
+                req = Request(full)
+                req.url, req.method, req.params, req.kw = url, name, params, kw
+                req.headers = dict(kw.get("headers") or {})
+                log.append(req)
+                return _resolve(reply, url, full, kw, strict)
+            return _call
+
+        target = session or _http.SESSION
+        monkeypatch.setattr(target, "get", _method("GET"))
+        monkeypatch.setattr(target, "post", _method("POST"))
+        return log
+    return _install

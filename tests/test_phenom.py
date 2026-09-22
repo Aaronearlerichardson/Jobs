@@ -42,25 +42,20 @@ def _job(req_id, title="Registered Nurse",
 
 
 @pytest.fixture
-def phenom_pages(monkeypatch):
-    """Stub `phenom.SESSION.get`: a bare GET (no `from`/`size` params)
-    answers the board's locale-resolving root GET (see `_locale_base`),
-    simulating the real site's own redirect; a `/search-results` GET is
-    answered from `pages`, keyed by the `from` query param -- a real
-    Phenom board pages this way, not by page number (see module doc).
+def phenom_pages(serve):
+    """`serve` one board: a bare GET (no `from`/`size` params) answers the
+    board's locale-resolving root GET (see `_locale_base`), simulating the
+    real site's own redirect; a `/search-results` GET is answered from
+    `pages`, keyed by the `from` query param -- a real Phenom board pages
+    this way, not by page number (see module doc).
     """
     def _install(base, pages, root_ok=True):
-        calls = []
-
-        def _get(url, params=None, headers=None, **kw):
-            calls.append({"url": url, "params": dict(params or {})})
+        def _get(url, params=None, **kw):
             if params and "from" in params:
                 return fake_response(text=pages.get(params["from"], ""))
             return fake_response(text="", status=200 if root_ok else 404,
                                  url=base)
-
-        monkeypatch.setattr(phenom.SESSION, "get", _get)
-        return calls
+        return serve(_get)
     return _install
 
 
@@ -96,8 +91,8 @@ class TestListing:
         })
         rows = phenom.fetch_phenom_all("careers.example.org")
         assert [r["id"] for r in rows] == ["phenom_1", "phenom_2"]
-        assert calls[0]["url"] == "https://careers.example.org"
-        assert calls[1]["url"] == f"{base}/search-results"
+        assert calls[0].url == "https://careers.example.org"
+        assert calls[1].url == f"{base}/search-results"
 
     def test_overlap_paging_survives_reshuffled_pages(self, phenom_pages):
         """Ten jobs, page_size=6 (step=3): the server's own listing order
@@ -197,11 +192,8 @@ class TestCompanyDispatch:
         assert [j["id"] for j in out] == ["phenom_1"]
         assert out[0]["ats"] == "phenom"
 
-    def test_hydrate_description_reads_a_recorded_detail_page(self,
-                                                              monkeypatch):
-        monkeypatch.setattr(
-            phenom.SESSION, "get",
-            lambda *a, **k: fake_response(text=load_text("phenom_job_detail.html")))
+    def test_hydrate_description_reads_a_recorded_detail_page(self, serve):
+        serve(load_text("phenom_job_detail.html"))
         job = {"ats": "phenom", "url": "https://careers.example.org/us/en/job/273419",
                "description": "", "location": ""}
         out = company.hydrate_description(job)

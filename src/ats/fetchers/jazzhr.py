@@ -19,7 +19,7 @@ from src.net.http import HEADERS, SESSION, fetch_failed
 from .board import board_jobs
 from .jsonld import _job_from_posting, extract_jsonld, is_jobposting
 
-_APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
+APPLY_RE = re.compile(r"/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+")
 
 
 def board_url(subdomain):
@@ -62,7 +62,7 @@ def fetch_jazzhr(company_name, subdomain, gate=None, loc_re=None, max_jobs=60,
         return fetch_failed(f"JazzHR {label}", e)
 
     seen, urls = set(), []
-    for path in _APPLY_RE.findall(r.text):
+    for path in APPLY_RE.findall(r.text):
         url = base + path
         if url in seen:
             continue

@@ -213,25 +213,9 @@ def rewrite_digest(conn, t, top_n=15, heading=""):
 
 
 # --------------------------------------------------------------------------- #
-#  Company-tag helpers (store roster semantics, shared by crawl + ops).        #
+#  Company-row helpers (store roster semantics, shared by crawl + ops).        #
+#  Tag checks are tags.has(company, tags.WATCH) etc.                           #
 # --------------------------------------------------------------------------- #
-#
-# NEAR-MISS, DELIBERATE: only a tag name differs; the shared logic already
-# lives in tags.has().
-
-def _is_sweep_tagged(company):
-    """True if the company carries the 'sweep' scope tag."""
-    if not company:
-        return False
-    return tags.has(company.get("tags"), tags.SWEEP)
-
-
-def _is_watched(company):
-    """True if the company carries the 'watch' tag."""
-    if not company:
-        return False
-    return tags.has(company.get("tags"), tags.WATCH)
-
 
 def _mission_trusted(company, floor):
     """True if a store company row earns watch-grade remote treatment on its
@@ -289,7 +273,7 @@ def _whole_board(company, mission_floor=None):
         and the count climbs fast as the floor drops. It is a knob to move
         deliberately.
     """
-    return (_is_sweep_tagged(company) or _is_watched(company)
+    return (tags.has(company, tags.SWEEP) or tags.has(company, tags.WATCH)
             or _mission_trusted(company, mission_floor))
 
 
@@ -316,11 +300,11 @@ def _keep_job(company, job, t):
         # crawl path and the triage path disagreed about the same posting at
         # the same company, and one silently dropped what the other kept.
         if not is_relevant(title, job.get("description", ""),
-                           watch_titles=_is_watched(company)):
+                           watch_titles=tags.has(company, tags.WATCH)):
             return False
     if t["exclude_gate"] and gates.exclude_reason(
             title, job.get("description", ""),
-            allow_defense=_is_watched(company), track_id=t["id"]):
+            allow_defense=tags.has(company, tags.WATCH), track_id=t["id"]):
         return False
     floor = t.get("remote_mission_floor")
     if t["geo_gate"] and _whole_board(company, floor):
@@ -335,7 +319,7 @@ def _keep_job(company, job, t):
         #              untrustworthy for an out-of-area exception (slug
         #              collisions flooded the ranking with remote junk).
         gm = geo_mode(job.get("location", ""), job.get("description", ""))
-        if _is_watched(company) or _mission_trusted(company, floor):
+        if tags.has(company, tags.WATCH) or _mission_trusted(company, floor):
             if gm is None:
                 return False
         elif gm != "onsite":
@@ -1537,7 +1521,7 @@ def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
                 # explicitly remote. Enforced even for curated adds.
                 loc = j.get("location", "") or ""
                 is_local = bool(NC_RE.search(loc))
-                trusted = (_is_watched(company_row)
+                trusted = (tags.has(company_row, tags.WATCH)
                            or _mission_trusted(company_row,
                                                t.get("remote_mission_floor")))
                 is_remote_trusted = (
@@ -1748,7 +1732,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
             off = [c for c in store.get_companies(conn, active_only=True)
                    if c.get("mission_tier") == "other"
                    and not config.is_multi_division(c.get("name"))
-                   and not _is_watched(c)]
+                   and not tags.has(c, tags.WATCH)]
             for c in off:
                 store.deactivate_company(conn, c["id"])
                 print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
@@ -2164,15 +2148,15 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 # `board_rows` already records that the postings live under `jobs`. A private
 # copy of either reads an empty board as "no employer name", silently.
 #
-# SmartRecruiters has no fetcher module, so its root lives here; `limit=1` is
-# the shape src.discovery.resolve.probes.probe_smartrecruiters uses -- one
-# posting is enough to name a board.
+# SmartRecruiters' root is company_fetch's; `limit=1` is the shape
+# src.discovery.resolve.probes.probe_smartrecruiters uses -- one posting is
+# enough to name a board.
 _EMPLOYER_NAME_READERS = {
     "greenhouse": (fetchers_api.BOARD_URLS["greenhouse"], "Greenhouse",
                    lambda d: fetchers_api.board_rows("greenhouse", d),
                    lambda j: j.get("company_name")),
     "smartrecruiters": (
-        "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1",
+        company_fetch.SMARTRECRUITERS_API + "?limit=1",
         "SmartRecruiters",
         lambda d: (d or {}).get("content") or [],
         lambda j: (j.get("company") or {}).get("name")),

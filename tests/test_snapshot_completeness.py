@@ -397,16 +397,6 @@ class TestSuccessFactorsSnapshot:
         assert http.snapshot_info()["capped"]
 
 
-class _OnePageSession:
-    """Serves one fixed page of HTML regardless of the requested startrow."""
-
-    def __init__(self, html):
-        self.html = html
-
-    def get(self, url, **kw):
-        return fake_response(text=self.html)
-
-
 class TestSuccessFactorsLocation:
     """A slug-less tenant (URLs shaped "City-Title-ST-zip", no comma, so
     _SF_LOC_SLUG_RE never matches) falls back to the row's own markup. The
@@ -435,23 +425,22 @@ class TestSuccessFactorsLocation:
             '</tr></table></body></html>')
 
     def test_the_jobLocation_cell_wins_over_the_flattened_row_text(
-            self, monkeypatch):
-        monkeypatch.setattr(sf, "SESSION",
-                            _OnePageSession(self._row_html("Springfield, IL, US, 62701")))
+            self, serve):
+        serve(self._row_html("Springfield, IL, US, 62701"))
         rows = list(sf._sf_rows("https://careers.example.edu", "Example",
                                 step=25, max_pages=1))
         assert len(rows) == 1
         assert rows[0]["location"] == "Springfield, IL, US, 62701"
 
     def test_a_skin_with_no_jobLocation_cell_still_gets_a_clean_place(
-            self, monkeypatch, local_addr):
+            self, serve, local_addr):
         """No `.jobLocation` markup at all: falls back to location_snippet
         on the row text, run through the same date/repeat cleanup."""
         html = ('<html><body><table><tr class="data-row">'
                 '<td><a class="jobTitle-link" href="/job/x/1/">Some Title</a>'
                 f'<span>{local_addr} Sep 17, 2026 {local_addr}</span></td>'
                 '</tr></table></body></html>')
-        monkeypatch.setattr(sf, "SESSION", _OnePageSession(html))
+        serve(html)
         rows = list(sf._sf_rows("https://careers.example.com", "Example",
                                 step=25, max_pages=1))
         assert len(rows) == 1

@@ -71,54 +71,39 @@ def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
     return ids
 
 
-@pytest.fixture
-def answer(monkeypatch):
-    """Serve one response to every probe, and record the request."""
-    seen = {}
-
-    def _install(resp):
-        def _get(url, **kw):
-            seen["url"], seen["headers"] = url, kw.get("headers") or {}
-            seen["timeout"] = kw.get("timeout")
-            return resp
-        monkeypatch.setattr(probes.SESSION, "get", _get)
-        return seen
-    return _install
-
-
 class TestAPresentBoardIsConfirmed:
-    def test_greenhouse_counts_its_jobs(self, answer):
-        answer(fake_response({"jobs": [1, 2, 3]}))
+    def test_greenhouse_counts_its_jobs(self, serve):
+        serve(fake_response({"jobs": [1, 2, 3]}))
         assert probes.probe_greenhouse("acme") == (True, 3)
 
-    def test_lever_counts_a_bare_list(self, answer):
-        answer(fake_response([1, 2]))
+    def test_lever_counts_a_bare_list(self, serve):
+        serve(fake_response([1, 2]))
         assert probes.probe_lever("acme") == (True, 2)
 
-    def test_lever_tolerates_a_non_list_payload(self, answer):
-        answer(fake_response({"unexpected": True}))
+    def test_lever_tolerates_a_non_list_payload(self, serve):
+        serve(fake_response({"unexpected": True}))
         assert probes.probe_lever("acme") == (True, 0)
 
-    def test_ashby_reads_the_posting_api_key(self, answer):
-        answer(fake_response({"jobs": [1, 2], "jobPostings": []}))
+    def test_ashby_reads_the_posting_api_key(self, serve):
+        serve(fake_response({"jobs": [1, 2], "jobPostings": []}))
         assert probes.probe_ashby("acme") == (True, 2)
 
-    def test_ashby_falls_back_to_the_embed_key(self, answer):
-        answer(fake_response({"jobPostings": [1]}))
+    def test_ashby_falls_back_to_the_embed_key(self, serve):
+        serve(fake_response({"jobPostings": [1]}))
         assert probes.probe_ashby("acme") == (True, 1)
 
-    def test_bamboohr_asks_for_json(self, answer):
-        seen = answer(fake_response({"result": [1, 2, 3, 4]}))
+    def test_bamboohr_asks_for_json(self, serve):
+        seen = serve(fake_response({"result": [1, 2, 3, 4]}))
         assert probes.probe_bamboohr("acme") == (True, 4)
-        assert seen["headers"]["Accept"] == "application/json"
+        assert seen[-1].headers["Accept"] == "application/json"
 
-    def test_jazzhr_counts_apply_links_in_the_page(self, answer):
-        answer(fake_response(text="<a href='/apply/AbC123/'>x</a>"
-                          "<a href='/apply/dEf456/'>y</a>"))
+    def test_jazzhr_counts_apply_links_in_the_page(self, serve):
+        serve(fake_response(text="<a href='/apply/AbC123/Engineer'>x</a>"
+                          "<a href='/apply/dEf456/Scientist'>y</a>"))
         assert probes.probe_jazzhr("acme") == (True, 2)
 
-    def test_kula_accepts_a_substantial_page(self, answer):
-        answer(fake_response(text="x" * 1001))
+    def test_kula_accepts_a_substantial_page(self, serve):
+        serve(fake_response(text="x" * 1001))
         assert probes.probe_kula("acme") == (True, 0)
 
 
@@ -126,24 +111,25 @@ class TestAnEmptyBoardIsNotAlwaysAMiss:
     """An ATS that only serves real slugs may legitimately list nothing;
     one that answers for any slug must show postings to count as found."""
 
-    def test_greenhouse_empty_is_still_a_board(self, answer):
-        answer(fake_response({"jobs": []}))
+    def test_greenhouse_empty_is_still_a_board(self, serve):
+        serve(fake_response({"jobs": []}))
         assert probes.probe_greenhouse("acme") == (True, 0)
 
-    def test_smartrecruiters_empty_is_not_a_board(self, answer):
-        answer(fake_response({"totalFound": 0}))
+    def test_smartrecruiters_empty_is_not_a_board(self, serve):
+        serve(fake_response({"totalFound": 0}))
         assert probes.probe_smartrecruiters("acme") == (False, 0)
 
-    def test_smartrecruiters_with_postings_is(self, answer):
-        answer(fake_response({"totalFound": 7}))
+    def test_smartrecruiters_with_postings_is(self, serve):
+        serve(fake_response({"totalFound": 7}))
         assert probes.probe_smartrecruiters("acme") == (True, 7)
 
-    def test_jazzhr_with_no_apply_links_is_not_a_board(self, answer):
-        answer(fake_response(text="<html>nothing here</html>"))
+    def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
+        # Every JazzHR page links /apply/confirm/, postings or not.
+        serve(fake_response(text="<a href='/apply/confirm/'>x</a>" * 2))
         assert probes.probe_jazzhr("acme") == (False, 0)
 
-    def test_kula_rejects_a_stub_page(self, answer):
-        answer(fake_response(text="too short"))
+    def test_kula_rejects_a_stub_page(self, serve):
+        serve(fake_response(text="too short"))
         assert probes.probe_kula("acme") == (False, 0)
 
 
@@ -153,38 +139,26 @@ class TestFailureIsReportedNeverRaised:
     payload that will not parse -- so one broken host cannot end the pass.
     """
 
-    def test_a_non_200_is_a_miss(self, answer):
-        answer(fake_response({"jobs": [1]}, status=404))
+    def test_a_non_200_is_a_miss(self, serve):
+        serve(fake_response({"jobs": [1]}, status=404))
         assert probes.probe_greenhouse("acme") == (False, 0)
 
-    def test_unparseable_json_is_a_miss(self, answer):
-        answer(fake_response(None))
+    def test_unparseable_json_is_a_miss(self, serve):
+        serve(fake_response(None))
         assert probes.probe_greenhouse("acme") == (False, 0)
 
-    def test_a_raising_session_is_a_miss(self, monkeypatch):
-        def _boom(*a, **kw):
-            raise OSError("connection reset")
-        monkeypatch.setattr(probes.SESSION, "get", _boom)
+    def test_a_raising_session_is_a_miss(self, serve):
+        serve(OSError("connection reset"))
         assert probes.probe_greenhouse("acme") == (False, 0)
 
-    def test_kula_retries_once_before_giving_up(self, monkeypatch):
-        calls = []
-
-        def _get(url, **kw):
-            calls.append(url)
-            raise OSError("throttled")
-        monkeypatch.setattr(probes.SESSION, "get", _get)
+    def test_kula_retries_once_before_giving_up(self, serve, monkeypatch):
+        calls = serve(OSError("throttled"))
         monkeypatch.setattr(probes.time, "sleep", lambda s: None)
         assert probes.probe_kula("acme") == (False, 0)
         assert len(calls) == 2, "kula gets one retry; the others get none"
 
-    def test_the_others_do_not_retry(self, monkeypatch):
-        calls = []
-
-        def _get(url, **kw):
-            calls.append(url)
-            raise OSError("throttled")
-        monkeypatch.setattr(probes.SESSION, "get", _get)
+    def test_the_others_do_not_retry(self, serve):
+        calls = serve(OSError("throttled"))
         assert probes.probe_greenhouse("acme") == (False, 0)
         assert len(calls) == 1
 
@@ -660,26 +634,10 @@ FAMILY_API = {
 
 
 @pytest.fixture
-def probe_http(monkeypatch):
-    """Route the job probe's requests by URL fragment, recording
-    every (url, headers) pair. An unrouted URL fails the test loudly
-    rather than reaching the network."""
-    seen = []
-    monkeypatch.setattr(job_probe, "_ASHBY_BOARDS", {})   # per-pass memo
-    monkeypatch.setattr(job_probe, "_DEAD_HOSTS", {})     # per-pass breaker
-
-    def _install(routes):
-        def _get(url, **kw):
-            seen.append((url, kw.get("headers") or {}))
-            for frag, resp in routes.items():
-                if frag in url:
-                    if isinstance(resp, Exception):
-                        raise resp
-                    return resp
-            raise AssertionError(f"probe reached an unrouted URL: {url}")
-        monkeypatch.setattr(job_probe.SESSION, "get", _get)
-        return seen
-    return _install
+def probe_http(serve):
+    """`serve` by URL fragment, where an unrouted URL fails the test
+    rather than answering 404."""
+    return lambda routes: serve(routes, strict=True)
 
 
 class TestProbeIsDecisivePerFamily:
@@ -819,7 +777,7 @@ class TestProbeIsDecisivePerFamily:
         2026-09-21 were that, not a dead posting."""
         seen = probe_http({"careers-acme.icims.com": fake_response(url=ICIMS_JOB)})
         job_probe.probe_job_open(ICIMS_JOB)
-        [(_, sent)] = seen
+        [sent] = [r.headers for r in seen]
         assert sent["User-Agent"] == ICIMS_HEADERS["User-Agent"]
         assert sent["User-Agent"] != HEADERS["User-Agent"]
 
@@ -887,7 +845,7 @@ class TestAnUnreachableUrlCostsLittle:
         seen = probe_http({"jobs.biospace.com/job/1/": fake_response(status=404)})
         assert job_probe.probe_job_open(
             "https://jobs.biospace.com \r\n\t/job/1/\r\n\r\n")[0] is False
-        assert seen[0][0] == "https://jobs.biospace.com/job/1/"
+        assert seen[0] == "https://jobs.biospace.com/job/1/"
 
     def test_a_refusing_host_is_asked_three_times_per_pass(self, probe_http):
         seen = probe_http({"dead.example": requests.ConnectionError()})

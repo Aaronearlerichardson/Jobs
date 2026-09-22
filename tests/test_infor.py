@@ -59,23 +59,15 @@ def _page(entries, next_url=None):
 
 
 @pytest.fixture
-def infor_board(monkeypatch):
-    """Stub `http.SESSION.get` for one board: list pages keyed by the URL
-    asked for (the first page under the bare list endpoint, later pages
-    under whatever `nextPageUrl` the previous page named), plus one detail
-    payload for any `.JobPostingDisplay` GET. Records every call."""
-    def _install(pages, detail=None, status=200):
-        calls = []
-
-        def _get(url, params=None, headers=None, **kw):
-            calls.append({"url": url, "params": dict(params or {})})
-            if ".JobPostingDisplay" in url:
-                return fake_response(detail, status=status)
-            return fake_response(pages.get(url), status=status)
-
-        monkeypatch.setattr(http.SESSION, "get", _get)
-        return calls
-    return _install
+def infor_board(serve):
+    """`serve` one board: list pages keyed by the URL asked for (the first
+    page under the bare list endpoint, later pages under whatever
+    `nextPageUrl` the previous page named), plus one detail payload for
+    any `.JobPostingDisplay` GET."""
+    return lambda pages, detail=None, status=200: serve(
+        lambda url, **kw: fake_response(
+            detail if ".JobPostingDisplay" in url else pages.get(url),
+            status=status))
 
 
 class TestListing:
@@ -118,12 +110,12 @@ class TestListing:
         rows = infor.fetch_infor_all(SLUG)
         assert [r["id"] for r in rows] == [f"infor_css-acme-prd_{i}_1"
                                            for i in (1, 2, 3)]
-        assert [c["url"] for c in calls] == [LIST_URL, page2]
+        assert [c.url for c in calls] == [LIST_URL, page2]
         # Only the first request builds the query; the cursor URL carries
         # its own and must not be given a second set.
-        assert calls[0]["params"]["csk.HROrganization"] == ORG
-        assert calls[0]["params"]["pageop"] == "load"
-        assert calls[1]["params"] == {}
+        assert calls[0].params["csk.HROrganization"] == ORG
+        assert calls[0].params["pageop"] == "load"
+        assert calls[1].params == {}
         assert not http.snapshot_info()["capped"]
 
     def test_a_page_of_repeats_ends_the_walk_and_reports_capped(self, infor_board):
@@ -239,10 +231,10 @@ class TestDetail:
             self, infor_board):
         calls = infor_board({}, detail=load("infor_job_detail.json"))
         infor.fetch_infor_description(infor.job_url(HOST, ORG, 207651, 1))
-        assert calls[0]["url"].startswith(
+        assert calls[0].url.startswith(
             f"https://{HOST}/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
             f"%28{ORG}%2C207651%2C1%29.JobPostingDisplay?")
-        assert "dependentForm=true" in calls[0]["url"]
+        assert "dependentForm=true" in calls[0].url
 
     def test_a_url_this_module_did_not_build_is_not_fetched(self, infor_board):
         calls = infor_board({})
@@ -274,7 +266,7 @@ class TestSweepEntry:
         # One listing GET, then a detail GET for the Chef row the title gate
         # rejected (board.py pays for a body before dropping) and one for the
         # kept row.
-        assert sum(".JobPostingDisplay" in c["url"] for c in calls) == 2
+        assert sum(".JobPostingDisplay" in c.url for c in calls) == 2
 
 
 class TestCompanyDispatch:
@@ -317,7 +309,7 @@ class TestCompanyDispatch:
         titles = company.sample_titles({"ats": "infor", "slug": SLUG}, n=2)
         assert titles == ["Data Engineer", "Analyst"]
         assert len(calls) == 1                       # listing only, no details
-        assert calls[0]["params"]["pagesize"] == 2
+        assert calls[0].params["pagesize"] == 2
 
 
 def test_detect_reads_a_board_url_as_host_and_org():

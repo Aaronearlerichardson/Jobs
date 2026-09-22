@@ -229,13 +229,7 @@ class TestJunkNamesInReresolve:
 # ─── sniffer DNS pre-check ───────────────────────────────────────────────
 
 class TestSnifferResolvesHostsOnce:
-    def _reset(self, monkeypatch):
-        monkeypatch.setattr(fetchpool, "_DEAD_HOSTS", {})
-        monkeypatch.setattr(fetchpool, "_DNS_CACHE", {})
-        monkeypatch.setattr(fetchpool, "_PAGE_MEMO", {})
-
     def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
-        self._reset(monkeypatch)
         looked_up, fetched = [], []
 
         def _gai(host, *a, **k):
@@ -261,7 +255,6 @@ class TestSnifferResolvesHostsOnce:
 
     def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
         import threading
-        self._reset(monkeypatch)
         gate = threading.Event()
 
         def _gai(host, *a, **k):
@@ -270,17 +263,13 @@ class TestSnifferResolvesHostsOnce:
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
         kept = fetchpool._drop_unresolvable(["https://slow.example/"], timeout=0.05)
         assert kept == []
-        assert fetchpool._dead_host("https://slow.example/") == "", \
+        assert not fetchpool._DEAD_HOSTS.dead("https://slow.example/"), \
             "a slow resolver is not a missing name"
         gate.set()
 
-    def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch):
-        self._reset(monkeypatch)
-
-        class _S:
-            def get(self, url, **kw):
-                raise requests.exceptions.ConnectionError("refused")
-        monkeypatch.setattr(fetchpool, "SESSION", _S())
+    def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch,
+                                                             serve):
+        serve(requests.exceptions.ConnectionError("refused"))
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo",
                             lambda *a, **k: [("addr",)])
         assert fetchpool._fetch_page("https://x.example/") is None

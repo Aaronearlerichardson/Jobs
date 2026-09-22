@@ -117,6 +117,11 @@ def _adapt(jobs, ats, loc_re=None):
     return out
 
 
+#: One board's postings, formatted with its slug. SmartRecruiters has no
+#: module of its own, so this is the one copy the closure probe, the slug
+#: probe and the employer-name check read.
+SMARTRECRUITERS_API = "https://api.smartrecruiters.com/v1/companies/{}/postings"
+
 # Pages a whole-board SmartRecruiters pull reads by default (x page size
 # 100 = the pre-2026-09-18 1,000-row cap). FETCHERS' "smartrecruiters"
 # entry below raises this for a mission-worth-it board via
@@ -139,7 +144,7 @@ def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=_SR_MAX_PAGES):
     out = []
     total = None
     for page in range(max_pages):
-        data = get_json(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings"
+        data = get_json(f"{SMARTRECRUITERS_API.format(slug)}"
                          f"?limit=100&offset={page*100}",
                          f"smartrecruiters {slug} p{page}")
         if data is None:
@@ -249,7 +254,7 @@ def hydrate_description(job):
     if job.get("ats") == "smartrecruiters" and job.get("_sr"):
         slug, pid = job["_sr"]
         try:
-            r = SESSION.get(f"https://api.smartrecruiters.com/v1/companies/{slug}/postings/{pid}", headers=HEADERS)
+            r = SESSION.get(f"{SMARTRECRUITERS_API.format(slug)}/{pid}", headers=HEADERS)
             secs = r.json().get("jobAd", {}).get("sections", {}) or {}
             parts = [secs.get(k, {}).get("text", "") for k in
                      ("jobDescription", "qualifications", "additionalInformation")]

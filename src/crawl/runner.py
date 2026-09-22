@@ -37,6 +37,7 @@ from typing import NamedTuple
 
 from src import config
 from src import store
+from src import tags
 from src.ats.registry import ATS_REGISTRY, iter_store_sources
 from src.claude.resume import resume_text
 from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
@@ -336,7 +337,7 @@ def _gate_company_board(conn, t, c, jobs, commit, snapshot=None):
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
 
     watch_hits = []
-    if ops._is_watched(c):
+    if tags.has(c, tags.WATCH):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company, any geography -- out-of-scope ones stored
         # unscored so they aren't re-flagged next run.
