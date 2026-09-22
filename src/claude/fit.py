@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import math
 import re
+from contextlib import closing
 from dataclasses import dataclass, field
 
 try:
@@ -322,9 +323,8 @@ def _disposition_block() -> str:
         if n > 0:
             try:
                 from src import store
-                conn = store.connect()
-                block = disposition_examples_block(conn, n)
-                conn.close()
+                with closing(store.connect()) as conn:
+                    block = disposition_examples_block(conn, n)
             except Exception:
                 block = ""
         _DISPO_BLOCK_CACHE = block

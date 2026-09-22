@@ -12,6 +12,8 @@ model suggested and a resolver confirmed is exactly the kind of name that
 used to reach the roster without ever having been an employer.
 """
 
+from contextlib import closing
+
 from src import store
 from src import tags
 from src.ats import coords
@@ -78,46 +80,45 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
     if not confirmed:
         return [f"  (no confirmed candidates for '{term}')"]
 
-    conn = store.connect()
-    added, skipped, summary = 0, 0, []
-    for c in confirmed:
-        # "Can this row be fetched" is fetchers.company.FETCHERS, the table
-        # fetch_company dispatches on and the one every other caller of the
-        # write path trusts (local_sourcing._hit_from_detection stores a
-        # custom board through it without asking anything else). NOT
-        # src.ats.registry.ATS_REGISTRY: that table schedules ONE crawl loop
-        # -- iter_store_sources' lightweight sweep -- and deliberately omits
-        # the families it does not schedule, `custom` among them. Gating
-        # here on it reported a confirmed self-hosted careers page and then
-        # threw it away.
-        if c.ats not in company_fetch.FETCHERS:
-            summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
-            skipped += 1
-            continue
-        hit = _candidate_hit(c)
-        if hit is None:
-            summary.append(f"    [skip] {c.name}: malformed slug {c.slug_guess!r}")
-            skipped += 1
-            continue
-        if dry_run:
+    with closing(store.connect()) as conn:
+        added, skipped, summary = 0, 0, []
+        for c in confirmed:
+            # "Can this row be fetched" is fetchers.company.FETCHERS, the table
+            # fetch_company dispatches on and the one every other caller of the
+            # write path trusts (local_sourcing._hit_from_detection stores a
+            # custom board through it without asking anything else). NOT
+            # src.ats.registry.ATS_REGISTRY: that table schedules ONE crawl loop
+            # -- iter_store_sources' lightweight sweep -- and deliberately omits
+            # the families it does not schedule, `custom` among them. Gating
+            # here on it reported a confirmed self-hosted careers page and then
+            # threw it away.
+            if c.ats not in company_fetch.FETCHERS:
+                summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
+                skipped += 1
+                continue
+            hit = _candidate_hit(c)
+            if hit is None:
+                summary.append(f"    [skip] {c.name}: malformed slug {c.slug_guess!r}")
+                skipped += 1
+                continue
+            if dry_run:
+                added += 1
+                summary.append(f"    + {c.name:32} {c.ats:12} (unscored preview)")
+                continue
+            written = score_and_upsert(
+                conn, hit, source=f"discovery:{term[:60]}",
+                tags=seed_tag_for(c.ats), extra={"notes": c.notes or None})
+            if not written:
+                # Already on the roster under another name -- score_and_upsert
+                # printed which one.
+                skipped += 1
+                continue
+            row, active, pending = written
             added += 1
-            summary.append(f"    + {c.name:32} {c.ats:12} (unscored preview)")
-            continue
-        written = score_and_upsert(
-            conn, hit, source=f"discovery:{term[:60]}",
-            tags=seed_tag_for(c.ats), extra={"notes": c.notes or None})
-        if not written:
-            # Already on the roster under another name -- score_and_upsert
-            # printed which one.
-            skipped += 1
-            continue
-        row, active, pending = written
-        added += 1
-        state = "[review]" if pending else ("active" if active else "off-mission")
-        summary.append(f"    + {c.name:32} {c.ats:12} "
-                       f"{str(row.get('mission_tier')):16} {state}")
+            state = "[review]" if pending else ("active" if active else "off-mission")
+            summary.append(f"    + {c.name:32} {c.ats:12} "
+                           f"{str(row.get('mission_tier')):16} {state}")
 
-    conn.close()
     verb = "would queue/refresh" if dry_run else "queued/refreshed"
     summary.insert(0, f"  {'[DRY-RUN] ' if dry_run else ''}{verb} {added} "
                       f"compan(ies) in the store, {skipped} skipped")

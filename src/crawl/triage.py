@@ -74,7 +74,7 @@ written the asking out twice.
 
 import logging
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timedelta
 
 from src import config
@@ -726,38 +726,36 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
                             tracks=tracks)
     db_path = db_path or config.STORE_DB_PATH
     tracks = roster_tracks(tracks)
-    conn = store.connect(db_path)
-    rows = store.triage_pending(conn, limit=limit)
-    bar = "=" * 70
-    print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
-          f"- {datetime.now():%Y-%m-%d %H:%M}")
-    print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
-          f"{', '.join(t['id'] for t in tracks)}\n{bar}\n")
-    summary = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
-               "hydrated": 0, "scored": 0, "surfaced": 0, "left": 0,
-               "skip_score": 0, "secs": 0.0}
-    if not rows or not tracks:
-        conn.close()
-        print("  nothing to do")
-        return summary
-    t0 = time.monotonic()
-    stamp = now or datetime.now()
-    cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
+    with closing(store.connect(db_path)) as conn:
+        rows = store.triage_pending(conn, limit=limit)
+        bar = "=" * 70
+        print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
+              f"- {datetime.now():%Y-%m-%d %H:%M}")
+        print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
+              f"{', '.join(t['id'] for t in tracks)}\n{bar}\n")
+        summary = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
+                   "hydrated": 0, "scored": 0, "surfaced": 0, "left": 0,
+                   "skip_score": 0, "secs": 0.0}
+        if not rows or not tracks:
+            print("  nothing to do")
+            return summary
+        t0 = time.monotonic()
+        stamp = now or datetime.now()
+        cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
 
-    groups, companies = _by_company(conn, rows)
-    decided, survivors = _free_gates(conn, companies, groups, tracks,
-                                     mission_scorer, cutoff)
-    n_free = len(decided)
-    waiting = {}
-    if hydrate:
-        waiting = _hydrate(conn, companies, survivors, summary, stamp,
-                           max_workers, hydrate_fn, cutoff)
-    final = _body_gates(conn, companies, survivors, tracks, mission_scorer,
-                        decided, summary, n_free, waiting, cutoff)
-    scores, over_cap = _score(final, summary, score_cap, fit, max_workers)
-    _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
-                    stamp)
-    conn.close()
+        groups, companies = _by_company(conn, rows)
+        decided, survivors = _free_gates(conn, companies, groups, tracks,
+                                         mission_scorer, cutoff)
+        n_free = len(decided)
+        waiting = {}
+        if hydrate:
+            waiting = _hydrate(conn, companies, survivors, summary, stamp,
+                               max_workers, hydrate_fn, cutoff)
+        final = _body_gates(conn, companies, survivors, tracks, mission_scorer,
+                            decided, summary, n_free, waiting, cutoff)
+        scores, over_cap = _score(final, summary, score_cap, fit, max_workers)
+        _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
+                        stamp)
 
     summary["secs"] = time.monotonic() - t0
     _print_summary(summary, bar)
@@ -898,22 +896,21 @@ def requeue_rows(db_path=None, apply=False, sample=10, tracks=None):
     Returns {"counts": {reason: n}, "requeued": n if applied else 0}.
     """
     db_path = db_path or config.STORE_DB_PATH
-    conn = store.connect(db_path)
-    found = requeue_reasons(conn, tracks)
-    counts = {}
-    for v in found.values():
-        counts[v["reason"]] = counts.get(v["reason"], 0) + 1
-    verb = "requeued" if apply else "would requeue"
-    print(f"  {verb} {len(found)} row(s): "
-          + (", ".join(f"{n} {reason}" for reason, n in sorted(counts.items()))
-             or "none"))
-    for jid, v in list(found.items())[:sample]:
-        print(f"    {v['company_name']} | {v['title']} | {v['location'] or ''}")
-    if len(found) > sample:
-        print(f"    ... and {len(found) - sample} more")
-    if apply:
-        with store.batch(conn):
-            for jid in found:
-                store.clear_triage(conn, jid)
-    conn.close()
+    with closing(store.connect(db_path)) as conn:
+        found = requeue_reasons(conn, tracks)
+        counts = {}
+        for v in found.values():
+            counts[v["reason"]] = counts.get(v["reason"], 0) + 1
+        verb = "requeued" if apply else "would requeue"
+        print(f"  {verb} {len(found)} row(s): "
+              + (", ".join(f"{n} {reason}" for reason, n in sorted(counts.items()))
+                 or "none"))
+        for jid, v in list(found.items())[:sample]:
+            print(f"    {v['company_name']} | {v['title']} | {v['location'] or ''}")
+        if len(found) > sample:
+            print(f"    ... and {len(found) - sample} more")
+        if apply:
+            with store.batch(conn):
+                for jid in found:
+                    store.clear_triage(conn, jid)
     return {"counts": counts, "requeued": len(found) if apply else 0}

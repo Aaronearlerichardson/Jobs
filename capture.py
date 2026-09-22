@@ -28,6 +28,7 @@ import json
 import re
 import sys
 import time
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -117,19 +118,18 @@ def _record_companies(names, source_site, sites=None):
     instead of guessing the domain from the name."""
     sites = sites or {}
     fresh = []
-    conn = store.connect()
-    have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
-    for n in sorted({n.strip() for n in names if n and n.strip()}):
-        if n.lower() in have:
-            continue
-        row = {"name": n, "active": 0, "source": "page_capture",
-               "notes": f"seen on {source_site}; resolve board via "
-                        f"discover.py --resolve-leads"}
-        if sites.get(n):
-            row["careers_url"] = sites[n]
-        store.upsert_company(conn, row)
-        fresh.append(n)
-    conn.close()
+    with closing(store.connect()) as conn:
+        have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
+        for n in sorted({n.strip() for n in names if n and n.strip()}):
+            if n.lower() in have:
+                continue
+            row = {"name": n, "active": 0, "source": "page_capture",
+                   "notes": f"seen on {source_site}; resolve board via "
+                            f"discover.py --resolve-leads"}
+            if sites.get(n):
+                row["careers_url"] = sites[n]
+            store.upsert_company(conn, row)
+            fresh.append(n)
     return fresh
 
 
@@ -166,9 +166,8 @@ def ingest_html(url, html, label=""):
     """Parse one page and feed the standard ingest pipeline. Returns a
     summary dict."""
     jobs, source = parse_page(url, html)
-    conn = store.connect()
-    owner = attribute_company(conn, page_url(html, url), jobs)
-    conn.close()
+    with closing(store.connect()) as conn:
+        owner = attribute_company(conn, page_url(html, url), jobs)
     ingested = ingest_external_jobs(jobs, source=source) if jobs else 0
     # Company name -> its own website, when the page exposed it (JSON-LD).
     sites = {j["company"]: j["company_url"] for j in jobs

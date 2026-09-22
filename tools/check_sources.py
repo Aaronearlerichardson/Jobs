@@ -442,11 +442,10 @@ def probe_roster(limit=None, workers=8):
     from src import store
     from src.ats.registry import ATS_REGISTRY, store_slug
 
-    conn = store.connect()
-    rows = [dict(r) for r in conn.execute(
-        "SELECT name, ats, slug, careers_url, wd_tenant, wd_pod, wd_site "
-        "FROM companies WHERE active=1 AND ats IS NOT NULL ORDER BY name")]
-    conn.close()
+    with contextlib.closing(store.connect()) as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT name, ats, slug, careers_url, wd_tenant, wd_pod, wd_site "
+            "FROM companies WHERE active=1 AND ats IS NOT NULL ORDER BY name")]
 
     # Paginating platforms would walk thousands of postings to prove one
     # endpoint is alive. The single-request ATSes are the ones worth probing

@@ -16,6 +16,7 @@ resolve.board.resolve_or_miss, score, queue for review).
 """
 
 import re
+from contextlib import closing
 
 from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
@@ -440,64 +441,63 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         print("  no company names to resolve.")
         return []
 
-    conn = connect()
-    skip = ({name_key(r["name"])
-             for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
-            | _blocked_keys(conn))
-    fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
-    skipped = len(names) - len(fresh) - len(junk)
-    for n, why in junk:
-        # Recorded, not resolved: the miss keeps the paste a worklist, and
-        # its 'junk-name' family is one no re-resolution pass retries.
-        record_miss(conn, n, f"junk-name:{why}", source="paste")
-        print(f"    [junk]  {n[:30]:30} {why} - not an employer name, skipped")
-    print(f"  {len(names)} name(s) given"
-          + (f", {skipped} already tracked or blocked" if skipped else "")
-          + (f", {len(junk)} not employer names" if junk else "")
-          + f" -> resolving {len(fresh)}...")
-    if not fresh:
-        return []
+    with closing(connect()) as conn:
+        skip = ({name_key(r["name"])
+                 for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
+                | _blocked_keys(conn))
+        fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
+        skipped = len(names) - len(fresh) - len(junk)
+        for n, why in junk:
+            # Recorded, not resolved: the miss keeps the paste a worklist, and
+            # its 'junk-name' family is one no re-resolution pass retries.
+            record_miss(conn, n, f"junk-name:{why}", source="paste")
+            print(f"    [junk]  {n[:30]:30} {why} - not an employer name, skipped")
+        print(f"  {len(names)} name(s) given"
+              + (f", {skipped} already tracked or blocked" if skipped else "")
+              + (f", {len(junk)} not employer names" if junk else "")
+              + f" -> resolving {len(fresh)}...")
+        if not fresh:
+            return []
 
-    written, unresolved = [], []
+        written, unresolved = [], []
 
-    def _stalled(n):
-        record_miss(conn, n, "fetch-error:stalled", source="paste")
-        unresolved.append((n, "fetch-error:stalled"))
+        def _stalled(n):
+            record_miss(conn, n, "fetch-error:stalled", source="paste")
+            unresolved.append((n, "fetch-error:stalled"))
 
-    def _consume(fut, name):
-        hit, reason = resolved(fut, name)
-        if not hit:
-            # A pasted name that resolves to nothing used to be printed
-            # once and lost; keep it with a reason so the paste is a
-            # worklist, not a one-shot.
-            record_miss(conn, name, reason, source="paste")
-            unresolved.append((name, reason))
-            return
-        result = score_and_upsert(conn, hit, source="paste",
-                                  include_missions=include_missions)
-        if not result:
-            return
-        row, active, pending = result
-        written.append(hit)
-        tier = row["mission_tier"]
-        # resolve_board_sniff_first's `via` says HOW the board was found:
-        # 'sniff' read it off the company's own careers page, 'probe' guessed
-        # a slug from the name, 'websearch' only means some result URL
-        # matched. The weakest two used to be corroborated (or written
-        # inactive) here; the review queue is that check now, and it shows
-        # the reviewer which one they are looking at.
-        flag = {"probe": "  [slug-guess]",
-                "websearch": "  [websearch match]"}.get(hit.get("via"), "")
-        state = ("pending review" if pending
-                 else "active" if active else "inactive")
-        print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
-              f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
-              f"{state}{flag}")
+        def _consume(fut, name):
+            hit, reason = resolved(fut, name)
+            if not hit:
+                # A pasted name that resolves to nothing used to be printed
+                # once and lost; keep it with a reason so the paste is a
+                # worklist, not a one-shot.
+                record_miss(conn, name, reason, source="paste")
+                unresolved.append((name, reason))
+                return
+            result = score_and_upsert(conn, hit, source="paste",
+                                      include_missions=include_missions)
+            if not result:
+                return
+            row, active, pending = result
+            written.append(hit)
+            tier = row["mission_tier"]
+            # resolve_board_sniff_first's `via` says HOW the board was found:
+            # 'sniff' read it off the company's own careers page, 'probe' guessed
+            # a slug from the name, 'websearch' only means some result URL
+            # matched. The weakest two used to be corroborated (or written
+            # inactive) here; the review queue is that check now, and it shows
+            # the reviewer which one they are looking at.
+            flag = {"probe": "  [slug-guess]",
+                    "websearch": "  [websearch match]"}.get(hit.get("via"), "")
+            state = ("pending review" if pending
+                     else "active" if active else "inactive")
+            print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
+                  f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
+                  f"{state}{flag}")
 
-    drain(fresh, resolve_or_miss, _consume, _stalled,
-          max_workers=max_workers)
-    conn.commit()
-    conn.close()
+        drain(fresh, resolve_or_miss, _consume, _stalled,
+              max_workers=max_workers)
+        conn.commit()
     if unresolved:
         print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "
               f"(kept as misses — see the companies table's miss_reason):")

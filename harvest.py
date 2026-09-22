@@ -45,6 +45,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import closing
 from datetime import datetime
 
 from src import config
@@ -247,12 +248,11 @@ def main(argv=None):
 
     if args.list:
         from src import store
-        conn = store.connect(args.db)
-        plan_stats = {}
-        boards = harvest.plan(conn, only=only, names=args.names,
-                              min_age_hours=min_age, limit=args.limit,
-                              stats=plan_stats)
-        conn.close()
+        with closing(store.connect(args.db)) as conn:
+            plan_stats = {}
+            boards = harvest.plan(conn, only=only, names=args.names,
+                                  min_age_hours=min_age, limit=args.limit,
+                                  stats=plan_stats)
         for c in boards:
             print(f"  {c['name']}  ({c['ats']}, ~{c.get('total_job_count') or 0}"
                   f" jobs, last harvested {c.get('last_harvested_at') or 'never'})")

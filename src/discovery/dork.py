@@ -12,6 +12,7 @@ Two entry points:
 
 import json
 import time
+from contextlib import closing
 
 from src import config
 from src import store
@@ -199,44 +200,44 @@ def harvest_urls(urls, verbose=True):
     rather than on the roster.
     """
     boards = extract_boards_from_urls(urls)
-    conn = store.connect()
-    have = _existing_boards(conn)
-    added = 0
-    for ats, slug in boards:
-        key = ("workday", str(slug)) if ats == "workday" else (ats, slug)
-        if key in have:
-            continue
-        comp = coords.columns(ats, slug)
-        try:
-            jobs = company_fetch.fetch_company_nc(comp)
-        except Exception:
-            jobs = []
-        nc = len(jobs)
-        name = (slug[0] if ats == "workday" else slug).replace("-", " ").title()
-        # Add even with 0 current NC openings IF we can confirm an NC HQ/office
-        # (so a daily run catches their next NC posting) — but not otherwise,
-        # else non-NC companies that merely mention NC would pollute the roster.
-        if nc == 0 and not nc_hq_signal(name):
-            continue
-        # Scoring, activation and the review queue are the shared write
-        # path (local_sourcing.score_and_upsert). The row is tagged local
-        # even at nc == 0: the HQ signal above is what admitted it. An
-        # inactive row is near-unrecoverable here -- harvest_urls skips
-        # boards already in the store, so the company is never re-probed --
-        # which is why the activation rule must be the shared one.
-        result = score_and_upsert(
-            conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
-            source=SLUG_NAME_SOURCE, tags=company_tags.LOCAL)
-        if not result:
-            continue
-        row, active, pending = result
-        added += 1
-        if verbose:
-            state = ("PENDING" if pending
-                     else "ACTIVE" if active else "inactive")
-            print(f"  {name[:26]:26} {ats:12} nc={nc:2} "
-                  f"{str(row['mission_tier']):19} "
-                  f"{row['mission_score'] or 0:.2f} {state}")
+    with closing(store.connect()) as conn:
+        have = _existing_boards(conn)
+        added = 0
+        for ats, slug in boards:
+            key = ("workday", str(slug)) if ats == "workday" else (ats, slug)
+            if key in have:
+                continue
+            comp = coords.columns(ats, slug)
+            try:
+                jobs = company_fetch.fetch_company_nc(comp)
+            except Exception:
+                jobs = []
+            nc = len(jobs)
+            name = (slug[0] if ats == "workday" else slug).replace("-", " ").title()
+            # Add even with 0 current NC openings IF we can confirm an NC HQ/office
+            # (so a daily run catches their next NC posting) — but not otherwise,
+            # else non-NC companies that merely mention NC would pollute the roster.
+            if nc == 0 and not nc_hq_signal(name):
+                continue
+            # Scoring, activation and the review queue are the shared write
+            # path (local_sourcing.score_and_upsert). The row is tagged local
+            # even at nc == 0: the HQ signal above is what admitted it. An
+            # inactive row is near-unrecoverable here -- harvest_urls skips
+            # boards already in the store, so the company is never re-probed --
+            # which is why the activation rule must be the shared one.
+            result = score_and_upsert(
+                conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
+                source=SLUG_NAME_SOURCE, tags=company_tags.LOCAL)
+            if not result:
+                continue
+            row, active, pending = result
+            added += 1
+            if verbose:
+                state = ("PENDING" if pending
+                         else "ACTIVE" if active else "inactive")
+                print(f"  {name[:26]:26} {ats:12} nc={nc:2} "
+                      f"{str(row['mission_tier']):19} "
+                      f"{row['mission_score'] or 0:.2f} {state}")
     return added, len(boards)
 
 

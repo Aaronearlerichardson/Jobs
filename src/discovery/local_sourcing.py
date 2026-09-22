@@ -27,6 +27,7 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 """
 
 import time
+from contextlib import closing
 from datetime import datetime, timedelta
 
 from src import config
@@ -587,47 +588,46 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     from src.store import connect, miss_counts, record_miss
 
     confirmed, _, misses = discover_local(extra_names)
-    conn = connect()
-    written = []
+    with closing(connect()) as conn:
+        written = []
 
-    # Misses first: they are pure local writes, so the roster's failure
-    # record survives even if the mission-scoring pass below is interrupted.
-    n_miss = sum(record_miss(conn, m["name"], m["reason"], **_miss_row(m))
-                 for m in misses)
-    if misses:
-        print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
-              f"confirmed); store now holds: "
-              + ", ".join(f"{fam}={n}" for fam, n in miss_counts(conn)))
-    print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
+        # Misses first: they are pure local writes, so the roster's failure
+        # record survives even if the mission-scoring pass below is interrupted.
+        n_miss = sum(record_miss(conn, m["name"], m["reason"], **_miss_row(m))
+                     for m in misses)
+        if misses:
+            print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
+                  f"confirmed); store now holds: "
+                  + ", ".join(f"{fam}={n}" for fam, n in miss_counts(conn)))
+        print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
 
-    # The title fetch (1 GET) + mission call (1 LLM request) per company are
-    # pure network I/O — the historical serial tail of the pass. Run them in
-    # a pool; SQLite upserts stay on this thread (connections don't cross
-    # threads). Output is completion-ordered.
-    def _score_one(h):
-        return h, _score_hit(h)
+        # The title fetch (1 GET) + mission call (1 LLM request) per company are
+        # pure network I/O — the historical serial tail of the pass. Run them in
+        # a pool; SQLite upserts stay on this thread (connections don't cross
+        # threads). Output is completion-ordered.
+        def _score_one(h):
+            return h, _score_hit(h)
 
-    def _score_done(fut, name):
-        try:
-            h, scored = fut.result()
-        except Exception as e:
-            print(f"    [!] mission scoring failed for {name!r}: {e}")
-            return
-        result = score_and_upsert(conn, h, source="local_sourcing",
-                                  include_missions=include_missions,
-                                  scored=scored)
-        if not result:
-            return
-        row, active, pending = result
-        written.append(dict(row))
-        tier, score, reason = scored
-        flag = ("PENDING REVIEW" if pending
-                else "active" if active else "INACTIVE(other)")
-        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-        print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
-    drain(confirmed, _score_one, _score_done, lambda name: None,
-          label=lambda h: h["name"], max_workers=8)
-    conn.close()
+        def _score_done(fut, name):
+            try:
+                h, scored = fut.result()
+            except Exception as e:
+                print(f"    [!] mission scoring failed for {name!r}: {e}")
+                return
+            result = score_and_upsert(conn, h, source="local_sourcing",
+                                      include_missions=include_missions,
+                                      scored=scored)
+            if not result:
+                return
+            row, active, pending = result
+            written.append(dict(row))
+            tier, score, reason = scored
+            flag = ("PENDING REVIEW" if pending
+                    else "active" if active else "INACTIVE(other)")
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+        drain(confirmed, _score_one, _score_done, lambda name: None,
+              label=lambda h: h["name"], max_workers=8)
 
     if dork:
         print("\n  ATS-dork sweep (search-indexed board URLs)...")
@@ -687,18 +687,16 @@ def add_board(name, url, capture=False):
     from .resolve.sniffer import sniff_ats
 
     if capture:
-        conn = connect()
-        row = {"name": name, "ats": CAPTURE_ATS, "careers_url": url,
-               "source": "manual", "active": 1,
-               "notes": "capture-only board: browse it yourself and save "
-                        "pages with capture.py --watch"}
-        dup = _board_already_tracked(conn, row)
-        if dup:
-            _report_dup_board(name, dup)
-            conn.close()
-            return None
-        upsert_company(conn, row)
-        conn.close()
+        with closing(connect()) as conn:
+            row = {"name": name, "ats": CAPTURE_ATS, "careers_url": url,
+                   "source": "manual", "active": 1,
+                   "notes": "capture-only board: browse it yourself and save "
+                            "pages with capture.py --watch"}
+            dup = _board_already_tracked(conn, row)
+            if dup:
+                _report_dup_board(name, dup)
+                return None
+            upsert_company(conn, row)
         print(f"  [OK] {name}: capture-only, {url}  -- save its pages with "
               f"capture.py --watch")
         return {"ats": CAPTURE_ATS, "careers_url": url}
@@ -727,26 +725,24 @@ def add_board(name, url, capture=False):
 
     tier, score, reason = score_company_mission(name, mission_context(board))
 
-    conn = connect()
-    dup = _board_already_tracked(conn, board)
-    if dup:
-        _report_dup_board(name, dup)
-        conn.close()
-        return None
-    row = {
-        **board,
-        "local_job_count": nc, "mission_tier": tier, "mission_score": score,
-        "mission_reason": reason, "tags": company_tags.LOCAL if nc else None,
-        "source": "manual", "active": 1,
-    }
-    # The URL is the user's, but the ATS coordinates under it were sniffed:
-    # a careers page that links a shared/parent tenant resolves to somebody
-    # else's board. One confirmation click covers both.
-    pending = not is_confirmed_company(conn, name)
-    if pending:
-        row = mark_pending(row)
-    upsert_company(conn, row)
-    conn.close()
+    with closing(connect()) as conn:
+        dup = _board_already_tracked(conn, board)
+        if dup:
+            _report_dup_board(name, dup)
+            return None
+        row = {
+            **board,
+            "local_job_count": nc, "mission_tier": tier, "mission_score": score,
+            "mission_reason": reason, "tags": company_tags.LOCAL if nc else None,
+            "source": "manual", "active": 1,
+        }
+        # The URL is the user's, but the ATS coordinates under it were sniffed:
+        # a careers page that links a shared/parent tenant resolves to somebody
+        # else's board. One confirmation click covers both.
+        pending = not is_confirmed_company(conn, name)
+        if pending:
+            row = mark_pending(row)
+        upsert_company(conn, row)
     ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
     print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  "
           f"{'PENDING REVIEW' if pending else 'ACTIVE'}")
@@ -772,76 +768,74 @@ def score_missions(max_workers=6, rescore_all=False):
     from src.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
     from src.store import connect, get_companies, upsert_company
 
-    conn = connect()
-    cos = [c for c in get_companies(conn, active_only=rescore_all)
-           if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
-    if not cos:
-        print("  Nothing to score - every active company has a mission tier.")
-        conn.close()
-        return 0
-    print(f"  mission-scoring {len(cos)} compan(ies)...")
+    with closing(connect()) as conn:
+        cos = [c for c in get_companies(conn, active_only=rescore_all)
+               if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
+        if not cos:
+            print("  Nothing to score - every active company has a mission tier.")
+            return 0
+        print(f"  mission-scoring {len(cos)} compan(ies)...")
 
-    def _one(c):
-        return c, score_company_mission(c["name"], mission_context(c))
+        def _one(c):
+            return c, score_company_mission(c["name"], mission_context(c))
 
-    n = 0
-    def _scored(fut, name):
-        nonlocal n
-        try:
-            c, (tier, score, reason) = fut.result()
-        except Exception as e:
-            print(f"    [!] {name}: {e}")
-            return
-        if tier is None and score is None:
-            return            # scoring unavailable - leave the row alone
-        # Off-mission companies are deactivated so the crawl skips them,
-        # matching the new-company sourcing path (an `other` tier means
-        # "not health/bio/science" — no reason to keep crawling it).
-        # Watched companies are exempt: the watch tag is the user
-        # deliberately keeping an off-mission employer crawled (Covar).
-        update = {"name": c["name"], "mission_tier": tier,
-                  "mission_score": score, "mission_reason": reason}
-        revived = False
-        if (tier is not None and tier not in ACTIVE_MISSION_TIERS
-                and not config.is_multi_division(c["name"])
-                and not company_tags.has(c.get("tags"), company_tags.WATCH)):
-            update["active"] = 0
-        # NOT src.claude.is_active_mission: this is the REACTIVATION
-        # half, and it deliberately does not revive on `tier is None`.
-        # A None tier with a non-None score means the model answered with
-        # a mission name outside the profile's taxonomy (score_company_
-        # mission nulls the tier but keeps the score), so the `return`
-        # above did not fire. The helper would call that "unavailable" and
-        # revive the row; here an unrecognised answer must leave an
-        # already-inactive company alone. See tests/test_invariants.py.
-        elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
-                                      or config.is_multi_division(c["name"])):
-            # The recovery half: this row reached an on-mission tier but
-            # is sitting inactive, which for an unscored row means its
-            # original mission call failed rather than judged it. Revive
-            # it. Dead boards are excluded — prune_dead_boards turns those
-            # off because the endpoint 404s, and a good mission score says
-            # nothing about whether the board still resolves. Rows in the
-            # review queue are excluded too: they are inactive because a
-            # person has not confirmed them yet, not because a call
-            # failed, and reviving them here would skip the queue (the
-            # 2026-09-01 re-resolution pass queued 24 unscored rows that
-            # this healer would otherwise have activated wholesale).
-            if (not str(c.get("notes") or "").startswith("deactivated: dead")
-                    and not company_tags.has(c.get("tags"), company_tags.PENDING)):
-                update["active"] = 1
-                revived = True
-        upsert_company(conn, update)
-        n += 1
-        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-        flag = ("  -> deactivated (off-mission)"
-                if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
-                else "  -> REACTIVATED (was unscored + inactive)" if revived
-                else "")
-        print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
-    drain(cos, _one, _scored, lambda name: None,
-          label=lambda c: c["name"], max_workers=max_workers)
-    conn.close()
+        n = 0
+        def _scored(fut, name):
+            nonlocal n
+            try:
+                c, (tier, score, reason) = fut.result()
+            except Exception as e:
+                print(f"    [!] {name}: {e}")
+                return
+            if tier is None and score is None:
+                return            # scoring unavailable - leave the row alone
+            # Off-mission companies are deactivated so the crawl skips them,
+            # matching the new-company sourcing path (an `other` tier means
+            # "not health/bio/science" — no reason to keep crawling it).
+            # Watched companies are exempt: the watch tag is the user
+            # deliberately keeping an off-mission employer crawled (Covar).
+            update = {"name": c["name"], "mission_tier": tier,
+                      "mission_score": score, "mission_reason": reason}
+            revived = False
+            if (tier is not None and tier not in ACTIVE_MISSION_TIERS
+                    and not config.is_multi_division(c["name"])
+                    and not company_tags.has(c.get("tags"), company_tags.WATCH)):
+                update["active"] = 0
+            # NOT src.claude.is_active_mission: this is the REACTIVATION
+            # half, and it deliberately does not revive on `tier is None`.
+            # A None tier with a non-None score means the model answered with
+            # a mission name outside the profile's taxonomy (score_company_
+            # mission nulls the tier but keeps the score), so the `return`
+            # above did not fire. The helper would call that "unavailable" and
+            # revive the row; here an unrecognised answer must leave an
+            # already-inactive company alone. See tests/test_invariants.py.
+            elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
+                                          or config.is_multi_division(c["name"])):
+                # The recovery half: this row reached an on-mission tier but
+                # is sitting inactive, which for an unscored row means its
+                # original mission call failed rather than judged it. Revive
+                # it. Dead boards are excluded — prune_dead_boards turns those
+                # off because the endpoint 404s, and a good mission score says
+                # nothing about whether the board still resolves. Rows in the
+                # review queue are excluded too: they are inactive because a
+                # person has not confirmed them yet, not because a call
+                # failed, and reviving them here would skip the queue (the
+                # 2026-09-01 re-resolution pass queued 24 unscored rows that
+                # this healer would otherwise have activated wholesale).
+                if (not str(c.get("notes") or "").startswith("deactivated: dead")
+                        and not company_tags.has(c.get("tags"), company_tags.PENDING)):
+                    update["active"] = 1
+                    revived = True
+            upsert_company(conn, update)
+            n += 1
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            flag = ("  -> deactivated (off-mission)"
+                    if (tier is not None and tier not in ACTIVE_MISSION_TIERS)
+                    else "  -> REACTIVATED (was unscored + inactive)" if revived
+                    else "")
+            print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
+        drain(cos, _one, _scored, lambda name: None,
+              label=lambda c: c["name"], max_workers=max_workers)
     print(f"\n  {n} compan(ies) scored.")
     return n
 
@@ -893,73 +887,71 @@ def resolve_leads(max_workers=8,
     from src.store import (connect, get_companies as _store_companies,
                             record_miss, recent_miss_names)
 
-    conn = connect()
-    leads = [c for c in _store_companies(conn, active_only=False)
-             if not c.get("ats") and not c.get("active")]
-    if not all_leads:
-        leads = [c for c in leads if c.get("source") in sources]
-    # Skip leads that failed recently: without this every rerun re-probes
-    # every permanent miss, and the pass gets slower the longer it runs.
-    # retry_days=0 (or --all-leads) retries the lot.
-    if retry_days and not all_leads:
-        recent = recent_miss_names(conn, days=retry_days)
-        skipped_recent = [c for c in leads if c["name"] in recent]
-        leads = [c for c in leads if c["name"] not in recent]
-        if skipped_recent:
-            print(f"  skipping {len(skipped_recent)} lead(s) that missed in "
-                  f"the last {retry_days}d (--all-leads to retry them)")
-    if limit:
-        leads = leads[:int(limit)]
-    if not leads:
-        print("  No unresolved leads to resolve"
-              + ("." if all_leads else f" (source in {sources}; --all-leads to widen)."))
-        conn.close()
-        return []
-    print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
-          f"fallback; every board validated by a live fetch)...")
+    with closing(connect()) as conn:
+        leads = [c for c in _store_companies(conn, active_only=False)
+                 if not c.get("ats") and not c.get("active")]
+        if not all_leads:
+            leads = [c for c in leads if c.get("source") in sources]
+        # Skip leads that failed recently: without this every rerun re-probes
+        # every permanent miss, and the pass gets slower the longer it runs.
+        # retry_days=0 (or --all-leads) retries the lot.
+        if retry_days and not all_leads:
+            recent = recent_miss_names(conn, days=retry_days)
+            skipped_recent = [c for c in leads if c["name"] in recent]
+            leads = [c for c in leads if c["name"] not in recent]
+            if skipped_recent:
+                print(f"  skipping {len(skipped_recent)} lead(s) that missed in "
+                      f"the last {retry_days}d (--all-leads to retry them)")
+        if limit:
+            leads = leads[:int(limit)]
+        if not leads:
+            print("  No unresolved leads to resolve"
+                  + ("." if all_leads else f" (source in {sources}; --all-leads to widen)."))
+            return []
+        print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
+              f"fallback; every board validated by a live fetch)...")
 
-    # Not `resolved`: that name is board.resolved(), called in _consume below.
-    resolved_rows, probe_only = [], []
-    by_name = {c["name"]: c for c in leads}
+        # Not `resolved`: that name is board.resolved(), called in _consume below.
+        resolved_rows, probe_only = [], []
+        by_name = {c["name"]: c for c in leads}
 
-    def _stalled(name):
-        # A lead whose domains blackhole becomes a recorded miss, not a
-        # hung command (src.net.parallel.drain_or_abandon).
-        record_miss(conn, name, "fetch-error:stalled",
-                    source=by_name[name].get("source"))
+        def _stalled(name):
+            # A lead whose domains blackhole becomes a recorded miss, not a
+            # hung command (src.net.parallel.drain_or_abandon).
+            record_miss(conn, name, "fetch-error:stalled",
+                        source=by_name[name].get("source"))
 
-    def _consume(fut, name):
-        c = by_name[name]
-        hit, reason = resolved(fut, name)
-        if not hit:
-            # Was printed and forgotten; now the lead row keeps WHY, so
-            # the next run can skip it and the user can see the tally.
-            record_miss(conn, c["name"], reason, source=c.get("source"))
-            print(f"    [miss] {c['name'][:34]:34} {reason}")
-            return
-        # A lead is a name somebody's page mentioned, not an employer
-        # anyone vouched for: resolving it produces a review candidate,
-        # written under the lead's own name.
-        result = score_and_upsert(conn, {**hit, "name": c["name"]},
-                                  source=c.get("source") or "resolve_leads")
-        if not result:
-            return
-        row, active, pending = result
-        resolved_rows.append(row)
-        if hit.get("via") == "probe":
-            probe_only.append(c["name"])
-        tier, score = row["mission_tier"], row["mission_score"]
-        ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-        flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
-        mark = "queue" if pending else ("OK  " if active else "off ")
-        print(f"    [{mark}] {c['name'][:30]:30} "
-              f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
-              f"{str(tier):18} {ss}{flag}")
-    drain(leads,
-          lambda c: resolve_or_miss(c["name"], c.get("careers_url") or ""),
-          _consume, _stalled, label=lambda c: c["name"],
-          max_workers=max_workers)
-    conn.close()
+        def _consume(fut, name):
+            c = by_name[name]
+            hit, reason = resolved(fut, name)
+            if not hit:
+                # Was printed and forgotten; now the lead row keeps WHY, so
+                # the next run can skip it and the user can see the tally.
+                record_miss(conn, c["name"], reason, source=c.get("source"))
+                print(f"    [miss] {c['name'][:34]:34} {reason}")
+                return
+            # A lead is a name somebody's page mentioned, not an employer
+            # anyone vouched for: resolving it produces a review candidate,
+            # written under the lead's own name.
+            result = score_and_upsert(conn, {**hit, "name": c["name"]},
+                                      source=c.get("source") or "resolve_leads")
+            if not result:
+                return
+            row, active, pending = result
+            resolved_rows.append(row)
+            if hit.get("via") == "probe":
+                probe_only.append(c["name"])
+            tier, score = row["mission_tier"], row["mission_score"]
+            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+            flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
+            mark = "queue" if pending else ("OK  " if active else "off ")
+            print(f"    [{mark}] {c['name'][:30]:30} "
+                  f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
+                  f"{str(tier):18} {ss}{flag}")
+        drain(leads,
+              lambda c: resolve_or_miss(c["name"], c.get("careers_url") or ""),
+              _consume, _stalled, label=lambda c: c["name"],
+              max_workers=max_workers)
     queued = sum(1 for r in resolved_rows
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
     print(f"\n  {len(resolved_rows)} board(s) resolved, "

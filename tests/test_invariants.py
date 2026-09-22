@@ -380,3 +380,49 @@ def test_pool_owners_still_own_pools():
              if not any(r == rel and "ThreadPoolExecutor(" in s
                         for r, s in source_files())]
     assert not stale, f"POOL_OWNERS lists {stale}, which no longer build one."
+
+
+# --------------------------------------------------------------------------- #
+#  5. A store connection is closed however its block ends                     #
+# --------------------------------------------------------------------------- #
+
+def _unclosed_connections(src):
+    """Functions in `src` that keep a `x = connect(...)` connection without
+    a try/finally closing it. Returning it hands it to the caller (the
+    factory itself)."""
+    out = []
+    for fn in ast.walk(ast.parse(src)):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        held = {t.id for n in ast.walk(fn) if isinstance(n, ast.Assign)
+                and isinstance(n.value, ast.Call)
+                and getattr(n.value.func, "attr",
+                            getattr(n.value.func, "id", None)) == "connect"
+                for t in n.targets if isinstance(t, ast.Name)}
+        returned = {n.value.id for n in ast.walk(fn) if isinstance(n, ast.Return)
+                    and isinstance(n.value, ast.Name)}
+        closed = any(isinstance(c, ast.Call) and getattr(c.func, "attr", None) == "close"
+                     for t in ast.walk(fn) if isinstance(t, ast.Try)
+                     for s in t.finalbody for c in ast.walk(s))
+        if held - returned and not closed:
+            out.append(fn.name)
+    return out
+
+
+def test_store_connections_close_on_every_path():
+    """`conn = connect()` ... `conn.close()` leaks on any exception in
+    between, and a leaked connection keeps its transaction -- the write
+    lock with it -- until garbage collection. Open the store with
+    `with closing(store.connect(...)) as conn:`, ops.maintenance.track_store,
+    or a try/finally.
+
+    Notes:
+        track_store fixed ten of these in ops/ (2026-09); 17 more had
+        regrown or survived in crawl/, discovery/, claude/, capture.py and
+        tools/ by 2026-09-22 (one never closed at all).
+    """
+    assert _unclosed_connections(
+        "def f():\n    conn = connect()\n    conn.close()\n") == ["f"]
+    offenders = {rel: names for rel, src in source_files()
+                 if "connect(" in src and (names := _unclosed_connections(src))}
+    assert not offenders, f"store connections that can leak: {offenders}"

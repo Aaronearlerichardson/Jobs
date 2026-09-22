@@ -51,6 +51,7 @@ import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
 from concurrent.futures import wait as fut_wait
+from contextlib import closing
 from datetime import datetime, timedelta
 
 from src import config
@@ -543,11 +544,10 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
     """
     db_path = db_path or config.STORE_DB_PATH
     claude_baseline = cache_stats()     # this pass's own Claude spend footer
-    conn = store.connect(db_path)
-    plan_stats = {}
-    boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
-                  limit=limit, stats=plan_stats)
-    conn.close()
+    with closing(store.connect(db_path)) as conn:
+        plan_stats = {}
+        boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
+                      limit=limit, stats=plan_stats)
     age = plan_stats["min_age_hours"]
 
     bar = "=" * 70

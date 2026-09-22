@@ -32,6 +32,7 @@ are not data — the technical-title regex, the exclude gate, digest
 rendering — but never the methodology.
 """
 
+from contextlib import closing
 from datetime import datetime
 from typing import NamedTuple
 
@@ -138,12 +139,11 @@ def build_sources(cfg, t, include_websearch=None):
     # 2) Company store (this track's own DB, optionally tag-scoped).
     if src["store"]:
         try:
-            conn = store.connect(t["db_path"])
-            # Not every active row: dormant companies (never-productive,
-            # or high-volume off-mission boards) only come round again on
-            # their weekly slot — see store.record_crawl_outcome.
-            rows = store.crawlable_companies(conn, tag=t["store_tag"])
-            conn.close()
+            with closing(store.connect(t["db_path"])) as conn:
+                # Not every active row: dormant companies (never-productive,
+                # or high-volume off-mission boards) only come round again on
+                # their weekly slot — see store.record_crawl_outcome.
+                rows = store.crawlable_companies(conn, tag=t["store_tag"])
         except Exception as e:
             print(f"  [!] company store unavailable ({e})")
             rows = []
@@ -687,60 +687,59 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     apply_keyword_focus(config, t)
     specs = build_sources(config, t, include_websearch=websearch)
     sources = [(s["name"], s["platform"], s["thunk"]) for s in specs]
-    conn = store.connect(t["db_path"])
+    with closing(store.connect(t["db_path"])) as conn:
 
-    bar = "=" * 70
-    gates_desc = []
-    if t["require_core_anchor"]:
-        gates_desc.append("core-anchor")
-    gates_desc.append("technical-title")
-    gates_desc.append("geo" if t["geo_gate"] else "remote-stamped")
-    print(f"\n{bar}\n  [{t['label'].upper()}] crawl - "
-          f"{datetime.now():%Y-%m-%d %H:%M}")
-    print(f"  engine={engine} keywords={t['keyword_mode']} "
-          f"sources={sum(1 for v in t['sources'].values() if v)} families "
-          f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
-    mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
-    print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
-    if not sources:
-        print("  [!] No sources — check [tracks.*].sources and the company "
-              "store (discover.py --local / --import-companies).")
+        bar = "=" * 70
+        gates_desc = []
+        if t["require_core_anchor"]:
+            gates_desc.append("core-anchor")
+        gates_desc.append("technical-title")
+        gates_desc.append("geo" if t["geo_gate"] else "remote-stamped")
+        print(f"\n{bar}\n  [{t['label'].upper()}] crawl - "
+              f"{datetime.now():%Y-%m-%d %H:%M}")
+        print(f"  engine={engine} keywords={t['keyword_mode']} "
+              f"sources={sum(1 for v in t['sources'].values() if v)} families "
+              f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
+        mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
+        print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
+        if not sources:
+            print("  [!] No sources — check [tracks.*].sources and the company "
+                  "store (discover.py --local / --import-companies).")
 
-    done_count = [0]
+        done_count = [0]
 
-    def _progress(name, platform, jobs, err):
-        done_count[0] += 1
-        status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
-        print(f"  [{done_count[0]:>3}/{len(sources)}] {name} ({platform}): "
-              f"{status}")
+        def _progress(name, platform, jobs, err):
+            done_count[0] += 1
+            status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
+            print(f"  [{done_count[0]:>3}/{len(sources)}] {name} ({platform}): "
+                  f"{status}")
 
-    fetched = fetch_all(sources, on_done=_progress)
+        fetched = fetch_all(sources, on_done=_progress)
 
-    got = _gate_sources(conn, t, specs, fetched, commit)
+        got = _gate_sources(conn, t, specs, fetched, commit)
 
-    n_would_score = (len(got.to_score) + len(got.matches)) if fit else 0
-    guard_tripped = fit and _cost_guard_trips(t, n_would_score, confirm_cost)
-    scored = _score_and_persist(conn, t, got, resume, fit=fit, commit=commit,
-                                guard_tripped=guard_tripped,
-                                max_workers=max_workers)
+        n_would_score = (len(got.to_score) + len(got.matches)) if fit else 0
+        guard_tripped = fit and _cost_guard_trips(t, n_would_score, confirm_cost)
+        scored = _score_and_persist(conn, t, got, resume, fit=fit, commit=commit,
+                                    guard_tripped=guard_tripped,
+                                    max_workers=max_workers)
 
-    linked = t["sources"]["store"] and t["sources"]["location_scoped"]
-    if resume and commit and linked and not guard_tripped:
-        scored += ops.self_heal_unscored(conn, resume, track=t["track"],
-                                         max_workers=max_workers)
-    if verify_n and resume and commit and not guard_tripped:
-        ops.verify_top(top_n=verify_n, max_workers=max(2, max_workers // 2),
-                       conn=conn, t=t)
+        linked = t["sources"]["store"] and t["sources"]["location_scoped"]
+        if resume and commit and linked and not guard_tripped:
+            scored += ops.self_heal_unscored(conn, resume, track=t["track"],
+                                             max_workers=max_workers)
+        if verify_n and resume and commit and not guard_tripped:
+            ops.verify_top(top_n=verify_n, max_workers=max(2, max_workers // 2),
+                           conn=conn, t=t)
 
-    _print_funnel(got.funnel, bar)
+        _print_funnel(got.funnel, bar)
 
-    ranked = None
-    if linked:
-        ranked = _report_ranked(conn, t, got, scored, send=send,
-                                top_n=top_n, bar=bar)
-    if got.matches or not linked:
-        _report_matches(got.matches, t, send=send, samples=samples, bar=bar)
+        ranked = None
+        if linked:
+            ranked = _report_ranked(conn, t, got, scored, send=send,
+                                    top_n=top_n, bar=bar)
+        if got.matches or not linked:
+            _report_matches(got.matches, t, send=send, samples=samples, bar=bar)
 
-    print("")
-    conn.close()
+        print("")
     return ranked if ranked is not None else got.matches
