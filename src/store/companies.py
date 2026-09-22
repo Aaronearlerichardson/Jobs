@@ -460,12 +460,16 @@ def _company_index(conn):
 
 def company_by_board(conn, row):
     """The existing company row whose board matches `row`'s (see board_key),
-    or None. Discovery resolves a pasted or harvested NAME to a board, and a
-    name the roster spells differently ("SAS" vs "SAS Institute", "Veeva
-    Systems" vs "Veeva", "NVIDIA AI" vs "NVIDIA" — all three re-added on
-    2026-09-01) passes the name-keyed already-tracked check and lands as a
-    second row on the same board until the next dedup. Checking the board
-    before the insert stops the churn at the source."""
+    or None. Discovery asks it before inserting, because a name the roster
+    spells differently passes the name-keyed already-tracked check and
+    would land as a second row on the same board.
+
+    Notes:
+        "SAS" vs "SAS Institute", "Veeva Systems" vs "Veeva" and "NVIDIA AI"
+        vs "NVIDIA" were all re-added on 2026-09-01; until the next dedup
+        the crawl fetched each board twice and the ranking showed two
+        companies.
+    """
     key = board_key(row)
     if key is None:
         return None

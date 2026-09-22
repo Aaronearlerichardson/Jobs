@@ -585,18 +585,14 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     (retry_days=0 retries everything).
 
     Companies are fetched CONCURRENTLY (`max_workers`), like the Workday
-    sibling below. This function advertised max_workers=8 and then never
-    used it: it walked `group_by_company` one company at a time, and every
-    board pull and every per-job hydration in it was a blocking GET on the
-    calling thread. 2026-09-11
-    (data/logs/session-20260911-162142-webui-backfill-descriptions.log):
-    "backfilling 43600 description(s) via company board(s)..." at 16:21:43,
-    and by 16:40:39 — nineteen minutes — roughly twenty company lines and
-    about 1,878 rows had gone through, one of them ("J&J MedTech 1063
-    stale -> 1060 matched", 16:37:11) holding the op alone for some nine
-    minutes. The log has no footer: the run was killed before it finished.
+    sibling below.
 
     Notes:
+        This function once advertised max_workers=8 and walked one company
+        at a time. The 2026-09-11 web-UI run (session-20260911-162142) got
+        through ~1,878 of 43,600 rows in nineteen minutes, nine of them on
+        J&J MedTech alone, and was killed before it finished.
+
         Company lines now print in COMPLETION order, not roster order —
         `fan_out` yields as boards come back, and the sibling has always
         printed that way. The counts either line adds up to are unchanged.
@@ -882,8 +878,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     Unverifiable rows (dead URL and no stored body, API down) keep their
     first-pass score untouched; once src.claude's breaker has disabled the
     API for this run the pass stops with ONE line instead of a per-row
-    'unverified' (2026-09-09: 121 rows x 2 rounds x 2 runs, every live JD
-    fetched for nothing). Costs at most top_n x rounds API calls per
+    'unverified'. Costs at most top_n x rounds API calls per
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
     `force=True` re-verifies every finalist regardless, floor or not
@@ -897,6 +892,10 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
         top_n never reaches, however many rounds run. They only take the
         slots the top-N slice left unspent, so a busy run costs nothing
         extra.
+
+        The per-row 'unverified' it used to print after the breaker tripped
+        cost 121 rows x 2 rounds x 2 runs on 2026-09-09, every live JD
+        fetched for nothing.
     """
     from src.claude.api import api_disabled
     from src.claude.fit import (DEEP_MARKER, FitResult, is_deep_verified,
@@ -1678,12 +1677,13 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
     from "dead" (404) are probed. Returns (n_dead, n_offmission).
 
-    Lived in src.store until 2026-09-10; it probes the network and applies
-    roster policy, so it is an operation, and the store keeps only the
-    write (store.deactivate_company).
-
     Prints how many boards it probes, then one line per company it
     deactivates (name, ATS, reason), so a clean run still leaves a trace.
+
+    Notes:
+        Lived in src.store until 2026-09-10; it probes the network and
+        applies roster policy, so it is an operation, and the store keeps
+        only the write (store.deactivate_company).
     """
     from src.discovery.resolve.probes import (probe_greenhouse, probe_lever,
                                    probe_ashby, probe_bamboohr)
@@ -2225,14 +2225,7 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
         This is deliberately NOT a name_key comparison: name_key strips
         spaces, so it cannot tell "Centria Autism" (what the payload
         carries) from "Centriaautism" (the slug-derived name stored) --
-        the exact improvement this op exists to make. An earlier version
-        used name_is_own_slug(new_name, slug) here and, live-checked
-        against the 22 real candidates on 2026-09-18, wrongly skipped 8 of
-        14 genuine renames as "nothing to fix" (Axsome Therapeutics,
-        Shields Health Solutions, Garner Health, Beam Therapeutics,
-        Formation Bio, American Institutes for Research, MapLight
-        Therapeutics, Eliot Community Human Services) because each one's
-        name_key happens to equal its own slug's, spaces and all;
+        the exact improvement this op exists to make;
       * it collides (src.match.names.name_key) with a DIFFERENT company
         already on the roster -- `companies.name` is UNIQUE, and this op
         renames one row, it does not merge two.
@@ -2250,6 +2243,12 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
         wrong grain and was confirmed live to produce a WRONG name, not
         merely a missing one; Lever and Ashby carry no employer field in
         their public postings API at all).
+
+        An earlier version compared with name_is_own_slug(new_name, slug)
+        and, live-checked against the 22 real candidates on 2026-09-18,
+        wrongly skipped 8 of 14 genuine renames (Axsome Therapeutics,
+        Garner Health, Beam Therapeutics, ...) because each one's name_key
+        equals its own slug's.
     """
     from src.match.names import junk_name_reason, name_key
 

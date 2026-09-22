@@ -756,20 +756,15 @@ def remote_admitted(row, remote_mission_floor):
 
 def _collapse_key(r):
     """Group-by key for 'same opening at the same employer' in
-    ranked_jobs(collapse=True): (company key, normalised title) — reuses
-    _norm_title for the title, and review._name_key -- the key every
-    other name comparison in this package already uses -- for the company
-    name, rather than a second normaliser of either.
+    ranked_jobs(collapse=True): (company key, normalised title), from
+    _norm_title and review._name_key rather than a second normaliser of
+    either.
 
-    `company_id` is authoritative when a row has one: two companies never
-    share an id, and one company's rows never disagree about it. The tiny
-    minority of rows with NO company_id — LinkedIn captures, jsonld sweep
-    hits, manual --add (see sync_job_statuses) — fall back to the
-    name key (4 of 119,411 rows in the 2026-09-17 live store, none of
-    which collapse either way). Rows with neither an id nor a name key
-    off their own job_id,
-    which never repeats, so a nameless row simply never collapses with
-    anything instead of colliding with every other nameless row:
+    `company_id` is authoritative when a row has one. Rows with none —
+    LinkedIn captures, jsonld sweep hits, manual --add (see
+    sync_job_statuses) — fall back to the name key, and rows with neither
+    key off their own job_id, which never repeats, so a nameless row never
+    collides with every other nameless row:
 
     >>> _collapse_key({"company_id": 5, "company_name": "Acme",
     ...                "title": "Data Engineer", "job_id": "x"})
@@ -780,6 +775,10 @@ def _collapse_key(r):
     >>> _collapse_key({"company_id": None, "company_name": "",
     ...                "title": "Data Engineer", "job_id": "j1"})
     ('job:j1', 'data engineer')
+
+    Notes:
+        4 of 119,411 rows in the 2026-09-17 live store had no company_id,
+        and none of them collapse either way.
     """
     # Deferred, like companies.py's own reach into review.py, so neither
     # module depends on the other at load time (see review.py's header).
@@ -960,10 +959,9 @@ def dedup_jobs(conn):
     """Collapse job rows that are the SAME posting under different ids: same
     company, same URL modulo scheme/query/fragment (_norm_url), same
     normalized title. upsert_job's re-key only catches an EXACT URL match,
-    so a fetcher that emitted the same posting with a different query string
-    (iCIMS `?in_iframe=1` vs `?hub=9&in_iframe=1`, 12 SAS pairs in the
-    2026-09-01 store) under a second id namespace slipped past it, and the
-    pair then double-ranked and double-spent deep-verify.
+    so the same posting emitted with a different query string under a
+    second id namespace slips past it, double-ranks and double-spends
+    deep-verify.
 
     Two guards keep this from eating distinct postings. Title must match —
     some custom boards give several DISTINCT postings one landing URL (see
@@ -972,12 +970,17 @@ def dedup_jobs(conn):
     URL is a shared careers landing page (butterflynetwork.com/careers?
     gh_jid=N) reduce to one URL for every job, and a title reposted under a
     fresh requisition (a second office, a re-opened req) is a separate
-    posting, not a duplicate — the dry run without this guard would have
-    merged three such Butterfly Network pairs.
+    posting, not a duplicate.
 
     Keeps, per group: a dispositioned row over an undispositioned one, then
     an open row over a closed one, then the earliest first_seen (the row
-    whose history is longest). Returns the number of rows deleted."""
+    whose history is longest). Returns the number of rows deleted.
+
+    Notes:
+        The 2026-09-01 store held 12 SAS pairs (iCIMS `?in_iframe=1` vs
+        `?hub=9&in_iframe=1`). The dry run without the requisition guard
+        would have merged three Butterfly Network pairs.
+    """
     from collections import defaultdict
     groups = defaultdict(list)
     for r in conn.execute(

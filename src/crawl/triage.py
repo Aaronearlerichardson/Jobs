@@ -624,19 +624,21 @@ def _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
     every drop (DEBUG "drop <gate> | <company> | <title> | <location> |
     <triage_detail>") and prints every score ("score <n> <surfaced|fit> |
     <company> | <title> | <location> | <fit reason>" -- "surfaced" IS the
-    OK status here, spelled out rather than "ok" plus a redundant
-    "[SURFACED]" tag the way this used to print two names for one fact).
+    OK status here).
 
     The drop record's three free-text fields (company, title, location)
-    are run through net.util.clean_field first: 124 open rows already carry a
-    newline or tab in a title or location (2026-09-18 audit), and this is
-    the one line in the whole run that packs five fields onto one bare
-    "|"-joined line with no quoting -- a literal newline in any of them
-    otherwise splits it into two bare fragments a session-log reader
-    cannot tell from a second record ("Calibration | local-tech=title" on
-    its own). Defence in depth: the fetchers clean these at write time
-    (board.board_jobs; the modules that bypass it), but a row already
-    dirty in the store reaches this line however it got there.
+    are run through net.util.clean_field first: it is the one line in the
+    run that packs five fields onto one unquoted "|"-joined line, and a
+    literal newline in any of them splits it into fragments a session-log
+    reader cannot tell from a second record. The fetchers clean these at
+    write time too (board.board_jobs), but a row already dirty in the
+    store reaches this line however it got there.
+
+    Notes:
+        124 open rows carried a newline or tab in a title or location in
+        the 2026-09-18 audit ("Calibration | local-tech=title" printed on a
+        line of its own). The score line used to print "ok" plus a
+        redundant "[SURFACED]" tag, two names for one fact.
     """
     with store.batch(conn):
         for jid, (status, detail, c, r) in decided.items():

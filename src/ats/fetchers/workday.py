@@ -251,10 +251,7 @@ def _wd_scope_failed(scoped_total, board_total, cap):
 
     A scope that returns as many postings as the whole board, or at least
     `cap` (the most the pager will ever read), did nothing: the tenant
-    ignored the facet or the search text. 2026-09-09: one board answered
-    every scoped call with all 2000 reqs for a day; the pull read 60
-    pages, detail-fetched 1,199 "N Locations" rows to rescue them (531s
-    of an 872s crawl), and kept all 1,200 as local.
+    ignored the facet or the search text.
 
     >>> _wd_scope_failed(82, 2000, 1200)
     False
@@ -266,6 +263,12 @@ def _wd_scope_failed(scoped_total, board_total, cap):
     False
     >>> _wd_scope_failed(0, 0, 1200)
     False
+
+    Notes:
+        2026-09-09: one board answered every scoped call with all 2000 reqs
+        for a day; the pull read 60 pages, detail-fetched 1,199 "N
+        Locations" rows to rescue them (531s of an 872s crawl), and kept
+        all 1,200 as local.
     """
     if not isinstance(scoped_total, (int, float)) or scoped_total <= 0:
         return False
@@ -292,19 +295,9 @@ def _scoped_body(api, hdr, loc_re, search_text):
 
 
 def _wd_capped_total(total, count):
-    """The capped_total to report to net.http.note_capped: never smaller
-    than `count` (the rows this pull actually, post-dedup, returned) --
-    the board's own reported `total` only when it is at least that large,
-    else `count` itself; None stays None (an untrustworthy total, i.e. no
-    total at all, reports as unknown rather than a manufactured number).
-
-    Workday's page-0 `total` can UNDER-report a live board: the 2026-09-18
-    audit found boards like ICON plc showing "1200 job(s) ... capped of
-    840" -- MORE rows returned than the API's own declared total, because
-    the un-deduped pager double-counted postings across pages and nobody
-    had compared the two numbers. store.sync_job_statuses documents
-    `capped_total` as the board's size for a human/log reader; reporting
-    one smaller than the rows just received is worse than reporting none.
+    """The capped_total for net.http.note_capped: the board's reported
+    `total`, never less than `count` (the rows this pull returned, post-
+    dedup); no total reports as unknown, not as a manufactured number.
 
     >>> _wd_capped_total(2000, 1200)
     2000
@@ -312,6 +305,14 @@ def _wd_capped_total(total, count):
     1200
     >>> _wd_capped_total(None, 1200) is None
     True
+
+    Notes:
+        Workday's page-0 `total` can UNDER-report a live board: the
+        2026-09-18 audit found ICON plc at "1200 job(s) ... capped of 840",
+        because the un-deduped pager double-counted postings across pages.
+        store.sync_job_statuses treats `capped_total` as the board's size
+        for a human reader, and one smaller than the rows just received is
+        worse than none.
     """
     return None if total is None else max(total, count)
 
@@ -537,11 +538,14 @@ def wd_local_count(tenant, pod, site, loc_re, search_text=None, page_size=20,
     way fetch_workday_all would scope them: the facet-scoped (else
     search-text-scoped) total when the scope narrowed the board, otherwise
     a count over the first `sample_pages` pages by LISTED location only.
+    Returns 0 when the board cannot be read at all. Pinned by
+    tests/test_log_audit_fixes.py::TestWorkdayLocalCount.
 
-    The discovery probe used to trust the scoped total outright, and wrote
-    local_job_count = total_job_count = 1200 for a board on 2026-09-09
-    when the tenant ignored its search text (the crawl then pulled the
-    whole board). Returns 0 when the board cannot be read at all."""
+    Notes:
+        The discovery probe used to trust the scoped total outright, and
+        wrote local_job_count = total_job_count = 1200 for a board on
+        2026-09-09 whose tenant ignored its search text.
+    """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
     api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
     body, _applied, board_total = _scoped_body(api, _CXS_HEADERS, loc_re, search_text)

@@ -147,27 +147,24 @@ _FAILED = threading.local()
 def fetch_failed(label, err, indent=4):
     """Report one failed fetch, count it, and hand back [].
 
-    Thirty-seven sites across src/ats had written
-    `print(f"    [!] {label}: {e}")` out by hand, and the copies had
-    already drifted -- two indents, and ultipro.py using sys.stdout.write
-    because print() emits the text and the newline as SEPARATE writes,
-    which let another thread splice a line into the middle of one (seen
-    fused with a [SNIFF] line in the 2026-08-28 log). One writer means one
-    indent and one atomic write for everybody.
-
-    Counting is the point, though. A fetcher that fails soft-returns [],
-    and `[]` is also what a board with nothing on it returns, so by the
-    time a caller sees the result the difference is gone -- 116 of 620
-    boards came back empty in EVERY harvest run of the last 25 logs and
-    not one of them was recorded as anything but an ordinary empty board.
-    The failure was only ever in the log text. Now it is also a number the
-    caller can read.
+    The line goes out as ONE write, so another thread cannot splice into
+    it. The count is the point: a fetcher that fails soft-returns [],
+    which is also what a board with nothing on it returns, so the count
+    is how a caller still tells the two apart (see snapshot_info).
 
     Returns [] so a soft-failing fetcher can `return fetch_failed(...)`;
     call it as a statement where the failure path breaks or continues.
-
     Also remembers `label: err` as this thread's last failure (see
     snapshot_info's `last_error`).
+
+    Notes:
+        Thirty-seven sites across src/ats had written
+        `print(f"    [!] {label}: {e}")` by hand and had drifted: two
+        indents, and print()'s separate text and newline writes let another
+        thread splice into a line (fused with a [SNIFF] line in the
+        2026-08-28 log). And 116 of 620 boards came back empty in EVERY
+        harvest run of the last 25 logs, not one of them recorded as
+        anything but an ordinary empty board.
     """
     _FAILED.n = getattr(_FAILED, "n", 0) + 1
     _FAILED.last = f"{label}: {err}"

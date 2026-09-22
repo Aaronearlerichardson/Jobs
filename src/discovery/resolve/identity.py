@@ -270,18 +270,12 @@ def candidate_pages(name, careers_url="", **kw):
 
 def _hq_match_beyond_brand(text, name, hq_re=None):
     r"""True if `text` carries a "<place>, ST" match whose place is NOT just
-    the company's own name.
-
-    Garner Health is a New York company, but "Garner" is also a configured
-    locality town — so every page of garnerhealth.com address-matched and
-    the 2026-08-28 discover run activated it as NC-local with zero NC jobs.
-    A match whose place tokens all appear in the company name is brand
-    text; a match on any OTHER configured place still counts.
+    the company's own name: a match whose place tokens all appear in the
+    company name is brand text, and a match on any OTHER configured place
+    still counts.
 
     `hq_re` defaults to the profile-derived locality pattern; the examples
-    pass their own so they hold on any profile (the suite must pass on
-    profile.example.toml, whose [locality] lists no Garner — a worktree
-    without a personal profile failed this doctest on 2026-09-01):
+    pass their own so they hold on any profile:
 
     >>> pat = re.compile(r"\b(?:Garner|Durham),\s*NC\b")
     >>> _hq_match_beyond_brand("visit us in Garner, NC", "Garner Health", pat)
@@ -292,6 +286,13 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     True
     >>> _hq_match_beyond_brand("no address here", "Acme Bio", pat)
     False
+
+    Notes:
+        Garner Health is a New York company, but "Garner" is also a
+        configured locality town, so every page of garnerhealth.com
+        address-matched and the 2026-08-28 discover run activated it as
+        NC-local with zero NC jobs. The doctest once relied on the
+        personal profile and failed on profile.example.toml (2026-09-01).
     """
     squashed = name_key(name)
     for m in (hq_re or _NC_HQ_RE).finditer(text or ""):

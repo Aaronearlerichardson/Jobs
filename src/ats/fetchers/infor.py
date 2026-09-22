@@ -312,15 +312,13 @@ def posting_state(payload, today=None):
     `fetchers/probe.py`'s closure probe. None means "nothing was proved".
 
     The endpoint answers HTTP 200 whatever the posting's fate, so the
-    status code is never the witness. Verified live on 2026-09-21 against
-    a board of 1,575 open postings and a window of requisitions no longer
-    on it: a pulled posting either loses its record outright...
+    status code is never the witness. A pulled posting either loses its
+    record outright...
 
     >>> posting_state({"status": "DOES_NOT_EXIST", "statusCode": 404})
     (False, 'infor api: posting record gone')
 
-    ...or keeps it with a posting-end date now in the past (every sampled
-    unlisted record that still existed had one, four years stale):
+    ...or keeps it with a posting-end date now in the past:
 
     >>> ended = {"fields": {"PostingDateRange_prd_End": {"value": "20220630"}}}
     >>> posting_state(ended, today="2026-09-21")
@@ -340,6 +338,12 @@ def posting_state(payload, today=None):
 
     >>> posting_state({})
     (None, 'infor api: no posting record')
+
+    Notes:
+        Verified live on 2026-09-21 against a board of 1,575 open postings
+        and a window of requisitions no longer on it: every sampled
+        unlisted record that still existed had an end date, four years
+        stale.
     """
     payload = payload or {}
     if (str(payload.get("status") or "").upper() == "DOES_NOT_EXIST"

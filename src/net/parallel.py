@@ -66,12 +66,15 @@ def drain(items, fn, consume, stalled, label=str,
     per completion, `stalled(label)` for anything still unstarted when
     nothing has completed for RESOLVE_STALL_S.
 
-    Six call sites wrote the two-line preamble out -- construct the
-    executor, build the {future: label} dict -- and every one of them
-    then threw the executor away. The choice between this and `fan_out`
-    is whether the work can hang: a bounded API call cannot, a company
-    resolution chaining page fetches can, and did (2026-08-28: 59 of 60
-    names in 8 minutes, then >1h on the last).
+    The choice between this and `fan_out` is whether the work can hang: a
+    bounded API call cannot, a company resolution chaining page fetches
+    can.
+
+    Notes:
+        Six call sites wrote the two-line preamble out (construct the
+        executor, build the {future: label} dict) and then threw the
+        executor away. The hang is real: 2026-08-28 resolved 59 of 60
+        names in 8 minutes, then spent >1h on the last.
     """
     items = list(items)
     if not items:

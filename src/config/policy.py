@@ -229,7 +229,7 @@ def board_max_pages(company, page_size, offmission_pages):
     """max_pages for a whole-board Workday/SmartRecruiters listing pull:
     BOARD_MAX_ROWS's wider budget (in pages of `page_size`) for a
     mission-worth-it board, or `offmission_pages` -- the fetcher's own
-    pre-2026-09-18 default -- for one is_offmission_inactive. The SAME
+    narrower default -- for one is_offmission_inactive. The SAME
     gate the harvester's cadence already uses for these boards, not a
     second rule: one a track's own mission gate discards on every triage
     pass never earns the wider, slower read either.

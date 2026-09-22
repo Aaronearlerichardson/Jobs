@@ -217,17 +217,14 @@ def parse_company_names(blob, limit=300):
 
     Two passes. If the page repeats each job title — the shape every
     LinkedIn results row has — the employer is pinned by position and the
-    surrounding chrome is never even considered. A real search page yields
-    15 employers and no junk that way, against 117 lines for the filter.
+    surrounding chrome is never even considered.
 
-    Otherwise fall back to filtering lines. Permissiveness is no longer
-    cheap: a junk name that reaches the resolver costs a full sniff ->
-    probe -> websearch chain, is PERSISTED as a miss row either way
-    (add_names records every unresolved name), and a generic word can
-    websearch-resolve to an unrelated real company's board (2026-08-28:
-    "Biotech" landed on Dianthus Therapeutics' greenhouse board, ACTIVE).
-    So page chrome, stat lines, sector labels and JD section headers are
-    filtered out on sight; a dropped real name is still the rarer, cheaper
+    Otherwise fall back to filtering lines. A junk name that reaches the
+    resolver costs a full sniff -> probe -> websearch chain, is PERSISTED
+    as a miss row either way (add_names records every unresolved name),
+    and can websearch-resolve to an unrelated company's board. So page
+    chrome, stat lines, sector labels and JD section headers are filtered
+    out on sight; a dropped real name is still the rarer, cheaper
     mistake, so the filters key on shapes no employer name takes:
 
     >>> parse_company_names('''Home
@@ -245,6 +242,12 @@ def parse_company_names(blob, limit=300):
     ... IQVIA
     ... Durham, NC''')
     ['Alpaca Health', 'IQVIA']
+
+    Notes:
+        On a real search page the position pass yields 15 employers and no
+        junk, against 117 lines for the filter. 2026-08-28: "Biotech"
+        websearch-resolved to Dianthus Therapeutics' greenhouse board and
+        was stored ACTIVE.
     """
     if isinstance(blob, (list, tuple)):
         lines = [str(x) for x in blob]
@@ -313,14 +316,18 @@ def _blocked_keys(conn):
 
 def screen_names(names):
     """Split `names` into (employer-shaped, [(name, reason)]) with
-    core.names.junk_name_reason. Runs ahead of every resolution path, because a
-    section heading or a category noun that reaches the resolver costs a
-    careers-page sniff, two web searches and a mission call before it
-    fails (2026-09-01/02 add-names and reresolve runs: "Required
-    Qualifications", "Proficiency in SQL.", "Oncology", "99+ results").
+    src.match.names.junk_name_reason. Runs ahead of every resolution path,
+    because a section heading or a category noun that reaches the resolver
+    costs a careers-page sniff, two web searches and a mission call before
+    it fails.
 
     >>> screen_names(["Beacon Biosignals", "Required Qualifications", ""])
     (['Beacon Biosignals'], [('Required Qualifications', 'section-heading'), ('', 'empty')])
+
+    Notes:
+        The 2026-09-01/02 add-names and reresolve runs resolved "Required
+        Qualifications", "Proficiency in SQL.", "Oncology" and "99+
+        results".
     """
     kept, junk = [], []
     for n in names:

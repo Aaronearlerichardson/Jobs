@@ -92,11 +92,10 @@ def job_meta(url, need_desc=False):
 
 def clean_title(text):
     r"""Strip the screen-reader label iCIMS row anchors put ahead of the
-    title and collapse the whitespace around it. Templates differ: some
-    label the anchor "Requisition Title", others just "Title" on its own
-    line (three tenants stored 15 rows as "Title \n \nSr. Process Engineer"
-    on 2026-09-01). A bare "Title" is only a label when a line break
-    follows it, so "Title IX Coordinator" survives.
+    title and collapse the whitespace around it. Templates label the anchor
+    "Requisition Title" or a bare "Title" on its own line; a bare "Title"
+    is only a label when a line break follows it, so "Title IX Coordinator"
+    survives.
 
     >>> clean_title("Requisition Title Data Engineer")
     'Data Engineer'
@@ -106,6 +105,10 @@ def clean_title(text):
     'Title IX Coordinator'
     >>> clean_title("  Software   Developer ")
     'Software Developer'
+
+    Notes:
+        Three tenants stored 15 rows titled "Title \n \nSr. Process
+        Engineer" on 2026-09-01.
     """
     text = re.sub(r"^\s*Requisition Title\s*", "", text or "")
     text = re.sub(r"^\s*Title\s*\n\s*", "", text)
@@ -115,15 +118,17 @@ def clean_title(text):
 def canonical_url(url):
     """One stored URL per posting: path only, plus the `in_iframe=1` flag
     every consumer needs (it selects the server-rendered document).
-    Tenants hand out the same posting under varying query strings
-    (`?hub=9&in_iframe=1` from a portal alias vs `?in_iframe=1` from the
-    sitemap), and upsert_job's re-key matches URLs exactly, so the variants
-    became duplicate rows (2026-09-01).
 
     >>> canonical_url("https://careers-x.icims.com/jobs/42453/software-developer/job?hub=9&in_iframe=1")
     'https://careers-x.icims.com/jobs/42453/software-developer/job?in_iframe=1'
     >>> canonical_url("https://careers-x.icims.com/jobs/42453/software-developer/job")
     'https://careers-x.icims.com/jobs/42453/software-developer/job?in_iframe=1'
+
+    Notes:
+        Tenants hand out one posting under varying query strings (a portal
+        alias's `?hub=9&in_iframe=1`, the sitemap's `?in_iframe=1`), and
+        upsert_job's re-key matches URLs exactly, so the variants became
+        duplicate rows (2026-09-01).
     """
     base = (url or "").split("#", 1)[0].split("?", 1)[0]
     return f"{base}?in_iframe=1" if base else ""
@@ -185,9 +190,12 @@ def _sitemap_rows(tenant):
     """Every live posting a JS-shell tenant lists in /sitemap.xml; titles
     from the URL slug, locations resolved per job by the caller.
 
-    Raises on a non-2xx status (2026-09-16: icims.com's WAF answers this
-    URL with a 403 on some tenants) instead of regexing an error page and
-    quietly reporting zero postings -- see `_search_rows`.
+    Raises on a non-2xx status instead of regexing an error page into zero
+    postings -- see `_search_rows`.
+
+    Notes:
+        icims.com's WAF answers this URL with a 403 on some tenants
+        (2026-09-16).
     """
     r = SESSION.get(f"https://{tenant}.icims.com/sitemap.xml", headers=ICIMS_HEADERS)
     r.raise_for_status()

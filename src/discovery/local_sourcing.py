@@ -409,14 +409,8 @@ def mission_context(board):
 
 
 def _board_already_tracked(conn, row):
-    """The roster company that already owns `row`'s board under ANOTHER
-    name, or None. Every discovery path checks names before resolving, but
-    a name the roster spells differently ("SAS" for "SAS Institute", "Veeva
-    Systems" for "Veeva", "NVIDIA AI" for "NVIDIA" — all re-added on
-    2026-09-01) passes that check and then resolves to a board that is
-    already on file; until the next dedup the crawl fetched the board twice
-    and the ranking showed two companies. Same-name matches are NOT dups —
-    that is the ordinary re-probe/update path — so the caller may upsert."""
+    """store.company_by_board, minus a same-name match: that is the
+    ordinary re-probe/update path, which the caller may upsert."""
     from src.store import company_by_board
     existing = company_by_board(conn, row)
     if not existing:

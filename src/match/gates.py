@@ -78,21 +78,25 @@ def exclude_reason(title, description="", allow_defense=False, *,
     for WATCHED companies: watching a defense-adjacent employer means "I
     want its technical roles anyway".
 
-    clinical_titles/clinical_markers (2026-09-18): a title that names a
-    hands-on clinical-service occupation ("CT Technologist", "Medical Lab
+    clinical_titles/clinical_markers: a title that names a hands-on
+    clinical-service occupation ("CT Technologist", "Medical Lab
     Scientist", "Nurse Practitioner...") passes the free tech_title_regex
-    gate on a word the occupation shares with engineering roles by
-    coincidence ("technologist", "scientist", "quality" are all in the
-    engine default) and would otherwise pay for hydration and a Claude fit
-    call for nothing — 88 of 113 scored rows in the 2026-09-18 Duke Health
-    pass, every one 0.00-0.05. clinical_titles is title-only (BOUNDED),
-    like title_tokens, because the occupation is what the title announces;
-    clinical_markers is checked against the fuller `text` (title +
-    description) so a hit anywhere spares the drop — "Research Technician"
-    and "Clinical Data Scientist" keep scoring even though "technician" /
-    "nurse" alone would otherwise match, and a description that names the
-    research/data/engineering angle later still saves a title that looked
-    clinical-only at harvest time."""
+    gate on a word it shares with engineering roles by coincidence
+    ("technologist", "scientist", "quality" are all in the engine default)
+    and would otherwise pay for hydration and a Claude fit call for
+    nothing. clinical_titles is title-only (BOUNDED), like title_tokens,
+    because the occupation is what the title announces; clinical_markers
+    is checked against the fuller `text` (title + description) so a hit
+    anywhere spares the drop — "Research Technician" and "Clinical Data
+    Scientist" keep scoring even though "technician" / "nurse" alone would
+    otherwise match, and a description that names the research/data/
+    engineering angle later still saves a title that looked clinical-only
+    at harvest time.
+
+    Notes:
+        Added 2026-09-18: those titles were 88 of 113 scored rows in that
+        day's Duke Health pass, every one scored 0.00-0.05.
+    """
     tables = _exclude_tables(track_id)
     title_l = (title or "").lower()
     text = f"{title} {description}".lower()
