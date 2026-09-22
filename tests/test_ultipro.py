@@ -8,8 +8,6 @@ on its own host, so the fetcher tries recruiting2 first and falls back to
 recruiting on a 404.
 """
 
-import types
-
 import pytest
 
 from conftest import fake_response
@@ -50,25 +48,17 @@ class _Tenant:
     def hosts_asked(self):
         return [u.split("//")[1].split(".")[0] for u in self.urls]
 
-    # requests.Session() is used as a context manager
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
 
 @pytest.fixture
-def tenant(monkeypatch):
-    """Install a tenant behind `requests.Session()` and forget which hosts
-    earlier tests learned (the per-slug memory is process-wide)."""
+def tenant(monkeypatch, serve):
+    """Serve a tenant and forget which hosts earlier tests learned (the
+    per-slug memory is process-wide)."""
     monkeypatch.setattr(ultipro, "_HOST_OF", {})
     monkeypatch.setattr(ultipro.time, "sleep", lambda s: None)
 
     def _install(host, opps=None, **kw):
         t = _Tenant(host, [_opp(1), _opp(2)] if opps is None else opps, **kw)
-        monkeypatch.setattr(ultipro, "requests",
-                            types.SimpleNamespace(Session=lambda: t))
+        serve(t.post)
         http.reset_fetch_failures()
         return t
     return _install

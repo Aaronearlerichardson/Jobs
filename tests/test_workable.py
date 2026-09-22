@@ -132,15 +132,6 @@ class TestListing:
                                         "capped": False, "capped_total": None,
                                         "last_error": None}
 
-    def test_a_dead_board_is_a_reported_failure_not_an_exception(
-            self, workable_board):
-        """A slug that names no account 404s. That is a reported miss, and
-        it must be distinguishable from the empty board above."""
-        workable_board(None, status=404)
-        http.reset_fetch_failures()
-        assert workable.fetch_workable("no-such-account", "Nobody") == []
-        assert http.snapshot_info()["fetch_errors"] == 1
-
     def test_a_row_missing_its_shortcode_or_title_is_skipped(self, workable_board):
         workable_board(_board([
             _job(),

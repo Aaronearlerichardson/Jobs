@@ -24,9 +24,9 @@ from bs4 import BeautifulSoup
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (api, company, discourse, getro, hibob, icims,
-                              jobvite, peopleadmin, phenom, remoteok,
-                              remotive, usajobs, workday)
+from src.ats.fetchers import (api, company, discourse, getro, hibob,
+                              jobvite, peopleadmin, remoteok, remotive,
+                              usajobs)
 from src.discovery import apply
 from src.net import http
 
@@ -180,10 +180,6 @@ class TestHibob:
         remote = [j for j in jobs if j["location"].endswith("Remote")]
         assert remote and remote[0].get("remote_hint") == "hibob:workspaceType"
 
-    def test_http_error_returns_empty(self, serve, match_everything):
-        serve(fake_response({}, status=401))
-        assert hibob.fetch_hibob("x", "X") == []
-
     def test_unexpected_shape_returns_empty(self, serve, match_everything):
         serve(fake_response(["not", "a", "dict"]))
         assert hibob.fetch_hibob("x", "X") == []
@@ -273,11 +269,6 @@ class TestPeopleAdmin:
                                "search.atom": load_text(self.UNC)})
         assert len(peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")) == 7
         assert len(calls) == 2
-
-    def test_http_error_returns_empty_not_raises(self, serve,
-                                                 match_everything):
-        serve({"": 503})
-        assert peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC") == []
 
     def test_description_carries_department_and_position_type(
             self, serve, match_everything):
@@ -1075,34 +1066,31 @@ class TestMissionContext:
 class TestADeadEndpointIsNeverAnException:
     """Every JSON-pulling fetcher goes through net.http.get_json, and the
     scraped ones report through net.http.fetch_failed, so the "a dead
-    source reports and returns empty" contract is ONE contract.
+    source reports and returns empty" contract is ONE contract, checked
+    for both failure shapes (a refused socket and an HTTP error reach
+    get_json's handler by different routes).
 
-    It used to be a per-fetcher test, which meant greenhouse, lever, ashby
-    and hibob had one while remoteok, remotive and the Discourse forums did
-    not. Parametrised here it costs less and covers more -- and it covers
-    both failure shapes, a refused socket and an HTTP error, which reach
-    get_json's handler by different routes.
+    Parametrised over company.FETCHERS itself, so a board fetcher is
+    covered the day it is registered; FEEDS are the sources outside it.
+
+    Notes:
+        A hand-kept list of calls stood here until 2026-09-22 and was never
+        extended: Workable, HiBob and PeopleAdmin grew per-file copies (the
+        last two asserting [] but not the COUNT), and ten fetchers had no
+        dead-listing test at all.
     """
 
-    CALLS = {
-        "greenhouse": lambda: api.fetch_greenhouse("x", "X"),
-        "lever": lambda: api.fetch_lever("x", "X"),
-        "ashby": lambda: api.fetch_ashby("x", "X"),
+    #: One registry row every fetcher can read its coordinates from; the
+    #: ATSes whose slug is structured get their own.
+    ROW = {"slug": "acme", "careers_url": "https://acme.test/careers",
+           "wd_tenant": "acme", "wd_pod": 5, "wd_site": "External"}
+    SLUGS = {"adp": "cid|ccid", "ultipro": "CODE|GUID",
+             "infor": "css-acme-prd.inforcloudsuite.com|42"}
+    FEEDS = {
         "remoteok": lambda: remoteok.fetch_remoteok(),
         "remotive": lambda: remotive.fetch_remotive(),
         "discourse": lambda: discourse.fetch_discourse(
             "Forum", "https://forum.test", 1),
-        "phenom": lambda: phenom.fetch_phenom_all("careers.test"),
-        # 2026-09-16 audit: these four read a non-2xx board-listing
-        # response (or the request exception itself) as an empty board,
-        # with fetch_errors left at 0 -- see icims._search_rows/
-        # _sitemap_rows, company._get_soup, workday.fetch_workday_all's
-        # paging POST, and company.fetch_smartrecruiters_all's paging GET.
-        "icims": lambda: icims.fetch_icims_all("acme"),
-        "custom careers": lambda: company.fetch_custom_careers(
-            "https://acme.test/careers"),
-        "workday": lambda: workday.fetch_workday_all("deadco", 5, "External"),
-        "smartrecruiters": lambda: company.fetch_smartrecruiters_all("acme"),
     }
 
     @pytest.fixture(params=["refused", "http-500"])
@@ -1110,11 +1098,16 @@ class TestADeadEndpointIsNeverAnException:
         serve(OSError("connection refused") if request.param == "refused"
               else fake_response(status=500))
 
-    @pytest.mark.parametrize("name", sorted(CALLS))
+    @pytest.mark.parametrize("name", sorted(company.FETCHERS) + sorted(FEEDS))
     def test_reports_and_returns_empty(self, name, dead_source, capsys,
                                        match_everything):
         http.reset_fetch_failures()
-        assert self.CALLS[name]() == []
+        if name in self.FEEDS:
+            got = self.FEEDS[name]()
+        else:
+            got = company.fetch_company({**self.ROW, "ats": name,
+                                         "slug": self.SLUGS.get(name, "acme")})
+        assert got == []
         # A dead source must be COUNTED, not just logged: an uncounted
         # failure and a genuinely empty board are the same [] to a caller
         # that only checks the return value (see net.http.fetch_failed).

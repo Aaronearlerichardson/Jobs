@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import capture
+from conftest import fake_response
 import src.claude.fit as fit
 import src.store as store
 from src import tags
@@ -179,10 +180,11 @@ class TestAttribution:
         assert lead["ats"] is None and lead["active"] == 0
         assert lead["source"] == "page_capture"
 
-    def test_a_row_with_a_real_board_keeps_it(self, roster, local_addr):
+    def test_a_row_with_a_real_board_keeps_it(self, roster, local_addr, serve):
         cid = store.upsert_company(roster, {
             "name": "Acme Dx", "ats": "greenhouse", "slug": "acmedx",
             "careers_url": "https://www.acmedx.com/careers/"})
+        serve(fake_response({"jobs": []}))   # ingest hydrates from the board
         capture.ingest_html("", _results_page("www.acmedx.com", local_addr))
         row = store.get_company(roster, cid)
         assert row["ats"] == "greenhouse"

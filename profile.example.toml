@@ -258,8 +258,9 @@ harvest_offmission_hours = 168
 # mission-worth-it pass sees.
 # board_max_rows = 3000
 
-# Honor robots.txt (default true). Turning this off disables the check, not
-# the connection pooling or the per-host Crawl-delay pacing.
+# Honor robots.txt (default true). Turning this off skips robots.txt
+# entirely -- the path check AND the per-host Crawl-delay pacing, which is
+# read from it. Connection pooling stays.
 # respect_robots = true
 
 # Hosts to crawl WITHOUT consulting robots.txt while respect_robots stays

@@ -158,10 +158,8 @@ def board_fetch(label, parse, row, company_name="", gate=None, loc_re=None,
     No doctest of its own: its callers' public entry points already pin
     every behaviour here. The dead-listing path is covered by
     tests/test_fetcher_parsers.py::TestADeadEndpointIsNeverAnException
-    (greenhouse/lever/ashby, two failure shapes each) and by the
-    `fetch_hibob` (401), `fetch_workable` (404) and `fetch_ultipro` (500,
-    and a slug on neither host) cases; the row/filter path by
-    `board_jobs`' own doctest.
+    (every registered fetcher, two failure shapes each); the row/filter
+    path by `board_jobs`' own doctest.
 
     Notes:
         Five fetchers -- rippling, workable, hibob, ultipro, paylocity --

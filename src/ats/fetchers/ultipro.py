@@ -12,9 +12,10 @@ The listing carries the ``BriefDescription`` inline, so no per-job detail call
 is needed. The store slug is ``"<CODE>|<GUID>"``.
 
 Notes:
-    parse_board posts through a bare requests.Session rather than the shared
-    PoliteSession (as it has since the fetcher was added), so it names its
-    timeout explicitly instead of inheriting the session default.
+    Until 2026-09-22 parse_board posted through a private requests.Session,
+    which skipped robots.txt: UKG's disallows `*/JobBoardView`, the search
+    endpoint, so this fetcher works only with `[policy] respect_robots =
+    false` or both hosts in `robots_exempt_hosts`.
 
     The slug does not record which host serves the board (the detector in
     src.ats.signatures accepts both), and a board answers only on its own:
@@ -25,13 +26,9 @@ Notes:
 
 import time
 
-import requests
-
-from src.net.http import DEFAULT_TIMEOUT, JSON_HEADERS
+from src.net.http import JSON_HEADERS, SESSION
 from src.net.util import text_from_html
 from .board import board_fetch
-
-_JSON = {**JSON_HEADERS, "Content-Type": "application/json"}
 
 
 #: Subdomains a board may be served from, in the order they are tried.
@@ -47,30 +44,29 @@ def _base(slug, host=None):
     return f"https://{host or _HOST_OF.get(slug, _HOSTS[0])}.ultipro.com/{code}/JobBoard/{guid}"
 
 
-def parse_board(slug, page_size=100, max_pages=10, timeout=DEFAULT_TIMEOUT):
+def parse_board(slug, page_size=100, max_pages=10):
     """Return the raw opportunity list for one board slug (``CODE|GUID``)."""
     out = []
     # The host that answered last time goes first; a 404 falls through to the other.
     hosts = sorted(_HOSTS, key=lambda h: h != _HOST_OF.get(slug))
-    with requests.Session() as s:
-        for page in range(max_pages):
-            body = {"opportunitySearch": {"Top": page_size, "Skip": page * page_size,
-                                          "QueryString": "", "OrderBy": [], "Filters": []}}
-            for host in hosts:
-                r = s.post(f"{_base(slug, host)}/JobBoardView/LoadSearchResults",
-                           json=body, timeout=timeout, headers=_JSON)
-                if r.status_code != 404:
-                    break
-            r.raise_for_status()
-            _HOST_OF[slug] = host
-            hosts = [host]      # later pages stay on the host that answered
-            opps = r.json().get("opportunities", []) or []
-            if not opps:
+    for page in range(max_pages):
+        body = {"opportunitySearch": {"Top": page_size, "Skip": page * page_size,
+                                      "QueryString": "", "OrderBy": [], "Filters": []}}
+        for host in hosts:
+            r = SESSION.post(f"{_base(slug, host)}/JobBoardView/LoadSearchResults",
+                             json=body, headers=JSON_HEADERS)
+            if r.status_code != 404:
                 break
-            out.extend(opps)
-            if len(opps) < page_size:
-                break
-            time.sleep(0.3)
+        r.raise_for_status()
+        _HOST_OF[slug] = host
+        hosts = [host]      # later pages stay on the host that answered
+        opps = r.json().get("opportunities", []) or []
+        if not opps:
+            break
+        out.extend(opps)
+        if len(opps) < page_size:
+            break
+        time.sleep(0.3)
     return out
 
 

@@ -161,6 +161,11 @@ class TestFetchDeduplication:
     timeouts when the host was one that hangs instead of refusing.
     """
 
+    @pytest.fixture(autouse=True)
+    def _robots_on(self, monkeypatch):
+        from src import config
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
+
     @staticmethod
     def _spy_cache(delay=0.05):
         """A RobotsCache whose network fetch is replaced by a call recorder."""
