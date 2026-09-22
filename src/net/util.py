@@ -2,8 +2,10 @@
 
 import hashlib
 import html
+import json
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 from src import config
@@ -19,6 +21,39 @@ def cache_dir(*parts):
     cache (board detection, Workday and iCIMS location lookups). Not
     created here: callers mkdir when they first write."""
     return config.DATA_DIR.joinpath(".cache", *parts)
+
+
+def hashed_cache_path(base_dir, key):
+    """The JSON cache file for `key` under `base_dir`: sha1(key) + ".json",
+    so callers never handle raw keys as filenames."""
+    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
+    return base_dir / f"{h}.json"
+
+
+def json_cache_get(path, ttl):
+    """The JSON value stored at `path`, or None when the file is absent,
+    unreadable, or older than `ttl` seconds.
+
+    Shared by every mtime-TTL disk cache in the crawl (DDG search results,
+    board-detection outcomes): each caller picks its own base directory and
+    value shape (a raw value, or a wrapper that lets it cache a negative
+    result distinctly from a miss)."""
+    try:
+        if time.time() - path.stat().st_mtime > ttl:
+            return None
+        return json.loads(path.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def json_cache_put(path, value):
+    """Best-effort JSON write to `path`; a cache failure never fails the
+    caller."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def default_search_text():

@@ -23,13 +23,12 @@ Notes:
     fix) and src.ats.fetchers.websearch._ddg_search (none).
 """
 
-import hashlib
-import json
 import logging
 import threading
 import time
 
 from src import config
+from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
 
 # File-only diagnostics (session log DEBUG channel -- never printed).
 _log = logging.getLogger("discovery")
@@ -56,30 +55,19 @@ _RESOLVER_MARKERS = ("dns error", "query refused")
 # ─── Disk cache ──────────────────────────────────────────────────────────
 
 def _cache_path(key):
-    h = hashlib.sha1(key.encode("utf-8")).hexdigest()
-    return CACHE_DIR / f"{h}.json"
+    return hashed_cache_path(CACHE_DIR, key)
 
 
 def cache_get(key):
     """The cached JSON value for `key`, or None when absent or older than
     CACHE_TTL. Also used by the LLM name brainstorm, which rides the same
     TTL."""
-    p = _cache_path(key)
-    try:
-        if time.time() - p.stat().st_mtime > CACHE_TTL:
-            return None
-        return json.loads(p.read_text("utf-8"))
-    except Exception:
-        return None
+    return json_cache_get(_cache_path(key), CACHE_TTL)
 
 
 def cache_put(key, value):
     """Best-effort write; a cache failure never fails the search."""
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        _cache_path(key).write_text(json.dumps(value), encoding="utf-8")
-    except Exception:
-        pass
+    json_cache_put(_cache_path(key), value)
 
 
 # ─── The ddgs package ────────────────────────────────────────────────────

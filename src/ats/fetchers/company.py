@@ -20,10 +20,7 @@ description/title readers. The per-job open/closed probe that read
 those same platforms is fetchers/probe.py.
 """
 
-import hashlib
-import json
 import re
-import time
 from urllib.parse import unquote
 
 from bs4 import BeautifulSoup, SoupStrainer
@@ -42,7 +39,8 @@ _ANCHORS_ONLY = SoupStrainer("a")
 from src.net.http import HEADERS, SESSION, fetch_failed, get_json, note_capped
 from src.match.locality import NC_RE, location_unknown  # profile [locality]
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
-                          default_search_text, norm_posted_date)
+                          default_search_text, hashed_cache_path,
+                          json_cache_get, json_cache_put, norm_posted_date)
 from . import icims, workday
 from .adp_wfn import fetch_adp
 from .api import fetch_ashby, fetch_greenhouse, fetch_lever
@@ -606,28 +604,18 @@ _BOARD_CACHE_TTL = 6 * 3600      # seconds
 
 
 def _board_cache_path(url):
-    return cache_dir("board") / f"{hashlib.sha1(url.encode('utf-8')).hexdigest()}.json"
+    return hashed_cache_path(cache_dir("board"), url)
 
 
 def _board_cache_get(url):
     """(listing_or_None,) on a live entry, or None on miss/expired/error.
     The 1-tuple lets callers distinguish a cached negative from a miss."""
-    p = _board_cache_path(url)
-    try:
-        if time.time() - p.stat().st_mtime > _BOARD_CACHE_TTL:
-            return None
-        return (json.loads(p.read_text("utf-8")).get("listing"),)
-    except Exception:
-        return None
+    cached = json_cache_get(_board_cache_path(url), _BOARD_CACHE_TTL)
+    return None if cached is None else (cached.get("listing"),)
 
 
 def _board_cache_put(url, listing):
-    try:
-        p = _board_cache_path(url)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps({"listing": listing}), encoding="utf-8")
-    except Exception:
-        pass
+    json_cache_put(_board_cache_path(url), {"listing": listing})
 
 
 def custom_board_listing_url(page_url, html=None):
