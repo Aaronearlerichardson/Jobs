@@ -69,7 +69,7 @@ class TestWorkdayScopeGuard:
         monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
         monkeypatch.setattr(wd, "_wd_detail_locations",
                             lambda *a: ["US, NC, Durham"] if session.get(a[-1]) else [])
-        monkeypatch.setattr(wd.time, "sleep", lambda *a: None)
+        monkeypatch.setattr("time.sleep", lambda *a: None)
 
     def test_unnarrowed_scope_keeps_listed_matches_only_without_detail_gets(
             self, monkeypatch, capsys):

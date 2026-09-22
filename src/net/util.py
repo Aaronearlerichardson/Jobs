@@ -36,9 +36,9 @@ def json_cache_get(path, ttl):
     unreadable, or older than `ttl` seconds.
 
     Shared by every mtime-TTL disk cache in the crawl (DDG search results,
-    board-detection outcomes): each caller picks its own base directory and
-    value shape (a raw value, or a wrapper that lets it cache a negative
-    result distinctly from a miss)."""
+    board detection, Workday and iCIMS locations): each caller picks its
+    own base directory and value shape (a raw value, or a wrapper that
+    lets it cache a negative result distinctly from a miss)."""
     try:
         if time.time() - path.stat().st_mtime > ttl:
             return None
@@ -144,7 +144,8 @@ def text_from_html(raw):
 
 
 def strip_html(s):
-    """Markup out, one line of readable text back. "" for anything falsy.
+    """Markup out, one line of readable text back. "" for anything falsy;
+    any other non-string is str()-ed first (payloads are untrusted).
 
     Entities first, THEN tags: unescaping later would turn a literal
     "&lt;script&gt;" in the copy into a tag this has already decided not to
@@ -156,12 +157,12 @@ def strip_html(s):
 
     >>> strip_html("<p>Hello&nbsp;&amp; welcome</p>\\n<li>EEG  work</li>")
     'Hello & welcome EEG work'
-    >>> strip_html(None)
-    ''
+    >>> strip_html(None), strip_html(42)
+    ('', '42')
     """
     if not s:
         return ""
-    return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(s))).strip()
+    return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(str(s)))).strip()
 
 
 def clean_field(text):

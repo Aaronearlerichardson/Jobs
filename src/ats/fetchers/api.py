@@ -168,6 +168,21 @@ def _greenhouse_body(content):
     return text_from_html(html.unescape(content or ""))
 
 
+def fetch_greenhouse_description(url):
+    """The JD text of the Greenhouse posting a stored job URL names; ""
+    when it names none or the boards API answers anything but 200.
+
+    >>> fetch_greenhouse_description("https://example.org/")   # not a job URL
+    ''
+    """
+    m = GREENHOUSE_JOB_URL_RE.search(url or "")
+    if not m:
+        return ""
+    r = SESSION.get(f"{GREENHOUSE_API}/{m.group(1)}/jobs/{m.group(2)}"
+                    "?content=true", timeout=20, headers=HEADERS)
+    return _greenhouse_body(r.json().get("content")) if r.status_code == 200 else ""
+
+
 def _greenhouse_row(slug, j):
     title = j.get("title", "")
     loc = merge_locations((j.get("location") or {}).get("name", ""),

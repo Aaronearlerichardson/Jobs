@@ -36,7 +36,8 @@ from bs4 import BeautifulSoup
 
 from src.match.locality import location_snippet
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import clean_field, norm_posted_date, stable_id
+from src.net.util import (clean_field, norm_posted_date, stable_id,
+                          text_from_html)
 
 # Tried in order; the first feed with entries wins.
 FEED_PATHS = ("/postings/all_jobs.atom", "/postings/search.atom")
@@ -114,8 +115,7 @@ def _parse_feed(xml, host, company_name, gate=None):
         # <content> on current tenants, <summary> on older ones. Either way
         # the body is escaped HTML: unescaped once by the XML parser, then
         # stripped of its tags.
-        body = BeautifulSoup(_text(e.find("content") or e.find("summary")),
-                             "html.parser").get_text(" ", strip=True)
+        body = text_from_html(_text(e.find("content") or e.find("summary")))
         # <author><name> is the hiring department. Folding it into the
         # description is what puts "Epidemiology" or "Neurology" in front of
         # the keyword and title gates, which see no other structured field.

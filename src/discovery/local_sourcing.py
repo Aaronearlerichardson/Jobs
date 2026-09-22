@@ -35,11 +35,10 @@ from src import tags as company_tags
 from src.ats import coords
 from src.ats.fetchers import company as company_fetch
 from src.match.names import name_key
-from src.net.http import HEADERS, SESSION
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import resolve_or_miss, resolved
-from .resolve.probes import _nc_count_workday, _wd_search_text, probe_company
+from .resolve.probes import _nc_count_workday, probe_company
 from .resolve.websearch_board import _websearch_board
 
 # --------------------------------------------------------------------------- #
@@ -358,10 +357,16 @@ def _sample_titles(hit, n=6):
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
-    Greenhouse, Lever, Ashby and Workday are asked for less than their
-    whole-board fetchers pull (no descriptions, `limit=n`), so they keep the
-    requests below; every other family samples through its own fetcher
-    (fetchers.company.sample_titles). [] when nothing could be read.
+    Greenhouse, Lever and Ashby are asked for less than their whole-board
+    fetchers pull (api.board_summary: no descriptions); every other family
+    samples through its own fetcher (fetchers.company.sample_titles). []
+    when nothing could be read.
+
+    Notes:
+        Workday had its own hand-built CXS request here until 2026-09-22.
+        It lacked workday._wd_cxs_tenant's underscore fix, so the roster's
+        two hyphenated tenants (Bioventus, United Therapeutics) were
+        mission-scored with no titles at all.
     """
     from src.ats.fetchers import api as board_api
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
@@ -376,13 +381,6 @@ def _sample_titles(hit, n=6):
         if ats in board_api.BOARD_URLS:
             return [title for title, _loc in
                     board_api.board_summary(ats, slug)[:n]]
-        if ats == "workday":
-            t, p, s = board["wd_tenant"], board["wd_pod"], board["wd_site"]
-            api = f"https://{t}.wd{p}.myworkdayjobs.com/wday/cxs/{t}/{s}/jobs"
-            r = SESSION.post(api, json={"appliedFacets": {}, "limit": n, "offset": 0,
-                                         "searchText": _wd_search_text()},
-                              timeout=config.PROBE_TIMEOUT, headers={**HEADERS, "Content-Type": "application/json"})
-            return [j.get("title", "") for j in r.json().get("jobPostings", [])[:n]]
     except Exception:
         return []
     return company_fetch.sample_titles(board, n)

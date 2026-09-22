@@ -41,7 +41,7 @@ from src.match.locality import NC_RE, location_unknown  # profile [locality]
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           default_search_text, hashed_cache_path, host_of,
                           json_cache_get, json_cache_put, norm_posted_date,
-                          origin_of)
+                          origin_of, text_from_html)
 from . import icims, workday
 from .adp_wfn import fetch_adp
 from .api import fetch_ashby, fetch_greenhouse, fetch_lever
@@ -260,7 +260,7 @@ def hydrate_description(job):
             parts = [secs.get(k, {}).get("text", "") for k in
                      ("jobDescription", "qualifications", "additionalInformation")]
             html = " ".join(p for p in parts if p)
-            job["description"] = BeautifulSoup(html, "html.parser").get_text(" ")[:_DESC_MAX]
+            job["description"] = text_from_html(html)[:_DESC_MAX]
         except Exception:
             pass
     elif job.get("ats") == "paylocity":

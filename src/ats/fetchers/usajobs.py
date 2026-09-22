@@ -30,12 +30,9 @@ Notes:
     normal rather than a parsing bug.
 """
 
-import html
-import re
-
 from src import config
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date
+from src.net.util import norm_posted_date, strip_html
 
 API_URL = "https://data.usajobs.gov/api/search"
 
@@ -50,25 +47,6 @@ DEFAULT_RESULTS_PER_PAGE = 250
 
 # Hard stop, so a mistyped filter cannot walk the entire federal board.
 MAX_PAGES = 20
-
-
-def _clean(value):
-    """Collapse a USAJOBS HTML fragment to single-spaced plain text.
-
-    >>> _clean("<p>Data  Scientist</p>")
-    'Data Scientist'
-    >>> _clean("R&amp;D lead")
-    'R&D lead'
-
-    Anything empty (including a missing key's ``None``) becomes "":
-
-    >>> _clean(None), _clean("")
-    ('', '')
-    """
-    if not value:
-        return ""
-    text = html.unescape(str(value))
-    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", text)).strip()
 
 
 def _salary_text(remuneration):
@@ -90,7 +68,7 @@ def _salary_text(remuneration):
     for pay in remuneration or []:
         if not isinstance(pay, dict):
             continue
-        interval = _clean(pay.get("Description") or pay.get("RateIntervalCode"))
+        interval = strip_html(pay.get("Description") or pay.get("RateIntervalCode"))
         try:
             amounts = [f"${float(v):,.0f}"
                        for v in (pay.get("MinimumRange"), pay.get("MaximumRange"))
@@ -126,10 +104,10 @@ def _locations(descriptor):
     for loc in descriptor.get("PositionLocation") or []:
         if not isinstance(loc, dict):
             continue
-        name = _clean(loc.get("LocationName") or loc.get("CityName"))
+        name = strip_html(loc.get("LocationName") or loc.get("CityName"))
         if name and name not in names:
             names.append(name)
-    return "; ".join(names) or _clean(descriptor.get("PositionLocationDisplay"))
+    return "; ".join(names) or strip_html(descriptor.get("PositionLocationDisplay"))
 
 
 def _describe(details, descriptor):
@@ -157,10 +135,10 @@ def _describe(details, descriptor):
     """
     duties = details.get("MajorDuties")
     if isinstance(duties, (list, tuple)):
-        duties = " ".join(_clean(d) for d in duties if d)
-    chunks = [_clean(details.get("JobSummary")),
-              _clean(duties),
-              _clean(descriptor.get("QualificationSummary"))]
+        duties = " ".join(strip_html(d) for d in duties if d)
+    chunks = [strip_html(details.get("JobSummary")),
+              strip_html(duties),
+              strip_html(descriptor.get("QualificationSummary"))]
     salary = _salary_text(descriptor.get("PositionRemuneration"))
     if salary:
         chunks.append(f"Salary: {salary}")
@@ -224,7 +202,7 @@ def _parse_item(item):
     if not isinstance(descriptor, dict):
         return None
     jid = item.get("MatchedObjectId") or descriptor.get("PositionID")
-    title = _clean(descriptor.get("PositionTitle"))
+    title = strip_html(descriptor.get("PositionTitle"))
     if not jid or not title:
         return None
 
@@ -239,13 +217,13 @@ def _parse_item(item):
         details = {}
 
     body = _describe(details, descriptor)
-    department = _clean(descriptor.get("DepartmentName"))
+    department = strip_html(descriptor.get("DepartmentName"))
     if department:
         body = f"{department}. {body}".strip()
 
     job = {
         "id":          f"usajobs_{jid}",
-        "company":     _clean(descriptor.get("OrganizationName")) or "USAJOBS",
+        "company":     strip_html(descriptor.get("OrganizationName")) or "USAJOBS",
         "title":       title,
         "url":         url,
         "location":    _locations(descriptor),

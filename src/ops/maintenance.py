@@ -30,6 +30,7 @@ from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import get_json
 from src.net.parallel import drain, fan_out, fetch_all
+from src.net.util import text_from_html
 
 
 def _default_track():
@@ -776,7 +777,16 @@ def _live_jd(row):
     detail fetch (Workday CXS, Greenhouse boards API, then the generic
     JSON-LD/careers-page extractor) over the stored text. Falls back to the
     stored description when the live pull is shorter or fails — the deep
-    verify pass must never see LESS text than the first pass did."""
+    verify pass must never see LESS text than the first pass did. Lengths
+    are compared as readable text: a stored body can still carry markup an
+    older reader left in it, which only looks longer.
+
+    Notes:
+        Compared raw, the markup won: 62 of 96 sampled Greenhouse rows
+        (2026-09-22) handed the verify model stored HTML over the same
+        posting's clean live text. 12,101 of 16,400 open Greenhouse rows
+        still carried that markup then.
+    """
     url = row.get("url") or ""
     text = ""
     try:
@@ -784,32 +794,14 @@ def _live_jd(row):
             from src.ats.fetchers.workday import fetch_workday_description
             text = fetch_workday_description(url) or ""
         else:
-            # Greenhouse job-page URL -> (board slug, job id), and the
-            # boards-API root: one definition each, in the module that owns
-            # the platform (works for boards. and job-boards.greenhouse.io).
-            from src.ats.fetchers.api import (GREENHOUSE_API,
-                                              GREENHOUSE_JOB_URL_RE)
-            m = GREENHOUSE_JOB_URL_RE.search(url)
-            if m:
-                import html as _html
-
-                from bs4 import BeautifulSoup
-
-                from src.net.http import HEADERS, SESSION
-                r = SESSION.get(
-                    f"{GREENHOUSE_API}/{m.group(1)}/jobs/{m.group(2)}"
-                    f"?content=true",
-                    timeout=20, headers=HEADERS)
-                if r.status_code == 200:
-                    text = BeautifulSoup(
-                        _html.unescape(r.json().get("content", "") or ""),
-                        "lxml").get_text(" ")
+            from src.ats.fetchers.api import fetch_greenhouse_description
+            text = fetch_greenhouse_description(url)
         if not text and url:
             text = company_fetch._description_from_job_url(url)
     except Exception:
         text = ""
     stored = row.get("description") or ""
-    return text if len(text) > len(stored) else stored
+    return text if text and len(text) >= len(text_from_html(stored)) else stored
 
 
 def _verify_floor_candidates(conn, t, floor, exclude_ids=()):

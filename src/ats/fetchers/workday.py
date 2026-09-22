@@ -17,16 +17,14 @@ other backfills, in src/ops/maintenance.py -- here it was the one backfill
 that could not reach `track_store`, and so ran against the default DB.
 """
 
-import hashlib
-import json
 import re
-import time
 from urllib.parse import urlparse
 
 from src import config
 from src.match.locality import N_LOCATIONS_RE
 from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
-from src.net.util import (cache_dir, default_search_text, norm_posted_date,
+from src.net.util import (cache_dir, default_search_text, hashed_cache_path,
+                          json_cache_get, json_cache_put, norm_posted_date,
                           text_from_html)
 from .board import board_jobs, loc_ok
 
@@ -187,21 +185,13 @@ def _wd_detail_locations(tenant, pod, site, path):
     """All locations of one req from its CXS detail JSON, disk-cached.
     Returns a list of location strings ([] on any failure: callers must
     treat that as 'unknown', not 'no')."""
-    cache = cache_dir("wdloc")
-    key = hashlib.sha1(f"{tenant}|{path}".encode("utf-8")).hexdigest()
-    p = cache / f"{key}.json"
-    try:
-        if time.time() - p.stat().st_mtime <= _LOC_CACHE_TTL:
-            return json.loads(p.read_text("utf-8")).get("locs", [])
-    except Exception:
-        pass
+    p = hashed_cache_path(cache_dir("wdloc"), f"{tenant}|{path}")
+    cached = json_cache_get(p, _LOC_CACHE_TTL)
+    if cached is not None:
+        return cached.get("locs", [])
     locs = detail_locations(cxs_detail(tenant, pod, site, path))
     if locs:  # cache only decided outcomes, like the board cache
-        try:
-            cache.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"locs": locs}), encoding="utf-8")
-        except Exception:
-            pass
+        json_cache_put(p, {"locs": locs})
     return locs
 
 

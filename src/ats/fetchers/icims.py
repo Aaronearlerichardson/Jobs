@@ -20,16 +20,15 @@ abbreviation gets 'No Results Found' on some), so a located search that
 comes back empty is retried WITHOUT the location param.
 """
 
-import json
 import re
-import time
 from urllib.parse import unquote
 
 from bs4 import BeautifulSoup
 
 from src import config
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import LOC_TEXT_RE, cache_dir
+from src.net.util import (LOC_TEXT_RE, cache_dir, json_cache_get,
+                          json_cache_put)
 from .board import board_jobs, loc_ok
 from .jsonld import (_normalize_description, _normalize_location,
                      extract_jsonld, is_jobposting)
@@ -56,15 +55,10 @@ def job_meta(url, need_desc=False):
     m = re.search(r"/jobs/(\d+)/", url or "")
     if not m:
         return "", ""
-    cache = cache_dir("icimsloc")
     host = re.sub(r"^https?://", "", url).split("/")[0]
-    p = cache / f"{host}_{m.group(1)}.json"
-    cached_loc = None
-    try:
-        if time.time() - p.stat().st_mtime <= _LOC_CACHE_TTL:
-            cached_loc = json.loads(p.read_text("utf-8")).get("loc", "")
-    except Exception:
-        pass
+    p = cache_dir("icimsloc") / f"{host}_{m.group(1)}.json"
+    cached = json_cache_get(p, _LOC_CACHE_TTL)
+    cached_loc = None if cached is None else cached.get("loc", "")
     sep = "&" if "?" in url else "?"
     detail_url = url if "in_iframe" in url else f"{url}{sep}in_iframe=1"
     if cached_loc is not None and not need_desc:
@@ -82,11 +76,7 @@ def job_meta(url, need_desc=False):
     except Exception:
         return "", ""
     if loc:
-        try:
-            cache.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps({"loc": loc}), encoding="utf-8")
-        except Exception:
-            pass
+        json_cache_put(p, {"loc": loc})
     return loc, desc
 
 

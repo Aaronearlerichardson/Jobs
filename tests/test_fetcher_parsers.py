@@ -563,16 +563,6 @@ class TestAshbyKeyAcrossCallSites:
         assert jobs[0]["location"] == "Morrisville, North Carolina"
         assert jobs[0]["ats"] == "ashby" and jobs[0]["posted_at"] == "2026-05-28"
 
-    def test_workday_branch_still_reads_job_postings(self, serve):
-        """Workday really does return `jobPostings`. The two branches sit in
-        one function, so a careless sweep would break Workday while fixing
-        Ashby — this pins the other direction."""
-        from src.discovery import local_sourcing
-        serve(fake_response({"jobPostings": [{"title": "Clinical Trial Liaison"}]}))
-        titles = local_sourcing._sample_titles(
-            {"ats": "workday", "slug": ("icon", 3, "broadbean_external")})
-        assert titles == ["Clinical Trial Liaison"]
-
 
 class TestGetro:
     """A Getro network board, read from its own host only: the sitemap is

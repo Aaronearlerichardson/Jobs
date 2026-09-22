@@ -42,7 +42,6 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -55,6 +54,7 @@ console_utf8()
 from src import config                                       # noqa: E402
 from src.net.http import SESSION, HEADERS          # noqa: E402
 from src.net.robots import CACHE as ROBOTS         # noqa: E402
+from src.net.util import origin_of                # noqa: E402
 
 OK, BLOCKED, BROKEN, ROBOTS_OFF, SKIPPED = (
     "ok", "blocked", "broken", "robots", "skipped")
@@ -143,7 +143,7 @@ ROBOTS_TARGETS = [
 
 def probe_robots(label, url):
     """What does this host's robots.txt say about the path we'd fetch?"""
-    origin = f"{urlparse(url).scheme}://{urlparse(url).netloc}"
+    origin = origin_of(url)
     started = time.monotonic()
     code, note = None, ""
     try:
