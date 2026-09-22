@@ -48,11 +48,11 @@ could fetch nothing from it.
 
 import re
 
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION
 from src.net.util import norm_posted_date
 from .api import merge_locations
-from .board import board_jobs
-from .workday import text_from_html      # shared HTML->text stripper
+from .board import board_fetch
+from .workday import text_from_html  # shared HTML->text stripper
 
 _WIDGET_API = "https://apply.workable.com/api/v1/widget/accounts/{slug}"
 _JOB_API = "https://apply.workable.com/api/v1/accounts/{slug}/jobs/{shortcode}"
@@ -231,11 +231,9 @@ def fetch_workable(slug, company_name="", gate=None, loc_re=None,
     `gate` screens the title plus the posting's department and then, within
     `max_details` detail GETs, descriptions. One listing request, then at
     most one request per surviving row."""
-    try:
-        raw = parse_board(slug)
-    except Exception as e:
-        return fetch_failed(f"Workable {company_name or slug}", e)
-    return board_jobs(
-        (_row(slug, j) for j in raw), company_name, gate=gate, loc_re=loc_re,
+    return board_fetch(
+        f"Workable {company_name or slug}",
+        lambda: parse_board(slug), lambda j: _row(slug, j),
+        company_name, gate=gate, loc_re=loc_re,
         fetch_description=lambda row: fetch_description(slug, row["_shortcode"]),
         max_details=max_details, detail_delay=detail_delay)

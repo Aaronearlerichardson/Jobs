@@ -4,9 +4,10 @@ body fetch or a fit score. Offline: the mission scorer, the hydrator and
 the fit scorer are all stubbed."""
 
 import logging
-from datetime import datetime, timedelta
 
 import pytest
+
+from conftest import company_row as _company, iso_days_ago, make_board_fn
 
 from src import tags
 from src import store
@@ -15,12 +16,6 @@ from src.crawl import harvest, triage
 
 LOCAL = "local-tech"
 SWEEP = "remote-neural"
-
-
-def _company(conn, name, **extra):
-    store.upsert_company(conn, {"name": name, "ats": "greenhouse",
-                                "slug": name.lower(), **extra})
-    return store.get_company(conn, store.company_id_by_name(conn, name))
 
 
 def _wd_company(conn, name="Wd"):
@@ -716,10 +711,7 @@ def test_harvest_pass_ends_with_triage_then_digests(tmp_path, monkeypatch):
                         lambda: [{"track": LOCAL}, {"track": SWEEP}])
     monkeypatch.setattr(harvest, "rewrite_digest",
                         lambda conn, t, **kw: order.append(t["track"]))
-
-    def fake_board(company, db_path, progress=lambda: None, hydrate=False):
-        return {"err": None, "fetched": 1, "new": 1, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 0.0}
+    fake_board = make_board_fn(fetched=1, new=1)
 
     s = harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
                     score_cap=7)
@@ -837,7 +829,7 @@ def test_bodied_workday_location_lookup_failure_defers_then_expires(
 
     # The last attempt is now older than RETRY_DAYS: the geo gate stops
     # waiting and decides on the body already stored -- no further lookup.
-    old = (datetime.now() - timedelta(days=triage.RETRY_DAYS + 1)).isoformat()
+    old = iso_days_ago(triage.RETRY_DAYS + 1)
     conn.execute("UPDATE jobs SET desc_checked_at=? WHERE job_id='j'", (old,))
     conn.commit()
     triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],

@@ -14,9 +14,24 @@ The listing carries no description, so each kept row costs one detail
 call (see fetchers/board.py for the order of filters and the budget).
 """
 
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed, get_json
+from src.net.http import JSON_HEADERS, SESSION, get_json
 from src.net.util import text_from_html
-from .board import board_jobs
+from .board import board_fetch
+
+
+def board_url(subdomain):
+    """The board root every other URL here hangs off; `detail_url`'s
+    doctest pins the host shape through it."""
+    return f"https://{subdomain}.bamboohr.com"
+
+
+def parse_board(subdomain, timeout=None):
+    """The raw ``result`` list (the whole board) for one subdomain. Raises
+    on any HTTP or JSON failure; `fetch_bamboohr` reports it."""
+    r = SESSION.get(f"{board_url(subdomain)}/careers/list",
+                    timeout=timeout, headers=JSON_HEADERS)
+    r.raise_for_status()
+    return r.json().get("result") or []
 
 
 def _location_str(job):
@@ -44,7 +59,7 @@ def detail_url(subdomain, jid):
         while the posting's own page keeps answering 200, so the two must
         address it the same way.
     """
-    return f"https://{subdomain}.bamboohr.com/careers/{jid}/detail"
+    return f"{board_url(subdomain)}/careers/{jid}/detail"
 
 
 def _fetch_description(subdomain, jid, label="", timeout=None):
@@ -63,13 +78,14 @@ def _fetch_description(subdomain, jid, label="", timeout=None):
     return text_from_html(opening.get("description") or "")
 
 
-def _row(base, subdomain, entry):
+def _row(subdomain, entry):
     jid = str(entry.get("id") or "")
     title = entry.get("jobOpeningName") or ""
     if not jid or not title:
         return None
     row = {"id": f"bamboo_{subdomain}_{jid}", "title": title,
-           "url": f"{base}/careers/{jid}", "location": _location_str(entry),
+           "url": f"{board_url(subdomain)}/careers/{jid}",
+           "location": _location_str(entry),
            "description": "",
            "head": f"{title} {entry.get('departmentLabel') or ''}",
            "_jid": jid}
@@ -80,15 +96,10 @@ def _row(base, subdomain, entry):
 
 def fetch_bamboohr(subdomain, company_name="", gate=None, loc_re=None,
                    max_details=40, detail_delay=0.2):
-    base = f"https://{subdomain}.bamboohr.com"
-    try:
-        r = SESSION.get(f"{base}/careers/list", headers=JSON_HEADERS)
-        r.raise_for_status()
-        entries = r.json().get("result") or []
-    except Exception as e:
-        return fetch_failed(f"BambooHR {company_name or subdomain}", e)
-    return board_jobs((_row(base, subdomain, e) for e in entries), company_name,
-                      gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: _fetch_description(
-                          subdomain, row["_jid"], company_name),
-                      max_details=max_details, detail_delay=detail_delay)
+    return board_fetch(f"BambooHR {company_name or subdomain}",
+                       lambda: parse_board(subdomain),
+                       lambda e: _row(subdomain, e),
+                       company_name, gate=gate, loc_re=loc_re,
+                       fetch_description=lambda row: _fetch_description(
+                           subdomain, row["_jid"], company_name),
+                       max_details=max_details, detail_delay=detail_delay)

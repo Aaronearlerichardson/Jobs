@@ -23,9 +23,9 @@ Morrisville NC pharma company whose careers page links out to HiBob with no
 other detectable ATS signature on the page itself).
 """
 
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed
+from src.net.http import JSON_HEADERS, SESSION
 from src.net.util import norm_posted_date, text_from_html
-from .board import board_jobs
+from .board import board_fetch
 
 _API = "https://{tenant}.careers.hibob.com/api/job-ad"
 
@@ -68,9 +68,7 @@ def _row(tenant, j):
 
 
 def fetch_hibob(tenant, company_name="", gate=None, loc_re=None):
-    try:
-        raw = parse_board(tenant)
-    except Exception as e:
-        return fetch_failed(f"HiBob {company_name or tenant}", e)
-    return board_jobs((_row(tenant, j) for j in raw), company_name,
-                      gate=gate, loc_re=loc_re)
+    # No fetch_description: HiBob's listing carries the body inline.
+    return board_fetch(f"HiBob {company_name or tenant}",
+                       lambda: parse_board(tenant), lambda j: _row(tenant, j),
+                       company_name, gate=gate, loc_re=loc_re)

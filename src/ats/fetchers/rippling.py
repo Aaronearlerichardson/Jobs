@@ -15,9 +15,9 @@ Replaces the old ``custom`` treatment of Rippling boards, whose static HTML
 scrape returned nothing because the board is client-rendered.
 """
 
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed, get_json
+from src.net.http import JSON_HEADERS, SESSION, get_json
 from src.net.util import text_from_html
-from .board import board_jobs
+from .board import board_fetch
 
 _API = "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs"
 
@@ -79,12 +79,9 @@ def _row(slug, j):
 
 def fetch_rippling(slug, company_name="", gate=None, loc_re=None, max_details=40,
                    detail_delay=0.2):
-    try:
-        raw = parse_board(slug)
-    except Exception as e:
-        return fetch_failed(f"Rippling {company_name or slug}", e)
-    return board_jobs((_row(slug, j) for j in raw), company_name,
-                      gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: fetch_description(
-                          slug, row["_uuid"], company_name),
-                      max_details=max_details, detail_delay=detail_delay)
+    return board_fetch(f"Rippling {company_name or slug}",
+                       lambda: parse_board(slug), lambda j: _row(slug, j),
+                       company_name, gate=gate, loc_re=loc_re,
+                       fetch_description=lambda row: fetch_description(
+                           slug, row["_uuid"], company_name),
+                       max_details=max_details, detail_delay=detail_delay)

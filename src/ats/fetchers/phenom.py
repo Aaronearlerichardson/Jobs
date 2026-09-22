@@ -205,6 +205,10 @@ def fetch_phenom_description(job_url):
 
     >>> fetch_phenom_description("https://example.org/")   # not a job URL
     ('', '')
+
+    Notes:
+        Structurally identical to `infor.fetch_infor_description`,
+        deliberately -- see the note there.
     """
     ref = job_ref_from_url(job_url)
     if not ref:

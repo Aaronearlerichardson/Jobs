@@ -15,7 +15,7 @@ import re
 from src.config import PROBE_TIMEOUT
 from src.net.http import HEADERS, SESSION, get_json
 from src.net.util import norm_posted_date, text_from_html
-from .board import board_jobs
+from .board import board_fetch
 
 #: The public API root each platform answers on, and the Greenhouse job-page
 #: URL shape. Public, and read from here rather than re-derived, because the
@@ -61,15 +61,9 @@ _get_board = get_json
 #  The cheap whole-board read: title + location, no descriptions              #
 # --------------------------------------------------------------------------- #
 #
-# Discovery asks these same three boards three more questions, none of which
-# wants a crawl: does this guessed slug name a real board (resolve.probes),
-# how many of its postings are in your locality (the check that rejects a
-# slug collision), and what is it hiring for (the mission scorer's context).
-# Each was written out per platform per question -- nine request-and-parse
-# blocks carrying three copies of each payload shape. A private copy of a
-# shape fails SILENTLY: reading Workday's "jobPostings" off an Ashby board
-# yields an empty list, not an error, and that one scored every Ashby
-# company on its name alone.
+# Shared by discovery's slug probe, NC count, and mission-context sample --
+# one payload-shape reader so a private copy can't silently misread a key
+# and return an empty board.
 
 #: The whole-board URL per platform; `{}` takes the handle. Descriptions are
 #: excluded where the API allows it -- none of the three callers reads one.
@@ -150,13 +144,9 @@ def board_summary(ats, handle, timeout=None):
 def _greenhouse_body(content):
     """Greenhouse `content` as readable text.
 
-    Unescaped BEFORE the shared stripper runs, because Greenhouse serves
-    the body ESCAPED: `content` is a JSON string holding "&lt;p&gt;...",
-    so a stripper handed it directly finds no markup to strip and the
-    unescape at the end of its own pass hands back the tags as TEXT. That
-    is how 19,367 of the 19,413 stored Greenhouse descriptions came to
-    carry literal <div>/<p>/<li> markup in the body the keyword gates,
-    the fit prompt and the digest all read (2026-09-22 store audit).
+    Unescaped BEFORE the shared stripper runs: `content` is a JSON string
+    holding "&lt;p&gt;...", so a stripper handed it directly finds no
+    markup to strip and hands back the tags as TEXT.
 
     >>> _greenhouse_body("&lt;p&gt;Build EEG&amp;nbsp;pipelines&lt;/p&gt;")
     'Build EEG\\xa0pipelines'
@@ -168,6 +158,12 @@ def _greenhouse_body(content):
     'Build EEG pipelines'
     >>> _greenhouse_body("")
     ''
+
+    Notes:
+        Before this existed, 19,367 of 19,413 stored Greenhouse
+        descriptions carried literal <div>/<p>/<li> markup in the body the
+        keyword gates, the fit prompt and the digest all read (2026-09-22
+        store audit).
     """
     return text_from_html(html.unescape(content or ""))
 
@@ -190,12 +186,7 @@ def _greenhouse_row(slug, j):
 
 
 def fetch_greenhouse(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"{GREENHOUSE_API}/{slug}/jobs?content=true",
-                      f"Greenhouse {company_name or slug}")
-    if not isinstance(data, dict):
-        return []
-    return board_jobs((_greenhouse_row(slug, j) for j in data.get("jobs", [])),
-                      company_name, gate=gate, loc_re=loc_re)
+    return _fetch_board("greenhouse", slug, company_name, gate, loc_re)
 
 
 def _lever_row(slug, j):
@@ -214,12 +205,7 @@ def _lever_row(slug, j):
 
 
 def fetch_lever(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"{LEVER_API}/{slug}?mode=json",
-                      f"Lever {company_name or slug}")
-    if not isinstance(data, list):
-        return []
-    return board_jobs((_lever_row(slug, j) for j in data),
-                      company_name, gate=gate, loc_re=loc_re)
+    return _fetch_board("lever", slug, company_name, gate, loc_re)
 
 
 def _ashby_row(slug, j):
@@ -244,15 +230,37 @@ def _ashby_row(slug, j):
 
 
 def fetch_ashby(slug, company_name="", gate=None, loc_re=None):
-    data = _get_board(f"{ASHBY_API}/{slug}",
-                      f"Ashby {company_name or slug}")
-    if not isinstance(data, dict):
-        return []
-    # The posting-api returns {"jobs": [...], "apiVersion": ...}. A copy of
-    # this read once asked for "jobPostings" (Workday's key), so EVERY Ashby
-    # board silently yielded zero postings: a missing key is an empty list,
-    # and the caller can't tell that from "no matches". Pinned by
-    # tests/test_fetcher_parsers.py::TestAshby and the board canary
-    # (tools/check_boards.py).
-    return board_jobs((_ashby_row(slug, j) for j in data.get("jobs", [])),
-                      company_name, gate=gate, loc_re=loc_re)
+    return _fetch_board("ashby", slug, company_name, gate, loc_re)
+
+
+# ── The one whole-board crawl, three platforms ──────────────────────────── #
+#
+# The three fetchers above each kept a SECOND, private copy of its payload's
+# shape, a few lines below the `_BOARD_SHAPE` table that already holds it for
+# the summary path -- and a copy of a shape is a silently empty board, never
+# an error. (One such copy once asked for Workday's "jobPostings" key and
+# zeroed every Ashby board; pinned now by
+# tests/test_fetcher_parsers.py::TestAshby and the board canary,
+# tools/check_boards.py.) `board_rows` is the one read of the shape for both
+# callers, and it subsumes the isinstance guards: a wrong top-level type, and
+# the None _get_board returns on a failed response, are both "no postings".
+
+#: Per platform: the whole-board URL WITH descriptions (`{}` takes the slug
+#: -- this is the crawl, not the metadata-only read BOARD_URLS serves), the
+#: name used in the failure line, and the row builder.
+_FETCH = {
+    "greenhouse": (GREENHOUSE_API + "/{}/jobs?content=true", "Greenhouse",
+                   _greenhouse_row),
+    "lever":      (LEVER_API + "/{}?mode=json", "Lever", _lever_row),
+    "ashby":      (ASHBY_API + "/{}", "Ashby", _ashby_row),
+}
+
+
+def _fetch_board(ats, slug, company_name, gate, loc_re):
+    url, platform, row = _FETCH[ats]
+    label = f"{platform} {company_name or slug}"
+    return board_fetch(
+        label,
+        lambda: board_rows(ats, _get_board(url.format(slug), label)),
+        lambda j: row(slug, j),
+        company_name, gate=gate, loc_re=loc_re)

@@ -49,6 +49,7 @@ rather than given a third copy of this rule.
 
 import time
 
+from src.net.http import fetch_failed
 from src.net.util import clean_field
 
 
@@ -143,3 +144,46 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
         job["description"] = desc
         out.append(job)
     return out
+
+
+def board_fetch(label, parse, row, company_name="", gate=None, loc_re=None,
+                fetch_description=None, max_details=40, detail_delay=0.2):
+    """`board_jobs` over a listing this module still has to go and GET.
+
+    `parse()` returns the raw listing entries and may raise; `row(entry)`
+    shapes one of them, or returns None to drop it. A `parse()` that
+    raises is reported through `net.http.fetch_failed` and yields no jobs,
+    never an exception at the crawl. Everything else is `board_jobs`'.
+
+    No doctest of its own: its callers' public entry points already pin
+    every behaviour here. The dead-listing path is covered by
+    tests/test_fetcher_parsers.py::TestADeadEndpointIsNeverAnException
+    (greenhouse/lever/ashby, two failure shapes each) and by the
+    `fetch_hibob` (401), `fetch_workable` (404) and `fetch_ultipro` (500,
+    and a slug on neither host) cases; the row/filter path by
+    `board_jobs`' own doctest.
+
+    Notes:
+        Five fetchers -- rippling, workable, hibob, ultipro, paylocity --
+        had each written the same four lines around the call above: pull
+        the whole board, turn a listing failure into a reported dead
+        source rather than an exception at the crawl, then map the raw
+        entries through the module's own row builder. Only the label, the
+        listing call and the row builder ever differed, and
+        `fetch_workable` was written by copying `fetch_rippling` (0.98
+        structural similarity, 2026-09-22 clone scan).
+
+        Reporting the listing failure is the part worth having in one
+        place: `net.http.fetch_failed` hands back [], which is also what
+        an empty board hands back, so a fetcher that swallows the
+        exception instead leaves "this board is down" and "this board has
+        nothing on it" indistinguishable at every caller (see
+        fetch_failed's own note).
+    """
+    try:
+        raw = parse()
+    except Exception as e:
+        return fetch_failed(label, e)
+    return board_jobs((row(j) for j in raw), company_name, gate=gate,
+                      loc_re=loc_re, fetch_description=fetch_description,
+                      max_details=max_details, detail_delay=detail_delay)

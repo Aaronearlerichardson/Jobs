@@ -24,8 +24,8 @@ import time
 from urllib.parse import urlparse
 
 from src import config
-from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
 from src.match.locality import N_LOCATIONS_RE
+from src.net.http import JSON_HEADERS, SESSION, fetch_failed, note_capped
 from src.net.util import (cache_dir, default_search_text, norm_posted_date,
                           text_from_html)
 from .board import board_jobs, loc_ok

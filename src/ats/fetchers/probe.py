@@ -23,7 +23,6 @@ from src.net.http import HEADERS, JSON_HEADERS, SESSION
 from . import bamboohr, icims, infor, jazzhr, workday
 from .api import ASHBY_API, GREENHOUSE_API, GREENHOUSE_JOB_URL_RE, LEVER_API
 
-
 # Standard "this posting is gone" notices across ATS templates. Curated and
 # phrase-anchored (never a bare "closed"/"expired") so an open JD that merely
 # mentions e.g. "closed-loop systems" can't trip it.

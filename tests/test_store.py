@@ -3,6 +3,8 @@ lifecycle, dispositions, crawl dormancy, and track membership."""
 
 from datetime import datetime, timedelta
 
+from conftest import iso_days_ago
+
 from src import config
 import src.match.locality as locality
 import src.store as store
@@ -74,8 +76,7 @@ class TestDormancy:
         """Pretend the last crawl was `days` ago -- the streak only grows once
         per calendar day, so nothing else can fake consecutive empty days."""
         db.execute("UPDATE companies SET last_crawled_at=? WHERE id=?",
-                   ((datetime.now() - timedelta(days=days)).isoformat(),
-                    company))
+                   (iso_days_ago(days), company))
         db.commit()
 
     def _empty_days(self, db, company, n, **kw):

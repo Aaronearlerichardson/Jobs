@@ -11,6 +11,7 @@ Nothing in the suite may touch the Claude API or the network.
 
 import json
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -207,9 +208,70 @@ def client():
     return web.app.test_client()
 
 
+@pytest.fixture
+def wired_db_path(tmp_path, monkeypatch):
+    """A throwaway store, wired into BOTH places the code looks one up.
+
+    A route opens `UI_TRACKS[track]["db_path"]` (ops.maintenance.track_store);
+    everything that runs outside a request — discovery's preview_names,
+    capture's ingest, harvest/triage's own defaults — falls back to
+    `config.STORE_DB_PATH`. Seven helpers across two files wired one or both
+    of those by hand, and four of them wired only the track config, which
+    holds only for as long as the test stays on the route side of that line.
+    Both are wired here, always, so no test can reach the real store by
+    taking one step past what its own setup happened to cover.
+
+    Returns the path; the file itself is created by whoever connects first.
+    """
+    db_path = tmp_path / "wired.db"
+    monkeypatch.setattr(_config, "STORE_DB_PATH", db_path)
+    monkeypatch.setitem(_config.UI_TRACKS[_config.DEFAULT_TRACK],
+                        "db_path", db_path)
+    return db_path
+
+
 # --------------------------------------------------------------------------- #
 #  Store plumbing the tests share
 # --------------------------------------------------------------------------- #
+
+def iso_days_ago(days):
+    """An ISO timestamp `days` days back — the shape every age column in the
+    store (last_seen, harvested_at, miss_at) is compared against."""
+    return (datetime.now() - timedelta(days=days)).isoformat()
+
+
+def company_row(conn, name, ats="greenhouse", **extra):
+    """Upsert one company by name and hand back the stored row.
+
+    `extra` lands last, so a caller's own `ats`/`slug` still wins. Two files
+    had written this same three-liner out byte for byte.
+    """
+    _store.upsert_company(conn, {"name": name, "ats": ats,
+                                 "slug": name.lower(), **extra})
+    return _store.get_company(conn, _store.company_id_by_name(conn, name))
+
+
+def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
+                  closed=0, reopened=0, secs=0.0, **extra):
+    """A stand-in for `harvest.harvest_board`, for tests of `harvest.run`.
+
+    `run()` reads a fixed set of keys off whatever board_fn hands back, and
+    eight tests across two files had each spelled that dict out by hand — so
+    a key run() starts reading has to be added in eight places, and the ones
+    that miss it fail with a KeyError nowhere near the change.
+
+    `extra` carries the optional keys only some callers set (fetch_errors,
+    last_error). `before(company)` runs before the dict is returned, for the
+    tests that need the call recorded, blocked, or raised from.
+    """
+    def board_fn(company, db_path, progress=lambda: None, hydrate=True):
+        if before is not None:
+            before(company)
+        return {"err": err, "fetched": fetched, "new": new,
+                "hydrated": hydrated, "closed": closed, "reopened": reopened,
+                "secs": secs, **extra}
+    return board_fn
+
 
 def keep_store_open(monkeypatch, db):
     """Point `store.connect()` at the test's OWN connection, with close()

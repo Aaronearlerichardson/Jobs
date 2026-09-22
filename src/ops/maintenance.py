@@ -20,6 +20,7 @@ from src import digest
 from src import store
 from src import tags
 from src.ats import coords
+from src.ats.fetchers import api as fetchers_api
 from src.ats.fetchers import company as company_fetch
 from src.ats.fetchers import probe
 from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
@@ -214,21 +215,19 @@ def rewrite_digest(conn, t, top_n=15, heading=""):
 # --------------------------------------------------------------------------- #
 #  Company-tag helpers (store roster semantics, shared by crawl + ops).        #
 # --------------------------------------------------------------------------- #
+#
+# NEAR-MISS, DELIBERATE: only a tag name differs; the shared logic already
+# lives in tags.has().
 
 def _is_sweep_tagged(company):
-    """True if a company store row carries the 'sweep' scope tag (src/tags.py
-    — 'neural' in older stores). Its board is cheap to pull whole, so it is
-    fetched unfiltered; the geo gate is then applied per posting below."""
+    """True if the company carries the 'sweep' scope tag."""
     if not company:
         return False
     return tags.has(company.get("tags"), tags.SWEEP)
 
 
 def _is_watched(company):
-    """True if the company carries the 'watch' tag (run_scraper.py --watch
-    NAME): the user wants to see EVERY new technical posting there. Watched
-    companies get their whole board fetched and their new technical postings
-    surface in a dedicated digest section regardless of rank or geography."""
+    """True if the company carries the 'watch' tag."""
     if not company:
         return False
     return tags.has(company.get("tags"), tags.WATCH)
@@ -2136,40 +2135,39 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 #     read at all rather than screen-scraped freshly for this one op.
 
 
-def _employer_name_greenhouse(slug):
-    """The employer name Greenhouse's OWN board carries for `slug` (a
-    posting's `company_name`), or "" on any failure or an empty board.
-
-    `content=false` is the same lightweight listing shape
-    src.ats.fetchers.api.BOARD_URLS already uses for a metadata-only read --
-    this needs one field off one posting, not every posting's full JD."""
-    data = get_json(
-        f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-        f"Greenhouse {slug} (employer-name check)", default={})
-    jobs = (data or {}).get("jobs") or []
-    return (jobs[0].get("company_name") or "").strip() if jobs else ""
-
-
-def _employer_name_smartrecruiters(slug):
-    """The employer name SmartRecruiters' OWN board carries for `slug` (a
-    posting's `company.name`), or "" on any failure or an empty board.
-
-    `limit=1` is the same shape src.discovery.resolve.probes
-    .probe_smartrecruiters already uses -- one posting is enough to name
-    the board."""
-    data = get_json(
-        f"https://api.smartrecruiters.com/v1/companies/{slug}/postings?limit=1",
-        f"SmartRecruiters {slug} (employer-name check)", default={})
-    content = (data or {}).get("content") or []
-    return ((content[0].get("company") or {}).get("name") or "").strip() \
-        if content else ""
+# ats -> (listing URL with `{}` for the slug, label for the failure line,
+# the postings out of the payload, the employer name off one posting). Only
+# an ATS with a reliable, BOARD-level (not per-posting) employer field in its
+# own listing payload qualifies -- see the module comment above for why
+# Workday/Lever/Ashby are not here.
+#
+# Greenhouse's URL and payload shape are read from the fetcher that owns them
+# (src.ats.fetchers.api) rather than written out again: `BOARD_URLS` is
+# already the metadata-only `content=false` listing this check wants, and
+# `board_rows` already records that the postings live under `jobs`. A private
+# copy of either reads an empty board as "no employer name", silently.
+#
+# SmartRecruiters has no fetcher module, so its root lives here; `limit=1` is
+# the shape src.discovery.resolve.probes.probe_smartrecruiters uses -- one
+# posting is enough to name a board.
+_EMPLOYER_NAME_READERS = {
+    "greenhouse": (fetchers_api.BOARD_URLS["greenhouse"], "Greenhouse",
+                   lambda d: fetchers_api.board_rows("greenhouse", d),
+                   lambda j: j.get("company_name")),
+    "smartrecruiters": (
+        "https://api.smartrecruiters.com/v1/companies/{}/postings?limit=1",
+        "SmartRecruiters",
+        lambda d: (d or {}).get("content") or [],
+        lambda j: (j.get("company") or {}).get("name")),
+}
 
 
-# ats -> the reader above for it. Only an ATS with a reliable, BOARD-level
-# (not per-posting) employer field in its own listing payload qualifies --
-# see the module comment above for why Workday/Lever/Ashby are not here.
-_EMPLOYER_NAME_READERS = {"greenhouse": _employer_name_greenhouse,
-                          "smartrecruiters": _employer_name_smartrecruiters}
+def _employer_name(ats, slug):
+    url, label, rows_of, name_of = _EMPLOYER_NAME_READERS[ats]
+    data = get_json(url.format(slug),
+                    f"{label} {slug} (employer-name check)", default={})
+    rows = rows_of(data)
+    return (name_of(rows[0]) or "").strip() if rows else ""
 
 
 def _slug_named_boards(conn):
@@ -2269,7 +2267,7 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
                    for r in conn.execute("SELECT name FROM companies")}
         out = []
         for c in rows:
-            new_name = _EMPLOYER_NAME_READERS[c["ats"]](c["slug"])
+            new_name = _employer_name(c["ats"], c["slug"])
             label = f"{c['name'][:30]:30} {c['ats']:15}"
             if not new_name:
                 print(f"    [skip]      {label} board answered no employer name")

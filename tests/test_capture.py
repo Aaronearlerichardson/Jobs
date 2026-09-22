@@ -9,7 +9,6 @@ from pathlib import Path
 import pytest
 
 import capture
-from src import config
 import src.claude.fit as fit
 import src.store as store
 from src import tags
@@ -120,16 +119,14 @@ class TestGenericBoards:
 
 
 @pytest.fixture
-def roster(tmp_path, monkeypatch):
+def roster(wired_db_path, monkeypatch):
     """A throwaway store that BOTH capture.py entry points read -- the
-    default connect() and the default track's db_path -- plus a stubbed fit
-    scorer so the ingest never reaches the Claude API. Yields a connection."""
-    db_path = tmp_path / "capture.db"
-    monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
-    monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK], "db_path", db_path)
+    default connect() and the default track's db_path (conftest's
+    `wired_db_path`) -- plus a stubbed fit scorer so the ingest never
+    reaches the Claude API. Yields a connection."""
     monkeypatch.setattr(ops, "score_resume_fit",
                         lambda *a, **k: fit.FitResult(score=0.5, reason="stub"))
-    conn = store.connect(db_path)
+    conn = store.connect(wired_db_path)
     yield conn
     conn.close()
 

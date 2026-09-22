@@ -113,12 +113,10 @@ class TestCompanyCrawlState:
     """The roster tab has to show WHY a company stopped producing rows --
     dormant is not deactivated -- and offer the one-click way back."""
 
-    def _sleepy_store(self, tmp_path, monkeypatch):
-        """Point the default track at a throwaway DB: these tests write, and
-        the suite may never touch the real store."""
-        from src import config
+    def _sleepy_store(self, db_path):
+        """One dormant company in conftest's `wired_db_path` throwaway store:
+        these tests write, and the suite may never touch the real one."""
         from src import store
-        db_path = tmp_path / "roster.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Sleepy", "ats": "greenhouse",
                                           "slug": "sleepy"})
@@ -127,26 +125,22 @@ class TestCompanyCrawlState:
                      "WHERE id=?", (cid,))
         conn.commit()
         conn.close()
-        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
-                            "db_path", db_path)
         return cid
 
-    def test_companies_expose_crawl_state(self, client, tmp_path, monkeypatch):
-        cid = self._sleepy_store(tmp_path, monkeypatch)
+    def test_companies_expose_crawl_state(self, client, wired_db_path):
+        cid = self._sleepy_store(wired_db_path)
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
         assert row["crawl_state"] == "dormant"
         assert row["empty_streak"] == 6
         assert row["next_crawl_at"].startswith("2099")
 
-    def test_capture_only_rows_show_the_marker(self, client, tmp_path,
-                                               monkeypatch):
+    def test_capture_only_rows_show_the_marker(self, client, wired_db_path):
         # The roster shows WHY a company is never fetched: its ats reads
         # "capture", and it stays an active, never-dormant row.
-        from src import config
         from src import store
-        self._sleepy_store(tmp_path, monkeypatch)
-        conn = store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
+        self._sleepy_store(wired_db_path)
+        conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Saved", "ats": store.CAPTURE_ATS,
                                           "careers_url": "https://jobs.saved.org/"})
         conn.close()
@@ -155,21 +149,20 @@ class TestCompanyCrawlState:
         assert row["ats"] == "capture" and row["active"]
         assert row["crawl_state"] == "active" and row["empty_streak"] == 0
 
-    def test_dormant_rows_leave_the_active_count(self, client, tmp_path,
-                                                 monkeypatch):
-        self._sleepy_store(tmp_path, monkeypatch)
+    def test_dormant_rows_leave_the_active_count(self, client, wired_db_path):
+        self._sleepy_store(wired_db_path)
         assert json.loads(client.get("/api/stats").data)["companies_active"] == 0
 
-    def test_reactivate_clears_the_schedule(self, client, tmp_path, monkeypatch):
-        cid = self._sleepy_store(tmp_path, monkeypatch)
+    def test_reactivate_clears_the_schedule(self, client, wired_db_path):
+        cid = self._sleepy_store(wired_db_path)
         assert client.post(f"/api/company/{cid}/reactivate").status_code == 200
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
         assert row["crawl_state"] == "active"
         assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
 
-    def test_unknown_company_404s(self, client, tmp_path, monkeypatch):
-        self._sleepy_store(tmp_path, monkeypatch)
+    def test_unknown_company_404s(self, client, wired_db_path):
+        self._sleepy_store(wired_db_path)
         assert client.post("/api/company/9999/reactivate").status_code == 404
 
 
@@ -177,13 +170,11 @@ class TestPipelineApi:
     """The Pipeline tab past 'applied': the tracking fields it edits, the
     follow-up list it groups by, and the conversion table it renders."""
 
-    def _pipeline_store(self, tmp_path, monkeypatch):
-        """Point the default track at a throwaway DB holding one live
-        application. These tests write, and the suite may never touch the
-        real store."""
-        from src import config
+    def _pipeline_store(self, db_path):
+        """One live application in conftest's `wired_db_path` throwaway
+        store: these tests write, and the suite may never touch the real
+        one."""
         from src import store
-        db_path = tmp_path / "pipeline.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
                                           "slug": "acme"})
@@ -194,21 +185,18 @@ class TestPipelineApi:
             "resume_fit_score": 0.54})
         store.set_disposition(conn, "p1", "applied")
         conn.close()
-        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
-                            "db_path", db_path)
-        return db_path
 
     def _row(self, client):
         return json.loads(client.get("/api/pipeline").data)["rows"][0]
 
-    def test_pipeline_exposes_the_tracking_columns(self, client, tmp_path,
-                                                   monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_pipeline_exposes_the_tracking_columns(self, client,
+                                                   wired_db_path):
+        self._pipeline_store(wired_db_path)
         assert {"applied_at", "followup_at", "contact", "referral",
                 "outcome_reason"} <= set(self._row(client))
 
-    def test_tracking_fields_round_trip(self, client, tmp_path, monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_tracking_fields_round_trip(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
         resp = client.post("/api/job/p1/pipeline",
                            json={"followup_at": "2026-09-08",
                                  "contact": "Dana R", "referral": 1,
@@ -221,71 +209,70 @@ class TestPipelineApi:
         assert row["outcome_reason"] == "rejected-interview"
 
     def test_one_field_at_a_time_leaves_the_others_alone(self, client,
-                                                         tmp_path, monkeypatch):
+                                                         wired_db_path):
         # The SPA's editor saves on each control's own `change`.
-        self._pipeline_store(tmp_path, monkeypatch)
+        self._pipeline_store(wired_db_path)
         client.post("/api/job/p1/pipeline", json={"contact": "Dana R"})
         client.post("/api/job/p1/pipeline", json={"referral": 1})
         row = self._row(client)
         assert row["contact"] == "Dana R" and row["referral"] == 1
 
-    def test_stats_count_applications_sent_this_week(self, client, tmp_path,
-                                                     monkeypatch):
+    def test_stats_count_applications_sent_this_week(self, client,
+                                                     wired_db_path):
         """The 'applied this week' tile: an application from a month ago is
         not this week's volume, and one since moved on to interviewing
         still counts for the week it went out in."""
-        from datetime import datetime, timedelta
+        from conftest import iso_days_ago
         from src import store
-        db_path = self._pipeline_store(tmp_path, monkeypatch)
-        conn = store.connect(db_path)
+        self._pipeline_store(wired_db_path)
+        conn = store.connect(wired_db_path)
         store.upsert_job(conn, {
             "job_id": "p2", "company_name": "Acme", "title": "Old One",
             "url": "https://acme.io/p2", "location": "Anywhere",
             "resume_fit_score": 0.5})
         store.set_disposition(conn, "p2", "applied")
         conn.execute("UPDATE jobs SET applied_at=? WHERE job_id='p2'",
-                     ((datetime.now() - timedelta(days=30)).isoformat(),))
+                     (iso_days_ago(30),))
         conn.commit()
         store.set_disposition(conn, "p1", "interviewing")
         conn.close()
         stats = json.loads(client.get("/api/stats").data)
         assert stats["applied_7d"] == 1
 
-    def test_a_field_outside_the_whitelist_is_ignored(self, client, tmp_path,
-                                                      monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_a_field_outside_the_whitelist_is_ignored(self, client,
+                                                      wired_db_path):
+        self._pipeline_store(wired_db_path)
         assert client.post("/api/job/p1/pipeline",
                            json={"resume_fit_score": 0}).status_code == 200
         assert self._row(client)["resume_fit_score"] == 0.54
 
-    def test_an_outcome_outside_the_vocabulary_400s(self, client, tmp_path,
-                                                    monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_an_outcome_outside_the_vocabulary_400s(self, client,
+                                                    wired_db_path):
+        self._pipeline_store(wired_db_path)
         assert client.post("/api/job/p1/pipeline",
                            json={"outcome_reason": "ghosted"}).status_code == 400
 
-    def test_unknown_job_400s(self, client, tmp_path, monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_unknown_job_400s(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
         assert client.post("/api/job/nope/pipeline",
                            json={"contact": "X"}).status_code == 400
 
     def test_followups_due_appears_once_the_date_has_arrived(self, client,
-                                                             tmp_path,
-                                                             monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+                                                             wired_db_path):
+        self._pipeline_store(wired_db_path)
         assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
         client.post("/api/job/p1/pipeline", json={"followup_at": "2000-01-01"})
         assert json.loads(
             client.get("/api/pipeline").data)["followups_due"] == ["p1"]
 
-    def test_a_future_followup_is_not_due(self, client, tmp_path, monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_a_future_followup_is_not_due(self, client, wired_db_path):
+        self._pipeline_store(wired_db_path)
         client.post("/api/job/p1/pipeline", json={"followup_at": "2099-01-01"})
         assert json.loads(client.get("/api/pipeline").data)["followups_due"] == []
 
-    def test_conversion_report_bands_the_application(self, client, tmp_path,
-                                                     monkeypatch):
-        self._pipeline_store(tmp_path, monkeypatch)
+    def test_conversion_report_bands_the_application(self, client,
+                                                     wired_db_path):
+        self._pipeline_store(wired_db_path)
         rep = json.loads(client.get("/api/report/conversion").data)
         assert len(rep) == 1
         assert rep[0]["band"] == "mid" and rep[0]["geo_mode"] == "onsite"
@@ -298,13 +285,12 @@ class TestApplyBandFields:
     it depends on is that every /api/jobs row carries the four fields it
     reads, with the geo bucket derived live from the location."""
 
-    def test_jobs_expose_what_the_band_filter_reads(self, client, tmp_path,
-                                                    monkeypatch, local_addr):
+    def test_jobs_expose_what_the_band_filter_reads(self, client,
+                                                    wired_db_path, local_addr):
         from src import config
         from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
-        db_path = tmp_path / "band.db"
-        conn = store.connect(db_path)
+        conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
                                           "slug": "acme"})
         store.upsert_job(conn, {
@@ -313,7 +299,6 @@ class TestApplyBandFields:
             "location": local_addr, "track": t["track"],
             "resume_fit_score": 0.54})
         conn.close()
-        monkeypatch.setitem(t, "db_path", db_path)
         rows = json.loads(client.get("/api/jobs").data)
         row = next(r for r in rows if r["job_id"] == "b1")
         assert row["resume_fit_score"] == 0.54
@@ -328,12 +313,11 @@ class TestCollapsedJobFields:
     the survivor's dup_count/dup_job_ids/dup_urls must reach the JSON."""
 
     def test_a_duplicate_pair_collapses_with_dup_fields_exposed(
-            self, client, tmp_path, monkeypatch, local_addr):
+            self, client, wired_db_path, local_addr):
         from src import config
         from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
-        db_path = tmp_path / "collapse.db"
-        conn = store.connect(db_path)
+        conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
                                           "slug": "acme"})
         for jid, fit in (("c1", 0.9), ("c2", 0.4)):
@@ -343,7 +327,6 @@ class TestCollapsedJobFields:
                 "location": local_addr, "track": t["track"],
                 "resume_fit_score": fit})
         conn.close()
-        monkeypatch.setitem(t, "db_path", db_path)
         rows = json.loads(client.get("/api/jobs").data)
         ids = {r["job_id"] for r in rows}
         assert ids == {"c1"}                        # c2 folded into c1
@@ -363,11 +346,10 @@ class TestRemoteAdmissionFields:
 
     FIT = 0.94
 
-    def _store(self, tmp_path, monkeypatch, mission, floor=0.85):
+    def _store(self, db_path, monkeypatch, mission, floor=0.85):
         from src import config
         from src import store
         t = config.UI_TRACKS[config.DEFAULT_TRACK]
-        db_path = tmp_path / "admission.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, {"name": "Acme", "ats": "greenhouse",
                                           "slug": "acme",
@@ -381,47 +363,49 @@ class TestRemoteAdmissionFields:
                                 "resume_fit_score": self.FIT})
         conn.commit()
         conn.close()
-        monkeypatch.setitem(t, "db_path", db_path)
         monkeypatch.setitem(t, "remote_mission_floor", floor)
         return cid
 
     def _job(self, client):
         return json.loads(client.get("/api/jobs").data)[0]
 
-    def test_core_mission_remote_is_admitted_unwatched(self, client, tmp_path,
+    def test_core_mission_remote_is_admitted_unwatched(self, client,
+                                                       wired_db_path,
                                                        monkeypatch):
-        self._store(tmp_path, monkeypatch, mission=0.9)
+        self._store(wired_db_path, monkeypatch, mission=0.9)
         job = self._job(client)
         assert job["watched"] is False and job["remote_ok"] is True
 
-    def test_below_the_floor_is_not(self, client, tmp_path, monkeypatch):
-        self._store(tmp_path, monkeypatch, mission=0.5)
+    def test_below_the_floor_is_not(self, client, wired_db_path, monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.5)
         assert self._job(client)["remote_ok"] is False
 
-    def test_no_floor_disables_it(self, client, tmp_path, monkeypatch):
-        self._store(tmp_path, monkeypatch, mission=0.9, floor=None)
+    def test_no_floor_disables_it(self, client, wired_db_path, monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.9, floor=None)
         assert self._job(client)["remote_ok"] is False
 
     def test_watch_admits_a_company_far_below_the_floor(self, client,
-                                                        tmp_path, monkeypatch):
+                                                        wired_db_path,
+                                                        monkeypatch):
         # Above the track's min_mission (or the row leaves the ranking for an
         # unrelated reason), nowhere near the remote floor.
-        cid = self._store(tmp_path, monkeypatch, mission=0.3)
+        cid = self._store(wired_db_path, monkeypatch, mission=0.3)
         assert client.post(f"/api/company/{cid}/watch",
                            json={"on": True}).status_code == 200
         assert self._job(client)["remote_ok"] is True
 
-    def test_roster_carries_the_best_fit_so_far(self, client, tmp_path,
+    def test_roster_carries_the_best_fit_so_far(self, client, wired_db_path,
                                                 monkeypatch):
-        cid = self._store(tmp_path, monkeypatch, mission=0.9)
+        cid = self._store(wired_db_path, monkeypatch, mission=0.9)
         row = next(r for r in json.loads(client.get("/api/companies").data)
                    if r["id"] == cid)
         assert row["best_fit"] == self.FIT and row["open_jobs"] == 1
 
-    def test_best_fit_is_none_without_jobs(self, client, tmp_path, monkeypatch):
-        self._store(tmp_path, monkeypatch, mission=0.9)
+    def test_best_fit_is_none_without_jobs(self, client, wired_db_path,
+                                           monkeypatch):
+        self._store(wired_db_path, monkeypatch, mission=0.9)
         from src import store
-        conn = store.connect(tmp_path / "admission.db")
+        conn = store.connect(wired_db_path)
         cid = store.upsert_company(conn, {"name": "Quiet", "ats": "lever",
                                           "slug": "quiet"})
         conn.close()
@@ -434,85 +418,75 @@ class TestReviewQueue:
     """Every automated roster write waits for a person now, and the queue is
     the API surface that person works through."""
 
-    def _queued_store(self, tmp_path, monkeypatch, name="Guess"):
-        """A throwaway DB holding one review candidate, pointed at by BOTH
-        the track config (the routes) and config.STORE_DB_PATH (discovery's
-        own store.connect()). The suite may never touch the real store."""
-        from src import config
+    def _queued_store(self, db_path, name="Guess"):
+        """One review candidate in conftest's `wired_db_path` throwaway
+        store -- which the routes and discovery's own store.connect() both
+        read, so the suite never touches the real one."""
         from src import store
-        db_path = tmp_path / "review.db"
         conn = store.connect(db_path)
         cid = store.upsert_company(conn, store.mark_pending(
             {"name": name, "ats": "greenhouse", "slug": "guess",
              "source": "paste", "local_job_count": 2, "total_job_count": 9}))
         conn.close()
-        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
-                            "db_path", db_path)
-        monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
         return cid
 
-    @staticmethod
-    def _store(monkeypatch=None):
-        from src import config
-        from src import store
-        return store.connect(config.UI_TRACKS[config.DEFAULT_TRACK]["db_path"])
-
-    def test_pending_lists_the_queue(self, client, tmp_path, monkeypatch):
-        cid = self._queued_store(tmp_path, monkeypatch)
+    def test_pending_lists_the_queue(self, client, wired_db_path):
+        cid = self._queued_store(wired_db_path)
         rows = json.loads(client.get("/api/pending").data)
         assert [r["id"] for r in rows] == [cid]
         assert rows[0]["source"] == "paste"
         assert rows[0]["local_job_count"] == 2
 
-    def test_a_candidate_is_counted_but_not_crawled(self, client, tmp_path,
-                                                    monkeypatch):
-        self._queued_store(tmp_path, monkeypatch)
+    def test_a_candidate_is_counted_but_not_crawled(self, client,
+                                                    wired_db_path):
+        self._queued_store(wired_db_path)
         stats = json.loads(client.get("/api/stats").data)
         assert stats["companies_active"] == 0
         assert stats["pending_review"] == 1
 
-    def test_confirm_puts_it_on_the_roster(self, client, tmp_path, monkeypatch):
-        cid = self._queued_store(tmp_path, monkeypatch)
+    def test_confirm_puts_it_on_the_roster(self, client, wired_db_path):
+        cid = self._queued_store(wired_db_path)
         assert client.post(f"/api/company/{cid}/confirm").status_code == 200
         assert json.loads(client.get("/api/pending").data) == []
         assert json.loads(client.get("/api/stats").data)["companies_active"] == 1
 
-    def test_reject_removes_it_and_blocks_the_name(self, client, tmp_path,
-                                                   monkeypatch):
+    def test_reject_removes_it_and_blocks_the_name(self, client,
+                                                   wired_db_path):
         from src import store
-        cid = self._queued_store(tmp_path, monkeypatch)
+        cid = self._queued_store(wired_db_path)
         resp = client.post(f"/api/company/{cid}/reject",
                            json={"reason": "not a company"})
         assert resp.status_code == 200
-        conn = self._store()
+        conn = store.connect(wired_db_path)
         try:
             assert store.get_companies(conn, active_only=False) == []
             assert store.blocked_name_keys(conn) == {"guess"}
         finally:
             conn.close()
 
-    def test_unknown_company_404s(self, client, tmp_path, monkeypatch):
-        self._queued_store(tmp_path, monkeypatch)
+    def test_unknown_company_404s(self, client, wired_db_path):
+        self._queued_store(wired_db_path)
         assert client.post("/api/company/9999/confirm").status_code == 404
         assert client.post("/api/company/9999/reject").status_code == 404
 
     def test_block_records_the_names_the_reviewer_rejected(
-            self, client, tmp_path, monkeypatch):
+            self, client, wired_db_path):
         from src import store
-        self._queued_store(tmp_path, monkeypatch)
+        self._queued_store(wired_db_path)
         resp = client.post("/api/names/block",
                            json={"names": ["Who You Are", "Job Location"]})
         assert json.loads(resp.data)["blocked"] == 2
-        conn = self._store()
+        conn = store.connect(wired_db_path)
         try:
             assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
         finally:
             conn.close()
 
-    def test_preview_parses_without_resolving_anything(self, client, tmp_path,
+    def test_preview_parses_without_resolving_anything(self, client,
+                                                       wired_db_path,
                                                        monkeypatch):
         import src.discovery.paste_ingest as ls
-        self._queued_store(tmp_path, monkeypatch)
+        self._queued_store(wired_db_path)
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         tried = []
@@ -928,26 +902,15 @@ class TestRunQueue:
     #  The paste flow is not an operation and must not wait for one       #
     # ----------------------------------------------------------------- #
 
-    @staticmethod
-    def _paste_store(tmp_path, monkeypatch):
-        """Point BOTH the track config (what the routes open) and
-        config.STORE_DB_PATH (what preview_names opens for itself) at a
-        throwaway DB, so the suite never touches the real store."""
-        from src import config
-        from src import store
-        db_path = tmp_path / "paste.db"
-        store.connect(db_path).close()
-        monkeypatch.setitem(config.UI_TRACKS[config.DEFAULT_TRACK],
-                            "db_path", db_path)
-        monkeypatch.setattr(config, "STORE_DB_PATH", db_path)
-        return db_path
-
-    def test_preview_parses_while_an_op_runs(self, client, tmp_path,
+    def test_preview_parses_while_an_op_runs(self, client, wired_db_path,
                                              monkeypatch, stub_ops):
         """Preview resolves nothing and writes nothing -- refusing it while
-        an op held the slot only stopped the person preparing the list."""
+        an op held the slot only stopped the person preparing the list.
+
+        conftest's `wired_db_path` covers both the track config (what the
+        routes open) and config.STORE_DB_PATH (what preview_names opens for
+        itself)."""
         import src.discovery.paste_ingest as ls
-        self._paste_store(tmp_path, monkeypatch)
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         stub_ops.add("q-first")
@@ -960,15 +923,13 @@ class TestRunQueue:
         stub_ops.release("q-first")
 
     def test_block_records_the_junk_names_while_an_op_runs(self, client,
-                                                           tmp_path,
-                                                           monkeypatch,
+                                                           wired_db_path,
                                                            stub_ops):
         """The UI blocklists the rejected names and THEN queues add-names,
         so a 409 here lost the blocklist for a run that went ahead anyway.
         The write itself is one INSERT on its own connection, which is what
         the review-queue confirm/reject routes have always done mid-run."""
         from src import store
-        db_path = self._paste_store(tmp_path, monkeypatch)
         stub_ops.add("q-first")
         client.post("/api/run/q-first")
         assert self._status(client)["running"] is True
@@ -979,7 +940,7 @@ class TestRunQueue:
         assert body["blocked"] == 2
         assert body["keys"] == ["joblocation", "whoyouare"]
         assert self._status(client)["running"] is True,             "blocking must not disturb the run holding the slot"
-        conn = store.connect(db_path)
+        conn = store.connect(wired_db_path)
         try:
             assert store.blocked_name_keys(conn) == {"whoyouare", "joblocation"}
         finally:

@@ -14,7 +14,6 @@ from datetime import datetime
 
 from .schema import apply_update, sql
 
-
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
 # in ranking; the rest leave the ranking: applied/interviewing move to the
 # digest's pipeline section, rejected/dismissed disappear (and dismissed

@@ -27,9 +27,9 @@ import time
 
 import requests
 
-from src.net.http import DEFAULT_TIMEOUT, JSON_HEADERS, fetch_failed
+from src.net.http import DEFAULT_TIMEOUT, JSON_HEADERS
 from src.net.util import text_from_html
-from .board import board_jobs
+from .board import board_fetch
 
 _JSON = {**JSON_HEADERS, "Content-Type": "application/json"}
 
@@ -105,10 +105,8 @@ def _row(slug, code, o):
 
 
 def fetch_ultipro(slug, company_name="", gate=None, loc_re=None):
+    # No fetch_description: BriefDescription rides the listing (module doc).
     code = slug.split("|")[0]
-    try:
-        opps = parse_board(slug)
-    except Exception as e:
-        return fetch_failed(f"UltiPro {company_name or code}", e)
-    return board_jobs((_row(slug, code, o) for o in opps), company_name,
-                      gate=gate, loc_re=loc_re)
+    return board_fetch(f"UltiPro {company_name or code}",
+                       lambda: parse_board(slug), lambda o: _row(slug, code, o),
+                       company_name, gate=gate, loc_re=loc_re)

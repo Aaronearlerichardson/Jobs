@@ -108,8 +108,14 @@ class TestListing:
 
     def test_every_posting_on_the_recorded_board_is_local(self):
         """Why this board is on the roster at all: `match.locality.is_nc`
-        has to read the normalized location as the profile's own area."""
+        has to read the normalized location as the profile's own area.
+        This board is real and Raleigh-specific, so the claim only holds
+        under a profile whose [locality] covers NC; skip elsewhere rather
+        than assert something CI's example profile was never going to
+        agree with."""
         from src.match.locality import is_nc
+        if not is_nc("Raleigh, North Carolina, United States"):
+            pytest.skip("profile's locality doesn't cover this board's real location")
         rows = [workable._row(SLUG, j) for j in load("workable_board.json")["jobs"]]
         assert all(is_nc(r["location"]) for r in rows)
 
@@ -194,21 +200,22 @@ class TestLocation:
             {"city": "Raleigh", "state": "North Carolina"}
         ).startswith("Raleigh, North Carolina")
 
-    def test_a_multi_site_posting_names_every_office(self):
+    def test_a_multi_site_posting_names_every_office(self, local_addr, elsewhere):
         """`locations[]` is the full list while the flat fields show only
         the primary site. Joined with ";", which is the separator
         `locality.is_nc` reads one office at a time -- a posting whose
-        SECOND office is local must stay local."""
+        SECOND office is local must stay local. `elsewhere`/`local_addr`
+        keep this independent of which profile is loaded."""
         from src.match.locality import is_nc
+        far_city, far_rest = elsewhere.split(", ", 1)
+        loc_city, loc_state = local_addr.split(", ", 1)
         loc = workable.location_str(_job(
-            city="Copenhagen", state="Capital Region of Denmark",
-            country="Denmark",
-            locations=[{"city": "Copenhagen", "region": "Capital Region of Denmark",
-                        "country": "Denmark", "hidden": False},
-                       {"city": "Raleigh", "region": "North Carolina",
+            city=far_city, state="", country=far_rest,
+            locations=[{"city": far_city, "region": "", "country": far_rest,
+                        "hidden": False},
+                       {"city": loc_city, "region": loc_state,
                         "country": "United States", "hidden": False}]))
-        assert loc == ("Copenhagen, Capital Region of Denmark, Denmark; "
-                       "Raleigh, North Carolina, United States")
+        assert loc == f"{far_city}, {far_rest}; {loc_city}, {loc_state}, United States"
         assert is_nc(loc)
 
     def test_a_hidden_office_is_not_a_location(self):

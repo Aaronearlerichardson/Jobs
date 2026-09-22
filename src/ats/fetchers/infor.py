@@ -49,7 +49,7 @@ import time
 from urllib.parse import quote
 
 from src.net.http import JSON_HEADERS, fetch_failed, get_json, note_capped
-from src.net.util import text_from_html          # shared HTML->text stripper
+from src.net.util import text_from_html  # shared HTML->text stripper
 from .board import board_jobs, loc_ok
 
 #: The candidate-facing board. Infor names the internal one INTERNAL; only
@@ -291,6 +291,14 @@ def fetch_infor_description(url):
 
     >>> fetch_infor_description("https://example.org/")   # not a job URL
     ('', '')
+
+    Notes:
+        NEAR-MISS, DELIBERATE (2026-09-22 clone scan): structurally
+        identical to `phenom.fetch_phenom_description`, and stays so. The
+        shape IS the contract `company.hydrate_description` calls an ATS
+        by -- URL in, (description, location) out -- and all four
+        operations inside are this platform's own, so a shared helper
+        would take four callables to save three lines.
     """
     ref = job_ref_from_url(url)
     if not ref:

@@ -21,7 +21,7 @@ from bs4 import BeautifulSoup
 
 from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import text_from_html
-from .board import board_jobs
+from .board import board_fetch
 
 _BOARD = "https://recruiting.paylocity.com/recruiting/jobs/All/{guid}/x"
 _DETAIL = "https://recruiting.paylocity.com/Recruiting/Jobs/Details/{jid}"
@@ -96,12 +96,9 @@ def _row(guid, j):
 def fetch_paylocity(guid, company_name="", gate=None, loc_re=None, max_details=40,
                     detail_delay=0.2):
     label = company_name or guid[:8]
-    try:
-        raw = parse_board(guid)
-    except Exception as e:
-        return fetch_failed(f"Paylocity {label}", e)
-    return board_jobs((_row(guid, j) for j in raw), company_name,
-                      gate=gate, loc_re=loc_re,
-                      fetch_description=lambda row: fetch_description(
-                          row["_jid"], label),
-                      max_details=max_details, detail_delay=detail_delay)
+    return board_fetch(f"Paylocity {label}",
+                       lambda: parse_board(guid), lambda j: _row(guid, j),
+                       company_name, gate=gate, loc_re=loc_re,
+                       fetch_description=lambda row: fetch_description(
+                           row["_jid"], label),
+                       max_details=max_details, detail_delay=detail_delay)

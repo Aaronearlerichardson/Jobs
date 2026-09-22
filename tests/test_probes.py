@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from conftest import fake_response, keep_store_open
+from conftest import fake_response, iso_days_ago, keep_store_open
 
 from src.ats.fetchers import probe as job_probe
 from src.ats.fetchers.icims import ICIMS_HEADERS
@@ -30,10 +30,6 @@ from src.net.http import HEADERS
 from src.ops import maintenance as ops
 from src.ops import roster
 import src.store as store
-
-
-def _iso_days_ago(days):
-    return (datetime.now() - timedelta(days=days)).isoformat()
 
 
 def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
@@ -66,7 +62,7 @@ def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
                               "url": url or f"https://acme.example/{jid}"})
         ids.append(jid)
     db.execute("UPDATE jobs SET last_seen=? WHERE company_id=?",
-               (_iso_days_ago(days_stale), cid))
+               (iso_days_ago(days_stale), cid))
     db.execute("UPDATE companies SET last_harvested_at=?, miss_reason=? "
                "WHERE id=?", (harvested, miss_reason, cid))
     db.commit()
@@ -327,7 +323,7 @@ class TestSelfHealRetryMarker:
         calls = self._stub_refusal(monkeypatch)
         jid = add_job("j1", description="x" * 300, fit=None)
         db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
-                  (f"unscored:refused:300:{_iso_days_ago(31)[:10]}", jid))
+                  (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
 
         ops.self_heal_unscored(db, "resume", "local-tech")
@@ -374,7 +370,7 @@ class TestSelfHealRetryMarker:
         import src.claude.fit as fit_module
         jid = add_job("j1", description="x" * 300, fit=None)
         db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
-                  (f"unscored:refused:300:{_iso_days_ago(31)[:10]}", jid))
+                  (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
         monkeypatch.setattr(fit_module, "call_claude_json", lambda *a, **k: {
             "domain": 0.5, "function": 0.5, "stack": 0.5, "seniority": 0.5,
@@ -596,7 +592,7 @@ class TestClosedProbeGiveUp:
         self._answer(monkeypatch, (None, "gated"))
         self._run(db, ops.CLOSED_PROBE_GIVE_UP)
         db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
-                   (_iso_days_ago(ops.DEAD_BOARD_CLOSE_DAYS + 6), jid))
+                   (iso_days_ago(ops.DEAD_BOARD_CLOSE_DAYS + 6), jid))
         db.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
                    "WHERE name='Acme'")
         db.commit()
@@ -874,7 +870,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
             self, db, monkeypatch):
         # Walked two days ago and the row has been unseen for thirty: the
         # walk happened and did not list it.
-        [jid] = seed_stale(db, "Walked", harvested=_iso_days_ago(2))
+        [jid] = seed_stale(db, "Walked", harvested=iso_days_ago(2))
         urls = self._probed(monkeypatch)
 
         ops.check_closed_jobs(conn=db, stale_days=7)
@@ -885,7 +881,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
             self, db, monkeypatch, capsys):
         # Off-mission and inactive, so it waits 168h; last walked just
         # past the 7-day staleness line, i.e. due but not yet run.
-        seed_stale(db, "Deferred", harvested=_iso_days_ago(8),
+        seed_stale(db, "Deferred", harvested=iso_days_ago(8),
                    active=0, mission_tier="other")
         urls = self._probed(monkeypatch)
 
@@ -906,7 +902,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
         """'no-board-found' keeps a company out of
         store.harvestable_companies, so its rows can never be answered by
         a board diff however recently the ats column was filled in."""
-        [jid] = seed_stale(db, "Unresolved", harvested=_iso_days_ago(90),
+        [jid] = seed_stale(db, "Unresolved", harvested=iso_days_ago(90),
                            miss_reason="no-board-found")
         urls = self._probed(monkeypatch)
 
@@ -922,7 +918,7 @@ class TestProbeOutcomesAreReportedPerFamily:
 
     def test_each_family_gets_a_line_with_its_counts_and_reasons(
             self, db, monkeypatch, capsys):
-        seed_stale(db, harvested=_iso_days_ago(1),
+        seed_stale(db, harvested=iso_days_ago(1),
                    urls=[LEVER_JOB, LEVER_JOB + "x", ICIMS_JOB,
                          "https://www.linkedin.com/jobs/view/1"])
         verdicts = {LEVER_JOB: (True, "lever api: posting live"),
@@ -944,7 +940,7 @@ class TestProbeOutcomesAreReportedPerFamily:
             self, db, monkeypatch, capsys):
         """Two rows closed by the same kind of notice must tally as one
         reason, not as two singletons named after their own wording."""
-        seed_stale(db, harvested=_iso_days_ago(1),
+        seed_stale(db, harvested=iso_days_ago(1),
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
             ops.probe, "probe_job_open",

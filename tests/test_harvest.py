@@ -6,17 +6,13 @@ import threading
 
 import pytest
 
+from conftest import company_row as _company, make_board_fn
+
 from src import config, store
 from src.claude import api as claude_api
 from src.match import gates
 from src.crawl import harvest
 from src.net import http
-
-
-def _company(conn, name, ats="greenhouse", **extra):
-    store.upsert_company(conn, {"name": name, "ats": ats,
-                                "slug": name.lower(), **extra})
-    return store.get_company(conn, store.company_id_by_name(conn, name))
 
 
 def _job(i, desc=""):
@@ -189,13 +185,8 @@ class TestOffmissionCadence:
         conn = store.connect(db)
         self._stale_board(conn, "Dominos", 24, active=0, mission_tier="other")
         self._stale_board(conn, "Acme", 24, active=1, mission_tier="core-mission")
-
-        def fake_board(company, db_path, progress=lambda: None, hydrate=True):
-            return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                    "closed": 0, "reopened": 0, "secs": 0.0}
-
-        harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
-                   triage=False)
+        harvest.run(db_path=db, max_workers=1, board_fn=make_board_fn(),
+                    triage=False)
         out = capsys.readouterr().out
         header = next(l for l in out.splitlines() if "board(s)" in l)
         assert "1 off-mission board(s) deferred to 168h" in header
@@ -556,14 +547,14 @@ def test_run_reports_and_skips_fresh_boards(tmp_path, monkeypatch):
     conn.commit()
     pulled = []
 
-    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
+    def pull(company):
         pulled.append(company["name"])
         if company["name"] == "B":
             raise RuntimeError("down")
-        return {"err": None, "fetched": 3, "new": 2, "hydrated": 1,
-                "closed": 0, "reopened": 0, "secs": 0.1}
 
-    s = harvest.run(db_path=db, max_workers=2, board_fn=fake_board)
+    s = harvest.run(db_path=db, max_workers=2,
+                    board_fn=make_board_fn(before=pull, fetched=3, new=2,
+                                           hydrated=1, secs=0.1))
     assert sorted(pulled) == ["A", "B"]
     assert (s["boards"], s["ok"], s["err"], s["stalled"]) == (3 - 1, 1, 1, 0)
     assert s["fetched"] == 3 and s["new"] == 2
@@ -574,13 +565,9 @@ def test_run_abandons_a_stalled_board(tmp_path):
     conn = store.connect(db)
     _company(conn, "Wedged")
     release = threading.Event()
-
-    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
-        release.wait(5)                      # no progress() calls at all
-        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 0.0}
-
-    s = harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
+    # Blocks, and never calls progress() at all.
+    board_fn = make_board_fn(before=lambda company: release.wait(5))
+    s = harvest.run(db_path=db, max_workers=1, board_fn=board_fn,
                     stall_s=0.0, poll_s=0.1)
     release.set()
     assert s["stalled"] == 1 and s["ok"] == 0
@@ -598,13 +585,10 @@ def test_dead_board_status_line_names_the_last_error_and_warns(
     db = tmp_path / "s.db"
     conn = store.connect(db)
     _company(conn, "Acme")
-
-    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
-        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 1.0, "fetch_errors": 1,
-                "last_error": "GET https://x.test/sitemap.xml: 403"}
-
-    s = harvest.run(db_path=db, max_workers=1, board_fn=fake_board,
+    board_fn = make_board_fn(
+        secs=1.0, fetch_errors=1,
+        last_error="GET https://x.test/sitemap.xml: 403")
+    s = harvest.run(db_path=db, max_workers=1, board_fn=board_fn,
                     triage=False)
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines() if "Acme" in l)
@@ -639,12 +623,8 @@ def test_harvest_summary_names_boards_whose_name_is_just_their_own_slug(
                                 "source": SLUG_NAME_SOURCE})
     store.upsert_company(conn, {"name": "Solo", "ats": "lever",
                                 "slug": "solo", "source": "manual"})
-
-    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
-        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 0.0}
-
-    harvest.run(db_path=db, max_workers=2, board_fn=fake_board, triage=False)
+    harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn(),
+                triage=False)
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines()
                if "named after their own slug" in l)
@@ -658,12 +638,8 @@ def test_harvest_summary_line_is_bare_when_nothing_is_flagged(
     conn = store.connect(db)
     store.upsert_company(conn, {"name": "Acme Health", "ats": "lever",
                                 "slug": "acme-careers"})
-
-    def fake_board(company, db_path, progress=lambda: None, hydrate=True):
-        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 0.0}
-
-    harvest.run(db_path=db, max_workers=1, board_fn=fake_board, triage=False)
+    harvest.run(db_path=db, max_workers=1, board_fn=make_board_fn(),
+                triage=False)
     out = capsys.readouterr().out
     line = next(l for l in out.splitlines()
                if "named after their own slug" in l)
@@ -779,11 +755,6 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
                             lambda conn, t, **kw: order.append("digest"))
         return db, order
 
-    @staticmethod
-    def _fake_board(company, db_path, progress=lambda: None, hydrate=False):
-        return {"err": None, "fetched": 0, "new": 0, "hydrated": 0,
-                "closed": 0, "reopened": 0, "secs": 0.0}
-
     def _kinds(self, order):
         return [o[0] if isinstance(o, tuple) else o for o in order]
 
@@ -792,7 +763,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setattr(claude_api, "_FATAL_MSG", None)
-        harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board)
+        harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn())
         assert self._kinds(order) == ["triage", "verify", "closed", "digest"]
         verify_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "verify")
@@ -811,7 +782,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", key)
         monkeypatch.setattr(claude_api, "_FATAL_MSG", fatal)
-        harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board)
+        harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn())
         out = capsys.readouterr().out
         assert out.count("verify skipped") == 1 and why in out
         assert self._kinds(order) == ["triage", "closed", "digest"]
@@ -820,7 +791,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         db, order = self._wire(monkeypatch, tmp_path)
         monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setattr(claude_api, "_FATAL_MSG", None)
-        s = harvest.run(db_path=db, max_workers=2, board_fn=self._fake_board,
+        s = harvest.run(db_path=db, max_workers=2, board_fn=make_board_fn(),
                         triage=False)
         assert "triage" not in s
         assert order == []

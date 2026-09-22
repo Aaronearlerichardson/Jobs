@@ -11,9 +11,11 @@ Offline: the resolver, the mission scorer and the board fetch are all
 stubbed, exactly as the pasted-name tests stub them.
 """
 
-from datetime import datetime, timedelta
+import re
 
 import pytest
+
+from conftest import iso_days_ago
 
 import src.store as store
 from src import tags
@@ -31,14 +33,12 @@ def _miss(db, name, reason, **fields):
 def _silent(db, name, harvested_days_ago=1, **fields):
     """A board added 30 days ago that has listed nothing since and was
     harvested `harvested_days_ago` days ago: a SILENT_FAMILY row."""
-    now = datetime.now()
     store.upsert_company(db, {"name": name, "ats": "lever",
                               "slug": name.lower(), "total_job_count": 0,
                               **fields})
     db.execute("UPDATE companies SET created_at=?, last_harvested_at=? "
                "WHERE name=?",
-               ((now - timedelta(days=30)).isoformat(),
-                (now - timedelta(days=harvested_days_ago)).isoformat(), name))
+               (iso_days_ago(30), iso_days_ago(harvested_days_ago), name))
 
 
 class TestReresolveSelection:
@@ -422,10 +422,29 @@ class TestRenameSlugBoards:
             "source": source, **fields})
 
     def _stub_readers(self, monkeypatch, **by_slug):
-        """_EMPLOYER_NAME_READERS replaced with pure lookups -- no HTTP."""
-        monkeypatch.setattr(ops, "_EMPLOYER_NAME_READERS", {
-            "greenhouse": lambda slug: by_slug.get(slug, ""),
-            "smartrecruiters": lambda slug: by_slug.get(slug, "")})
+        """Each board's OWN listing payload, served without HTTP.
+
+        Stubs the NETWORK, not the reader: the two payload shapes
+        (Greenhouse's `jobs[].company_name`, SmartRecruiters' nested
+        `content[].company.name`) and the URL each slug is asked for are
+        exactly what the reader exists to get right, and a stub that
+        replaced the reader itself tested neither -- it only pinned the
+        shape of a private table, and broke when that table stopped
+        holding callables (2026-09-22 dedup: two readers -> one
+        `_employer_name` over a URL/shape table).
+
+        A slug not named here answers with an empty board.
+        """
+        slug_re = re.compile(r"/(?:boards|companies)/([^/]+)/(?:jobs|postings)")
+
+        def _get_json(url, label, default=None, **kw):
+            m = slug_re.search(url)
+            name = by_slug.get(m.group(1), "") if m else ""
+            if "smartrecruiters" in url:
+                return {"content": [{"company": {"name": name}}] if name else []}
+            return {"jobs": [{"company_name": name}] if name else []}
+
+        monkeypatch.setattr(ops, "get_json", _get_json)
 
     def test_a_dork_sourced_slug_name_is_renamed_from_the_payload(
             self, db, monkeypatch):

@@ -491,6 +491,15 @@ def api_config_validate():
     return jsonify(errors=profile_edit.validate(p.get("toml") or ""))
 
 
+def _save_config(text):
+    errors = profile_edit.validate(text)
+    if errors:
+        return jsonify(error="validation failed", errors=errors), 400
+    profile_edit.backup_then_write(text)
+    schedule_restart()
+    return jsonify(ok=True, restarting=True)
+
+
 @app.put("/api/config")
 def api_config_put():
     busy = _config_busy()
@@ -504,12 +513,7 @@ def api_config_put():
         text = profile_edit.apply_updates(updates)
     except Exception as e:
         return jsonify(error=f"could not apply updates: {e}"), 400
-    errors = profile_edit.validate(text)
-    if errors:
-        return jsonify(error="validation failed", errors=errors), 400
-    profile_edit.backup_then_write(text)
-    schedule_restart()
-    return jsonify(ok=True, restarting=True)
+    return _save_config(text)
 
 
 @app.put("/api/config/raw")
@@ -517,14 +521,7 @@ def api_config_put_raw():
     busy = _config_busy()
     if busy:
         return busy
-    p = request.get_json(silent=True) or {}
-    text = p.get("toml") or ""
-    errors = profile_edit.validate(text)
-    if errors:
-        return jsonify(error="validation failed", errors=errors), 400
-    profile_edit.backup_then_write(text)
-    schedule_restart()
-    return jsonify(ok=True, restarting=True)
+    return _save_config((request.get_json(silent=True) or {}).get("toml") or "")
 
 
 @app.get("/api/stats")

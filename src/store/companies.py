@@ -574,6 +574,9 @@ def set_company_tag(conn, name, tag, add=True):
     return val or ""
 
 
+# NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
+# merging needs a query builder, not a lookup.
+
 def get_company(conn, company_id):
     """One company row by id, or None."""
     if not company_id:

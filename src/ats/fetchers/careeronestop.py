@@ -26,7 +26,7 @@ from urllib.parse import quote
 
 from src import config
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import stable_id
+from src.net.util import default_search_text, stable_id
 
 # v2 — v1 was retired and returns a blanket 401 even with valid credentials.
 _API = "https://api.careeronestop.org/v2/jobsearch"
@@ -61,21 +61,10 @@ def _company_match(posted_company, queried_name):
 
 
 def _default_location():
-    """A location term this API will accept, derived from [locality].
-
-    NOT `[locality].name` verbatim: that is a human label and may be
-    anything ("North Carolina / Research Triangle"). A `/` in it silently
-    becomes an extra path segment — `quote()` leaves `/` alone by default —
-    and the request 404s on a malformed path rather than failing loudly.
-    Prefer a spelled-out state/region term, else the longest place name."""
-    words = [s for s in config.LOCALITY_STATE_SUFFIX if len(s) > 2]
-    if words:
-        return max(words, key=len)
-    places = [s for s in config.LOCALITY_SUBSTRINGS if s]
-    if places:
-        return max(places, key=len)
-    # Last resort: the label, with anything path-breaking taken off.
-    return re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip()
+    """`default_search_text()`, else the [locality] label with `/` cut --
+    a raw `/` in this API's path segment 404s; `quote()` leaves it alone."""
+    return (default_search_text()
+            or re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip())
 
 
 def fetch_nlx_company(name, location=None, days=60,

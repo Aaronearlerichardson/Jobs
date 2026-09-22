@@ -283,9 +283,8 @@ def clear_triage(conn, job_id):
     ...  r["description"])
     (None, None, None, 'body')
     """
-    sets = ", ".join(f"{c}=NULL" for c in (*_TRIAGE_COLS, *_SCORE_COLS))
-    conn.execute(f"UPDATE jobs SET {sets} WHERE job_id=?", (job_id,))
-    _commit(conn)
+    apply_update(conn, "jobs", "job_id", job_id,
+                 {c: None for c in (*_TRIAGE_COLS, *_SCORE_COLS)})
 
 
 def store_body(conn, job_id, description, location=None):
@@ -665,10 +664,8 @@ def update_job_scores(conn, job_id, cols):
     FitResult.as_columns() dict; any missing key is written NULL, so passing an
     empty/partial dict clears a stale score (an unscorable row drops out of
     ranking)."""
-    sets = ", ".join(f"{c}=?" for c in _SCORE_COLS)
-    conn.execute(f"UPDATE jobs SET {sets} WHERE job_id=?",
-                 [cols.get(c) for c in _SCORE_COLS] + [job_id])
-    _commit(conn)
+    apply_update(conn, "jobs", "job_id", job_id,
+                 {c: cols.get(c) for c in _SCORE_COLS})
 
 
 # Matches the fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
