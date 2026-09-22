@@ -95,6 +95,32 @@ def _wd_cxs_tenant(tenant, pod, site):
     return resolved
 
 
+def _cxs_jobs_url(tenant, pod, site):
+    return (f"https://{tenant}.wd{pod}.myworkdayjobs.com"
+            f"/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs")
+
+
+def live_total(tenant, pod, site, timeout=None):
+    """The posting count a board's CXS listing reports, or None when it
+    does not answer 200 with one: the live check behind a sniffed triple,
+    asked on the tenant id every pull uses.
+
+    Notes:
+        discovery's probe built this request on the raw tenant until
+        2026-09-22, so a hyphenated tenant (vhr-unither) never validated.
+    """
+    try:
+        r = SESSION.post(_cxs_jobs_url(tenant, pod, site),
+                         json={"appliedFacets": {}, "limit": 1, "offset": 0,
+                               "searchText": ""},
+                         timeout=timeout, headers=_CXS_HEADERS)
+        if r.status_code != 200:
+            return None
+        return int(r.json().get("total", 0) or 0)
+    except Exception:
+        return None
+
+
 def _cxs_detail_url(job_url):
     """Map a Workday job-page URL to its CXS JSON detail endpoint, or None.
 
@@ -376,7 +402,7 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     detect, not a giving-up point.
     """
     host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
-    api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
+    api = _cxs_jobs_url(tenant, pod, site)
     link = f"{host}/en-US/{site}"
     body_extra, applied_facets, board_total = _scoped_body(
         api, _CXS_HEADERS, loc_re, search_text)
@@ -536,8 +562,7 @@ def wd_local_count(tenant, pod, site, loc_re, search_text=None, page_size=20,
         wrote local_job_count = total_job_count = 1200 for a board on
         2026-09-09 whose tenant ignored its search text.
     """
-    host = f"https://{tenant}.wd{pod}.myworkdayjobs.com"
-    api = f"{host}/wday/cxs/{_wd_cxs_tenant(tenant, pod, site)}/{site}/jobs"
+    api = _cxs_jobs_url(tenant, pod, site)
     body, _applied, board_total = _scoped_body(api, _CXS_HEADERS, loc_re, search_text)
     try:
         r = SESSION.post(api, json={**body, "limit": 1, "offset": 0},

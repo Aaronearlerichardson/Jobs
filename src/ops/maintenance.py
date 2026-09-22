@@ -28,7 +28,7 @@ from src.claude.resume import resume_text
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
-from src.net.http import get_json
+from src.net.http import fetch_failed, get_json
 from src.net.parallel import drain, fan_out, fetch_all
 from src.net.util import text_from_html
 
@@ -145,7 +145,7 @@ def board_index(company):
     try:
         board = company_fetch.fetch_company(company, loc_re=None)
     except Exception as e:                      # noqa: BLE001 - reported
-        print(f"    [!] {company['name']}: board fetch failed: {e}")
+        fetch_failed(f"{company['name']}: board fetch failed", e)
         return {}
     return {(b.get("title") or "").strip().lower(): b for b in board}
 
@@ -378,7 +378,7 @@ def crawl_company(conn, resume, company, max_workers=6, t=None):
     try:
         jobs = company_fetch.fetch_company(company, loc_re)
     except Exception as e:
-        print(f"    [!] fetch error for {company['name']}: {e}")
+        fetch_failed(f"fetch error for {company['name']}", e)
         return (0, 0, 0)
     # A successful non-empty snapshot is the authority on what this company
     # currently lists: close stored rows that vanished, revive returners.

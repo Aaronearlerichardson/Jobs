@@ -153,14 +153,8 @@ def _coords_from_urls(urls):
         hit = detect("", url or "", leads=False)
         if not hit:
             continue
-        packed = pack(hit[1], hit[2], url)
-        row = {"ats": packed["ats"], "careers_url": packed.get("careers_url")}
-        if packed["ats"] == "workday":
-            t, pod, site = packed["triple"]
-            row.update({"wd_tenant": t, "wd_pod": pod, "wd_site": site})
-        else:
-            row["slug"] = packed.get("slug")
-        return row
+        return coords.columns(hit[1], hit[2],
+                              pack(hit[1], hit[2], url)["careers_url"])
     return None
 
 

@@ -177,7 +177,7 @@ def ensure_mission(conn, company, titles=(), scorer=score_company_mission):
     try:
         context = (" | ".join(t for t in titles if t)
                    or coords.board_context(company))
-        tier, score, reason = scorer(company.get("name") or "", context[:1500])
+        tier, score, reason = scorer(company.get("name") or "", context)
     except Exception as e:                      # noqa: BLE001 - reported
         print(f"    [!] mission score failed for {company.get('name')}: {e}")
         return None, None

@@ -258,37 +258,16 @@ PROBES = {
 # company name alone (e.g. redhat.wd5.myworkdayjobs.com/Jobs_External), so
 # probe_workday scans the company's careers page(s) for a myworkdayjobs.com
 # link (src.ats.signatures.extract_workday_triple), then validates the
-# triple against the CXS search API to get a live job count.
+# triple against the CXS search API to get a live job count
+# (workday.live_total).
 #
 # Because the signature differs from the other probes, this one is NOT
 # in PROBES — probe_company calls it explicitly as its last step.
 
 
-def _count_workday_jobs(tenant: str, wd_pod: int, site: str):
-    """
-    POST the Workday CXS /jobs endpoint to validate the triple and
-    learn the posting count. Returns an int on success, None on any
-    transport/parse failure (i.e. "URL structure looked right but we
-    couldn't confirm it's live").
-    """
-    api = (f"https://{tenant}.wd{wd_pod}.myworkdayjobs.com"
-           f"/wday/cxs/{tenant}/{site}/jobs")
-    try:
-        r = SESSION.post(
-            api,
-            json={"appliedFacets": {}, "limit": 1, "offset": 0, "searchText": ""},
-            timeout=config.PROBE_TIMEOUT,
-            headers={
-                **HEADERS,
-                "Accept":       "application/json",
-                "Content-Type": "application/json",
-            },
-        )
-        if r.status_code != 200:
-            return None
-        return int(r.json().get("total", 0) or 0)
-    except Exception:
-        return None
+def _count_workday_jobs(tenant, wd_pod, site):
+    return _fetcher("workday").live_total(tenant, wd_pod, site,
+                                          timeout=config.PROBE_TIMEOUT)
 
 
 def probe_workday(name: str, careers_url: str = ""):

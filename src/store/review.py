@@ -16,7 +16,7 @@ from datetime import datetime
 
 from src import config
 from src import tags
-from .schema import connect  # noqa: F401  (the doctests open stores)
+from .schema import _commit, connect  # noqa: F401  (connect: the doctests open stores)
 
 
 # --------------------------------------------------------------------------- #
@@ -188,7 +188,7 @@ def confirm_company(conn, cid, active=None):
     conn.execute(
         "UPDATE companies SET tags=?, active=? WHERE id=?",
         (tags.join(kept), int(active), cid))
-    conn.commit()
+    _commit(conn)
     from .companies import get_company  # not at module level: see module doc
     return get_company(conn, cid)
 
@@ -229,7 +229,7 @@ def reject_company(conn, cid, reason=None):
     name = row["name"]
     conn.execute("DELETE FROM jobs WHERE company_id=?", (cid,))
     conn.execute("DELETE FROM companies WHERE id=?", (cid,))
-    conn.commit()
+    _commit(conn)
     block_name(conn, name, reason)
     return name
 
@@ -263,7 +263,7 @@ def block_name(conn, name, reason=None):
         "VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
         "name=excluded.name, reason=excluded.reason, added_at=excluded.added_at",
         (key, name, reason, datetime.now().isoformat()))
-    conn.commit()
+    _commit(conn)
     return key
 
 

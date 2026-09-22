@@ -30,7 +30,6 @@ from src.net.http import JSON_HEADERS, SESSION
 from src.net.util import text_from_html
 from .board import board_fetch
 
-
 #: Subdomains a board may be served from, in the order they are tried.
 _HOSTS = ("recruiting2", "recruiting")
 
