@@ -198,7 +198,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         # Noisy hint to the user — browser launches are slow, and they'll
         # otherwise wonder why discover() is suddenly pausing.
         marker = "[js]" if js_probe.launched else "[js init]"
-        meta = js_probe.probe(c.name, c.careers_url)
+        meta, _ = js_probe.probe(c.name, c.careers_url)
         log(f"    {marker} {c.name}: headless scrape... "
             f"{'hit' if meta else 'miss'}")
         time.sleep(delay)

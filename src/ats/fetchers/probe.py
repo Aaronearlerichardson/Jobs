@@ -18,12 +18,14 @@ closing the posting.
 
 import logging
 import re
+import threading
 import time
 from urllib.parse import urlsplit
 
 import requests
 
 from src.net.http import HEADERS, JSON_HEADERS, SESSION
+from src.net.util import clean_url
 from . import bamboohr, icims, infor, jazzhr, workday
 from .api import ASHBY_API, GREENHOUSE_API, GREENHOUSE_JOB_URL_RE, LEVER_API
 
@@ -206,6 +208,7 @@ def _probe_ashby(m):
 # are skipped unasked.
 _HOST_TRIPS = 3
 _DEAD_HOSTS = {}        # host -> (expires_at, connection failures)
+_DEAD_HOSTS_LOCK = threading.Lock()     # probes run under fan_out
 
 
 def _host_dead(host):
@@ -214,9 +217,10 @@ def _host_dead(host):
 
 
 def _note_connection_failure(host):
-    hit = _DEAD_HOSTS.get(host)
-    _DEAD_HOSTS[host] = ((hit[0], hit[1] + 1) if hit and hit[0] > time.time()
-                         else (time.time() + _ASHBY_BOARD_TTL, 1))
+    with _DEAD_HOSTS_LOCK:
+        hit = _DEAD_HOSTS.get(host)
+        _DEAD_HOSTS[host] = ((hit[0], hit[1] + 1) if hit and hit[0] > time.time()
+                             else (time.time() + _ASHBY_BOARD_TTL, 1))
 
 
 def _infor_verdict(r):
@@ -288,12 +292,8 @@ def probe_job_open(url):
     """
     if not url:
         return None, "no url"
-    # Some feed rows were stored with CR/LF/tabs inside the URL (BioSpace:
-    # "https://jobs.biospace.com \r\n\t/job/..."), which requests rejects
-    # before reaching the network. Stripping it here heals those rows
-    # without a migration; store.upsert_job (_url_no_ws, same rule) keeps
-    # new ones clean. Lone spaces stay: Duke Health ids carry real ones.
-    clean = re.sub(r"\s*[\r\n\t]\s*", "", url).strip()
+    # Heals rows stored before store.upsert_job applied the same rule.
+    clean = clean_url(url)
     if clean != url:
         _log.debug("probe url had embedded whitespace: %s", clean)
         url = clean

@@ -193,6 +193,26 @@ def clean_field(text):
     return _SPACE_RE.sub(" ", text or "").strip()
 
 
+_URL_BREAK_RE = re.compile(r"\s*[\r\n\t]\s*")
+
+
+def clean_url(u):
+    """`u` trimmed, minus any whitespace run holding a line break or tab.
+    A lone space stays (requests percent-encodes it); falsy passes through.
+
+    >>> clean_url("https://h.com \\r\\n\\t/job/DPC 1/\\r\\n")
+    'https://h.com/job/DPC 1/'
+    >>> clean_url(None)
+
+    Notes:
+        225 BioSpace rows were stored as "https://jobs.biospace.com
+        \\r\\n\\t/job/...", and requests rejects those before reaching the
+        network. Duke Health's Phenom ids ("job/DPC VCT 03") carry real
+        spaces, which is why only runs with a break or tab go.
+    """
+    return _URL_BREAK_RE.sub("", u).strip() if u else u
+
+
 def stable_id(*parts) -> str:
     """Deterministic short hash for building job IDs.
 

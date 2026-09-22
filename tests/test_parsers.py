@@ -432,16 +432,12 @@ class TestDiscoveryWiring:
         assert len(DORK_QUERIES) >= 4
         assert any("greenhouse" in q for q in DORK_QUERIES)
 
-    def test_probe_instances_coexist_unlaunched(self):
-        # Lazy launch: K probes can be constructed and torn down without
+    def test_probe_pool_coexists_unlaunched(self):
+        # Lazy launch: a K-browser pool can be built and torn down without
         # ever starting a browser.
-        from contextlib import ExitStack
-
-        from src.discovery.resolve.probes import WorkdayJsProbe
-        with ExitStack() as stack:
-            probes = [stack.enter_context(WorkdayJsProbe()) for _ in range(3)]
-            assert len(probes) == 3
-            assert not any(p._launched for p in probes)
+        from src.discovery.resolve.probes import WorkdayJsProbePool
+        with WorkdayJsProbePool(3) as pool:
+            assert pool.size == 3 and not pool.launched
 
 
 class TestPastedPageNames:

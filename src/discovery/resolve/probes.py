@@ -369,11 +369,11 @@ class WorkdayJsProbe:
 
     Usage:
         with WorkdayJsProbe() as js:
-            meta = js.probe("NetApp", careers_url="")
+            meta, outcome = js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
     failure is reported once per process (_report_js_disabled) and every
-    later probe() returns None.
+    later probe() returns (None, "no browser").
     """
 
     def __init__(self):
@@ -486,12 +486,12 @@ class WorkdayJsProbe:
         """Runs entirely on the browser-owning thread."""
         page = self._ensure_page()
         if page is None:
-            return None
+            return None, "no browser"
         for url in candidate_urls(name, careers_url):
             if time.monotonic() > deadline:
                 # The caller gave up and recycled; stop loading pages so
                 # this abandoned thread reaches its queued close.
-                return None
+                return None, "budget exceeded"
             triple = self._scan(page, url)
             if not triple:
                 continue
@@ -501,19 +501,22 @@ class WorkdayJsProbe:
                 source = page.url
             except Exception:
                 source = url
+            validated = count is not None
             return {
                 "tenant":     tenant,
                 "wd_pod":     wd_pod,
                 "site":       site,
                 "count":      count or 0,
-                "validated":  count is not None,
+                "validated":  validated,
                 "source_url": source,
-            }
-        return None
+            }, "hit" if validated else "not validated"
+        return None, "no workday link"
 
     def probe(self, name: str, careers_url: str = ""):
         """
-        Same return shape as probe_workday(), or None.
+        (meta, outcome): meta is probe_workday()'s shape or None; outcome
+        is "hit", "not validated", "no workday link", "no browser",
+        "budget exceeded" or "errored: <exception>".
 
         Thread-safe: every Playwright call is dispatched onto the single
         browser-owning worker thread and the caller blocks on .result().
@@ -521,15 +524,13 @@ class WorkdayJsProbe:
         but their static probe_workday() work keeps running in parallel.
         """
         if not self._enabled:
-            return None
+            return None, "no browser"
         t0 = time.monotonic()
         fut = self._executor.submit(
             self._probe_impl, name, careers_url, t0 + JS_PROBE_BUDGET_S,
         )
         try:
-            meta = fut.result(timeout=JS_PROBE_BUDGET_S)
-            outcome = ("no workday link" if meta is None
-                       else "hit" if meta["validated"] else "not validated")
+            meta, outcome = fut.result(timeout=JS_PROBE_BUDGET_S)
         except Exception as e:
             meta = None
             if fut.done():
@@ -541,7 +542,7 @@ class WorkdayJsProbe:
                 outcome = "budget exceeded"
         _log.debug("js probe %s: %s in %.1fs", name, outcome,
                    time.monotonic() - t0)
-        return meta
+        return meta, outcome
 
     def _recycle(self):
         """Abandon a browser thread stuck past the budget; start clean.

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from src import config
 from src import tags
+from src.net.util import clean_url
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql)
 
@@ -404,7 +405,7 @@ def upsert_job(conn, j, keep_location=False):
     'Peoria, IL'
     """
     now = datetime.now().isoformat()
-    url = _url_no_ws(j.get("url"))
+    url = clean_url(j.get("url"))
     new = not job_exists(conn, j["job_id"])
     if new and url:
         # Same posting arriving under a NEW id scheme — a company's ats/
@@ -498,19 +499,6 @@ def _norm_url(u):
     u = (u or "").strip().lower()
     u = re.sub(r"^https?://", "", u)
     return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
-
-
-def _url_no_ws(u):
-    """`u` trimmed, minus any whitespace run holding a line break or tab:
-    225 BioSpace rows stored "https://jobs.biospace.com \\r\\n\\t/job/..."
-    and every probe of them died in requests before reaching the network.
-    A lone space is kept -- Duke Health's Phenom ids ("job/DPC VCT 03")
-    carry real ones, which requests percent-encodes.
-
-    >>> _url_no_ws("https://h.com \\r\\n\\t/job/DPC 1/\\r\\n")
-    'https://h.com/job/DPC 1/'
-    """
-    return re.sub(r"\s*[\r\n\t]\s*", "", u).strip() if u else u
 
 
 def touch_job(conn, job_id):

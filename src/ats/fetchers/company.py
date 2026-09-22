@@ -490,7 +490,7 @@ _OFFSITE_RE = re.compile(
 def _openings_link(soup, root):
     """A SAME-HOST 'see current openings' link to follow one hop, or None.
     Won't follow off to an aggregator or an ATS: those aren't a custom board."""
-    host = re.match(r"https?://([^/]+)", root).group(1)
+    host = _SCHEME_HOST_RE.match(root).group(1)
     for a in soup.find_all("a", href=True):
         href = a["href"]
         if href.startswith("http"):

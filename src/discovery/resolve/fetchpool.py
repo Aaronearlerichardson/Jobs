@@ -137,10 +137,14 @@ _DEAD_HOST_TTL = 15 * 60
 _DEAD_HOSTS_LOCK = threading.Lock()
 
 
+def _host_of(url):
+    m = re.match(r"https?://([^/]+)", url or "")
+    return m.group(1).lower() if m else ""
+
+
 def _dead_host(url):
     """The host of `url` if a connection to it was refused within the TTL."""
-    m = re.match(r"https?://([^/]+)", url or "")
-    host = m.group(1).lower() if m else ""
+    host = _host_of(url)
     with _DEAD_HOSTS_LOCK:
         t = _DEAD_HOSTS.get(host)
         if t is not None and time.time() - t < _DEAD_HOST_TTL:
@@ -150,10 +154,10 @@ def _dead_host(url):
 
 
 def _mark_dead_host(url):
-    m = re.match(r"https?://([^/]+)", url or "")
-    if m:
+    host = _host_of(url)
+    if host:
         with _DEAD_HOSTS_LOCK:
-            _DEAD_HOSTS[m.group(1).lower()] = time.time()
+            _DEAD_HOSTS[host] = time.time()
 
 
 # Per-URL outcome memo, url -> (time recorded, Response or None). The
@@ -225,11 +229,6 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
 # was minutes per name. Resolve each host ONCE, bounded, before any GET.
 _DNS_CACHE = {}
 _DNS_TIMEOUT = 4.0
-
-
-def _host_of(url):
-    m = re.match(r"https?://([^/]+)", url or "")
-    return m.group(1).lower() if m else ""
 
 
 def _resolves(host):

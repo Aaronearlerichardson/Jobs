@@ -239,7 +239,7 @@ def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
         monkeypatch.setattr(js, "_ensure_page", HungPage)
         stuck = js._executor
         t0 = time.monotonic()
-        assert js.probe("Acme") is None
+        assert js.probe("Acme") == (None, "budget exceeded")
         assert time.monotonic() - t0 < 0.5
         assert js._executor is not stuck and js._page is None
 

@@ -140,7 +140,7 @@ def _js_workday_pass(hits, max_workers):
         return
     if not missed:
         return
-    from .resolve.probes import JS_PROBE_BUDGET_S, WorkdayJsProbePool
+    from .resolve.probes import WorkdayJsProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
     # exactly one page load; the serial design existed for sync-
     # Playwright's thread affinity, not politeness. Each probe instance
@@ -159,25 +159,14 @@ def _js_workday_pass(hits, max_workers):
 
         def _js_one(name):
             t0 = time.monotonic()
-            wd = pool.probe(name)
-            dt = time.monotonic() - t0
-            if wd and wd.get("validated"):
+            wd, outcome = pool.probe(name)
+            if outcome == "hit":
                 nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
                 return {"name": name, "ats": "workday",
                         "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
                         "count": wd["count"], "nc": nc}
-            # probe() answers None both for "no link on any page" and for a
-            # scrape it abandoned at the budget; only the clock tells them
-            # apart.
-            if wd:
-                reason = "not validated"
-            elif not pool.launched:
-                reason = "no browser"
-            elif dt >= JS_PROBE_BUDGET_S:
-                reason = "budget exceeded"
-            else:
-                reason = "no workday link"
-            return {"name": name, "reason": reason, "elapsed": dt}
+            return {"name": name, "reason": outcome,
+                    "elapsed": time.monotonic() - t0}
 
         # Every name prints a line: 2026-09-22 printed 4 [JS-OK] for 38
         # majors, and the other 34 (and a 338s stall) left no trace.
