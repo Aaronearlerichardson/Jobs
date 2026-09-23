@@ -7,6 +7,7 @@ import threading
 import time
 
 from src import config
+from src.ats.fetchers.board import BOARDS, board_for
 from src.ats.signatures import extract_workday_triple
 from src.match.locality import is_nc as _has_nc
 from src.match.names import slug_guesses
@@ -174,20 +175,6 @@ def _fetcher(module):
     return importlib.import_module(f"src.ats.fetchers.{module}")
 
 
-def _board_probe(ats):
-    """A Greenhouse/Lever/Ashby probe. URL and payload shape both come from
-    src.ats.fetchers.api, which also serves the locality count below and
-    local_sourcing's title sample: a private copy of either is a silent
-    empty board, never an error."""
-    return _api_probe(
-        lambda h: _fetcher("api").BOARD_URLS[ats].format(h),
-        lambda r, h: len(_fetcher("api").board_rows(ats, r.json())))
-
-
-probe_greenhouse = _board_probe("greenhouse")
-probe_lever = _board_probe("lever")
-probe_ashby = _board_probe("ashby")
-
 # Kula serves a full HTML page (no JSON API) and throttles under probe
 # bursts -- a confirmed-live board can 4xx/timeout once during a parallel
 # discovery run. One retry with a short backoff recovers those without
@@ -230,9 +217,9 @@ probe_workable = _parser_probe("workable")
 
 
 PROBES = {
-    "greenhouse": probe_greenhouse,
-    "lever":      probe_lever,
-    "ashby":      probe_ashby,
+    # A platform with a config.BOARDS spec probes through the engine:
+    # one cheap listing read, ok when it lists a posting.
+    **{b.name: b.probe for b in BOARDS.values() if b.fetchable},
     "kula":       probe_kula,
     "jazzhr":     probe_jazzhr,
     "bamboohr":   probe_bamboohr,
@@ -622,10 +609,9 @@ def _wd_search_text():
 
 
 def _nc_count(ats, slug):
-    """Postings on a JSON-API board that are in your [locality] — the count
-    that rejects a slug guess landing on somebody else's board."""
-    return sum(1 for _title, loc in _fetcher("api").board_summary(ats, slug)
-               if _has_nc(loc))
+    """Postings on a board that are in your [locality] — the count that
+    rejects a slug guess landing on somebody else's board."""
+    return board_for(ats).local_count(slug, _has_nc)
 
 
 def _nc_count_workday(tenant, pod, site):
@@ -643,17 +629,16 @@ def _nc_count_workday(tenant, pod, site):
 
 def probe_company(name, try_workday=True):
     """
-    Probe Greenhouse/Lever/Ashby (fast) then — only if ``try_workday`` —
-    Workday (slow careers-page fallback), then VERIFY the board has NC-area
-    jobs (kills false-positive slug collisions and enforces local relevance).
+    Probe every platform whose spec sets ``guess`` (fast) then — only if
+    ``try_workday`` — Workday (slow careers-page fallback), then VERIFY the
+    board has NC-area jobs (kills false-positive slug collisions and enforces
+    local relevance).
     Returns a hit dict with an ``nc`` count, or None.
     """
     hit = None
     for slug in slug_guesses(name):
-        for ats, fn in (("greenhouse", probe_greenhouse),
-                        ("lever", probe_lever),
-                        ("ashby", probe_ashby)):
-            ok, count = fn(slug)
+        for ats in (b.name for b in BOARDS.values() if b.spec.get("guess")):
+            ok, count = PROBES[ats](slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
                        "count": count, "nc": _nc_count(ats, slug)}

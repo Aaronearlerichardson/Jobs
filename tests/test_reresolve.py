@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from conftest import iso_days_ago
+from conftest import fake_response, iso_days_ago
 
 import src.store as store
 from src import tags
@@ -421,7 +421,7 @@ class TestRenameSlugBoards:
             "name": name, "ats": ats, "slug": slug, "active": 1,
             "source": source, **fields})
 
-    def _stub_readers(self, monkeypatch, **by_slug):
+    def _stub_readers(self, serve, **by_slug):
         """Each board's OWN listing payload, served without HTTP.
 
         Stubs the NETWORK, not the reader: the two payload shapes
@@ -437,19 +437,20 @@ class TestRenameSlugBoards:
         """
         slug_re = re.compile(r"/(?:boards|companies)/([^/]+)/(?:jobs|postings)")
 
-        def _get_json(url, label, default=None, **kw):
+        def _get(url, **kw):
             m = slug_re.search(url)
             name = by_slug.get(m.group(1), "") if m else ""
             if "smartrecruiters" in url:
-                return {"content": [{"company": {"name": name}}] if name else []}
-            return {"jobs": [{"company_name": name}] if name else []}
+                return fake_response(
+                    {"content": [{"company": {"name": name}}] if name else []})
+            return fake_response({"jobs": [{"company_name": name}] if name else []})
 
-        monkeypatch.setattr(ops, "get_json", _get_json)
+        serve(_get)
 
     def test_a_dork_sourced_slug_name_is_renamed_from_the_payload(
-            self, db, monkeypatch):
+            self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
-        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+        self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
         out = ops.rename_slug_boards(conn=db, commit=True)
 
@@ -457,9 +458,9 @@ class TestRenameSlugBoards:
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "MedElite Group, LLC."
 
-    def test_preview_writes_nothing(self, db, monkeypatch):
+    def test_preview_writes_nothing(self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
-        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+        self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
         out = ops.rename_slug_boards(conn=db, commit=False)
 
@@ -468,7 +469,7 @@ class TestRenameSlugBoards:
         assert row["name"] == "Medelitellc", "preview must never write"
 
     def test_a_legitimately_named_company_is_never_a_candidate(
-            self, db, monkeypatch):
+            self, db, serve):
         """name_is_own_slug alone also matches a real one-word name that
         happens to equal its slug ("Ceribell" / slug "ceribell") -- the
         SLUG_NAME_SOURCE restriction is what keeps this op off rows a
@@ -478,32 +479,32 @@ class TestRenameSlugBoards:
         NeU's stored Greenhouse slug no longer points at NeU's own board."""
         self._slug_co(db, "Ceribell", "greenhouse", "ceribell",
                       source="local_sourcing")
-        self._stub_readers(monkeypatch, ceribell="Ceribell, Inc")
+        self._stub_readers(serve, ceribell="Ceribell, Inc")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "Ceribell"
 
     def test_a_name_that_is_not_its_own_slug_is_never_a_candidate(
-            self, db, monkeypatch):
+            self, db, serve):
         self._slug_co(db, "Precision for Medicine", "greenhouse", "pfm")
-        self._stub_readers(monkeypatch, pfm="Precision for Medicine")
+        self._stub_readers(serve, pfm="Precision for Medicine")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
 
-    def test_an_empty_payload_answer_is_skipped(self, db, monkeypatch, capsys):
+    def test_an_empty_payload_answer_is_skipped(self, db, serve, capsys):
         self._slug_co(db, "Resultspt", "greenhouse", "resultspt")
-        self._stub_readers(monkeypatch)   # every slug answers ""
+        self._stub_readers(serve)   # every slug answers ""
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
         assert "no employer name" in capsys.readouterr().out
 
     def test_a_junk_payload_name_is_rejected_not_written(
-            self, db, monkeypatch, capsys):
+            self, db, serve, capsys):
         # A payload can carry garbage too -- the same junk_name_reason
         # screen a pasted or re-resolved name goes through applies here.
         self._slug_co(db, "Science37", "greenhouse", "science37")
-        self._stub_readers(monkeypatch, science37="Science 37")
+        self._stub_readers(serve, science37="Science 37")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
         out = capsys.readouterr().out
@@ -512,19 +513,19 @@ class TestRenameSlugBoards:
         assert row["name"] == "Science37"
 
     def test_a_name_matching_what_is_already_stored_is_not_reapplied(
-            self, db, monkeypatch):
+            self, db, serve):
         self._slug_co(db, "Eurofins", "smartrecruiters", "Eurofins")
-        self._stub_readers(monkeypatch, Eurofins="Eurofins")
+        self._stub_readers(serve, Eurofins="Eurofins")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
 
     def test_a_name_that_would_collide_with_another_company_is_rejected(
-            self, db, monkeypatch, capsys):
+            self, db, serve, capsys):
         store.upsert_company(db, {"name": "Cortica", "ats": "greenhouse",
                                   "slug": "cortica-hq", "active": 1,
                                   "source": "local_sourcing"})
         self._slug_co(db, "Corticaneuro", "greenhouse", "corticaneuro")
-        self._stub_readers(monkeypatch, corticaneuro="Cortica")
+        self._stub_readers(serve, corticaneuro="Cortica")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
         assert "collides" in capsys.readouterr().out
@@ -532,10 +533,10 @@ class TestRenameSlugBoards:
             "SELECT name FROM companies WHERE name='Corticaneuro'").fetchone()
         assert row is not None, "the row must be left exactly as it was"
 
-    def test_an_inactive_board_is_not_a_candidate(self, db, monkeypatch):
+    def test_an_inactive_board_is_not_a_candidate(self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc",
                       active=0)
-        self._stub_readers(monkeypatch, medelitellc="MedElite Group, LLC.")
+        self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
         assert ops.rename_slug_boards(conn=db, commit=True) == []
 

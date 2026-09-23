@@ -10,10 +10,12 @@ The board-shaped ATS fetchers take `gate=None` (a relevance predicate
 see board.py for the order of filters. The registry in src/ats/registry.py
 passes the profile's keyword gate for the unvetted-board sweep; the
 company-vetted path (company.py) passes a location regex instead.
+
+Platforms with a `config.BOARDS` spec have no fetch function here: they
+run on the engine in board.py (`board.board_for(ats).jobs(...)`).
 """
 
 from .adp_wfn import fetch_adp
-from .api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
 from .careeronestop import fetch_nlx_company
 from .discourse import fetch_discourse
@@ -41,11 +43,9 @@ from .workday import fetch_workday
 
 __all__ = [
     "fetch_adp",
-    "fetch_ashby",
     "fetch_bamboohr",
     "fetch_discourse",
     "fetch_getro_all",
-    "fetch_greenhouse",
     "fetch_hibob",
     "fetch_hnhiring",
     "fetch_icims",
@@ -54,7 +54,6 @@ __all__ = [
     "fetch_jobvite",
     "fetch_jsonld_page",
     "fetch_kula",
-    "fetch_lever",
     "fetch_nlx_company",
     "fetch_paylocity",
     "fetch_peopleadmin",

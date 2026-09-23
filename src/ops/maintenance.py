@@ -20,9 +20,9 @@ from src import digest
 from src import store
 from src import tags
 from src.ats import coords
-from src.ats.fetchers import api as fetchers_api
 from src.ats.fetchers import company as company_fetch
 from src.ats.fetchers import probe
+from src.ats.fetchers.board import BOARDS, board_for, board_for_url
 from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
 from src.claude.resume import resume_text
 from src.match import gates
@@ -774,8 +774,9 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
 
 def _live_jd(row):
     """Freshest full JD text for one stored job row, preferring a live
-    detail fetch (Workday CXS, Greenhouse boards API, then the generic
-    JSON-LD/careers-page extractor) over the stored text. Falls back to the
+    detail fetch (the platform's own detail endpoint through the board
+    engine, Workday CXS, then the generic JSON-LD/careers-page extractor)
+    over the stored text. Falls back to the
     stored description when the live pull is shorter or fails — the deep
     verify pass must never see LESS text than the first pass did. Lengths
     are compared as readable text: a stored body can still carry markup an
@@ -790,12 +791,12 @@ def _live_jd(row):
     url = row.get("url") or ""
     text = ""
     try:
-        if "myworkdayjobs.com" in url:
+        board = board_for_url(url)
+        if board:
+            text = board.description_for(url)
+        elif "myworkdayjobs.com" in url:
             from src.ats.fetchers.workday import fetch_workday_description
             text = fetch_workday_description(url) or ""
-        else:
-            from src.ats.fetchers.api import fetch_greenhouse_description
-            text = fetch_greenhouse_description(url)
         if not text and url:
             text = company_fetch._description_from_job_url(url)
     except Exception:
@@ -1677,8 +1678,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
         applies roster policy, so it is an operation, and the store keeps
         only the write (store.deactivate_company).
     """
-    from src.discovery.resolve.probes import (probe_greenhouse, probe_lever,
-                                   probe_ashby, probe_bamboohr)
+    from src.discovery.resolve.probes import probe_bamboohr
 
     def _ultipro_alive(slug):
         # Not src.discovery.resolve.probes.probe_ultipro: its ok flag means "has jobs",
@@ -1692,9 +1692,8 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
         except Exception:
             return (False, 0)
 
-    PROBE = {"greenhouse": probe_greenhouse, "lever": probe_lever,
-             "ashby": probe_ashby, "bamboohr": probe_bamboohr,
-             "ultipro": _ultipro_alive}
+    PROBE = {**{b.name: b.alive for b in BOARDS.values() if b.spec.get("prunable")},
+             "bamboohr": probe_bamboohr, "ultipro": _ultipro_alive}
 
     rows = [c for c in store.get_companies(conn, active_only=True)
             if c.get("ats") in PROBE and c.get("slug")]
@@ -2106,8 +2105,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 #   * Greenhouse -- every job object in the boards-api listing carries
 #     `company_name` (confirmed live, 2026-09-18: tenant "centriaautism"
 #     answers "Centria Autism", "medelitellc" answers "MedElite Group,
-#     LLC."). fetchers.api._greenhouse_row never reads it -- it builds the
-#     row's title/location/description and drops the rest of the object.
+#     LLC."); config.BOARDS names it as the spec's `employer` field.
 #   * SmartRecruiters -- every posting carries `company.name` (confirmed
 #     live: "AbbVie", "Eurofins"). fetchers.company.fetch_smartrecruiters_all
 #     never reads it either.
@@ -2134,19 +2132,13 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 # own listing payload qualifies -- see the module comment above for why
 # Workday/Lever/Ashby are not here.
 #
-# Greenhouse's URL and payload shape are read from the fetcher that owns them
-# (src.ats.fetchers.api) rather than written out again: `BOARD_URLS` is
-# already the metadata-only `content=false` listing this check wants, and
-# `board_rows` already records that the postings live under `jobs`. A private
-# copy of either reads an empty board as "no employer name", silently.
+# A platform with a config.BOARDS spec names its field there (`employer`)
+# and is read through the engine; it has no row here.
 #
 # SmartRecruiters' root is company_fetch's; `limit=1` is the shape
 # src.discovery.resolve.probes.probe_smartrecruiters uses -- one posting is
 # enough to name a board.
 _EMPLOYER_NAME_READERS = {
-    "greenhouse": (fetchers_api.BOARD_URLS["greenhouse"], "Greenhouse",
-                   lambda d: fetchers_api.board_rows("greenhouse", d),
-                   lambda j: j.get("company_name")),
     "smartrecruiters": (
         company_fetch.SMARTRECRUITERS_API + "?limit=1",
         "SmartRecruiters",
@@ -2155,7 +2147,15 @@ _EMPLOYER_NAME_READERS = {
 }
 
 
+def _employer_atses():
+    return sorted({b.name for b in BOARDS.values() if b.spec.get("employer")}
+                  | set(_EMPLOYER_NAME_READERS))
+
+
 def _employer_name(ats, slug):
+    board = board_for(ats)
+    if board:
+        return board.employer_name(slug)
     url, label, rows_of, name_of = _EMPLOYER_NAME_READERS[ats]
     data = get_json(url.format(slug),
                     f"{label} {slug} (employer-name check)", default={})
@@ -2164,7 +2164,7 @@ def _employer_name(ats, slug):
 
 
 def _slug_named_boards(conn):
-    """The active companies on a supported ATS (_EMPLOYER_NAME_READERS)
+    """The active companies on a supported ATS (_employer_atses)
     that src.ats.coords.slug_named calls slug-named -- the same rule, and
     the same one definition of it, the HARVEST SUMMARY's own tally
     applies. Biggest board first -- the boards a wrong name embarrasses
@@ -2184,11 +2184,12 @@ def _slug_named_boards(conn):
         or a human to catch, not this op to paper over by renaming NeU to
         Fora.
     """
-    ph = ",".join("?" for _ in _EMPLOYER_NAME_READERS)
+    atses = _employer_atses()
+    ph = ",".join("?" for _ in atses)
     rows = [dict(r) for r in conn.execute(
         f"SELECT id, name, ats, slug, source, total_job_count FROM companies "
         f"WHERE COALESCE(active,0)=1 AND ats IN ({ph})",
-        tuple(_EMPLOYER_NAME_READERS)).fetchall()]
+        tuple(atses)).fetchall()]
     rows = [r for r in rows if coords.slug_named(r)]
     rows.sort(key=lambda r: -(r.get("total_job_count") or 0))
     return rows

@@ -24,9 +24,10 @@ from bs4 import BeautifulSoup
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (api, company, discourse, getro, hibob,
+from src.ats.fetchers import (company, discourse, getro, hibob,
                               jobvite, peopleadmin, remoteok, remotive,
                               usajobs)
+from src.ats.fetchers.board import BOARDS, board_for
 from src.discovery import apply
 from src.net import http
 
@@ -71,86 +72,28 @@ def usajobs_pages(serve):
         [fake_response(p, status=status) for p in payloads])
 
 
-class TestGreenhouse:
-    def test_parses_postings(self, serve, match_everything):
-        serve(fake_response(load("greenhouse_board.json")))
-        jobs = api.fetch_greenhouse("databricks", "Databricks")
-        assert jobs
-        j = jobs[0]
-        assert j["id"].startswith("gh_databricks_")
-        assert j["title"] and j["url"].startswith("http")
-        assert j["company"] == "Databricks"
-
-    def test_location_falls_back_when_absent(self, serve, match_everything):
-        payload = load("greenhouse_board.json")
-        payload["jobs"][0]["location"] = {}
-        payload["jobs"][0]["offices"] = []
-        serve(fake_response(payload))
-        assert api.fetch_greenhouse("x", "X")[0]["location"] == "Unknown"
-
-    def test_offices_join_the_location(self, serve, match_everything):
-        """A multi-location posting shows one city (or "Remote") up front
-        and the rest under offices; the location regex must see them all."""
-        payload = load("greenhouse_board.json")
-        payload["jobs"][0]["location"] = {"name": "Remote"}
-        payload["jobs"][0]["offices"] = [{"name": "Durham, NC"}, {"name": "Remote"}]
-        serve(fake_response(payload))
-        assert api.fetch_greenhouse("x", "X")[0]["location"] == "Remote; Durham, NC"
-
-    def test_unexpected_shape_returns_empty(self, serve, match_everything):
-        serve(fake_response(["not", "a", "dict"]))
-        assert api.fetch_greenhouse("x", "X") == []
+#: Spec'd platforms with a recorded listing: (ats, fixture, handle).
+BOARD_FIXTURES = [("greenhouse", "greenhouse_board.json", "databricks"),
+                  ("lever", "lever_board.json", "veeva"),
+                  ("ashby", "ashby_board.json", "vanta")]
 
 
-class TestLever:
-    def test_parses_postings(self, serve, match_everything):
-        serve(fake_response(load("lever_board.json")))
-        jobs = api.fetch_lever("veeva", "Veeva")
-        assert jobs
-        j = jobs[0]
-        # Prefixes are the store's dedup namespace: gh_ / lv_ / ashby_.
-        assert j["id"].startswith("lv_veeva_")
-        assert j["title"] and j["url"].startswith("http")
+class TestSpecdBoardsReadTheirListings:
+    """The engine reads each recorded listing into exactly the rows its
+    platform's fetcher module produced before the move to config.BOARDS
+    (<ats>_rows.json, recorded from that module)."""
 
+    @pytest.mark.parametrize("ats,fixture,handle", BOARD_FIXTURES)
+    def test_rows_match_the_recording(self, serve, ats, fixture, handle):
+        serve(fake_response(load(fixture)))
+        assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
 
-class TestAshby:
-    def test_reads_the_jobs_key(self, serve, match_everything):
-        """Regression: the payload key is `jobs`, not `jobPostings`.
-
-        Reading the wrong key returned [] for every Ashby board — silently,
-        because a missing key is an empty list and the crawler cannot tell
-        that from 'nothing matched'."""
-        payload = load("ashby_board.json")
-        assert "jobs" in payload and "jobPostings" not in payload
-        serve(fake_response(payload))
-        jobs = api.fetch_ashby("vanta", "Vanta")
-        assert jobs, "Ashby parsed zero postings from a non-empty board"
-
-    def test_parses_postings(self, serve, match_everything):
-        serve(fake_response(load("ashby_board.json")))
-        j = api.fetch_ashby("vanta", "Vanta")[0]
-        assert j["id"].startswith("ashby_vanta_")
-        assert j["title"] and j["url"].startswith("http")
-        assert j["location"]
-
-    def test_department_and_team_both_feed_relevance(self, serve,
-                                                     match_everything):
-        # `department`/`team` are the real keys; `departmentName` never
-        # existed, so department text was invisible to the keyword gate.
-        payload = load("ashby_board.json")
-        assert any({"department", "team"} & set(j) for j in payload["jobs"])
-
-    def test_remote_hint_from_structured_fields(self, serve, match_everything):
-        payload = load("ashby_board.json")
-        payload["jobs"][0]["isRemote"] = False
-        payload["jobs"][0]["workplaceType"] = "Remote"
-        serve(fake_response(payload))
-        assert api.fetch_ashby("v", "V")[0].get("remote_hint") == "ashby:isRemote"
-
-    def test_posted_at_is_captured(self, serve, match_everything):
-        serve(fake_response(load("ashby_board.json")))
-        jobs = api.fetch_ashby("vanta", "Vanta")
-        assert any(j.get("posted_at") for j in jobs)
+    @pytest.mark.parametrize("ats", sorted(b.name for b in BOARDS.values()
+                                           if b.fetchable))
+    def test_an_unexpected_shape_is_an_empty_board(self, serve, ats):
+        serve(fake_response(["not", "a", "board"] if ats != "lever"
+                            else {"not": "a list"}))
+        assert board_for(ats).jobs("x", "X") == []
 
 
 class TestHibob:
@@ -477,12 +420,12 @@ class TestRelevanceGate:
     def test_irrelevant_postings_are_dropped_by_the_gate(
             self, serve, nothing_matches):
         serve(fake_response(load("greenhouse_board.json")))
-        assert api.fetch_greenhouse("databricks", "Databricks",
-                                        gate=is_relevant) == []
+        assert board_for("greenhouse").jobs("databricks", "Databricks",
+                                            gate=is_relevant) == []
 
     def test_no_gate_keeps_everything(self, serve, nothing_matches):
         serve(fake_response(load("greenhouse_board.json")))
-        assert api.fetch_greenhouse("databricks", "Databricks")
+        assert board_for("greenhouse").jobs("databricks", "Databricks")
 
     def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
         from src.ats.registry import ATS_REGISTRY
@@ -498,7 +441,7 @@ class TestRelevanceGate:
         the data dir)."""
         import re
         from pathlib import Path
-        pkg = Path(api.__file__).parent
+        pkg = Path(company.__file__).parent
         for src in pkg.glob("*.py"):
             text = src.read_text(encoding="utf-8")
             assert not re.search(r"^from core\.filters import", text, re.M), src.name
@@ -538,8 +481,8 @@ class TestAshbyKeyAcrossCallSites:
         serve(fake_response(TestAshbyKeyAcrossCallSites.BOARD))
 
     def test_probe_reports_the_real_total(self, ashby_board):
-        from src.discovery.resolve.probes import probe_ashby
-        assert probe_ashby("susteon") == (True, 2)
+        from src.discovery.resolve.probes import PROBES
+        assert PROBES["ashby"]("susteon") == (True, 2)
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):
         from src.match.locality import is_nc
@@ -930,7 +873,7 @@ class TestOneFetcherPerAts:
                                                           match_everything):
         from src.ats.fetchers import company
         serve(fake_response(load("greenhouse_board.json")))
-        module = api.fetch_greenhouse("databricks", "Databricks")
+        module = board_for("greenhouse").jobs("databricks", "Databricks")
         vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
         assert [j["id"] for j in vetted] == [j["id"] for j in module]
         assert all(j["ats"] == "greenhouse" and j["_wd"] is None

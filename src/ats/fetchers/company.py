@@ -7,7 +7,8 @@ src/store/__init__.py), so the whole board is pulled with no relevance gate and 
 caller's own filter chain decides. `fetch_company` dispatches a store row
 to the ATS's fetcher module (fetchers/<ats>.py, the same functions the
 unvetted-board sweep calls with `gate=is_relevant`) and `_adapt` puts the
-result in the company-fetch shape:
+result in the company-fetch shape (`board.adapt`); a platform with a
+`config.BOARDS` spec is pulled by its engine, `board.Board.whole_board`:
 
     {"id", "title", "url", "location", "description", "ats", "_wd",
      ["posted_at"], ["remote_hint"]}
@@ -44,9 +45,8 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           origin_of, text_from_html)
 from . import icims, infor, phenom, workday
 from .adp_wfn import fetch_adp
-from .api import fetch_ashby, fetch_greenhouse, fetch_lever
 from .bamboohr import fetch_bamboohr
-from .board import loc_ok
+from .board import BOARDS, adapt as _adapt, board_for, loc_ok
 from .hibob import fetch_hibob
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims_all
@@ -68,54 +68,6 @@ _DESC_MAX = config.MAX_DESC_CHARS
 # Kept for discovery (local_sourcing), which imports the Workday search
 # term under this name.
 _default_search_text = default_search_text
-
-
-# --- the shape --------------------------------------------------------------- #
-
-_JOB_KEYS = ("id", "title", "url", "location", "description", "posted_at",
-             "remote_hint", "_wd")
-
-
-def _adapt(jobs, ats, loc_re=None):
-    r"""A fetcher module's job dicts in the company-fetch shape: `ats`
-    named, `company` dropped (the store row supplies it), the description
-    capped at the JD budget, `_wd` kept where the module set it.
-
-    The modules apply `loc_re` themselves; pass one here only for rows a
-    module could not filter (see fetch_peopleadmin_all).
-
-    >>> _adapt([{"id": "x_1", "company": "Acme", "title": "T", "url": "u",
-    ...          "location": "Durham, NC", "description": "d", "posted_at": "2026-01-02"}], "x")
-    [{'id': 'x_1', 'title': 'T', 'url': 'u', 'location': 'Durham, NC', 'description': 'd', 'posted_at': '2026-01-02', 'ats': 'x', '_wd': None}]
-
-    `title` and `location` are `net.util.clean_field`-ed here, BEFORE `loc_re`
-    sees the location: this is the whole-board path's one choke point, the
-    way `board.board_jobs` is the sweep path's, so no fetcher module routed
-    through it can store an embedded newline or tab (see board.py's module
-    docstring for what that corrupts). A location split across two lines
-    also has to be cleaned before it is matched, or the filter decides on
-    text no human wrote:
-
-    >>> _adapt([{"id": "x_2", "title": "Data\nEngineer", "url": "u",
-    ...          "location": "Durham,\tNC", "description": ""}], "x")[0]["location"]
-    'Durham, NC'
-
-    The three builders in this module that shape the adapted dict
-    themselves (SmartRecruiters, "custom" careers pages, wpjson) never
-    reach here, and call `clean_field` at their own row builders instead.
-    """
-    out = []
-    for j in jobs:
-        j["title"] = clean_field(j.get("title"))
-        j["location"] = clean_field(j.get("location"))
-        if not loc_ok(loc_re, j["location"]):
-            continue
-        job = {k: j[k] for k in _JOB_KEYS if k in j}
-        job["description"] = (j.get("description") or "")[:_DESC_MAX]
-        job["ats"] = ats
-        job.setdefault("_wd", None)
-        out.append(job)
-    return out
 
 
 #: One board's postings, formatted with its slug. SmartRecruiters has no
@@ -221,6 +173,9 @@ def needs_detail(job):
     ...               "location": "Durham, NC"})
     False
     """
+    board = board_for(job.get("ats"))
+    if board:
+        return board.needs_detail(job)
     if not job.get("description"):
         return True
     return job.get("ats") == "workday" and bool(job.get("_wd")) \
@@ -248,7 +203,10 @@ def hydrate_description(job):
     """
     if not needs_detail(job):
         return job
-    if job.get("ats") == "workday" and job.get("_wd"):
+    board = board_for(job.get("ats"))
+    if board:
+        board.hydrate(job)
+    elif job.get("ats") == "workday" and job.get("_wd"):
         if job.get("description"):
             locs = workday._wd_detail_locations(*job["_wd"])
             if locs:
@@ -701,15 +659,14 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
 # Detail budget for a whole-board pull: the company was vetted, so every
 # in-area row is worth its description (the sweep's default is a screening
 # budget), paced a little faster than the sweep.
-_WHOLE_BOARD = dict(max_details=200, detail_delay=0.15)
+_WHOLE_BOARD = dict(max_details=config.WHOLE_BOARD_DETAILS,
+                    detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S)
 
 # ats -> (store row, loc_re) -> company-shaped jobs. The rows are those of the
 # ATS's fetcher module, ungated, with the location filter applied on the
 # listing before any detail call (fetchers/board.py).
 FETCHERS = {
-    "greenhouse":      lambda c, lr: _adapt(fetch_greenhouse(c["slug"], loc_re=lr), "greenhouse"),
-    "lever":           lambda c, lr: _adapt(fetch_lever(c["slug"], loc_re=lr), "lever"),
-    "ashby":           lambda c, lr: _adapt(fetch_ashby(c["slug"], loc_re=lr), "ashby"),
+    **{b.name: b.whole_board for b in BOARDS.values() if b.fetchable},
     "jazzhr":          lambda c, lr: _adapt(fetch_jazzhr("", c["slug"], loc_re=lr), "jazzhr"),
     "jobvite":         lambda c, lr: _adapt(fetch_jobvite(c["slug"], loc_re=lr), "jobvite"),
     "bamboohr":        lambda c, lr: _adapt(fetch_bamboohr(c["slug"], loc_re=lr, **_WHOLE_BOARD), "bamboohr"),
@@ -806,8 +763,12 @@ def sample_titles(company, n=6):
         came back `other` / 0.05 as a study-education platform.
     """
     ats = company.get("ats")
+    board = board_for(ats)
     try:
-        if ats in _TITLE_SAMPLERS:
+        if board:
+            handle = board.handle(company)
+            jobs = board.listing(handle, cheap=True) if handle else []
+        elif ats in _TITLE_SAMPLERS:
             jobs = _TITLE_SAMPLERS[ats](company, n)
         else:
             jobs = fetch_company(company)

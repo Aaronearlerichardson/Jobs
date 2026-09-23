@@ -426,3 +426,11 @@ def test_store_connections_close_on_every_path():
     offenders = {rel: names for rel, src in source_files()
                  if "connect(" in src and (names := _unclosed_connections(src))}
     assert not offenders, f"store connections that can leak: {offenders}"
+
+
+def test_board_specs_are_json():
+    """config.BOARDS holds only what JSON can: moving it to a JSON file
+    later must be a copy, not a rewrite. (Each spec is also checked
+    against the schema when src.ats.fetchers.board builds its engine.)"""
+    import json
+    assert json.loads(json.dumps(config.BOARDS)) == config.BOARDS

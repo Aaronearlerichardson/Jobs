@@ -12,6 +12,7 @@ both into the names the rest of the code reads:
     src/config/tracks.py    [tracks.*] tables + engine defaults -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
+    src/config/boards.py    BOARDS: every per-platform ATS board fact, as data
 
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings
@@ -20,6 +21,7 @@ attribute at use time — src/crawl/runner.py and src/ops/background.py reassign
 while a track runs, and a from-bound copy goes stale.
 """
 
+from .boards import BOARDS  # noqa: F401
 from .paths import (  # noqa: F401
     APP_NAME, _resolve_data_dir,
     SCRIPT_DIR, APP_HOME, DATA_DIR, STORE_DB_PATH, REPORT_DIR,
@@ -31,6 +33,8 @@ from .policy import (  # noqa: F401
     WATCH_DIVISION_TITLES,
     ACTIVE_MISSION_TIERS, is_active_mission, HARVEST_OFFMISSION_HOURS,
     is_offmission_inactive, BOARD_MAX_ROWS, board_max_pages,
+    SWEEP_DETAILS, SWEEP_DETAIL_DELAY_S, WHOLE_BOARD_DETAILS,
+    WHOLE_BOARD_DETAIL_DELAY_S, BOARD_MEMO_S,
     RESPECT_ROBOTS, ROBOTS_EXEMPT_HOSTS, SEARCH_DNS_FALLBACK,
     ROBOTS_CONNECT_TIMEOUT, ROBOTS_READ_TIMEOUT, BROWSER_CHANNELS,
 )

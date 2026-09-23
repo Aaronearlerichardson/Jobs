@@ -25,6 +25,7 @@ from src import config as _config                           # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
 import src.crawl.runner as _runner                  # noqa: E402
+import src.ats.fetchers.board as _board             # noqa: E402
 import src.ats.fetchers.probe as _job_probe         # noqa: E402
 import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
 from src.net import http as _http                   # noqa: E402
@@ -43,14 +44,14 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _fresh_run_state(monkeypatch):
     """Per-run memos start empty in every test: both dead-host breakers,
-    discovery's page memo and DNS cache, and the closure probe's Ashby
-    board memo."""
+    discovery's page memo and DNS cache, and the board engine's listing
+    memo."""
     for mod in (_fetchpool, _job_probe):
         old = mod._DEAD_HOSTS
         monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
     monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
     monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
-    monkeypatch.setattr(_job_probe, "_ASHBY_BOARDS", {})
+    monkeypatch.setattr(_board, "_MEMO", {})
 
 
 # --------------------------------------------------------------------------- #
@@ -334,8 +335,7 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     400 makes raise_for_status raise requests.HTTPError carrying this
     response, as requests does (claude.api reads its status and body). `url`
     is the FINAL url a redirect-following GET reports (what
-    probe.probe_job_open's greenhouse redirect check and
-    sniffer.candidate_pages read); it is always present, so no caller has to
+    sniffer.candidate_pages reads); it is always present, so no caller has to
     bolt one on.
     """
     body = text if text is not None else (

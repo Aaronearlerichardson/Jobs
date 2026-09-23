@@ -99,44 +99,60 @@ SESSION = _build_session()
 
 
 def get_json(url, label, default=None, **kw):
-    """The endpoint's JSON, or `default` -- reported, never raised.
+    """The endpoint's JSON, or `default` -- reported (`request_json`'s
+    reasons), never raised.
 
-    Nine fetchers wrote this out, three of them having already named it
-    (`api._get_board`, `hnhiring._get_json`, `company._get_json`). A board
-    that 500s, comes back empty, answers with something that will not
-    parse, or times out is a DEAD SOURCE, not an exception for the crawl to
-    handle: the fan-out is running two hundred other boards and one of them
-    being down says nothing about the rest. So this reports and returns,
-    and every caller's failure path is the same shape.
+    A board that 500s, comes back empty, answers with something that will
+    not parse, or times out is a DEAD SOURCE, not an exception for the
+    crawl to handle: the fan-out is running two hundred other boards and
+    one of them being down says nothing about the rest. So this reports
+    and returns, and every caller's failure path is the same shape.
 
     `label` names the source in the failure line -- it is the only thing a
     session log has to go on when a board stops answering. `default` is
     what the caller wants back: [] for a board listing, None for a detail
-    payload the caller checks. The failure reason is one of "HTTP n",
-    "empty response" or "non-JSON response" for an answered request, or
-    the raised exception itself (connection refused, timeout, ...) for one
-    that never got a response.
+    payload the caller checks.
 
     No doctest: the exception-path wording is requests' own, which changes
     between versions. tests/test_fetcher_parsers.py pins the contract
     through the fetchers instead.
+
+    Notes:
+        Nine fetchers wrote this out, three of them having already named
+        it (`api._get_board`, `hnhiring._get_json`, `company._get_json`).
+    """
+    _status, data, err = request_json("GET", url, label, **kw)
+    return default if err else data
+
+
+def request_json(method, url, label=None, **kw):
+    """(status, payload, error) for one JSON request through SESSION.
+
+    `error` is None on success, else "HTTP n", "empty response",
+    "non-JSON response" or the raised exception (`status` None); it is
+    reported through `fetch_failed` under `label` when a label is given.
+    A caller judging a status itself (a closure probe reading 404 as
+    "gone") passes no label.
     """
     try:
-        r = SESSION.get(url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
+        r = getattr(SESSION, method.lower())(
+            url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
     except Exception as e:
-        fetch_failed(label, e)
-        return default
+        if label:
+            fetch_failed(label, e)
+        return None, None, e
     if r.status_code >= 400:
-        fetch_failed(label, f"HTTP {r.status_code}")
-        return default
-    if not r.content.strip():
-        fetch_failed(label, "empty response")
-        return default
-    try:
-        return r.json()
-    except ValueError:
-        fetch_failed(label, "non-JSON response")
-        return default
+        err = f"HTTP {r.status_code}"
+    elif not r.content.strip():
+        err = "empty response"
+    else:
+        try:
+            return r.status_code, r.json(), None
+        except ValueError:
+            err = "non-JSON response"
+    if label:
+        fetch_failed(label, err)
+    return r.status_code, None, err
 
 
 #: Per-THREAD count of fetch failures, because the harvester runs one board

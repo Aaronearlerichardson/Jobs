@@ -28,15 +28,12 @@ from src.match.filters import is_relevant
 
 from .fetchers import (
     fetch_adp,
-    fetch_ashby,
     fetch_bamboohr,
-    fetch_greenhouse,
     fetch_hibob,
     fetch_infor,
     fetch_jazzhr,
     fetch_jobvite,
     fetch_kula,
-    fetch_lever,
     fetch_paylocity,
     fetch_peopleadmin,
     fetch_phenom,
@@ -46,6 +43,16 @@ from .fetchers import (
     fetch_workable,
     fetch_workday,
 )
+from .fetchers.board import BOARDS
+
+
+def _engine_entry(board):
+    """The ATS_REGISTRY row for a platform the engine runs: its sweep
+    thunk, the seed tag its `sweep` flag picks, and that tag's pause."""
+    sweep = bool(board.spec.get("sweep"))
+    return (lambda n, s: lambda: board.jobs(s, n, gate=is_relevant),
+            tags.SWEEP if sweep else tags.LOCAL, 0.5 if sweep else 1.0)
+
 
 # ats -> (thunk(name, slug) -> fetch callable, seed tag, politeness pause)
 #
@@ -55,9 +62,7 @@ from .fetchers import (
 # company-vetted path (fetchers/company.py) calls the same fetchers with
 # no gate and a location regex instead.
 ATS_REGISTRY = {
-    "greenhouse": (lambda n, s: lambda: fetch_greenhouse(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "lever":      (lambda n, s: lambda: fetch_lever(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "ashby":      (lambda n, s: lambda: fetch_ashby(s, n, gate=is_relevant), tags.SWEEP, 0.5),
+    **{b.name: _engine_entry(b) for b in BOARDS.values() if b.fetchable},
     "kula":       (lambda n, s: lambda: fetch_kula(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
@@ -85,7 +90,8 @@ ATS_REGISTRY = {
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole,
 # and that seed the SWEEP tag: lightweight JSON APIs or single-page boards.
 # The heavyweight boards stay location-scoped and seed LOCAL.
-LIGHTWEIGHT = ("greenhouse", "lever", "ashby", "kula", "jazzhr", "jobvite", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
+LIGHTWEIGHT = tuple(b.name for b in BOARDS.values() if b.spec.get("sweep")) + (
+    "kula", "jazzhr", "jobvite", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
 
 
 def seed_tag_for(ats):

@@ -130,7 +130,8 @@ def text_from_html(raw):
         unescaping first would let the tag regex eat from there to the
         next ">". A board whose API hands back ESCAPED markup (Greenhouse
         `content`) therefore has to unescape at the call site, before the
-        markup is markup -- see fetchers/api.py.
+        markup is markup -- see the unescape_html_text transform in
+        fetchers/fields.py.
     """
     if not raw:
         return ""

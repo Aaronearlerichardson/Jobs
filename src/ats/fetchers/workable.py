@@ -50,7 +50,7 @@ import re
 
 from src.net.http import JSON_HEADERS, SESSION
 from src.net.util import norm_posted_date
-from .api import merge_locations
+from .fields import merge_locations
 from .board import board_fetch
 from .workday import text_from_html  # shared HTML->text stripper
 
@@ -154,7 +154,7 @@ def location_str(job):
     The flat ``city``/``state``/``country`` fields are the posting's primary
     site; ``locations[]`` is the full list, and a multi-site posting often
     shows only the first up front while the site that matters sits further
-    down (see `api.merge_locations`, whose ";" join is also the separator
+    down (see `fields.merge_locations`, whose ";" join is also the separator
     `match.locality.is_nc` reads one office at a time).
 
     >>> location_str({"city": "Raleigh", "state": "North Carolina",

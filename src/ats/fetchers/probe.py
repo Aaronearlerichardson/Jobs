@@ -8,7 +8,8 @@ This is a reader, not a fetcher: it shares nothing with the whole-board
 pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
 per-ATS endpoint builders it asks -- `bamboohr.detail_url`,
 `jazzhr.board_url`, `infor.detail_url`/`posting_state`, Workday's CXS URL
-helpers, `api.py`'s board APIs and `company.SMARTRECRUITERS_API`.
+helpers and `company.SMARTRECRUITERS_API`. A platform with a
+`config.BOARDS` spec is asked through the engine (`Board.probe_job`).
 
 One rule runs through every branch: a row is closed ONLY on positive
 evidence. Every refusal a host can make -- 403, 405, 429, 5xx, a timeout,
@@ -22,10 +23,11 @@ import time
 
 import requests
 
+from src import config
 from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
 from . import bamboohr, icims, infor, jazzhr, workday
-from .api import ASHBY_API, GREENHOUSE_API, GREENHOUSE_JOB_URL_RE, LEVER_API
+from .board import board_for_url
 from .company import SMARTRECRUITERS_API
 
 _log = logging.getLogger(__name__)
@@ -56,11 +58,6 @@ _GATED_HOST_RE = re.compile(
 # to the endpoint the fetcher already reads (_FAMILY_PROBE) rather than to
 # the page.
 _JOB_URL_RE = {
-    "lever":      re.compile(r"lever\.co/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})"),
-    # api.py's own regex, which ops.maintenance._live_jd also reads a stored
-    # job URL through -- the two copies of it had already drifted.
-    "greenhouse": GREENHOUSE_JOB_URL_RE,
-    "ashby":      re.compile(r"ashbyhq\.com/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})"),
     "smartrecruiters": re.compile(r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)"),
     "bamboohr":   re.compile(r"//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)", re.I),
     "jazzhr":     re.compile(r"//([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)",
@@ -99,6 +96,9 @@ def probe_family(url):
         return "gated"
     if workday._cxs_detail_url(url):
         return "workday"
+    board = board_for_url(url)
+    if board:
+        return board.name
     for fam, rex in _JOB_URL_RE.items():
         if rex.search(url):
             return fam
@@ -110,8 +110,7 @@ def _endpoint_verdict(api, family, headers=None, live=None):
     is gone. Every other refusal -- 403, 405, 429, 5xx, a timeout -- is
     unverifiable: a host declining to answer is not a closed posting.
     `live(response)` replaces the default "200 means live" for a platform
-    that keeps serving pulled postings (SmartRecruiters) or that can only
-    be asked about its whole board (Ashby).
+    that keeps serving pulled postings (SmartRecruiters, Infor).
     """
     try:
         r = SESSION.get(api, headers=headers or JSON_HEADERS)
@@ -122,15 +121,6 @@ def _endpoint_verdict(api, family, headers=None, live=None):
     if r.status_code != 200:
         return None, f"{family} api HTTP {r.status_code}"
     return live(r) if live else (True, f"{family} api: posting live")
-
-
-def _probe_lever(m):
-    return _endpoint_verdict(f"{LEVER_API}/{m.group(1)}/{m.group(2)}", "lever")
-
-
-def _probe_greenhouse(m):
-    return _endpoint_verdict(
-        f"{GREENHOUSE_API}/{m.group(1)}/jobs/{m.group(2)}", "greenhouse")
 
 
 def _probe_bamboohr(m):
@@ -164,48 +154,11 @@ def _smartrecruiters_verdict(r):
     return True, "smartrecruiters api: active"
 
 
-_ASHBY_BOARD_TTL = 600.0
-_ASHBY_BOARDS = {}      # handle -> (expires_at, {posting ids} or None)
-
-
-def _ashby_board_ids(handle):
-    """The posting ids on one Ashby board, memoized for the pass so a
-    company with many stale rows fetches its board once, not once per row.
-    None for BOTH an unreadable and an empty listing: neither is evidence
-    a posting closed (fetchers soft-fail to [] -- see
-    store.sync_job_statuses' caller contract)."""
-    hit = _ASHBY_BOARDS.get(handle)
-    if hit and hit[0] > time.time():
-        return hit[1]
-    ids = None
-    try:
-        r = SESSION.get(f"{ASHBY_API}/{handle}", headers=JSON_HEADERS)
-        if r.status_code == 200:
-            ids = {str(j.get("id", "")).lower()
-                   for j in (r.json().get("jobs") or [])} or None
-    except Exception:
-        ids = None
-    _ASHBY_BOARDS[handle] = (time.time() + _ASHBY_BOARD_TTL, ids)
-    return ids
-
-
-def _probe_ashby(m):
-    """Ashby publishes no per-posting endpoint, so the board listing the
-    fetcher already reads is the witness: an id missing from a NON-EMPTY
-    board is positive evidence that the posting is gone."""
-    ids = _ashby_board_ids(m.group(1))
-    if not ids:
-        return None, "ashby api: board unreadable or empty"
-    if m.group(2).lower() in ids:
-        return True, "ashby api: board lists it"
-    return False, "ashby api: board no longer lists it"
-
-
 # A job-detail host that refuses connections refuses every row on it: the
 # 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on one host. After
-# three in a row, within the Ashby memo's window, its remaining rows are
+# three in a row, within the board memo's window, its remaining rows are
 # skipped unasked. Three, not discovery's one: these hosts answered before.
-_DEAD_HOSTS = HostBreaker(ttl=_ASHBY_BOARD_TTL, trips=3)
+_DEAD_HOSTS = HostBreaker(ttl=config.BOARD_MEMO_S, trips=3)
 
 
 def _infor_verdict(r):
@@ -222,9 +175,6 @@ def _infor_verdict(r):
 #: detail page answers 410 for a pulled posting, it just needs the WAF's
 #: headers (_page_headers).
 _FAMILY_PROBE = {
-    "lever":           _probe_lever,
-    "greenhouse":      _probe_greenhouse,
-    "ashby":           _probe_ashby,
     "bamboohr":        _probe_bamboohr,
     "jazzhr":          _probe_jazzhr,
     "smartrecruiters": lambda m: _endpoint_verdict(
@@ -261,10 +211,9 @@ def probe_job_open(url):
 
     The posting's own page is the LAST resort, not the first: Lever,
     Greenhouse, Ashby, BambooHR and SmartRecruiters all serve a pulled
-    posting as a plain HTTP 200, so `probe_family` routes the URL to that
-    platform's public endpoint first and only an indeterminate answer
-    there falls through to the page (which still catches e.g.
-    greenhouse's redirect off a pulled job page).
+    posting as a plain HTTP 200, so the URL goes to that platform's
+    public endpoint first (`Board.probe_job`, else `_FAMILY_PROBE`) and
+    only an indeterminate answer there falls through to the page.
 
     A row is closed ONLY on positive evidence: 404/410 from one of those
     endpoints or from the page, an ATS "no longer available" notice, a
@@ -311,6 +260,11 @@ def probe_job_open(url):
     # The platform's own API first; its reason is the one worth reporting
     # if the page below cannot tell either.
     fallback = ""
+    board = board_for_url(url)
+    if board:
+        is_open, fallback = board.probe_job(url)
+        if is_open is not None:
+            return is_open, fallback
     fam = probe_family(url)
     if fam in _FAMILY_PROBE:
         is_open, fallback = _FAMILY_PROBE[fam](_JOB_URL_RE[fam].search(url))
@@ -333,11 +287,6 @@ def probe_job_open(url):
     m = _CLOSED_TEXT_RE.search(html)
     if m:
         return False, f"page says {m.group(0)[:50]!r}"
-    # Greenhouse silently redirects a closed job's URL back to the board root.
-    if "greenhouse.io" in url:
-        tail = url.rstrip("/").rsplit("/", 1)[-1].split("?")[0]
-        if tail and tail not in (r.url or ""):
-            return False, "greenhouse redirect off job page"
     try:
         from .jsonld import extract_jsonld, is_jobposting
         for obj in extract_jsonld(html):

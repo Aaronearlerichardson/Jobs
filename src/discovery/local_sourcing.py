@@ -357,10 +357,8 @@ def _sample_titles(hit, n=6):
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
-    Greenhouse, Lever and Ashby are asked for less than their whole-board
-    fetchers pull (api.board_summary: no descriptions); every other family
-    samples through its own fetcher (fetchers.company.sample_titles). []
-    when nothing could be read.
+    Every family samples through fetchers.company.sample_titles. [] when
+    nothing could be read.
 
     Notes:
         Workday had its own hand-built CXS request here until 2026-09-22.
@@ -368,21 +366,8 @@ def _sample_titles(hit, n=6):
         two hyphenated tenants (Bioventus, United Therapeutics) were
         mission-scored with no titles at all.
     """
-    from src.ats.fetchers import api as board_api
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
     board = hit if "wd_tenant" in hit else coords.from_hit(hit)
-    ats, slug = board["ats"], board["slug"]
-    try:
-        # The three JSON-API boards: one read, one payload shape, owned by
-        # the fetcher (api.board_summary). A private copy of the Ashby shape
-        # here once asked for Workday's "jobPostings" key, which is an empty
-        # title list rather than an error -- so every Ashby company was
-        # mission-scored on its name alone.
-        if ats in board_api.BOARD_URLS:
-            return [title for title, _loc in
-                    board_api.board_summary(ats, slug)[:n]]
-    except Exception:
-        return []
     return company_fetch.sample_titles(board, n)
 
 

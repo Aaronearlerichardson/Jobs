@@ -112,7 +112,8 @@ CLOSED_PROBE_LIMIT = 100
 # both web-UI crawls after it, each a live GET the three-day grace
 # (store.HARVEST_DEAD_AFTER_DAYS) would have kept spending. Workday is out:
 # its tenants 404 transiently. The crawl (src.crawl.runner) reads this too.
-DEFINITIVE_404_ATS = frozenset({"greenhouse", "lever", "ashby"})
+DEFINITIVE_404_ATS = frozenset(
+    ats for ats, spec in config.BOARDS.items() if spec.get("prunable"))
 _HTTP_404 = re.compile(r"\bHTTP 404\b")
 
 

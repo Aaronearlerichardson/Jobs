@@ -26,6 +26,7 @@ import requests
 from conftest import fake_response, iso_days_ago, keep_store_open
 
 from src.ats.fetchers import probe as job_probe
+from src.ats.fetchers.board import board_for
 from src.ats.fetchers.icims import ICIMS_HEADERS
 from src.discovery.resolve import probes
 from src.net.http import HEADERS
@@ -74,23 +75,23 @@ def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
 class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, serve):
         serve(fake_response({"jobs": [1, 2, 3]}))
-        assert probes.probe_greenhouse("acme") == (True, 3)
+        assert probes.PROBES["greenhouse"]("acme") == (True, 3)
 
     def test_lever_counts_a_bare_list(self, serve):
         serve(fake_response([1, 2]))
-        assert probes.probe_lever("acme") == (True, 2)
+        assert probes.PROBES["lever"]("acme") == (True, 2)
 
     def test_lever_tolerates_a_non_list_payload(self, serve):
         serve(fake_response({"unexpected": True}))
-        assert probes.probe_lever("acme") == (True, 0)
+        assert probes.PROBES["lever"]("acme") == (False, 0)
 
     def test_ashby_reads_the_posting_api_key(self, serve):
         serve(fake_response({"jobs": [1, 2], "jobPostings": []}))
-        assert probes.probe_ashby("acme") == (True, 2)
+        assert probes.PROBES["ashby"]("acme") == (True, 2)
 
     def test_ashby_falls_back_to_the_embed_key(self, serve):
         serve(fake_response({"jobPostings": [1]}))
-        assert probes.probe_ashby("acme") == (True, 1)
+        assert probes.PROBES["ashby"]("acme") == (True, 1)
 
     def test_bamboohr_asks_for_json(self, serve):
         seen = serve(fake_response({"result": [1, 2, 3, 4]}))
@@ -107,13 +108,15 @@ class TestAPresentBoardIsConfirmed:
         assert probes.probe_kula("acme") == (True, 0)
 
 
-class TestAnEmptyBoardIsNotAlwaysAMiss:
-    """An ATS that only serves real slugs may legitimately list nothing;
-    one that answers for any slug must show postings to count as found."""
+class TestAnEmptyBoardIsAMiss:
+    """A guessed slug confirms only by listing postings: an empty board
+    gives the mission scorer nothing and the roster an empty row. (Prune's
+    "is the board still there" check is `Board.alive`, which an empty
+    board passes.)"""
 
-    def test_greenhouse_empty_is_still_a_board(self, serve):
+    def test_greenhouse_empty_is_not_a_board(self, serve):
         serve(fake_response({"jobs": []}))
-        assert probes.probe_greenhouse("acme") == (True, 0)
+        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
     def test_smartrecruiters_empty_is_not_a_board(self, serve):
         serve(fake_response({"totalFound": 0}))
@@ -141,15 +144,15 @@ class TestFailureIsReportedNeverRaised:
 
     def test_a_non_200_is_a_miss(self, serve):
         serve(fake_response({"jobs": [1]}, status=404))
-        assert probes.probe_greenhouse("acme") == (False, 0)
+        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
     def test_unparseable_json_is_a_miss(self, serve):
         serve(fake_response(None))
-        assert probes.probe_greenhouse("acme") == (False, 0)
+        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
     def test_a_raising_session_is_a_miss(self, serve):
         serve(OSError("connection reset"))
-        assert probes.probe_greenhouse("acme") == (False, 0)
+        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
     def test_kula_retries_once_before_giving_up(self, serve, monkeypatch):
         calls = serve(OSError("throttled"))
@@ -159,7 +162,7 @@ class TestFailureIsReportedNeverRaised:
 
     def test_the_others_do_not_retry(self, serve):
         calls = serve(OSError("throttled"))
-        assert probes.probe_greenhouse("acme") == (False, 0)
+        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
         assert len(calls) == 1
 
 
@@ -232,7 +235,7 @@ class TestPruneNamesWhatItDeactivates:
         keep_store_open(monkeypatch, db)
         self._company(db, "Gone Co", "greenhouse", "gone")
         self._company(db, "Live Co", "greenhouse", "live")
-        monkeypatch.setattr(probes, "probe_greenhouse",
+        monkeypatch.setattr(board_for("greenhouse"), "alive",
                             lambda slug: (slug == "live", 3))
 
         roster.prune()
@@ -249,7 +252,7 @@ class TestPruneNamesWhatItDeactivates:
             self, db, monkeypatch, capsys):
         self._company(db, "Other Co", "lever", "other",
                       mission_tier="other", mission_score=0.05)
-        monkeypatch.setattr(probes, "probe_lever", lambda slug: (True, 5))
+        monkeypatch.setattr(board_for("lever"), "alive", lambda slug: (True, 5))
 
         assert ops.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
 
@@ -822,19 +825,6 @@ class TestOnlyPositiveEvidenceCloses:
         assert job_probe.probe_job_open(
             "https://www.linkedin.com/jobs/view/123")[0] is None
         assert seen == []
-
-    def test_the_greenhouse_redirect_check_survives_an_unanswerable_api(
-            self, probe_http):
-        """Greenhouse sends a pulled job's URL back to the board root. That
-        evidence predates the API branch and must still be reached when the
-        API cannot answer."""
-        probe_http({FAMILY_API[GH_JOB]: fake_response(status=429),
-                    "job-boards.greenhouse.io/acme/jobs":
-                        fake_response(url="https://job-boards.greenhouse.io/acme"
-                                  "?error=true")})
-        is_open, reason = job_probe.probe_job_open(GH_JOB)
-        assert is_open is False
-        assert reason == "greenhouse redirect off job page"
 
 
 class TestAnUnreachableUrlCostsLittle:
