@@ -125,34 +125,45 @@ def get_json(url, label, default=None, **kw):
     return default if err else data
 
 
-def request_json(method, url, label=None, **kw):
-    """(status, payload, error) for one JSON request through SESSION.
+def request(method, url, label=None, **kw):
+    """(status, response, error) for one request through SESSION.
 
-    `error` is None on success, else "HTTP n", "empty response",
-    "non-JSON response" or the raised exception (`status` None); it is
-    reported through `fetch_failed` under `label` when a label is given.
-    A caller judging a status itself (a closure probe reading 404 as
-    "gone") passes no label.
+    `error` is None on success, else "HTTP n" (status >= 400) or the raised
+    exception (`status` and `response` None); it is reported through
+    `fetch_failed` under `label` when a label is given. A caller judging a
+    status itself (a closure probe reading 404 as "gone") passes no label.
     """
     try:
         r = getattr(SESSION, method.lower())(
             url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
     except Exception as e:
-        if label:
-            fetch_failed(label, e)
-        return None, None, e
+        return None, None, failed(label, e)
     if r.status_code >= 400:
-        err = f"HTTP {r.status_code}"
-    elif not r.content.strip():
-        err = "empty response"
-    else:
-        try:
-            return r.status_code, r.json(), None
-        except ValueError:
-            err = "non-JSON response"
+        return r.status_code, r, failed(label, f"HTTP {r.status_code}")
+    return r.status_code, r, None
+
+
+def request_json(method, url, label=None, **kw):
+    """(status, payload, error) for one JSON request: `request`'s, plus
+    "empty response" and "non-JSON response" as errors."""
+    status, r, err = request(method, url, label, **kw)
+    if err:
+        return status, None, err
+    if not r.content.strip():
+        return status, None, failed(label, "empty response")
+    try:
+        return status, r.json(), None
+    except ValueError:
+        return status, None, failed(label, "non-JSON response")
+
+
+def failed(label, err):
+    """`err`, reported through `fetch_failed` when there is a `label`:
+    the one call for a path whose label is optional (a quiet probe passes
+    none). Call `fetch_failed` directly where a failure is always news."""
     if label:
         fetch_failed(label, err)
-    return r.status_code, None, err
+    return err
 
 
 #: Per-THREAD count of fetch failures, because the harvester runs one board

@@ -83,7 +83,7 @@ def job_ref_from_url(url):
     coordinates from a stored job's `url` alone -- the company-vetted
     path's `_adapt` keeps no ATS-specific "_"-prefixed key besides
     Workday's `_wd`, so a URL-only round trip is what every other
-    ATS-specific hydrate branch does too (paylocity, rippling, icims).
+    ATS-specific hydrate branch does too (infor, icims).
 
     >>> job_ref_from_url("https://careers.dukehealth.org/us/en/job/273419")
     ('https://careers.dukehealth.org/us/en', '273419')

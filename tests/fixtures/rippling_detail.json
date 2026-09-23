@@ -1,0 +1,20 @@
+{
+ "uuid": "25f3fc2a-b77e-430b-9144-8cc3bb1531c9",
+ "name": "AI/ML Training Performance Engineer ",
+ "companyName": "Blackrock Neurotech",
+ "description": {
+  "company": "<div><body><h3 style='font-family:\"Basel Grotesk\",Arial,sans-serif;line-height:1.6;font-size:21pt;font-weight:600;letter-spacing:0.25px;margin-top:14px;margin-bottom:4px;padding-left:0px;'><b><strong style=\"color:black;white-space:pre-wrap;\">Build the systems that expand human capability</strong></b",
+  "role": "<div><body><h4 style='font-family:\"Basel Grotesk\",Arial,sans-serif;line-height:1.6;font-size:18pt;font-weight:600;letter-spacing:0px;margin-top:12px;margin-bottom:4px;padding-left:0px;'><b><strong style=\"white-space:pre-wrap;\">The Role</strong></b></h4><p style='font-family:\"Basel Grotesk\",Arial,san"
+ },
+ "department": {
+  "name": "BCI Data Science",
+  "base_department": "BCI Neuralace",
+  "department_tree": [
+   "BCI Neuralace",
+   "BCI Data Science"
+  ]
+ },
+ "workLocations": [
+  "Salt Lake City, UT"
+ ]
+}

@@ -1,0 +1,41 @@
+[
+ {
+  "uuid": "25f3fc2a-b77e-430b-9144-8cc3bb1531c9",
+  "name": "AI/ML Training Performance Engineer ",
+  "department": {
+   "id": "BCI Neuralace",
+   "label": "BCI Neuralace"
+  },
+  "url": "https://ats.rippling.com/blackrockneurotech/jobs/25f3fc2a-b77e-430b-9144-8cc3bb1531c9",
+  "workLocation": {
+   "label": "Salt Lake City, UT",
+   "id": "Salt Lake City, UT"
+  }
+ },
+ {
+  "uuid": "c3ca660d-7890-4dea-b7ba-e6d1b387ac73",
+  "name": "Director, Clinical Affairs",
+  "department": {
+   "id": "Central Services",
+   "label": "Central Services"
+  },
+  "url": "https://ats.rippling.com/blackrockneurotech/jobs/c3ca660d-7890-4dea-b7ba-e6d1b387ac73",
+  "workLocation": {
+   "label": "Salt Lake City, UT",
+   "id": "Salt Lake City, UT"
+  }
+ },
+ {
+  "uuid": "955c62ae-f68c-4644-9060-3fe0f8c24ae5",
+  "name": "Director, Software Engineering",
+  "department": {
+   "id": "BCI",
+   "label": "BCI"
+  },
+  "url": "https://ats.rippling.com/blackrockneurotech/jobs/955c62ae-f68c-4644-9060-3fe0f8c24ae5",
+  "workLocation": {
+   "label": "Salt Lake City, UT",
+   "id": "Salt Lake City, UT"
+  }
+ }
+]

@@ -44,21 +44,14 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           json_cache_get, json_cache_put, norm_posted_date,
                           origin_of, text_from_html)
 from . import icims, infor, phenom, workday
-from .adp_wfn import fetch_adp
-from .bamboohr import fetch_bamboohr
 from .board import BOARDS, adapt as _adapt, board_for, loc_ok
-from .hibob import fetch_hibob
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims_all
 from .infor import fetch_infor_all
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
-from .paylocity import fetch_paylocity
 from .peopleadmin import fetch_peopleadmin
 from .phenom import fetch_phenom_all
-from .rippling import fetch_rippling
-from .ultipro import fetch_ultipro
-from .workable import fetch_workable
 from .workday import fetch_workday_all, wd_local_count  # noqa: F401 (re-export)
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
@@ -233,26 +226,6 @@ def hydrate_description(job):
             job["description"] = text_from_html(html)[:_DESC_MAX]
         except Exception:
             pass
-    elif job.get("ats") == "paylocity":
-        m = re.search(r"/Details/(\d+)", job.get("url", "") or "")
-        if m:
-            from .paylocity import fetch_description
-            job["description"] = fetch_description(m.group(1))[:_DESC_MAX]
-    elif job.get("ats") == "rippling":
-        m = re.search(r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", job.get("url", "") or "")
-        if m:
-            from .rippling import fetch_description
-            job["description"] = fetch_description(m.group(1), m.group(2))[:_DESC_MAX]
-    elif job.get("ats") == "workable" and job.get("url"):
-        # Same URL-only round trip as the rippling branch above: the stored
-        # tenant-path URL carries BOTH coordinates (account slug + posting
-        # shortcode), and no "_"-prefixed key survives _adapt. The slug-less
-        # short link names no account, so job_ref_from_url refuses it and
-        # the generic fallback below is what tries.
-        from .workable import fetch_description, job_ref_from_url
-        ref = job_ref_from_url(job["url"])
-        if ref:
-            job["description"] = fetch_description(*ref)[:_DESC_MAX]
     elif job.get("ats") == "icims" and job.get("url"):
         # The ?in_iframe=1 document is server-rendered with JSON-LD even on
         # JS-shell tenants; it also names the posting's real location(s).
@@ -264,8 +237,7 @@ def hydrate_description(job):
     elif job.get("ats") == "phenom" and job.get("url"):
         # No "_"-prefixed coordinate survives _adapt for this ATS (only
         # Workday's _wd does), so the detail coordinates are re-derived
-        # from the job's own URL -- same pattern as the paylocity/
-        # rippling branches above.
+        # from the job's own URL.
         desc, loc = _hydrate_from_url(phenom, job["url"])
         if desc:
             job["description"] = desc[:_DESC_MAX]
@@ -656,12 +628,6 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
 
 # --- dispatch ------------------------------------------------------------------ #
 
-# Detail budget for a whole-board pull: the company was vetted, so every
-# in-area row is worth its description (the sweep's default is a screening
-# budget), paced a little faster than the sweep.
-_WHOLE_BOARD = dict(max_details=config.WHOLE_BOARD_DETAILS,
-                    detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S)
-
 # ats -> (store row, loc_re) -> company-shaped jobs. The rows are those of the
 # ATS's fetcher module, ungated, with the location filter applied on the
 # listing before any detail call (fetchers/board.py).
@@ -669,14 +635,7 @@ FETCHERS = {
     **{b.name: b.whole_board for b in BOARDS.values() if b.fetchable},
     "jazzhr":          lambda c, lr: _adapt(fetch_jazzhr("", c["slug"], loc_re=lr), "jazzhr"),
     "jobvite":         lambda c, lr: _adapt(fetch_jobvite(c["slug"], loc_re=lr), "jobvite"),
-    "bamboohr":        lambda c, lr: _adapt(fetch_bamboohr(c["slug"], loc_re=lr, **_WHOLE_BOARD), "bamboohr"),
-    "adp":             lambda c, lr: _adapt(fetch_adp(*c["slug"].split("|", 1), loc_re=lr, **_WHOLE_BOARD), "adp"),
     "kula":            lambda c, lr: _adapt(fetch_kula("", c["slug"], loc_re=lr), "kula"),
-    "paylocity":       lambda c, lr: _adapt(fetch_paylocity(c["slug"], loc_re=lr, **_WHOLE_BOARD), "paylocity"),
-    "rippling":        lambda c, lr: _adapt(fetch_rippling(c["slug"], loc_re=lr, **_WHOLE_BOARD), "rippling"),
-    "ultipro":         lambda c, lr: _adapt(fetch_ultipro(c["slug"], loc_re=lr), "ultipro"),
-    "hibob":           lambda c, lr: _adapt(fetch_hibob(c["slug"], loc_re=lr), "hibob"),
-    "workable":        lambda c, lr: _adapt(fetch_workable(c["slug"], loc_re=lr, **_WHOLE_BOARD), "workable"),
     # Page budget: config.board_max_pages raises it for a mission-worth-it
     # board (config.BOARD_MAX_ROWS), else keeps the fetcher's own narrower
     # default (workday._WD_MAX_PAGES / _SR_MAX_PAGES) for one
@@ -723,12 +682,6 @@ def fetch_company_nc(company):
 # listing IS the postings). An ATS not named here answers a listing in one
 # request and samples through FETCHERS unchanged.
 _TITLE_SAMPLERS = {
-    "bamboohr":        lambda c, n: fetch_bamboohr(c["slug"], max_details=0),
-    "adp":             lambda c, n: fetch_adp(*c["slug"].split("|", 1),
-                                              max_details=0, max_pages=1),
-    "paylocity":       lambda c, n: fetch_paylocity(c["slug"], max_details=0),
-    "rippling":        lambda c, n: fetch_rippling(c["slug"], max_details=0),
-    "workable":        lambda c, n: fetch_workable(c["slug"], max_details=0),
     "jobvite":         lambda c, n: fetch_jobvite(c["slug"], max_details=0),
     "jazzhr":          lambda c, n: fetch_jazzhr("", c["slug"], max_jobs=n),
     "icims":           lambda c, n: fetch_icims_all(c["slug"], meta_cap=0),

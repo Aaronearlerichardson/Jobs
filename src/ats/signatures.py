@@ -14,7 +14,7 @@ import re
 # ─── Platform signatures ─────────────────────────────────────────────────
 #
 # Fetchable platforms: regex captures the board slug; confirmable via a
-# live count (src.discovery.resolve.probes / ADP requisition API). ADP needs two params
+# live count (src.discovery.resolve.probes). ADP needs two params
 # (cid, ccId), handled specially. Workday (a triple) is detected first via
 # extract_workday_triple — highest confidence.
 ATS_LINK_PATTERNS = [
@@ -28,12 +28,12 @@ ATS_LINK_PATTERNS = [
     ("smartrecruiters", re.compile(r"api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/", re.I)),
     # Paylocity: the board slug is the 36-char company GUID in the board URL
     # (recruiting.paylocity.com/recruiting/jobs/All/<guid>/<name>). Fetchable
-    # via src/ats/fetchers/paylocity.py; the URL's name segment is cosmetic.
+    # via its config.BOARDS spec; the URL's name segment is cosmetic.
     ("paylocity", re.compile(r"recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})", re.I)),
     # Rippling: board slug in ats.rippling.com/<slug>/jobs (public JSON API).
     ("rippling", re.compile(r"ats\.rippling\.com/([a-z0-9][a-z0-9-]+)/jobs", re.I)),
     # HiBob: tenant subdomain of careers.hibob.com (public JSON API at
-    # <tenant>.careers.hibob.com/api/job-ad — see fetchers/hibob.py).
+    # <tenant>.careers.hibob.com/api/job-ad; see config.BOARDS).
     ("hibob", re.compile(r"([a-z0-9][a-z0-9-]+)\.careers\.hibob\.com", re.I)),
     # Jobvite: tenant slug of jobs.jobvite.com/<tenant> (server-rendered
     # listing + JSON-LD job pages — see fetchers/jobvite.py).
@@ -41,7 +41,7 @@ ATS_LINK_PATTERNS = [
     # Workable: the account slug in apply.workable.com/<slug> — the board
     # page and the tenant-path posting page (/<slug>/j/<shortcode>) both
     # lead with it, and the widget API a site embeds carries it one path
-    # deeper (public JSON API — see fetchers/workable.py). The slug-less
+    # deeper (public JSON API; see config.BOARDS). The slug-less
     # short link (apply.workable.com/j/<shortcode>) names no account; its
     # one-character "slug" is under detect's length floor, so it is not a
     # detection.

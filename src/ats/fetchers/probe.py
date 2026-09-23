@@ -6,7 +6,7 @@
 
 This is a reader, not a fetcher: it shares nothing with the whole-board
 pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
-per-ATS endpoint builders it asks -- `bamboohr.detail_url`,
+per-ATS endpoint builders it asks --
 `jazzhr.board_url`, `infor.detail_url`/`posting_state`, Workday's CXS URL
 helpers and `company.SMARTRECRUITERS_API`. A platform with a
 `config.BOARDS` spec is asked through the engine (`Board.probe_job`).
@@ -26,7 +26,7 @@ import requests
 from src import config
 from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
-from . import bamboohr, icims, infor, jazzhr, workday
+from . import icims, infor, jazzhr, workday
 from .board import board_for_url
 from .company import SMARTRECRUITERS_API
 
@@ -59,7 +59,6 @@ _GATED_HOST_RE = re.compile(
 # the page.
 _JOB_URL_RE = {
     "smartrecruiters": re.compile(r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)"),
-    "bamboohr":   re.compile(r"//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)", re.I),
     "jazzhr":     re.compile(r"//([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)",
                              re.I),
     "icims":      re.compile(r"//([a-z0-9-]+)\.icims\.com/jobs/(\d+)/", re.I),
@@ -123,11 +122,6 @@ def _endpoint_verdict(api, family, headers=None, live=None):
     return live(r) if live else (True, f"{family} api: posting live")
 
 
-def _probe_bamboohr(m):
-    return _endpoint_verdict(bamboohr.detail_url(m.group(1), m.group(2)),
-                             "bamboohr")
-
-
 def _probe_jazzhr(m):
     # The slug-free apply URL: 410 once the posting is pulled, 200 while live.
     return _endpoint_verdict(
@@ -175,7 +169,6 @@ def _infor_verdict(r):
 #: detail page answers 410 for a pulled posting, it just needs the WAF's
 #: headers (_page_headers).
 _FAMILY_PROBE = {
-    "bamboohr":        _probe_bamboohr,
     "jazzhr":          _probe_jazzhr,
     "smartrecruiters": lambda m: _endpoint_verdict(
         f"{SMARTRECRUITERS_API.format(m.group(1))}/{m.group(2)}",
@@ -199,12 +192,14 @@ def _page_headers(url):
             else HEADERS)
 
 
-def probe_job_open(url):
+def probe_job_open(url, job_id=None):
     """Best-effort liveness check of one job's own detail URL.
 
     Returns (is_open, reason): True = positively live, False = positively
     closed, None = indeterminate (bot-gated host, fetch error, or a 200 with
     no recognizable signal); callers must leave stored status alone on None.
+    `job_id` names the posting where its URL cannot (a board whose postings
+    all share one page).
     Only used for rows the crawl's board-diff can't cover (see
     tracks.local_tech.check_closed_jobs); board snapshots are authoritative
     where available.
@@ -262,7 +257,7 @@ def probe_job_open(url):
     fallback = ""
     board = board_for_url(url)
     if board:
-        is_open, fallback = board.probe_job(url)
+        is_open, fallback = board.probe_job(url, job_id)
         if is_open is not None:
             return is_open, fallback
     fam = probe_family(url)

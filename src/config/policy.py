@@ -224,10 +224,13 @@ def is_offmission_inactive(c):
 # narrower default instead -- see board_max_pages.
 BOARD_MAX_ROWS = int(_pol.get("board_max_rows", 3000))
 
-# One value per rule for every ATS board (src.ats.fetchers.board): detail
-# GETs a sweep pull may spend screening rows, and a vetted whole-board pull
-# hydrating them, with the pause between two; and how long a listing read
-# for closure checks or deep verify is reused.
+# One value per rule for every ATS board (src.ats.fetchers.board): the
+# pause between two listing pages; detail GETs a sweep pull may spend
+# screening rows, and a vetted whole-board pull hydrating them, with the
+# pause between two; and how long a listing read for closure checks or
+# deep verify is reused. A host's robots Crawl-delay still applies on top
+# (net.robots waits out whichever is longer).
+PAGE_DELAY_S = 0.3
 SWEEP_DETAILS = 40
 SWEEP_DETAIL_DELAY_S = 0.2
 WHOLE_BOARD_DETAILS = 200
@@ -236,7 +239,7 @@ BOARD_MEMO_S = 600.0
 
 
 def board_max_pages(company, page_size, offmission_pages):
-    """max_pages for a whole-board Workday/SmartRecruiters listing pull:
+    """max_pages for a paged whole-board listing pull:
     BOARD_MAX_ROWS's wider budget (in pages of `page_size`) for a
     mission-worth-it board, or `offmission_pages` -- the fetcher's own
     narrower default -- for one is_offmission_inactive. The SAME

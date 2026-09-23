@@ -24,7 +24,7 @@ from bs4 import BeautifulSoup
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (company, discourse, getro, hibob,
+from src.ats.fetchers import (board, company, discourse, getro,
                               jobvite, peopleadmin, remoteok, remotive,
                               usajobs)
 from src.ats.fetchers.board import BOARDS, board_for
@@ -72,20 +72,43 @@ def usajobs_pages(serve):
         [fake_response(p, status=status) for p in payloads])
 
 
-#: Spec'd platforms with a recorded listing: (ats, fixture, handle).
-BOARD_FIXTURES = [("greenhouse", "greenhouse_board.json", "databricks"),
-                  ("lever", "lever_board.json", "veeva"),
-                  ("ashby", "ashby_board.json", "vanta")]
+#: Spec'd platforms with a recorded listing: (ats, handle, listing fixture,
+#: detail fixture or None). Trimmed real responses.
+BOARD_FIXTURES = [
+    ("greenhouse", "databricks", "greenhouse_board.json", None),
+    ("lever", "veeva", "lever_board.json", None),
+    ("ashby", "vanta", "ashby_board.json", None),
+    ("bamboohr", "imec", "bamboohr_board.json", "bamboohr_detail.json"),
+    ("rippling", "blackrockneurotech", "rippling_board.json", "rippling_detail.json"),
+    ("hibob", "liquidia", "hibob_board.json", None),
+    ("workable", "eupry-aps", "workable_board.json", "workable_job_detail.json"),
+    ("paylocity", "d527ad39-680d-45fa-9178-38a81898aec2", "paylocity_board.html",
+     "paylocity_detail.html"),
+    ("ultipro", "BAY1006BML|0669eed3-5441-4f8e-a7b1-c5df596a4dfe", "ultipro_board.json", None),
+    ("adp", "7120c628-221c-4769-b7e7-8ab11b78b67f|9200879253113_2", "adp_board.json",
+     "adp_detail.json"),
+]
+
+
+def _fixture_response(name):
+    return (fake_response(text=load_text(name)) if name.endswith(".html")
+            else fake_response(load(name)))
 
 
 class TestSpecdBoardsReadTheirListings:
-    """The engine reads each recorded listing into exactly the rows its
-    platform's fetcher module produced before the move to config.BOARDS
-    (<ats>_rows.json, recorded from that module)."""
+    """The engine reads each recorded listing (and, for a row with no body,
+    the recorded detail) into exactly the rows <ats>_rows.json holds:
+    recorded from each platform's fetcher module before the move to
+    config.BOARDS, except where a row changed on purpose (paylocity: the
+    detail page's body, not the listing's teaser)."""
 
-    @pytest.mark.parametrize("ats,fixture,handle", BOARD_FIXTURES)
-    def test_rows_match_the_recording(self, serve, ats, fixture, handle):
-        serve(fake_response(load(fixture)))
+    @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
+    def test_rows_match_the_recording(self, serve, monkeypatch, ats, handle,
+                                      listing, detail):
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        replies = [_fixture_response(listing),
+                   _fixture_response(detail) if detail else fake_response(status=404)]
+        serve(replies)
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
 
     @pytest.mark.parametrize("ats", sorted(b.name for b in BOARDS.values()
@@ -94,38 +117,6 @@ class TestSpecdBoardsReadTheirListings:
         serve(fake_response(["not", "a", "board"] if ats != "lever"
                             else {"not": "a list"}))
         assert board_for(ats).jobs("x", "X") == []
-
-
-class TestHibob:
-    def test_parses_postings(self, serve, match_everything):
-        serve(fake_response(load("hibob_board.json")))
-        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
-        assert jobs
-        j = jobs[0]
-        assert j["id"].startswith("hibob_liquidia_")
-        assert j["title"] and j["url"] == "https://liquidia.careers.hibob.com/jobs"
-        assert j["company"] == "Liquidia"
-
-    def test_description_html_is_stripped(self, serve, match_everything):
-        serve(fake_response(load("hibob_board.json")))
-        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
-        assert all("<" not in j["description"] for j in jobs)
-
-    def test_location_combines_site_and_workspace_type(self, serve,
-                                                        match_everything):
-        serve(fake_response(load("hibob_board.json")))
-        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
-        assert jobs[0]["location"] == "USA - Hybrid"
-
-    def test_remote_hint_from_workspace_type(self, serve, match_everything):
-        serve(fake_response(load("hibob_board.json")))
-        jobs = hibob.fetch_hibob("liquidia", "Liquidia")
-        remote = [j for j in jobs if j["location"].endswith("Remote")]
-        assert remote and remote[0].get("remote_hint") == "hibob:workspaceType"
-
-    def test_unexpected_shape_returns_empty(self, serve, match_everything):
-        serve(fake_response(["not", "a", "dict"]))
-        assert hibob.fetch_hibob("x", "X") == []
 
 
 class TestPeopleAdmin:

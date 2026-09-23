@@ -18,8 +18,6 @@ import logging
 from bs4 import BeautifulSoup, SoupStrainer
 
 from src.ats.signatures import detect, pack
-from src.config import PROBE_TIMEOUT
-from src.net.http import SESSION, JSON_HEADERS
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import (_foreign_board, candidate_pages,
                        candidate_responses, corroborated)
@@ -68,21 +66,6 @@ def _scan_root(name, careers_url=""):
 
 def _confirm_coords(ats, slug):
     """Get a live job count for sniffed coordinates. Returns int or None."""
-    if ats == "adp":
-        cid, _, ccid = slug.partition("|")
-        try:
-            r = SESSION.get(
-                "https://workforcenow.adp.com/mascsr/default/careercenter"
-                "/public/events/staffing/v1/job-requisitions",
-                params={"cid": cid, "ccId": ccid, "locale": "en_US", "$top": 1},
-                timeout=PROBE_TIMEOUT,
-                headers=JSON_HEADERS,
-            )
-            if r.status_code != 200:
-                return None
-            return int(r.json().get("meta", {}).get("totalNumber", 0) or 0)
-        except Exception:
-            return None
     probe = PROBES.get(ats)
     if not probe:
         return None

@@ -1,0 +1,27 @@
+[
+ {
+  "id": "bamboo_imec_97",
+  "title": "Supply Chain Technical Specialist",
+  "url": "https://imec.bamboohr.com/careers/97",
+  "location": "Chicago, Illinois",
+  "description": "MUST RESIDE IN ILLINOIS \n\n *Field-based work environment with work conducted from a home office when not onsite at client facilities\n\n *Frequent travel throughout the state to support client engagements and onsite activities\n\n *Work authorizati",
+  "company": "Acme"
+ },
+ {
+  "id": "bamboo_imec_98",
+  "title": "Digital Technologies Technical Specialist",
+  "url": "https://imec.bamboohr.com/careers/98",
+  "location": "Chicago, Illinois",
+  "description": "MUST RESIDE IN ILLINOIS \n\n *Field-based work environment with work conducted from a home office when not onsite at client facilities\n\n *Frequent travel throughout the state to support client engagements and onsite activities\n\n *Work authorizati",
+  "company": "Acme"
+ },
+ {
+  "id": "bamboo_imec_101",
+  "title": "Workforce Development Specialist",
+  "url": "https://imec.bamboohr.com/careers/101",
+  "location": "Remote",
+  "description": "MUST RESIDE IN ILLINOIS \n\n *Field-based work environment with work conducted from a home office when not onsite at client facilities\n\n *Frequent travel throughout the state to support client engagements and onsite activities\n\n *Work authorizati",
+  "remote_hint": "bamboohr:locationType",
+  "company": "Acme"
+ }
+]

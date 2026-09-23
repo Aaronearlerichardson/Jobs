@@ -1,0 +1,67 @@
+{
+ "meta": {
+  "totalCount": 4
+ },
+ "result": [
+  {
+   "id": "97",
+   "jobOpeningName": "Supply Chain Technical Specialist",
+   "departmentId": "18450",
+   "departmentLabel": "Client Solutions",
+   "employmentStatusLabel": "Full-Time",
+   "employmentType": null,
+   "location": {
+    "city": "Chicago",
+    "state": "Illinois"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  },
+  {
+   "id": "98",
+   "jobOpeningName": "Digital Technologies Technical Specialist",
+   "departmentId": "18450",
+   "departmentLabel": "Client Solutions",
+   "employmentStatusLabel": "Full-Time",
+   "employmentType": null,
+   "location": {
+    "city": "Chicago",
+    "state": "Illinois"
+   },
+   "atsLocation": {
+    "country": null,
+    "state": null,
+    "province": null,
+    "city": null
+   },
+   "isRemote": null,
+   "locationType": "2"
+  },
+  {
+   "id": "101",
+   "jobOpeningName": "Workforce Development Specialist",
+   "departmentId": "18450",
+   "departmentLabel": "Client Solutions",
+   "employmentStatusLabel": "Full-Time",
+   "employmentType": null,
+   "location": {
+    "city": null,
+    "state": null
+   },
+   "atsLocation": {
+    "country": "United States",
+    "state": "Illinois",
+    "province": null,
+    "city": "Peoria"
+   },
+   "isRemote": null,
+   "locationType": "1"
+  }
+ ]
+}

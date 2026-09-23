@@ -12,8 +12,8 @@ filter order is decided once:
      an out-of-area posting costs one listing row and nothing more;
   2. relevance (`gate`), cheap fields first: `gate(head)` on the title
      (plus the department where the ATS lists one); only a row that fails
-     on those pays for its description, and `gate(head, description)`
-     then decides. No gate keeps every row;
+     on those, and has no body yet, pays for its description, and
+     `gate(head, description)` then decides. No gate keeps every row;
   3. description hydration for what is kept, within `max_details`.
 
 `gate=None, loc_re=None` is a whole-board pull (the company-vetted path in
@@ -53,13 +53,16 @@ platform, so no module outside the spec names one. `BOARDS` holds one per
 spec; `board_for(ats)` and `board_for_url(url)` find them.
 """
 
+import json
 import re
 import time
+
+from bs4 import BeautifulSoup
 
 from src import config
 from src.match.locality import location_unknown
 from src.net import http
-from src.net.http import JSON_HEADERS, fetch_failed
+from src.net.http import HEADERS, JSON_HEADERS, note_capped
 from src.net.util import clean_field
 
 from . import fields
@@ -81,8 +84,8 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
     """Job dicts for the rows that pass `loc_re` and `gate` (see module doc).
 
     `fetch_description(row)` is the ATS's detail call, when it has one; it
-    runs at most `max_details` times per board, `detail_delay` seconds
-    apart, and a failure ("" back) leaves whatever the listing carried.
+    runs only for a row the listing gave no body, at most `max_details`
+    times per board, `detail_delay` seconds apart.
 
     >>> rows = [{"id": "1", "title": "Data Engineer", "url": "u1", "location": "Durham, NC",
     ...          "description": "", "_key": "a"},
@@ -146,8 +149,8 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
         head = clean_field(row.pop("head", None)) or title
         desc = row.get("description") or ""
         if gate is not None:
-            if not gate(head) and can_fetch():
-                desc = hydrate(row) or desc
+            if not gate(head) and not desc and can_fetch():
+                desc = hydrate(row)
             if not gate(head, desc):
                 continue
         if not desc and can_fetch():
@@ -157,48 +160,6 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
         job["description"] = desc
         out.append(job)
     return out
-
-
-def board_fetch(label, parse, row, company_name="", gate=None, loc_re=None,
-                fetch_description=None, max_details=config.SWEEP_DETAILS,
-                detail_delay=config.SWEEP_DETAIL_DELAY_S):
-    """`board_jobs` over a listing this module still has to go and GET.
-
-    `parse()` returns the raw listing entries and may raise; `row(entry)`
-    shapes one of them, or returns None to drop it. A `parse()` that
-    raises is reported through `net.http.fetch_failed` and yields no jobs,
-    never an exception at the crawl. Everything else is `board_jobs`'.
-
-    No doctest of its own: its callers' public entry points already pin
-    every behaviour here. The dead-listing path is covered by
-    tests/test_fetcher_parsers.py::TestADeadEndpointIsNeverAnException
-    (every registered fetcher, two failure shapes each); the row/filter
-    path by `board_jobs`' own doctest.
-
-    Notes:
-        Five fetchers -- rippling, workable, hibob, ultipro, paylocity --
-        had each written the same four lines around the call above: pull
-        the whole board, turn a listing failure into a reported dead
-        source rather than an exception at the crawl, then map the raw
-        entries through the module's own row builder. Only the label, the
-        listing call and the row builder ever differed, and
-        `fetch_workable` was written by copying `fetch_rippling` (0.98
-        structural similarity, 2026-09-22 clone scan).
-
-        Reporting the listing failure is the part worth having in one
-        place: `net.http.fetch_failed` hands back [], which is also what
-        an empty board hands back, so a fetcher that swallows the
-        exception instead leaves "this board is down" and "this board has
-        nothing on it" indistinguishable at every caller (see
-        fetch_failed's own note).
-    """
-    try:
-        raw = parse()
-    except Exception as e:
-        return fetch_failed(label, e)
-    return board_jobs((row(j) for j in raw), company_name, gate=gate,
-                      loc_re=loc_re, fetch_description=fetch_description,
-                      max_details=max_details, detail_delay=detail_delay)
 
 
 # --------------------------------------------------------------------------- #
@@ -249,21 +210,35 @@ SPEC_KEYS = {
     "sweep": bool,          # the lightweight sweep pulls it whole; seeds tags.SWEEP
     "prunable": bool,       # prune_dead_boards may deactivate it; two 404s bury it
     "guess": bool,          # discovery may guess its handle from a company name
-    "handle": dict,         # {"columns": [...], "sep": "|"}; default one "slug" column
-    "job_ref": dict,        # {"re", "parts"}: a stored posting URL -> the handle's
-                            # columns plus "jid", the posting id
-    "listing": dict,        # {"url", "probe_url", "decoder", "fields"}
-    "detail": dict,         # {"url", "fields", "location"}: one posting read back
+    "eager": bool,          # a whole-board pull reads each kept row's detail
+    "handle": dict,         # {"columns", "parts", "sep", "try", "accept"}: the
+                            # store columns joined by sep; `parts` names the
+                            # pieces (default the columns); `try` lists values
+                            # for one part, tried until one answers with a
+                            # status outside `accept.status_not`, memoized
+    "job_ref": dict,        # {"re", "parts"}: a stored posting URL -> handle
+                            # parts plus "jid", the posting id
+    "listing": dict,        # {"url", "method", "params", "json", "headers",
+                            #  "probe_url", "decoder", "pager", "fields"}
+    "detail": dict,         # {"url", "method", "params", "json", "headers",
+                            #  "decoder", "record", "fields", "location"}:
+                            # one posting read back
     "closure": dict,        # {"via": "detail" | "listing" | "page", "open", "closed"}
     "employer": (str, dict),  # a field spec naming the employer on a listing entry
 }
-_LISTING_KEYS = {"url", "probe_url", "decoder", "fields"}
-_DETAIL_KEYS = {"url", "fields", "location"}
+_LISTING_KEYS = {"url", "method", "params", "json", "headers", "probe_url",
+                 "decoder", "pager", "fields"}
+_DETAIL_KEYS = {"url", "method", "params", "json", "headers", "decoder",
+                "record", "fields", "location"}
 _ROW_FIELDS = {"id", "title", "url", "location", "description", "posted_at",
                "remote_hint", "department"}
+_DECODERS = {"json", "json_in_html", "html"}
+_PAGERS = {"offset"}
 
 #: Listings read for closure and deep verify: (ats, handle) -> (expires, entries).
 _MEMO = {}
+#: The handle part values `handle.try` settled on: (ats, handle) -> {part: value}.
+_VARIANTS = {}
 
 
 def validate_spec(name, spec):
@@ -285,12 +260,18 @@ def validate_spec(name, spec):
         if not isinstance(v, SPEC_KEYS[key]):
             bad(f"{key} is {type(v).__name__}")
     for key, allowed in (("listing", _LISTING_KEYS), ("detail", _DETAIL_KEYS)):
-        extra = set(spec.get(key) or {}) - allowed
+        part = spec.get(key) or {}
+        extra = set(part) - allowed
         if extra:
             bad(f"unknown {key} key(s) {sorted(extra)}")
-        extra = set((spec.get(key) or {}).get("fields") or {}) - _ROW_FIELDS
+        extra = set(part.get("fields") or {}) - _ROW_FIELDS
         if any(not k.startswith("_") for k in extra):
             bad(f"unknown {key} field(s) {sorted(extra)}")
+        if (part.get("decoder") or {}).get("kind", "json") not in _DECODERS:
+            bad(f"{key}.decoder.kind")
+    pager = (spec.get("listing") or {}).get("pager")
+    if pager and (pager.get("kind") not in _PAGERS or not pager.get("size")):
+        bad("listing.pager needs a known kind and a size")
     if spec.get("job_ref"):
         try:
             n = re.compile(spec["job_ref"]["re"]).groups
@@ -311,13 +292,49 @@ def validate_spec(name, spec):
         bad(str(e))
 
 
+def _fill(tpl, lookup, vals):
+    """A request template filled in: "$size"/"$offset" by value (typed),
+    every other string as a `fields.fmt` template.
+
+    >>> _fill({"top": "$size", "q": "{code}", "f": []}, {"code": "AC"}.get, {"$size": 50})
+    {'top': 50, 'q': 'AC', 'f': []}
+    """
+    if isinstance(tpl, dict):
+        return {k: _fill(v, lookup, vals) for k, v in tpl.items()}
+    if isinstance(tpl, list):
+        return [_fill(v, lookup, vals) for v in tpl]
+    if isinstance(tpl, str):
+        return vals[tpl] if tpl in vals else fields.fmt(tpl, lookup)
+    return tpl
+
+
+def _decode(dec, text):
+    """A non-JSON response body as data; None when it holds none. Raises
+    ValueError when embedded JSON will not parse."""
+    if dec.get("kind") == "json_in_html":
+        m = re.search(dec["regex"], text)
+        return json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
+    el = BeautifulSoup(text, "html.parser").select_one(dec["select"])
+    return {"text": el.get_text(" ", strip=True)} if el else None
+
+
+def _first_path(payload, wanted, kind):
+    """The first value of type `kind` at one of the paths `wanted` (one or
+    a list) in `payload`, or None."""
+    for p in wanted if isinstance(wanted, list) else [wanted]:
+        v = fields.path(payload, p)
+        if isinstance(v, kind):
+            return v
+    return None
+
+
 class Board:
     """One platform, compiled from `config.BOARDS[name]`. Every loop lives
     here; the spec names the endpoints and the fields.
 
     A handle is the store row's board columns joined by "|" (the string
-    `registry.store_slug` builds); its parts, named after the columns,
-    fill the spec's URL templates.
+    `registry.store_slug` builds); split on the spec's separator, its
+    parts fill the spec's templates.
     """
 
     def __init__(self, name, spec):
@@ -326,12 +343,15 @@ class Board:
         self.listing_spec = spec.get("listing") or {}
         self.detail_spec = spec.get("detail") or {}
         self.fetchable = bool(self.listing_spec)
-        self._columns = (spec.get("handle") or {}).get("columns", ["slug"])
-        self._sep = (spec.get("handle") or {}).get("sep", "|")
+        self._hspec = spec.get("handle") or {}
+        self._columns = self._hspec.get("columns", ["slug"])
+        self._part_names = self._hspec.get("parts", self._columns)
+        self._sep = self._hspec.get("sep", "|")
         ref = spec.get("job_ref")
         self._ref_re = re.compile(ref["re"]) if ref else None
         self._ref_parts = ref["parts"] if ref else []
         self._closure = spec.get("closure") or {}
+        self._pager = self.listing_spec.get("pager") or {}
 
     def __repr__(self):
         return f"Board({self.name!r})"
@@ -344,7 +364,9 @@ class Board:
         return self._sep.join(vals) if all(vals) else None
 
     def _parts(self, handle):
-        return dict(zip(self._columns, str(handle).split(self._sep)))
+        parts = dict(zip(self._part_names, str(handle).split(self._sep)))
+        parts.update(_VARIANTS.get((self.name, str(handle)), {}))
+        return parts
 
     def job_ref(self, url):
         """The named parts a stored posting URL carries, or None when the
@@ -356,33 +378,67 @@ class Board:
         return self.job_ref(url) is not None
 
     def _handle_of(self, ref):
-        return self._sep.join(ref.get(c, "") for c in self._columns)
+        return self._sep.join(ref.get(p, "") for p in self._part_names)
+
+    # --- requests ----------------------------------------------------------
+
+    def _fetch(self, req, parts, vals=None, label=None, timeout=None):
+        """(status, payload, error) for one request built from `req` (the
+        listing or detail spec) and the handle `parts`."""
+        dec = req.get("decoder") or {}
+        kind = dec.get("kind", "json")
+        vals = vals or {}
+        kw = {"headers": {**(JSON_HEADERS if kind == "json" else HEADERS),
+                          **_fill(req.get("headers") or {}, parts.get, vals)}}
+        for key in ("params", "json"):
+            if req.get(key):
+                kw[key] = _fill(req[key], parts.get, vals)
+        if timeout:
+            kw["timeout"] = timeout
+        url, method = fields.fmt(req["url"], parts.get), req.get("method", "GET")
+        if kind == "json":
+            return http.request_json(method, url, label, **kw)
+        status, r, err = http.request(method, url, label, **kw)
+        if err:
+            return status, None, err
+        try:
+            return status, _decode(dec, r.text), None
+        except ValueError:
+            return status, None, http.failed(label, "unreadable response")
+
+    def _page(self, req, handle, vals, label=None, timeout=None):
+        """(parts, status, payload, error) for one listing request. A
+        `handle.try` part not yet settled for this handle is tried value by
+        value (quietly) until one answers with a status outside
+        `handle.accept.status_not`; a success settles it."""
+        parts = self._parts(handle)
+        tries = self._hspec.get("try") or {}
+        key = (self.name, str(handle))
+        if not tries or key in _VARIANTS:
+            return (parts, *self._fetch(req, parts, vals, label, timeout))
+        wrong = (self._hspec.get("accept") or {}).get("status_not", [])
+        (name, values), = tries.items()
+        for v in values:
+            status, payload, err = self._fetch(req, {**parts, name: v}, vals, None, timeout)
+            if status is not None and status not in wrong:
+                if not err:
+                    _VARIANTS[key] = {name: v}
+                break
+        if err:
+            http.failed(label, err)
+        return {**parts, name: v}, status, payload, err
 
     # --- the listing -------------------------------------------------------
 
     def _label(self, handle, company_name=""):
         return f"{self.name} {company_name or handle}"
 
-    def _read(self, handle, label=None, cheap=False):
-        """The listing's entries, or None when the request failed (reported
-        under `label` when given). `cheap` reads `probe_url` where the spec
-        has one, at PROBE_TIMEOUT: probes, samples, counts."""
-        spec = self.listing_spec
-        url = spec["probe_url"] if cheap and spec.get("probe_url") else spec["url"]
-        kw = {"timeout": config.PROBE_TIMEOUT} if cheap else {}
-        _status, data, err = http.request_json(
-            "GET", fields.fmt(url, self._parts(handle).get), label,
-            headers=JSON_HEADERS, **kw)
-        return None if err else self._entries(data)
-
     def _entries(self, payload):
-        """The posting list in a listing payload; a wrong shape is []."""
+        """The postings (dicts) in a listing payload: the first of the
+        spec's entry paths holding a list; a wrong shape is []."""
         wanted = (self.listing_spec.get("decoder") or {}).get("entries", "")
-        for p in wanted if isinstance(wanted, list) else [wanted]:
-            v = fields.path(payload, p)
-            if v is not None:
-                return v if isinstance(v, list) else []
-        return []
+        return [e for e in _first_path(payload, wanted, list) or []
+                if isinstance(e, dict)]
 
     def _row(self, parts, entry):
         fs = self.listing_spec["fields"]
@@ -395,29 +451,67 @@ class Board:
             return fields.value(fs.get(k), entry, ctx)
 
         title = get("title") or ""
-        row = {"id": get("id"), "title": title, "url": get("url") or "",
+        row = {"id": fields.value(fs.get("id"), entry, ctx, strict=True),
+               "title": title, "url": get("url") or "",
                "location": get("location") or "",
-               "description": get("description") or "",
-               "posted_at": fields.TRANSFORMS["date"](get("posted_at"))}
-        hint = get("remote_hint")
-        if hint:
-            row["remote_hint"] = hint
+               "description": get("description") or ""}
+        for key, v in (("posted_at", fields.TRANSFORMS["date"](get("posted_at"))),
+                       ("remote_hint", get("remote_hint"))):
+            if v:
+                row[key] = v
         dept = get("department")
         row["head"] = f"{title} {dept}" if dept else title
         return row
 
+    def _walk(self, handle, label=None, cheap=False, size=None, pages=None):
+        """(rows, total) for the board, deduped by id; (None, None) when the
+        first request failed. A later page's failure ends the walk with the
+        rows so far (reported, so the snapshot reads incomplete). A walk
+        that stops short of the board's end notes the snapshot capped:
+        every page read with the last still full, a page adding nothing new
+        with no total proving the walk complete, or fewer rows than the
+        total. `cheap` reads one page of `probe_url` at PROBE_TIMEOUT."""
+        spec, pager = self.listing_spec, self._pager
+        req = {**spec, "url": spec["probe_url"]} if cheap and spec.get("probe_url") else spec
+        size = size or pager.get("size", 0)
+        pages = 1 if cheap or not pager else pages or pager.get("pages", 1)
+        timeout = config.PROBE_TIMEOUT if cheap else None
+        rows, seen, total, capped = [], set(), None, False
+        for n in range(pages):
+            page_label = f"{label} p{n}" if label and pager else label
+            parts, _status, payload, err = self._page(
+                req, handle, {"$size": size, "$offset": n * size}, page_label, timeout)
+            if err:
+                return (None, None) if n == 0 else (rows, total)
+            if n == 0 and pager.get("total"):
+                t = fields.path(payload, pager["total"])
+                total = t if isinstance(t, int) else None
+            entries = self._entries(payload)
+            new = [r for r in (self._row(parts, e) for e in entries)
+                   if r["id"] is None or r["id"] not in seen]
+            seen.update(r["id"] for r in new)
+            rows += new
+            if not pager or not entries or len(entries) < size:
+                break
+            if not new or n + 1 == pages:
+                capped = True
+                break
+            time.sleep(config.PAGE_DELAY_S)
+        if not cheap and (capped or total is not None) and \
+                (total is None or len(rows) < total):
+            note_capped(total)
+        return rows, total
+
     def listing(self, handle, label=None, cheap=False):
         """Every row on the board, mapped by the spec's fields; [] when the
         listing failed (reported under `label` when given)."""
-        entries = self._read(handle, label, cheap) or []
-        parts = self._parts(handle)
-        return [self._row(parts, e) for e in entries if isinstance(e, dict)]
+        return self._walk(handle, label, cheap)[0] or []
 
     # --- the pulls ---------------------------------------------------------
 
     def _detail_rows(self):
-        """board_jobs' detail callback, for a listing that carries no body."""
-        if not self.detail_spec or "description" in self.listing_spec["fields"]:
+        """board_jobs' detail callback: a row's body from its detail."""
+        if not self.detail_spec:
             return None
         return lambda row: self.description_for(row.get("url"), report=True)
 
@@ -428,65 +522,86 @@ class Board:
                           fetch_description=self._detail_rows())
 
     def whole_board(self, company, loc_re=None):
-        """The company-vetted pull: every row passing `loc_re`, adapted."""
+        """The company-vetted pull: every row passing `loc_re`, adapted, with
+        each kept row's detail read where the spec is `eager`."""
         handle = self.handle(company)
         if not handle:
             return []
-        rows = self.listing(handle, self._label(handle))
-        return adapt(board_jobs(rows, "", loc_re=loc_re), self.name)
+        pages = (config.board_max_pages(company, self._pager["size"], self._pager.get("pages", 1))
+                 if self._pager else None)
+        rows = self._walk(handle, self._label(handle), pages=pages)[0] or []
+        eager = self._detail_rows() if self.spec.get("eager") else None
+        return adapt(board_jobs(rows, "", loc_re=loc_re, fetch_description=eager,
+                                max_details=config.WHOLE_BOARD_DETAILS,
+                                detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S),
+                     self.name)
 
     def probe(self, handle):
-        """(ok, n) for a guessed handle: one cheap read, n postings on it,
-        ok when there is at least one. Quiet: a miss is the expected answer."""
-        entries = self._read(handle, cheap=True)
-        n = len(entries or [])
+        """(ok, n) for a guessed handle: one cheap read, n postings on it (the
+        listing's own total where it reports one), ok when there is at least
+        one. Quiet: a miss is the expected answer."""
+        n = self.alive(handle)[1]
         return n > 0, n
 
     def alive(self, handle):
         """(ok, n) where ok means the board request itself succeeded, empty
         or not: the dead-board check."""
-        entries = self._read(handle, cheap=True)
-        return entries is not None, len(entries or [])
+        rows, total = self._walk(handle, cheap=True, size=1)
+        return rows is not None, total if total is not None else len(rows or [])
 
     def local_count(self, handle, is_local):
-        """Postings whose listed location `is_local(text)` accepts."""
+        """Postings on one cheap read whose listed location `is_local` accepts."""
         return sum(1 for r in self.listing(handle, cheap=True)
                    if is_local(r["location"]))
 
     def employer_name(self, handle):
         """The employer the listing names on its first posting, or ""."""
-        entries = self._read(handle, cheap=True) or []
         spec = self.spec.get("employer")
-        return (str(fields.value(spec, entries[0]) or "").strip()
-                if spec and entries else "")
+        if not spec:
+            return ""
+        req = {**self.listing_spec, "url": self.listing_spec.get("probe_url")
+               or self.listing_spec["url"]}
+        _parts, _s, payload, err = self._page(req, handle, {"$size": 1, "$offset": 0},
+                                              timeout=config.PROBE_TIMEOUT)
+        entries = [] if err else self._entries(payload)
+        return str(fields.value(spec, entries[0]) or "").strip() if entries else ""
 
     # --- one posting -------------------------------------------------------
 
     def _listing_entries(self, handle):
-        """The raw listing entries, memoized for config.BOARD_MEMO_S so a
-        board with many stale rows is read once per pass. None when the
-        listing is unreadable or empty."""
+        """The raw first-page listing entries, memoized for
+        config.BOARD_MEMO_S so a board with many stale rows is read once
+        per pass. None when the listing is unreadable or empty."""
         key = (self.name, handle)
         hit = _MEMO.get(key)
         if hit and hit[0] > time.time():
             return hit[1]
-        entries = self._read(handle) or None
+        _parts, _s, payload, err = self._page(
+            self.listing_spec, handle, {"$size": self._pager.get("size", 0), "$offset": 0})
+        entries = None if err else self._entries(payload) or None
         _MEMO[key] = (time.time() + config.BOARD_MEMO_S, entries)
         return entries
 
-    def _member(self, ref):
-        """The listing entry whose id is the posting `ref` names, or None."""
-        want = str(ref.get("jid", "")).lower()
-        for e in self._listing_entries(self._handle_of(ref)) or []:
-            if isinstance(e, dict) and str(e.get("id", "")).lower() == want:
-                return e
-        return None
+    def _member(self, ref, job_id=None):
+        """The listing entry for the posting `ref` names: by the posting id
+        its URL carries, else by the row id `job_id` (a platform whose
+        posting URLs are all the board's own). None when absent."""
+        handle = self._handle_of(ref)
+        entries = self._listing_entries(handle) or []
+        if ref.get("jid"):
+            want = str(ref["jid"]).lower()
+            return next((e for e in entries if str(e.get("id", "")).lower() == want), None)
+        parts, want = self._parts(handle), str(job_id or "").lower()
+        return next((e for e in entries
+                     if want and str(self._row(parts, e)["id"] or "").lower() == want), None)
 
     def detail(self, ref, report=False):
         """(status, record, error) for the posting `ref` names."""
-        label = f"{self.name} {self._handle_of(ref)} detail" if report else None
-        return http.request_json("GET", fields.fmt(self.detail_spec["url"], ref.get),
-                                 label, headers=JSON_HEADERS)
+        label = " ".join(x for x in (self.name, self._handle_of(ref), "job",
+                                     ref.get("jid")) if x) if report else None
+        status, payload, err = self._fetch(self.detail_spec, ref, label=label)
+        rec = _first_path(payload, self.detail_spec.get("record", ""), dict) if payload else None
+        return status, rec, err
 
     def _posting(self, url, report=False):
         """(record, its field specs) for the posting `url` names, read live:
@@ -541,10 +656,11 @@ class Board:
         if ref is None or via == "page":
             return None, ""
         if via == "listing":
-            entries = self._listing_entries(self._handle_of(ref))
-            if not entries:
+            if not (ref.get("jid") or job_id):
+                return None, ""
+            if not self._listing_entries(self._handle_of(ref)):
                 return None, f"{self.name} api: board unreadable or empty"
-            if self._member(ref) is not None:
+            if self._member(ref, job_id) is not None:
                 return True, f"{self.name} api: board lists it"
             return False, f"{self.name} api: board no longer lists it"
         status, rec, err = self.detail(ref)

@@ -1,20 +1,21 @@
-"""UKG Pro (UltiPro) fetcher: which host serves a board, offline.
+"""UKG Pro (UltiPro): which host serves a board, offline.
 
 The detector accepts boards on both `recruiting2.` and `recruiting.`, and the
-stored slug (`CODE|GUID`) drops the host. The fetcher hardcoded recruiting2,
-so a board served from recruiting was detected, stored and then 404'd on every
-pass: zero jobs, indistinguishable from an empty board. A tenant answers only
-on its own host, so the fetcher tries recruiting2 first and falls back to
-recruiting on a 404.
+stored slug (`CODE|GUID`) drops the host. A tenant answers only on its own
+host, so the spec's `handle.try` asks recruiting2 first, falls back to
+recruiting on a 404, and remembers the winner (the engine's `handle.try`
+mechanism, in src.ats.fetchers.board, with UKG Pro its first user).
 """
 
 import pytest
 
 from conftest import fake_response
-from src.ats.fetchers import ultipro
+from src.ats.fetchers import board
+from src.ats.fetchers.board import board_for
 from src.net import http
 
 SLUG = "ACME1000|ad28382f-2fcd-4cbb-bb18-24dd71b05bce"
+UKG = board_for("ultipro")
 
 
 def _opp(n):
@@ -51,10 +52,8 @@ class _Tenant:
 
 @pytest.fixture
 def tenant(monkeypatch, serve):
-    """Serve a tenant and forget which hosts earlier tests learned (the
-    per-slug memory is process-wide)."""
-    monkeypatch.setattr(ultipro, "_HOST_OF", {})
-    monkeypatch.setattr(ultipro.time, "sleep", lambda s: None)
+    """Serve a tenant; the engine's page pause is skipped."""
+    monkeypatch.setattr(board.time, "sleep", lambda s: None)
 
     def _install(host, opps=None, **kw):
         t = _Tenant(host, [_opp(1), _opp(2)] if opps is None else opps, **kw)
@@ -67,72 +66,55 @@ def tenant(monkeypatch, serve):
 class TestHostFallback:
     def test_a_recruiting2_board_is_fetched_in_one_request(self, tenant):
         t = tenant("recruiting2")
-        jobs = ultipro.fetch_ultipro(SLUG, "Acme")
+        jobs = UKG.jobs(SLUG, "Acme")
         assert [j["title"] for j in jobs] == ["Data Engineer 1", "Data Engineer 2"]
         assert t.hosts_asked() == ["recruiting2"]
-        assert all(j["url"].startswith(
-            "https://recruiting2.ultipro.com/ACME1000/JobBoard/") for j in jobs)
         assert http.fetch_failures() == 0
 
     def test_a_recruiting_only_board_falls_back_on_a_404(self, tenant):
         t = tenant("recruiting")
-        jobs = ultipro.fetch_ultipro(SLUG, "Acme")
-        assert len(jobs) == 2
+        job = UKG.jobs(SLUG, "Acme")[0]
         assert t.hosts_asked() == ["recruiting2", "recruiting"]
         assert http.fetch_failures() == 0
-
-    def test_job_urls_and_ids_follow_the_host_that_answered(self, tenant):
-        tenant("recruiting")
-        job = ultipro.fetch_ultipro(SLUG, "Acme")[0]
+        # URLs follow the host that answered; the id never carried the host,
+        # so existing rows keep matching.
         assert job["url"] == (
             "https://recruiting.ultipro.com/ACME1000/JobBoard/"
             "ad28382f-2fcd-4cbb-bb18-24dd71b05bce/OpportunityDetail"
             "?opportunityId=0001aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
-        # The id never carried the host, so existing rows keep matching.
         assert job["id"] == "ultipro_ACME1000_0001aaaa-bbb"
 
-    def test_the_working_host_is_remembered_for_the_slug(self, tenant):
-        t = tenant("recruiting")
-        ultipro.fetch_ultipro(SLUG, "Acme")
-        t.urls.clear()
-        ultipro.fetch_ultipro(SLUG, "Acme")
-        assert t.hosts_asked() == ["recruiting"], "no 404 round trip the second time"
-
-    def test_paging_stays_on_the_host_that_answered(self, tenant):
-        t = tenant("recruiting", [_opp(1), _opp(2), _opp(3)])
-        assert len(ultipro.parse_board(SLUG, page_size=2)) == 3
+    def test_the_working_host_is_remembered_and_paging_stays_on_it(self, tenant):
+        t = tenant("recruiting", [_opp(n) for n in range(101)])
+        assert len(UKG.jobs(SLUG, "Acme")) == 101
         assert t.hosts_asked() == ["recruiting2", "recruiting", "recruiting"]
+        t.urls.clear()
+        UKG.jobs(SLUG, "Acme")
+        assert t.hosts_asked() == ["recruiting", "recruiting"], "no 404 round trip"
 
     def test_a_later_page_404_is_an_error_not_a_host_switch(self, tenant):
-        t = tenant("recruiting2", [_opp(1), _opp(2), _opp(3)], fail_from_page=1)
-        with pytest.raises(Exception):
-            ultipro.parse_board(SLUG, page_size=2)
+        t = tenant("recruiting2", [_opp(n) for n in range(101)], fail_from_page=1)
+        assert len(UKG.jobs(SLUG, "Acme")) == 100
         assert t.hosts_asked() == ["recruiting2", "recruiting2"]
+        assert http.snapshot_info()["incomplete"]
 
     def test_a_non_404_error_does_not_try_the_other_host(self, tenant):
         t = tenant("recruiting2", status=500)
-        assert ultipro.fetch_ultipro(SLUG, "Acme") == []
+        assert UKG.jobs(SLUG, "Acme") == []
         assert t.hosts_asked() == ["recruiting2"]
         assert http.fetch_failures() == 1
+        # An error settles no host: the board is found once it answers.
+        t.host, t.status = "recruiting", 200
+        assert len(UKG.jobs(SLUG, "Acme")) == 2
 
-    def test_a_board_on_neither_host_is_an_empty_board_with_an_error(
-            self, tenant, capsys):
+    def test_a_board_on_neither_host_is_dead_and_not_remembered(self, tenant):
         t = tenant("elsewhere")
-        assert ultipro.fetch_ultipro(SLUG, "Acme") == []
-        assert t.hosts_asked() == ["recruiting2", "recruiting"]
+        assert UKG.jobs(SLUG, "Acme") == []
         assert http.fetch_failures() == 1
-        assert "UltiPro Acme" in http.snapshot_info()["last_error"]
-        assert "[!] UltiPro Acme" in capsys.readouterr().out
-        assert SLUG not in ultipro._HOST_OF
-
-    def test_parse_board_still_raises_when_both_hosts_404(self, tenant):
-        """prune_dead_boards and the discovery probe read a raise as
-        'the board request fails'; an empty listing is a live board."""
-        tenant("elsewhere")
-        with pytest.raises(Exception):
-            ultipro.parse_board(SLUG)
+        assert UKG.alive(SLUG) == (False, 0)
+        assert t.hosts_asked() == ["recruiting2", "recruiting"] * 2
 
     def test_an_empty_listing_is_a_live_board(self, tenant):
         tenant("recruiting", [])
-        assert ultipro.parse_board(SLUG) == []
+        assert UKG.alive(SLUG) == (True, 0)
         assert http.fetch_failures() == 0

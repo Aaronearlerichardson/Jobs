@@ -27,20 +27,13 @@ from src import tags
 from src.match.filters import is_relevant
 
 from .fetchers import (
-    fetch_adp,
-    fetch_bamboohr,
-    fetch_hibob,
     fetch_infor,
     fetch_jazzhr,
     fetch_jobvite,
     fetch_kula,
-    fetch_paylocity,
     fetch_peopleadmin,
     fetch_phenom,
-    fetch_rippling,
-    fetch_ultipro,
     fetch_successfactors,
-    fetch_workable,
     fetch_workday,
 )
 from .fetchers.board import BOARDS
@@ -66,12 +59,6 @@ ATS_REGISTRY = {
     "kula":       (lambda n, s: lambda: fetch_kula(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "bamboohr":   (lambda n, s: lambda: fetch_bamboohr(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "adp":        (lambda n, s: lambda: fetch_adp(*s.split("|", 1), n, gate=is_relevant), tags.SWEEP, 0.5),
-    "paylocity":  (lambda n, s: lambda: fetch_paylocity(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "rippling":   (lambda n, s: lambda: fetch_rippling(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "ultipro":    (lambda n, s: lambda: fetch_ultipro(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "hibob":      (lambda n, s: lambda: fetch_hibob(s, n, gate=is_relevant), tags.SWEEP, 0.5),
     "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
                                         st=s.split("|")[2]:
                                  fetch_workday(t, p, st, n, gate=is_relevant)), tags.LOCAL, 1.0),
@@ -79,19 +66,13 @@ ATS_REGISTRY = {
     "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
     "phenom":         (lambda n, s: lambda: fetch_phenom(s, n, gate=is_relevant), tags.LOCAL, 1.0),
     "infor":          (lambda n, s: lambda: fetch_infor(s, n, gate=is_relevant), tags.LOCAL, 1.0),
-    # Workable's LISTING is as cheap as any board in LIGHTWEIGHT (one JSON
-    # GET, whole board, no paging), but the listing carries no description:
-    # a body costs one detail GET per posting, so it seeds LOCAL and stays
-    # out of the unvetted sweep until a board is worth that per-posting
-    # spend. Flip it to SWEEP + LIGHTWEIGHT if the sweep should carry it.
-    "workable":       (lambda n, s: lambda: fetch_workable(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole,
 # and that seed the SWEEP tag: lightweight JSON APIs or single-page boards.
 # The heavyweight boards stay location-scoped and seed LOCAL.
 LIGHTWEIGHT = tuple(b.name for b in BOARDS.values() if b.spec.get("sweep")) + (
-    "kula", "jazzhr", "jobvite", "bamboohr", "adp", "paylocity", "rippling", "ultipro", "hibob")
+    "kula", "jazzhr", "jobvite")
 
 
 def seed_tag_for(ats):

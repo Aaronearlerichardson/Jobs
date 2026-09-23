@@ -1,13 +1,12 @@
 """The (ok, count) contract every ATS slug probe answers, and the
 three-valued verdict the per-JOB closure probe answers.
 
-The twelve slug probes used to be twelve hand-written request-and-swallow
-blocks; they are built from two helpers now (probes._api_probe /
-_parser_probe). What matters per ATS is the `require_jobs` decision -- is
-a 200 proof of a board, or must it list something -- and that decision is
-what these pin, because it is invisible in the table otherwise and it has
-been got wrong before: SmartRecruiters answers 200 with totalFound:0 for
-ANY slug, so every guessed slug "confirmed" with zero jobs.
+A platform with a config.BOARDS spec probes through the engine
+(`Board.probe`: one cheap read, ok only when it lists a posting); the rest
+are built from probes._api_probe, where what matters per ATS is the
+`require_jobs` decision -- is a 200 proof of a board, or must it list
+something. It has been got wrong before: SmartRecruiters answers 200 with
+totalFound:0 for ANY slug, so every guessed slug "confirmed" with zero jobs.
 
 The job probe (fetchers.probe.probe_job_open, driven by
 ops.check_closed_jobs) has the same shape of hidden decision, one per ATS
@@ -74,11 +73,11 @@ def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
 
 class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, serve):
-        serve(fake_response({"jobs": [1, 2, 3]}))
+        serve(fake_response({"jobs": [{}, {}, {}]}))
         assert probes.PROBES["greenhouse"]("acme") == (True, 3)
 
     def test_lever_counts_a_bare_list(self, serve):
-        serve(fake_response([1, 2]))
+        serve(fake_response([{}, {}]))
         assert probes.PROBES["lever"]("acme") == (True, 2)
 
     def test_lever_tolerates_a_non_list_payload(self, serve):
@@ -86,16 +85,16 @@ class TestAPresentBoardIsConfirmed:
         assert probes.PROBES["lever"]("acme") == (False, 0)
 
     def test_ashby_reads_the_posting_api_key(self, serve):
-        serve(fake_response({"jobs": [1, 2], "jobPostings": []}))
+        serve(fake_response({"jobs": [{}, {}], "jobPostings": []}))
         assert probes.PROBES["ashby"]("acme") == (True, 2)
 
     def test_ashby_falls_back_to_the_embed_key(self, serve):
-        serve(fake_response({"jobPostings": [1]}))
+        serve(fake_response({"jobPostings": [{}]}))
         assert probes.PROBES["ashby"]("acme") == (True, 1)
 
     def test_bamboohr_asks_for_json(self, serve):
-        seen = serve(fake_response({"result": [1, 2, 3, 4]}))
-        assert probes.probe_bamboohr("acme") == (True, 4)
+        seen = serve(fake_response({"result": [{}, {}, {}, {}]}))
+        assert probes.PROBES["bamboohr"]("acme") == (True, 4)
         assert seen[-1].headers["Accept"] == "application/json"
 
     def test_jazzhr_counts_apply_links_in_the_page(self, serve):
@@ -143,7 +142,7 @@ class TestFailureIsReportedNeverRaised:
     """
 
     def test_a_non_200_is_a_miss(self, serve):
-        serve(fake_response({"jobs": [1]}, status=404))
+        serve(fake_response({"jobs": [{}]}, status=404))
         assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
     def test_unparseable_json_is_a_miss(self, serve):
@@ -164,29 +163,6 @@ class TestFailureIsReportedNeverRaised:
         calls = serve(OSError("throttled"))
         assert probes.PROBES["greenhouse"]("acme") == (False, 0)
         assert len(calls) == 1
-
-
-class TestParserBackedProbes:
-    """Four ATSes reuse the fetcher's own board parser rather than a URL
-    of their own. Their `ok` means "has jobs", which is why
-    ops.prune_dead_boards refuses to use them to decide a board is dead.
-    """
-
-    def test_it_counts_what_the_parser_returned(self, monkeypatch):
-        monkeypatch.setattr("src.ats.fetchers.rippling.parse_board",
-                            lambda h: [1, 2, 3])
-        assert probes.probe_rippling("acme") == (True, 3)
-
-    def test_an_empty_parse_is_not_ok(self, monkeypatch):
-        monkeypatch.setattr("src.ats.fetchers.hibob.parse_board",
-                            lambda h: [])
-        assert probes.probe_hibob("acme") == (False, 0)
-
-    def test_a_raising_parser_is_a_miss(self, monkeypatch):
-        def _boom(h):
-            raise RuntimeError("shape changed")
-        monkeypatch.setattr("src.ats.fetchers.ultipro.parse_board", _boom)
-        assert probes.probe_ultipro("CODE|GUID") == (False, 0)
 
 
 def test_every_registered_probe_is_callable():
@@ -421,7 +397,7 @@ class TestDeadBoardClosure:
                            miss_reason="board-dead:greenhouse", days_stale=20)
         probed = []
 
-        def _probe(url):
+        def _probe(url, job_id=None):
             probed.append(url)
             return (None, "n/a")
         monkeypatch.setattr(ops.probe, "probe_job_open", _probe)
@@ -443,7 +419,7 @@ class TestDeadBoardClosure:
         [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
                            days_stale=400)
         monkeypatch.setattr(ops.probe, "probe_job_open",
-                            lambda url: (None, "n/a"))
+                            lambda url, job_id=None: (None, "n/a"))
 
         ops.check_closed_jobs(conn=db, stale_days=999)
 
@@ -456,7 +432,7 @@ class TestDeadBoardClosure:
         [jid] = seed_stale(db, "Ats Gap", ats=None,
                            miss_reason="ats-unsupported:ukg", days_stale=400)
         monkeypatch.setattr(ops.probe, "probe_job_open",
-                            lambda url: (None, "n/a"))
+                            lambda url, job_id=None: (None, "n/a"))
 
         ops.check_closed_jobs(conn=db, stale_days=999)
 
@@ -479,7 +455,7 @@ class TestClosedProbeRotation:
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
         monkeypatch.setattr(ops.probe, "probe_job_open",
-                            lambda url: (None, "gated"))
+                            lambda url, job_id=None: (None, "gated"))
 
         for _ in range(3):
             ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
@@ -492,7 +468,7 @@ class TestClosedProbeRotation:
     def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
         seed_stale(db, n=250)
         monkeypatch.setattr(ops.probe, "probe_job_open",
-                            lambda url: (None, "gated"))
+                            lambda url, job_id=None: (None, "gated"))
 
         ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
 
@@ -515,7 +491,7 @@ class TestClosedProbeGiveUp:
         """Serve one probe verdict and record every URL probed."""
         probed = []
 
-        def _probe(url):
+        def _probe(url, job_id=None):
             probed.append(url)
             return verdict
         monkeypatch.setattr(ops.probe, "probe_job_open", _probe)
@@ -857,7 +833,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
     def _probed(monkeypatch):
         urls = []
         monkeypatch.setattr(ops.probe, "probe_job_open",
-                            lambda url: urls.append(url) or (None, "gated"))
+                            lambda url, job_id=None: urls.append(url) or (None, "gated"))
         return urls
 
     def test_a_board_walked_inside_the_window_still_has_its_rows_probed(
@@ -920,7 +896,8 @@ class TestProbeOutcomesAreReportedPerFamily:
                     ICIMS_JOB: (None, "HTTP 405"),
                     "https://www.linkedin.com/jobs/view/1":
                         (None, "bot-gated aggregator host")}
-        monkeypatch.setattr(ops.probe, "probe_job_open", verdicts.get)
+        monkeypatch.setattr(ops.probe, "probe_job_open",
+                            lambda url, job_id=None: verdicts[url])
 
         ops.check_closed_jobs(conn=db, stale_days=7)
 
@@ -938,7 +915,7 @@ class TestProbeOutcomesAreReportedPerFamily:
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
             ops.probe, "probe_job_open",
-            lambda url: (False, f"page says {url[-12:]!r}"))
+            lambda url, job_id=None: (False, f"page says {url[-12:]!r}"))
 
         ops.check_closed_jobs(conn=db, stale_days=7)
 

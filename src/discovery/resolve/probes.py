@@ -150,28 +150,10 @@ def _api_probe(url, count, *, require_jobs=False, accept=None, headers=None,
     return probe
 
 
-def _parser_probe(module):
-    """Build a probe out of the fetcher's own board parser, for the ATSes
-    where the fetcher already knows the URL and the payload shape. Imported
-    lazily: probes.py is pulled in by discovery paths that never fetch a
-    board, and these modules are not cheap.
-
-    Their `ok` flag means "has jobs", not "board exists" -- see the
-    comment in ops.prune_dead_boards, which cannot use them for that
-    reason.
-    """
-    def probe(handle):
-        try:
-            jobs = _fetcher(module).parse_board(handle)
-            return (len(jobs) > 0, len(jobs))
-        except Exception:
-            return (False, 0)
-    return probe
-
-
 def _fetcher(module):
-    """src.ats.fetchers.<module>, imported at probe time for the reason
-    _parser_probe gives."""
+    """src.ats.fetchers.<module>, imported at probe time: probes.py is
+    pulled in by discovery paths that never fetch a board, and the fetcher
+    modules are not cheap."""
     return importlib.import_module(f"src.ats.fetchers.{module}")
 
 
@@ -191,11 +173,6 @@ probe_jazzhr = _api_probe(
     lambda r, h: len(_fetcher("jazzhr").APPLY_RE.findall(r.text)),
     require_jobs=True)
 
-probe_bamboohr = _api_probe(
-    lambda h: f"{_fetcher('bamboohr').board_url(h)}/careers/list",
-    lambda r, h: len(r.json().get("result", []) or []),
-    headers={"Accept": "application/json"})
-
 probe_smartrecruiters = _api_probe(
     lambda h: f"{_fetcher('company').SMARTRECRUITERS_API.format(h)}?limit=1",
     lambda r, h: int(r.json().get("totalFound", 0) or 0),
@@ -206,15 +183,6 @@ probe_jobvite = _api_probe(
     lambda r, h: len(_fetcher("jobvite").parse_listing(r.text, h)),
     require_jobs=True, timeout=10)
 
-#: Paylocity by company GUID, UKG Pro (UltiPro) by 'CODE|GUID', Rippling,
-#: HiBob and Workable by slug/tenant -- all five through the fetcher's
-#: parser.
-probe_paylocity = _parser_probe("paylocity")
-probe_rippling = _parser_probe("rippling")
-probe_ultipro = _parser_probe("ultipro")
-probe_hibob = _parser_probe("hibob")
-probe_workable = _parser_probe("workable")
-
 
 PROBES = {
     # A platform with a config.BOARDS spec probes through the engine:
@@ -222,20 +190,8 @@ PROBES = {
     **{b.name: b.probe for b in BOARDS.values() if b.fetchable},
     "kula":       probe_kula,
     "jazzhr":     probe_jazzhr,
-    "bamboohr":   probe_bamboohr,
     "smartrecruiters": probe_smartrecruiters,
-    "paylocity":  probe_paylocity,
-    "rippling":   probe_rippling,
-    "ultipro":    probe_ultipro,
-    "hibob":      probe_hibob,
     "jobvite":    probe_jobvite,
-    # An account slug is NOT the company name -- Eupry publishes under
-    # "eupry-aps" while a separate, empty "eupry" account also answers 200
-    # -- so a guessed slug only confirms here because _parser_probe demands
-    # jobs > 0. A board found by slug guess still deserves the identity
-    # look every ``via='probe'`` hit gets (pipeline._flag_for_verification,
-    # local_sourcing.resolve_leads's "probe-only: verify" line).
-    "workable":   probe_workable,
 }
 
 

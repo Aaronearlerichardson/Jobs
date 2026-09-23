@@ -1404,7 +1404,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             # So it is caught here rather than left to fan_out, which would
             # drop the row and quietly shrink the denominator.
             try:
-                return probe.probe_job_open(r["url"])
+                return probe.probe_job_open(r["url"], r["job_id"])
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {type(e).__name__}"
 
@@ -1678,22 +1678,9 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
         applies roster policy, so it is an operation, and the store keeps
         only the write (store.deactivate_company).
     """
-    from src.discovery.resolve.probes import probe_bamboohr
-
-    def _ultipro_alive(slug):
-        # Not src.discovery.resolve.probes.probe_ultipro: its ok flag means "has jobs",
-        # which would prune a live-but-currently-empty board. Dead here
-        # means the board REQUEST fails (the 404 spam three roster rows
-        # produced in every 2026-08-28 crawl log); an empty listing is
-        # alive.
-        from src.ats.fetchers.ultipro import parse_board
-        try:
-            return (True, len(parse_board(slug)))
-        except Exception:
-            return (False, 0)
-
-    PROBE = {**{b.name: b.alive for b in BOARDS.values() if b.spec.get("prunable")},
-             "bamboohr": probe_bamboohr, "ultipro": _ultipro_alive}
+    # Board.alive, not the slug probe: an empty board is alive; dead means
+    # the board REQUEST fails.
+    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.get("prunable")}
 
     rows = [c for c in store.get_companies(conn, active_only=True)
             if c.get("ats") in PROBE and c.get("slug")]

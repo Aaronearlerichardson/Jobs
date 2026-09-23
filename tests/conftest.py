@@ -45,13 +45,14 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
 def _fresh_run_state(monkeypatch):
     """Per-run memos start empty in every test: both dead-host breakers,
     discovery's page memo and DNS cache, and the board engine's listing
-    memo."""
+    memo and settled handle variants."""
     for mod in (_fetchpool, _job_probe):
         old = mod._DEAD_HOSTS
         monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
     monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
     monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
     monkeypatch.setattr(_board, "_MEMO", {})
+    monkeypatch.setattr(_board, "_VARIANTS", {})
 
 
 # --------------------------------------------------------------------------- #
