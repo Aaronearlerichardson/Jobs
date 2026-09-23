@@ -27,7 +27,7 @@ from src.match.filters import is_relevant
 from src.ats.fetchers import (board, company, discourse, getro,
                               jobvite, peopleadmin, remoteok, remotive,
                               usajobs)
-from src.ats.fetchers.board import BOARDS, board_for
+from src.ats.fetchers.board import BOARDS, board_for, board_for_url
 from src.discovery import apply
 from src.net import http
 
@@ -87,7 +87,16 @@ BOARD_FIXTURES = [
     ("ultipro", "BAY1006BML|0669eed3-5441-4f8e-a7b1-c5df596a4dfe", "ultipro_board.json", None),
     ("adp", "7120c628-221c-4769-b7e7-8ab11b78b67f|9200879253113_2", "adp_board.json",
      "adp_detail.json"),
+    ("smartrecruiters", "Guidehealth", "smartrecruiters_board.json",
+     "smartrecruiters_detail.json"),
+    ("infor", "css-unchealthunc-prd.inforcloudsuite.com|9999", "infor_job_list.json",
+     "infor_job_detail.json"),
+    ("phenom", "careers.example.org", "phenom_search_results.html", "phenom_job_detail.html"),
 ]
+
+#: Where the root redirect lands for a board whose handle follows one
+#: (`handle.follow`): the first request such a board makes.
+REDIRECTS = {"phenom": "https://careers.example.org/us/en"}
 
 
 def _fixture_response(name):
@@ -100,16 +109,43 @@ class TestSpecdBoardsReadTheirListings:
     the recorded detail) into exactly the rows <ats>_rows.json holds:
     recorded from each platform's fetcher module before the move to
     config.BOARDS, except where a row changed on purpose (paylocity: the
-    detail page's body, not the listing's teaser)."""
+    detail page's body, not the listing's teaser; phenom: ids carry the
+    host, "phenom_<host_key>_<reqId>")."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
     def test_rows_match_the_recording(self, serve, monkeypatch, ats, handle,
                                       listing, detail):
         monkeypatch.setattr(board.time, "sleep", lambda s: None)
-        replies = [_fixture_response(listing),
-                   _fixture_response(detail) if detail else fake_response(status=404)]
+        replies = ([fake_response(url=REDIRECTS[ats])] if ats in REDIRECTS else []) + [
+            _fixture_response(listing),
+            _fixture_response(detail) if detail else fake_response(status=404)]
         serve(replies)
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
+
+    #: (stored URL, listed location, detail fixture, the location after):
+    #: `detail.location` "always" replaces a listed one, "if_unknown" only
+    #: fills a missing one.
+    HYDRATE = [
+        ("https://careers.example.org/us/en/job/273419", "Durham, NC",
+         "phenom_job_detail.html", "Durham, North Carolina, United States"),
+        ("https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/form/JobPosting%5BJobPostingSet"
+         "%5D%2842%2C207651%2C1%29.JobPostingDisplay?pagesize=1", "",
+         "infor_job_detail.json", "Morrisville, NC, US"),
+        ("https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/form/JobPosting%5BJobPostingSet"
+         "%5D%2842%2C207651%2C1%29.JobPostingDisplay?pagesize=1", "Chapel Hill, NC",
+         "infor_job_detail.json", "Chapel Hill, NC"),
+    ]
+
+    @pytest.mark.parametrize("url,listed,detail,location", HYDRATE)
+    def test_a_stored_row_hydrates_from_its_url(self, serve, url, listed, detail,
+                                                location):
+        """Only the URL survives the store: the engine reads the posting's
+        coordinates back out of it (`job_ref`) for its detail."""
+        serve(_fixture_response(detail))
+        job = company.hydrate_description({"ats": board_for_url(url).name, "url": url,
+                                           "description": "", "location": listed})
+        assert job["location"] == location
+        assert job["description"] and "<p>" not in job["description"]
 
     @pytest.mark.parametrize("ats", sorted(b.name for b in BOARDS.values()
                                            if b.fetchable))
@@ -790,8 +826,8 @@ class TestFieldHygiene:
     """A stored title or location never carries a newline, tab or a run of
     spaces. The two paths clean at one choke point each -- board.board_jobs
     for the sweep, company._adapt for the whole-board pull -- so these pin
-    the three builders in company.py that reach NEITHER, shaping the
-    adapted dict themselves.
+    the two builders in company.py that reach NEITHER, shaping the adapted
+    dict themselves.
 
     124 open rows carried such a value on 2026-09-18; in the session log
     they split triage's one-line DEBUG "drop" record into fragments
@@ -807,15 +843,6 @@ class TestFieldHygiene:
         out = company._adapt(rows, "workday", re.compile("Durham, NC"))
         assert [(j["title"], j["location"]) for j in out] == \
             [("Data Engineer", "Durham, NC")]
-
-    def test_smartrecruiters_cleans_its_own_rows(self, serve):
-        serve(fake_response({"totalFound": 1, "content": [
-            {"id": "77", "name": "Clinical\nData Engineer",
-             "location": {"city": "Durham\t", "region": "NC",
-                          "country": "US"}}]}))
-        j = company.fetch_smartrecruiters_all("acme")[0]
-        assert j["title"] == "Clinical Data Engineer"
-        assert j["location"] == "Durham, NC, US"
 
     def test_wpjson_cleans_its_own_rows(self, serve):
         serve(fake_response({"max_num_pages": 1, "posts": [

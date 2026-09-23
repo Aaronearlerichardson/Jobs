@@ -551,7 +551,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
 
     `capped=True` marks a snapshot truncated by a page cap
     (net.http.note_capped) — the pager (fetchers.workday.fetch_workday_all,
-    fetchers.company.fetch_smartrecruiters_all, ...) exhausted its page
+    the board engine's page walk, ...) exhausted its page
     budget without reaching a natural end. Such a pull is an unstable
     WINDOW of the board, not the board itself, so a board-native row
     absent from it is NEVER closed here — not on the first miss, not on
@@ -955,6 +955,81 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     return rows
 
 
+def _survivor_first(r):
+    """dedup_jobs' sort key, survivor first: a dispositioned row, then an
+    open one, then the EARLIEST first_seen (ISO strings sort by time, and
+    a row with none sorts before every dated one)."""
+    return (r.get("disposition") is None,
+            (r.get("status") or "open") != "open",
+            r.get("first_seen") or "")
+
+
+def same_posting(a, b):
+    """Whether two job rows name one posting: the same URL modulo scheme,
+    query and fragment (_norm_url), and the same normalized title.
+
+    >>> same_posting({"url": "https://x.test/j/1?src=a", "title": "Data  Eng"},
+    ...              {"url": "http://x.test/j/1/", "title": "data eng"})
+    True
+    >>> same_posting({"url": "https://x.test/j/1", "title": "Data Eng"},
+    ...              {"url": "https://x.test/j/1", "title": "Lab Tech"})
+    False
+    """
+    key = _posting_key(a)
+    return all(key) and key == _posting_key(b)
+
+
+def _posting_key(r):
+    """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
+    return _norm_url(r.get("url")), _norm_title(r.get("title"))
+
+
+def merge_jobs(conn, row_ids, job_id):
+    """Fold the job rows `row_ids` (one posting stored under several ids)
+    into one row named `job_id`; returns its row id. The survivor is
+    dedup_jobs' (_survivor_first) and keeps its values, `closed_at` with
+    its status; a field it lacks comes from the others, `first_seen` is
+    the earliest, `description` the longest and `track` every track; the
+    others are deleted. Rows that are not one posting (same_posting)
+    raise ValueError, nothing written.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_job(conn, {"job_id": "old_7", "title": "T", "url": "u",
+    ...                       "track": "a", "resume_fit_score": 0.4})
+    >>> _ = upsert_job(conn, {"job_id": "new_x_7", "title": "T", "url": "u?src=a",
+    ...                       "track": "b", "description": "body"})
+    >>> ids = [r["id"] for r in conn.execute("SELECT id FROM jobs")]
+    >>> _ = merge_jobs(conn, ids, "new_x_7")
+    >>> [tuple(r) for r in conn.execute("SELECT job_id, track, resume_fit_score, "
+    ...                                 "description FROM jobs")]
+    [('new_x_7', 'a,b', 0.4, 'body')]
+    """
+    ph = ",".join("?" for _ in row_ids)
+    rows = sorted((dict(r) for r in conn.execute(
+        f"SELECT * FROM jobs WHERE id IN ({ph})", tuple(row_ids))), key=_survivor_first)
+    keep, losers = rows[0], rows[1:]
+    if not all(same_posting(keep, l) for l in losers):
+        raise ValueError(f"job rows {sorted(row_ids)} are not one posting")
+    fill = {}
+    for col, mine in keep.items():
+        if col in ("id", "job_id", "closed_at"):
+            continue
+        vals = [mine] + [l[col] for l in losers]
+        if col == "first_seen":
+            v = min((x for x in vals if x), default=None)
+        elif col == "description":
+            v = max(vals, key=lambda x: len(x or ""))
+        elif col == "track":
+            v = join_tracks(set().union(*(track_set(x) for x in vals)))
+        else:
+            v = next((x for x in vals if x not in (None, "")), mine)
+        if v != mine:
+            fill[col] = v
+    conn.executemany("DELETE FROM jobs WHERE id=?", [(l["id"],) for l in losers])
+    apply_update(conn, "jobs", "id", keep["id"], {**fill, "job_id": job_id})
+    return keep["id"]
+
+
 def dedup_jobs(conn):
     """Collapse job rows that are the SAME posting under different ids: same
     company, same URL modulo scheme/query/fragment (_norm_url), same
@@ -983,25 +1058,16 @@ def dedup_jobs(conn):
     """
     from collections import defaultdict
     groups = defaultdict(list)
-    for r in conn.execute(
+    for r in map(dict, conn.execute(
             "SELECT job_id, company_id, url, title, disposition, status, "
             "first_seen FROM jobs WHERE company_id IS NOT NULL "
-            "AND url IS NOT NULL AND url != ''"):
-        key = (r["company_id"], _norm_url(r["url"]), _norm_title(r["title"]),
-               r["job_id"].rsplit("_", 1)[-1])
+            "AND url IS NOT NULL AND url != ''")):
+        key = (r["company_id"], *_posting_key(r), r["job_id"].rsplit("_", 1)[-1])
         if key[1] and key[2]:
-            groups[key].append(dict(r))
-
-    def keep_first(r):
-        # Survivor first: a dispositioned row, then an open one, then the
-        # EARLIEST first_seen (ISO strings sort by time, and a row with
-        # none sorts before every dated one, as it always has).
-        return (r.get("disposition") is None,
-                (r.get("status") or "open") != "open",
-                r.get("first_seen") or "")
+            groups[key].append(r)
 
     return dedup_groups(
-        conn, "jobs", "job_id", groups, rank=keep_first,
+        conn, "jobs", "job_id", groups, rank=_survivor_first,
         describe=lambda keep, losers: (
             f"{(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
             f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}"))

@@ -542,10 +542,61 @@ class TestRenameSlugBoards:
 
     def test_an_unsupported_ats_is_not_a_candidate(self, db, monkeypatch):
         # Workday/Lever/Ashby carry no reliable board-level employer field
-        # (see the module comment on _EMPLOYER_NAME_READERS) -- confirmed
+        # (see the module comment above _employer_atses) -- confirmed
         # live, not merely assumed, so they are not in the reader map at
         # all rather than silently returning "".
         store.upsert_company(db, {"name": "Lifestance", "ats": "lever",
                                   "slug": "lifestance", "active": 1,
                                   "source": "ats_dork"})
         assert ops.rename_slug_boards(conn=db, commit=True) == []
+
+
+class TestRekeyJobs:
+    """rekey_jobs moves stored rows to the id their board spec gives them
+    now (Phenom's gained its host, D11), merging a row a harvest already
+    stored under the new id only when both name one posting."""
+
+    A, B = "https://careers.a.org/us/en/job/", "https://careers.b.org/us/en/job/"
+
+    @staticmethod
+    def _job(db, cid, job_id, url, title, **cols):
+        cols = {"job_id": job_id, "company_id": cid, "url": url, "title": title,
+                "status": "open", **cols}
+        db.execute(f"INSERT INTO jobs ({', '.join(cols)}) "
+                   f"VALUES ({', '.join('?' * len(cols))})", tuple(cols.values()))
+
+    @pytest.fixture
+    def rows(self, db):
+        a = store.upsert_company(db, {"name": "A", "ats": "phenom", "slug": "careers.a.org"})
+        b = store.upsert_company(db, {"name": "B", "ats": "phenom", "slug": "careers.b.org"})
+        self._job(db, a, "phenom_1", self.A + "1", "T1")
+        self._job(db, a, "phenom_2", self.A + "2", "T2", disposition="applied",
+                  first_seen="2026-01-01")
+        self._job(db, a, "phenom_careers_a_org_2", self.A + "2", "t2",
+                  resume_fit_score=0.7, first_seen="2026-09-01")
+        self._job(db, a, "phenom_3", self.A + "3", "T3")
+        self._job(db, a, "phenom_careers_a_org_3", self.A + "3", "Another posting")
+        self._job(db, a, "wd_x_1", "https://x.wd1.myworkdayjobs.com/Site/job/Y_1", "W")
+        self._job(db, b, "phenom_4", self.B + "4", "T4")
+        self._job(db, a, "phenom_careers_b_org_4", self.A + "careers_b_org_4", "T4")
+        db.commit()
+
+    def _ids(self, db):
+        return sorted(r[0] for r in db.execute("SELECT job_id FROM jobs"))
+
+    def test_the_preview_sorts_every_row_and_writes_nothing(self, db, rows):
+        before = self._ids(db)
+        assert ops.rekey_jobs("phenom", conn=db) == {
+            "unchanged": 2, "rekey": 2, "merge": 1, "conflict": 1,
+            "cross-tenant": 1, "unresolvable": 1}
+        assert self._ids(db) == before
+
+    def test_apply_rekeys_and_merges_one_posting_into_one_row(self, db, rows):
+        ops.rekey_jobs("phenom", commit=True, conn=db)
+        assert self._ids(db) == sorted([
+            "phenom_careers_a_org_1", "phenom_careers_a_org_2", "phenom_3",
+            "phenom_careers_a_org_3", "wd_x_1", "phenom_4",
+            "phenom_careers_a_org_careers_b_org_4"])
+        merged = db.execute("SELECT disposition, resume_fit_score, first_seen FROM jobs "
+                            "WHERE job_id='phenom_careers_a_org_2'").fetchone()
+        assert tuple(merged) == ("applied", 0.7, "2026-01-01")

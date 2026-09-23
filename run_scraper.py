@@ -156,6 +156,8 @@ _COMMANDS = [
         "requeue": a.requeue, "requeue_apply": a.requeue_apply})),
     ("rescore", _op("rescore", lambda a: {
         "workers": a.workers, "described_only": a.described_only})),
+    ("rekey_jobs", _op("rekey-jobs", lambda a: {
+        "ats": a.rekey_jobs, "apply": a.rekey_apply})),
 ]
 
 
@@ -231,6 +233,12 @@ def main(argv=None):
                     help="Fetch missing JD text via each company's own board")
     ap.add_argument("--backfill-axes", action="store_true",
                     help="Populate per-axis fit columns from fit_reason (offline)")
+    ap.add_argument("--rekey-jobs", metavar="ATS",
+                    help="Report the stored jobs under ATS companies whose id "
+                         "the board spec now spells differently; writes "
+                         "only with --rekey-apply")
+    ap.add_argument("--rekey-apply", action="store_true",
+                    help="With --rekey-jobs: re-key (or merge) the rows")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap rows processed (backfills / probes)")
     # ── roster / dispositions / store ───────────────────────────────────

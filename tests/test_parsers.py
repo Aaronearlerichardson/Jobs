@@ -41,6 +41,29 @@ class TestSniffer:
                "&ccid=19000101_000003")
         assert ats_signatures.detect(url)[1] == "adp"
 
+    def test_detects_infor_host_and_org(self):
+        """An Infor board URL names BOTH halves of the coordinate; one
+        without the org id names no board."""
+        host = "css-acme-prd.inforcloudsuite.com"
+        url = (f"https://{host}/hcm/Jobs/page/JobsHomePage"
+               f"?csk.JobBoard=EXTERNAL&csk.HROrganization=42")
+        assert ats_signatures.detect("", url) == ("fetchable", "infor", f"{host}|42")
+        assert ats_signatures.detect("", f"https://{host}/hcm/Jobs/page/JobsHomePage") is None
+        assert ats_signatures.detect(f'<a href="{url.replace("&", "&amp;")}">Jobs</a>') == \
+            ("fetchable", "infor", f"{host}|42")
+
+    def test_sniffs_a_phenom_board_from_its_widget_endpoint(self, monkeypatch):
+        """A Phenom tenant's own site is the board: its pages embed the
+        widget API origin, which is the board's slug."""
+        root = "https://www.example-health.org/careers"
+        page = fake_response(text='<html><script>var ddo = {"widgetApiEndpoint":'
+                                  '"https://careers.example-health.org/widgets"};'
+                                  '</script></html>', url=root)
+        monkeypatch.setattr(sniffer, "candidate_pages",
+                            lambda name, careers_url, **kw: iter([page]))
+        assert sniffer.sniff_ats("Example Health") == {
+            "ats": "phenom", "slug": "careers.example-health.org", "careers_url": root}
+
     def test_probes_cover_sniffable_atses(self):
         from src.discovery.resolve.probes import PROBES
         assert {"greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr",

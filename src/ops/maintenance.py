@@ -28,7 +28,7 @@ from src.claude.resume import resume_text
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
-from src.net.http import fetch_failed, get_json
+from src.net.http import fetch_failed
 from src.net.parallel import drain, fan_out, fetch_all
 from src.net.util import text_from_html
 
@@ -2092,10 +2092,12 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 #   * Greenhouse -- every job object in the boards-api listing carries
 #     `company_name` (confirmed live, 2026-09-18: tenant "centriaautism"
 #     answers "Centria Autism", "medelitellc" answers "MedElite Group,
-#     LLC."); config.BOARDS names it as the spec's `employer` field.
+#     LLC.").
 #   * SmartRecruiters -- every posting carries `company.name` (confirmed
-#     live: "AbbVie", "Eurofins"). fetchers.company.fetch_smartrecruiters_all
-#     never reads it either.
+#     live: "AbbVie", "Eurofins").
+#
+# config.BOARDS names that field as each spec's `employer`; the engine
+# reads it off one listing request (`Board.employer_name`).
 #
 # Workday, Lever and Ashby were checked the same way and do NOT qualify:
 #   * Workday's CXS job-DETAIL JSON (not the listing) carries a top-level
@@ -2113,41 +2115,12 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 #     read at all rather than screen-scraped freshly for this one op.
 
 
-# ats -> (listing URL with `{}` for the slug, label for the failure line,
-# the postings out of the payload, the employer name off one posting). Only
-# an ATS with a reliable, BOARD-level (not per-posting) employer field in its
-# own listing payload qualifies -- see the module comment above for why
-# Workday/Lever/Ashby are not here.
-#
-# A platform with a config.BOARDS spec names its field there (`employer`)
-# and is read through the engine; it has no row here.
-#
-# SmartRecruiters' root is company_fetch's; `limit=1` is the shape
-# src.discovery.resolve.probes.probe_smartrecruiters uses -- one posting is
-# enough to name a board.
-_EMPLOYER_NAME_READERS = {
-    "smartrecruiters": (
-        company_fetch.SMARTRECRUITERS_API + "?limit=1",
-        "SmartRecruiters",
-        lambda d: (d or {}).get("content") or [],
-        lambda j: (j.get("company") or {}).get("name")),
-}
-
-
 def _employer_atses():
-    return sorted({b.name for b in BOARDS.values() if b.spec.get("employer")}
-                  | set(_EMPLOYER_NAME_READERS))
+    return sorted(b.name for b in BOARDS.values() if b.spec.get("employer"))
 
 
 def _employer_name(ats, slug):
-    board = board_for(ats)
-    if board:
-        return board.employer_name(slug)
-    url, label, rows_of, name_of = _EMPLOYER_NAME_READERS[ats]
-    data = get_json(url.format(slug),
-                    f"{label} {slug} (employer-name check)", default={})
-    rows = rows_of(data)
-    return (name_of(rows[0]) or "").strip() if rows else ""
+    return board_for(ats).employer_name(slug)
 
 
 def _slug_named_boards(conn):
@@ -2186,7 +2159,7 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
     """PREVIEW (default) or APPLY a rename of every active, dork-sourced
     Greenhouse/SmartRecruiters board whose stored name is nothing but its
     own board slug (_slug_named_boards) to the employer name the board's
-    OWN listing payload carries (_EMPLOYER_NAME_READERS). One GET per
+    OWN listing payload carries (`Board.employer_name`). One GET per
     candidate board, no detail fetch, no whole-board pull.
 
     Same preview/apply shape as reresolve_misses: `commit=False` (the
@@ -2196,7 +2169,7 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
 
     A fetched name is rejected -- reported, never written, in EITHER mode
     -- when:
-      * the board answered empty or errored (_EMPLOYER_NAME_READERS -> "");
+      * the board answered empty or errored (`Board.employer_name` -> "");
       * src.match.names.junk_name_reason flags it -- the SAME screen a
         pasted or re-resolved name is run through, so a malformed payload
         naming a section heading rather than an employer can never
@@ -2280,3 +2253,87 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
                  else "would be renamed (preview: nothing written)")
               + f" of {len(rows)} checked.")
         return out
+
+
+# --------------------------------------------------------------------------- #
+#  Job-id migration: rows stored under an id rule a board spec has changed    #
+# --------------------------------------------------------------------------- #
+
+REKEY_BUCKETS = ("unchanged", "rekey", "merge", "conflict", "cross-tenant",
+                 "unresolvable")
+
+
+def rekey_jobs(ats, commit=False, t=None, conn=None):
+    """PREVIEW (default) or APPLY moving every stored job under an `ats`
+    company to the id that board's spec gives it now (`Board.row_id`: the
+    company's handle and the posting the row's URL names). Prints each
+    bucket's count and five samples; returns {bucket: count}.
+
+    Each row lands in one bucket:
+      unchanged     its id already is the spec's
+      rekey         the new id is free: the row takes it
+      merge         a row of the same company holds it for the same posting
+                    (store.same_posting: a harvest ran first); the two
+                    become one (store.merge_jobs)
+      conflict      a row of the same company holds it for another
+                    posting: both kept
+      cross-tenant  another company's row holds it: both kept
+      unresolvable  the URL names no posting the spec reads (a row an
+                    earlier platform stored, a malformed URL): untouched
+
+    Only `commit=True` writes, as one store.batch.
+
+    Notes:
+        D11 (2026-09-23): Phenom ids gained their host, "phenom_<reqId>"
+        -> "phenom_<host_key>_<reqId>", because tenants on their own
+        domains can share requisition numbers. Run it before the first
+        harvest under a new rule: upsert_job re-keys a row itself only on
+        an exact URL and title match, and never moves its company_id.
+    """
+    board = board_for(ats)
+    if board is None or not board.fetchable:
+        print(f"  [!] no board spec reads {ats!r} rows")
+        return {}
+    with track_store(t, conn) as conn:
+        companies = {r["id"]: dict(r) for r in conn.execute(
+            "SELECT * FROM companies WHERE ats=?", (ats,))}
+        ph = ",".join("?" for _ in companies)
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT id, job_id, company_id, url, title FROM jobs "
+            f"WHERE company_id IN ({ph}) ORDER BY id", tuple(companies))] if companies else []
+        buckets = {b: [] for b in REKEY_BUCKETS}
+        plan, claimed = [], {}
+        for r in rows:
+            handle = board.handle(companies[r["company_id"]])
+            new_id = board.row_id(handle, r["url"]) if handle else None
+            holder = claimed.get(new_id) or (new_id and conn.execute(
+                "SELECT id, job_id, company_id, url, title FROM jobs WHERE job_id=?",
+                (new_id,)).fetchone())
+            holder = dict(holder) if holder else None
+            if not new_id:
+                kind = "unresolvable"
+            elif new_id == r["job_id"]:
+                kind = "unchanged"
+            elif holder is None:
+                kind, claimed[new_id] = "rekey", r
+            elif holder["company_id"] != r["company_id"]:
+                kind = "cross-tenant"
+            else:
+                kind = "merge" if store.same_posting(holder, r) else "conflict"
+            buckets[kind].append((r["job_id"], new_id))
+            if kind in ("rekey", "merge"):
+                plan.append((kind, r, new_id, holder))
+        if commit:
+            with store.batch(conn):
+                for kind, r, new_id, holder in plan:
+                    if kind == "rekey":
+                        conn.execute("UPDATE jobs SET job_id=? WHERE id=?", (new_id, r["id"]))
+                    else:
+                        store.merge_jobs(conn, [holder["id"], r["id"]], new_id)
+    print(f"  {ats}: {len(rows)} stored row(s) under {len(companies)} compan(ies)")
+    for b in REKEY_BUCKETS:
+        print(f"    {b:13} {len(buckets[b])}")
+        for old, new in buckets[b][:5] if b != "unchanged" else []:
+            print(f"      {old!r} -> {new}")
+    print("  applied." if commit else "  preview: nothing written.")
+    return {b: len(v) for b, v in buckets.items()}

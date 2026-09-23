@@ -320,4 +320,146 @@ BOARDS = {
         "closure": {"via": "detail", "closed": {"falsy": "requisitionTitle"},
                     "open": {"truthy": "requisitionTitle"}},
     },
+    "smartrecruiters": {
+        # Not in the lightweight sweep: boards run to thousands of rows.
+        "job_ref": {"re": r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", "parts": ["slug", "id"]},
+        "listing": {
+            "url": "https://api.smartrecruiters.com/v1/companies/{slug}/postings",
+            "params": {"limit": "$size", "offset": "$offset"},
+            "decoder": {"kind": "json", "entries": "content"},
+            "pager": {"kind": "offset", "size": 100, "pages": 10, "total": "totalFound"},
+            "fields": {
+                "id": {"format": "sr_{slug}_{id}"},
+                "title": "name",
+                "url": {"format": "https://jobs.smartrecruiters.com/{slug}/{id}"},
+                "location": {"join": ["location.city", "location.region", "location.country"],
+                             "sep": ", "},
+                "posted_at": "releasedDate",
+                "department": {"join": ["department.label", "function.label"]},
+            },
+        },
+        "detail": {
+            "url": "https://api.smartrecruiters.com/v1/companies/{slug}/postings/{id}",
+            "fields": {"description": {"join": ["jobAd.sections.jobDescription.text",
+                                                "jobAd.sections.qualifications.text",
+                                                "jobAd.sections.additionalInformation.text"],
+                                       "transform": "html_text"}},
+            "location": "never",
+        },
+        # A pulled posting answers 200 with active=false. A repost answers
+        # under its successor's id, which only postingUrl carries: a verdict
+        # on the successor, so neither open nor closed for this row.
+        "closure": {"closed": [{"when": {"eq": ["active", False]}, "why": {"const": "active=false"}}],
+                    "open": [{"when": {"all": [{"eq": ["active", True]},
+                                               {"any": [{"falsy": "id"}, {"falsy": "postingUrl"},
+                                                        {"contains": ["postingUrl", "$id"]}]}]},
+                              "why": {"const": "active"}}]},
+        "employer": "company.name",
+    },
+    "infor": {
+        "handle": {"parts": ["host", "org"]},
+        # The posting key is a triple (org, requisition, posting revision),
+        # URL-encoded into the path; the parts are named after the listing
+        # keys the row id reads.
+        "job_ref": {"re": r"(?i)^https?://([^/]+)/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
+                          r"%28(\d+)%2C(\d+)%2C(\d+)%29\.JobPostingDisplay",
+                    "parts": ["host", "org", "JobRequisition", "JobPosting"]},
+        "listing": {
+            "url": "https://{host}/hcm/Jobs/list/JobPosting.SearchForJobsResults",
+            "params": {"pageop": "load", "pagesize": "$size",
+                       "pagepanel": "JobsHomePage.Jobs.Jobs",
+                       "csk.JobBoard": "EXTERNAL", "csk.HROrganization": "{org}"},
+            # Every field is wrapped: {"value": ..., "size": ..., ...}.
+            "decoder": {"kind": "json", "entries": "dataViewSet.data[].fields", "values": "value"},
+            # The next-page URL carries opaque record keys: rebuilt by hand
+            # it silently re-serves page 1, so it is followed verbatim.
+            "pager": {"kind": "cursor", "size": 500, "pages": 40,
+                      "next": "dataViewSet.pagingUrls.nextPageUrl",
+                      "has_next": "dataViewSet.pagingInfo.hasNext"},
+            "fields": {
+                "_req": {"first": ["JobRequisition", "JobId"]},
+                "_tenant": {"format": "{host}", "transform": "host_label"},
+                "id": {"format": "infor_{_tenant}_{_req}_{JobPosting}"},
+                "title": "Description",
+                "url": {"format": "https://{host}/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
+                                  "%28{org}%2C{_req}%2C{JobPosting}%29.JobPostingDisplay"
+                                  "?pagesize=1&csk.JobBoard=EXTERNAL&csk.HROrganization={org}"},
+                "location": {"of": {"first": ["LocationOfJobDescriptionForSort", "LocationOfJob"]},
+                             "transform": "colon_location"},
+                "posted_at": {"of": "PostingDateRange_prd_Begin", "transform": "ymd"},
+                "department": {"first": ["_op_Category_prd_Description_spc_translation_cp_",
+                                         "Category"]},
+            },
+        },
+        "detail": {
+            "url": "https://{host}/hcm/Jobs/form/JobPosting%5BJobPostingSet%5D"
+                   "%28{org}%2C{JobRequisition}%2C{JobPosting}%29.JobPostingDisplay"
+                   "?pageop=load&pagesize=1&dependentForm=true"
+                   "&csk.JobBoard=EXTERNAL&csk.HROrganization={org}",
+            "decoder": {"kind": "json", "values": "value"},
+            "fields": {
+                "description": {"of": "fields._op_PositionDescription_spc_translation_cp_",
+                                "transform": "html_text"},
+                # "US:NC:Morrisville | <category> | <work type>"
+                "location": {"of": {"of": "fields._op_JobRequisitionLocationCategoryWorkType"
+                                          "_spc_translation_cp_", "transform": "before:|"},
+                             "transform": "colon_location"},
+            },
+            "location": "if_unknown",
+        },
+        # A pulled posting answers 200 either way: its record gone, or kept
+        # with a posting-end date in the past (2026-09-21, live).
+        "closure": {"closed": [
+            {"when": {"any": [{"eq": ["status", "DOES_NOT_EXIST"]}, {"eq": ["statusCode", 404]}]},
+             "why": {"const": "posting record gone"}},
+            {"when": {"past": {"of": "fields.PostingDateRange_prd_End", "transform": "ymd"}},
+             "why": {"join": [{"const": "posting ended"},
+                              {"of": "fields.PostingDateRange_prd_End", "transform": "ymd"}]}}],
+                    "open": {"truthy": "fields"}},
+    },
+    "phenom": {
+        # The listing lives under a locale prefix only the board's root
+        # redirect names (/us/en, /global/en, ...).
+        "handle": {"follow": {"base": "{slug}"}},
+        # Last in this table: its URLs are the ones on the tenant's own host.
+        "job_ref": {"re": r"^(https?://([^/?#]+)/[a-z]{2,8}/[a-z]{2}(?:[-_][A-Za-z]{2})?)"
+                          r"/job/([^/?#]+)/?$",
+                    "parts": ["base", "slug", "reqId"]},
+        "listing": {
+            "url": "{base}/search-results",
+            "params": {"from": "$offset", "size": "$size"},
+            "decoder": {"kind": "json_in_html", "regex": r"phApp\.ddo\s*=\s*",
+                        "entries": "eagerLoadRefineSearch.data.jobs"},
+            # The row order is unstable between requests: half-page overlap
+            # catches a row shifting across a page boundary. The server caps
+            # size at 500.
+            "pager": {"kind": "overlap", "size": 500, "step": 250, "pages": 40,
+                      "total": "eagerLoadRefineSearch.totalHits"},
+            "fields": {
+                "_req": {"first": ["reqId", "jobId"]},
+                "_key": {"format": "{slug}", "transform": "host_key"},
+                "id": {"format": "phenom_{_key}_{_req}"},
+                "title": "title",
+                "url": {"format": "{base}/job/{_req}"},
+                "location": {"first": ["location", "cityStateCountry", "cityState",
+                                       {"join": ["city", "state", "country"], "sep": ", "}]},
+                "posted_at": "postedDate",
+                "department": "category",
+            },
+        },
+        "detail": {
+            "url": "{base}/job/{reqId}",
+            "decoder": {"kind": "json_in_html", "regex": r"phApp\.ddo\s*=\s*"},
+            "record": "jobDetail.data.job",
+            "fields": {
+                "description": {"of": "description", "transform": "html_text"},
+                "location": {"first": ["location", "cityStateCountry", "cityState",
+                                       {"join": ["city", "state", "country"], "sep": ", "},
+                                       {"join": ["standardised_multi_location[]"
+                                                 ".standardisedMapQueryLocation"], "sep": "; "}]},
+            },
+            "location": "always",
+        },
+        "closure": {"via": "page"},
+    },
 }

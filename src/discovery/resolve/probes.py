@@ -173,11 +173,6 @@ probe_jazzhr = _api_probe(
     lambda r, h: len(_fetcher("jazzhr").APPLY_RE.findall(r.text)),
     require_jobs=True)
 
-probe_smartrecruiters = _api_probe(
-    lambda h: f"{_fetcher('company').SMARTRECRUITERS_API.format(h)}?limit=1",
-    lambda r, h: int(r.json().get("totalFound", 0) or 0),
-    require_jobs=True)
-
 probe_jobvite = _api_probe(
     lambda h: f"{_fetcher('jobvite').BASE}/{h}/search?p=0",
     lambda r, h: len(_fetcher("jobvite").parse_listing(r.text, h)),
@@ -190,7 +185,6 @@ PROBES = {
     **{b.name: b.probe for b in BOARDS.values() if b.fetchable},
     "kula":       probe_kula,
     "jazzhr":     probe_jazzhr,
-    "smartrecruiters": probe_smartrecruiters,
     "jobvite":    probe_jobvite,
 }
 

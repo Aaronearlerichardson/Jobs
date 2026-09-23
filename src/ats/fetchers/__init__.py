@@ -21,12 +21,10 @@ from .getro import fetch_getro_all
 from .hnhiring import fetch_hnhiring
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims
-from .infor import fetch_infor
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .jsonld import fetch_jsonld_page
 from .peopleadmin import fetch_peopleadmin
-from .phenom import fetch_phenom
 from .remoteok import fetch_remoteok
 from .remotive import fetch_remotive
 from .rssfeed import fetch_rss
@@ -39,14 +37,12 @@ __all__ = [
     "fetch_getro_all",
     "fetch_hnhiring",
     "fetch_icims",
-    "fetch_infor",
     "fetch_jazzhr",
     "fetch_jobvite",
     "fetch_jsonld_page",
     "fetch_kula",
     "fetch_nlx_company",
     "fetch_peopleadmin",
-    "fetch_phenom",
     "fetch_remoteok",
     "fetch_remotive",
     "fetch_rss",

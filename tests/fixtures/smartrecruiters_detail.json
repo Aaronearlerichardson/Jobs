@@ -1,0 +1,58 @@
+{
+ "id": "3743990015568355",
+ "name": "Patient Engagement Specialist - Remote",
+ "uuid": "49f889e7-5565-4c5c-92a8-eeabb3bac653",
+ "jobId": "27216157-d1f0-420d-acbb-57ac64dae596",
+ "refNumber": "REF292X",
+ "company": {
+  "name": "Guidehealth",
+  "identifier": "Guidehealth"
+ },
+ "location": {
+  "city": "Dallas",
+  "region": "TX",
+  "country": "us",
+  "remote": true,
+  "hybrid": false,
+  "latitude": "32.7766642",
+  "longitude": "-96.79698789999999",
+  "fullLocation": "Dallas, TX, United States"
+ },
+ "releasedDate": "2026-09-22T16:21:42.578Z",
+ "postingUrl": "https://jobs.smartrecruiters.com/Guidehealth/3743990015568355-patient-engagement-specialist-remote",
+ "jobAd": {
+  "sections": {
+   "companyDescription": {
+    "title": "Company Description",
+    "text": "<p><strong>Build Your Career in Healthcare</strong></p><p>Healthcare is changing quickly, driven by technology, data, AI, and new approaches to delivering better care. At Guidehealth, you’ll have the opportunity to build your healthcare knowledge and develop skills for the future while gaining expos"
+   },
+   "jobDescription": {
+    "title": "Job Description",
+    "text": "<p><strong>What You'll Be Doing</strong></p><ul><li>Proactively reaching out to patients and members through phone, text, chat, email, and other digital channels to engage them in healthcare programs, services, and recommended care.</li><li>Building rapport quickly across different communication cha"
+   },
+   "qualifications": {
+    "title": "Qualifications",
+    "text": "<p><strong>What you'll need for success in this exciting opportunity</strong></p><ul><li>Experience proactively communicating with customers or patients across multiple channels, including phone, text, chat, email, or other digital platforms.</li><li>The confidence and persistence to initiate outbou"
+   },
+   "additionalInformation": {
+    "title": "Additional Information",
+    "text": "<p><em><strong>The base pay range for this role is between $20 - $22 per hour paid bi-weekly</strong></em></p><div sr-tagline=\"\"></div><p><strong>ALIVE with Purpose: How We Thrive at Guidehealth&#xa0;</strong></p><p>At Guidehealth, our values come to life in everything we do.&#xa0;</p><ul><li>We are"
+   },
+   "videos": {
+    "title": "Videos To Watch",
+    "urls": [
+     "https://youtu.be/BAWs9H1UN2M?si=DxZ-kjq-Xo-NmQdU"
+    ]
+   }
+  }
+ },
+ "active": true,
+ "function": {
+  "id": "health_care_provider",
+  "label": "Health Care Provider"
+ },
+ "typeOfEmployment": {
+  "id": "permanent",
+  "label": "Full-time"
+ }
+}

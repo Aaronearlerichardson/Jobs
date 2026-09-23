@@ -15,10 +15,9 @@ result in the company-fetch shape (`board.adapt`); a platform with a
 
 `_wd` is Workday's (tenant, pod, site, path) for `hydrate_description`,
 None elsewhere. The module also keeps what has no fetcher module of its
-own: SmartRecruiters and WordPress careers endpoints, self-hosted
-("custom") careers pages and their board detection, and the per-URL
-description/title readers. The per-job open/closed probe that read
-those same platforms is fetchers/probe.py.
+own: WordPress careers endpoints, self-hosted ("custom") careers pages
+and their board detection, and the per-URL description/title readers.
+The per-job open/closed probe is fetchers/probe.py.
 """
 
 import re
@@ -37,21 +36,19 @@ from src import config
 # full tree via _get_soup.
 _ANCHORS_ONLY = SoupStrainer("a")
 
-from src.net.http import HEADERS, SESSION, fetch_failed, get_json, note_capped
+from src.net.http import HEADERS, SESSION, fetch_failed, get_json
 from src.match.locality import NC_RE, location_unknown  # profile [locality]
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           default_search_text, hashed_cache_path, host_of,
                           json_cache_get, json_cache_put, norm_posted_date,
-                          origin_of, text_from_html)
-from . import icims, infor, phenom, workday
+                          origin_of)
+from . import icims, workday
 from .board import BOARDS, adapt as _adapt, board_for, loc_ok
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims_all
-from .infor import fetch_infor_all
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .peopleadmin import fetch_peopleadmin
-from .phenom import fetch_phenom_all
 from .workday import fetch_workday_all, wd_local_count  # noqa: F401 (re-export)
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
@@ -61,70 +58,6 @@ _DESC_MAX = config.MAX_DESC_CHARS
 # Kept for discovery (local_sourcing), which imports the Workday search
 # term under this name.
 _default_search_text = default_search_text
-
-
-#: One board's postings, formatted with its slug. SmartRecruiters has no
-#: module of its own, so this is the one copy the closure probe, the slug
-#: probe and the employer-name check read.
-SMARTRECRUITERS_API = "https://api.smartrecruiters.com/v1/companies/{}/postings"
-
-# Pages a whole-board SmartRecruiters pull reads by default (x page size
-# 100 = the pre-2026-09-18 1,000-row cap). FETCHERS' "smartrecruiters"
-# entry below raises this for a mission-worth-it board via
-# config.board_max_pages -- see src.config.policy.BOARD_MAX_ROWS.
-_SR_MAX_PAGES = 10
-
-
-def fetch_smartrecruiters_all(slug, loc_re=None, max_pages=_SR_MAX_PAGES):
-    """SmartRecruiters public postings API. Descriptions hydrated lazily.
-
-    Reports a capped snapshot (net.http.note_capped) when every page up to
-    `max_pages` came back full, or, on an unscoped pull, when fewer rows
-    came back than the response's own `totalFound`. A scoped pull's
-    `totalFound` is never compared: the rows it drops for locality are not
-    missing.
-
-    A page `get_json` cannot read (error status, non-JSON body) ends the
-    walk as a reported failure, never as the board's end.
-    """
-    out = []
-    total = None
-    for page in range(max_pages):
-        data = get_json(f"{SMARTRECRUITERS_API.format(slug)}"
-                         f"?limit=100&offset={page*100}",
-                         f"smartrecruiters {slug} p{page}")
-        if data is None:
-            break
-        if isinstance(data.get("totalFound"), (int, float)):
-            total = data["totalFound"]
-        content = data.get("content", []) or []
-        if not content:
-            break
-        for p in content:
-            loc = p.get("location", {}) or {}
-            # Each COMPONENT cleaned before the join, not the joined
-            # string: a trailing tab on "city" would otherwise survive the
-            # collapse as a space before the comma ("Durham , NC"), and a
-            # component that is only whitespace would contribute a bare ", ".
-            loc_s = ", ".join(x for x in (clean_field(loc.get("city")),
-                                          clean_field(loc.get("region")),
-                                          clean_field(loc.get("country"))) if x)
-            if not loc_ok(loc_re, loc_s):
-                continue
-            pid = p.get("id")
-            out.append({"id": f"sr_{slug}_{pid}",
-                        "title": clean_field(p.get("name")),
-                        "url": f"https://jobs.smartrecruiters.com/{slug}/{pid}",
-                        "location": loc_s, "description": "", "ats": "smartrecruiters",
-                        "_wd": None, "_sr": (slug, pid),
-                        "posted_at": norm_posted_date(p.get("releasedDate"))})
-        if len(content) < 100:
-            break
-    else:
-        note_capped(total if loc_re is None else None)
-    if loc_re is None and (total or 0) > len(out):
-        note_capped(total)
-    return out
 
 
 def fetch_peopleadmin_all(host, loc_re=None):
@@ -146,13 +79,12 @@ def fetch_peopleadmin_all(host, loc_re=None):
 
 def needs_detail(job):
     """True when hydrate_description would fetch anything for `job`: no
-    body yet, or (Workday only) a body already but a location the listing
-    never resolved -- the "<N> Locations" placeholder (or any other
-    location_unknown text). Every OTHER ats's location comes solely from
-    the listing (hydrate_description never revisits it once a body is in),
-    so a bodied non-Workday row never needs a second detail call. Shared
-    by harvest._hydrate_rows and triage._hydrate, which both select rows
-    to fetch by this predicate rather than "no description" alone.
+    body yet, or a body already but a location the listing never resolved
+    (the "<N> Locations" placeholder, or any other location_unknown text)
+    on Workday or on a spec'd platform whose detail can fill it
+    (`Board.needs_detail`). Shared by harvest._hydrate_rows and
+    triage._hydrate, which both select rows to fetch by this predicate
+    rather than "no description" alone.
 
     >>> needs_detail({"description": "", "ats": "greenhouse", "_wd": None})
     True
@@ -173,18 +105,6 @@ def needs_detail(job):
         return True
     return job.get("ats") == "workday" and bool(job.get("_wd")) \
         and location_unknown(job.get("location"))
-
-
-def _hydrate_from_url(platform, url):
-    """(description, location), "" each on a miss, for a stored job URL
-    on a platform whose detail call needs only what the URL names: the
-    module supplies job_ref_from_url, detail, detail_description and
-    detail_location (phenom, infor)."""
-    ref = platform.job_ref_from_url(url)
-    if not ref:
-        return "", ""
-    payload = platform.detail(*ref)
-    return platform.detail_description(payload), platform.detail_location(payload)
 
 
 def hydrate_description(job):
@@ -215,41 +135,13 @@ def hydrate_description(job):
             if locs and location_unknown(job.get("location")):
                 job["location"] = "; ".join(locs)
         return job
-    if job.get("ats") == "smartrecruiters" and job.get("_sr"):
-        slug, pid = job["_sr"]
-        try:
-            r = SESSION.get(f"{SMARTRECRUITERS_API.format(slug)}/{pid}", headers=HEADERS)
-            secs = r.json().get("jobAd", {}).get("sections", {}) or {}
-            parts = [secs.get(k, {}).get("text", "") for k in
-                     ("jobDescription", "qualifications", "additionalInformation")]
-            html = " ".join(p for p in parts if p)
-            job["description"] = text_from_html(html)[:_DESC_MAX]
-        except Exception:
-            pass
-    elif job.get("ats") == "icims" and job.get("url"):
+    if job.get("ats") == "icims" and job.get("url"):
         # The ?in_iframe=1 document is server-rendered with JSON-LD even on
         # JS-shell tenants; it also names the posting's real location(s).
         loc, desc = icims.job_meta(job["url"], need_desc=True)
         if desc:
             job["description"] = desc[:_DESC_MAX]
         if loc and (job.get("location") or "").strip() in ("", icims.LOCAL_LABEL):
-            job["location"] = loc
-    elif job.get("ats") == "phenom" and job.get("url"):
-        # No "_"-prefixed coordinate survives _adapt for this ATS (only
-        # Workday's _wd does), so the detail coordinates are re-derived
-        # from the job's own URL.
-        desc, loc = _hydrate_from_url(phenom, job["url"])
-        if desc:
-            job["description"] = desc[:_DESC_MAX]
-        if loc:
-            job["location"] = loc
-    elif job.get("ats") == "infor" and job.get("url"):
-        # Same URL-only round trip as the phenom branch; the generic
-        # fallback below cannot help here, the stored URL being a JS shell.
-        desc, loc = _hydrate_from_url(infor, job["url"])
-        if desc:
-            job["description"] = desc[:_DESC_MAX]
-        if loc and location_unknown(job.get("location")):
             job["location"] = loc
     elif job.get("ats") == "wpjson" and job.get("url"):
         # Outbound apply page (an Arcoro/BirdDog portal). Server-rendered;
@@ -638,17 +530,12 @@ FETCHERS = {
     "kula":            lambda c, lr: _adapt(fetch_kula("", c["slug"], loc_re=lr), "kula"),
     # Page budget: config.board_max_pages raises it for a mission-worth-it
     # board (config.BOARD_MAX_ROWS), else keeps the fetcher's own narrower
-    # default (workday._WD_MAX_PAGES / _SR_MAX_PAGES) for one
-    # config.is_offmission_inactive -- see policy.board_max_pages.
+    # default (workday._WD_MAX_PAGES) for one config.is_offmission_inactive
+    # -- see policy.board_max_pages.
     "workday":         lambda c, lr: _adapt(fetch_workday_all(
                            c["wd_tenant"], c["wd_pod"], c["wd_site"], lr,
                            max_pages=config.board_max_pages(
                                c, 20, workday._WD_MAX_PAGES)), "workday"),
-    "phenom":          lambda c, lr: _adapt(fetch_phenom_all(c.get("slug") or c.get("careers_url"), lr), "phenom"),
-    "infor":           lambda c, lr: _adapt(fetch_infor_all(c["slug"], lr), "infor"),
-    "smartrecruiters": lambda c, lr: fetch_smartrecruiters_all(
-                           c["slug"], lr,
-                           max_pages=config.board_max_pages(c, 100, _SR_MAX_PAGES)),
     "icims":           lambda c, lr: _adapt(fetch_icims_all(c["slug"], lr), "icims"),
     "successfactors":  lambda c, lr: _adapt(fetch_successfactors("", c["careers_url"], loc_re=lr), "successfactors"),
     "peopleadmin":     lambda c, lr: fetch_peopleadmin_all(c["careers_url"], lr),
@@ -685,13 +572,8 @@ _TITLE_SAMPLERS = {
     "jobvite":         lambda c, n: fetch_jobvite(c["slug"], max_details=0),
     "jazzhr":          lambda c, n: fetch_jazzhr("", c["slug"], max_jobs=n),
     "icims":           lambda c, n: fetch_icims_all(c["slug"], meta_cap=0),
-    "phenom":          lambda c, n: fetch_phenom_all(
-                           c.get("slug") or c.get("careers_url"), max_pages=1),
-    "infor":           lambda c, n: fetch_infor_all(c["slug"], page_size=n,
-                                                    max_pages=1),
     "successfactors":  lambda c, n: fetch_successfactors(
                            "", c["careers_url"], max_pages=1),
-    "smartrecruiters": lambda c, n: fetch_smartrecruiters_all(c["slug"], max_pages=1),
     "workday":         lambda c, n: fetch_workday_all(
                            c["wd_tenant"], c["wd_pod"], c["wd_site"], max_pages=1),
 }

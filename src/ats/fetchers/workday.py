@@ -379,9 +379,9 @@ def fetch_workday_all(tenant, pod, site, loc_re=None, search_text=None,
     Each row carries `_wd` = (tenant, pod, site, externalPath), the
     coordinates `cxs_detail` needs to fetch its body later.
 
-    Deduped by posting id WITHIN this one pull (same shape as
-    fetchers/phenom.py's fetch_phenom_all: a seen-id set, `new_ids == 0`
-    stops the walk early) -- Workday's own posting order is unstable
+    Deduped by posting id WITHIN this one pull (same shape as the board
+    engine's page walk: a seen-id set, `new_ids == 0` stops the walk
+    early) -- Workday's own posting order is unstable
     enough that a page can repeat postings a previous page already
     returned (see _wd_capped_total's docstring for the "more rows than
     the board's own total" symptom this caused before deduping existed).

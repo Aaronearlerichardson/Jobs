@@ -119,11 +119,11 @@ class TestAnEmptyBoardIsAMiss:
 
     def test_smartrecruiters_empty_is_not_a_board(self, serve):
         serve(fake_response({"totalFound": 0}))
-        assert probes.probe_smartrecruiters("acme") == (False, 0)
+        assert probes.PROBES["smartrecruiters"]("acme") == (False, 0)
 
     def test_smartrecruiters_with_postings_is(self, serve):
         serve(fake_response({"totalFound": 7}))
-        assert probes.probe_smartrecruiters("acme") == (True, 7)
+        assert probes.PROBES["smartrecruiters"]("acme") == (True, 7)
 
     def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
         # Every JazzHR page links /apply/confirm/, postings or not.

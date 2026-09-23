@@ -1,0 +1,148 @@
+{
+ "offset": 0,
+ "limit": 100,
+ "totalFound": 3,
+ "content": [
+  {
+   "id": "3743990015568355",
+   "name": "Patient Engagement Specialist - Remote",
+   "uuid": "49f889e7-5565-4c5c-92a8-eeabb3bac653",
+   "jobAdId": "ebfee4a1-da77-4f86-9697-c714af69e012",
+   "defaultJobAd": false,
+   "refNumber": "REF292X",
+   "company": {
+    "identifier": "Guidehealth",
+    "name": "Guidehealth"
+   },
+   "releasedDate": "2026-09-22T16:21:42.578Z",
+   "location": {
+    "city": "Dallas",
+    "region": "TX",
+    "country": "us",
+    "remote": true,
+    "hybrid": false,
+    "latitude": "32.7766642",
+    "longitude": "-96.79698789999999",
+    "fullLocation": "Dallas, TX, United States"
+   },
+   "industry": {
+    "id": "hospital_and_health_care",
+    "label": "Hospital And Health Care"
+   },
+   "department": {},
+   "function": {
+    "id": "health_care_provider",
+    "label": "Health Care Provider"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "associate",
+    "label": "Associate"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/Guidehealth/postings/3743990015568355",
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  },
+  {
+   "id": "3743990015329216",
+   "name": "Remote Clinical Pharmacist – HEDIS Medication Adherence",
+   "uuid": "f54c8b3d-8b43-4b82-91f3-fbd41a668d70",
+   "jobAdId": "0115dea5-f00a-4402-b975-d61356db94bd",
+   "defaultJobAd": false,
+   "refNumber": "REF308X",
+   "company": {
+    "identifier": "Guidehealth",
+    "name": "Guidehealth"
+   },
+   "releasedDate": "2026-09-17T01:42:07.930Z",
+   "location": {
+    "city": "Houston",
+    "region": "TX",
+    "country": "us",
+    "remote": true,
+    "hybrid": false,
+    "latitude": "29.7600771",
+    "longitude": "-95.37011079999999",
+    "fullLocation": "Houston, TX, United States"
+   },
+   "industry": {
+    "id": "hospital_and_health_care",
+    "label": "Hospital And Health Care"
+   },
+   "department": {},
+   "function": {
+    "id": "analyst",
+    "label": "Analyst"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "mid_senior_level",
+    "label": "Mid-Senior Level"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/Guidehealth/postings/3743990015329216",
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  },
+  {
+   "id": "3743990015329017",
+   "name": "Remote Clinical Pharmacist – HEDIS Medication Adherence",
+   "uuid": "38b11b46-567f-4c47-88f6-4f4f7f863518",
+   "jobAdId": "36696111-7b98-4295-8bd4-9a245b441797",
+   "defaultJobAd": false,
+   "refNumber": "REF308X",
+   "company": {
+    "identifier": "Guidehealth",
+    "name": "Guidehealth"
+   },
+   "releasedDate": "2026-09-17T01:41:41.674Z",
+   "location": {
+    "city": "Atlanta",
+    "region": "GA",
+    "country": "us",
+    "remote": true,
+    "hybrid": false,
+    "latitude": "33.7501275",
+    "longitude": "-84.3885209",
+    "fullLocation": "Atlanta, GA, United States"
+   },
+   "industry": {
+    "id": "hospital_and_health_care",
+    "label": "Hospital And Health Care"
+   },
+   "department": {},
+   "function": {
+    "id": "analyst",
+    "label": "Analyst"
+   },
+   "typeOfEmployment": {
+    "id": "permanent",
+    "label": "Full-time"
+   },
+   "experienceLevel": {
+    "id": "mid_senior_level",
+    "label": "Mid-Senior Level"
+   },
+   "visibility": "PUBLIC",
+   "ref": "https://api.smartrecruiters.com/v1/companies/Guidehealth/postings/3743990015329017",
+   "language": {
+    "code": "en",
+    "label": "English",
+    "labelNative": "English (US)"
+   }
+  }
+ ]
+}

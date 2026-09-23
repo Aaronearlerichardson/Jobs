@@ -8,7 +8,7 @@ A field spec is a PATH or a dict with one operator:
     first          [spec, ...]: the first truthy value that is not a dict
     join           [spec, ...] (+ "sep", default " "; "max" keeps the first
                    n): the truthy values, lists flattened, dicts dropped,
-                   joined
+                   each trimmed (a blank one dropped), joined
     each           a list path, with "do" (a spec read on each item) and
                    "skip" (a condition dropping an item): the values
     merge          {"primary", "extras"}: `merge_locations`
@@ -21,13 +21,14 @@ A field spec is a PATH or a dict with one operator:
 and optionally "when" (a condition; "else" is used when it fails),
 "transform" (a name in TRANSFORMS, "name:arg" passing it an argument) and
 "default" (used for a falsy value). A condition is one of truthy, falsy,
-eq, contains, any, all.
+eq, contains, past, any, all.
 """
 
 import html
 import re
+import time
 
-from src.net.util import norm_posted_date, text_from_html
+from src.net.util import host_of, norm_posted_date, text_from_html
 
 
 def _text(v):
@@ -48,13 +49,59 @@ def _after(text, marker):
     return body or text
 
 
+def _ymd(v):
+    """A YYYYMMDD value as an ISO date; None for zeros or anything else.
+
+    >>> _ymd("20260921"), _ymd(20260921), _ymd("00000000"), _ymd("")
+    ('2026-09-21', '2026-09-21', None, None)
+    """
+    m = re.match(r"^(\d{4})(\d{2})(\d{2})$", str(v).strip())
+    return f"{m[1]}-{m[2]}-{m[3]}" if m and m[1] != "0000" else None
+
+
+def _colon_location(raw):
+    """A colon-delimited, broadest-first location ("US:NC:Morrisville") as
+    a readable one, a two-letter state kept beside its city.
+
+    >>> _colon_location("US:NC:Morrisville"), _colon_location("Chapel Hill:NC")
+    ('Morrisville, NC, US', 'Chapel Hill, NC')
+    >>> _colon_location("US:NC"), _colon_location("Smithfield")
+    ('NC, US', 'Smithfield')
+    """
+    code = re.compile(r"^[A-Za-z]{2}$")
+    parts = [p.strip() for p in str(raw).split(":") if p.strip()]
+    country = parts.pop(0) if len(parts) > 1 and code.match(parts[0]) else ""
+    state = next((parts.pop(i) for i, p in enumerate(parts) if code.match(p)), "")
+    return ", ".join(x for x in (", ".join(parts), state, country) if x)
+
+
+def _host(v):
+    """A URL's host, or `v` itself when it is a bare host."""
+    return host_of(v) if "://" in str(v) else str(v)
+
+
+def _host_key(v):
+    """A URL's host, or a bare host, as one id-safe token: the whole host,
+    since tenants on their own domains share a first label.
+
+    >>> _host_key("careers.dukehealth.org"), _host_key("https://jobs.ncsu.edu/x")
+    ('careers_dukehealth_org', 'jobs_ncsu_edu')
+    """
+    return re.sub(r"[^a-z0-9]+", "_", _host(v).lower()).strip("_")
+
+
 TRANSFORMS = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
     # is unescaped: stripped first, the tags come back as TEXT.
     "unescape_html_text": lambda v: text_from_html(html.unescape(_text(v))),
     "date": norm_posted_date,
+    "ymd": _ymd,
     "after_marker": _after,
+    "before": lambda v, marker: str(v).split(marker, 1)[0].strip(),
+    "colon_location": _colon_location,
+    "host_key": _host_key,
+    "host_label": lambda v: _host(v).split(".", 1)[0],
 }
 
 _TOKEN_RE = re.compile(r"\{([A-Za-z0-9_.\[\]]+)(?::(\d+))?\}")
@@ -157,6 +204,8 @@ def value(spec, entry, ctx=None, strict=False):
     'Remote; Durham, NC'
     >>> value({"first": ["nope", "title"]}, e), value({"join": ["title", "loc"], "sep": ", "}, e)
     ('Eng', 'Eng, Remote')
+    >>> value({"join": ["c", "s", "n"], "sep": ", "}, {"c": "Durham\\t", "s": " ", "n": "US"})
+    'Durham, US'
     >>> value({"first": ["offices[0]", "title"]}, e)
     'Eng'
     >>> value({"format": "x_{slug}_{title}"}, e, {"slug": "acme"})
@@ -187,9 +236,10 @@ def value(spec, entry, ctx=None, strict=False):
         v = next((x for x in (value(s, entry, ctx) for s in spec["first"])
                   if x and not isinstance(x, dict)), None)
     elif "join" in spec:
-        parts = [p for p in _flat([value(s, entry, ctx) for s in spec["join"]])
-                 if p and not isinstance(p, dict)]
-        v = spec.get("sep", " ").join(str(p) for p in parts[:spec.get("max")])
+        parts = [s for s in (str(p).strip() for p in _flat([value(s, entry, ctx)
+                                                             for s in spec["join"]])
+                             if p and not isinstance(p, dict)) if s]
+        v = spec.get("sep", " ").join(parts[:spec.get("max")])
     elif "each" in spec:
         items = path(entry, spec["each"])
         v = [value(spec.get("do", ""), i, ctx)
@@ -216,7 +266,7 @@ def value(spec, entry, ctx=None, strict=False):
 
 _OPERATORS = {"first", "join", "each", "merge", "format", "const", "of"}
 _MODIFIERS = {"sep", "max", "do", "skip", "when", "else", "transform", "default"}
-_CONDITIONS = {"any", "all", "truthy", "falsy", "eq", "contains"}
+_CONDITIONS = {"any", "all", "truthy", "falsy", "eq", "contains", "past"}
 
 
 def check(spec):
@@ -266,13 +316,18 @@ def _check_cond(cond):
 def holds(cond, entry, ctx=None):
     """Whether condition `cond` holds for `entry`. `eq` compares strings
     case-insensitively and anything else by type and value; `contains`
-    searches a list's items joined.
+    searches a list's items joined, for a needle that is literal or, as
+    "$path", another field's value; `past` holds for an ISO date before
+    today.
 
-    >>> e = {"t": "Remote", "flag": False, "xs": ["a", "Remote US"]}
+    >>> e = {"t": "Remote", "flag": False, "xs": ["a", "Remote US"], "id": "7",
+    ...      "u": "/jobs/7-eng", "end": "2020-01-31"}
     >>> holds({"eq": ["t", "remote"]}, e), holds({"eq": ["flag", False]}, e)
     (True, True)
     >>> holds({"eq": ["missing", False]}, e), holds({"contains": ["xs", "remote"]}, e)
     (False, True)
+    >>> holds({"contains": ["u", "$id"]}, e), holds({"past": "end"}, e), holds({"past": "t"}, e)
+    (True, True, False)
     >>> holds({"any": [{"truthy": "flag"}, {"falsy": "missing"}]}, e)
     True
     """
@@ -285,6 +340,9 @@ def holds(cond, entry, ctx=None):
         return bool(value(arg, entry, ctx))
     if op == "falsy":
         return not value(arg, entry, ctx)
+    if op == "past":
+        v = str(value(arg, entry, ctx) or "")
+        return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
     v = value(arg[0], entry, ctx)
     if op == "eq":
         want = arg[1]
@@ -292,6 +350,9 @@ def holds(cond, entry, ctx=None):
             return v is not None and str(v).lower() == want.lower()
         return type(v) is type(want) and v == want
     if op == "contains":
+        needle = arg[1]
+        if needle.startswith("$"):
+            needle = str(value(needle[1:], entry, ctx) or "")
         hay = " ".join(str(x) for x in _flat(v) if x) if isinstance(v, list) else str(v or "")
-        return arg[1].lower() in hay.lower()
+        return bool(needle) and needle.lower() in hay.lower()
     raise ValueError(f"unknown condition {op!r}")

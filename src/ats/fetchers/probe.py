@@ -6,10 +6,9 @@
 
 This is a reader, not a fetcher: it shares nothing with the whole-board
 pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
-per-ATS endpoint builders it asks --
-`jazzhr.board_url`, `infor.detail_url`/`posting_state`, Workday's CXS URL
-helpers and `company.SMARTRECRUITERS_API`. A platform with a
-`config.BOARDS` spec is asked through the engine (`Board.probe_job`).
+per-ATS endpoint builders it asks -- `jazzhr.board_url` and Workday's CXS
+URL helpers. A platform with a `config.BOARDS` spec is asked through the
+engine (`Board.probe_job`).
 
 One rule runs through every branch: a row is closed ONLY on positive
 evidence. Every refusal a host can make -- 403, 405, 429, 5xx, a timeout,
@@ -26,9 +25,8 @@ import requests
 from src import config
 from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
-from . import icims, infor, jazzhr, workday
+from . import icims, jazzhr, workday
 from .board import board_for_url
-from .company import SMARTRECRUITERS_API
 
 _log = logging.getLogger(__name__)
 
@@ -58,13 +56,9 @@ _GATED_HOST_RE = re.compile(
 # to the endpoint the fetcher already reads (_FAMILY_PROBE) rather than to
 # the page.
 _JOB_URL_RE = {
-    "smartrecruiters": re.compile(r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)"),
     "jazzhr":     re.compile(r"//([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)",
                              re.I),
     "icims":      re.compile(r"//([a-z0-9-]+)\.icims\.com/jobs/(\d+)/", re.I),
-    # (host, org, requisition, posting revision) — the fetcher's own regex,
-    # so the two never drift apart.
-    "infor":      infor.JOB_URL_RE,
 }
 
 
@@ -104,12 +98,10 @@ def probe_family(url):
     return ""
 
 
-def _endpoint_verdict(api, family, headers=None, live=None):
+def _endpoint_verdict(api, family, headers=None):
     """(is_open, reason) from an endpoint whose 404/410 PROVES the posting
     is gone. Every other refusal -- 403, 405, 429, 5xx, a timeout -- is
     unverifiable: a host declining to answer is not a closed posting.
-    `live(response)` replaces the default "200 means live" for a platform
-    that keeps serving pulled postings (SmartRecruiters, Infor).
     """
     try:
         r = SESSION.get(api, headers=headers or JSON_HEADERS)
@@ -119,7 +111,7 @@ def _endpoint_verdict(api, family, headers=None, live=None):
         return False, f"{family} api HTTP {r.status_code}"
     if r.status_code != 200:
         return None, f"{family} api HTTP {r.status_code}"
-    return live(r) if live else (True, f"{family} api: posting live")
+    return True, f"{family} api: posting live"
 
 
 def _probe_jazzhr(m):
@@ -129,39 +121,11 @@ def _probe_jazzhr(m):
         headers=HEADERS)
 
 
-def _smartrecruiters_verdict(r):
-    """SmartRecruiters keeps serving a pulled posting at HTTP 200, so the
-    status code says nothing; `active` is the field that does."""
-    try:
-        d = r.json()
-    except ValueError:
-        return None, "smartrecruiters api: non-JSON"
-    if d.get("active") is False:
-        return False, "smartrecruiters api: active=false"
-    if d.get("active") is not True:
-        return None, "smartrecruiters api: no active flag"
-    jid = str(d.get("id") or "")
-    # A repost answers under its SUCCESSOR's id (postingUrl carries that
-    # one), which is a verdict on the successor, not on this row.
-    if jid and jid not in (d.get("postingUrl") or jid):
-        return None, "smartrecruiters api: reposted under a new id"
-    return True, "smartrecruiters api: active"
-
-
 # A job-detail host that refuses connections refuses every row on it: the
 # 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on one host. After
 # three in a row, within the board memo's window, its remaining rows are
 # skipped unasked. Three, not discovery's one: these hosts answered before.
 _DEAD_HOSTS = HostBreaker(ttl=config.BOARD_MEMO_S, trips=3)
-
-
-def _infor_verdict(r):
-    """Infor answers HTTP 200 for a pulled posting as readily as for a live
-    one, so the verdict is in the body (fetchers/infor.posting_state)."""
-    try:
-        return infor.posting_state(r.json())
-    except ValueError:
-        return None, "infor api: non-JSON"
 
 
 #: Per-family liveness checks, keyed as _JOB_URL_RE is; each takes that
@@ -170,11 +134,6 @@ def _infor_verdict(r):
 #: headers (_page_headers).
 _FAMILY_PROBE = {
     "jazzhr":          _probe_jazzhr,
-    "smartrecruiters": lambda m: _endpoint_verdict(
-        f"{SMARTRECRUITERS_API.format(m.group(1))}/{m.group(2)}",
-        "smartrecruiters", live=_smartrecruiters_verdict),
-    "infor": lambda m: _endpoint_verdict(
-        infor.detail_url(*m.groups()), "infor", live=_infor_verdict),
 }
 
 
@@ -212,8 +171,8 @@ def probe_job_open(url, job_id=None):
 
     A row is closed ONLY on positive evidence: 404/410 from one of those
     endpoints or from the page, an ATS "no longer available" notice, a
-    past JSON-LD validThrough or Infor posting-end date, a Workday CXS
-    miss, or an id absent from a non-empty board listing.
+    past JSON-LD validThrough, a spec's `closure.closed` rule, a Workday
+    CXS miss, or an id absent from a non-empty board listing.
     403/405/429/5xx/timeouts never close.
     """
     if not url:

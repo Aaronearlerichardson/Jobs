@@ -258,6 +258,14 @@ REGISTRY = {
         "target": "src.ops.maintenance:rename_slug_boards",
         "params": [_LIMIT, Param("apply", "commit", "bool", False), _TRACK],
     },
+    "rekey-jobs": {
+        "label": "Re-key a platform's stored job ids",
+        "engine": None,
+        "target": "src.ops.maintenance:rekey_jobs",
+        "params": [Param("ats", default=""), Param("apply", "commit", "bool", False),
+                   _TRACK],
+        "ui": False,      # a one-off migration after a spec's id rule changes
+    },
     "prune": {
         "label": "Prune dead boards",
         "engine": None,

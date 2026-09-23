@@ -13,6 +13,7 @@ import re
 import pytest
 
 from conftest import fake_response
+from src.ats.fetchers import board
 from src.ats.fetchers import company as company_fetch
 from src.ats.fetchers import html_scrape as sf
 from src.ats.fetchers import workday as wd
@@ -28,7 +29,7 @@ def fresh_accounting():
 
 
 # --------------------------------------------------------------------------- #
-#  Workday and SmartRecruiters: one rule, two APIs                             #
+#  Workday                                                                     #
 # --------------------------------------------------------------------------- #
 
 class _WDPager:
@@ -68,20 +69,6 @@ class _WDPager:
                               "jobPostings": self._page(offset, limit)})
 
 
-class _SRPager:
-    """`fail_later`: as _WDPager's, with a 406."""
-
-    def __init__(self, content, total, fail_later=False):
-        self.content, self.total, self.fail_later = content, total, fail_later
-
-    def get(self, url, **kw):
-        offset = int(re.search(r"offset=(\d+)", url).group(1))
-        if offset and self.fail_later:
-            return fake_response({"message": "Not Acceptable"}, status=406)
-        return fake_response({"totalFound": self.total,
-                              "content": self.content[offset:offset + 100]})
-
-
 def _pull_workday(monkeypatch, n, total, scoped, max_pages, fail_later=False):
     postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
                  "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
@@ -93,22 +80,8 @@ def _pull_workday(monkeypatch, n, total, scoped, max_pages, fail_later=False):
                                 page_size=20, max_pages=max_pages)
 
 
-def _pull_smartrecruiters(monkeypatch, n, total, scoped, max_pages,
-                          fail_later=False):
-    content = [{"id": f"r{i}", "name": "Data Engineer",
-                "location": {"city": "Durham", "region": "NC", "country": "US"},
-                "releasedDate": "2026-01-01T00:00:00Z"} for i in range(n)]
-    # fetch_smartrecruiters_all pages through net.http.get_json, which reads
-    # the SESSION name bound in net.http (its own definition site), not
-    # company.py's re-export of the same object -- patch it there.
-    monkeypatch.setattr(http, "SESSION", _SRPager(content, total, fail_later))
-    return company_fetch.fetch_smartrecruiters_all(
-        "acme", loc_re=NC_RE if scoped else None, max_pages=max_pages)
-
-
 #: ats -> (pull, rows per page)
-PAGERS = {"workday": (_pull_workday, 20),
-          "smartrecruiters": (_pull_smartrecruiters, 100)}
+PAGERS = {"workday": (_pull_workday, 20)}
 
 
 @pytest.mark.parametrize("ats", sorted(PAGERS))
@@ -123,7 +96,7 @@ class TestTotalPagedSnapshot:
 
     def test_fewer_rows_than_the_total_is_capped(self, monkeypatch, ats):
         """Paging stopped on a short page, but the board reports far more
-        (Stryker and Labcorp on Workday, Dominos on SmartRecruiters)."""
+        (Stryker and Labcorp on Workday)."""
         pull, page = PAGERS[ats]
         assert len(pull(monkeypatch, 2 * page + 5, 3400, False, 10)) == 2 * page + 5
         assert http.snapshot_info()["capped_total"] == 3400
@@ -182,7 +155,7 @@ def test_a_whole_board_pull_never_spends_the_locations_rescue(monkeypatch, capsy
 
 class TestWorkdayDedupe:
     """fetch_workday_all dedupes by posting id WITHIN one pull, the same
-    shape as fetchers/phenom.py's fetch_phenom_all: a seen-id set, and a
+    shape as the board engine's page walk: a seen-id set, and a
     page that contributes no new id ends the walk early rather than
     counting as a page toward the cap."""
 
@@ -295,11 +268,12 @@ class TestWorkdayTotalCeiling:
 
 
 class TestPageBudget:
-    """The Workday/SmartRecruiters page cap is a [policy] setting
+    """The Workday page cap is a [policy] setting
     (config.BOARD_MAX_ROWS) applied through config.board_max_pages, which
     is gated by the SAME off-mission/inactive predicate the harvester's
     own long-interval cadence uses (config.is_offmission_inactive) -- see
-    fetchers/company.py's FETCHERS['workday']/['smartrecruiters']."""
+    fetchers/company.py's FETCHERS['workday'] (and every paged spec's
+    `Board.whole_board`)."""
 
     def _wd_company(self, **extra):
         return {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5,
@@ -330,6 +304,138 @@ class TestPageBudget:
         assert len(rows) == 1200, (
             "a board a track's own mission gate discards anyway keeps the "
             "narrower, pre-2026-09-18 read")
+
+
+# --------------------------------------------------------------------------- #
+#  The board engine's pagers (config.BOARDS listing.pager)                    #
+# --------------------------------------------------------------------------- #
+
+def _engine(kind, handle=None, url="https://x.test/list", **pager):
+    """A one-field spec on the engine, paged by `kind` (the pager's other
+    keys given), listing `items` at `url`."""
+    spec = {"listing": {"url": url, "params": {"o": "$offset", "n": "$size"},
+                        "decoder": {"kind": "json", "entries": "items"},
+                        "pager": {"kind": kind, **pager},
+                        "fields": {"id": {"format": "t_{id}"}, "title": "title",
+                                   "url": {"format": "https://x.test/{id}"}}}}
+    return board.Board("t", {**spec, **({"handle": handle} if handle else {})})
+
+
+def _items(ids):
+    return [{"id": i, "title": "Data Engineer"} for i in ids]
+
+
+@pytest.fixture
+def offset_board(serve, monkeypatch):
+    """`serve` an offset-paged board: `pages` maps an offset to the ids
+    served there, `total` is on every page; `fail_from` answers 500 at and
+    after that offset."""
+    monkeypatch.setattr(board.time, "sleep", lambda s: None)
+
+    def _install(pages, total=None, fail_from=None):
+        def reply(url, params=None, **kw):
+            o = params["o"]
+            if fail_from is not None and o >= fail_from:
+                return fake_response(status=500)
+            return fake_response({"total": total, "items": _items(pages.get(o, []))})
+        return serve(reply)
+    return _install
+
+
+class TestEnginePagers:
+    """What the engine's page walk reports about its snapshot, per pager
+    kind: the rows a whole-board pull returns, and whether they are the
+    whole board (a capped snapshot closes nothing)."""
+
+    @pytest.mark.parametrize("pages,total,capped_total", [
+        ({0: [0, 1], 2: [2, 3], 4: [4]}, 5, None),         # the total, reached
+        ({0: [0, 1], 2: [2]}, 3400, 3400),                 # far short of it
+    ])
+    def test_the_total_decides_whether_the_walk_was_whole(
+            self, offset_board, pages, total, capped_total):
+        offset_board(pages, total)
+        rows = _engine("offset", size=2, pages=9, total="total").listing("h", "t h")
+        assert [r["id"] for r in rows] == [f"t_{i}" for o in pages for i in pages[o]]
+        assert http.snapshot_info()["capped_total"] == capped_total
+
+    def test_every_page_full_with_no_total_is_capped(self, offset_board):
+        offset_board({0: [0, 1], 2: [2, 3]})
+        assert len(_engine("offset", size=2, pages=2).listing("h", "t h")) == 4
+        info = http.snapshot_info()
+        assert info["capped"] and info["capped_total"] is None
+
+    def test_a_short_page_short_of_the_total_reads_on(self, offset_board):
+        """A server may serve fewer rows than asked (two Phenom tenants
+        serve 10 whatever the size): the total, not the page, says when the
+        board ends."""
+        calls = offset_board({0: [0, 1], 5: [5, 6]}, total=7)
+        rows = _engine("offset", size=5, pages=9, total="total").listing("h", "t h")
+        assert [r["id"] for r in rows] == ["t_0", "t_1", "t_5", "t_6"]
+        assert [c.params["o"] for c in calls] == [0, 5, 10]
+        assert http.snapshot_info()["capped_total"] == 7
+
+    def test_a_failed_later_page_is_counted_not_capped(self, offset_board):
+        offset_board({0: [0, 1], 2: [2, 3]}, total=4, fail_from=2)
+        assert len(_engine("offset", size=2, pages=9, total="total").listing("h", "t h")) == 2
+        info = http.snapshot_info()
+        assert info["incomplete"] and not info["capped"]
+
+    def test_overlapping_pages_survive_a_reshuffled_order(self, offset_board):
+        """The listing order is unstable between requests: a row can shift
+        across a page boundary. Half-page overlap plus dedupe by id still
+        collects every row once."""
+        offset_board({0: [0, 1, 2, 3, 4, 5], 3: [5, 4, 8, 7, 6, 3], 6: [6, 7, 8, 9]},
+                     total=10)
+        rows = _engine("overlap", size=6, step=3, pages=9, total="total").listing("h", "t h")
+        assert sorted(r["id"] for r in rows) == sorted(f"t_{i}" for i in range(10))
+        assert len(rows) == 10 and not http.snapshot_info()["capped"]
+
+    def test_a_page_adding_nothing_new_ends_the_walk_capped(self, offset_board):
+        calls = offset_board({0: [0, 1, 2, 3], 2: [0, 1, 2, 3]}, total=999)
+        rows = _engine("overlap", size=4, step=2, pages=9, total="total").listing("h", "t h")
+        assert len(rows) == 4 and len(calls) == 2
+        assert http.snapshot_info()["capped_total"] == 999
+
+    def test_a_cursor_is_followed_verbatim(self, serve):
+        """The next-page URL carries opaque keys (rebuilt by hand, it
+        re-serves page 1): it is followed as served, and `has_next` ends
+        the walk."""
+        nxt = "https://x.test/list?op=next&fk=A"
+        calls = serve({nxt: fake_response({"items": _items([2]), "more": False}),
+                       "x.test/list": fake_response({"items": _items([0, 1]), "more": True,
+                                                     "next": nxt})})
+        rows = _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
+        assert [r["id"] for r in rows] == ["t_0", "t_1", "t_2"]
+        assert [c.params for c in calls] == [{"o": 0, "n": 2}, {}]
+        assert not http.snapshot_info()["capped"]
+
+    @pytest.mark.parametrize("nxt", ["https://x.test/list?again",
+                                     "https://elsewhere.test/list?p=2"])
+    def test_a_looping_or_foreign_cursor_ends_the_walk_capped(self, serve, nxt):
+        """A cursor served back to the same rows, or pointing outside the
+        listing's own directory (served data, not a promise), ends the
+        walk; the rows are real, a missing one proves nothing."""
+        calls = serve(fake_response({"items": _items([0, 1]), "more": True, "next": nxt}))
+        rows = _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
+        assert len(rows) == 2 and len(calls) == (2 if "x.test" in nxt else 1)
+        assert http.snapshot_info()["capped"]
+
+    def test_a_followed_part_is_resolved_once_per_handle(self, serve):
+        """`handle.follow`: the base a board's root redirects to, asked on
+        the handle's first listing and remembered."""
+        calls = serve(lambda url, **kw: fake_response(
+            {"items": _items([0])} if "/list" in url else None, url="https://x.test/us/en"))
+        b = _engine("offset", handle={"follow": {"base": "{slug}"}}, url="{base}/list",
+                    size=9, pages=1)
+        assert len(b.listing("x.test")) == len(b.listing("x.test")) == 1
+        assert [c.url for c in calls] == ["https://x.test", "https://x.test/us/en/list",
+                                          "https://x.test/us/en/list"]
+
+    def test_a_handle_missing_a_part_names_no_board(self, serve):
+        calls = serve(fake_response({"items": _items([0])}))
+        b = _engine("offset", handle={"parts": ["host", "org"]}, size=9, pages=1)
+        assert b.listing("x.test", "t x.test") == [] and calls == []
+        assert http.snapshot_info()["incomplete"]
 
 
 # --------------------------------------------------------------------------- #

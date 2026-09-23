@@ -55,7 +55,7 @@ _UKG_RE = re.compile(r"recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a
 # Infor CloudSuite HCM candidate boards. Handled in detect beside ADP and UKG
 # because the coordinate is a PAIR: one tenant host can serve several HR
 # organizations, and `csk.HROrganization` is what scopes a board, so the slug
-# fetchers/infor.py takes is "<host>|<org>". The /hcm/Jobs path is required —
+# the infor board spec takes is "<host>|<org>". The /hcm/Jobs path is required —
 # the same host family also serves the signed-in employee app.
 _INFOR_RE = re.compile(r"([a-z0-9-]+\.inforcloudsuite\.com)/hcm/Jobs\b", re.I)
 _INFOR_ORG_RE = re.compile(r"csk\.HROrganization=([A-Za-z0-9_-]+)", re.I)
@@ -68,7 +68,7 @@ SEMI_FETCHABLE_PATTERNS = [
     ("successfactors",  re.compile(r"([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)", re.I)),
     # Phenom People: the tenant's own site IS the board, so there is no
     # vendor host to match. Every page embeds its widget API origin as JSON
-    # instead, and that host is the slug fetchers/phenom.py takes.
+    # instead, and that host is the slug the phenom board spec takes.
     ("phenom",          re.compile(r'"widgetApiEndpoint"\s*:\s*"https?://([a-z0-9.-]+)/widgets"', re.I)),
 ]
 
