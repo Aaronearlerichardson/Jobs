@@ -912,7 +912,7 @@ class Board:
     def _apply(self, job, rec, fs, ctx):
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",
-        "if_unknown" the default: `_unknown`, or "never"); a remote hint and
+        "if_unknown": `_unknown`, or "never", the default); a remote hint and
         a posting date it lacks. Only the body is read off a listing entry
         (a platform with no detail)."""
         desc = fs["description"](rec, ctx)

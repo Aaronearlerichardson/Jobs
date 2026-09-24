@@ -27,8 +27,7 @@ BOARDS = {
         "sweep": True,
         "prunable": True,
         "guess": True,
-        "job_ref": {"re": r"greenhouse\.io/(?:embed/job_app\?for=)?([A-Za-z0-9_.-]+)/jobs/(\d+)",
-                    "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"greenhouse\.io/(?:embed/job_app\?for=)?([A-Za-z0-9_.-]+)/jobs/(\d+)"},
         "listing": {
             "url": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
             "probe_url": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
@@ -49,7 +48,6 @@ BOARDS = {
         "detail": {
             "url": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs/{jid}?content=true",
             "fields": {"description": {"of": "content", "transform": "unescape_html_text"}},
-            "location": "never",
         },
         "employer": "company_name",
     },
@@ -59,8 +57,7 @@ BOARDS = {
         "sweep": True,
         "prunable": True,
         "guess": True,
-        "job_ref": {"re": r"lever\.co/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})",
-                    "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"lever\.co/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})"},
         "listing": {
             "url": "https://api.lever.co/v0/postings/{slug}?mode=json",
             "fields": {
@@ -81,7 +78,6 @@ BOARDS = {
         "detail": {
             "url": "https://api.lever.co/v0/postings/{slug}/{jid}",
             "fields": {"description": "descriptionPlain"},
-            "location": "never",
         },
     },
     "ashby": {
@@ -90,8 +86,7 @@ BOARDS = {
         "sweep": True,
         "prunable": True,
         "guess": True,
-        "job_ref": {"re": r"ashbyhq\.com/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})",
-                    "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"ashbyhq\.com/([A-Za-z0-9_.-]+)/([0-9a-fA-F-]{20,})"},
         "listing": {
             "url": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
             # The posting API says "jobs"; only the embed payload says "jobPostings".
@@ -120,8 +115,7 @@ BOARDS = {
         "sweep": True,
         "prunable": True,
         "eager": True,
-        "job_ref": {"re": r"(?i)//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)",
-                    "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"(?i)//([a-z0-9-]+)\.bamboohr\.com/careers/(\d+)"},
         "listing": {
             "url": "https://{slug}.bamboohr.com/careers/list",
             "decoder": {"entries": "result"},
@@ -147,7 +141,6 @@ BOARDS = {
             "url": "https://{slug}.bamboohr.com/careers/{jid}/detail",
             "record": "result.jobOpening",
             "fields": {"description": {"of": "description", "transform": "html_text"}},
-            "location": "never",
         },
     },
     "rippling": {
@@ -155,7 +148,7 @@ BOARDS = {
         "canary": {"name": "Blackrock Neurotech", "handle": "blackrockneurotech"},
         "sweep": True,
         "eager": True,
-        "job_ref": {"re": r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})"},
         "listing": {
             "url": "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs",
             "decoder": {"entries": ["", "jobs"]},
@@ -175,7 +168,6 @@ BOARDS = {
             "fields": {"description": {"first": [{"join": ["description.role", "description.company"]},
                                                  "description"],
                                        "transform": "html_text"}},
-            "location": "never",
         },
     },
     "hibob": {
@@ -212,8 +204,7 @@ BOARDS = {
         "eager": True,
         # The tenant-path posting URL names both coordinates; the listing's
         # own short link (/j/<shortcode>) names no account.
-        "job_ref": {"re": r"(?i)^https?://apply\.workable\.com/([A-Za-z0-9][A-Za-z0-9_-]*)/j/([A-Za-z0-9]+)",
-                    "parts": ["slug", "jid"]},
+        "job_ref": {"re": r"(?i)^https?://apply\.workable\.com/([A-Za-z0-9][A-Za-z0-9_-]*)/j/([A-Za-z0-9]+)"},
         "listing": {
             "url": "https://apply.workable.com/api/v1/widget/accounts/{slug}",
             "decoder": {"entries": "jobs"},
@@ -240,7 +231,6 @@ BOARDS = {
             # per-board boilerplate and stays out.
             "fields": {"description": {"join": ["description", "requirements"], "sep": "\n",
                                        "transform": "html_text"}},
-            "location": "never",
         },
     },
     "paylocity": {
@@ -277,7 +267,6 @@ BOARDS = {
             "decoder": {"kind": "html", "select": ".job-preview-details, [class*=job-preview]"},
             # The page's "Apply <title> <location> Apply" chrome leads the body.
             "fields": {"description": {"of": "text", "transform": "after_marker:Description"}},
-            "location": "never",
         },
         # A pulled posting's detail page still answers 200 (2026-09-23).
         "closure": {"via": "page"},
@@ -299,7 +288,7 @@ BOARDS = {
             "json": {"opportunitySearch": {"Top": "$size", "Skip": "$offset", "QueryString": "",
                                            "OrderBy": [], "Filters": []}},
             "decoder": {"entries": "opportunities"},
-            "pager": {"kind": "offset", "size": 100, "pages": 10, "total": "totalCount"},
+            "pager": {"kind": "offset", "size": 100, "total": "totalCount"},
             "fields": {
                 "id": {"format": "ultipro_{code}_{Id:12}"},
                 "title": "Title",
@@ -332,7 +321,7 @@ BOARDS = {
             "params": {"cid": "{cid}", "ccId": "{ccid}", "locale": "en_US",
                        "$top": "$size", "$skip": "$offset"},
             "decoder": {"entries": "jobRequisitions"},
-            "pager": {"kind": "offset", "size": 50, "pages": 10, "total": "meta.totalNumber"},
+            "pager": {"kind": "offset", "size": 50, "total": "meta.totalNumber"},
             "fields": {
                 "id": {"format": "adp_{cid:8}_{itemID}"},
                 "title": "requisitionTitle",
@@ -349,7 +338,6 @@ BOARDS = {
             "record": ["jobRequisitions[0]", ""],
             "fields": {"description": {"first": ["requisitionDescription", "description"],
                                        "transform": "html_text"}},
-            "location": "never",
         },
         # A pulled requisition answers 200 with an empty record (2026-09-23).
         "closure": {"closed": {"falsy": "requisitionTitle"},
@@ -367,7 +355,7 @@ BOARDS = {
             "url": "https://api.smartrecruiters.com/v1/companies/{slug}/postings",
             "params": {"limit": "$size", "offset": "$offset"},
             "decoder": {"entries": "content"},
-            "pager": {"kind": "offset", "size": 100, "pages": 10, "total": "totalFound"},
+            "pager": {"kind": "offset", "size": 100, "total": "totalFound"},
             "fields": {
                 "id": {"format": "sr_{slug}_{id}"},
                 "title": "name",
@@ -384,7 +372,6 @@ BOARDS = {
                                                 "jobAd.sections.qualifications.text",
                                                 "jobAd.sections.additionalInformation.text"],
                                        "transform": "html_text"}},
-            "location": "never",
         },
         # A pulled posting answers 200 with active=false. A repost answers
         # under its successor's id, which only postingUrl carries: a verdict
@@ -468,6 +455,7 @@ BOARDS = {
                                 "when": {"any": [{"eq": ["remoteType", "Remote"]},
                                                  {"eq": ["remoteType", "Fully Remote"]}]}},
             },
+            "location": "if_unknown",
         },
         "closure": {"open": {"any": [{"truthy": "jobDescription"}, {"truthy": "title"}]},
                     "unmatched": "no posting record",
@@ -530,6 +518,7 @@ BOARDS = {
                                           "_spc_translation_cp_", "transform": "before:|"},
                              "transform": "colon_location"},
             },
+            "location": "if_unknown",
         },
         # A pulled posting answers 200 either way: its record gone, or kept
         # with a posting-end date in the past (2026-09-21, live).
@@ -574,6 +563,7 @@ BOARDS = {
                 "posted_at": "posted_at",
                 "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
             },
+            "location": "if_unknown",
         },
         "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}",
                     "why": "a pulled posting's page still answers 200, its slug-free apply "
@@ -620,6 +610,7 @@ BOARDS = {
                 "posted_at": "posted_at",
                 "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
             },
+            "location": "if_unknown",
         },
         "closure": {"via": "page"},
     },
@@ -763,6 +754,7 @@ BOARDS = {
             "headers": {"User-Agent": "$plain_user_agent"},
             "decoder": {"kind": "jsonld"},
             "fields": {"description": "description", "location": "location"},
+            "location": "if_unknown",
         },
         # A pulled posting's page answers 410.
         "closure": {"via": "page"},
@@ -861,7 +853,6 @@ BOARDS = {
             "decoder": {"kind": "html",
                         "select": ["#portalViewRequirement", "[class*='bmportalrequirementdetails']"]},
             "fields": {"description": "text"},
-            "location": "never",
         },
         "closure": {"via": "page"},
     },

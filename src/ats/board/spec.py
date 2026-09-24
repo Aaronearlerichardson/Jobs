@@ -124,7 +124,8 @@ class Detect(_Spec):
 
 class JobRef(_Spec):
     re: Regex = Field(description="Reads a stored posting URL")
-    parts: tuple[Str, ...] = Field(description="Its groups' names: handle parts, then the "
+    parts: tuple[Str, ...] = Field(("slug", "jid"),
+                                   description="Its groups' names: handle parts, then the "
                                                "posting's own (jid, or listing keys its id reads)")
 
     @model_validator(mode="after")
@@ -227,7 +228,7 @@ Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
 class _Pager(_Workaround):
     WORKAROUNDS = ("ceiling",)
     size: Count = Field(description="Rows asked per page")
-    pages: Count = Field(1, description="The most pages a walk reads")
+    pages: Count = Field(10, description="The most pages a walk reads")
     total: Grammar = Field(None, description="Names the board's total on the first page")
     ceiling: Count | None = Field(None, description="The most rows the server serves: a total "
                                                     "there ends nothing")
@@ -349,7 +350,7 @@ class Detail(_Request):
     record: Paths | None = Field(None, description="The record's paths in an answer; default "
                                                    "the decoder's first entry")
     location: Literal["always", "if_unknown", "never"] = Field(
-        "if_unknown", description="When the detail's location replaces the row's")
+        "never", description="When the detail's location replaces the row's")
 
 
 class Rescue(_Spec):
