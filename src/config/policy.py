@@ -209,7 +209,7 @@ def is_offmission_inactive(c):
 
 
 # =========================================================================
-#  Whole-board page budget (src.ats.fetchers.workday, .company)
+#  Whole-board page budget (src.ats.fetchers.board)
 # =========================================================================
 
 # Rows a mission-worth-it Workday or SmartRecruiters whole-board pull reads
@@ -236,6 +236,12 @@ SWEEP_DETAIL_DELAY_S = 0.2
 WHOLE_BOARD_DETAILS = 200
 WHOLE_BOARD_DETAIL_DELAY_S = 0.15
 BOARD_MEMO_S = 600.0
+# Stored rows one board may hydrate per harvest or triage run, the pause
+# between two of those detail GETs, and the pages a local count samples
+# when a board ignores its locality scope.
+HYDRATE_CAP_PER_RUN = 100
+HYDRATE_DELAY_S = 1.0
+LOCAL_COUNT_SAMPLE_PAGES = 5
 
 
 def board_max_pages(company, page_size, offmission_pages):

@@ -89,6 +89,7 @@ BOARD_FIXTURES = [
      "adp_detail.json"),
     ("smartrecruiters", "Guidehealth", "smartrecruiters_board.json",
      "smartrecruiters_detail.json"),
+    ("workday", "askbio|12|AskBio", "workday_board.json", "workday_detail.json"),
     ("infor", "css-unchealthunc-prd.inforcloudsuite.com|9999", "infor_job_list.json",
      "infor_job_detail.json"),
     ("phenom", "careers.example.org", "phenom_search_results.html", "phenom_job_detail.html"),
@@ -134,6 +135,9 @@ class TestSpecdBoardsReadTheirListings:
         ("https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/form/JobPosting%5BJobPostingSet"
          "%5D%2842%2C207651%2C1%29.JobPostingDisplay?pagesize=1", "Chapel Hill, NC",
          "infor_job_detail.json", "Chapel Hill, NC"),
+        ("https://askbio.wd12.myworkdayjobs.com/en-US/AskBio/job/Durham-NC/Eng_R1",
+         "2 Locations", "workday_detail.json",
+         "USA - Pennsylvania - West Point; USA - New Jersey - Rahway"),
     ]
 
     @pytest.mark.parametrize("url,listed,detail,location", HYDRATE)
@@ -894,8 +898,7 @@ class TestOneFetcherPerAts:
         module = board_for("greenhouse").jobs("databricks", "Databricks")
         vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
         assert [j["id"] for j in vetted] == [j["id"] for j in module]
-        assert all(j["ats"] == "greenhouse" and j["_wd"] is None
-                   and "company" not in j for j in vetted)
+        assert all(j["ats"] == "greenhouse" and "company" not in j for j in vetted)
 
     def test_the_location_regex_filters_the_listing(self, serve,
                                                     match_everything):

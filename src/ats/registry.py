@@ -32,9 +32,8 @@ from .fetchers import (
     fetch_kula,
     fetch_peopleadmin,
     fetch_successfactors,
-    fetch_workday,
 )
-from .fetchers.board import BOARDS
+from .fetchers.board import BOARDS, board_for
 
 
 def _engine_entry(board):
@@ -57,9 +56,6 @@ ATS_REGISTRY = {
     "kula":       (lambda n, s: lambda: fetch_kula(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s, gate=is_relevant), tags.SWEEP, 0.5),
     "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "workday":    (lambda n, s: (lambda t=s.split("|")[0], p=int(s.split("|")[1]),
-                                        st=s.split("|")[2]:
-                                 fetch_workday(t, p, st, n, gate=is_relevant)), tags.LOCAL, 1.0),
     "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s, gate=is_relevant), tags.LOCAL, 1.0),
     "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
 }
@@ -77,9 +73,12 @@ def seed_tag_for(ats):
 
 
 def store_slug(company):
-    """The registry-normalized slug for a store company row."""
-    if company.get("ats") == "workday":
-        return f"{company.get('wd_tenant')}|{company.get('wd_pod')}|{company.get('wd_site')}"
+    """The registry-normalized slug for a store company row: a spec'd
+    board's handle ("" when a column is empty), else the slug or the
+    careers URL."""
+    board = board_for(company.get("ats"))
+    if board:
+        return board.handle(company) or ""
     return company.get("slug") or company.get("careers_url") or ""
 
 
@@ -93,11 +92,5 @@ def iter_store_sources(companies, only=LIGHTWEIGHT):
         slug = store_slug(c)
         if not slug:
             continue
-        if ats == "workday":
-            # Guard malformed triples (e.g. a lead row with NULL tenant →
-            # "None|None|None") — int(pod) at thunk-build would crash.
-            parts = slug.split("|")
-            if len(parts) != 3 or not parts[1].isdigit():
-                continue
         mk, _tag, _pause = ATS_REGISTRY[ats]
         yield ats, c["name"], slug, mk(c["name"], slug)

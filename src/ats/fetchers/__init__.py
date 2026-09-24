@@ -30,7 +30,6 @@ from .remotive import fetch_remotive
 from .rssfeed import fetch_rss
 from .usajobs import fetch_usajobs
 from .websearch import fetch_websearch
-from .workday import fetch_workday
 
 __all__ = [
     "fetch_discourse",
@@ -49,5 +48,4 @@ __all__ = [
     "fetch_successfactors",
     "fetch_usajobs",
     "fetch_websearch",
-    "fetch_workday",
 ]

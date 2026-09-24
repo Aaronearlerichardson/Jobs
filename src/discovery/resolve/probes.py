@@ -7,9 +7,10 @@ import threading
 import time
 
 from src import config
+from src.ats import coords
 from src.ats.fetchers.board import BOARDS, board_for
 from src.ats.signatures import extract_workday_triple
-from src.match.locality import is_nc as _has_nc
+from src.match.locality import NC_RE
 from src.match.names import slug_guesses
 from src.net.http import HEADERS, SESSION
 from .fetchpool import candidate_urls
@@ -195,16 +196,24 @@ PROBES = {
 # company name alone (e.g. redhat.wd5.myworkdayjobs.com/Jobs_External), so
 # probe_workday scans the company's careers page(s) for a myworkdayjobs.com
 # link (src.ats.signatures.extract_workday_triple), then validates the
-# triple against the CXS search API to get a live job count
-# (workday.live_total).
+# triple against the board's listing to get a live job count
+# (`Board.alive`).
 #
 # Because the signature differs from the other probes, this one is NOT
 # in PROBES — probe_company calls it explicitly as its last step.
 
 
+def _handle(ats, slug):
+    """The engine handle for a resolver hit's slug (a tuple where the
+    board spans several columns)."""
+    return board_for(ats).handle(coords.columns(ats, slug))
+
+
 def _count_workday_jobs(tenant, wd_pod, site):
-    return _fetcher("workday").live_total(tenant, wd_pod, site,
-                                          timeout=config.PROBE_TIMEOUT)
+    """The posting count the board's listing reports, None when it does
+    not answer."""
+    ok, n = board_for("workday").alive(_handle("workday", (tenant, wd_pod, site)))
+    return n if ok else None
 
 
 def probe_workday(name: str, careers_url: str = ""):
@@ -550,31 +559,11 @@ class WorkdayJsProbePool:
 # was.
 
 
-def _wd_search_text():
-    """Free-text location term for Workday's CXS search, from [locality] —
-    the same derivation the crawl fetcher uses, so a probe's count and the
-    later crawl agree on what "in your area" means."""
-    from src.ats.fetchers.company import _default_search_text
-    return _default_search_text()
-
-
 def _nc_count(ats, slug):
-    """Postings on a board that are in your [locality] — the count that
-    rejects a slug guess landing on somebody else's board."""
-    return board_for(ats).local_count(slug, _has_nc)
-
-
-def _nc_count_workday(tenant, pod, site):
-    """Count Workday postings in your [locality], scoped the way the crawl
-    scopes the board (location facets, else searchText), and never taken
-    at face value when the scope did not narrow anything -- see
-    src.ats.fetchers.company.wd_local_count."""
-    from src.ats.fetchers.company import NC_RE, wd_local_count
-    try:
-        return wd_local_count(tenant, pod, site, NC_RE,
-                              search_text=_wd_search_text())
-    except Exception:
-        return 0
+    """Postings on a board that are in your [locality] (`Board.local_count`):
+    the count that rejects a slug guess landing on somebody else's board.
+    `slug` is a resolver hit's."""
+    return board_for(ats).local_count(_handle(ats, slug), NC_RE)
 
 
 def probe_company(name, try_workday=True):
@@ -598,8 +587,7 @@ def probe_company(name, try_workday=True):
     if not hit and try_workday:
         wd = probe_workday(name)
         if wd and wd.get("validated"):
-            hit = {"name": name, "ats": "workday",
-                   "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                   "count": wd["count"],
-                   "nc": _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])}
+            triple = (wd["tenant"], wd["wd_pod"], wd["site"])
+            hit = {"name": name, "ats": "workday", "slug": triple,
+                   "count": wd["count"], "nc": _nc_count("workday", triple)}
     return hit

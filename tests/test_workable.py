@@ -188,7 +188,7 @@ class TestCompanyDispatch:
                        detail=load("workable_job_detail.json"))
         out = company.fetch_company({"ats": "workable", "slug": SLUG})
         assert [j["id"] for j in out][0] == "workable_eupry-aps_D68529D654"
-        assert out[0]["ats"] == "workable" and out[0]["_wd"] is None
+        assert out[0]["ats"] == "workable"
         assert "company" not in out[0]
 
     def test_the_location_regex_filters_the_listing(self, workable_board):

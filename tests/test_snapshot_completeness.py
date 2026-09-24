@@ -13,10 +13,11 @@ import re
 import pytest
 
 from conftest import fake_response
+from src import config
 from src.ats.fetchers import board
 from src.ats.fetchers import company as company_fetch
 from src.ats.fetchers import html_scrape as sf
-from src.ats.fetchers import workday as wd
+from src.ats.fetchers.board import board_for
 from src.net import http
 
 NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)
@@ -29,281 +30,181 @@ def fresh_accounting():
 
 
 # --------------------------------------------------------------------------- #
-#  Workday                                                                     #
+#  Workday: a scoped, ceilinged offset pager (config.BOARDS["workday"])        #
 # --------------------------------------------------------------------------- #
 
-class _WDPager:
-    """A Workday CXS tenant over a flat posting list. Like the live API
-    (probed 2026-09-16: gilead answered total 490 at offset 0, then 0 at
-    offsets 20 and 400), only the first page reports `total`.
-    `fail_later`: every page after the first is rejected with a 422 whose
-    body still parses as JSON (osv-bioventus.wd501's shape).
-
-    `pages` serves EXPLICIT pages (a list of posting lists) by
-    offset // limit instead of slicing one flat list, repeating the LAST
-    page once the walk runs past the end -- Workday's own posting order is
-    unstable enough that a page can hand back postings an EARLIER page
-    already returned (2026-09-18: that duplication, un-deduped, is why
-    live boards showed MORE rows than their own declared total, e.g. "ICON
-    plc: 1200 job(s) ... capped of 840"). One pager with that parameter
-    rather than a second class: only the line that picks the page differs.
-    """
-
-    def __init__(self, postings=None, total=None, fail_later=False,
-                 pages=None):
-        self.postings = postings or []
-        self.total, self.fail_later, self.pages = total, fail_later, pages
-
-    def _page(self, offset, limit):
-        if self.pages is None:
-            return self.postings[offset:offset + limit]
-        return self.pages[min(offset // limit, len(self.pages) - 1)]
-
-    def post(self, url, json=None, **kw):
-        body = json or {}
-        offset, limit = body.get("offset", 0), body.get("limit", 20)
-        if offset and self.fail_later:
-            return fake_response({"errorCode": "HTTP_422"}, status=422)
-        return fake_response({"total": self.total if offset == 0 else 0,
-                              "facets": [],
-                              "jobPostings": self._page(offset, limit)})
+WD = {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5, "wd_site": "Site",
+      "active": 1, "mission_tier": "adjacent"}
 
 
-def _pull_workday(monkeypatch, n, total, scoped, max_pages, fail_later=False):
-    postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                 "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                for i in range(n)]
-    monkeypatch.setattr(wd, "SESSION", _WDPager(postings, total, fail_later))
-    monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-    return wd.fetch_workday_all("acme", 5, "Site", search_text="",
-                                loc_re=NC_RE if scoped else None,
-                                page_size=20, max_pages=max_pages)
+def _posting(loc, path, title="Data Engineer"):
+    return {"title": title, "locationsText": loc, "externalPath": path}
 
 
-#: ats -> (pull, rows per page)
-PAGERS = {"workday": (_pull_workday, 20)}
+def _postings(n, loc="US, NC, Durham"):
+    return [_posting(loc, f"/job/x/{i}") for i in range(n)]
 
 
-@pytest.mark.parametrize("ats", sorted(PAGERS))
-class TestTotalPagedSnapshot:
-    """Capped when every page up to max_pages came back full, or when an
-    unscoped pull returned fewer rows than the board's own total."""
+@pytest.fixture
+def cxs(serve, monkeypatch, tmp_path):
+    """`serve` a Workday tenant. A listing POST pages `postings`, or
+    `scoped` when it carries a facet or a search term (unless
+    `ignores_scope`); page 0 alone reports a total (`totals`: the board's
+    and the scoped answer's, default their lengths). A detail GET names
+    `detail` as the posting's location. A hyphenated tenant id in the
+    path answers 422. Location lookups are cached under tmp_path."""
+    monkeypatch.setattr(board.time, "sleep", lambda s: None)
+    monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
 
-    def test_a_complete_board_is_not_capped(self, monkeypatch, ats):
-        pull, page = PAGERS[ats]
-        assert len(pull(monkeypatch, page // 2, page // 2, False, 10)) == page // 2
-        assert not http.snapshot_info()["capped"]
+    def _install(postings, scoped=None, totals=None, ignores_scope=False,
+                 detail="US, NC, Durham"):
+        board_total, scoped_total = totals or (len(postings), len(scoped or []))
 
-    def test_fewer_rows_than_the_total_is_capped(self, monkeypatch, ats):
-        """Paging stopped on a short page, but the board reports far more
-        (Stryker and Labcorp on Workday)."""
-        pull, page = PAGERS[ats]
-        assert len(pull(monkeypatch, 2 * page + 5, 3400, False, 10)) == 2 * page + 5
-        assert http.snapshot_info()["capped_total"] == 3400
+        def reply(url, json=None, **kw):
+            if re.search(r"/cxs/[^/]*-", url):
+                return fake_response({"errorCode": "HTTP_422"}, status=422)
+            if json is None:
+                return fake_response({"jobPostingInfo": {
+                    "title": "T", "jobDescription": "<p>Build things.</p>",
+                    "location": detail, "remoteType": "Remote"}})
+            use = (bool(json["appliedFacets"] or json["searchText"])
+                   and scoped is not None and not ignores_scope)
+            rows, total = (scoped, scoped_total) if use else (postings, board_total)
+            return fake_response({
+                "total": total if json["offset"] == 0 else 0,
+                "jobPostings": rows[json["offset"]:json["offset"] + json["limit"]],
+                "facets": [{"facetParameter": "locations", "values": [
+                    {"id": "nc-id", "descriptor": "North Carolina"}]}]})
+        return serve(reply)
+    return _install
 
-    def test_reading_every_page_is_capped_even_if_the_total_matches(
-            self, monkeypatch, ats):
-        pull, page = PAGERS[ats]
-        assert len(pull(monkeypatch, 3 * page, 3 * page, False, 3)) == 3 * page
-        assert http.snapshot_info()["capped"]
 
-    def test_a_scoped_pull_is_never_compared_against_the_total(
-            self, monkeypatch, ats):
-        """A local subset is SUPPOSED to be smaller than the board."""
-        pull, _ = PAGERS[ats]
-        assert len(pull(monkeypatch, 5, 500, True, 3)) == 5
-        assert not http.snapshot_info()["capped"]
+class TestWorkdaySnapshot:
+    """What a Workday pull reports about its snapshot, beyond the engine's
+    pager rules (TestEnginePagers)."""
 
-    def test_a_failed_later_page_is_counted_not_capped(self, monkeypatch, ats):
-        """A later page answering an error marks the snapshot INCOMPLETE,
-        never the board's honest end and never a cap (snapshot_info's "a
-        failure outranks a cap"); page 1's rows still come back.
+    @pytest.mark.parametrize("n,total,capped", [
+        (2000, 2000, True),     # rows == the reported total, AT the ceiling
+        (2000, None, True),     # no total: the rows alone reach the ceiling
+        (1995, 1995, False),    # a board under the ceiling is complete
+    ])
+    def test_the_ceiling_caps_a_window_of_the_board(self, cxs, n, total, capped):
+        """The API reports a bigger board as 2000 and serves 2000 rows, so
+        at the ceiling rows and total AGREE and would read as complete.
 
-        2026-09-16: both pagers trusted `r.json()` without a status check,
-        so a non-2xx body that still parsed as JSON (a 422 from
-        osv-bioventus.wd501 / vhr-unither.wd5 on Workday) read as "no more
-        postings".
+        Notes:
+            2026-09-18: Abbott and NVIDIA each fetched exactly 2000 rows at
+            a reported total of 2000, untagged, and 70 and 10 live reqs
+            were closed.
         """
-        pull, page = PAGERS[ats]
-        assert len(pull(monkeypatch, page, 500, False, 5, fail_later=True)) == page
-        info = http.snapshot_info()
-        assert info["incomplete"] and info["fetch_errors"] > 0
-        assert not info["capped"], "a failure outranks a cap"
+        cxs(_postings(n), totals=(total, 0))
+        assert len(board_for("workday").whole_board(WD)) == n
+        assert http.snapshot_info()["capped"] is capped
 
-
-def test_a_whole_board_pull_never_spends_the_locations_rescue(monkeypatch, capsys):
-    """loc_re=None (the harvester's shape) keeps every row regardless of
-    where it sits, so a multi-site "N Locations" row must cost nothing
-    beyond the listing itself: no detail GET, no budget warning, the
-    listed text kept as-is (2026-09-17: every harvest pass was spending
-    the 150-GET rescue budget on multi-site rows a whole-board pull never
-    needed it for). `_WDPager` deliberately defines no `get`, so an
-    accidental detail rescue raises AttributeError rather than passing
-    quietly.
-    """
-    postings = [{"title": "Data Engineer", "locationsText": "3 Locations",
-                "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                for i in range(5)]
-    monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 5))
-    monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-    rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
-                                loc_re=None, page_size=20, max_pages=3)
-    assert len(rows) == 5
-    assert all(r["location"] == "3 Locations" for r in rows)
-    assert "[!]" not in capsys.readouterr().out
-
-
-class TestWorkdayDedupe:
-    """fetch_workday_all dedupes by posting id WITHIN one pull, the same
-    shape as the board engine's page walk: a seen-id set, and a
-    page that contributes no new id ends the walk early rather than
-    counting as a page toward the cap."""
-
-    def test_a_fully_repeated_page_stops_the_walk_without_capping(
-            self, monkeypatch):
-        page0 = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                  "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                 for i in range(20)]
-        # Every page after the first hands back the SAME 20 postings.
-        monkeypatch.setattr(wd, "SESSION",
-                            _WDPager(total=20, pages=[page0, page0, page0]))
-        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-        rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
-                                    loc_re=None, page_size=20, max_pages=10)
-        assert len(rows) == 20, "deduped: the repeated page added nothing new"
-        assert not http.snapshot_info()["capped"], (
-            "a page that repeats what an earlier one already returned IS "
-            "the board's honest end this pager can detect, not a cap")
-
-    def test_a_partially_repeated_page_only_keeps_the_new_rows(
-            self, monkeypatch):
-        """A page can mix genuinely new postings with ones an earlier page
-        already served (a partial shuffle, not a full wrap-around): only
-        the new ones are kept, and the walk keeps going past it."""
-        page0 = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                  "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                 for i in range(20)]
-        page1 = page0[:10] + [
-            {"title": "Data Engineer", "locationsText": "US, NC, Durham",
-             "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-            for i in range(20, 30)]
-        monkeypatch.setattr(wd, "SESSION",
-                            _WDPager(total=30, pages=[page0, page1]))
-        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-        rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
-                                    loc_re=None, page_size=20, max_pages=10)
-        assert len(rows) == 30, "20 from page 0, 10 NEW ones from page 1"
+    def test_a_scoped_pull_is_never_compared_against_its_total(self, cxs):
+        """A scope's total counts rows the pull then drops for locality."""
+        cxs(_postings(40, "US, TX, Austin"), scoped=_postings(5), totals=(40, 12))
+        assert len(board_for("workday").whole_board(WD, NC_RE)) == 5
         assert not http.snapshot_info()["capped"]
 
+    def test_a_whole_board_pull_never_spends_the_location_rescue(self, cxs, capsys):
+        """loc_re=None keeps every row wherever it sits, so a multi-site
+        "N Locations" row costs no detail GET and keeps its listed text.
 
-def test_capped_total_is_never_smaller_than_the_rows_returned(monkeypatch):
-    """2026-09-18: several live boards showed a capped snapshot SMALLER
-    than the number of rows they had just handed back -- "ICON plc: 1200
-    job(s) ... capped of 840", "Blue Cross Blue Shield: 1200 ... capped of
-    40" -- because the un-deduped pager's row count and Workday's own
-    page-0 `total` disagreed and the total was trusted outright.
-    capped_total must never contradict what the caller can see with its
-    own eyes: it is now the LARGER of the two, never Workday's `total`
-    alone.
+        Notes:
+            2026-09-17: every harvest pass was spending the 150-GET rescue
+            budget on multi-site rows a whole-board pull never needed.
+        """
+        calls = cxs(_postings(5, "3 Locations"))
+        rows = board_for("workday").whole_board(WD)
+        assert [r["location"] for r in rows] == ["3 Locations"] * 5
+        assert [c.method for c in calls] == ["POST"]
+        assert "[!]" not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("company,rows", [
+        (WD, 1300),                                             # reads on
+        ({**WD, "active": 0, "mission_tier": "other"}, 1200),   # the spec's 60 pages
+    ])
+    def test_the_page_budget_widens_for_a_mission_worth_it_board(
+            self, cxs, monkeypatch, company, rows):
+        """config.board_max_pages: BOARD_MAX_ROWS for a board a track can
+        surface, the spec's own page budget for one off-mission and
+        inactive."""
+        cxs(_postings(1300))
+        monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 1400)
+        assert len(company_fetch.fetch_company(company, None)) == rows
+
+
+class TestWorkdayScope:
+    """A pull scoped to a locality asks the board for it (a location facet,
+    else a search term) and rescues rows whose listing names no place.
+
+    Notes:
+        2026-09-09: one board answered every scoped call with its whole
+        board; the pull read 60 pages, detail-fetched 1,199 "N Locations"
+        rows (531s of an 872s crawl) and kept all 1,200 as local.
     """
-    postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                for i in range(60)]
-    # The board's own reported total (50) UNDERCOUNTS the 60 distinct
-    # postings three full pages actually return.
-    monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 50))
-    monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-    rows = wd.fetch_workday_all("acme", 5, "Site", search_text="",
-                                loc_re=None, page_size=20, max_pages=3)
-    assert len(rows) == 60
-    info = http.snapshot_info()
-    assert info["capped"]
-    assert info["capped_total"] == 60, (
-        "capped_total must never be smaller than the rows just returned")
 
+    def test_a_scope_the_board_ignored_keeps_listed_matches_only(self, cxs, capsys):
+        rows = ([_posting("5 Locations", f"/job/US-CA-Santa-Clara/Eng_{i}")
+                 for i in range(40)]
+                + [_posting("US, NC, Durham", "/job/US-NC-Durham/Eng_NC1"),
+                   _posting("3 Locations", "/job/US-NC-Durham/Eng_NC2")])
+        calls = cxs(rows, scoped=rows[:2], ignores_scope=True)
+        out = board_for("workday").whole_board(WD, NC_RE)
+        assert [(j["id"], j["location"]) for j in out] == [
+            ("wd_acme_Eng_NC1", "US, NC, Durham"),
+            ("wd_acme_Eng_NC2", "US NC Durham (3 Locations)")]
+        assert "GET" not in [c.method for c in calls], "no detail rescue"
+        assert "unnarrowed" in capsys.readouterr().out
 
-class TestWorkdayTotalCeiling:
-    """Workday caps its OWN reported `total`, and what it will serve, at
-    wd.WD_TOTAL_CEILING. At the ceiling the rows returned and the reported
-    total AGREE, so the "fewer rows than the total" rule reads the pull as
-    complete and the board diff closes everything that sat past it --
-    2026-09-18: Abbott and NVIDIA each fetched exactly 2000 rows at a
-    reported total of exactly 2000, neither was tagged capped, and 70 and 10
-    live reqs were closed. A board UNDER the ceiling is genuinely complete
-    and must stay uncapped, or nothing on it would ever close again.
-    """
+    def test_a_narrowed_scope_expands_multi_location_rows(self, cxs):
+        calls = cxs(_postings(30, "5 Locations"),
+                    scoped=[_posting("5 Locations", "/job/US-CA-Santa-Clara/Eng_NC")])
+        out = board_for("workday").whole_board(WD, NC_RE)
+        assert [j["location"] for j in out] == ["US, NC, Durham"]
+        assert [c.method for c in calls].count("GET") == 1
 
-    def _pages_for(self, n):
-        return n // 20 + 5
+    def test_the_rescue_has_a_per_pull_budget(self, cxs, capsys):
+        """Past `rescue.cap`, a row the facet vouched for stays on its
+        listed text; the budget line says so."""
+        spec = config.BOARDS["workday"]
+        capped = board.Board("workday", {**spec, "rescue": {**spec["rescue"], "cap": 4}})
+        local = [_posting("5 Locations", f"/job/US-CA-Santa-Clara/Eng_{i}") for i in range(6)]
+        calls = cxs(local + _postings(30, "US, TX, Austin"), scoped=local)
+        out = capped.whole_board(WD, NC_RE)
+        assert [c.method for c in calls].count("GET") == 4
+        assert [j["location"] for j in out].count("5 Locations") == 2
+        assert "detail budget" in capsys.readouterr().out
 
-    def test_a_board_at_the_ceiling_is_capped(self, monkeypatch):
-        n = wd.WD_TOTAL_CEILING
-        rows = _pull_workday(monkeypatch, n, n, False, self._pages_for(n))
-        assert len(rows) == n
-        info = http.snapshot_info()
-        assert info["capped"], "rows == the reported total AT the ceiling"
-        assert info["capped_total"] == n
+    def test_the_local_count_is_the_scoped_total(self, cxs):
+        cxs(_postings(50, "x"), scoped=_postings(3))
+        assert board_for("workday").local_count("acme|5|Site", NC_RE) == 3
 
-    def test_the_ceiling_is_read_off_the_rows_when_no_total_is_reported(
-            self, monkeypatch):
-        """The row count alone reaches the ceiling, so the pull caps itself
-        even though page 0 declared no usable total."""
-        n = wd.WD_TOTAL_CEILING
-        rows = _pull_workday(monkeypatch, n, None, False, self._pages_for(n))
-        assert len(rows) == n
-        info = http.snapshot_info()
-        assert info["capped"]
-        assert info["capped_total"] == n, "falls back to the rows returned"
+    def test_an_ignored_scope_counts_listed_locations_on_a_sample(
+            self, cxs, monkeypatch):
+        """Never the whole board reported as local."""
+        rows = (_postings(150, "US, CA, Santa Clara")
+                + [_posting("US, NC, Durham", "/job/US-NC-Durham/Eng_NC")])
+        cxs(rows, scoped=[], ignores_scope=True)
+        monkeypatch.setattr(board.config, "LOCAL_COUNT_SAMPLE_PAGES", 2)
+        assert board_for("workday").local_count("acme|5|Site", NC_RE) == 0
 
-    def test_a_board_just_under_the_ceiling_is_not_capped(self, monkeypatch):
-        n = wd.WD_TOTAL_CEILING - 5
-        rows = _pull_workday(monkeypatch, n, n, False, self._pages_for(n))
-        assert len(rows) == n
-        assert not http.snapshot_info()["capped"], (
-            "a genuinely complete board must keep closing its vanished rows")
-
-    def test_a_small_board_is_untouched_by_the_rule(self, monkeypatch):
-        assert len(_pull_workday(monkeypatch, 12, 12, False, 5)) == 12
-        assert not http.snapshot_info()["capped"]
-
-
-class TestPageBudget:
-    """The Workday page cap is a [policy] setting
-    (config.BOARD_MAX_ROWS) applied through config.board_max_pages, which
-    is gated by the SAME off-mission/inactive predicate the harvester's
-    own long-interval cadence uses (config.is_offmission_inactive) -- see
-    fetchers/company.py's FETCHERS['workday'] (and every paged spec's
-    `Board.whole_board`)."""
-
-    def _wd_company(self, **extra):
-        return {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5,
-                "wd_site": "Site", "active": 1, "mission_tier": "adjacent",
-                **extra}
-
-    def test_a_mission_worth_it_board_reads_past_the_narrow_default(
-            self, monkeypatch):
-        postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                    "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                    for i in range(1300)]     # > the narrow 60-page/1200-row cap
-        monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 1300))
-        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-        monkeypatch.setattr(company_fetch.config, "BOARD_MAX_ROWS", 1400)
-        rows = company_fetch.fetch_company(self._wd_company(), None)
-        assert len(rows) == 1300, "the wider budget read past the old 1,200-row cap"
-
-    def test_an_offmission_inactive_board_keeps_the_narrow_default(
-            self, monkeypatch):
-        postings = [{"title": "Data Engineer", "locationsText": "US, NC, Durham",
-                    "externalPath": f"/job/x/{i}", "postedOn": "Posted Today"}
-                    for i in range(1300)]
-        monkeypatch.setattr(wd, "SESSION", _WDPager(postings, 1300))
-        monkeypatch.setattr(wd, "_wd_cxs_tenant", lambda t, p, s: t)
-        monkeypatch.setattr(company_fetch.config, "BOARD_MAX_ROWS", 1400)
-        company = self._wd_company(active=0, mission_tier="other")
-        rows = company_fetch.fetch_company(company, None)
-        assert len(rows) == 1200, (
-            "a board a track's own mission gate discards anyway keeps the "
-            "narrower, pre-2026-09-18 read")
+    def test_a_hyphenated_tenant_is_read_through_its_underscore_id(self, cxs):
+        """The CXS path takes the tenant's internal id, the underscore form
+        of a hyphenated host (the hyphen form 422s): tried once, then
+        settled for the pull and a stored row's detail, whose remote type
+        rides along as a hint."""
+        calls = cxs(_postings(3))
+        company = {**WD, "wd_tenant": "vhr-unither"}
+        rows = board_for("workday").whole_board(company)
+        job = company_fetch.hydrate_description(
+            {"ats": "workday", "url": rows[0]["url"], "description": "", "location": ""},
+            company)
+        assert len(rows) == 3 and job["location"] == "US, NC, Durham"
+        assert job["remote_hint"] == "workday:remoteType"
+        assert [c.url.split("/cxs/")[1].split("/")[0] for c in calls] == [
+            "vhr-unither", "vhr_unither", "vhr_unither"]
 
 
 # --------------------------------------------------------------------------- #

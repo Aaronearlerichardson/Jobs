@@ -436,15 +436,16 @@ mid value — so fetch the bodies first.
 ### Re-scoring & description backfill
 
 ```bash
-python run_scraper.py --track local --backfill-descriptions            # fetch full JD text for stored Workday jobs (CXS)
-python run_scraper.py --track local --backfill-descriptions --limit 20 # try a small batch first
+python run_scraper.py --track local --backfill-board-descriptions            # fetch missing JD text via each company's board
+python run_scraper.py --track local --backfill-board-descriptions --limit 20 # try a small batch first
 python run_scraper.py --track local --rescore                          # re-score every stored job with the current rubric
 python run_scraper.py --track local --rescore --described-only         # ...only jobs that already have a JD body
 ```
 
-Workday serves each job's full description as plain JSON from
-`/wday/cxs/{tenant}/{site}{externalPath}` — the live fetcher pulls it, and
-`--backfill-descriptions` fills it in for rows stored before that (idempotent).
+Most boards list postings without a body; each platform's detail endpoint
+(its `detail` spec in `src/config/boards.py`) serves it, and
+`--backfill-board-descriptions` fills it in for rows stored before that
+(idempotent).
 Run the backfill, then `--rescore`: real text goes in, and the no-description
 rows that used to clog the top clear out. Use `--rescore` after changing your
 résumé, the `[fit]` block, or the prompt — a normal crawl only scores jobs it
@@ -716,10 +717,11 @@ python harvest.py --once --hydrate        # the old whole-board hydration
 Listings alone take a while at polite pacing; boards run concurrently
 (`--workers`, `HARVEST_WORKERS`), cheapest ATSes first, and a board with no
 progress for 15 minutes is abandoned. Bodies already in the store are never
-fetched twice, so each pass advances the roster. Workday closes the
-connection after roughly 150 detail requests per tenant, so triage fetches
-at most 100 bodiless Workday rows per board per pass (`HYDRATE_CAP` in
-`src/crawl/harvest.py`) and leaves the rest for the next one.
+fetched twice, so each pass advances the roster. Some hosts close the
+connection after roughly 150 detail requests, so triage fetches at most 100
+bodiless rows per board per pass, a second apart (`HYDRATE_CAP_PER_RUN` and
+`HYDRATE_DELAY_S` in `src/config/policy.py`), and leaves the rest for the
+next one.
 
 By default the process stays up and runs a pass every 12 hours (`--every`;
 `--once` for a single pass). Between passes it parks on a timed wait, which

@@ -6,9 +6,8 @@
 
 This is a reader, not a fetcher: it shares nothing with the whole-board
 pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
-per-ATS endpoint builders it asks -- `jazzhr.board_url` and Workday's CXS
-URL helpers. A platform with a `config.BOARDS` spec is asked through the
-engine (`Board.probe_job`).
+per-ATS endpoint builder it asks, `jazzhr.board_url`. A platform with a
+`config.BOARDS` spec is asked through the engine (`Board.probe_job`).
 
 One rule runs through every branch: a row is closed ONLY on positive
 evidence. Every refusal a host can make -- 403, 405, 429, 5xx, a timeout,
@@ -25,7 +24,7 @@ import requests
 from src import config
 from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
-from . import icims, jazzhr, workday
+from . import icims, jazzhr
 from .board import board_for_url
 
 _log = logging.getLogger(__name__)
@@ -87,8 +86,6 @@ def probe_family(url):
         return ""
     if _GATED_HOST_RE.search(url):
         return "gated"
-    if workday._cxs_detail_url(url):
-        return "workday"
     board = board_for_url(url)
     if board:
         return board.name
@@ -171,8 +168,8 @@ def probe_job_open(url, job_id=None):
 
     A row is closed ONLY on positive evidence: 404/410 from one of those
     endpoints or from the page, an ATS "no longer available" notice, a
-    past JSON-LD validThrough, a spec's `closure.closed` rule, a Workday
-    CXS miss, or an id absent from a non-empty board listing.
+    past JSON-LD validThrough, a spec's `closure.closed` or `unmatched`
+    rule, or an id absent from a non-empty board listing.
     403/405/429/5xx/timeouts never close.
     """
     if not url:
@@ -184,32 +181,6 @@ def probe_job_open(url, job_id=None):
         url = clean
     if _GATED_HOST_RE.search(url):
         return None, "bot-gated aggregator host"
-
-    # Workday: the CXS JSON detail endpoint is authoritative and JS-free.
-    # Hyphenated tenants need the underscore tenant id in the CXS path,
-    # so each variant is tried before concluding anything.
-    cxs = workday._cxs_detail_url(url)
-    if cxs:
-        last_status = None
-        for u in workday._cxs_tenant_variants(cxs):
-            try:
-                r = SESSION.get(u,
-                                headers=JSON_HEADERS)
-            except Exception as e:
-                return None, f"workday cxs error: {type(e).__name__}"
-            last_status = r.status_code
-            if r.status_code != 200:
-                continue
-            try:
-                info = r.json().get("jobPostingInfo") or {}
-            except ValueError:
-                return None, "workday cxs non-JSON"
-            if info.get("jobDescription") or info.get("title"):
-                return True, "workday cxs: posting live"
-            return False, "workday cxs: no jobPostingInfo"
-        if last_status in (404, 410):
-            return False, f"workday cxs HTTP {last_status}"
-        return None, f"workday cxs HTTP {last_status}"
 
     # The platform's own API first; its reason is the one worth reporting
     # if the page below cannot tell either.

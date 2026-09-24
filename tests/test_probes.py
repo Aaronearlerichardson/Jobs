@@ -597,6 +597,7 @@ INFOR_JOB = ("https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/form/"
              "JobPosting%5BJobPostingSet%5D%2842%2C207651%2C1%29"
              ".JobPostingDisplay?pagesize=1&csk.JobBoard=EXTERNAL"
              "&csk.HROrganization=42")
+WD_JOB = "https://acme.wd5.myworkdayjobs.com/en-US/External/job/Durham-NC/Eng_R1"
 
 #: The endpoint each family is expected to ask, keyed by job URL. A probe
 #: that stopped calling its API would otherwise pass the closure tests by
@@ -609,6 +610,7 @@ FAMILY_API = {
     BAMBOO_JOB: "acme.bamboohr.com/careers/29/detail",
     JAZZ_JOB: "acme.applytojob.com/apply/8LvYWTHbW7",
     INFOR_JOB: ".JobPostingDisplay?pageop=load",
+    WD_JOB: "wday/cxs/acme/External/job/Durham-NC/Eng_R1",
 }
 
 
@@ -749,6 +751,18 @@ class TestProbeIsDecisivePerFamily:
         probe_http({FAMILY_API[INFOR_JOB]: self._infor(),
                     INFOR_JOB.split("?")[0]: fake_response(url=INFOR_JOB)})
         assert job_probe.probe_job_open(INFOR_JOB)[0] is None
+
+    @pytest.mark.parametrize("info,is_open", [
+        ({"title": "Engineer", "jobDescription": "<p>Build.</p>"}, True),
+        ({}, False),                 # the record answers without a posting
+        (None, False),               # no record at all
+    ])
+    def test_workday_is_open_while_its_record_names_the_posting(
+            self, probe_http, info, is_open):
+        """A pulled Workday posting's detail still answers 200."""
+        probe_http({FAMILY_API[WD_JOB]: fake_response(
+            {} if info is None else {"jobPostingInfo": info})})
+        assert job_probe.probe_job_open(WD_JOB)[0] is is_open
 
     def test_icims_sends_the_headers_its_waf_accepts(self, probe_http):
         """iCIMS's WAF 405s the crawler's default Chrome-like UA (see

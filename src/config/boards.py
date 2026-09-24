@@ -356,6 +356,69 @@ BOARDS = {
                               "why": {"const": "active"}}]},
         "employer": "company.name",
     },
+    "workday": {
+        # Not in the lightweight sweep: boards run to thousands of rows and
+        # are pulled scoped to the locality.
+        "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
+                   "parts": ["tenant", "pod", "site"],
+                   # The CXS path names the tenant's internal id: for a
+                   # hyphenated host usually the underscore form (the
+                   # hyphen form 422s).
+                   "try": {"cxs_tenant": ["{tenant}", "{tenant|underscore}"]},
+                   "accept": {"status": [200], "total": True}},
+        # The URL's site slot can hold a locale; the company row's wins.
+        "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
+                          r"(?:/[a-z]{2}(?:-[A-Za-z]{2})?)?/([^/?#]+)(/job/[^?#]*)",
+                    "parts": ["tenant", "pod", "site", "path"]},
+        "listing": {
+            "method": "POST",
+            "url": "https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{cxs_tenant}/{site}/jobs",
+            "json": {"appliedFacets": "$facets", "searchText": "$search_text",
+                     "limit": "$size", "offset": "$offset"},
+            "headers": {"Content-Type": "application/json"},
+            "decoder": {"kind": "json", "entries": "jobPostings"},
+            # Only page 0 reports the total. The API serves 2000 rows at
+            # most and reports a bigger board as 2000.
+            "pager": {"kind": "offset", "size": 20, "pages": 60, "total": "total",
+                      "ceiling": 2000},
+            "scope": {"kind": "facets", "facets": "facets", "param": "facetParameter",
+                      "param_re": "(?i)location|country|region|city|state",
+                      "values": "values", "id": "id", "label": "descriptor"},
+            "fields": {
+                "_pid": {"first": [{"of": "externalPath", "transform": "group:([^/]*)$"},
+                                   {"of": "title", "transform": "stable_id"}]},
+                "id": {"format": "wd_{tenant}_{_pid}"},
+                "title": "title",
+                "url": {"format": "https://{tenant}.wd{pod}.myworkdayjobs.com/en-US/{site}"
+                                  "{externalPath}",
+                        "when": {"truthy": "externalPath"},
+                        "else": {"format": "https://{tenant}.wd{pod}.myworkdayjobs.com"}},
+                "location": "locationsText",
+                "posted_at": {"first": ["postedOnDate", "postedOn"]},
+                # A listing entry carries six keys, none a department (2026-09-23).
+                "department": None,
+            },
+        },
+        # A multi-site posting lists as "<N> Locations"; its path names one site.
+        "rescue": {"unknown": r"(?i)^\s*\d+\s+locations?\s*$", "cap": 150, "cache_days": 3,
+                   "free": {"of": {"of": "externalPath", "transform": "group:^/job/([^/]+)/"},
+                            "transform": "dash_space"}},
+        "detail": {
+            "url": "https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{cxs_tenant}/{site}{path}",
+            "record": "jobPostingInfo",
+            "fields": {
+                "description": {"of": "jobDescription", "transform": "html_text"},
+                "location": {"join": ["location", "additionalLocations[]"], "sep": "; "},
+                "remote_hint": {"const": "workday:remoteType",
+                                "when": {"any": [{"eq": ["remoteType", "Remote"]},
+                                                 {"eq": ["remoteType", "Fully Remote"]}]}},
+            },
+            "location": "if_unknown",
+        },
+        # A pulled posting's record answers 200 without a title or a body.
+        "closure": {"open": {"any": [{"truthy": "jobDescription"}, {"truthy": "title"}]},
+                    "unmatched": "no posting record"},
+    },
     "infor": {
         "handle": {"parts": ["host", "org"]},
         # The posting key is a triple (org, requisition, posting revision),

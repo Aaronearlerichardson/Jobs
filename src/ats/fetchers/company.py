@@ -10,14 +10,13 @@ unvetted-board sweep calls with `gate=is_relevant`) and `_adapt` puts the
 result in the company-fetch shape (`board.adapt`); a platform with a
 `config.BOARDS` spec is pulled by its engine, `board.Board.whole_board`:
 
-    {"id", "title", "url", "location", "description", "ats", "_wd",
+    {"id", "title", "url", "location", "description", "ats",
      ["posted_at"], ["remote_hint"]}
 
-`_wd` is Workday's (tenant, pod, site, path) for `hydrate_description`,
-None elsewhere. The module also keeps what has no fetcher module of its
-own: WordPress careers endpoints, self-hosted ("custom") careers pages
-and their board detection, and the per-URL description/title readers.
-The per-job open/closed probe is fetchers/probe.py.
+The module also keeps what has no fetcher module of its own: WordPress
+careers endpoints, self-hosted ("custom") careers pages and their board
+detection, and the per-URL description/title readers. The per-job
+open/closed probe is fetchers/probe.py.
 """
 
 import re
@@ -37,27 +36,22 @@ from src import config
 _ANCHORS_ONLY = SoupStrainer("a")
 
 from src.net.http import HEADERS, SESSION, fetch_failed, get_json
-from src.match.locality import NC_RE, location_unknown  # profile [locality]
+from src.match.locality import NC_RE  # profile [locality]
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
-                          default_search_text, hashed_cache_path, host_of,
+                          hashed_cache_path, host_of,
                           json_cache_get, json_cache_put, norm_posted_date,
                           origin_of)
-from . import icims, workday
-from .board import BOARDS, adapt as _adapt, board_for, loc_ok
+from . import icims
+from .board import BOARDS, adapt as _adapt, board_for, board_for_url, loc_ok
 from .html_scrape import fetch_kula, fetch_successfactors
 from .icims import fetch_icims_all
 from .jazzhr import fetch_jazzhr
 from .jobvite import fetch_jobvite
 from .peopleadmin import fetch_peopleadmin
-from .workday import fetch_workday_all, wd_local_count  # noqa: F401 (re-export)
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
 # scoring prompt, so a long posting's requirements block survives end to end.
 _DESC_MAX = config.MAX_DESC_CHARS
-
-# Kept for discovery (local_sourcing), which imports the Workday search
-# term under this name.
-_default_search_text = default_search_text
 
 
 def fetch_peopleadmin_all(host, loc_re=None):
@@ -77,64 +71,49 @@ def fetch_peopleadmin_all(host, loc_re=None):
     return out
 
 
+def _board_of(job):
+    """The engine that reads `job`'s posting: its ATS's, when that one
+    reads the URL; else the one whose `job_ref` does; else its ATS's."""
+    board = board_for(job.get("ats"))
+    if board and board.owns_url(job.get("url")):
+        return board
+    return board_for_url(job.get("url")) or board
+
+
 def needs_detail(job):
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
-    (the "<N> Locations" placeholder, or any other location_unknown text)
-    on Workday or on a spec'd platform whose detail can fill it
-    (`Board.needs_detail`). Shared by harvest._hydrate_rows and
-    triage._hydrate, which both select rows to fetch by this predicate
-    rather than "no description" alone.
+    that the posting's engine can fill (`Board.needs_detail`). Shared by
+    harvest._hydrate_rows and triage._hydrate, which both select rows to
+    fetch by this predicate rather than "no description" alone.
 
-    >>> needs_detail({"description": "", "ats": "greenhouse", "_wd": None})
+    >>> needs_detail({"description": "", "ats": "greenhouse"})
     True
-    >>> needs_detail({"description": "d", "ats": "greenhouse", "_wd": None})
+    >>> needs_detail({"description": "d", "ats": "greenhouse"})
     False
-    >>> wd = ("acme", 5, "Ext", "/job/x")
-    >>> needs_detail({"description": "d", "ats": "workday", "_wd": wd,
+    >>> url = "https://acme.wd5.myworkdayjobs.com/en-US/Ext/job/x/Eng_R1"
+    >>> needs_detail({"description": "d", "ats": "workday", "url": url,
     ...               "location": "2 Locations"})
     True
-    >>> needs_detail({"description": "d", "ats": "workday", "_wd": wd,
+    >>> needs_detail({"description": "d", "ats": "workday", "url": url,
     ...               "location": "Durham, NC"})
     False
     """
-    board = board_for(job.get("ats"))
-    if board:
-        return board.needs_detail(job)
-    if not job.get("description"):
-        return True
-    return job.get("ats") == "workday" and bool(job.get("_wd")) \
-        and location_unknown(job.get("location"))
+    board = _board_of(job)
+    return board.needs_detail(job) if board else not job.get("description")
 
 
-def hydrate_description(job):
-    """Fetch, in place, whatever `needs_detail` says `job` still lacks: a
-    bodiless row's description through its ATS's detail call (for Workday
-    the same JSON also carries the location list), or a bodied Workday
-    row's location alone, from the disk-cached per-req lookup
-    (workday._wd_detail_locations) with no body refetch.
+def hydrate_description(job, company=None):
+    """Fetch, in place, whatever `needs_detail` says `job` still lacks,
+    through the posting's engine (`Board.hydrate`; `company`, the row's
+    store row, names its board), else the ATS's own detail reader, else
+    the posting's page.
     """
     if not needs_detail(job):
         return job
-    board = board_for(job.get("ats"))
+    board = _board_of(job)
     if board:
-        board.hydrate(job)
-    elif job.get("ats") == "workday" and job.get("_wd"):
-        if job.get("description"):
-            locs = workday._wd_detail_locations(*job["_wd"])
-            if locs:
-                job["location"] = "; ".join(locs)
-            return job
-        info = workday.cxs_detail(*job["_wd"])
-        if info:
-            job["description"] = workday.text_from_html(
-                info.get("jobDescription", ""))[:_DESC_MAX]
-            # Same JSON carries the req's full location list: upgrade a
-            # useless "2 Locations" locationsText to the real thing.
-            locs = workday.detail_locations(info)
-            if locs and location_unknown(job.get("location")):
-                job["location"] = "; ".join(locs)
-        return job
+        board.hydrate(job, company)
     if job.get("ats") == "icims" and job.get("url"):
         # The ?in_iframe=1 document is server-rendered with JSON-LD even on
         # JS-shell tenants; it also names the posting's real location(s).
@@ -158,8 +137,8 @@ def hydrate_description(job):
             pass
     # Generic fallback: any job with a detail URL whose ATS-specific branch
     # didn't yield a body (SuccessFactors career sites whose slug is unknown,
-    # custom boards, Workday rows that arrived without _wd). Covers the
-    # empty-description rows that were silently unscorable.
+    # custom boards). Covers the empty-description rows that were silently
+    # unscorable.
     if not job.get("description") and job.get("url"):
         d = _description_from_job_url(job["url"])
         if d:
@@ -419,7 +398,7 @@ def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
         out.append({"id": f"custom_{re.sub(r'[^a-z0-9]+', '-', url.lower())[-48:]}",
                     "title": clean_field(title)[:90], "url": url,
                     "location": loc[:70],
-                    "description": "", "ats": "custom", "_wd": None})
+                    "description": "", "ats": "custom"})
     return out
 
 
@@ -511,7 +490,7 @@ def fetch_wpjson_careers_all(base_url, loc_re=None):
                         "title": clean_field(p.get("post_title")) or "Unknown",
                         "url": url, "location": loc, "description": "",
                         "posted_at": norm_posted_date((p.get("post_date") or "")[:10]),
-                        "ats": "wpjson", "_wd": None})
+                        "ats": "wpjson"})
         if page >= int(d.get("max_num_pages") or 1):
             break
         page += 1
@@ -528,14 +507,6 @@ FETCHERS = {
     "jazzhr":          lambda c, lr: _adapt(fetch_jazzhr("", c["slug"], loc_re=lr), "jazzhr"),
     "jobvite":         lambda c, lr: _adapt(fetch_jobvite(c["slug"], loc_re=lr), "jobvite"),
     "kula":            lambda c, lr: _adapt(fetch_kula("", c["slug"], loc_re=lr), "kula"),
-    # Page budget: config.board_max_pages raises it for a mission-worth-it
-    # board (config.BOARD_MAX_ROWS), else keeps the fetcher's own narrower
-    # default (workday._WD_MAX_PAGES) for one config.is_offmission_inactive
-    # -- see policy.board_max_pages.
-    "workday":         lambda c, lr: _adapt(fetch_workday_all(
-                           c["wd_tenant"], c["wd_pod"], c["wd_site"], lr,
-                           max_pages=config.board_max_pages(
-                               c, 20, workday._WD_MAX_PAGES)), "workday"),
     "icims":           lambda c, lr: _adapt(fetch_icims_all(c["slug"], lr), "icims"),
     "successfactors":  lambda c, lr: _adapt(fetch_successfactors("", c["careers_url"], loc_re=lr), "successfactors"),
     "peopleadmin":     lambda c, lr: fetch_peopleadmin_all(c["careers_url"], lr),
@@ -574,8 +545,6 @@ _TITLE_SAMPLERS = {
     "icims":           lambda c, n: fetch_icims_all(c["slug"], meta_cap=0),
     "successfactors":  lambda c, n: fetch_successfactors(
                            "", c["careers_url"], max_pages=1),
-    "workday":         lambda c, n: fetch_workday_all(
-                           c["wd_tenant"], c["wd_pod"], c["wd_site"], max_pages=1),
 }
 
 

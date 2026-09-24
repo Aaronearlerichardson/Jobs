@@ -75,7 +75,7 @@ def stale_body_rows(conn, where, columns="job_id, title, url", min_len=200,
     already failed on, and the header line saying so.
 
     `where` is the extra predicate that picks one backfill's population
-    (company-linked rows, Workday URLs); the rest -- too short to score,
+    (company-linked rows); the rest -- too short to score,
     not closed, not attempted inside `retry_days` -- is the same question
     every backfill asks. Both of them had written it out, and they had
     already diverged: one read `desc_checked_at` off a sqlite3.Row and the
@@ -585,8 +585,9 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     don't re-fetch every board to fail on the same vanished postings
     (retry_days=0 retries everything).
 
-    Companies are fetched CONCURRENTLY (`max_workers`), like the Workday
-    sibling below.
+    Companies are fetched CONCURRENTLY (`max_workers`). A row the board
+    pull does not cover is hydrated through its company's engine
+    (`company_fetch.hydrate_description`).
 
     Notes:
         This function once advertised max_workers=8 and walked one company
@@ -652,7 +653,7 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                     # detail page (JSON-LD / career-site markup).
                     stub = {"title": r["title"], "url": r["url"],
                             "ats": company.get("ats"), "description": ""}
-                    company_fetch.hydrate_description(stub)
+                    company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")
                 out.append((r["job_id"], desc))
             return out
@@ -669,47 +670,6 @@ def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                         n += 1
                         n_matched += 1
             print(f"    {company['name']:30} {len(rs):2} stale -> {n_matched:2} matched")
-    print(f"  {n} of {len(rows)} description(s) backfilled.")
-    return n
-
-
-def backfill_workday_descriptions(max_workers=8, limit=None, min_len=200,
-                                  t=None, retry_days=3):
-    """The same backfill, for stored Workday rows, via the CXS per-job
-    endpoint rather than a whole-board pull. Only touches rows whose URL is
-    a myworkdayjobs.com board.
-
-    Lived in src/ats/fetchers/workday.py, which made it the one backfill
-    that could not see `track_store`: it opened `store.connect()` with no
-    argument, so under a profile that gives a track its own `db` it
-    backfilled the DEFAULT store while reporting the track's name. Same
-    divergence the roster ops had, same fix.
-    """
-    from src.ats.fetchers.workday import fetch_workday_description
-
-    t = _t(t)
-    with track_store(t) as conn:
-        rows = stale_body_rows(conn, "url LIKE '%myworkdayjobs.com%'",
-                               columns="job_id, url", min_len=min_len,
-                               retry_days=retry_days, limit=limit,
-                               label="Workday description(s) via CXS")
-
-        def _one(r):
-            return r["job_id"], fetch_workday_description(r["url"])
-
-        n, empty = 0, []
-        for jid, text in fan_out(rows, _one, "backfill"):
-            if save_body(conn, jid, text):
-                n += 1
-            else:
-                empty.append(jid)
-    # "0 of 4 backfilled" with no why was undiagnosable from the session
-    # log; name the silent failures (CXS answered but returned no JD text,
-    # usually a posting that closed since it was stored).
-    if empty:
-        print(f"    [!] {len(empty)} fetch(es) returned no JD text "
-              f"(posting gone from CXS?): "
-              + ", ".join(empty[:5]) + (" ..." if len(empty) > 5 else ""))
     print(f"  {n} of {len(rows)} description(s) backfilled.")
     return n
 
@@ -775,7 +735,7 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
 def _live_jd(row):
     """Freshest full JD text for one stored job row, preferring a live
     detail fetch (the platform's own detail endpoint through the board
-    engine, Workday CXS, then the generic JSON-LD/careers-page extractor)
+    engine, then the generic JSON-LD/careers-page extractor)
     over the stored text. Falls back to the
     stored description when the live pull is shorter or fails — the deep
     verify pass must never see LESS text than the first pass did. Lengths
@@ -794,9 +754,6 @@ def _live_jd(row):
         board = board_for_url(url)
         if board:
             text = board.description_for(url)
-        elif "myworkdayjobs.com" in url:
-            from src.ats.fetchers.workday import fetch_workday_description
-            text = fetch_workday_description(url) or ""
         if not text and url:
             text = company_fetch._description_from_job_url(url)
     except Exception:
@@ -1294,8 +1251,8 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
-    accepting" notice, a past JSON-LD validThrough, a Workday CXS miss, an
-    id absent from a non-empty board listing -- see
+    accepting" notice, a past JSON-LD validThrough, a spec's closure
+    rule, an id absent from a non-empty board listing -- see
     fetchers.probe.probe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board

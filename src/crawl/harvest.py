@@ -58,7 +58,7 @@ from src import config
 from src import store
 from src.ats.coords import slug_named
 from src.ats.fetchers import company as company_fetch
-from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
+from src.ats.registry import LIGHTWEIGHT
 from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
 from src.match.locality import geo_mode, location_unknown
@@ -71,25 +71,18 @@ _log = logging.getLogger(__name__)
 # Boards in flight at once. Each board is one host, and a board's own
 # requests are serial, so this is also the per-host politeness bound.
 DEFAULT_WORKERS = worker_count("HARVEST_WORKERS")
-# Pause between one board's detail GETs (hydration is a page per posting)
-# when the ATS registry has no politeness pause for the family. The
-# registry's own value wins when it has one: Workday cut Insulet off after
-# 151 detail GETs at two per second (2026-09-10 smoke run), and its
-# registry pause is a full second.
-HYDRATE_DELAY_S = 0.5
+# Hydration is a detail GET per posting, config.HYDRATE_DELAY_S apart and
+# at most config.HYDRATE_CAP_PER_RUN per board per run: one host cut the
+# crawler off after 151 detail GETs at two per second (2026-09-10), and
+# again after 42 on a retry ten minutes later. The rows left bodiless are
+# picked up by later runs (stored bodies are never re-fetched, so each run
+# advances).
 # Consecutive hydration misses that mean the host has stopped answering
-# (Workday drops the connection outright once it decides you are a bot).
+# (some drop the connection outright once they decide you are a bot).
 # The first streak earns one pause-and-retry; a second ends hydration for
 # this board, and the next run picks the bodiless rows up again.
 MISS_STREAK = 5
 MISS_BACKOFF_S = 90.0
-# Per-board, per-run ceiling on detail GETs for hosts that throttle by
-# volume. Workday closed the connection after 151 detail GETs (2026-09-10,
-# Insulet), and again after 42 on a retry ten minutes later, and the first
-# refused request hung for minutes each time. Staying under the limit
-# avoids both; the rows left bodiless are picked up by later runs (the
-# store's existing bodies are never re-fetched, so each run advances).
-HYDRATE_CAP = {"workday": 100}
 # A board that has made NO progress (no fetch return, no hydrated row) for
 # this long is abandoned. Generous: one detail GET is bounded by
 # config.FETCH_TIMEOUT, so only a wedged fetcher gets here.
@@ -328,17 +321,6 @@ def bury_404_board(conn, company, error):
     return reason
 
 
-def hydrate_delay(ats):
-    """Seconds between one board's detail GETs: the ATS registry's
-    politeness pause when it has one, else HYDRATE_DELAY_S.
-
-    >>> hydrate_delay("workday"), hydrate_delay("custom")
-    (1.0, 0.5)
-    """
-    entry = ATS_REGISTRY.get(ats)
-    return max(entry[2], HYDRATE_DELAY_S) if entry else HYDRATE_DELAY_S
-
-
 def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
                   delay=None, now=None, backoff_s=MISS_BACKOFF_S):
     """Fetch, hydrate and store ONE board. Runs on a worker thread and opens
@@ -349,7 +331,7 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
 
     `progress()` is called after the listing returns and after every
     hydrated row, which is how the run's watchdog tells a slow board from a
-    wedged one. `delay` defaults to hydrate_delay(ats).
+    wedged one. `delay` defaults to config.HYDRATE_DELAY_S.
 
     `hydrate` is OFF by default: the listing is stored bodiless and the
     triage pass (src/crawl/triage.py) fetches bodies for the rows that
@@ -362,8 +344,6 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     failure fills last_error, never `err`, which means an exception.
     """
     t0 = time.monotonic()
-    if delay is None:
-        delay = hydrate_delay(company.get("ats"))
     stats = {"name": company.get("name"), "ats": company.get("ats"),
              "fetched": 0, "new": 0, "hydrated": 0, "unhydrated": 0,
              "closed": 0, "reopened": 0, "fetch_errors": 0, "err": None,
@@ -418,9 +398,9 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
     conn = store.connect(db_path)
     try:
         # Bodies already in the store (an earlier harvest, or a crawl) are
-        # reused, never re-fetched: the listing comes back bodiless from
-        # Workday every time, and re-hydrating 100 known rows is what
-        # tripped the host's limit on the second Insulet run.
+        # reused, never re-fetched: many listings come back bodiless every
+        # time, and re-hydrating 100 known rows is what tripped one host's
+        # limit on a second run (2026-09-10).
         if jobs and company.get("id"):
             stored = store.descriptions_for_company(conn, company["id"])
             for j in jobs:
@@ -441,8 +421,8 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
                     capped=stats.get("capped", False), now=stamp_dt)
                 stats["reopened"], stats["closed"] = re_, cl
             for j in jobs:
-                # A whole-board Workday listing says "N Locations" every
-                # pass; the real list triage resolved stays.
+                # A whole-board listing can say "N Locations" every pass;
+                # the real list triage resolved stays.
                 if store.upsert_job(
                         conn, _row(j, company, stamp),
                         keep_location=location_unknown(j.get("location"))):
@@ -467,24 +447,25 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
 
 def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
     """Resolve every row in `jobs` that still needs a detail call
-    (company_fetch.needs_detail: no body yet, or -- Workday only -- a body
-    already but a location the listing never resolved), in place, within
-    the host's tolerances: the per-run cap, the pause between GETs, and
-    the miss-streak breaker.
+    (company_fetch.needs_detail: no body yet, or a body already but a
+    location the listing never resolved), in place, within the host's
+    tolerances: config.HYDRATE_CAP_PER_RUN rows, `delay` between GETs
+    (config.HYDRATE_DELAY_S when None), and the miss-streak breaker.
 
     Fills stats['hydrated'] (rows whose detail need was resolved this
-    pass -- a body arrived, or a Workday location-only row's location
-    did) and stats['unhydrated'] (rows that still need one when this pass
-    ends, whether never reached or tried and failed). A Workday location
-    lookup that comes back empty counts as a miss for the breaker exactly
-    like a failed body fetch always has -- needs_detail is what decides
-    "resolved or not" either way, so the two cases share one counter.
+    pass -- a body arrived, or a location-only row's location did) and
+    stats['unhydrated'] (rows that still need one when this pass ends,
+    whether never reached or tried and failed). A location lookup that
+    comes back empty counts as a miss for the breaker exactly like a
+    failed body fetch -- needs_detail decides "resolved or not" either
+    way, so the two cases share one counter.
     """
     todo = [j for j in jobs if company_fetch.needs_detail(j)]
-    cap = HYDRATE_CAP.get(company.get("ats"))
-    if cap and len(todo) > cap:
+    cap = config.HYDRATE_CAP_PER_RUN
+    delay = config.HYDRATE_DELAY_S if delay is None else delay
+    if len(todo) > cap:
         print(f"    {company.get('name')}: {len(todo)} row(s) needing detail, "
-              f"{company.get('ats')} cap is {cap}/run - the rest next run")
+              f"cap is {cap}/run - the rest next run")
         todo = todo[:cap]
     streak = paused = 0
     try:
@@ -492,7 +473,7 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
             _log.debug("hydrate %s", j.get("url"))
             j["_tried"] = True          # attempted (vs. left over the cap)
             try:
-                company_fetch.hydrate_description(j)
+                company_fetch.hydrate_description(j, company)
             except Exception as e:              # noqa: BLE001 - per row
                 _log.debug("hydrate %s failed: %s", j.get("url"), e)
             progress()

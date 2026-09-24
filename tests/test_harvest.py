@@ -18,7 +18,7 @@ from src.net import http
 def _job(i, desc=""):
     return {"id": f"gh_acme_{i}", "title": f"Engineer {i}",
             "url": f"https://x.test/j/{i}", "location": "Durham, NC",
-            "description": desc, "ats": "greenhouse", "_wd": None}
+            "description": desc, "ats": "greenhouse"}
 
 
 # ── store: concurrency ──────────────────────────────────────────────────────
@@ -205,7 +205,7 @@ def test_harvest_board_stores_hydrates_and_closes(tmp_path, monkeypatch):
     board = [_job(1, "already has a body"), _job(2)]
     monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
 
-    def fake_hydrate(job):
+    def fake_hydrate(job, company=None):
         job["description"] = "fetched body"
         return job
     monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
@@ -281,7 +281,7 @@ def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(
     monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
     calls = []
     monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
-                        lambda j: calls.append(j) or j)      # never a body
+                        lambda j, company=None: calls.append(j) or j)  # never a body
     naps = []
     monkeypatch.setattr(harvest.time, "sleep", lambda s: naps.append(s))
     stats = harvest.harvest_board(c, db, delay=0, backoff_s=7, hydrate=True)
@@ -292,7 +292,7 @@ def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(
     assert stats["fetched"] == 40 and stats["new"] == 40   # still stored
 
 
-def test_harvest_board_reuses_stored_bodies_and_caps_workday(
+def test_harvest_board_reuses_stored_bodies_and_caps_hydration(
         tmp_path, monkeypatch):
     db = tmp_path / "s.db"
     conn = store.connect(db)
@@ -305,10 +305,10 @@ def test_harvest_board_reuses_stored_bodies_and_caps_workday(
                                 "harvested_at": "x"})
     board = [_job(i) for i in range(3 + 150)]       # all bodiless listings
     monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
-    monkeypatch.setattr(harvest, "HYDRATE_CAP", {"workday": 100})
+    monkeypatch.setattr(config, "HYDRATE_CAP_PER_RUN", 100)
     calls = []
 
-    def fake_hydrate(j):
+    def fake_hydrate(j, company=None):
         calls.append(j["id"])
         j["description"] = "fresh body"
         return j
@@ -321,11 +321,6 @@ def test_harvest_board_reuses_stored_bodies_and_caps_workday(
     n_body = conn.execute("SELECT COUNT(*) FROM jobs WHERE "
                           "length(description) > 0").fetchone()[0]
     assert n_body == 103                             # 3 stored + 100 fresh
-
-
-def test_hydrate_delay_uses_the_registry_pause():
-    assert harvest.hydrate_delay("workday") == 1.0
-    assert harvest.hydrate_delay("greenhouse") == harvest.HYDRATE_DELAY_S
 
 
 def test_harvest_board_keeps_a_resolved_location_over_a_placeholder(
@@ -721,7 +716,7 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
                             "harvested_at": "2026-09-10T00:00:00"})
     board = [{"id": "gh_acme_1", "title": "Data Engineer",
               "url": "https://x.test/j/1", "location": "Durham, NC",
-              "description": "", "ats": "greenhouse", "_wd": None}]
+              "description": "", "ats": "greenhouse"}]
     t = next(iter(config.UI_TRACKS.values()))
     t = {**t, "db_path": db, "sources": {**t["sources"]},
          "email": False, "verify_top": 0, "require_core_anchor": False,

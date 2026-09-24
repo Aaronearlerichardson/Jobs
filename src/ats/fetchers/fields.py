@@ -14,7 +14,7 @@ A field spec is a PATH or a dict with one operator:
     merge          {"primary", "extras"}: `merge_locations`
     format         a template: "{name}" reads a handle part, an internal
                    "_" field, or an entry path, in that order; "{x:8}"
-                   keeps 8 characters
+                   keeps 8 characters, "{x|t}" applies transform t
     const          a literal
     of             a spec whose value a "transform" is applied to
 
@@ -28,7 +28,7 @@ import html
 import re
 import time
 
-from src.net.util import host_of, norm_posted_date, text_from_html
+from src.net.util import host_of, norm_posted_date, stable_id, text_from_html
 
 
 def _text(v):
@@ -90,6 +90,16 @@ def _host_key(v):
     return re.sub(r"[^a-z0-9]+", "_", _host(v).lower()).strip("_")
 
 
+def _group(v, regex):
+    """The first group of `regex`'s first match in `v`; None when none.
+
+    >>> _group("/job/US-NC-Durham/Eng_R1", "^/job/([^/]+)/"), _group("/x", "^/job/([^/]+)/")
+    ('US-NC-Durham', None)
+    """
+    m = re.search(regex, str(v))
+    return m.group(1) if m else None
+
+
 TRANSFORMS = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
@@ -102,9 +112,15 @@ TRANSFORMS = {
     "colon_location": _colon_location,
     "host_key": _host_key,
     "host_label": lambda v: _host(v).split(".", 1)[0],
+    "group": _group,
+    "dash_space": lambda v: str(v).replace("-", " "),
+    "underscore": lambda v: str(v).replace("-", "_"),
+    # A stable id for an entry the listing gives none: never hash(),
+    # which Python salts per process.
+    "stable_id": stable_id,
 }
 
-_TOKEN_RE = re.compile(r"\{([A-Za-z0-9_.\[\]]+)(?::(\d+))?\}")
+_TOKEN_RE = re.compile(r"\{([A-Za-z0-9_.\[\]]+)(?::(\d+))?(?:\|([a-z_]+))?\}")
 _STEP_RE = re.compile(r"^(.*?)(?:\[(\d*)\])?$")
 
 
@@ -176,12 +192,16 @@ def fmt(template, lookup, strict=False):
     'gh_acme_7_abc'
     >>> fmt("gh_{slug}_{id}", {"slug": "acme"}.get, strict=True) is None
     True
+    >>> fmt("{t}/{t|underscore}", {"t": "vhr-unither"}.get)
+    'vhr-unither/vhr_unither'
     """
     empty = []
 
     def fill(m):
         v = lookup(m.group(1))
         s = "" if v is None else str(v)
+        if s and m.group(3):
+            s = str(_transform(m.group(3), s))
         if not s.strip():
             empty.append(m.group(1))
         return s[:int(m.group(2))] if m.group(2) else s
@@ -287,6 +307,8 @@ def check(spec):
         raise ValueError(f"bad field spec keys {sorted(spec)}")
     if spec.get("transform") and spec["transform"].partition(":")[0] not in TRANSFORMS:
         raise ValueError(f"unknown transform {spec['transform']!r}")
+    if "format" in spec:
+        check_template(spec["format"])
     for sub in spec.get("first", []) + spec.get("join", []):
         check(sub)
     for key in ("of", "else", "do"):
@@ -298,6 +320,20 @@ def check(spec):
         check(spec["merge"]["extras"])
     if "when" in spec:
         _check_cond(spec["when"])
+
+
+def check_template(template):
+    """Raise ValueError when a "{x|t}" token in `template` names an
+    unknown transform.
+
+    >>> check_template("{tenant|nope}")
+    Traceback (most recent call last):
+    ...
+    ValueError: unknown transform 'nope'
+    """
+    for m in _TOKEN_RE.finditer(template):
+        if m.group(3) and m.group(3) not in TRANSFORMS:
+            raise ValueError(f"unknown transform {m.group(3)!r}")
 
 
 def _check_cond(cond):

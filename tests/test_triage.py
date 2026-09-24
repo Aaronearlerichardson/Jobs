@@ -27,7 +27,7 @@ def _wd_company(conn, name="Wd"):
 
 
 def _wd_url(jid):
-    """A URL coords.wd_handle recognizes as a Workday job page (the
+    """A URL the workday spec's job_ref reads as a Workday job page (the
     company row's own wd_tenant/pod/site win over whatever sits in the
     URL; only the /job/<path> tail is read from it)."""
     return f"https://acme.wd5.myworkdayjobs.com/External/job/{jid}"
@@ -775,8 +775,8 @@ def test_bodied_workday_n_locations_resolves_via_cached_location_lookup(
         tmp_path, tracks, stubs, local_addr):
     """A Workday row that already has a body but still carries the "N
     Locations" placeholder gets ONLY its location refreshed -- no body
-    refetch (needs_detail's second clause, hydrate_description's cached
-    workday._wd_detail_locations branch)."""
+    refetch (needs_detail's second clause, the engine's cached location
+    read)."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _wd_company(conn)

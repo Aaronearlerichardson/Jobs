@@ -81,11 +81,12 @@ from src import config
 from src import store
 from src import tags
 from src.ats import coords
+from src.ats.fetchers.board import BOARDS
 from src.ats.fetchers.company import needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
 from src.crawl import harvest
-from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows, hydrate_delay
+from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
@@ -112,7 +113,7 @@ DEFER = "defer"
 # next pass costs no GETs to reach them). Same order of magnitude as the
 # sweep engine's cost_guard.
 SCORE_CAP = 300
-# A detail fetch (body, or -- Workday -- a location-only lookup) that
+# A detail fetch (body, or a location-only lookup) that
 # failed this recently is not retried (the backfill ops' convention); the
 # row stays pending until then. _hydrate stamps desc_checked_at for either
 # kind of failure.
@@ -220,7 +221,7 @@ def mission_verdict(company, t):
 # --------------------------------------------------------------------------- #
 
 def _detail_stale(row, cutoff):
-    """True once a detail fetch on this row (a body, or -- Workday -- a
+    """True once a detail fetch on this row (a body, or a
     location-only lookup) already failed at least RETRY_DAYS ago, per its
     desc_checked_at. No stamp yet reads as fresh, never stale: a row gets
     one try before the geo gate stops waiting on it (see _geo_verdict)."""
@@ -353,16 +354,13 @@ def summarize(verdicts):
 
 def _fetcher_shape(row, company):
     """A stored row as the job dict fetchers.company.hydrate_description
-    expects, with the Workday handle rebuilt from the roster row (coords.
-    wd_handle) so the CXS detail endpoint is used rather than the slow
-    page fallback."""
-    job = {"id": row["job_id"], "job_id": row["job_id"],
-           "title": row.get("title") or "", "url": row.get("url") or "",
-           "location": row.get("location") or "",
-           "description": row.get("description") or "",
-           "ats": company.get("ats"), "_row": row}
-    job["_wd"] = coords.wd_handle(company, job["url"])
-    return job
+    expects (`_hydrate_rows` passes it the roster row, which names the
+    board)."""
+    return {"id": row["job_id"], "job_id": row["job_id"],
+            "title": row.get("title") or "", "url": row.get("url") or "",
+            "location": row.get("location") or "",
+            "description": row.get("description") or "",
+            "ats": company.get("ats"), "_row": row}
 
 
 def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S,
@@ -370,8 +368,6 @@ def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S,
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats."""
     stats = {"hydrated": 0, "unhydrated": 0}
-    if delay is None:
-        delay = hydrate_delay(company.get("ats"))
     _hydrate_rows(jobs, company, stats, progress, delay, backoff_s)
     return stats
 
@@ -419,7 +415,7 @@ def _free_gates(conn, companies, groups, tracks, mission_scorer, cutoff):
     Returns (decided, survivors). A survivor is OK on some track, or
     DEFER -- deferred meaning "cannot be ruled on without a body", which
     is what phase 2 goes and fetches. `cutoff` is the RETRY_DAYS boundary
-    _geo_verdict uses to give up on an unresolvable Workday location and
+    _geo_verdict uses to give up on an unresolvable location and
     decide the row right here instead of deferring it into phase 2.
     """
     decided, survivors = {}, {}
@@ -469,7 +465,7 @@ def _hydrate_order(survivors):
 def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
              hydrate_fn, cutoff):
     """Phase 2: resolve every survivor company_fetch.needs_detail still
-    flags -- a missing body, or (Workday only) a body already but a
+    flags -- a missing body, or a body already but a
     location the listing never named (see needs_detail/hydrate_description).
 
     One worker per company (hydration is per host), rows already fully
@@ -521,11 +517,14 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
             if j.get("description"):
                 # Persist at once: a row that ends this pass still pending
                 # (over the cap, or deferred) must not be fetched again
-                # next pass. Also covers a Workday row that only had its
+                # next pass. Also covers a row that only had its
                 # LOCATION resolved this pass (description is unchanged
                 # but still truthy), so the resolved location is kept too.
+                # A remote hint the detail gave rides along for this pass.
                 r["description"] = j["description"]
                 r["location"] = j.get("location") or r.get("location")
+                if j.get("remote_hint"):
+                    r["remote_hint"] = j["remote_hint"]
                 store.store_body(conn, j["id"], r["description"],
                                  r["location"])
             if not needs_detail(j):
@@ -811,9 +810,9 @@ def requeue_reasons(conn, tracks=None):
     crawl adopted, which has none, is never selected; a closed row is left
     as it is, since triage never re-judges one:
 
-      REQUEUE_GEO_UNKNOWN  a 'geo' drop on a Workday board whose location
-                           is still location_unknown (only a Workday row
-                           has a location lookup that can now name it);
+      REQUEUE_GEO_UNKNOWN  a 'geo' drop whose location is still
+                           location_unknown on a board whose detail can
+                           name it (`Board.fills_location`);
       REQUEUE_NON_LOCAL    an 'ok'/'fit' row whose location names a place
                            that fails is_nc and remote_signal, and that
                            passed only geo-gated tracks (`tracks`, default
@@ -849,11 +848,12 @@ def requeue_reasons(conn, tracks=None):
         out[r["job_id"]] = {"reason": reason, "company_name": r["company_name"],
                             "title": r["title"], "location": r["location"]}
 
+    located = [b.name for b in BOARDS.values() if b.fills_location]
     for r in conn.execute(
             "SELECT j.job_id, j.company_name, j.title, j.location "
             "FROM jobs j JOIN companies c ON c.id = j.company_id "
-            "WHERE j.triage_status='geo' AND c.ats='workday' "
-            "AND COALESCE(j.status,'open') != 'closed'"):
+            f"WHERE j.triage_status='geo' AND c.ats IN ({','.join('?' * len(located))}) "
+            "AND COALESCE(j.status,'open') != 'closed'", located):
         if location_unknown(r["location"]):
             add(r, REQUEUE_GEO_UNKNOWN)
     for r in conn.execute(

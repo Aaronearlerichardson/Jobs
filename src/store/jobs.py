@@ -550,8 +550,8 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         (matched rows are reopened regardless — they're live on the board).
 
     `capped=True` marks a snapshot truncated by a page cap
-    (net.http.note_capped) — the pager (fetchers.workday.fetch_workday_all,
-    the board engine's page walk, ...) exhausted its page
+    (net.http.note_capped): the pager (the board engine's page walk,
+    ...) exhausted its page
     budget without reaching a natural end. Such a pull is an unstable
     WINDOW of the board, not the board itself, so a board-native row
     absent from it is NEVER closed here — not on the first miss, not on

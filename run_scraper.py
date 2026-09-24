@@ -146,8 +146,6 @@ _COMMANDS = [
     ("sync_status", _op("sync", lambda a: {"top": a.top})),
     ("check_closed", _op("check-closed", lambda a: {
         "workers": a.workers, "limit": a.limit, "stale_days": a.stale_days})),
-    ("backfill_descriptions", _op("backfill-workday", lambda a: {
-        "workers": a.workers, "limit": a.limit})),
     ("backfill_board_descriptions", _op("backfill-descriptions", lambda a: {
         "workers": a.workers, "limit": a.limit})),
     ("backfill_axes", _op("backfill-axes", lambda a: {})),
@@ -227,8 +225,6 @@ def main(argv=None):
                     help="Re-score every stored job with the current rubric")
     ap.add_argument("--described-only", action="store_true",
                     help="With --rescore: only rows with a real JD body")
-    ap.add_argument("--backfill-descriptions", action="store_true",
-                    help="Fetch missing Workday JD text (CXS endpoint)")
     ap.add_argument("--backfill-board-descriptions", action="store_true",
                     help="Fetch missing JD text via each company's own board")
     ap.add_argument("--backfill-axes", action="store_true",

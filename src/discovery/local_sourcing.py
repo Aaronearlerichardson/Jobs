@@ -38,7 +38,7 @@ from src.match.names import name_key
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import resolve_or_miss, resolved
-from .resolve.probes import _nc_count_workday, probe_company
+from .resolve.probes import _nc_count, probe_company
 from .resolve.websearch_board import _websearch_board
 
 # --------------------------------------------------------------------------- #
@@ -161,10 +161,9 @@ def _js_workday_pass(hits, max_workers):
             t0 = time.monotonic()
             wd, outcome = pool.probe(name)
             if outcome == "hit":
-                nc = _nc_count_workday(wd["tenant"], wd["wd_pod"], wd["site"])
-                return {"name": name, "ats": "workday",
-                        "slug": (wd["tenant"], wd["wd_pod"], wd["site"]),
-                        "count": wd["count"], "nc": nc}
+                triple = (wd["tenant"], wd["wd_pod"], wd["site"])
+                return {"name": name, "ats": "workday", "slug": triple,
+                        "count": wd["count"], "nc": _nc_count("workday", triple)}
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 
@@ -362,8 +361,8 @@ def _sample_titles(hit, n=6):
 
     Notes:
         Workday had its own hand-built CXS request here until 2026-09-22.
-        It lacked workday._wd_cxs_tenant's underscore fix, so the roster's
-        two hyphenated tenants (Bioventus, United Therapeutics) were
+        It lacked the underscore tenant fix, so the roster's two
+        hyphenated tenants (Bioventus, United Therapeutics) were
         mission-scored with no titles at all.
     """
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.

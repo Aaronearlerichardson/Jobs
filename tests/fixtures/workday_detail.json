@@ -1,0 +1,45 @@
+{
+ "jobPostingInfo": {
+  "id": "0d1c732a46ac1001523b0bb788ce0000",
+  "title": "2027 Future Talent Program - Manufacturing Strategy, Business Development and Alliances (MSBDA) Intern",
+  "jobDescription": "<p style=\"text-align:left\">Job Description</p><p style=\"text-align:inherit\"></p><p>Our ability to excel depends on the integrity, knowledge, imagination, skill, diversity, and teamwork of people like you. To this end, we strive to create an environment of mutual respect, encouragement, and teamwork.",
+  "location": "USA - Pennsylvania - West Point",
+  "additionalLocations": [
+   "USA - New Jersey - Rahway"
+  ],
+  "postedOn": "Posted Today",
+  "startDate": "2026-09-23",
+  "timeType": "Full time",
+  "jobReqId": "R418677",
+  "jobPostingId": "XMLNAME-2027-Future-Talent-Program---Manufacturing-Strategy--Business-Development-and-Alliances--MSBDA--Intern_R418677",
+  "jobPostingSiteId": "SearchJobs",
+  "country": {
+   "descriptor": "United States of America",
+   "id": "bc33aa3152ec42d4995f4791a106ed09"
+  },
+  "canApply": true,
+  "posted": true,
+  "includeResumeParsing": true,
+  "jobRequisitionLocation": {
+   "descriptor": "USA - Pennsylvania - West Point",
+   "country": {
+    "descriptor": "United States of America",
+    "id": "bc33aa3152ec42d4995f4791a106ed09",
+    "alpha2Code": "US"
+   }
+  },
+  "remoteType": "Hybrid",
+  "externalUrl": "https://msd.wd5.myworkdayjobs.com/SearchJobs/job/USA---Pennsylvania---West-Point/XMLNAME-2027-Future-Talent-Program---Manufacturing-Strategy--Business-Development-and-Alliances--MSBDA--Intern_R418677",
+  "questionnaireId": "9c2f45e751ea1001ae3e7b683ccc0000",
+  "secondaryQuestionnaireId": "ab3e2439a05d100171b2ee1b90fe0000",
+  "timeLeftToApply": "30+ days left to apply",
+  "endDate": "2026-11-09",
+  "jobPostingEndDateAsText": "End Date: November 9, 2026"
+ },
+ "hiringOrganization": {
+  "name": "1000 Merck Sharp & Dohme LLC",
+  "url": ""
+ },
+ "similarJobs": [],
+ "userAuthenticated": false
+}

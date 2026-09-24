@@ -225,16 +225,6 @@ REGISTRY = {
         "target": "src.ops.maintenance:backfill_board_descriptions",
         "params": [_LIMIT, _WORKERS, _TRACK],
     },
-    "backfill-workday": {
-        "label": "Backfill Workday JDs",
-        # Was "local", which was really a statement about the old
-        # implementation: it opened the default store and so only made
-        # sense for the default track. It takes `t` now, like every other
-        # backfill, and a Workday board is not a local-engine thing.
-        "engine": None,
-        "target": "src.ops.maintenance:backfill_workday_descriptions",
-        "params": [_LIMIT, _WORKERS, _TRACK],
-    },
     "backfill-axes": {
         "label": "Backfill fit axes",
         "engine": None,
