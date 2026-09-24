@@ -4,14 +4,14 @@ The detector accepts boards on both `recruiting2.` and `recruiting.`, and the
 stored slug (`CODE|GUID`) drops the host. A tenant answers only on its own
 host, so the spec's `handle.try` asks recruiting2 first, falls back to
 recruiting on a 404, and remembers the winner (the engine's `handle.try`
-mechanism, in src.ats.fetchers.board, with UKG Pro its first user).
+mechanism, in src.ats.board.engine, with UKG Pro its first user).
 """
 
 import pytest
 
 from conftest import fake_response
-from src.ats.fetchers import board
-from src.ats.fetchers.board import board_for
+from src.ats.board import engine as board
+from src.ats.board import board_for
 from src.net import http
 
 SLUG = "ACME1000|ad28382f-2fcd-4cbb-bb18-24dd71b05bce"

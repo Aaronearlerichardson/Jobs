@@ -20,7 +20,7 @@ Notes:
     Three copies of this used to exist, each with one of the three guards:
     src.discovery.local_sourcing.ddg_text (cache + budget),
     src.discovery.dork._ddg_text (retries + paging + the frozen-build engine
-    fix) and src.ats.fetchers.websearch._ddg_search (none).
+    fix) and src.ats.feeds.websearch._ddg_search (none).
 """
 
 import logging

@@ -138,7 +138,7 @@ def text_from_html(raw):
         next ">". A board whose API hands back ESCAPED markup (Greenhouse
         `content`) therefore has to unescape at the call site, before the
         markup is markup -- see the unescape_html_text transform in
-        fetchers/fields.py.
+        board/fields.py.
     """
     if not raw:
         return ""
@@ -194,7 +194,7 @@ def clean_field(text):
 
     A value that is nothing BUT whitespace cleans to the empty string, not
     a string that merely looks empty -- callers that treat "" as "no
-    title"/"no location" (fetchers.board.board_jobs itself; every reader
+    title"/"no location" (board.engine.board_jobs itself; every reader
     downstream) see it as absent rather than as a title made of blanks:
 
     >>> clean_field("   \n\t  ")

@@ -20,7 +20,7 @@ from concurrent.futures import wait as fut_wait
 
 import requests
 
-from src.ats.signatures import FETCHABLE_HOST_RE
+from src import config
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net.http import HEADERS, SESSION, HostBreaker
@@ -28,6 +28,11 @@ from src.net.util import host_of, origin_of
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.fetchpool")
+
+# A careers_url on a fetchable vendor's host names a board, not the
+# company's site: its board comes from the URL itself (signatures.detect),
+# never from sniffing it or its origin's careers paths.
+_FETCHABLE_HOST_RE = config.hosts_re(config.FETCHABLE_HOSTS)
 
 
 # ─── Candidate careers-page URLs ─────────────────────────────────────────
@@ -104,17 +109,14 @@ def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
     []
     """
     urls = []
-    if careers_url and not FETCHABLE_HOST_RE.search(careers_url):
+    if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
         if patterns is _URL_PATTERNS:
             urls.append(careers_url)
         base = origin_of(careers_url)
         if base:
-            for path in dict.fromkeys(p for _, p in patterns):
-                urls.append(base + path)
+            urls += [base + path for path in dict.fromkeys(p for _, p in patterns)]
     toks = domain_tokens(name)
-    for host, path in patterns:
-        for tok in toks:
-            urls.append(f"https://{host.format(tok=tok)}{path}")
+    urls += [f"https://{host.format(tok=tok)}{path}" for host, path in patterns for tok in toks]
     seen, out = set(), []
     for u in urls:
         if u and u not in seen:

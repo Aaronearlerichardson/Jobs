@@ -18,6 +18,8 @@ Never imports store/__init__ at load time (that module imports this one).
 import re
 from datetime import datetime, timedelta
 
+from src import config
+
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
@@ -280,15 +282,17 @@ def roster_growth(conn, days=7):
 # fetch error for a board nobody asked.
 CAPTURE_ATS = "capture"
 
-# Multi-tenant hosts. A page there says which BOARD it is, not which company
-# owns it, so company_by_host trusts a domain-level match against a roster
-# row's careers_url only on company-owned hosts; on these it insists on the
-# board's own path.
-_SHARED_HOST_RE = re.compile(
-    r"myworkdayjobs|greenhouse\.io|lever\.co|ashbyhq|smartrecruiters|icims|"
-    r"taleo|bamboohr|jazzhr|applytojob|paylocity|workable|polymer\.co|"
-    r"gusto\.com|rippling|breezy|recruitee|teamtailor|jobvite|ultipro|"
-    r"successfactors|peopleadmin|linkedin|indeed|glassdoor|ziprecruiter", re.I)
+# Multi-tenant hosts (config.SHARED_HOSTS). A page there says which BOARD it
+# is, not which company owns it, so company_by_host trusts a domain-level
+# match against a roster row's careers_url only on company-owned hosts; on
+# these it insists on the board's own path.
+_SHARED_HOST_RE = config.hosts_re(config.SHARED_HOSTS)
+
+#: ats -> the store columns naming its board (config.BOARDS `handle.columns`,
+#: default the slug); a capture-only board is named by its careers_url.
+_BOARD_COLUMNS = {**{ats: tuple((s.get("handle") or {}).get("columns", ["slug"]))
+                     for ats, s in config.BOARDS.items()},
+                  CAPTURE_ATS: ("careers_url",)}
 
 
 def _split_url(url):
@@ -368,11 +372,12 @@ def company_by_host(conn, url):
 
 
 def board_key(r):
-    """The identity of a company row's BOARD, independent of its name: the
-    Workday triple, the (ats, slug) pair, or for careers_url-keyed ATSes the
-    URL itself. None when the row has no resolvable board. Shared by
-    dedup_companies (merging after the fact) and company_by_board (refusing
-    the duplicate before it lands).
+    """The identity of a company row's BOARD, independent of its name:
+    (ats, *the values of the columns its spec's handle names), a
+    careers_url lowercased with no trailing "/". None when the row has no
+    ats or its first board column is empty. Shared by dedup_companies
+    (merging after the fact) and company_by_board (refusing the duplicate
+    before it lands).
 
     careers_url-keyed ATSes: their slug is a shared datacenter host
     (SuccessFactors "performancemanagerN" serves many tenants) or absent,
@@ -389,15 +394,10 @@ def board_key(r):
     >>> board_key({"ats": None, "slug": None, "wd_tenant": None}) is None
     True
     """
-    if r.get("ats") == "workday" and r.get("wd_tenant"):
-        return ("workday", r["wd_tenant"], r.get("wd_pod"), r.get("wd_site"))
-    if r.get("ats") in ("successfactors", "peopleadmin", "custom", "wpjson",
-                        CAPTURE_ATS):
-        u = (r.get("careers_url") or "").rstrip("/").lower()
-        return (r["ats"], u) if u else None
-    if r.get("ats") and r.get("slug"):
-        return (r["ats"], r["slug"])
-    return None
+    ats = r.get("ats")
+    vals = [(r.get(c) or "").rstrip("/").lower() if c == "careers_url" else r.get(c)
+            for c in _BOARD_COLUMNS.get(ats, ("slug",))]
+    return (ats, *vals) if ats and vals[0] else None
 
 
 def _domain(host):

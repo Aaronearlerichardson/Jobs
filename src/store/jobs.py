@@ -519,7 +519,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
                       external_grace_days=3, capped=False, now=None):
     """Reconcile ONE company's stored jobs against a live board snapshot
     (`fetched_jobs`: dicts with id/title/url, as returned by
-    fetchers.company.fetch_company). Rows matched by job_id, URL, or
+    board.company.fetch_company). Rows matched by job_id, URL, or
     normalized title are (re)marked open and their last_seen touched; rows
     that have vanished from the snapshot are marked closed. Returns
     (n_reopened, n_closed).
@@ -608,7 +608,8 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     # carry underscores ("wd_amgen_<Title-Slug>_R-250290"). Single-token-tail
     # ids ("custom_<blob>") degrade to a full-id prefix, i.e. those rows only
     # ever close via the grace path — right for the flakiest scraped boards.
-    prefixes = {"_".join(i.split("_", 2)[:2]) + "_" for i in ids if "_" in i}
+    prefixes = tuple({"_".join(i.split("_", 2)[:2]) + "_"
+                      for i in ids if "_" in i})
     now = (now or datetime.now()).isoformat()
     grace_cutoff = (datetime.now()
                     - timedelta(days=external_grace_days)).isoformat()
@@ -617,7 +618,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         "SELECT job_id, url, title, track, status, first_seen, last_seen "
         "FROM jobs WHERE company_id=?", (company_id,)).fetchall()
     for r in rows:
-        board_native = any(r["job_id"].startswith(p) for p in prefixes)
+        board_native = r["job_id"].startswith(prefixes)
         present = (r["job_id"] in ids
                    or (not board_native
                        and (_norm_url(r["url"]) in urls

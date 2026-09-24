@@ -237,7 +237,7 @@ def run_full(exclude_ids=(), dry_run=False):
         print(f"  {len(candidates)} remaining candidate row(s) to rescore"
               f"{' (dry-run, no writes)' if dry_run else ''}")
         rows_out = []
-        n_crossed = deltas = 0
+        n_crossed = 0
         crossed_list = []
         for row in candidates:
             res = rescore_row(row)

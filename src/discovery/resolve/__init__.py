@@ -30,7 +30,7 @@ building the graph.
 from .board import classify_miss, resolve_board_sniff_first, resolve_or_miss
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import candidate_pages, corroborated, nc_hq_signal
-from .probes import PROBES, probe_company, probe_workday
+from .probes import probe_company, probe_workday
 from .sniffer import diagnose_no_board, sniff_ats, sniff_careers_ats
 
 __all__ = [
@@ -39,7 +39,6 @@ __all__ = [
     "candidate_pages",
     "corroborated",
     "nc_hq_signal",
-    "PROBES",
     "probe_company",
     "probe_workday",
     "diagnose_no_board",

@@ -10,7 +10,7 @@ import src.ops.maintenance as ops
 import src.crawl.runner as runner
 from src import tags
 from src.config import tracks as track_cfg
-from tests.test_triage import division_vocab, _PLAIN_ENG_BODY  # noqa: F401 (fixture)
+from tests.test_triage import _PLAIN_ENG_BODY
 
 
 class TestTrackConfig:

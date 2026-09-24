@@ -1,4 +1,4 @@
-"""Workable (its `config.BOARDS` spec, run by src.ats.fetchers.board): the
+"""Workable (its `config.BOARDS` spec, run by src.ats.board.engine): the
 single-request widget listing, the "City, Region, Country" location it
 builds, the per-posting description call, and the board detection that
 promoted Workable out of the detection-only lead bucket.
@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from conftest import fake_response
-from src.ats.fetchers.board import board_for
+from src.ats.board import board_for
 from src.ats.signatures import detect
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -132,58 +132,45 @@ class TestDetection:
         page = '<a href="https://apply.workable.com/eupry-aps/">Open roles</a>'
         assert detect(page) == ("fetchable", "workable", SLUG)
 
-    def test_the_slugless_short_link_names_no_board(self):
-        assert detect("", "https://apply.workable.com/j/D68529D654") is None
-
-    def test_workable_is_no_longer_a_lead(self):
-        from src.ats.signatures import ATS_LEAD_PATTERNS, ATS_LINK_PATTERNS
-        assert "workable" not in {a for a, _ in ATS_LEAD_PATTERNS}
-        assert "workable" in {a for a, _ in ATS_LINK_PATTERNS}
-
     def test_the_probe_confirms_a_board_with_a_live_count(self, serve):
         """A fetchable platform is one a slug can be CONFIRMED on
         (signatures.py's own definition)."""
-        from src.discovery.resolve import probes
         serve(fake_response(load("workable_board.json")))
-        assert probes.PROBES["workable"](SLUG) == (True, 4)
+        assert board_for("workable").probe(SLUG) == (True, 4)
         # An account with nothing published is not a board worth a row: an
         # account slug is not the company name ("eupry" is a different,
         # empty account), so a guessed slug confirms only with postings.
         serve(fake_response(_board([])))
-        assert probes.PROBES["workable"]("eupry") == (False, 0)
+        assert board_for("workable").probe("eupry") == (False, 0)
         serve(fake_response(status=404))
-        assert probes.PROBES["workable"]("no-such-account") == (False, 0)
+        assert board_for("workable").probe("no-such-account") == (False, 0)
 
 
 class TestRegistry:
-    """src/ats/registry.py: the sweep's thunk table and the seed tag."""
+    """src/ats/registry.py: the sweep's thunk and the seed tag."""
 
     def test_the_registry_knows_workable(self):
         from src import tags
-        from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT, seed_tag_for
-        assert "workable" in ATS_REGISTRY
+        from src.ats.registry import seed_tag_for
+        # The seed-tag rule is "SWEEP iff the spec sets sweep"
+        # (tests/test_boards_spec.py pins it); Workable seeds LOCAL.
         assert seed_tag_for("workable") == tags.LOCAL
-        # The seed-tag rule is "SWEEP iff LIGHTWEIGHT"
-        # (tests/test_fetcher_parsers.py pins it); Workable seeds LOCAL, so
-        # it must stay out of LIGHTWEIGHT.
-        assert "workable" not in LIGHTWEIGHT
 
     def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):
-        from src.ats.registry import ATS_REGISTRY
+        from src.ats.registry import sweep
         workable_board(load("workable_board.json"),
                        detail=load("workable_job_detail.json"))
-        mk, _tag, _pause = ATS_REGISTRY["workable"]
-        jobs = mk("Eupry", SLUG)()
+        jobs = sweep("workable", "Eupry", SLUG)()
         assert all(j["company"] == "Eupry" for j in jobs)
 
 
 class TestCompanyDispatch:
-    """fetchers/company.py: the dispatch table drives the spec's listing,
+    """board/company.py: the dispatch table drives the spec's listing,
     and hydrate_description fills a stored row from its URL alone (no ATS
     coordinate survives `adapt`)."""
 
     def test_fetch_company_adapts_this_modules_rows(self, workable_board):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         workable_board(load("workable_board.json"),
                        detail=load("workable_job_detail.json"))
         out = company.fetch_company({"ats": "workable", "slug": SLUG})
@@ -192,7 +179,7 @@ class TestCompanyDispatch:
         assert "company" not in out[0]
 
     def test_the_location_regex_filters_the_listing(self, workable_board):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         workable_board(_board([_job("AAAA111111", city="Raleigh",
                                     state="North Carolina"),
                                _job("BBBB222222", city="Austin",
@@ -203,7 +190,7 @@ class TestCompanyDispatch:
 
     def test_hydrate_description_reads_the_posting_from_its_url(
             self, workable_board):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         workable_board(detail=load("workable_job_detail.json"))
         job = {"ats": "workable", "url": JOB_URL,
                "description": "", "location": "Raleigh, North Carolina"}
@@ -212,7 +199,7 @@ class TestCompanyDispatch:
         assert out["location"] == "Raleigh, North Carolina"
 
     def test_the_title_sampler_reads_the_listing_only(self, workable_board):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         calls = workable_board(load("workable_board.json"),
                                detail=load("workable_job_detail.json"))
         titles = company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)

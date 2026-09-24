@@ -199,7 +199,7 @@ def is_offmission_inactive(c):
         is_multi_division.
 
         Moved here from src.crawl.harvest (whose plan() calls it for
-        the off-mission harvest cadence) so src.ats.fetchers.company could
+        the off-mission harvest cadence) so src.ats.board.company could
         read the SAME rule for board_max_pages without importing crawl --
         ats sits BELOW crawl in the import DAG. The asymmetry with
         is_active_mission above -- an unscored row is ACTIVE but is
@@ -213,7 +213,7 @@ def is_offmission_inactive(c):
 
 
 # =========================================================================
-#  Whole-board page budget (src.ats.fetchers.board)
+#  Whole-board page budget (src.ats.board.engine)
 # =========================================================================
 
 # Rows a mission-worth-it Workday or SmartRecruiters whole-board pull reads
@@ -228,7 +228,7 @@ def is_offmission_inactive(c):
 # narrower default instead -- see board_max_pages.
 BOARD_MAX_ROWS = int(_pol.get("board_max_rows", 3000))
 
-# One value per rule for every ATS board (src.ats.fetchers.board): the
+# One value per rule for every ATS board (src.ats.board.engine): the
 # pause between two listing pages; detail GETs a sweep pull may spend
 # screening rows, and a vetted whole-board pull hydrating them, with the
 # pause between two; and how long a listing read for closure checks or
@@ -247,19 +247,14 @@ HYDRATE_CAP_PER_RUN = 100
 HYDRATE_DELAY_S = 1.0
 LOCAL_COUNT_SAMPLE_PAGES = 5
 
-# The careers-page reader (src.ats.fetchers.custom): the job links a page
-# needs to be a board, the most characters a title and a location keep,
-# how long a detection verdict is reused, and the hosts never read as a
-# company's own board (job aggregators and ATS vendors; regex fragments).
+# The careers-page reader (src.ats.board.custom): the job links a page
+# needs to be a board, the most characters a title and a location keep, and
+# how long a detection verdict is reused. The hosts it never reads as a
+# company's own board derive from config.BOARDS (boards.py).
 CAREERS_PAGE_MIN_LINKS = 3
 CAREERS_PAGE_TITLE_MAX = 90
 CAREERS_PAGE_LOCATION_MAX = 70
 BOARD_DETECT_CACHE_S = 6 * 3600
-CAREERS_PAGE_OFFSITE_HOSTS = (
-    "indeed", "linkedin", "glassdoor", "ziprecruiter", "simplyhired", "monster",
-    "dice", "greenhouse", r"lever\.co", "ashbyhq", "myworkdayjobs",
-    "smartrecruiters", "icims", "paylocity", "bamboohr", "jobvite",
-    r"google\.com", "builtin")
 
 
 def board_max_pages(company, page_size, offmission_pages):

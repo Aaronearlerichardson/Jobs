@@ -81,8 +81,8 @@ from src import config
 from src import store
 from src import tags
 from src.ats import coords
-from src.ats.fetchers.board import BOARDS
-from src.ats.fetchers.company import needs_detail
+from src.ats.board import BOARDS
+from src.ats.board.company import needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
 from src.crawl import harvest
@@ -353,7 +353,7 @@ def summarize(verdicts):
 # --------------------------------------------------------------------------- #
 
 def _fetcher_shape(row, company):
-    """A stored row as the job dict fetchers.company.hydrate_description
+    """A stored row as the job dict board.company.hydrate_description
     expects (`_hydrate_rows` passes it the roster row, which names the
     board)."""
     return {"id": row["job_id"], "job_id": row["job_id"],

@@ -76,13 +76,15 @@ def print_location_expansion(term, expanded):
     exclude = expanded.get("exclude", [])
 
     print(f"\n  LOCATION_INCLUDE additions ({len(include)})")
+    known = {i.lower() for i in LOCATION_INCLUDE}
     for x in include:
-        marker = "  [already in list]" if x.lower() in [i.lower() for i in LOCATION_INCLUDE] else ""
+        marker = "  [already in list]" if x.lower() in known else ""
         print(f"    - {x}{marker}")
 
     print(f"\n  LOCATION_EXCLUDE additions ({len(exclude)})")
+    known = {i.lower() for i in LOCATION_EXCLUDE}
     for x in exclude:
-        marker = "  [already in list]" if x.lower() in [i.lower() for i in LOCATION_EXCLUDE] else ""
+        marker = "  [already in list]" if x.lower() in known else ""
         print(f"    - {x}{marker}")
 
     print(f"\n  {'-'*58}")

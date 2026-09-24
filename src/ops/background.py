@@ -8,6 +8,7 @@ import json
 import secrets
 import sys
 import threading
+from collections import deque
 from datetime import datetime
 
 from src import config
@@ -227,7 +228,7 @@ def _running():
 # Nothing here survives a restart: the queue is in memory, and a config save
 # relaunches the process (src/web/server.py schedule_restart), which is why
 # routes.py refuses to save while entries are waiting.
-QUEUE = []
+QUEUE = deque()
 
 
 def _params_key(params):
@@ -268,7 +269,7 @@ def _hand_off():
         TASK["active"] = False
         if not QUEUE:
             return None
-        entry = QUEUE.pop(0)
+        entry = QUEUE.popleft()
         _claim_locked(entry["name"])
         return entry
 

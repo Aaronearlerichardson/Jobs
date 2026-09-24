@@ -14,8 +14,8 @@ to its platform's engine, `board.Board.whole_board`, which reads the
 
 `hydrate_description` fills one stored posting through the engine that
 reads its URL, else from the posting's own page (`job_page_meta`). The
-per-job open/closed probe is fetchers/probe.py; the careers-page reader
-behind the `custom` spec is fetchers/custom.py.
+per-job open/closed probe is board/closure.py; the careers-page reader
+behind the `custom` spec is board/custom.py.
 """
 
 import re
@@ -27,7 +27,7 @@ from src import config
 from src.match.locality import NC_RE  # profile [locality]
 from src.net.http import HEADERS, PLAIN_HEADERS, SESSION
 from src.net.util import clean_field
-from .board import BOARDS, board_for, board_for_url
+from .engine import board_for, board_for_url
 from . import jsonld
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
@@ -183,19 +183,15 @@ def title_from_url_slug(url):
 
 # --- dispatch ------------------------------------------------------------------ #
 
-# ats -> (store row, loc_re) -> company-shaped jobs: every platform the
-# engine can pull.
-FETCHERS = {b.name: b.whole_board for b in BOARDS.values() if b.fetchable}
-
-
 def fetch_company(company, loc_re=None):
-    """Dispatch to the right fetcher for a company dict from the store.
+    """A store row's board pulled through its platform's engine
+    (`Board.whole_board`); [] for a platform no spec fetches.
 
     `loc_re=None` pulls the whole board; pass NC_RE for a pull scoped to
     the profile's locality (the local track's default).
     """
-    fn = FETCHERS.get(company.get("ats"))
-    return fn(company, loc_re) if fn else []
+    board = board_for(company.get("ats"))
+    return board.whole_board(company, loc_re) if board else []
 
 
 # fetch_company with the profile's locality regex; used by discovery

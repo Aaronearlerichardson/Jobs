@@ -42,12 +42,9 @@ def _sel(scope, *selectors):
 # Aggregator / ATS / social hosts — a URL on one of these is NOT the
 # company's own website, so it can't seed a careers-page guess for the lead
 # resolver. Only a company-owned domain is worth recording.
-_AGG_HOST_RE = re.compile(
-    r"linkedin\.|indeed\.|glassdoor\.|ziprecruiter\.|simplyhired|monster\.|"
-    r"dice\.|greenhouse\.|lever\.co|ashbyhq|myworkdayjobs|smartrecruiters|"
-    r"icims|bamboohr|jazzhr|applytojob|paylocity|paycom|workable|breezy|"
-    r"google\.com|facebook\.|twitter\.|x\.com|youtube\.|instagram\.|"
-    r"crunchbase|builtin|wellfound|schema\.org", re.I)
+_AGG_HOST_RE = config.hosts_re(config.SHARED_HOSTS + (
+    "facebook.", "twitter.", "x.com", "youtube.", "instagram.", "crunchbase",
+    "wellfound", "schema.org"))
 
 
 def _company_site(*urls):
@@ -374,7 +371,7 @@ def _card_location(a, title=""):
 
 
 def parse_generic(soup, page_url=""):
-    from src.ats.fetchers.custom import find_job_links
+    from src.ats.board.custom import find_job_links
     jobs, seen = [], set()
 
     def _emit(a, href, title):

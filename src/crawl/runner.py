@@ -32,6 +32,7 @@ are not data — the technical-title regex, the exclude gate, digest
 rendering — but never the methodology.
 """
 
+from collections import defaultdict, deque
 from contextlib import closing
 from datetime import datetime
 from typing import NamedTuple
@@ -39,9 +40,9 @@ from typing import NamedTuple
 from src import config
 from src import store
 from src import tags
-from src.ats.registry import ATS_REGISTRY, iter_store_sources
+from src.ats.registry import iter_store_sources, sweep
 from src.claude.resume import resume_text
-from src.match.filters import SHORT_KEYWORD, is_relevant, token_in
+from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
@@ -97,11 +98,8 @@ def core_anchor(title, description=""):
     terms stay substring so "subcortical" still matches "cortical". Reads
     the LIVE config lists, so after apply_keyword_focus this is exactly the
     track's own CORE keyword vocabulary."""
-    text = f"{title} {description}".lower()
-    for a in config.CORE_KEYWORDS:
-        if token_in(a, text, SHORT_KEYWORD):
-            return a
-    return None
+    return first_hit(config.CORE_KEYWORDS, f"{title} {description}".lower(),
+                     SHORT_KEYWORD)
 
 
 def build_sources(cfg, t, include_websearch=None):
@@ -113,7 +111,7 @@ def build_sources(cfg, t, include_websearch=None):
     upsert_job). Priority companies come first so cross-source duplicates
     resolve deterministically."""
     from src.ops import maintenance as ops
-    from src.ats.fetchers import company as company_fetch
+    from src.ats.board import company as company_fetch
 
     src = t["sources"]
     use_ws = src["websearch"] if include_websearch is None else include_websearch
@@ -130,11 +128,11 @@ def build_sources(cfg, t, include_websearch=None):
     # 1) Priority targets ([discovery] priority_companies), starred.
     if src["priority_companies"]:
         for name, ats, slug in getattr(cfg, "DISCOVERY_PRIORITY_COMPANIES", []):
-            entry = ATS_REGISTRY.get(ats)
-            if not entry:
+            thunk = sweep(ats, name, slug)
+            if not thunk:
                 print(f"  [!] priority company {name}: unknown ATS {ats!r}")
                 continue
-            add(name, ats + "*", entry[0](name, slug), key=(ats, str(slug)))
+            add(name, ats + "*", thunk, key=(ats, str(slug)))
 
     # 2) Company store (this track's own DB, optionally tag-scoped).
     if src["store"]:
@@ -169,8 +167,8 @@ def build_sources(cfg, t, include_websearch=None):
     # registry, the crawl injects the keyword gate here; the fetchers are
     # ungated on their own.
     if src["aggregators"]:
-        from src.ats.fetchers import (fetch_discourse, fetch_hnhiring,
-                                fetch_remoteok, fetch_remotive, fetch_rss)
+        from src.ats.feeds import (fetch_discourse, fetch_hnhiring,
+                                   fetch_remoteok, fetch_remotive, fetch_rss)
         for name, base, cat in cfg.DISCOURSE_BOARDS:
             add(name, "discourse",
                 lambda n=name, b=base, c=cat: fetch_discourse(n, b, c, gate=is_relevant))
@@ -198,7 +196,7 @@ def build_sources(cfg, t, include_websearch=None):
     # track wants — a federal campus has no ATS to put in the roster. Safe
     # to leave outside the gate because it ships OFF and needs credentials.
     if getattr(cfg, "USAJOBS_ENABLED", False):
-        from src.ats.fetchers import fetch_usajobs
+        from src.ats.feeds import fetch_usajobs
         add("USAJOBS", "usajobs",
             lambda: fetch_usajobs(
                 keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
@@ -211,8 +209,8 @@ def build_sources(cfg, t, include_websearch=None):
     # and the local track's geo gate decides which of its postings apply.
     # Ships OFF. Their employers are attributed after gating (run_track).
     if getattr(cfg, "GETRO_ENABLED", False):
-        from src.ats.fetchers import fetch_getro_all
-        from src.ats.fetchers.getro import board_host
+        from src.ats.feeds import fetch_getro_all
+        from src.ats.feeds.getro import board_host
         for board in getattr(cfg, "GETRO_BOARDS", []):
             host = board_host(board)
             if not host:
@@ -224,7 +222,7 @@ def build_sources(cfg, t, include_websearch=None):
 
     # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
-        from src.ats.fetchers import fetch_websearch
+        from src.ats.feeds import fetch_websearch
         for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):
             add(label, "websearch",
                 lambda l=label, q=query, m=n: fetch_websearch(
@@ -245,15 +243,14 @@ def _short(text, n):
 def _diversify(matches, n):
     """Up to n samples spread round-robin across companies so the precision
     sanity-check isn't dominated by one prolific employer."""
-    by_company = {}
+    by_company = defaultdict(deque)
     for j in matches:
-        by_company.setdefault(j.get("company") or j.get("company_name"),
-                              []).append(j)
+        by_company[j.get("company") or j.get("company_name")].append(j)
     picked = []
     while len(picked) < n and any(by_company.values()):
-        for comp in list(by_company):
-            if by_company[comp]:
-                picked.append(by_company[comp].pop(0))
+        for waiting in by_company.values():
+            if waiting:
+                picked.append(waiting.popleft())
                 if len(picked) >= n:
                     break
     return picked

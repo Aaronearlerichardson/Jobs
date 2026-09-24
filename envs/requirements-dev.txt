@@ -3,7 +3,9 @@
 
 pytest>=8.0
 pytest-cov>=5.0
-pyflakes>=3.0
+# The CI lint is `flake8 --select=F`: pyflakes' checks, but honouring
+# `# noqa`, which the src/ re-export facades rely on.
+flake8>=7.0
 # Standalone build (build_app.py); only needed when producing a binary.
 # >=4.2: build_app.py dropped --include-package-data=playwright and now
 # relies on Nuitka's own bundled playwright package config to ship the

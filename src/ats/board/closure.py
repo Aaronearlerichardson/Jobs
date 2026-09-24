@@ -23,7 +23,7 @@ import requests
 from src import config
 from src.net.http import HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
-from .board import board_for_url
+from .engine import board_for_url
 
 _log = logging.getLogger(__name__)
 
@@ -40,11 +40,9 @@ _CLOSED_TEXT_RE = re.compile("|".join((
     r"job (posting )?not found",
 )), re.I)
 
-# Hosts that bot-gate anonymous GETs (authwalls/999s): a probe there says
-# nothing about the posting, so report "unverifiable", never "closed".
-_GATED_HOST_RE = re.compile(
-    r"linkedin\.com|indeed\.com|glassdoor\.|ziprecruiter\.com|"
-    r"simplyhired\.com|monster\.com", re.I)
+# Job aggregators bot-gate anonymous GETs (authwalls/999s): a probe there
+# says nothing about the posting, so report "unverifiable", never "closed".
+_GATED_HOST_RE = config.hosts_re(config.AGGREGATOR_HOSTS)
 
 def probe_family(url):
     """The ATS family a stored job URL belongs to: what probe_job_open

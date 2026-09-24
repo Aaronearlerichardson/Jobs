@@ -13,7 +13,7 @@ Pipeline per query:
 import time
 
 from src.net import ddg
-from .jsonld import fetch_jsonld_page
+from src.ats.board.jsonld import fetch_jsonld_page
 
 
 def fetch_websearch(label, query, max_results=15, per_result_delay=0.5,

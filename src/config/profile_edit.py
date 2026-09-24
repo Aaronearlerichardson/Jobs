@@ -56,10 +56,8 @@ def validate(text):
     except tomllib.TOMLDecodeError as e:
         return [f"TOML syntax error: {e}"]
 
-    errors = []
-    for sec in _REQUIRED_SECTIONS:
-        if sec not in data:
-            errors.append(f"missing required section [{sec}]")
+    errors = [f"missing required section [{sec}]"
+              for sec in _REQUIRED_SECTIONS if sec not in data]
 
     for sec in _STR_LIST_SECTIONS:
         tbl = data.get(sec)
@@ -67,10 +65,10 @@ def validate(text):
             _check_str_lists(errors, sec, tbl)
 
     fit = data.get("fit", {})
-    for group in ("weights", "gate_penalty"):
-        for k, v in (fit.get(group) or {}).items():
-            if not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0:
-                errors.append(f"[fit] {group}.{k} must be a number in 0..1")
+    errors += [f"[fit] {group}.{k} must be a number in 0..1"
+               for group in ("weights", "gate_penalty")
+               for k, v in (fit.get(group) or {}).items()
+               if not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0]
 
     for i, tier in enumerate(data.get("mission", {}).get("tiers") or []):
         band = tier.get("band")
@@ -78,9 +76,9 @@ def validate(text):
                 or not all(isinstance(b, (int, float)) for b in band)):
             errors.append(f"[mission] tiers[{i}].band must be [lo, hi]")
 
-    for tid, t in (data.get("tracks") or {}).items():
-        if isinstance(t, dict) and not str(t.get("db") or "").strip():
-            errors.append(f"[tracks.{tid}] db must be a non-empty filename")
+    errors += [f"[tracks.{tid}] db must be a non-empty filename"
+               for tid, t in (data.get("tracks") or {}).items()
+               if isinstance(t, dict) and not str(t.get("db") or "").strip()]
 
     return errors
 

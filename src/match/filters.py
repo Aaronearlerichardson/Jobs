@@ -110,8 +110,12 @@ def token_pattern(term, short_len):
 
 
 @lru_cache(maxsize=4096)
-def _short_re(term):
-    return re.compile(rf"\b{re.escape(term)}\b")
+def _term_rule(term, short_len):
+    """(`term` lowercased, its boundary regex or None) under the
+    token_pattern rule."""
+    term = term.lower()
+    return term, (re.compile(rf"\b{re.escape(term)}\b")
+                  if _bounded(term, short_len) else None)
 
 
 def token_in(term, text, short_len):
@@ -131,11 +135,16 @@ def token_in(term, text, short_len):
     False
     >>> token_in("scribe", "we describe things", SUBSTRING)
     True
+
+    Notes:
+        The substring test runs first: a boundary match needs it too, and
+        a C-level `in` rules most terms out before any regex runs. Until
+        2026-09-24 every bounded term paid for a regex scan.
     """
-    term = term.lower()
-    if _bounded(term, short_len):
-        return _short_re(term).search(text) is not None
-    return term in text
+    term, bounded = _term_rule(term, short_len)
+    if term not in text:
+        return False
+    return bounded is None or bounded.search(text) is not None
 
 
 def first_hit(terms, text, short_len):
@@ -291,6 +300,13 @@ def watch_division_title(title):
                      (title or "").lower(), BOUNDED)
 
 
+@lru_cache(maxsize=64)
+def _untiered(include, core, domain, skill):
+    """The `include` keywords no tier lists, compared case-insensitively."""
+    tiered = {k.lower() for k in core + domain + skill}
+    return tuple(k for k in include if k.lower() not in tiered)
+
+
 def is_relevant(title, description="", *, watch_titles=False):
     """Whether a posting is in-field, under the tiered model at the top of
     this module.
@@ -315,8 +331,9 @@ def is_relevant(title, description="", *, watch_titles=False):
         return True
 
     # Legacy / dynamically-added keywords (not in any tier) act like Tier 1.
-    tiered = {k.lower() for k in CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS}
-    extras = [k for k in INCLUDE_KEYWORDS if k.lower() not in tiered]
+    # Keyed on the lists' CONTENTS: apply_keyword_focus mutates them.
+    extras = _untiered(tuple(INCLUDE_KEYWORDS), tuple(CORE_KEYWORDS),
+                       tuple(DOMAIN_KEYWORDS), tuple(SKILL_KEYWORDS))
     if extras and _kw_in(text, extras):
         return True
 

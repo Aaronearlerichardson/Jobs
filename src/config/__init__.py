@@ -12,7 +12,8 @@ both into the names the rest of the code reads:
     src/config/tracks.py    [tracks.*] tables + engine defaults -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
-    src/config/boards.py    BOARDS: every per-platform ATS board fact, as data
+    src/config/boards.py    BOARDS: every per-platform ATS board fact, as data,
+                        and the host lists derived from it
 
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings
@@ -21,7 +22,10 @@ attribute at use time — src/crawl/runner.py and src/ops/background.py reassign
 while a track runs, and a from-bound copy goes stale.
 """
 
-from .boards import BOARDS  # noqa: F401
+from .boards import (  # noqa: F401
+    BOARDS, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, FETCHABLE_HOSTS, SHARED_HOSTS,
+    hosts_re,
+)
 from .paths import (  # noqa: F401
     APP_NAME, _resolve_data_dir,
     SCRIPT_DIR, APP_HOME, DATA_DIR, STORE_DB_PATH, REPORT_DIR,
@@ -37,7 +41,7 @@ from .policy import (  # noqa: F401
     WHOLE_BOARD_DETAIL_DELAY_S, BOARD_MEMO_S, HYDRATE_CAP_PER_RUN,
     HYDRATE_DELAY_S, LOCAL_COUNT_SAMPLE_PAGES,
     CAREERS_PAGE_MIN_LINKS, CAREERS_PAGE_TITLE_MAX, CAREERS_PAGE_LOCATION_MAX,
-    BOARD_DETECT_CACHE_S, CAREERS_PAGE_OFFSITE_HOSTS,
+    BOARD_DETECT_CACHE_S,
     RESPECT_ROBOTS, ROBOTS_EXEMPT_HOSTS, SEARCH_DNS_FALLBACK,
     ROBOTS_CONNECT_TIMEOUT, ROBOTS_READ_TIMEOUT, BROWSER_CHANNELS,
 )

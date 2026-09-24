@@ -24,7 +24,9 @@ store's reason CODES as strings; persisting them is the caller's job
 lives here and they live one level up.
 """
 
+from src import config
 from src.ats import coords
+from src.ats.board import board_for
 
 from .probes import probe_company
 from .websearch_board import _websearch_board
@@ -34,7 +36,7 @@ def _validate_board(comp):
     """Fetch a resolved board and return (total, nc) live job counts. A board
     that returns zero jobs is treated as dead/wrong by the caller — this is
     what rejects a slug-guess that resolves to an empty or nonexistent board."""
-    from src.ats.fetchers import company as company_fetch
+    from src.ats.board import company as company_fetch
     try:
         allj = company_fetch.fetch_company(comp, None)
     except Exception:
@@ -91,14 +93,9 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
     fallback = None
     s = sniff_ats(name, careers_url or "")
     if s:
-        if s["ats"] == "workday":
-            hit = _mk("workday", s["triple"], s.get("careers_url"), "sniff")
-        elif s["ats"] == "custom":
-            hit = _mk("custom", None, s.get("careers_url"), "sniff")
-        else:
-            hit = _mk(s["ats"], s.get("slug"), s.get("careers_url"), "sniff")
+        hit = _mk(s["ats"], s.get("triple", s.get("slug")), s.get("careers_url"), "sniff")
         if hit:
-            if s["ats"] != "custom" or hit["nc"] > 0:
+            if s["ats"] != config.CAREERS_PAGE_ATS or hit["nc"] > 0:
                 return hit
             fallback = hit
 
@@ -117,12 +114,7 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
     #    Best-effort: degrades to a miss when the search backend is rate-limited.
     w = _websearch_board(name) if websearch else None
     if w:
-        if w["ats"] == "workday":
-            hit = _mk("workday", w["triple"], w.get("careers_url"), "websearch")
-        elif w["ats"] == "custom":
-            hit = _mk("custom", None, w.get("careers_url"), "websearch")
-        else:
-            hit = _mk(w["ats"], w.get("slug"), w.get("careers_url"), "websearch")
+        hit = _mk(w["ats"], w.get("triple", w.get("slug")), w.get("careers_url"), "websearch")
         if hit:
             return hit
 
@@ -151,7 +143,6 @@ def classify_miss(name, careers_url=""):
         path and only by the on-demand resolvers — never per candidate in
         a full discover_local pass.
     """
-    from src.ats.signatures import ATS_LEAD_PATTERNS
     from .sniffer import diagnose_no_board, sniff_careers_ats
     try:
         lead = sniff_careers_ats(name, careers_url or "")
@@ -164,7 +155,7 @@ def classify_miss(name, careers_url=""):
             sub = ""
         return f"no-board-found:{sub}" if sub else "no-board-found"
     ats = lead.get("ats") or "?"
-    if ats in {a for a, _ in ATS_LEAD_PATTERNS}:
+    if ats in config.BOARDS and not board_for(ats):
         return f"ats-unsupported:{ats}"
     return f"board-dead:{ats}"
 

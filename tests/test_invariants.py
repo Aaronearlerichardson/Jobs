@@ -15,6 +15,8 @@ real store.
 """
 
 import ast
+import builtins
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -431,6 +433,305 @@ def test_store_connections_close_on_every_path():
 def test_board_specs_are_json():
     """config.BOARDS holds only what JSON can: moving it to a JSON file
     later must be a copy, not a rewrite. (Each spec is also checked
-    against the schema when src.ats.fetchers.board builds its engine.)"""
+    against the schema when src.ats.board.engine builds its engine.)"""
     import json
     assert json.loads(json.dumps(config.BOARDS)) == config.BOARDS
+
+
+# --------------------------------------------------------------------------- #
+#  6. The mechanical performance rules (docs/PERFORMANCE.md)                  #
+# --------------------------------------------------------------------------- #
+#
+# Each check is a shape the AST shows without guessing at types, kept narrow
+# on purpose: a false positive teaches people to ignore the test. The
+# judgment rules (hot paths, caching, __slots__) are the reviewer's.
+
+#: Names a binding may not reuse. site's additions (exit, help, ...) are
+#: not language builtins.
+BUILTIN_NAMES = frozenset(
+    n for n in dir(builtins) if not n.startswith("_")) - {
+    "copyright", "credits", "exit", "help", "license", "quit"}
+
+#: rule -> (the fix, a snippet the check must flag).
+PERF_RULES = {
+    "shadow": ("rename the binding: it hides a builtin",
+               "def f(type):\n    return type\n"),
+    "eval": ("no eval/exec",
+             "def f(s):\n    return eval(s)\n"),
+    "scope-write": ("no writes through globals()/locals()",
+                    "def f():\n    globals()['x'] = 1\n"),
+    "pop0": ("use a collections.deque and popleft()",
+             "def f(q):\n    return q.pop(0)\n"),
+    "str-concat": ("collect the parts in a list and str.join them",
+                   "def f(xs):\n    s = ''\n    for x in xs:\n"
+                   "        s += x\n    return s\n"),
+    "list-in": ("test membership against a set or dict built outside the loop",
+                "def f(xs):\n    seen = []\n"
+                "    return [x for x in xs if x in seen]\n"),
+    "append-loop": ("use a comprehension (or += / extend with one)",
+                    "def f(xs):\n    out = []\n    for x in xs:\n"
+                    "        out.append(x * 2)\n    return out\n"),
+    "module-loop": ("move the loop into a function",
+                    "for i in range(3):\n    print(i)\n"),
+}
+
+#: Shapes that look close to a rule and are fine; the checks must pass them.
+_PERF_LOOKALIKES = (
+    # A method name is an attribute: it hides nothing outside the class.
+    "class F:\n    def filter(self, record):\n        return True\n",
+    # Grouping, not a list a comprehension could build.
+    "def f(rows):\n    by = {}\n    for r in rows:\n"
+    "        by.setdefault(r[0], []).append(r)\n    return by\n",
+    # The condition reads the list being built.
+    "def f(xs):\n    out = []\n    for x in xs:\n"
+    "        if len(out) < 3:\n            out.append(x)\n    return out\n",
+    # Rebuilt on every pass, never accumulated across passes.
+    "def f(xs):\n    for x in xs:\n        s = 'a'\n        s += x\n"
+    "        print(s)\n",
+    "def f(xs):\n    return [x for x in xs if x in {'a', 'b'}]\n",
+)
+
+#: Rule breaks in code another change owns, as (file, function, rule), each
+#: with a comment saying why. test_perf_handoffs_still_exist fails once one
+#: is fixed: drop the entry.
+PERF_HANDOFFS = set()
+
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_LOOPS = (ast.For, ast.AsyncFor, ast.While)
+_COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _own_nodes(scope):
+    """The nodes of `scope` outside any nested def, lambda or class."""
+    out, stack = [], list(ast.iter_child_nodes(scope))
+    while stack:
+        n = stack.pop()
+        out.append(n)
+        if not isinstance(n, (*_DEFS, ast.ClassDef)):
+            stack.extend(ast.iter_child_nodes(n))
+    return out
+
+
+def _is_str(node):
+    return isinstance(node, ast.JoinedStr) or (
+        isinstance(node, ast.Constant) and isinstance(node.value, str))
+
+
+def _builds_list(node):
+    return isinstance(node, (ast.List, ast.ListComp)) or (
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id in ("list", "sorted"))
+
+
+def _stored(nodes):
+    """Names bound in `nodes` by anything but `+=`."""
+    aug = Counter(n.target.id for n in nodes if isinstance(n, ast.AugAssign)
+                  and isinstance(n.target, ast.Name))
+    return Counter(n.id for n in nodes if isinstance(n, ast.Name)
+                   and isinstance(n.ctx, ast.Store)) - aug
+
+
+def _typed_names(nodes):
+    """(str names, list names): names whose every binding in `nodes` is a
+    str literal / a list-building expression. `+=` keeps the type;
+    parameters and every other binding kind break it."""
+    stored = _stored(nodes)
+    strs, lists = Counter(), Counter()
+    for n in nodes:
+        if isinstance(n, (ast.Assign, ast.AnnAssign)) and n.value is not None:
+            for t in (n.targets if isinstance(n, ast.Assign) else [n.target]):
+                if isinstance(t, ast.Name):
+                    strs[t.id] += _is_str(n.value)
+                    lists[t.id] += _builds_list(n.value)
+    params = {n.arg for n in nodes if isinstance(n, ast.arg)}
+    return ({k for k, c in strs.items() if c and c == stored[k]} - params,
+            {k for k, c in lists.items() if c and c == stored[k]} - params)
+
+
+def _is_append_loop(node):
+    """`for x in y: out.append(e)`, optionally under one `if c:`, where
+    `out` is a name or attribute that neither e, c nor y reads."""
+    if not (isinstance(node, ast.For) and not node.orelse
+            and len(node.body) == 1):
+        return False
+    stmt, reads = node.body[0], [node.iter]
+    if isinstance(stmt, ast.If) and not stmt.orelse and len(stmt.body) == 1:
+        reads.append(stmt.test)
+        stmt = stmt.body[0]
+    call = stmt.value if isinstance(stmt, ast.Expr) else None
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+            and call.func.attr == "append" and len(call.args) == 1
+            and not call.keywords
+            and not isinstance(call.args[0], ast.Starred)):
+        return False
+    recv = call.func.value
+    if not isinstance(recv, (ast.Name, ast.Attribute)):
+        return False
+    key = ast.dump(recv)
+    return not any(ast.dump(n) == key for r in [*reads, call.args[0]]
+                   for n in ast.walk(r))
+
+
+def _bound_builtins(node, kind):
+    """Builtin names `node` binds. Nothing in a class body: those are
+    attributes, and hide no builtin outside the class."""
+    if isinstance(node, ast.arg):
+        names = [node.arg]
+    elif kind == "class":
+        return []
+    elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+        names = [node.id]
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                           ast.ClassDef)):
+        names = [node.name]
+    elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        names = [a.asname or a.name.split(".")[0] for a in node.names]
+    elif isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        names = [node.name]
+    else:
+        return []
+    return [n for n in names if n in BUILTIN_NAMES]
+
+
+def _scope_write(node):
+    """A write through globals() or locals()."""
+    def is_scope_call(n):
+        return (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id in ("globals", "locals"))
+    if isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load):
+        return is_scope_call(node.value)
+    return (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("update", "setdefault", "pop", "popitem",
+                                   "clear", "__setitem__", "__delitem__")
+            and is_scope_call(node.func.value))
+
+
+def _str_accumulates(node, strs, loop):
+    """`s += ...` / `s = s + ...` on a str, inside `loop`, where the loop
+    does not rebind `s` first (so the string grows across passes)."""
+    if (isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Add)
+            and isinstance(node.target, ast.Name)):
+        name, added = node.target.id, node.value
+    elif (isinstance(node, ast.Assign) and len(node.targets) == 1
+          and isinstance(node.targets[0], ast.Name)
+          and isinstance(node.value, ast.BinOp)
+          and isinstance(node.value.op, ast.Add)
+          and isinstance(node.value.left, ast.Name)
+          and node.value.left.id == node.targets[0].id):
+        name, added = node.targets[0].id, node.value.right
+    else:
+        return False
+    if name not in strs and not _is_str(added):
+        return False
+    rebinds = [n for n in _own_nodes(loop) if isinstance(n, ast.Assign)
+               and n is not node and any(isinstance(t, ast.Name)
+                                         and t.id == name for t in n.targets)]
+    return not rebinds
+
+
+def _list_membership(node, lists):
+    return isinstance(node, ast.Compare) and any(
+        isinstance(op, (ast.In, ast.NotIn))
+        and (isinstance(c, (ast.List, ast.ListComp))
+             or (isinstance(c, ast.Name) and c.id in lists))
+        for op, c in zip(node.ops, node.comparators))
+
+
+def perf_violations(src):
+    """{(function, rule)} for every mechanical-rule break in `src`.
+    `function` is the dotted def path ('Cls.meth'), '<module>' outside one."""
+    tree = ast.parse(src)
+    hits = set()
+    mod_strs, mod_lists = _typed_names(_own_nodes(tree))
+
+    def visit(node, qual, kind, strs, lists, loops):
+        for child in ast.iter_child_nodes(node):
+            hits.update((qual, "shadow") for _ in _bound_builtins(child, kind))
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Name)
+                    and child.func.id in ("eval", "exec")):
+                hits.add((qual, "eval"))
+            if _scope_write(child):
+                hits.add((qual, "scope-write"))
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr == "pop" and not child.keywords
+                    and len(child.args) == 1
+                    and isinstance(child.args[0], ast.Constant)
+                    and child.args[0].value == 0):
+                hits.add((qual, "pop0"))
+            if loops and not isinstance(loops[-1], _COMPS) \
+                    and _str_accumulates(child, strs, loops[-1]):
+                hits.add((qual, "str-concat"))
+            if loops and _list_membership(child, lists):
+                hits.add((qual, "list-in"))
+            if _is_append_loop(child):
+                hits.add((qual, "append-loop"))
+            if isinstance(child, _LOOPS) and kind != "def":
+                hits.add((qual, "module-loop"))
+
+            c_qual, c_kind, c_strs, c_lists, c_loops = (qual, kind, strs,
+                                                        lists, loops)
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                  ast.ClassDef)):
+                c_qual = (child.name if qual == "<module>"
+                          else f"{qual}.{child.name}")
+            if isinstance(child, _DEFS):
+                own = _own_nodes(child)
+                c_strs, c_lists = _typed_names(own)
+                local = set(_stored(own)) | {n.arg for n in own
+                                             if isinstance(n, ast.arg)}
+                c_lists |= mod_lists - local
+                c_kind, c_loops = "def", ()
+            elif isinstance(child, ast.ClassDef):
+                c_kind, c_loops = "class", ()
+            elif isinstance(child, _LOOPS + _COMPS):
+                c_loops = loops + (child,)
+            visit(child, c_qual, c_kind, c_strs, c_lists, c_loops)
+
+    visit(tree, "<module>", "module", mod_strs, mod_lists, ())
+    return hits
+
+
+@pytest.fixture(scope="module")
+def perf_breaks():
+    """Every (file, function, rule) the scanned tree breaks."""
+    return {(rel, fn, rule) for rel, src in source_files()
+            for fn, rule in perf_violations(src)}
+
+
+def test_perf_checks_see_violations():
+    """Each check flags its own example and nothing in the lookalikes."""
+    for rule, (_, example) in PERF_RULES.items():
+        assert {r for _, r in perf_violations(example)} == {rule}, rule
+    for src in _PERF_LOOKALIKES:
+        assert not perf_violations(src), src
+
+
+@pytest.mark.parametrize("rule", sorted(PERF_RULES))
+def test_perf_rule_holds(rule, perf_breaks):
+    """docs/PERFORMANCE.md's mechanical rules hold in src/, tools/ and the
+    root scripts, apart from PERF_HANDOFFS."""
+    bad = sorted((rel, fn) for rel, fn, r in perf_breaks - PERF_HANDOFFS
+                 if r == rule)
+    assert not bad, (f"'{rule}' is broken at {bad}: {PERF_RULES[rule][0]}. "
+                     "See docs/PERFORMANCE.md.")
+
+
+def test_perf_handoffs_still_exist(perf_breaks):
+    """PERF_HANDOFFS can only shrink: a fixed entry must be dropped."""
+    stale = sorted(PERF_HANDOFFS - perf_breaks)
+    assert not stale, f"PERF_HANDOFFS lists {stale}, now fixed. Drop them."
+
+
+def test_compiled_code_has_no_assert_or_debug():
+    """build_app.py compiles with -O, which strips `assert` statements and
+    `if __debug__:` blocks, so src/ and the root scripts may use neither."""
+    found = sorted(
+        (rel, n.lineno) for rel, src in source_files()
+        if not rel.startswith("tools/")
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Assert)
+        or (isinstance(n, ast.Name) and n.id == "__debug__"))
+    assert not found, (f"assert/__debug__ at {found}: -O would drop them. "
+                       "Raise an exception instead.")

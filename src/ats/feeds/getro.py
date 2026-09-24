@@ -36,6 +36,7 @@ Notes:
 import json
 import re
 import time
+from collections import deque
 
 from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import host_of, norm_posted_date, strip_html, text_from_html
@@ -182,11 +183,9 @@ def parse_job_page(page_html, board_url, page_url=""):
             or job.get("closedAt") or job.get("deactivatedAt")):
         return None
     org = job.get("organization") if isinstance(job.get("organization"), dict) else {}
-    locations = []
-    for loc in job.get("locations") or []:
-        name = strip_html(loc.get("name") if isinstance(loc, dict) else loc)
-        if name and name not in locations:
-            locations.append(name)
+    locations = list(dict.fromkeys(
+        n for n in (strip_html(loc.get("name") if isinstance(loc, dict) else loc)
+                    for loc in job.get("locations") or []) if n))
     host = board_host(board_url)
     return {
         "id":          f"getro_{jid}",
@@ -209,12 +208,14 @@ def parse_job_page(page_html, board_url, page_url=""):
 
 
 def _fetch_sitemap(origin, label):
-    """Every job entry the board's sitemap (or sitemap index) lists."""
+    """Every job entry the board's sitemap (or sitemap index) lists, each
+    sitemap read once."""
     entries, seen = [], set()
-    queue = [f"{origin}/sitemap.xml"]
+    queue = deque([f"{origin}/sitemap.xml"])
+    queued = set(queue)
     fetched = 0
     while queue and fetched <= MAX_CHILD_SITEMAPS:
-        url = queue.pop(0)
+        url = queue.popleft()
         fetched += 1
         try:
             r = SESSION.get(url,
@@ -228,7 +229,9 @@ def _fetch_sitemap(origin, label):
             if j["id"] not in seen:
                 seen.add(j["id"])
                 entries.append(j)
-        queue.extend(c for c in children if c not in queue)
+        fresh = [c for c in dict.fromkeys(children) if c not in queued]
+        queued.update(fresh)
+        queue.extend(fresh)
     return entries
 
 

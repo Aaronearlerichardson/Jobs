@@ -233,6 +233,10 @@ Current invariants:
 - **At least five modules contain doctests**, so a doctest-only run can never
   go green on an empty collection (pytest exits 5 on "no tests collected", and
   a stray `|| true` would turn that into a tick).
+- **The mechanical performance rules** (no builtin shadowing, no `pop(0)`,
+  no append loops, ...) hold everywhere, and src/ has no `assert` for `-O`
+  to strip. The rules, and the judgment ones for hot paths, are
+  [docs/PERFORMANCE.md](PERFORMANCE.md).
 
 When you add one, write the failure message as an instruction — the reader is
 someone who just broke it and does not know why.
@@ -243,12 +247,12 @@ someone who just broke it and does not know why.
 pytest                                    # everything: tests/ + all doctests
 pytest --doctest-modules src/tags.py          # doctests in one module
 pytest tests/test_invariants.py           # the cross-module claims
-pytest --doctest-modules core -v          # see each doctest by name
+pytest --doctest-modules src -v           # see each doctest by name
 
 JOBS_PROFILE=profile.example.toml pytest  # what CI actually runs
 
-python -m pyflakes core scrapers discovery webapp tests *.py
-python -m compileall -q core scrapers discovery webapp *.py
+python -m flake8 --select=F src tools tests *.py
+python -m compileall -q src tools tests *.py
 ```
 
 `pytest.ini` points `testpaths` at `tests/` **and** the source trees, and puts

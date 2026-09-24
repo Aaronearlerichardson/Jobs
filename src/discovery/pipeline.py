@@ -14,13 +14,14 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from src.ats.board import board_for
 from src.claude.api import DISCOVER_SYSTEM, call_claude_json
 from src.config import REPORT_DIR
 from src.match.names import strip_suffixes
 from src.net.parallel import drain
 from src.net.util import worker_count
 from .resolve.board import resolve_board_sniff_first
-from .resolve.probes import PROBES, WorkdayJsProbePool
+from .resolve.probes import WorkdayJsProbePool
 from .resolve.sniffer import sniff_careers_ats
 from .seeds import seed_candidates_for
 
@@ -112,7 +113,7 @@ def _flag_for_verification(c, claimed_ats):
     disagreeing with Claude's guess, and how the board was found at all
     (see _VIA_NOTES)."""
     flags = []
-    if claimed_ats in PROBES and c.ats != claimed_ats:
+    if board_for(claimed_ats) and c.ats != claimed_ats:
         flags.append(f"found on {c.ats}, not Claude's guess ({claimed_ats})")
     if _VIA_NOTES.get(c.via):
         flags.append(_VIA_NOTES[c.via])

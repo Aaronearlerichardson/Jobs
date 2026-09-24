@@ -18,12 +18,11 @@ from conftest import fake_response, keep_store_open
 import src.discovery.pipeline as pipeline
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
-import src.discovery.resolve.probes as probes
 import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
-import src.ats.fetchers.company as company_fetch
-import src.ats.fetchers.custom as custom_fetch
-import src.ats.fetchers.probe as job_probe
+import src.ats.board.company as company_fetch
+import src.ats.board.custom as custom_fetch
+import src.ats.board.closure as job_probe
 from src.net.util import norm_posted_date
 
 
@@ -64,11 +63,6 @@ class TestSniffer:
                             lambda name, careers_url, **kw: iter([page]))
         assert sniffer.sniff_ats("Example Health") == {
             "ats": "phenom", "slug": "careers.example-health.org", "careers_url": root}
-
-    def test_probes_cover_sniffable_atses(self):
-        from src.discovery.resolve.probes import PROBES
-        assert {"greenhouse", "lever", "ashby", "kula", "jazzhr", "bamboohr",
-                "smartrecruiters"} <= set(PROBES)
 
 
 def _stub_fetch_all(monkeypatch, mapping):
@@ -143,7 +137,7 @@ class TestPageMemo:
         assert len(calls) == 2 and fetchpool._PAGE_MEMO == {}
 
     def test_cap_evicts_the_oldest_entry(self, serve, monkeypatch):
-        calls = self._session(serve)
+        self._session(serve)
         monkeypatch.setattr(fetchpool, "_PAGE_MEMO_CAP", 2)
         for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
             fetchpool._fetch_page(u)
@@ -299,14 +293,14 @@ class TestCustomBoardLinks:
 
 class TestHnParser:
     def test_role_found_out_of_order(self):
-        from src.ats.fetchers.hnhiring import _parse_post
+        from src.ats.feeds.hnhiring import _parse_post
         _, role, loc, _ = _parse_post(
             "Acme Neuro | Remote (US) | $150k-190k | Senior ML Engineer | Full-time")
         assert role == "Senior ML Engineer"
         assert "Remote" in loc
 
     def test_inc_suffix_not_chopped(self):
-        from src.ats.fetchers.hnhiring import _parse_post
+        from src.ats.feeds.hnhiring import _parse_post
         company, role, _, _ = _parse_post("Foo Inc. | ML Engineer | Durham, NC")
         assert company == "Foo Inc." and role == "ML Engineer"
 
@@ -1343,13 +1337,13 @@ class TestApplyToStoreFetchability:
 
     The resolver legitimately returns a `custom` hit -- a real careers page
     on no known platform, keyed on its URL (resolve.board._mk("custom",
-    None, ...)). apply_to_store gated on src.ats.registry.ATS_REGISTRY,
-    which schedules ONE crawl loop (iter_store_sources' lightweight sweep)
-    and omits `custom` on purpose, so every such candidate was reported
-    confirmed and then dropped with "no fetcher for ATS 'custom'". The
-    dispatch table fetch_company actually uses --
-    fetchers.company.FETCHERS -- has carried `custom` all along, and
-    local_sourcing's own custom hits store through it.
+    None, ...)). apply_to_store gated on the ATS sweep's registry, which
+    schedules ONE crawl loop (iter_store_sources' lightweight sweep) and
+    omitted `custom` on purpose, so every such candidate was reported
+    confirmed and then dropped with "no fetcher for ATS 'custom'". What
+    fetch_company actually dispatches on -- `board_for` -- has carried
+    `custom` all along, and local_sourcing's own custom hits store
+    through it.
 
     Offline: the store is the in-memory `db`, titles and the mission call
     are stubbed exactly as TestScoreAndUpsert stubs them.
@@ -1461,7 +1455,7 @@ class TestApplyToStoreFetchability:
         the sniffer can NAME but nothing can fetch stays out of the roster."""
         import src.store as store
         self._wire(monkeypatch, db)
-        assert "eightfold" not in company_fetch.FETCHERS
+        assert company_fetch.board_for("eightfold") is None
 
         lines = self._apply(self._candidate(
             "Gamma Devices", "eightfold", "gamma",

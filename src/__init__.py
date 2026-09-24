@@ -11,8 +11,9 @@ lives here, grouped by what it does rather than by when it was written:
     match/      the free gates: titles, keywords, geography, remote, names
     digest/     the ranked digest: rendering and delivery
     ats/        everything applicant-tracking-system specific --
-                signatures, the fetcher registry, one fetcher per ATS,
-                and the search-engine dork that finds new boards
+                signatures, the sweep registry, the board engine that
+                reads every platform's config.BOARDS spec, and the
+                feed fetchers
     net/        HTTP, robots, the fetch pool, DuckDuckGo, small helpers
     crawl/      the three passes over boards: crawl, harvest, triage
     discovery/  finding companies worth crawling in the first place

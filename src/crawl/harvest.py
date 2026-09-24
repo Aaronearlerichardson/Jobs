@@ -57,8 +57,7 @@ from datetime import datetime, timedelta
 from src import config
 from src import store
 from src.ats.coords import slug_named
-from src.ats.fetchers import company as company_fetch
-from src.ats.registry import LIGHTWEIGHT
+from src.ats.board import company as company_fetch
 from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
 from src.match.locality import geo_mode, location_unknown
@@ -130,8 +129,9 @@ def deferred_note(stats):
 
 
 def _ats_rank(ats):
-    """Cheap JSON boards first, then the heavyweights."""
-    return 0 if ats in LIGHTWEIGHT else 1
+    """Cheap boards (a spec the sweep pulls whole) first, then the
+    heavyweights."""
+    return 0 if (config.BOARDS.get(ats) or {}).get("sweep") else 1
 
 
 def plan(conn, only=None, names=None, min_age_hours=None,
@@ -146,7 +146,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
 
     A board that is config.is_offmission_inactive -- the one
     off-mission/inactive rule, shared with the whole-board page budget
-    (config.board_max_pages, read by src.ats.fetchers.company) and
+    (config.board_max_pages, read by src.ats.board.company) and
     defined in config.policy because ats sits BELOW crawl in the import
     DAG -- waits the longer config.HARVEST_OFFMISSION_HOURS instead of
     `min_age_hours`. Such a board is still fetched every pass, per the

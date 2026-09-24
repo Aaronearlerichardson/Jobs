@@ -22,8 +22,13 @@ and optionally "when" (a condition; "else" is used when it fails),
 "transform" (a name in TRANSFORMS, "name:arg" passing it an argument) and
 "default" (used for a falsy value). A condition is one of truthy, falsy,
 eq, contains, past, any, all.
+
+`value(spec, entry)` reads one value; `reader(spec)` reads the spec once
+and returns the callable the engine keeps, so a row costs no spec
+interpretation.
 """
 
+import functools
 import html
 import re
 import time
@@ -73,7 +78,7 @@ def _colon_location(raw):
     """
     code = re.compile(r"^[A-Za-z]{2}$")
     parts = [p.strip() for p in str(raw).split(":") if p.strip()]
-    country = parts.pop(0) if len(parts) > 1 and code.match(parts[0]) else ""
+    country, parts = (parts[0], parts[1:]) if len(parts) > 1 and code.match(parts[0]) else ("", parts)
     state = next((parts.pop(i) for i, p in enumerate(parts) if code.match(p)), "")
     return ", ".join(x for x in (", ".join(parts), state, country) if x)
 
@@ -270,23 +275,45 @@ def path(obj, p):
     >>> path(d, "a.c"), path(d, "offices[9].name"), path([1], "")
     (None, None, [1])
     """
+    return _getter(p)(obj)
+
+
+def _identity(obj):
+    return obj
+
+
+@functools.cache
+def _getter(p):
+    """`path` for one `p`, parsed once: a callable obj -> value."""
     if p == "":
-        return obj
-    cur, mapped = [obj], False
-    for step in p.split("."):
-        key, index = _STEP_RE.match(step).groups()
-        nxt = []
-        for c in cur:
-            v = c.get(key) if isinstance(c, dict) else None
-            if index is None:
-                nxt.append(v)
-            elif index == "":
-                nxt.extend(v if isinstance(v, list) else [])
-            else:
-                i = int(index)
-                nxt.append(v[i] if isinstance(v, list) and i < len(v) else None)
-        cur, mapped = nxt, mapped or index == ""
-    return cur if mapped else (cur[0] if cur else None)
+        return _identity
+    steps = [_STEP_RE.match(s).groups() for s in p.split(".")]
+    if all(index is None for _key, index in steps):
+        keys = tuple(key for key, _index in steps)
+
+        def chain(obj):
+            for k in keys:
+                obj = obj.get(k) if isinstance(obj, dict) else None
+            return obj
+        return chain
+    mapped = any(index == "" for _key, index in steps)
+    steps = [(key, index if index in (None, "") else int(index)) for key, index in steps]
+
+    def walk(obj):
+        cur = [obj]
+        for key, index in steps:
+            nxt = []
+            for c in cur:
+                v = c.get(key) if isinstance(c, dict) else None
+                if index is None:
+                    nxt.append(v)
+                elif index == "":
+                    nxt.extend(v if isinstance(v, list) else [])
+                else:
+                    nxt.append(v[index] if isinstance(v, list) and index < len(v) else None)
+            cur = nxt
+        return cur if mapped else (cur[0] if cur else None)
+    return walk
 
 
 def _flat(v):
@@ -304,23 +331,42 @@ def fmt(template, lookup, strict=False):
     >>> fmt("{t}/{t|underscore}", {"t": "vhr-unither"}.get)
     'vhr-unither/vhr_unither'
     """
-    empty = []
-
-    def fill(m):
-        v = lookup(m.group(1))
+    out, empty = [], False
+    for literal, name, n, transform in _template(template):
+        out.append(literal)
+        if name is None:
+            continue
+        v = lookup(name)
         s = "" if v is None else str(v)
-        if s and m.group(3):
-            s = str(_transform(m.group(3), s))
+        if s and transform:
+            s = str(_transform(transform)(s))
         if not s.strip():
-            empty.append(m.group(1))
-        return s[:int(m.group(2))] if m.group(2) else s
-    out = _TOKEN_RE.sub(fill, template)
-    return None if strict and empty else out
+            empty = True
+        out.append(s if n is None else s[:n])
+    return None if strict and empty else "".join(out)
 
 
-def _transform(name, v):
-    name, _, arg = name.partition(":")
-    return TRANSFORMS[name](v, arg) if arg else TRANSFORMS[name](v)
+@functools.cache
+def _template(template):
+    """`template` parsed once: (literal, token name, n, transform) per
+    token, the text after the last as a (literal, None, None, None)."""
+    parts, at = [], 0
+    for m in _TOKEN_RE.finditer(template):
+        parts.append((template[at:m.start()], m.group(1),
+                      int(m.group(2)) if m.group(2) else None, m.group(3)))
+        at = m.end()
+    parts.append((template[at:], None, None, None))
+    return tuple(parts)
+
+
+@functools.cache
+def _transform(name):
+    """The transform `name` ("t", or "t:arg" passing it an argument) as a
+    callable, looked up in TRANSFORMS when called."""
+    t, _, arg = name.partition(":")
+    if arg:
+        return lambda v: TRANSFORMS[t](v, arg)
+    return lambda v: TRANSFORMS[t](v)
 
 
 def value(spec, entry, ctx=None, strict=False):
@@ -352,45 +398,96 @@ def value(spec, entry, ctx=None, strict=False):
     ['Raleigh, NC']
 
     `strict` makes a "format" with an empty token None: an id built from
-    a missing key is no id.
+    a missing key is no id. `reader` is the same, read once.
     """
-    ctx = ctx or {}
+    return reader(spec, strict)(entry, ctx or {})
+
+
+def _none(entry, ctx):
+    return None
+
+
+def reader(spec, strict=False):
+    """Field spec `spec` read once: a callable (entry, ctx) -> the value
+    `value` would give. The engine builds one per spec field when a board
+    is built, so a row costs no spec interpretation."""
     if spec is None:
-        return None
+        return _none
     if isinstance(spec, str):
-        return ctx[spec] if spec.startswith("_") and spec in ctx else path(entry, spec)
-    if "when" in spec and not holds(spec["when"], entry, ctx):
-        v = value(spec.get("else"), entry, ctx)
-    elif "first" in spec:
-        v = next((x for x in (value(s, entry, ctx) for s in spec["first"])
-                  if x and not isinstance(x, dict)), None)
-    elif "join" in spec:
-        parts = [s for s in (str(p).strip() for p in _flat([value(s, entry, ctx)
-                                                             for s in spec["join"]])
-                             if p and not isinstance(p, dict)) if s]
-        v = spec.get("sep", " ").join(parts[:spec.get("max")])
-    elif "each" in spec:
-        items = path(entry, spec["each"])
-        v = [value(spec.get("do", ""), i, ctx)
-             for i in (items if isinstance(items, list) else [])
-             if not (spec.get("skip") and isinstance(i, dict)
-                     and holds(spec["skip"], i, ctx))]
-    elif "merge" in spec:
-        m = spec["merge"]
-        v = merge_locations(value(m["primary"], entry, ctx),
-                            _flat(value(m["extras"], entry, ctx)))
-    elif "format" in spec:
-        v = fmt(spec["format"],
-                lambda k: ctx[k] if k in ctx else path(entry, k), strict)
-    elif "const" in spec:
-        v = spec["const"]
-    else:
-        v = value(spec.get("of"), entry, ctx)
-    if v not in (None, "") and spec.get("transform"):
-        v = _transform(spec["transform"], v)
-    if not v and "default" in spec:
-        v = spec["default"]
-    return v
+        return _path_reader(spec)
+    body = _operator(spec, strict)
+    when = _condition(spec["when"]) if "when" in spec else None
+    other = reader(spec.get("else")) if when else None
+    transform = _transform(spec["transform"]) if spec.get("transform") else None
+    has_default, default = "default" in spec, spec.get("default")
+    if when is None and transform is None and not has_default:
+        return body
+
+    def read(entry, ctx):
+        v = body(entry, ctx) if when is None or when(entry, ctx) else other(entry, ctx)
+        if transform is not None and v not in (None, ""):
+            v = transform(v)
+        if not v and has_default:
+            v = default
+        return v
+    return read
+
+
+@functools.cache
+def _path_reader(p):
+    """A path spec's reader: an internal "_" field from ctx, else `path`."""
+    get = _getter(p)
+    if p.startswith("_"):
+        return lambda entry, ctx: ctx[p] if ctx and p in ctx else get(entry)
+    return lambda entry, ctx: get(entry)
+
+
+def _operator(spec, strict):
+    """The reader of a dict spec's operator (`of` by default), without its
+    modifiers."""
+    if "first" in spec:
+        subs = [reader(s) for s in spec["first"]]
+
+        def first(entry, ctx):
+            for f in subs:
+                x = f(entry, ctx)
+                if x and not isinstance(x, dict):
+                    return x
+            return None
+        return first
+    if "join" in spec:
+        subs, sep, cap = [reader(s) for s in spec["join"]], spec.get("sep", " "), spec.get("max")
+
+        def join(entry, ctx):
+            parts = [s for s in (str(p).strip() for p in _flat([f(entry, ctx) for f in subs])
+                                 if p and not isinstance(p, dict)) if s]
+            return sep.join(parts[:cap])
+        return join
+    if "each" in spec:
+        items_of, do = _getter(spec["each"]), reader(spec.get("do", ""))
+        skip = _condition(spec["skip"]) if spec.get("skip") else None
+
+        def each(entry, ctx):
+            items = items_of(entry)
+            return [do(i, ctx) for i in (items if isinstance(items, list) else [])
+                    if not (skip and isinstance(i, dict) and skip(i, ctx))]
+        return each
+    if "merge" in spec:
+        primary, extras = reader(spec["merge"]["primary"]), reader(spec["merge"]["extras"])
+        return lambda entry, ctx: merge_locations(primary(entry, ctx), _flat(extras(entry, ctx)))
+    if "format" in spec:
+        template = spec["format"]
+        getters = {name: _getter(name) for _lit, name, _n, _t in _template(template)
+                   if name is not None}
+
+        def form(entry, ctx):
+            return fmt(template, lambda k: ctx[k] if ctx and k in ctx else getters[k](entry),
+                       strict)
+        return form
+    if "const" in spec:
+        const = spec["const"]
+        return lambda entry, ctx: const
+    return reader(spec.get("of"))
 
 
 _OPERATORS = {"first", "join", "each", "merge", "format", "const", "of"}
@@ -476,28 +573,53 @@ def holds(cond, entry, ctx=None):
     >>> holds({"any": [{"truthy": "flag"}, {"falsy": "missing"}]}, e)
     True
     """
+    return _condition(cond)(entry, ctx or {})
+
+
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _condition(cond):
+    """Condition `cond` read once: a callable (entry, ctx) -> `holds`."""
     (op, arg), = cond.items()
-    if op == "any":
-        return any(holds(c, entry, ctx) for c in arg)
-    if op == "all":
-        return all(holds(c, entry, ctx) for c in arg)
-    if op == "truthy":
-        return bool(value(arg, entry, ctx))
-    if op == "falsy":
-        return not value(arg, entry, ctx)
-    if op == "past":
-        v = str(value(arg, entry, ctx) or "")
-        return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
-    v = value(arg[0], entry, ctx)
+    if op in ("any", "all"):
+        subs, agg = [_condition(c) for c in arg], any if op == "any" else all
+        return lambda entry, ctx: agg(c(entry, ctx) for c in subs)
+    if op in ("truthy", "falsy", "past"):
+        f = reader(arg)
+        if op == "truthy":
+            return lambda entry, ctx: bool(f(entry, ctx))
+        if op == "falsy":
+            return lambda entry, ctx: not f(entry, ctx)
+
+        def past(entry, ctx):
+            v = str(f(entry, ctx) or "")
+            return bool(_ISO_DATE_RE.match(v)) and v[:10] < time.strftime("%Y-%m-%d")
+        return past
+    f = reader(arg[0])
     if op == "eq":
         want = arg[1]
         if isinstance(want, str):
-            return v is not None and str(v).lower() == want.lower()
-        return type(v) is type(want) and v == want
+            low = want.lower()
+
+            def eq_text(entry, ctx):
+                v = f(entry, ctx)
+                return v is not None and str(v).lower() == low
+            return eq_text
+
+        def eq(entry, ctx):
+            v = f(entry, ctx)
+            return type(v) is type(want) and v == want
+        return eq
     if op == "contains":
         needle = arg[1]
-        if needle.startswith("$"):
-            needle = str(value(needle[1:], entry, ctx) or "")
-        hay = " ".join(str(x) for x in _flat(v) if x) if isinstance(v, list) else str(v or "")
-        return bool(needle) and needle.lower() in hay.lower()
+        of_needle = reader(needle[1:]) if needle.startswith("$") else None
+        low = needle.lower()
+
+        def contains(entry, ctx):
+            v = f(entry, ctx)
+            n = str(of_needle(entry, ctx) or "").lower() if of_needle else low
+            hay = " ".join(str(x) for x in _flat(v) if x) if isinstance(v, list) else str(v or "")
+            return bool(n) and n in hay.lower()
+        return contains
     raise ValueError(f"unknown condition {op!r}")

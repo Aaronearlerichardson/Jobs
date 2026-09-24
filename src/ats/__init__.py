@@ -1,10 +1,15 @@
 """Applicant-tracking systems: how a board is recognised and read.
 
     signatures.py  recognise a hosted board from a URL or page body and
-                   read its coordinates off the match (pure text)
+                   read its coordinates off the match (pure text, over
+                   the specs' `detect` entries)
     coords.py      those coordinates as the store's company columns
-    registry.py    which ATS families the crawl fetches, and how politely
-    fetchers/      one module per ATS, all returning the same job dicts
+    registry.py    which store rows the sweep pulls whole, and a new
+                   board's seed tag
+    board/         the board engine: every ATS board platform, read from
+                   its config.BOARDS spec by one engine
+    feeds/         the job sources that are not ATS boards (forums,
+                   aggregator feeds, USAJOBS, Getro, web search)
 
 Nothing here knows about tracks, ranking or the digest: an ATS module
 turns board coordinates into job dicts and stops. It reads config, match

@@ -20,9 +20,9 @@ from src import digest
 from src import store
 from src import tags
 from src.ats import coords
-from src.ats.fetchers import company as company_fetch
-from src.ats.fetchers import probe
-from src.ats.fetchers.board import BOARDS, board_for, board_for_url
+from src.ats.board import company as company_fetch
+from src.ats.board import closure
+from src.ats.board import BOARDS, board_for, board_for_url
 from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
 from src.claude.resume import resume_text
 from src.match import gates
@@ -1145,7 +1145,7 @@ def _probe_label(url):
     >>> _probe_label("")
     '?'
     """
-    fam = probe.probe_family(url)
+    fam = closure.probe_family(url)
     if fam and fam != "gated":
         return fam
     return re.sub(r"^https?://", "", url or "").split("/")[0].lower() or "?"
@@ -1253,7 +1253,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
     accepting" notice, a past JSON-LD validThrough, a spec's closure
     rule, an id absent from a non-empty board listing -- see
-    fetchers.probe.probe_job_open). Indeterminate probes (bot-gated
+    board.closure.probe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
     fetch has already failed (store.miss_family == "board-dead") -- no URL
@@ -1361,7 +1361,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             # So it is caught here rather than left to fan_out, which would
             # drop the row and quietly shrink the denominator.
             try:
-                return probe.probe_job_open(r["url"], r["job_id"])
+                return closure.probe_job_open(r["url"], r["job_id"])
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {type(e).__name__}"
 
@@ -2248,7 +2248,7 @@ def rekey_jobs(ats, commit=False, t=None, conn=None):
         an exact URL and title match, and never moves its company_id.
     """
     board = board_for(ats)
-    if board is None or not board.fetchable:
+    if board is None:
         print(f"  [!] no board spec reads {ats!r} rows")
         return {}
     with track_store(t, conn) as conn:

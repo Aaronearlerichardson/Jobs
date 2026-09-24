@@ -14,9 +14,9 @@ import pytest
 
 from conftest import fake_response
 from src import config
-from src.ats.fetchers import board
-from src.ats.fetchers import company as company_fetch
-from src.ats.fetchers.board import board_for
+from src.ats.board import engine as board
+from src.ats.board import company as company_fetch
+from src.ats.board import board_for
 from src.net import http
 
 NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)

@@ -15,11 +15,12 @@ and identity guards in this package.
 
 import logging
 
+from src import config
 from src.ats.signatures import detect, pack
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import (_foreign_board, candidate_pages,
                        candidate_responses, corroborated)
-from .probes import PROBES
+from .probes import confirm
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.sniffer")
@@ -27,8 +28,7 @@ _log = logging.getLogger("src.discovery.resolve.sniffer")
 
 def _scan_root(name, careers_url=""):
     """Fetch the bare homepage(s) (candidate_urls with ROOT_PATTERNS) and
-    return the first fetchable/semi-fetchable ATS hit (packed like
-    sniff_ats), else None.
+    return the first fetchable ATS hit (packed like sniff_ats), else None.
 
     The root is a regular candidate too, but a multi-token name or a
     careers_url hint can push it past the cap, so the failure path scans it
@@ -49,20 +49,11 @@ def _scan_root(name, careers_url=""):
     return None
 
 
-def _confirm_coords(ats, slug):
-    """Get a live job count for sniffed coordinates. Returns int or None."""
-    probe = PROBES.get(ats)
-    if not probe:
-        return None
-    ok, count = probe(slug)
-    return count if ok else None
-
-
 # ─── Public API ──────────────────────────────────────────────────────────
 
 def sniff_ats(name, careers_url=""):
-    """Raw detection: first fetchable/semi-fetchable ATS found, else a
-    custom self-hosted board, else None. Shape:
+    """Raw detection: first fetchable ATS found, else a custom self-hosted
+    board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}."""
     custom = None
     n_pages = 0
@@ -79,10 +70,10 @@ def sniff_ats(name, careers_url=""):
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
-            from src.ats.fetchers.custom import custom_board_listing_url
+            from src.ats.board.custom import custom_board_listing_url
             listing = custom_board_listing_url(r.url, r.text)
             if listing:
-                custom = {"ats": "custom", "careers_url": listing}
+                custom = {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
     # Counted after the walk rather than before it: "3 answered" was the
     # old line, and a page that answered but failed the identity check is
     # not a page this sniff could read anything off.
@@ -108,7 +99,7 @@ def sniff_careers_ats(name, careers_url=""):
         if ats == "workday" and _foreign_board(name, slug):
             continue
         if kind == "fetchable" and ats != "workday":
-            count = _confirm_coords(ats, slug)
+            count = confirm(ats, slug, pack(ats, slug, r.url)["careers_url"])
             if count is not None:
                 return {"confirmed": True, "ats": ats, "slug": slug,
                         "count": count, "source_url": r.url}
@@ -123,7 +114,7 @@ def sniff_careers_ats(name, careers_url=""):
     root_hit = _scan_root(name, careers_url)
     if root_hit:
         ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
-        count = _confirm_coords(ats, slug) if ats != "workday" else None
+        count = confirm(ats, slug, root_hit["careers_url"]) if ats != "workday" else None
         if count is not None:
             return {"confirmed": True, "ats": ats, "slug": slug,
                     "count": count, "source_url": root_hit["careers_url"]}
@@ -199,7 +190,7 @@ def diagnose_no_board(name, careers_url=""):
         safe_hits.append(r)
     if not safe_hits:
         return "wrong-domain" if saw_risky_uncorroborated else "domain-unreachable"
-    from src.ats.fetchers.custom import is_board_page
+    from src.ats.board.custom import is_board_page
     if any(is_board_page(r.text) for r in safe_hits):
         return "careers-page-no-ats"
     return "site-only-no-careers"

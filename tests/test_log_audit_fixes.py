@@ -15,7 +15,7 @@ import requests
 
 from conftest import keep_store_open
 import src.store as store
-from src.discovery import local_sourcing, paste_ingest
+from src.discovery import paste_ingest
 from src.discovery.resolve import board as resolve_board, fetchpool
 from src.match.names import junk_name_reason
 from src.ops import maintenance as ops

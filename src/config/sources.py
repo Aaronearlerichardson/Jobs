@@ -59,7 +59,7 @@ HNHIRING_MAX_THREADS = int(_src.get("hnhiring_max_threads", 2))
 # source needing credentials (USAJOBS_API_KEY / USAJOBS_EMAIL), and its
 # scope is a place rather than a topic, so there is no useful default
 # search. `series` is the real filter — occupational series codes; omit the
-# key for the technical set (see src/ats/fetchers/usajobs.DEFAULT_SERIES).
+# key for the technical set (see src/ats/feeds/usajobs.DEFAULT_SERIES).
 _usajobs = _src.get("usajobs", {})
 USAJOBS_ENABLED  = bool(_usajobs.get("enabled", False))
 USAJOBS_KEYWORD: str | None = _usajobs.get("keyword") or None
@@ -76,7 +76,7 @@ USAJOBS_RESULTS_PER_PAGE = int(_usajobs.get("results_per_page", 250))
 # on one host, each posting naming its employer. OFF by default like
 # USAJOBS: a board is a place, so there is no generic default. `boards` are
 # board URLs (any page; only the host is used). `max_details` caps the
-# posting pages fetched per board per crawl (see src/ats/fetchers/getro.py
+# posting pages fetched per board per crawl (see src/ats/feeds/getro.py
 # — titles are screened before any page fetch).
 _getro = _src.get("getro", {})
 GETRO_ENABLED = bool(_getro.get("enabled", False))

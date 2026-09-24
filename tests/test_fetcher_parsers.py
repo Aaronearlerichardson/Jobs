@@ -23,9 +23,9 @@ import pytest
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (board, company, discourse, fields, getro,
-                              remoteok, remotive, usajobs)
-from src.ats.fetchers.board import BOARDS, board_for, board_for_url
+from src.ats.board import BOARDS, board_for, board_for_url, company, fields
+from src.ats.board import engine as board
+from src.ats.feeds import discourse, getro, remoteok, remotive, usajobs
 from src.discovery import apply
 from src.net import http
 
@@ -414,10 +414,9 @@ class TestRelevanceGate:
         assert board_for("greenhouse").jobs("databricks", "Databricks")
 
     def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
-        from src.ats.registry import ATS_REGISTRY
+        from src.ats.registry import sweep
         serve(fake_response(load("greenhouse_board.json")))
-        thunk = ATS_REGISTRY["greenhouse"][0]("Databricks", "databricks")
-        assert thunk() == []
+        assert sweep("greenhouse", "Databricks", "databricks")() == []
 
     def test_no_fetcher_module_imports_the_filter_or_config_timeouts(self):
         """The point of the parameter: a fetcher module is reusable with
@@ -467,8 +466,7 @@ class TestAshbyKeyAcrossCallSites:
         serve(fake_response(TestAshbyKeyAcrossCallSites.BOARD))
 
     def test_probe_reports_the_real_total(self, ashby_board):
-        from src.discovery.resolve.probes import PROBES
-        assert PROBES["ashby"]("susteon") == (True, 2)
+        assert board_for("ashby").probe("susteon") == (True, 2)
 
     def test_nc_counter_sees_local_jobs(self, ashby_board):
         from src.match.locality import is_nc
@@ -486,7 +484,7 @@ class TestAshbyKeyAcrossCallSites:
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
     def test_company_fetcher_returns_postings(self, ashby_board):
-        from src.ats.fetchers.company import fetch_company
+        from src.ats.board.company import fetch_company
         jobs = fetch_company({"ats": "ashby", "slug": "susteon"})
         assert [j["title"] for j in jobs] == ["Catalysis Scientist", "Lab Technician"]
         assert jobs[0]["location"] == "Morrisville, North Carolina"
@@ -726,15 +724,9 @@ class TestOneFetcherPerAts:
     TestAshbyKeyAcrossCallSites); one implementation cannot.
     """
 
-    def test_the_seed_tag_follows_lightweight(self):
-        from src import tags
-        from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
-        for ats, (_mk, tag, _pause) in ATS_REGISTRY.items():
-            assert tag == (tags.SWEEP if ats in LIGHTWEIGHT else tags.LOCAL), ats
-
     def test_the_dispatch_table_adapts_the_module_fetcher(self, serve,
                                                           match_everything):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         serve(fake_response(load("greenhouse_board.json")))
         module = board_for("greenhouse").jobs("databricks", "Databricks")
         vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
@@ -743,7 +735,7 @@ class TestOneFetcherPerAts:
 
     def test_the_location_regex_filters_the_listing(self, serve,
                                                     match_everything):
-        from src.ats.fetchers import company
+        from src.ats.board import company
         serve(fake_response(load("greenhouse_board.json")))
         everything = company.fetch_company({"ats": "greenhouse", "slug": "x"})
         nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
@@ -862,8 +854,8 @@ class TestADeadEndpointIsNeverAnException:
     for both failure shapes (a refused socket and an HTTP error reach
     get_json's handler by different routes).
 
-    Parametrised over company.FETCHERS itself, so a board fetcher is
-    covered the day it is registered; FEEDS are the sources outside it.
+    Parametrised over the fetchable specs themselves, so a board platform
+    is covered the day it is specced; FEEDS are the sources outside them.
 
     Notes:
         A hand-kept list of calls stood here until 2026-09-22 and was never
@@ -890,7 +882,7 @@ class TestADeadEndpointIsNeverAnException:
         serve(OSError("connection refused") if request.param == "refused"
               else fake_response(status=500))
 
-    @pytest.mark.parametrize("name", sorted(company.FETCHERS) + sorted(FEEDS))
+    @pytest.mark.parametrize("name", sorted(n for n in BOARDS if board_for(n)) + sorted(FEEDS))
     def test_reports_and_returns_empty(self, name, dead_source, capsys,
                                        match_everything):
         http.reset_fetch_failures()

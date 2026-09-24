@@ -33,7 +33,7 @@ from datetime import datetime, timedelta
 from src import config
 from src import tags as company_tags
 from src.ats import coords
-from src.ats.fetchers import company as company_fetch
+from src.ats.board import company as company_fetch
 from src.match.names import name_key
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
@@ -73,7 +73,7 @@ def _hit_from_detection(name, det):
     coordinates that read empty are a DEAD board, which is a different
     miss from a name nothing could be found for.
     """
-    from src.ats.fetchers import company as company_fetch
+    from src.ats.board import company as company_fetch
     ats = det["ats"]
     slug = det["triple"] if ats == "workday" else det.get("slug")
     try:
@@ -356,7 +356,7 @@ def _sample_titles(hit, n=6):
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
-    Every family samples through fetchers.company.sample_titles. [] when
+    Every family samples through board.company.sample_titles. [] when
     nothing could be read.
 
     Notes:

@@ -14,6 +14,7 @@ One function now. Callers say what they resolved; this says what the
 store calls it.
 """
 
+from src import config
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
 
 #: The columns a board's identity occupies in `companies` (core.store).
@@ -21,8 +22,16 @@ BOARD_COLUMNS = ("ats", "slug", "wd_tenant", "wd_pod", "wd_site",
                  "careers_url")
 
 
+def _handle(ats):
+    """(columns, sep) of `ats`'s handle (config.BOARDS; default the slug)."""
+    h = (config.BOARDS.get(ats) or {}).get("handle") or {}
+    return h.get("columns", ["slug"]), h.get("sep", "|")
+
+
 def columns(ats, slug=None, careers_url=None, name=None, **extra):
-    """One board's coordinates as store company columns.
+    """One board's coordinates as store company columns: a handle spanning
+    several columns (its spec's `handle.columns`) fills them from its parts,
+    a tuple or a `sep`-joined string; any other goes in `slug`.
 
     Most platforms carry a single slug:
 
@@ -54,15 +63,12 @@ def columns(ats, slug=None, careers_url=None, name=None, **extra):
     >>> row["name"], row["active"], row["source"]
     ('Acme', 1, 'manual')
     """
-    is_wd = ats == "workday"
-    out = {
-        "ats": ats,
-        "slug": None if is_wd else (slug or None),
-        "wd_tenant": slug[0] if is_wd else None,
-        "wd_pod": slug[1] if is_wd else None,
-        "wd_site": slug[2] if is_wd else None,
-        "careers_url": careers_url,
-    }
+    cols, sep = _handle(ats)
+    multi = len(cols) > 1
+    out = {"ats": ats, "slug": None if multi else (slug or None),
+           "wd_tenant": None, "wd_pod": None, "wd_site": None, "careers_url": careers_url}
+    if multi:
+        out.update(zip(cols, slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)))
     if name is not None:
         out["name"] = name
     out.update(extra)
@@ -71,9 +77,10 @@ def columns(ats, slug=None, careers_url=None, name=None, **extra):
 
 def board_slug(company):
     """The one string that names this board on its own host, independent of
-    which coordinate column carries it: Workday's `wd_tenant`, or the
-    ordinary `slug` otherwise. '' for a careers_url-keyed board (custom,
-    successfactors, peopleadmin, wpjson, CAPTURE_ATS) that has neither.
+    which coordinate column carries it: the first of its handle's columns
+    (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
+    careers_url-keyed board (custom, successfactors, peopleadmin, wpjson,
+    CAPTURE_ATS) that has no slug.
 
     >>> board_slug({"ats": "workday", "wd_tenant": "aah", "slug": None})
     'aah'
@@ -83,7 +90,8 @@ def board_slug(company):
     ...             "careers_url": "https://x.org/careers"})
     ''
     """
-    return company.get("wd_tenant") or company.get("slug") or ""
+    first = _handle(company.get("ats"))[0][0]
+    return (first != "careers_url" and company.get(first)) or company.get("slug") or ""
 
 
 def slug_named(company):

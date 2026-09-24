@@ -52,7 +52,7 @@ def ingest_nlx(companies, t=None):
     """Pull postings for bot-gated employers from the federal NLx feed and
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""
-    from src.ats.fetchers.careeronestop import fetch_nlx_company
+    from src.ats.feeds.careeronestop import fetch_nlx_company
     from src.ops.maintenance import ingest_external_jobs
     if not companies:
         print("  [!] give a comma-separated list of employer names")

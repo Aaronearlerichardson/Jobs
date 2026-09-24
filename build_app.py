@@ -335,6 +335,10 @@ def build_command(name=None):
     cmd = [sys.executable, "-m", "nuitka", entry,
            "--onefile", f"--output-filename={output_name(name)}",
            "--assume-yes-for-downloads"]
+    # Link-time optimisation of the generated C; the C build takes longer.
+    cmd += ["--lto=yes"]
+    # -O drops asserts and __debug__ blocks; test_invariants keeps both out.
+    cmd += ["--python-flag=-O"]
     # Both targets are plain console apps (Nuitka's default, "force"), so
     # each gets a window of its own however it was started.
     #

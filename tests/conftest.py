@@ -25,8 +25,8 @@ from src import config as _config                           # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
 import src.crawl.runner as _runner                  # noqa: E402
-import src.ats.fetchers.board as _board             # noqa: E402
-import src.ats.fetchers.probe as _job_probe         # noqa: E402
+import src.ats.board.engine as _board             # noqa: E402
+import src.ats.board.closure as _job_probe         # noqa: E402
 import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
 from src.net import http as _http                   # noqa: E402
 
@@ -159,6 +159,31 @@ def exclude_vocab(monkeypatch):
     gates._exclude_tables.cache_clear()
     yield _configure
     gates._exclude_tables.cache_clear()
+
+
+@pytest.fixture
+def division_vocab(cfg, pristine_keywords, monkeypatch):
+    """A conglomerate whose division gate runs on a KNOWN vocabulary.
+
+    The tests using it exercise the REAL `filters.is_relevant` rather than
+    a stub -- the rule itself is what they are about -- so the loaded
+    profile must not be what decides the answer. The keyword tiers are
+    narrowed to one unmistakable in-field term, the [exclude] title phrase
+    that matters here is pinned, and [policy] watch_division_titles is set
+    to a two-entry stand-in for the real list. `pristine_keywords` puts the
+    profile's own lists back (and fails the test if it cannot).
+    """
+    for name, terms in (("CORE_KEYWORDS", ["electrophysiology"]),
+                        ("DOMAIN_KEYWORDS", ["electrophysiology"]),
+                        ("SKILL_KEYWORDS", ["electrophysiology"]),
+                        ("INCLUDE_KEYWORDS", ["electrophysiology"]),
+                        ("EXCLUDE_PHRASES", []),
+                        ("EXCLUDE_TITLE_PHRASES", ["manager"])):
+        getattr(cfg, name)[:] = terms
+    monkeypatch.setattr(cfg, "WATCH_DIVISION_TITLES",
+                        ("software engineer", "solutions architect"))
+    monkeypatch.setattr(cfg, "is_multi_division",
+                        lambda name: (name or "").lower().startswith("megacorp"))
 
 
 # --------------------------------------------------------------------------- #

@@ -323,7 +323,7 @@ Sites that require a login (LinkedIn, Indeed, metacareers) are **never fetched
 by this tool**. Instead, *you* browse them yourself, signed in as yourself,
 and the crawler parses the page your own browser already loaded. No automation
 touches those sites or your account — and their hosts are on an explicit skip
-list (`_GATED_HOST_RE` in `src/ats/fetchers/probe.py`), so even a stale link
+list (`_GATED_HOST_RE` in `src/ats/board/closure.py`), so even a stale link
 there is reported "unverifiable" rather than fetched.
 
 ```bash
@@ -827,7 +827,8 @@ prose that drifted from the code has already cost this project a real
 misdiagnosis. The standard, with worked examples and the house style for
 awkward outputs, is **[docs/DOCSTRINGS.md](docs/DOCSTRINGS.md)**.
 `tests/test_invariants.py` carries the cross-module claims no single docstring
-can prove.
+can prove, including the mechanical half of the performance rules in
+**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
 
 The suite is **offline by contract** — no network, no LLM API, no writes to
 your real profile or store. Fixtures derive their inputs from whichever
@@ -839,9 +840,10 @@ to a `tmp_path`.
 `main`**:
 
 - **test** (Ubuntu × Python 3.12, 3.13, 3.14) — asserts the run really is
-  example-profile + API-free, then byte-compiles, lints (pyflakes), validates
-  the example profile, runs pytest with coverage, checks every CLI `--help`,
-  and boots the web app to exercise the API and asset cache-busting.
+  example-profile + API-free, then byte-compiles, lints
+  (`flake8 --select=F`), validates the example profile, runs pytest with
+  coverage, checks every CLI `--help`, and boots the web app to exercise the
+  API and asset cache-busting.
 - **build** (Ubuntu + Windows + macOS) — `python build_app.py`, then *launches
   the built binary* and requires its API to answer; a build that compiles but
   can't boot is not a pass. Runs only after the tests pass. The same job also
@@ -871,11 +873,12 @@ python tools/check_boards.py --fail-on-broken
 - It is **not** part of the merge gate. Network checks fail for reasons a PR
   author can't fix (site down, runner IP challenged), and a gate that
   red-lights for unfixable reasons is one people learn to ignore.
-- It **widens the keyword filter** before judging a board. `is_relevant()`
-  runs *inside* each fetcher, so "0 jobs" would otherwise conflate "the board
-  is broken" with "nothing matched your search". Statuses separate `blocked`
-  (rate-limited/challenged — not our bug) from `broken` (4xx/5xx) from
-  `degraded` (reachable but suspiciously empty).
+- It reads the **board's own posting count**: a fetchable `config.BOARDS`
+  spec names a public `canary` board, probed with the engine's one cheap read
+  (`Board.alive`), with no keyword filter in the way, so "0 jobs" means the
+  board, not your search. Statuses separate `blocked` (rate-limited/challenged
+  — not our bug) from `broken` (4xx/5xx) from `degraded` (reachable but below
+  the canary's `min_jobs`).
 
 This paid for itself immediately: it caught `fetch_ashby` reading a
 `jobPostings` key from a payload whose key is `jobs`, which had been returning
@@ -906,7 +909,7 @@ causes and only one of them is a bug:
   API, a shape change.
 - **✅ ok** — alive, allowed, returning postings.
 
-Like the board canary it **widens the keyword filter first**, so a zero means
+It **widens the keyword filter first**, so a zero means
 the source gave us nothing rather than "nothing matched your search". Without
 that, a perfectly healthy feed that happens not to carry your field reads
 identically to a dead one.
@@ -923,10 +926,11 @@ identically to a dead one.
 | `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
-| `src/ats/registry.py` | declarative ATS registry: store rows ↔ fetch thunks |
-| `src/ats/fetchers/` | board fetchers (17 ATSes incl. Jobvite, Phenom and Infor CloudSuite HCM + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
-| `src/ats/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
-| `src/ats/fetchers/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |
+| `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |
+| `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec read by one engine |
+| `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/web search, CareerOneStop/NLx, USAJOBS, Getro network boards |
+| `src/ats/board/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
+| `src/ats/board/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |
 | `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `src/discovery/` | sourcing: where company names come from (seeds, directories, pasted pages, search dorking), local sourcing and the pipeline; `apply.py` upserts into the store |
 | `src/discovery/resolve/` | resolution: name -> board. Candidate URLs, the identity guard, the careers-page sniffer, the ATS slug probes, the web-search fallback. Reads no store |

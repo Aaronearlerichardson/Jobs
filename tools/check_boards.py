@@ -8,18 +8,23 @@ the way our fetcher expects?
 Coverage percentage cannot answer this question. The fetchers swallow HTTP
 errors and return [] by design (one dead board must not abort a crawl), so a
 platform that changes its JSON shape fails SILENTLY: job counts just quietly
-drop. This runs the real fetcher against a known-good public board per ATS
-and reports what actually came back.
+drop. This probes a known-good public board per ATS (the `canary` a
+fetchable `config.BOARDS` spec names) with the engine's own cheap read
+(`Board.alive`: one page, the listing's total where it reports one) and
+reports what actually came back.
 
 Two things make the result trustworthy:
 
-  * The keyword filter is widened to match everything. Fetchers apply
-    `is_relevant()` internally, so "0 jobs" would otherwise conflate "board
-    is broken" with "nothing matched your search terms". Here it measures
+  * The probe is the board's own count, no keyword filter: it measures
     the BOARD, not the profile.
   * Failures are classified rather than lumped together. A GitHub runner
     getting a 403 from an anti-bot service is not the same event as your
     parser breaking, and a canary that cries wolf gets ignored.
+
+A canary's `min_jobs` is the floor below which its board reads degraded:
+set well under the board's normal size, so ordinary hiring slowdowns do
+not cry wolf. A small employer that legitimately empties out is replaced
+in its spec rather than given a floor of 0.
 
 Statuses: ok | degraded (reachable, fewer postings than the floor) |
 blocked (rate-limited/challenged — not our bug) | broken (4xx/5xx/exception)
@@ -31,7 +36,6 @@ import io
 import json
 import sys
 import time
-import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -43,31 +47,25 @@ from tools._harness import blame, console_utf8              # noqa: E402
 
 console_utf8()
 
-from src import config                                     # noqa: E402
-from src.ats.registry import ATS_REGISTRY         # noqa: E402
-
-SAMPLES = Path(__file__).parent / "board_samples.toml"
+from src.ats.board import BOARDS                    # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
 
-def check_board(entry):
-    """Fetch one board and classify the outcome."""
-    ats, name, slug = entry["ats"], entry["name"], entry["slug"]
-    floor = int(entry.get("min_jobs", 1))
-    reg = ATS_REGISTRY.get(ats)
-    if not reg:
-        return {"ats": ats, "name": name, "status": "broken", "jobs": 0,
-                "detail": f"no fetcher registered for {ats!r}", "seconds": 0.0}
-
+def check_board(board):
+    """Probe one platform's canary board and classify the outcome."""
+    canary = board.spec["canary"]
+    ats, name = board.name, canary.get("name", canary["handle"])
+    floor = canary.get("min_jobs", 1)
     buf, started = io.StringIO(), time.monotonic()
     try:
-        # Fetchers print their diagnostics; capture them to classify.
+        # The engine prints its diagnostics; capture them to classify.
         with contextlib.redirect_stdout(buf):
-            jobs = reg[0](name, slug)()
+            ok, n = board.alive(canary["handle"])
         note = " ".join(buf.getvalue().split())
-        n = len(jobs)
-        if n >= floor:
+        if not ok and not note:
+            note = "the board request failed"
+        if ok and n >= floor:
             status, detail = "ok", ""
         elif note:
             status, detail = blame(note), note[:160]
@@ -94,16 +92,15 @@ def render_markdown(results, checked_at):
         f"{checked_at} · [how this works]"
         "(tools/check_boards.py)_",
         "",
-        "One request per platform against a public sample board, with the "
-        "keyword filter widened so the number reflects the BOARD rather than "
-        "any particular search profile.",
+        "One cheap read per platform against a public sample board: the "
+        "board's own posting count, whatever any search profile wants.",
         "",
         "| | Platform | Sample board | Postings | Detail |",
         "|---|---|---|---:|---|",
     ]
-    for r in sorted(results, key=lambda r: (r["status"] != "ok", r["ats"])):
-        lines.append(f"| {STATUS_EMOJI.get(r['status'], '?')} | `{r['ats']}` "
-                     f"| {r['name']} | {r['jobs']} | {r['detail'] or r['status']} |")
+    lines += [f"| {STATUS_EMOJI.get(r['status'], '?')} | `{r['ats']}` "
+              f"| {r['name']} | {r['jobs']} | {r['detail'] or r['status']} |"
+              for r in sorted(results, key=lambda r: (r["status"] != "ok", r["ats"]))]
     lines += [
         "",
         "**✅ ok** — endpoint alive, response parsed, postings returned.  ",
@@ -127,12 +124,9 @@ def main():
                     help="exit 1 if any board is broken (blocked never fails)")
     args = ap.parse_args()
 
-    entries = tomllib.loads(SAMPLES.read_text(encoding="utf-8"))["board"]
-    config.widen_keywords()
-
     results = []
-    for entry in entries:
-        r = check_board(entry)
+    for board in (b for b in BOARDS.values() if b.fetchable and "canary" in b.spec):
+        r = check_board(board)
         results.append(r)
         print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "
               f"{r['name'][:24]:24} {r['jobs']:5} postings  {r['seconds']:5.1f}s"

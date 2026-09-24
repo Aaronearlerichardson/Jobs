@@ -15,14 +15,14 @@ unconfigured -- so none of it is hard-coded to one region. NC_RE /
 NC_HQ_RE / is_nc are the historical public names, kept for import
 stability; they have been region-agnostic for a while.
 
-src/ats/fetchers/company, discovery/local_sourcing, the runner, the
+src/ats/board/company, discovery/local_sourcing, the runner, the
 harvest triage pass and the webapp all delegate here.
 """
 
 import re
 
 from src import config
-from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, token_in,
+from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, first_hit,
                                token_pattern)
 
 # Word-boundary for short/ambiguous tokens (so "nc" doesn't hit "clinic",
@@ -121,6 +121,38 @@ _OWN_STATE_RE = re.compile(rf"\b(?:{'|'.join(_SUFFIX)})\b" if _SUFFIX else r"(?!
 
 _SEGMENT_SPLIT_RE = re.compile(r"[;|]")
 
+# _NC_TOKEN_RE's terms lowercased, for _names_place's case-sensitive scan.
+_SUB_LOW = tuple(t.lower() for t in _SUB)
+_WB_LOW_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(t.lower()) for t in _WB) + r")\b"
+    if _WB else r"(?!x)x")
+_ASCII_TERMS = all(t.isascii() for t in _WB + _SUB)
+# The only non-ASCII characters re.I folds onto an ASCII character: dotted
+# and dotless i, long s, Kelvin sign. U+0130 is also the one character
+# whose lower() is longer than itself.
+_FOLDS_ONTO_ASCII = re.compile("[\u0130\u0131\u017f\u212a]")
+
+
+def _names_place(text):
+    """bool(_NC_TOKEN_RE.search(text)): whether any configured place term
+    occurs in `text`, case-insensitively, word tokens on boundaries.
+    tests/test_locality.py pins the agreement, fold characters included.
+
+    Notes:
+        With ASCII terms and none of the _FOLDS_ONTO_ASCII characters in
+        `text`, a re.I match is exactly a case-sensitive match on
+        text.lower(): lower() keeps every other character's length and
+        word-ness, and no other character folds onto ASCII (checked over
+        every code point, 2026-09-24). The lowered scan is a plain `in` per
+        substring term plus a small boundary regex, 5-8x faster than the
+        re.I alternation; geo_mode runs it on every harvested row.
+    """
+    if not _ASCII_TERMS or _FOLDS_ONTO_ASCII.search(text):
+        return _NC_TOKEN_RE.search(text) is not None
+    low = text.lower()
+    return (any(t in low for t in _SUB_LOW)
+            or _WB_LOW_RE.search(low) is not None)
+
 
 def _segment_is_local(segment):
     """Whether one ";"/"|"-separated location SEGMENT counts as local (see
@@ -211,7 +243,7 @@ _SNIPPET_ALTS = [token_pattern(t, SHORT_PLACE)
 _SNIPPET_ALTS.append(r"\bremote\b")
 
 # Shared with the field grammar's cut_date_tail transform
-# (src/ats/fetchers/fields.py) so the vocabulary lives in one place.
+# (src/ats/board/fields.py) so the vocabulary lives in one place.
 MONTH_ABBRS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
               "Sep", "Sept", "Oct", "Nov", "Dec")
 
@@ -256,7 +288,7 @@ def location_snippet(text, default=_NO_PLACE):
 
 
 # Workday's "<N> Locations" listing text for a multi-site req; the real
-# list comes with the detail JSON (fetchers.company.hydrate_description).
+# list comes with the detail JSON (board.company.hydrate_description).
 N_LOCATIONS_RE = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
 
 
@@ -266,7 +298,7 @@ def location_unknown(location):
     "<N> Location(s)" listing text -- three spellings of the same fact, that
     the geo gate has nothing to read yet and a detail call is what would
     fix it (see src.crawl.triage's module docstring and
-    fetchers.company.needs_detail/hydrate_description).
+    board.company.needs_detail/hydrate_description).
 
     >>> location_unknown(None), location_unknown("  ")
     (True, True)
@@ -412,10 +444,7 @@ def _has_token(text, tokens):
     """The first of `tokens` found in `text`, or None. Short codes ("wfh",
     "us", "uk") match on word boundaries so they cannot fire inside other
     words; phrases and longer words are substrings (filters.SHORT_REMOTE)."""
-    for tok in tokens:
-        if token_in(tok, text, SHORT_REMOTE):
-            return tok
-    return None
+    return first_hit(tokens, text, SHORT_REMOTE)
 
 
 def remote_signal(location, description=""):
@@ -516,7 +545,7 @@ def geo_mode(location, description=""):
     field) so "hybrid from our Durham office" still counts as onsite.
     Remote detection goes through `remote_signal` above (workforce-context
     phrases, hard negations) rather than a bare token list."""
-    if _NC_TOKEN_RE.search(f"{location or ''} {description or ''}"):
+    if _names_place(f"{location or ''} {description or ''}"):
         return "onsite"
     if remote_signal(location, description):
         return "remote"

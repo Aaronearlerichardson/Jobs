@@ -289,8 +289,8 @@ def disposition_examples_block(conn, limit=3):
     if not pos and not neg and not rej:
         return ""
     lines = ["", "CALIBRATION — this candidate's own recorded decisions on real postings:"]
-    for r in pos:
-        lines.append(f'- PURSUED: "{(r["title"] or "")[:70]}" at {r["company_name"]}')
+    lines += [f'- PURSUED: "{(r["title"] or "")[:70]}" at {r["company_name"]}'
+              for r in pos]
     for r in neg:
         note = (r["disposition_note"] or "").strip()
         tail = f' — their reason: "{note[:90]}"' if note else ""

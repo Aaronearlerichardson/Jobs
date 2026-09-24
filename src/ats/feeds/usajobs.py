@@ -100,13 +100,10 @@ def _locations(descriptor):
         what lets the locality gate see the local one instead of whichever
         station the agency happened to list first.
     """
-    names = []
-    for loc in descriptor.get("PositionLocation") or []:
-        if not isinstance(loc, dict):
-            continue
-        name = strip_html(loc.get("LocationName") or loc.get("CityName"))
-        if name and name not in names:
-            names.append(name)
+    names = dict.fromkeys(
+        n for n in (strip_html(loc.get("LocationName") or loc.get("CityName"))
+                    for loc in descriptor.get("PositionLocation") or []
+                    if isinstance(loc, dict)) if n)
     return "; ".join(names) or strip_html(descriptor.get("PositionLocationDisplay"))
 
 

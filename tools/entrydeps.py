@@ -85,7 +85,7 @@ def reachable(entry):
 
 
 def package_of(dotted):
-    """src.ats.fetchers.getro -> ats. Bare `src` is the package __init__."""
+    """src.ats.feeds.getro -> ats. Bare `src` is the package __init__."""
     parts = dotted.split(".")
     return parts[1] if len(parts) > 1 else "(src root)"
 

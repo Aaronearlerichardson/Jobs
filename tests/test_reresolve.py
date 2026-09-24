@@ -334,10 +334,7 @@ class TestPeopleAdminSignature:
     URL = "https://unc.peopleadmin.com/postings/search?query=data"
 
     def test_a_hosted_tenant_is_detected(self):
-        assert ats_signatures.detect("", self.URL) == ("semi", "peopleadmin", "unc")
-
-    def test_the_vendor_site_is_not_a_tenant(self):
-        assert ats_signatures.detect("", "https://www.peopleadmin.com/") is None
+        assert ats_signatures.detect("", self.URL) == ("fetchable", "peopleadmin", "unc")
 
     def test_a_tenant_on_its_own_hostname_has_no_signature(self):
         # Still an import-file job: nothing on jobs.ncsu.edu says which ATS
@@ -353,7 +350,7 @@ class TestPeopleAdminSignature:
         assert keys == {("peopleadmin", "https://unc.peopleadmin.com")}
 
     def test_the_packed_host_is_what_the_fetcher_reads(self, serve):
-        from src.ats.fetchers.company import fetch_company
+        from src.ats.board.company import fetch_company
         calls = serve(fake_response(text=""))
         fetch_company(ats_signatures.pack("peopleadmin", "unc", self.URL))
         assert calls[0] == "https://unc.peopleadmin.com/postings/all_jobs.atom"
@@ -377,7 +374,7 @@ class TestJobviteSignature:
             == ("jobvite", "acme")
 
     def test_the_packed_slug_is_what_the_fetcher_reads(self):
-        from src.ats.fetchers.board import board_for
+        from src.ats.board import board_for
         packed = ats_signatures.pack("jobvite", "acme", self.URL)
         assert board_for("jobvite").handle(packed) == "acme"
 

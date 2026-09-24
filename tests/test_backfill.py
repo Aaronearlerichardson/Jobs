@@ -10,7 +10,7 @@ last `retry_days` days.
 
 import src.store as store
 from src.ops import maintenance as ops
-from src.ats.fetchers import company as company_fetch
+from src.ats.board import company as company_fetch
 
 
 class TestBackfillRetryThrottle:

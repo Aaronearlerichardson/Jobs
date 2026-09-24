@@ -269,8 +269,8 @@ def gather_names(extra=None):
     profile seeds + Workday majors + configured directory scrapes + web-search
     harvesting + an LLM region/domain brainstorm + any explicit `extra`."""
     sources = [SEED_COMPANIES, MAJORS_WORKDAY]
-    for url in config.DISCOVERY_DIRECTORY_URLS:
-        sources.append(scrape_directory_names(url))
+    sources += [scrape_directory_names(url)
+                for url in config.DISCOVERY_DIRECTORY_URLS]
     harvested = harvest_search_names(config.DISCOVERY_NAME_SEARCH_QUERIES)
     if harvested:
         print(f"    web-search harvested {len(harvested)} candidate name(s)")

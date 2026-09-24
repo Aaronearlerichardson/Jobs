@@ -102,7 +102,7 @@ class TestStartFinish:
             "reuse idle connection")
         logging.getLogger("h2.codec.framed_write").debug("send frame=Headers")
         logging.getLogger("hyper_util.anything").info("third-party info line")
-        logging.getLogger("src.ats.fetchers.workday").debug("app debug line")
+        logging.getLogger("src.ats.board.engine").debug("app debug line")
         session_log.finish()
         text = path.read_text(encoding="utf-8")
         assert "reuse idle connection" not in text

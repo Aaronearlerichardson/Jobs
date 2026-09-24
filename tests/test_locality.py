@@ -25,6 +25,15 @@ def test_short_tokens_need_word_boundaries(cfg):
 class TestGeoMode:
     def test_local_address_is_onsite(self, local_addr):
         assert locality.geo_mode(local_addr) == "onsite"
+        # geo_mode's lowered scan agrees with the re.I regex it stands in
+        # for, including text carrying a character re.I folds onto ASCII.
+        for term in locality._WB + locality._SUB + ["clinic", "anywhere"]:
+            folded = (term.replace("i", "\u0131").replace("s", "\u017f")
+                      .replace("k", "\u212a"))
+            for s in (term, f"at {term.upper()}.", f"x{term}x", folded,
+                      f"{term} \u0130"):
+                assert locality._names_place(s) == bool(
+                    locality._NC_TOKEN_RE.search(s)), s
 
     def test_remote_location_is_remote(self):
         assert locality.geo_mode("Remote - US") == "remote"

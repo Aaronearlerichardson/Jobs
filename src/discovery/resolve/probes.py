@@ -7,8 +7,8 @@ import time
 
 from src import config
 from src.ats import coords
-from src.ats.fetchers.board import BOARDS, board_for
-from src.ats.signatures import extract_workday_triple
+from src.ats.board import BOARDS, board_for
+from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
 from .fetchpool import candidate_urls
@@ -103,27 +103,36 @@ def launch_chromium(pw, **kwargs):
     raise first_error
 
 
-# ─── The slug probes ─────────────────────────────────────────────────────
-#
-# Every one answers the same question -- does this handle name a real
-# board, and how many postings are on it -- as an (ok, count) pair: the
-# board's one cheap listing read, ok when it lists a posting
-# (`Board.probe`).
-
-PROBES = {b.name: b.probe for b in BOARDS.values() if b.fetchable}
-
-
 # ─── Workday (separate signature — needs name + careers URL hint) ────────
 #
 # Workday URLs are a tenant+pod+site triple we can't derive from the
 # company name alone (e.g. redhat.wd5.myworkdayjobs.com/Jobs_External), so
 # probe_workday scans the company's careers page(s) for a myworkdayjobs.com
-# link (src.ats.signatures.extract_workday_triple), then validates the
+# link (`extract_workday_triple`), then validates the
 # triple against the board's listing to get a live job count
 # (`Board.alive`).
 #
-# Because the signature differs from the other probes, this one is NOT
-# in PROBES — probe_company calls it explicitly as its last step.
+# Because the signature differs from a board's slug probe (`Board.probe`),
+# probe_company calls it explicitly as its last step.
+
+
+def confirm(ats, slug, careers_url=None):
+    """A live posting count for detected coordinates, or None: the board's
+    probe on the handle they name as store columns (`coords.columns`), so
+    a careers_url-keyed board is probed at its careers URL."""
+    b = board_for(ats)
+    handle = b.handle(coords.columns(ats, slug, careers_url)) if b else None
+    if not handle:
+        return None
+    ok, count = b.probe(handle)
+    return count if ok else None
+
+
+def extract_workday_triple(text):
+    """(tenant, pod, site) from the first Workday board URL in `text`
+    (`signatures.detect` restricted to that spec), or None."""
+    hit = detect(text or "", only="workday")
+    return hit[2] if hit else None
 
 
 def _handle(ats, slug):
@@ -500,7 +509,7 @@ def probe_company(name, try_workday=True):
     hit = None
     for slug in slug_guesses(name):
         for ats in (b.name for b in BOARDS.values() if b.spec.get("guess")):
-            ok, count = PROBES[ats](slug)
+            ok, count = board_for(ats).probe(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
                        "count": count, "nc": _nc_count(ats, slug)}

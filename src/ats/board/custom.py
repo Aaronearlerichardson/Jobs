@@ -47,7 +47,7 @@ _OPENINGS_HREF_RE = re.compile(
     r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
 _OPENINGS_TEXT_RE = re.compile(
     r"(current|open|view|see|all).{0,12}(opening|position|role|job)", re.I)
-_OFFSITE_RE = re.compile("|".join(config.CAREERS_PAGE_OFFSITE_HOSTS), re.I)
+_OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 
 
 def find_job_links(soup):

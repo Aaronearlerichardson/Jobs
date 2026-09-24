@@ -2,18 +2,27 @@
 
 `BOARDS[ats]` says how a store row names a board, how its listing is read
 and mapped to rows, how one posting is read back, and how a posting's
-closure is judged. The engine that reads it is `src.ats.fetchers.board`
-(whose `validate_spec` is the schema); nothing else in `src/` may name a
-platform.
+closure is judged. The engine that reads it is `src.ats.board` (its
+schema `src.ats.board.spec.validate_spec`); outside them, only
+tests/test_boards_spec.py's NAMED_PLATFORMS may name a platform in `src/`.
 
 The literal is JSON-compatible on purpose (str, int, float, bool, None,
 list, dict; regexes as strings): tests/test_invariants.py pins
 `json.loads(json.dumps(BOARDS)) == BOARDS`, so moving it to a JSON file
 later is mechanical.
+
+The host lists below it are derived from the specs' `detect` entries, so
+the layers under the engine (the store, the careers-page reader, the
+closure prober, page capture) know every vendor host without naming one.
 """
+
+import re
 
 BOARDS = {
     "greenhouse": {
+        "detect": [{"host": "greenhouse.io",
+                    "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
+        "canary": {"name": "Databricks", "handle": "databricks", "min_jobs": 1},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -44,6 +53,8 @@ BOARDS = {
         "employer": "company_name",
     },
     "lever": {
+        "detect": [{"host": "lever.co", "re": [r"(?i)jobs\.lever\.co/([a-z0-9_-]+)"]}],
+        "canary": {"name": "Veeva", "handle": "veeva", "min_jobs": 1},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -74,6 +85,8 @@ BOARDS = {
         },
     },
     "ashby": {
+        "detect": [{"host": "ashbyhq.com", "re": [r"(?i)jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)"]}],
+        "canary": {"name": "Vanta", "handle": "vanta", "min_jobs": 1},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -102,6 +115,8 @@ BOARDS = {
         "closure": {"via": "listing"},
     },
     "bamboohr": {
+        "detect": [{"host": "bamboohr.com", "re": [r"(?i)([a-z0-9-]+)\.bamboohr\.com"]}],
+        "canary": {"name": "EMS Biomedical", "handle": "ems", "min_jobs": 1},
         "sweep": True,
         "prunable": True,
         "eager": True,
@@ -136,6 +151,8 @@ BOARDS = {
         },
     },
     "rippling": {
+        "detect": [{"host": "rippling.com", "re": [r"(?i)ats\.rippling\.com/([a-z0-9][a-z0-9-]+)/jobs"]}],
+        "canary": {"name": "Blackrock Neurotech", "handle": "blackrockneurotech", "min_jobs": 1},
         "sweep": True,
         "eager": True,
         "job_ref": {"re": r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", "parts": ["slug", "jid"]},
@@ -162,6 +179,7 @@ BOARDS = {
         },
     },
     "hibob": {
+        "detect": [{"host": "hibob.com", "re": [r"(?i)([a-z0-9][a-z0-9-]+)\.careers\.hibob\.com"]}],
         "sweep": True,
         # Every posting's URL is the board's one /jobs page: the stored job
         # id is what names a posting (closure by board membership).
@@ -187,6 +205,9 @@ BOARDS = {
         "closure": {"via": "listing"},
     },
     "workable": {
+        "detect": [{"host": "workable.com",
+                    "re": [r"(?i)apply\.workable\.com/(?:api/v\d+/widget/accounts/)?([a-z0-9][a-z0-9_-]*)"]}],
+        "canary": {"name": "It Practice", "handle": "practicetek", "min_jobs": 1},
         # Not in the lightweight sweep (it seeds LOCAL); set "sweep" to add it.
         "eager": True,
         # The tenant-path posting URL names both coordinates; the listing's
@@ -223,6 +244,11 @@ BOARDS = {
         },
     },
     "paylocity": {
+        # The board URL's name segment after the company GUID is cosmetic.
+        "detect": [{"host": "paylocity.com",
+                    "re": [r"(?i)recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})"]}],
+        "canary": {"name": "United Imaging - North America",
+                   "handle": "d527ad39-680d-45fa-9178-38a81898aec2", "min_jobs": 1},
         "sweep": True,
         "eager": True,
         "job_ref": {"re": r"(?i)recruiting\.paylocity\.com/Recruiting/Jobs/Details/(\d+)",
@@ -257,6 +283,10 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "ultipro": {
+        "detect": [{"host": "ultipro.com",
+                    "re": [r"(?i)recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a-fA-F\-]{36})"]}],
+        "canary": {"name": "Baylor Genetics",
+                   "handle": "BAY1006BML|0669eed3-5441-4f8e-a7b1-c5df596a4dfe", "min_jobs": 1},
         "sweep": True,
         "prunable": True,
         "handle": {"parts": ["code", "guid"],
@@ -287,6 +317,12 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "adp": {
+        # The host names no board: the two ids ride in the query string.
+        "detect": [{"host": "workforcenow.adp.com",
+                    "re": [r"(?i)workforcenow\.adp\.com", r"(?i)[?&]cid=([0-9a-f-]{8,})",
+                           r"(?i)[?&]ccid=([0-9A-Za-z_]+)"]}],
+        "canary": {"name": "TARGAN Inc.",
+                   "handle": "9a6de238-e301-469b-8a29-d35b7eaeebd9|19000101_000001", "min_jobs": 1},
         "sweep": True,
         "eager": True,
         "handle": {"parts": ["cid", "ccid"]},
@@ -321,6 +357,11 @@ BOARDS = {
                     "open": {"truthy": "requisitionTitle"}},
     },
     "smartrecruiters": {
+        "detect": [{"host": "smartrecruiters.com",
+                    "re": [r"(?i)(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)"]},
+                   {"host": "smartrecruiters.com",
+                    "re": [r"(?i)api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/"]}],
+        "canary": {"name": "Eurofins", "handle": "Eurofins", "min_jobs": 1},
         # Not in the lightweight sweep: boards run to thousands of rows.
         "job_ref": {"re": r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", "parts": ["slug", "id"]},
         "listing": {
@@ -357,6 +398,20 @@ BOARDS = {
         "employer": "company.name",
     },
     "workday": {
+        # The CXS API URL first (the tenant appears twice), then any board
+        # URL; the site slot after an optional locale, never an API or
+        # asset segment.
+        "detect": [{"host": "myworkdayjobs.com",
+                    "re": [r"(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
+                           r"/wday/cxs/[a-z0-9-]+/([A-Za-z0-9_-]+)/"],
+                    "transform": ["lower", "int", None]},
+                   {"host": "myworkdayjobs.com",
+                    "re": [r"(?i)https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
+                           r"(?:/[a-z]{2}-[A-Z]{2})?/([A-Za-z0-9_-]+)"],
+                    "transform": ["lower", "int", None],
+                    "blocklist": ["wday", "cxs", "api", "static", "assets", "login"]}],
+        "canary": {"name": "ThermoFisher Scientific IT",
+                   "handle": "thermofisher|5|ThermoFisherCareers", "min_jobs": 1},
         # Not in the lightweight sweep: boards run to thousands of rows and
         # are pulled scoped to the locality.
         "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
@@ -420,6 +475,14 @@ BOARDS = {
                     "unmatched": "no posting record"},
     },
     "infor": {
+        # A board URL without the org id names no board. The /hcm/Jobs path
+        # is required: the same hosts serve the signed-in employee app.
+        "detect": [{"host": "inforcloudsuite.com",
+                    "re": [r"(?i)([a-z0-9-]+\.inforcloudsuite\.com)/hcm/Jobs\b",
+                           r"(?i)csk\.HROrganization=([A-Za-z0-9_-]+)"],
+                    "transform": ["lower", None]}],
+        "canary": {"name": "UNC Health", "handle": "css-unchealthunc-prd.inforcloudsuite.com|9999",
+                   "min_jobs": 1},
         "handle": {"parts": ["host", "org"]},
         # The posting key is a triple (org, requisition, posting revision),
         # URL-encoded into the path; the parts are named after the listing
@@ -481,6 +544,8 @@ BOARDS = {
                     "open": {"truthy": "fields"}},
     },
     "jazzhr": {
+        "detect": [{"host": "applytojob.com", "re": [r"(?i)([a-z0-9-]+)\.applytojob\.com"]}],
+        "canary": {"name": "Cyclotron Research Centre", "handle": "cyclotroninc", "min_jobs": 1},
         "sweep": True,
         "job_ref": {"re": r"(?i)^(https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)[^?#]*)",
                     "parts": ["link", "slug", "jid"]},
@@ -516,6 +581,8 @@ BOARDS = {
         "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}"},
     },
     "jobvite": {
+        "detect": [{"host": "jobvite.com", "re": [r"(?i)jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)"]}],
+        "canary": {"name": "Neogenomics", "handle": "neogenomics", "min_jobs": 1},
         "sweep": True,
         "eager": True,
         "handle": {"parts": ["tenant"]},
@@ -556,6 +623,9 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "kula": {
+        "detect": [{"host": "kula.ai", "re": [r"(?i)careers\.kula\.ai/([a-z0-9_-]+)"]}],
+        "canary": {"name": "Precision Neuroscience", "handle": "precision-neuroscience",
+                   "min_jobs": 1},
         "sweep": True,
         "listing": {
             "url": "https://careers.kula.ai/{slug}",
@@ -574,6 +644,10 @@ BOARDS = {
         },
     },
     "successfactors": {
+        "detect": [{"host": "successfactors.",
+                    "re": [r"(?i)([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)"]},
+                   {"host": "sapsf."}],
+        "canary": {"name": "Duke University", "handle": "https://careers.duke.edu", "min_jobs": 1},
         # The board is the careers site itself, keyed on its URL.
         "handle": {"columns": ["careers_url"], "parts": ["base"]},
         "listing": {
@@ -612,6 +686,9 @@ BOARDS = {
         },
     },
     "icims": {
+        "detect": [{"host": "icims.com", "re": [r"(?i)([a-z0-9-]+)\.icims\.com"]}],
+        "canary": {"name": "FUJIFILM Healthcare Americas Corporation",
+                   "handle": "uscareers-fujifilm", "min_jobs": 1},
         # A row naming no place is kept by a location filter its title passes.
         "unlocated": "title",
         "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
@@ -689,6 +766,12 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "peopleadmin": {
+        # Only the hosted tenants carry a signature (a university serving
+        # the software from its own hostname is added by hand); the board
+        # is the tenant's origin.
+        "detect": [{"host": "peopleadmin.com", "re": [r"(?i)([a-z0-9-]+)\.peopleadmin\.com"],
+                    "careers_url": "https://{slug}.peopleadmin.com"}],
+        "canary": {"name": "UNC Chapel Hill", "handle": "unc.peopleadmin.com", "min_jobs": 1},
         # The board is the tenant's host, keyed on any URL on it.
         "handle": {"columns": ["careers_url"], "parts": ["base"]},
         # A tenant is one campus: a posting naming no place is on it.
@@ -727,9 +810,10 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "custom": {
+        "canary": {"name": "Microsoft", "handle": "https://microsoft.ai/careers/", "min_jobs": 1},
         "sweep": True,
         # A self-hosted careers page, read by the careers-page reader
-        # (src.ats.fetchers.custom).
+        # (src.ats.board.custom).
         "handle": {"columns": ["careers_url"], "parts": ["page"]},
         "listing": {
             "url": "{page}",
@@ -745,6 +829,8 @@ BOARDS = {
         },
     },
     "wpjson": {
+        "canary": {"name": "restor3d", "handle": "https://www.restor3d.com/company/careers/",
+                   "min_jobs": 1},
         "sweep": True,
         # A WordPress theme's careers route, keyed on any page of the site.
         "handle": {"columns": ["careers_url"], "parts": ["site"]},
@@ -779,6 +865,10 @@ BOARDS = {
         "closure": {"via": "page"},
     },
     "phenom": {
+        # The tenant's own site is the board, so no vendor host names it:
+        # every page embeds its widget API origin, the handle.
+        "detect": [{"re": [r'(?i)"widgetApiEndpoint"\s*:\s*"https?://([a-z0-9.-]+)/widgets"']}],
+        "canary": {"name": "PPD", "handle": "jobs.thermofisher.com", "min_jobs": 1},
         # The listing lives under a locale prefix only the board's root
         # redirect names (/us/en, /global/en, ...).
         "handle": {"follow": {"base": "{slug}"}},
@@ -823,4 +913,58 @@ BOARDS = {
         },
         "closure": {"via": "page"},
     },
+    # Detection-only platforms: real ATSes discovery recognises but cannot
+    # fetch (bot-protected APIs or JS-only boards). A lead's detection
+    # names a host or path for the note; an entry with no `re` claims the
+    # vendor's host and detects nothing.
+    "eightfold": {"detect": [{"host": "eightfold.ai", "re": [r"(?i)([a-z0-9-]+\.eightfold\.ai)"]}]},
+    "dayforce": {"detect": [{"host": "dayforcehcm.com",
+                             "re": [r"(?i)(dayforcehcm\.com/[a-zA-Z-]+/[a-zA-Z0-9_-]+)"]}]},
+    "recruitee": {"detect": [{"host": "recruitee.com", "re": [r"(?i)([a-z0-9-]+\.recruitee\.com)"]}]},
+    "teamtailor": {"detect": [{"host": "teamtailor.com",
+                               "re": [r"(?i)([a-z0-9-]+\.teamtailor\.com)"]}]},
+    "taleo": {"detect": [{"host": "taleo.net", "re": [r"(?i)([a-z0-9-]+\.taleo\.net)"]}]},
+    # UKG Pro's other hosts: the board URL shape is the ultipro spec's.
+    "ukg": {"detect": [{"host": "ultipro.com", "re": [r"(?i)([a-z0-9-]+\.ultipro\.com)"]}]},
+    "paycom": {"detect": [{"host": "paycomonline.net",
+                           "re": [r"(?i)(paycomonline\.net/[A-Za-z0-9/_-]+)"]}]},
+    "breezy": {"detect": [{"host": "breezy.hr", "re": [r"(?i)([a-z0-9-]+\.breezy\.hr)"]}]},
+    "gohire": {"detect": [{"host": "gohire.io", "re": [r"(?i)([a-z0-9-]+\.gohire\.io)"]}]},
+    "polymer": {"detect": [{"host": "polymer.co"}]},
+    "gusto": {"detect": [{"host": "gusto.com"}]},
 }
+
+#: The spec that reads a careers page itself, no ATS signature on it: the
+#: sniffer's last resort, a board named by its URL alone.
+CAREERS_PAGE_ATS = "custom"
+
+#: Job aggregators: hosts listing other employers' postings. A careers page
+#: never names one as its own board, and they bot-gate anonymous reads, so
+#: a probe there says nothing.
+AGGREGATOR_HOSTS = ("linkedin.com", "indeed.com", "glassdoor.", "ziprecruiter.com",
+                    "simplyhired.com", "monster.com", "dice.com", "builtin.com")
+
+
+def _hosts(fetchable):
+    """The vendor hosts the specs' `detect` entries claim, in spec order;
+    only a fetchable spec's (one with a `listing`) when `fetchable`."""
+    return tuple(dict.fromkeys(d["host"] for s in BOARDS.values()
+                               if s.get("listing") or not fetchable
+                               for d in s.get("detect", []) if "host" in d))
+
+
+#: Every ATS vendor host, fetchable or lead: a page there names a board,
+#: not the company that owns it.
+BOARD_HOSTS = _hosts(fetchable=False)
+#: The vendor hosts of the platforms the engine fetches.
+FETCHABLE_HOSTS = _hosts(fetchable=True)
+#: Hosts shared by many employers: a page there names a board or a listing,
+#: never the company that owns it, so it is no company's own careers page
+#: or website. Google's serve its search and many employers' Sites pages.
+SHARED_HOSTS = AGGREGATOR_HOSTS + BOARD_HOSTS + ("google.com",)
+
+
+def hosts_re(hosts):
+    """A case-blind regex finding any of `hosts` (literal fragments) in a
+    URL or host."""
+    return re.compile("|".join(map(re.escape, hosts)), re.I)

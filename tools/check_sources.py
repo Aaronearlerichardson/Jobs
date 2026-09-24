@@ -247,16 +247,16 @@ def _run_fetcher(fn, *a, **kw):
 
 
 def probe_feeds():
-    from src.ats.fetchers import (fetch_hnhiring, fetch_remoteok,
-                                   fetch_remotive, fetch_rss)
+    from src.ats.feeds import (fetch_hnhiring, fetch_remoteok,
+                               fetch_remotive, fetch_rss)
 
     out = []
     checks = [("remoteok", lambda: fetch_remoteok(max_jobs=50)),
               ("remotive", lambda: fetch_remotive(max_jobs=50)),
               ("hn who-is-hiring", lambda: fetch_hnhiring(max_threads=1))]
-    for label, url, loc in config.RSS_FEEDS:
-        checks.append((f"rss: {label}",
-                       lambda u=url, l=loc: fetch_rss("probe", u, l, max_items=50)))
+    checks += [(f"rss: {label}",
+                lambda u=url, l=loc: fetch_rss("probe", u, l, max_items=50))
+               for label, url, loc in config.RSS_FEEDS]
 
     for label, call in checks:
         started = time.monotonic()
@@ -339,7 +339,7 @@ def probe_search(deep=False):
 
     # -- layer 3: the whole pipeline --------------------------------------
     if deep:
-        from src.ats.fetchers.websearch import fetch_websearch
+        from src.ats.feeds.websearch import fetch_websearch
         for label, q in SEARCH_QUERIES[1:]:
             started = time.monotonic()
             rows, note, exc = _run_fetcher(
@@ -365,7 +365,7 @@ def probe_search(deep=False):
 # --------------------------------------------------------------------------- #
 
 def probe_forums():
-    from src.ats.fetchers.discourse import fetch_discourse
+    from src.ats.feeds.discourse import fetch_discourse
     out = []
     if not config.DISCOURSE_BOARDS:
         return [{"section": "forums", "name": "(none configured)",
@@ -399,7 +399,7 @@ def probe_api():
                               "register free at careeronestop.org/Developers",
                     "seconds": 0.0})
         return out
-    from src.ats.fetchers.careeronestop import fetch_nlx_company
+    from src.ats.feeds.careeronestop import fetch_nlx_company
     rows, note, exc = _run_fetcher(fetch_nlx_company, "Google", max_pages=1)
     status = verdict(f"{note} {exc}", bool(rows))
     detail = (f"{len(rows)} postings" if rows
@@ -422,8 +422,8 @@ def probe_gated():
     automatically, and capture.py is the intended route (you browse them
     yourself, signed in as you, and the parser reads the page your browser
     already loaded)."""
-    from src.ats.fetchers.probe import _GATED_HOST_RE
-    hosts = _GATED_HOST_RE.pattern.replace("\\.", ".").split("|")
+    from src import config
+    hosts = config.AGGREGATOR_HOSTS
     return [{"section": "gated", "name": h.strip(), "status": SKIPPED,
              "detail": "never fetched by policy — use capture.py",
              "seconds": 0.0}
@@ -440,7 +440,8 @@ def probe_roster(limit=None, workers=8):
     boards move — all of which show up here as broken."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from src import store
-    from src.ats.registry import ATS_REGISTRY, store_slug
+    from src.ats.board import board_for
+    from src.ats.registry import sweep
 
     with contextlib.closing(store.connect()) as conn:
         rows = [dict(r) for r in conn.execute(
@@ -456,12 +457,13 @@ def probe_roster(limit=None, workers=8):
     skipped = len(rows) - len(todo)
 
     def one(row):
-        reg = ATS_REGISTRY.get(row["ats"])
-        if not reg:
+        board = board_for(row["ats"])
+        if not board:
             return {"section": "roster", "name": row["name"], "ats": row["ats"],
                     "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
         started = time.monotonic()
-        jobs, note, exc = _run_fetcher(reg[0](row["name"], store_slug(row)))
+        jobs, note, exc = _run_fetcher(
+            sweep(board.name, row["name"], board.handle(row) or ""))
         if jobs:
             status, detail = OK, f"{len(jobs)} postings"
         elif exc or note:

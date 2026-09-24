@@ -6,7 +6,7 @@ ok only when it lists a posting). A 200 alone is no proof of a board:
 SmartRecruiters answers 200 with totalFound:0 for ANY slug, so every
 guessed slug once "confirmed" with zero jobs.
 
-The job probe (fetchers.probe.probe_job_open, driven by
+The job probe (board.closure.probe_job_open, driven by
 ops.check_closed_jobs) has the same shape of hidden decision, one per ATS
 family: which answer counts as PROOF the posting is gone. Getting it
 wrong in either direction is silent -- too strict and the op closes
@@ -22,8 +22,8 @@ import requests
 
 from conftest import fake_response, iso_days_ago, keep_store_open
 
-from src.ats.fetchers import probe as job_probe
-from src.ats.fetchers.board import board_for
+from src.ats.board import closure as job_probe
+from src.ats.board import board_for
 from src.discovery.resolve import probes
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.ops import maintenance as ops
@@ -76,33 +76,33 @@ def _ids(n):
 class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, serve):
         serve(fake_response({"jobs": _ids(3) + [{}]}))
-        assert probes.PROBES["greenhouse"]("acme") == (True, 3)
+        assert board_for("greenhouse").probe("acme") == (True, 3)
 
     def test_lever_counts_a_bare_list(self, serve):
         serve(fake_response(_ids(2)))
-        assert probes.PROBES["lever"]("acme") == (True, 2)
+        assert board_for("lever").probe("acme") == (True, 2)
 
     def test_lever_tolerates_a_non_list_payload(self, serve):
         serve(fake_response({"unexpected": True}))
-        assert probes.PROBES["lever"]("acme") == (False, 0)
+        assert board_for("lever").probe("acme") == (False, 0)
 
     def test_ashby_reads_the_posting_api_key(self, serve):
         serve(fake_response({"jobs": _ids(2), "jobPostings": []}))
-        assert probes.PROBES["ashby"]("acme") == (True, 2)
+        assert board_for("ashby").probe("acme") == (True, 2)
 
     def test_ashby_falls_back_to_the_embed_key(self, serve):
         serve(fake_response({"jobPostings": _ids(1)}))
-        assert probes.PROBES["ashby"]("acme") == (True, 1)
+        assert board_for("ashby").probe("acme") == (True, 1)
 
     def test_bamboohr_asks_for_json(self, serve):
         seen = serve(fake_response({"result": _ids(4)}))
-        assert probes.PROBES["bamboohr"]("acme") == (True, 4)
+        assert board_for("bamboohr").probe("acme") == (True, 4)
         assert seen[-1].headers["Accept"] == "application/json"
 
     def test_jazzhr_counts_apply_links_in_the_page(self, serve):
         serve(fake_response(text="<a href='/apply/AbC123/Engineer'>x</a>"
                           "<a href='/apply/dEf456/Scientist'>y</a>"))
-        assert probes.PROBES["jazzhr"]("acme") == (True, 2)
+        assert board_for("jazzhr").probe("acme") == (True, 2)
 
 
 class TestAnEmptyBoardIsAMiss:
@@ -113,20 +113,20 @@ class TestAnEmptyBoardIsAMiss:
 
     def test_greenhouse_empty_is_not_a_board(self, serve):
         serve(fake_response({"jobs": []}))
-        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
+        assert board_for("greenhouse").probe("acme") == (False, 0)
 
     def test_smartrecruiters_empty_is_not_a_board(self, serve):
         serve(fake_response({"totalFound": 0}))
-        assert probes.PROBES["smartrecruiters"]("acme") == (False, 0)
+        assert board_for("smartrecruiters").probe("acme") == (False, 0)
 
     def test_smartrecruiters_with_postings_is(self, serve):
         serve(fake_response({"totalFound": 7}))
-        assert probes.PROBES["smartrecruiters"]("acme") == (True, 7)
+        assert board_for("smartrecruiters").probe("acme") == (True, 7)
 
     def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
         # Every JazzHR page links /apply/confirm/, postings or not.
         serve(fake_response(text="<a href='/apply/confirm/'>x</a>" * 2))
-        assert probes.PROBES["jazzhr"]("acme") == (False, 0)
+        assert board_for("jazzhr").probe("acme") == (False, 0)
 
 
 class TestFailureIsReportedNeverRaised:
@@ -137,27 +137,20 @@ class TestFailureIsReportedNeverRaised:
 
     def test_a_non_200_is_a_miss(self, serve):
         serve(fake_response({"jobs": [{}]}, status=404))
-        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
+        assert board_for("greenhouse").probe("acme") == (False, 0)
 
     def test_unparseable_json_is_a_miss(self, serve):
         serve(fake_response(None))
-        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
+        assert board_for("greenhouse").probe("acme") == (False, 0)
 
     def test_a_raising_session_is_a_miss(self, serve):
         serve(OSError("connection reset"))
-        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
+        assert board_for("greenhouse").probe("acme") == (False, 0)
 
     def test_a_probe_does_not_retry(self, serve):
         calls = serve(OSError("throttled"))
-        assert probes.PROBES["kula"]("acme") == (False, 0)
+        assert board_for("kula").probe("acme") == (False, 0)
         assert len(calls) == 1
-
-
-def test_every_registered_probe_is_callable():
-    """PROBES is what sniffer._confirm_coords looks a sniffed ATS up in; a
-    name in it with nothing behind it fails only in a live discovery run."""
-    for ats, probe in probes.PROBES.items():
-        assert callable(probe), ats
 
 
 def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
@@ -388,7 +381,7 @@ class TestDeadBoardClosure:
         def _probe(url, job_id=None):
             probed.append(url)
             return (None, "n/a")
-        monkeypatch.setattr(ops.probe, "probe_job_open", _probe)
+        monkeypatch.setattr(ops.closure, "probe_job_open", _probe)
 
         # stale_days=999 keeps this row OUT of the URL-probe population
         # entirely (last_seen is only 20 days old) -- proving the closure
@@ -406,7 +399,7 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
                            days_stale=400)
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "n/a"))
 
         ops.check_closed_jobs(conn=db, stale_days=999)
@@ -419,7 +412,7 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Ats Gap", ats=None,
                            miss_reason="ats-unsupported:ukg", days_stale=400)
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "n/a"))
 
         ops.check_closed_jobs(conn=db, stale_days=999)
@@ -442,7 +435,7 @@ class TestClosedProbeRotation:
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "gated"))
 
         for _ in range(3):
@@ -455,7 +448,7 @@ class TestClosedProbeRotation:
 
     def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
         seed_stale(db, n=250)
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "gated"))
 
         ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
@@ -482,7 +475,7 @@ class TestClosedProbeGiveUp:
         def _probe(url, job_id=None):
             probed.append(url)
             return verdict
-        monkeypatch.setattr(ops.probe, "probe_job_open", _probe)
+        monkeypatch.setattr(ops.closure, "probe_job_open", _probe)
         return probed
 
     def _run(self, db, n):
@@ -834,7 +827,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
     @staticmethod
     def _probed(monkeypatch):
         urls = []
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: urls.append(url) or (None, "gated"))
         return urls
 
@@ -898,7 +891,7 @@ class TestProbeOutcomesAreReportedPerFamily:
                     ICIMS_JOB: (None, "HTTP 405"),
                     "https://www.linkedin.com/jobs/view/1":
                         (None, "bot-gated aggregator host")}
-        monkeypatch.setattr(ops.probe, "probe_job_open",
+        monkeypatch.setattr(ops.closure, "probe_job_open",
                             lambda url, job_id=None: verdicts[url])
 
         ops.check_closed_jobs(conn=db, stale_days=7)
@@ -916,7 +909,7 @@ class TestProbeOutcomesAreReportedPerFamily:
         seed_stale(db, harvested=iso_days_ago(1),
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
-            ops.probe, "probe_job_open",
+            ops.closure, "probe_job_open",
             lambda url, job_id=None: (False, f"page says {url[-12:]!r}"))
 
         ops.check_closed_jobs(conn=db, stale_days=7)

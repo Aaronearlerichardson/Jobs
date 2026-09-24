@@ -783,21 +783,20 @@ def _print_safe(line):
 
 def print_report(candidates):
     w = 66
-    print = _print_safe
-    print(f"\n{'='*w}")
-    print("  Snowball: company names mined from stored job descriptions")
-    print(f"{'='*w}")
+    _print_safe(f"\n{'='*w}")
+    _print_safe("  Snowball: company names mined from stored job descriptions")
+    _print_safe(f"{'='*w}")
     if not candidates:
-        print("  (no new candidates above the mention threshold)")
+        _print_safe("  (no new candidates above the mention threshold)")
     for c in candidates:
         fit_flag = "  [high-fit posting]" if c["high_fit"] else ""
-        print(f"    {c['name'][:34]:34} score={c['score']:<5} "
-              f"postings={c['postings']:<3}{fit_flag}")
+        _print_safe(f"    {c['name'][:34]:34} score={c['score']:<5} "
+                    f"postings={c['postings']:<3}{fit_flag}")
         if c["sample_titles"]:
-            print(f"        e.g. {'; '.join(c['sample_titles'])}")
-    print(f"{'='*w}")
-    print(f"  {len(candidates)} candidate(s). Not written to the company "
-          f"store -- resolve/verify separately before adding.\n")
+            _print_safe(f"        e.g. {'; '.join(c['sample_titles'])}")
+    _print_safe(f"{'='*w}")
+    _print_safe(f"  {len(candidates)} candidate(s). Not written to the "
+                "company store -- resolve/verify separately before adding.\n")
 
 
 def run_snowball(min_mentions=2, min_score=None, use_llm=False, limit=None,

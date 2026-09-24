@@ -50,14 +50,15 @@ jobs:
           pip install -r envs/requirements-dev.txt
 
       - name: Confirm the run is profile-example + API-free
-        # profile.toml is gitignored, so a clean checkout has none and
-        # config.py falls back to the example. Assert that rather than
-        # assume it: a stray committed profile would silently change what
-        # the whole suite tests.
+        # profile.toml is gitignored, so a clean checkout has none, the
+        # runner's per-user data dir is empty, and src/config/profile.py
+        # falls back to the example. Assert that rather than assume it: a
+        # stray committed profile would silently change what the whole
+        # suite tests.
         run: |
           test ! -f profile.toml || { echo "profile.toml must not be committed"; exit 1; }
           python -c "
-          import config
+          from src import config
           assert config.PROFILE_SOURCE == 'profile.example.toml', config.PROFILE_SOURCE
           # No USABLE key: the placeholder (or anything blank, which config
           # resolves to the placeholder). Checking for a real key shape too,
@@ -69,10 +70,15 @@ jobs:
           "
 
       - name: Byte-compile everything
-        run: python -m compileall -q core scrapers discovery webapp *.py
+        # The package tree, the maintenance scripts, the suite, and the
+        # root entry points (*.py at the root is exactly those).
+        run: python -m compileall -q src tools tests *.py
 
       - name: Lint (undefined names / unused imports)
-        run: python -m pyflakes core scrapers discovery webapp tests *.py
+        # --select=F is exactly pyflakes' checks. flake8 rather than bare
+        # pyflakes because it honours `# noqa: F401`, which the src/
+        # package re-export facades and the doctest-only imports carry.
+        run: python -m flake8 --select=F src tools tests *.py
 
       - name: Validate the example profile
         run: |
@@ -98,15 +104,15 @@ jobs:
         # docs/DOCSTRINGS.md for the rule these enforce.
         #
         # Paths are given explicitly (they override testpaths) so tests/ is
-        # excluded and the number printed is doctests only.
+        # excluded and the number printed is doctests only. The root *.py
+        # glob is the entry scripts, the same set pytest.ini lists one by
+        # one; a hand-written copy here went stale when smoke_test.py was
+        # removed.
         run: |
-          SRC="src tools"
-          MODS="build_app.py capture.py crawler.py discover.py harvest.py"
-          MODS="$MODS run_scraper.py smoke_test.py webapp.py"
           # -o addopts=-q replaces pytest.ini's addopts rather than adding
           # to it: a second -q would make pytest -qq and swallow the very
           # "N passed" line this step greps for.
-          pytest -o addopts=-q --doctest-modules $SRC $MODS > doctest.log 2>&1 || {
+          pytest -o addopts=-q --doctest-modules src tools *.py > doctest.log 2>&1 || {
             cat doctest.log; exit 1;
           }
           cat doctest.log
@@ -143,6 +149,7 @@ jobs:
           python run_scraper.py --help > /dev/null
           python discover.py --help  > /dev/null
           python capture.py --help   > /dev/null
+          python harvest.py --help   > /dev/null
           python crawler.py --help   > /dev/null   # deprecation shim
 
       - name: Web app serves on the example profile

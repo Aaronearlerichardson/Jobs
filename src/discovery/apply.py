@@ -17,6 +17,7 @@ from contextlib import closing
 from src import store
 from src import tags
 from src.ats import coords
+from src.ats.board import board_for
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 
@@ -69,10 +70,9 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
         roster, ACTIVE, and it stayed crawled until somebody remembered to
         run the backfill.
     """
-    # Deferred: the write path pulls in the fetchers and the mission scorer,
-    # and src.discovery.__init__ imports this module on every `import
+    # Deferred: the write path pulls in the mission scorer, and
+    # src.discovery.__init__ imports this module on every `import
     # src.discovery` -- including the ones that only want the report.
-    from src.ats.fetchers import company as company_fetch
     from .local_sourcing import score_and_upsert
 
     term = result["term"]
@@ -83,10 +83,9 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
     with closing(store.connect()) as conn:
         added, skipped, summary = 0, 0, []
         for c in confirmed:
-            # "Can this row be fetched" is fetchers.company.FETCHERS, the table
-            # fetch_company dispatches on and the one every other caller of the
-            # write path trusts.
-            if c.ats not in company_fetch.FETCHERS:
+            # "Can this row be fetched" is board_for, what fetch_company
+            # dispatches on and every other caller of the write path trusts.
+            if not board_for(c.ats):
                 summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
                 skipped += 1
                 continue
@@ -133,7 +132,7 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
 # turn something discovery found into a roster row, and queue it for
 # review rather than trusting it.
 #
-# It lived in src/ats/fetchers/getro.py, next to the parser that produces
+# It lived in src/ats/feeds/getro.py, next to the parser that produces
 # `_employer`. That put a store WRITE inside a fetcher: src/ats otherwise
 # knows nothing about the roster, and this single function was the whole
 # reason the package reached src/store at all. Nothing in it is
