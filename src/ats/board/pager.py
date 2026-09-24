@@ -1,8 +1,8 @@
 """The listing walk: one listing read page by page, the rows it gives
 deduplicated, the stop rule, and the capped-snapshot bookkeeping.
 
-A `listing.pager` in a `config.BOARDS` spec says how pages step (see
-`spec._PAGERS`); `walk` reads them through the caller's request and row
+A listing's pager (a `spec.Pager`: offset, overlap, page or cursor) says
+how pages step; `walk` reads them through the caller's request and row
 callbacks, so it knows nothing of handles, headers or decoders.
 """
 
@@ -16,19 +16,34 @@ from . import fields
 
 
 def page_vals(pager, n, size):
-    """The named request values for page `n` (from 0) of `size` rows.
+    """The named request values for page `n` (from 0) of `size` rows, a
+    listing without a pager reading page 0.
 
-    >>> page_vals({}, 0, 1)
+    >>> from .spec import OverlapPager, PagePager
+    >>> page_vals(None, 0, 1)
     {'$size': 1, '$offset': 0, '$page': 0}
-    >>> page_vals({"kind": "page", "start": 1}, 2, 100)
+    >>> page_vals(PagePager(kind="page", start=1), 2, 100)
     {'$size': 100, '$offset': 200, '$page': 3}
-    >>> page_vals({"kind": "overlap", "step": 250}, 1, 500)["$offset"]
+    >>> why = "rows shift, 2026-09"
+    >>> page_vals(OverlapPager(kind="overlap", size=500, step=250, why=why), 1, 500)["$offset"]
     250
-    >>> page_vals({"kind": "page", "bare_first": True}, 0, 0)["$page"] is None
+    >>> page_vals(PagePager(kind="page", bare_first=True, why=why), 0, 0)["$page"] is None
     True
     """
-    return {"$size": size, "$offset": n * (pager.get("step") or size),
-            "$page": None if n == 0 and pager.get("bare_first") else pager.get("start", 0) + n}
+    if pager is None:
+        return {"$size": size, "$offset": n * size, "$page": n}
+    return {"$size": size, "$offset": pager.offset(n, size), "$page": pager.page(n)}
+
+
+def page_size(pager):
+    """Rows a pager asks per page; 0 when unknown or unpaged."""
+    return (pager.size or 0) if pager else 0
+
+
+def total_of(pager, payload):
+    """The int total a pager's `total` names on `payload`, else None."""
+    t = fields.value(pager.total, payload) if pager and pager.total else None
+    return t if isinstance(t, int) else None
 
 
 def postings(rows):
@@ -41,8 +56,8 @@ def ended(pager, payload, number, rows, size_known, n_entries, size):
     `declared` last (no declared page ends it); else once `rows` reach
     the known total; else on a short page (fewer than `size` entries: a
     server may serve fewer than asked)."""
-    if pager.get("declared"):
-        last = fields.value(pager["declared"], payload)
+    if pager.declared:
+        last = fields.value(pager.declared, payload)
         return not isinstance(last, int) or number >= last
     if size_known is not None:
         return len(rows) >= size_known
@@ -53,7 +68,7 @@ def next_url(payload, pager, home):
     """A cursor page's next-page URL, to follow verbatim; None when it
     names none or points outside the listing's own directory `home`
     (served data, not a promise)."""
-    nxt = fields.path(payload, pager["next"])
+    nxt = fields.path(payload, pager.next)
     return nxt if isinstance(nxt, str) and nxt.lower().startswith(home.lower()) else None
 
 
@@ -120,33 +135,32 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
     reach the `ceiling`. The capped total is the larger of total and rows,
     unknown on a scoped pull short of the ceiling. A `cheap` walk notes
     nothing."""
-    pager = spec.get("pager") or {}
-    size = size or pager.get("size", 0)
-    pages = 1 if not pager else pages or (1 if cheap else pager.get("pages", 1))
-    ceiling = pager.get("ceiling")
+    pager = spec.pager
+    size = size or page_size(pager)
+    pages = 1 if not pager else pages or (1 if cheap else pager.pages)
+    ceiling = pager.ceiling if pager else None
     rows, seen, total, size_known, capped, url = [], set(), None, None, False, None
     for n in range(pages):
         parts, payload, err = ask(n, page_vals(pager, n, size), url)
         if err:
             return (None, None) if n == 0 else (rows, total)
-        if n == 0 and pager.get("total"):
-            t = fields.value(pager["total"], payload)
-            total = t if isinstance(t, int) else None
+        if n == 0 and pager and pager.total:
+            total = total_of(pager, payload)
             size_known = None if total is not None and ceiling and total >= ceiling else total
         n_entries, listed = rows_of(parts, payload)
         new = _fresh(listed, seen)
         rows += new
         if not pager:
             break
-        if pager["kind"] == "cursor":
-            if not fields.path(payload, pager["has_next"]):
+        if pager.kind == "cursor":
+            if not fields.path(payload, pager.has_next):
                 break
-            home = fields.fmt(spec["url"], parts.get).rsplit("/", 1)[0] + "/"
+            home = fields.fmt(spec.url, parts.get).rsplit("/", 1)[0] + "/"
             url = next_url(payload, pager, home)
             if not url:
                 capped = True
                 break
-        elif not postings(listed) or ended(pager, payload, pager.get("start", 0) + n, rows,
+        elif not postings(listed) or ended(pager, payload, pager.number(n), rows,
                                            size_known, n_entries, size):
             break
         if not postings(new) or n + 1 == pages:

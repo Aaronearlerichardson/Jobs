@@ -5,6 +5,7 @@ import pytest
 
 import src.claude.api as claude
 import src.claude.fit as fit
+from src.config.profile_schema import FitWeights, GatePenalty
 
 
 class TestClipping:
@@ -21,22 +22,13 @@ class TestClipping:
 
 
 class TestGates:
-    def test_management_gate_registered(self):
-        assert "management" in fit.GATES
+    def test_the_calibration_defaults_are_the_schemas(self):
+        assert fit.DEFAULT_WEIGHTS == FitWeights().model_dump()
+        assert fit.DEFAULT_GATE_PENALTY == GatePenalty().model_dump()
 
     def test_management_gate_bites(self):
         axes = dict(domain=.35, function=.30, stack=.35, seniority=.45)
         assert fit.combine(axes, ["management"]) < fit.combine(axes, []) * 0.5
-
-    def test_profile_penalties_merge_rather_than_replace(self, cfg):
-        saved = getattr(cfg, "FIT_GATE_PENALTY", None)
-        cfg.FIT_GATE_PENALTY = {"geo": 0.10}       # a pre-management profile
-        try:
-            merged = fit._effective_penalties()
-        finally:
-            cfg.FIT_GATE_PENALTY = saved
-        assert merged["geo"] == 0.10               # profile wins where set
-        assert merged["management"] == 0.35        # default survives
 
     def test_clearance_regex_needs_a_held_clearance(self):
         assert fit._clearance_required("must have an active TS/SCI clearance")
@@ -145,13 +137,13 @@ class TestGateOverrides:
 
     @staticmethod
     def _ungated(res):
-        return fit.combine(res.axes, [], getattr(fit.config, "FIT_WEIGHTS", None),
-                           fit._effective_penalties())
+        return fit.combine(res.axes, [], fit.config.FIT_WEIGHTS,
+                           fit.config.FIT_GATE_PENALTY)
 
     def test_score_resume_fit_applies_it(self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
-            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
-            "gates": ["geo", "clearance"], "reason": "good lane"})
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.FitReply(
+            domain=.8, function=.8, stack=.7, seniority=1.0,
+            gates=["geo", "clearance"], reason="good lane"))
         body = ("Build neural data pipelines. " * 20
                 + "Applicants must be eligible to obtain a U.S. security "
                   "clearance.")
@@ -162,18 +154,19 @@ class TestGateOverrides:
 
     def test_verify_fit_applies_it_without_disarming_its_own_backstops(
             self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
-            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
-            "seat_type": "management", "gates": ["geo"], "reason": "deep"})
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.VerifyReply(
+            years_required=None, seat_type="management", must_haves=[],
+            candidate_gaps=[], domain=.8, function=.8, stack=.7,
+            seniority=1.0, gates=["geo"], reason="deep"))
         res = fit.verify_fit("Program Lead", "x " * 200, location=local_addr)
         assert res.gates == ["management"]      # geo stripped, seat gate kept
 
     def test_the_add_side_backstop_still_wins(self, monkeypatch, local_addr):
         # A local posting that really does demand an active clearance keeps
         # it: the strip must not undo the regex that just added it.
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {
-            "domain": .8, "function": .8, "stack": .7, "seniority": 1.0,
-            "gates": [], "reason": "cleared shop"})
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.FitReply(
+            domain=.8, function=.8, stack=.7, seniority=1.0,
+            gates=[], reason="cleared shop"))
         body = ("Signal processing work. " * 20
                 + "Must hold an active TS/SCI clearance; eligibility to "
                   "upgrade is a plus.")
@@ -202,17 +195,17 @@ class TestUnscoredCause:
         # REFUSED class (rather than needing the exact HTTP-level cause
         # from src.claude.api) sound.
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {})
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: None)
         res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
         assert res.score is None
         assert fit.unscored_cause(res.reason) == "refused"
 
     def test_a_scorer_that_never_asked_is_not_a_refusal(self, monkeypatch):
         # No key, and a tripped breaker, both make call_claude_json return
-        # {} WITHOUT asking the model. Reporting those as "unscored" would
+        # None WITHOUT asking the model. Reporting those as "unscored" would
         # let ops.maintenance's retry marker hold a perfectly scorable row
         # for UNSCORED_RETRY_DAYS over one billing hiccup.
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: {})
+        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: None)
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY",
                             "YOUR_ANTHROPIC_API_KEY_HERE")
         res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
@@ -230,6 +223,10 @@ class TestPrompts:
         prompt = fit.build_verify_prompt()
         assert all(k in prompt for k in
                    ("years_required", "seat_type", "candidate_gaps"))
+        # ...and the schema asks for them before the axes, as the prompt does.
+        assert list(fit.VerifyReply.model_fields)[:5] == [
+            "years_required", "seat_type", "must_haves", "candidate_gaps",
+            "domain"]
 
     def test_verify_refuses_stub_descriptions(self):
         assert fit.verify_fit("T", "too short").score is None
@@ -244,7 +241,7 @@ class TestPrompts:
 
         def fake(system, user, **kw):
             seen.update(system=system, user=user)
-            return {}                       # -> unscored, score None
+            return None                     # -> unscored, score None
 
         monkeypatch.setattr(fit, "call_claude_json", fake)
         body = "x" * (fit.MIN_DESC_CHARS + 10)

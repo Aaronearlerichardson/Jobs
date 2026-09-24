@@ -22,7 +22,7 @@ from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import drain
 from .local_sourcing import score_and_upsert
-from .name_sources import NAME_BLOCKLIST, _is_nav_noise
+from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
 from .resolve.board import resolve_or_miss, resolved
 
 # Lines that are never a company name in a pasted results page.
@@ -287,15 +287,9 @@ def extract_names_llm(blob, limit=60):
     user = ('Return JSON {"companies": ["name", ...]} with at most '
             f'{limit} entries, in the order they appear.\n\n'
             f"---\n{str(blob or '')[:20000]}\n---")
-    try:
-        data = call_claude_json(system, user, max_tokens=2000)
-    except Exception as e:
-        print(f"    [!] name extraction failed ({type(e).__name__}: {e}); "
-              f"falling back to the text parser")
-        return []
-    names = [str(x).strip() for x in (data or {}).get("companies", [])
-             if str(x).strip()]
-    return [n for n in names if 2 < len(n) <= 60][:limit]
+    data = call_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
+    return [n for n in (data.companies if data else [])
+            if 2 < len(n) <= 60][:limit]
 
 
 # A name the store already has a BOARD for is not worth resolving again.

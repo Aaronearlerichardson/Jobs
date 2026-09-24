@@ -386,11 +386,11 @@ class TestTitleExemptPhrases:
         restore_keywords does not put back) empties those globals, and this
         assertion would then pass by having nothing to exclude.
         """
-        exc = cfg.profile_section("exclude")
-        title_phrases = list(exc.get("title_phrases", []))
+        exc = cfg.PROFILE.exclude
+        title_phrases = list(exc.title_phrases)
         if not any("manager" in p.lower() for p in title_phrases):
             pytest.skip("profile does not exclude 'manager' titles")
-        vocab(title_phrases, list(exc.get("title_exempt_phrases", [])))
+        vocab(title_phrases, list(exc.title_exempt_phrases))
 
         assert not self._excluded("Clinical Data Manager")
         assert not self._excluded("Scientific Data Manager")

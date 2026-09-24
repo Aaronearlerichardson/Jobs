@@ -39,8 +39,10 @@ class TestFitResultCarriesTheModel:
 
         def fake(system, user, **kw):
             seen["model"] = kw.get("model")
-            return {"function": 0.8, "domain": 0.8, "stack": 0.8,
-                    "seniority": 0.8, "gates": [], "reason": "fine"}
+            return fit.VerifyReply(
+                years_required=None, seat_type="ic-engineering",
+                must_haves=[], candidate_gaps=[], function=0.8, domain=0.8,
+                stack=0.8, seniority=0.8, gates=[], reason="fine")
 
         monkeypatch.setattr(fit, "call_claude_json", fake)
         res = fit.verify_fit("Data Engineer", "x" * (fit.MIN_DESC_CHARS + 10))

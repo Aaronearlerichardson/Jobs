@@ -491,11 +491,6 @@ _PERF_LOOKALIKES = (
     "def f(xs):\n    return [x for x in xs if x in {'a', 'b'}]\n",
 )
 
-#: Rule breaks in code another change owns, as (file, function, rule), each
-#: with a comment saying why. test_perf_handoffs_still_exist fails once one
-#: is fixed: drop the entry.
-PERF_HANDOFFS = set()
-
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _LOOPS = (ast.For, ast.AsyncFor, ast.While)
 _COMPS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -711,17 +706,10 @@ def test_perf_checks_see_violations():
 @pytest.mark.parametrize("rule", sorted(PERF_RULES))
 def test_perf_rule_holds(rule, perf_breaks):
     """docs/PERFORMANCE.md's mechanical rules hold in src/, tools/ and the
-    root scripts, apart from PERF_HANDOFFS."""
-    bad = sorted((rel, fn) for rel, fn, r in perf_breaks - PERF_HANDOFFS
-                 if r == rule)
+    root scripts."""
+    bad = sorted((rel, fn) for rel, fn, r in perf_breaks if r == rule)
     assert not bad, (f"'{rule}' is broken at {bad}: {PERF_RULES[rule][0]}. "
                      "See docs/PERFORMANCE.md.")
-
-
-def test_perf_handoffs_still_exist(perf_breaks):
-    """PERF_HANDOFFS can only shrink: a fixed entry must be dropped."""
-    stale = sorted(PERF_HANDOFFS - perf_breaks)
-    assert not stale, f"PERF_HANDOFFS lists {stale}, now fixed. Drop them."
 
 
 def test_compiled_code_has_no_assert_or_debug():
@@ -735,3 +723,59 @@ def test_compiled_code_has_no_assert_or_debug():
         or (isinstance(n, ast.Name) and n.id == "__debug__"))
     assert not found, (f"assert/__debug__ at {found}: -O would drop them. "
                        "Raise an exception instead.")
+
+
+def _model_classes(trees):
+    """(rel, class node) for every pydantic model class: a subclass, by
+    base name, of BaseModel, BaseSettings or another model class."""
+    classes = [(rel, c) for rel, t in trees.items() for c in ast.walk(t)
+               if isinstance(c, ast.ClassDef)]
+    bases = {id(c): {getattr(b, "id", getattr(b, "attr", None)) for b in c.bases}
+             for _, c in classes}
+    names, grew = {"BaseModel", "BaseSettings"}, True
+    while grew:
+        found = {c.name for _, c in classes if bases[id(c)] & names}
+        grew, names = not found <= names, names | found
+    return [(rel, c) for rel, c in classes if bases[id(c)] & names]
+
+
+def test_pydantic_models_keep_their_annotations_as_strings():
+    """Every module defining a pydantic model has `from __future__ import
+    annotations`. Without it Nuitka compiles each class's `__annotate__`,
+    and on Python 3.14 pydantic's FORWARDREF read of that raises TypeError
+    whenever an annotation holds a lambda reading a name, or `str.lower`:
+    the exe dies at import while every test passes.
+
+    Notes:
+        Found 2026-09-24 building JobHarvester.exe (config.secrets.Settings,
+        then profile_schema.Methodology).
+    """
+    trees = {rel: ast.parse(src) for rel, src in source_files()}
+    modules = {rel for rel, _ in _model_classes(trees)}
+    assert "src/ats/board/spec.py" in modules, "the model scan found nothing"
+    bare = sorted(rel for rel in modules
+                  if not any(isinstance(n, ast.ImportFrom)
+                             and n.module == "__future__"
+                             and any(a.name == "annotations" for a in n.names)
+                             for n in trees[rel].body))
+    assert not bare, (f"pydantic models in {bare} without `from __future__ "
+                      "import annotations`: the compiled exe cannot import "
+                      "them. Add the import.")
+
+
+# --------------------------------------------------------------------------- #
+#  7. The environment is read in one place                                    #
+# --------------------------------------------------------------------------- #
+
+def test_the_environment_is_read_only_through_config_settings():
+    """src/config/secrets.py's Settings is the one reader of the
+    environment (typed, trimmed, blank-is-unset); everything else reads
+    config.SETTINGS."""
+    found = sorted(
+        (rel, n.lineno) for rel, src in source_files()
+        if not rel.startswith("src/config/")
+        for n in ast.walk(ast.parse(src))
+        if (isinstance(n, ast.Attribute) and n.attr in ("environ", "getenv"))
+        or (isinstance(n, ast.Name) and n.id in ("environ", "getenv")))
+    assert not found, (f"environment read at {found}: add a field to "
+                       "src/config/secrets.Settings and read config.SETTINGS.")

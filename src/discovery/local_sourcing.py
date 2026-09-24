@@ -46,8 +46,6 @@ from .resolve.websearch_board import _websearch_board
 # --------------------------------------------------------------------------- #
 
 
-_DEFAULT_WEBSEARCH_CAP = 20
-
 def _boardless(names, hits):
     """The names with no LOCAL board yet.
 
@@ -210,8 +208,7 @@ def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
     earlier uncapped profile blocked ~1271s of a 1726s run inside DDG's
     own retry/backoff (see src.net.ddg).
     """
-    cap = (config.DISCOVERY_WEBSEARCH_CAP if cap is None else cap)
-    cap = _DEFAULT_WEBSEARCH_CAP if cap is None else int(cap)
+    cap = config.DISCOVERY_WEBSEARCH_CAP if cap is None else int(cap)
     todo = _boardless(names, hits)
     if todo and cap > 0:
         from src.store import connect as _connect, recent_miss_names

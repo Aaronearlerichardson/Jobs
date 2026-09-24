@@ -14,18 +14,24 @@ One function now. Callers say what they resolved; this says what the
 store calls it.
 """
 
-from src import config
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
+
+from .board import BOARDS
+from .board.spec import Handle
 
 #: The columns a board's identity occupies in `companies` (core.store).
 BOARD_COLUMNS = ("ats", "slug", "wd_tenant", "wd_pod", "wd_site",
                  "careers_url")
 
 
+_NO_BOARD = Handle()
+
+
 def _handle(ats):
-    """(columns, sep) of `ats`'s handle (config.BOARDS; default the slug)."""
-    h = (config.BOARDS.get(ats) or {}).get("handle") or {}
-    return h.get("columns", ["slug"]), h.get("sep", "|")
+    """(columns, sep) of `ats`'s handle (`spec.Handle`; default the slug)."""
+    board = BOARDS.get(ats)
+    h = board.spec.handle if board else _NO_BOARD
+    return h.columns, h.sep
 
 
 def columns(ats, slug=None, careers_url=None, name=None, **extra):

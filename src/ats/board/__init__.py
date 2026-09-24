@@ -3,7 +3,7 @@ spec by one engine.
 
     engine.py   `Board`, the listing -> row -> detail loop; `BOARDS`,
                 `board_for(ats)`, `board_for_url(url)`
-    spec.py     the spec schema and `validate_spec`
+    spec.py     the spec schema: the models a spec parses into (`parse`)
     fields.py   the field grammar a spec names values in
     decode.py   response bodies as data (the decoders)
     pager.py    the listing walk, page by page

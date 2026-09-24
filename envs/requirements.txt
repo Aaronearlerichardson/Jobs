@@ -7,6 +7,10 @@ flask>=3.0.0
 # Comment-preserving TOML writer for the Settings tab (profile.toml editing).
 tomlkit>=0.12
 
+# Typed validation: board specs, profile.toml, Claude replies; env settings.
+pydantic>=2.12
+pydantic-settings>=2.11
+
 # Free Google alternative for the web-search fetcher.
 # DDG text search, no API key.
 ddgs>=5.0.0

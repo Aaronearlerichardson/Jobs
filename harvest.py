@@ -48,14 +48,11 @@ import traceback
 from contextlib import closing
 from datetime import datetime
 
-from src import config
-
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
-LOCK_PATH = config.DATA_DIR / "harvest.lock"
 DEFAULT_EVERY_HOURS = 12.0
 # Longest single wait between deadline checks. Short enough that a machine
 # waking from a long sleep notices an overdue pass within minutes; a timed
@@ -108,11 +105,16 @@ def overdue_warning(scheduled, started, threshold_s=OVERDUE_THRESHOLD_S):
     return f"[!] pass is {how} late (scheduled {when:%Y-%m-%d %H:%M})"
 
 
-def acquire_lock(path=LOCK_PATH):
-    """Hold an OS-level exclusive lock on `path` for the life of the
-    process (released by the OS on any exit, so a crash never leaves a
-    stale lock). Returns the open handle, or None when another harvester
-    already holds it."""
+def acquire_lock(path=None):
+    """Hold an OS-level exclusive lock on `path` (default
+    <DATA_DIR>/harvest.lock) for the life of the process (released by the
+    OS on any exit, so a crash never leaves a stale lock). Returns the open
+    handle, or None when another harvester already holds it."""
+    if path is None:
+        # config loads here, not at import, so a bad profile.toml or env
+        # var raises inside main()'s "Press Enter" guard.
+        from src import config
+        path = config.DATA_DIR / "harvest.lock"
     fh = open(path, "a+")
     try:
         if os.name == "nt":

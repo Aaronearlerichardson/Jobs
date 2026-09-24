@@ -26,10 +26,6 @@ hit is a real break, not a style opinion.
 `assert` and no `__debug__`; a test keeps it that way. Raise an exception
 where you would have asserted.
 
-A violation in code another change owns goes on `PERF_HANDOFFS` (file,
-function, rule) with a comment saying why. A test fails when a listed entry
-is fixed, so that list only shrinks.
-
 ## Judgment (hot paths only)
 
 Apply these where a profile shows the time goes, and prove the output did

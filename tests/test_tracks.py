@@ -9,7 +9,6 @@ import src.store as store
 import src.ops.maintenance as ops
 import src.crawl.runner as runner
 from src import tags
-from src.config import tracks as track_cfg
 from tests.test_triage import _PLAIN_ENG_BODY
 
 
@@ -17,18 +16,6 @@ class TestTrackConfig:
     def test_profile_defines_tracks(self, cfg):
         assert len(cfg.UI_TRACKS) >= 1
         assert cfg.DEFAULT_TRACK in cfg.UI_TRACKS
-
-    def test_every_track_names_a_real_engine(self, cfg):
-        # Against the registry, not a literal list, so adding an engine
-        # doesn't need this test edited.
-        assert all(t["engine"] in track_cfg._ENGINE_CRAWL_DEFAULTS
-                   for t in cfg.UI_TRACKS.values())
-
-    def test_retired_engine_names_still_resolve(self, cfg):
-        """A profile written against an older engine name keeps working."""
-        for legacy, current in cfg.ENGINE_ALIASES.items():
-            built = cfg._build_ui_tracks({"t": {"engine": legacy}})
-            assert built["t"]["engine"] == current
 
     def test_every_track_points_at_a_db(self, cfg):
         assert all(t["db_path"].name.endswith(".db")
@@ -50,11 +37,6 @@ class TestTrackConfig:
         assert cfg.UI_TRACKS[cfg.DEFAULT_TRACK]["verify_floor"] == 0.25
         built = cfg._build_ui_tracks({"t": {"verify_floor": 0.4}})
         assert built["t"]["verify_floor"] == 0.4
-
-    def test_dormancy_knobs_are_whole_numbers(self, cfg):
-        for t in cfg.UI_TRACKS.values():
-            assert isinstance(t["dormant_after"], int) and t["dormant_after"] >= 1
-            assert isinstance(t["dormant_days"], int) and t["dormant_days"] >= 1
 
     def test_engine_defaults_differ(self, local_track, sweep_track):
         assert local_track["keyword_mode"] == "extend"

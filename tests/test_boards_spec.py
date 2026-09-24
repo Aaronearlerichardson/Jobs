@@ -1,18 +1,19 @@
-"""Invariants of `config.BOARDS`: every spec reads, every platform detected
-is one of them, every fetchable one has a canary, and nothing outside the
-spec names a platform.
+"""Invariants of `config.BOARDS`: the schema refuses what it cannot read,
+no spec restates a default, every platform detected is a spec, every
+fetchable one has a canary, and nothing outside the spec names a platform.
 
 Offline: the specs are read, the source is parsed with `ast`, and detection
 runs over the recorded fixture pages.
 """
 
 import ast
-import re
 from pathlib import Path
+
+import pytest
 
 from src import config, tags
 from src.ats import signatures
-from src.ats.board.spec import validate_spec
+from src.ats.board import BOARDS, spec
 from src.ats.registry import seed_tag_for
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -29,28 +30,88 @@ NAMED_PLATFORMS = {
     "src/discovery/dork.py": {"workday", "peopleadmin"},
     "src/discovery/local_sourcing.py": {"workday"},
     "src/discovery/pipeline.py": {"workday"},
+    "src/discovery/resolve/board.py": {"workday"},
     "src/discovery/resolve/probes.py": {"workday"},
     "src/discovery/resolve/sniffer.py": {"workday"},
     "src/discovery/resolve/websearch_board.py": {"workday"},
 }
 
 
-def _regexes(spec):
-    """Every regex string a spec holds, wherever it sits."""
-    listings = spec.get("listing") or []
-    listings = listings if isinstance(listings, list) else [listings]
-    found = [(spec.get("job_ref") or {}).get("re"), (spec.get("rescue") or {}).get("unknown")]
-    found += [(alt.get("scope") or {}).get("param_re") for alt in listings]
-    found += [(part.get("decoder") or {}).get("regex") for part in listings + [spec.get("detail") or {}]]
-    found += [rx for d in spec.get("detect", []) for rx in d.get("re", [])]
-    return [rx for rx in found if rx]
+_WHY = "a quirk, 2026-09"
+_L = {"url": "https://x.test/{slug}", "fields": {"id": "id"}}
+_D = {"url": "https://x.test/{jid}"}
 
 
-def test_every_spec_validates_and_every_regex_compiles():
-    for name, spec in config.BOARDS.items():
-        validate_spec(name, spec)
-        for rx in _regexes(spec):
-            re.compile(rx)
+def _listing(**kw):
+    return {"listing": {**_L, **kw}}
+
+
+def _pager(**kw):
+    return _listing(pager=kw)
+
+
+def _always(**kw):
+    """A rescue on every pull, one key changed (a None one dropped)."""
+    rescue = {"when": "always", "unknown": "x", "cap": 1, "why": _WHY, **kw}
+    return {**_listing(), "detail": _D, "rescue": {k: v for k, v in rescue.items() if v is not None}}
+
+
+#: Specs the schema must refuse, one broken key each.
+REFUSED = [
+    {"sweeps": True}, {"sweep": "yes"}, {"canary": {"name": "A", "handle": 7}},
+    {"canary": {"name": "A", "handle": "a", "min_jobs": 0}}, {"unlocated": "maybe"},
+    _listing(nope=1), _listing(fields={"salary": "pay"}), _listing(url="{slug|nope}"),
+    _listing(fields={"title": {"of": "t", "transform": "nope"}}),
+    _listing(fields={"title": {"of": "t", "join": ["a"]}}),
+    _listing(decoder={"kind": "xml"}), _listing(decoder={"select": "a"}),
+    _listing(decoder={"kind": "json_in_html"}),
+    _listing(decoder={"kind": "json_in_html", "regex": "("}),
+    _listing(decoder={"kind": "html"}), _listing(decoder={"kind": "html", "select": ""}),
+    _pager(kind="scroll", size=1), _pager(kind="offset"), _pager(kind="offset", size=0),
+    _pager(kind="offset", size=2, step=1), _pager(kind="overlap", size=2, step=2, why=_WHY),
+    _pager(kind="cursor", size=2), _pager(kind="offset", size=2, ceiling="2000", why=_WHY),
+    _pager(kind="offset", size=2, ceiling=2000), _pager(kind="offset", size=2, why=_WHY),
+    _pager(kind="offset", size=2, ceiling=2000, why="because"),
+    _listing(scope={"kind": "facets", "facets": "f"}), _listing(scope={"kind": "param"}),
+    {"handle": {"columns": []}}, {"handle": {"nope": 1}}, {"handle": {"follow": {"base": 1}}},
+    {"handle": {"try": {"a": ["x"], "b": ["y"]}, "why": _WHY}},
+    {"handle": {"accept": {"nope": 1}, "why": _WHY}},
+    {"listing": [_L, {"url": "https://x.test/2"}]},
+    {"listing": [{**_L, "why": _WHY}, {"url": "https://x.test/2", "why": _WHY}]},
+    {**_listing(), "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
+    {**_listing(), "detail": _D, "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
+    _always(unknown="("), _always(cap="1"), _always(fields=["pay"]), _always(why=None),
+    {"closure": {"nope": 1}}, {"closure": {"via": "email"}}, {"closure": {"via": "detail"}},
+    {**_pager(kind="offset", size=2), "closure": {"via": "listing"}},
+    {"closure": {"unmatched": 7, "why": _WHY}}, {"closure": {"unmatched": "gone"}},
+    {"closure": {"closed": [{"why": {"const": "x"}}]}},
+    {"closure": {"closed": [{"when": {"truthy": "a"}, "if": 1}]}},
+    {"closure": {"open": {"maybe": "a"}}},
+    {"job_ref": {"re": "(", "parts": []}}, {"job_ref": {"re": "a/(\\d+)", "parts": []}},
+    {"employer": {"of": "a", "transform": "nope"}}, {"employer": 7},
+    {"detect": [{}]}, {"detect": [{"re": ["abc"]}]},
+    {"detect": [{"re": ["(a)"], "transform": ["x"]}]},
+    {"detect": [{"re": ["(a)"], "transform": [None, None]}]},
+    {"detect": [{"re": ["(a)"], "blocklist": [1]}]},
+    {"detect": [{"re": ["(a)"], "careers_url": "{slug|nope}"}]},
+]
+
+
+def test_the_schema_refuses_what_it_cannot_read():
+    """Each spec in REFUSED breaks one rule; the error names the spec."""
+    for i, raw in enumerate(REFUSED):
+        with pytest.raises(ValueError, match=f"^case{i}: "):
+            spec.parse(f"case{i}", raw)
+
+
+def test_no_key_restates_its_default():
+    """A key a spec sets to its model's default (or `closure.via` to the
+    one it would resolve to) does nothing: drop it."""
+    dead = [f"{name}.{path}" for name, b in BOARDS.items()
+            for path, value, given, default in spec.walk(b.spec) if given and value == default]
+    dead += [f"{name}.closure.via" for name, b in BOARDS.items()
+             if b.spec.closure.via == b.spec.default_via]
+    assert not dead
 
 
 def test_detect_returns_only_board_keys():
@@ -76,8 +137,8 @@ def test_every_fetchable_spec_has_a_canary():
 
 
 def test_the_seed_tag_follows_sweep():
-    for name, spec in config.BOARDS.items():
-        want = (tags.SWEEP if spec.get("sweep") else tags.LOCAL) if spec.get("listing") else None
+    for name, raw in config.BOARDS.items():
+        want = (tags.SWEEP if raw.get("sweep") else tags.LOCAL) if raw.get("listing") else None
         assert seed_tag_for(name) == want, name
 
 

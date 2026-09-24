@@ -1,5 +1,5 @@
-"""Response bodies as data: the decoders a `config.BOARDS` spec names, and
-where a decoded payload keeps its entries and a detail its record.
+"""Response bodies as data: the decoders a `config.BOARDS` spec names
+(`spec.Decoder`), and a decoded payload's entries and a detail's record.
 """
 
 import json
@@ -10,24 +10,20 @@ from bs4 import BeautifulSoup
 
 from . import custom, fields, jsonld
 
-#: Where a decoder's entries sit unless `entries` says; a detail's record
-#: is the first of them unless `record` says.
-ENTRIES = {"html": "elements", "jsonld": "postings", "atom": "entries"}
-
 
 def decode(dec, text, parts, url, area=None, hop=True):
     """A non-JSON response body (to `url`) as data; None when it holds
     none. Raises ValueError when embedded JSON will not parse. `area` and
     `hop` reach the careers-page reader (`custom.read_page`)."""
-    kind = dec.get("kind")
+    kind = dec.kind
     if kind == "json_in_html":
-        m = re.search(dec["regex"], text)
+        m = re.search(dec.regex, text)
         return json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
     if kind == "jsonld":
         return {"postings": jsonld.postings(text, url)}
     if kind == "atom":
         return {"entries": _atom(text)}
-    if dec.get("select") == "$job_links":
+    if dec.select == ("$job_links",):
         return custom.read_page(text, url, area, hop)
     return {"elements": elements(dec, text, parts, url), "page": text}
 
@@ -35,18 +31,16 @@ def decode(dec, text, parts, url, area=None, hop=True):
 def entries(payload, dec):
     """The postings (dicts) in a payload decoded by `dec`: the first of its
     entry paths holding a list; a wrong shape is []."""
-    wanted = dec.get("entries", ENTRIES.get(dec.get("kind"), ""))
-    return [e for e in first_path(payload, wanted, list) or [] if isinstance(e, dict)]
+    return [e for e in first_path(payload, dec.entries, list) or [] if isinstance(e, dict)]
 
 
 def record(payload, detail):
     """A detail answer's record: the first dict at the detail's `record`
-    path, by default its decoder's first entry; None when there is none."""
+    paths, by default its decoder's first entry; None when there is none."""
     if not payload:
         return None
-    kind = (detail.get("decoder") or {}).get("kind")
-    default = f"{ENTRIES[kind]}[0]" if kind in ENTRIES else ""
-    return first_path(payload, detail.get("record", default), dict)
+    return first_path(payload, (detail.decoder.first,) if detail.record is None else detail.record,
+                      dict)
 
 
 def _atom(text):
@@ -90,30 +84,32 @@ def elements(dec, text, parts, url):
     `cells`, {name: CSS}, the text of the first match inside it (None
     when none).
 
+    >>> from .spec import HtmlDecoder
     >>> page = ('<ul><li><a class="j" href="/acme/job/1">Data Engineer</a>'
     ...         '<p class="loc">Durham, NC</p></li></ul>')
-    >>> elements({"select": "a.j[href*='/{slug}/']", "context": ["li"],
-    ...           "cells": {"loc": ".loc"}}, page, {"slug": "acme"}, "https://x.test/acme")
+    >>> dec = HtmlDecoder(kind="html", select="a.j[href*='/{slug}/']", context=["li"],
+    ...                   cells={"loc": ".loc"})
+    >>> elements(dec, page, {"slug": "acme"}, "https://x.test/acme")
     [{'text': 'Data Engineer', 'raw': 'Data Engineer', 'href': '/acme/job/1', 'url': 'https://x.test/acme/job/1', 'context': 'Data Engineer Durham, NC', 'loc': 'Durham, NC'}]
     """
     soup = BeautifulSoup(text, "html.parser")
     found = []
-    for sel in dec["select"] if isinstance(dec["select"], list) else [dec["select"]]:
+    for sel in dec.select:
         found = soup.select(fields.fmt(sel, parts.get))
         if found:
             break
-    base = fields.fmt(dec["base"], parts.get) if dec.get("base") else url
+    base = fields.fmt(dec.base, parts.get) if dec.base else url
     out = []
     for el in found:
         href = el.get("href") or ""
         e = {"text": el.get_text(" ", strip=True), "raw": el.get_text(" "), "href": href,
              "url": urljoin(base, href) if href else ""}
-        if "context" in dec or "cells" in dec:
-            ctx, lines = _context(el, dec.get("context", "parent"))
+        if dec.context is not None or dec.cells:
+            ctx, lines = _context(el, dec.context or "parent")
             e["context"] = ctx.get_text(" ", strip=True) if ctx is not None else ""
             if lines is not None:
                 e["lines"] = lines
-            for name, css in (dec.get("cells") or {}).items():
+            for name, css in dec.cells.items():
                 cell = ctx.select_one(css) if ctx is not None else None
                 e[name] = cell.get_text(" ", strip=True) if cell is not None else None
         out.append(e)
@@ -136,15 +132,15 @@ def _context(el, how):
                 break
             node = node.parent
         return node, lines
-    if isinstance(how, list):
+    if isinstance(how, tuple):
         return next((p for p in (el.find_parent(t) for t in how) if p is not None), None), None
     return el.parent, None
 
 
 def first_path(payload, wanted, kind):
-    """The first value of type `kind` at one of the paths `wanted` (one or
-    a list) in `payload`, or None."""
-    for p in wanted if isinstance(wanted, list) else [wanted]:
+    """The first value of type `kind` at one of the paths `wanted` in
+    `payload`, or None."""
+    for p in wanted:
         v = fields.path(payload, p)
         if isinstance(v, kind):
             return v

@@ -611,7 +611,6 @@ Re-seeing a job anywhere reopens it.
 ```bash
 python run_scraper.py --prune                     # deactivate dead (404) ATS boards
 python run_scraper.py --prune --prune-offmission  # also drop off-mission companies
-python run_scraper.py --score "job description…"  # technical-bar score one posting
 python run_scraper.py --db alt.db ...             # isolated store (concurrent runs)
 python run_scraper.py --where                     # print profile + data paths
 ```
@@ -865,6 +864,8 @@ quietly drop.
 ```bash
 python tools/check_boards.py                 # one request per platform
 python tools/check_boards.py --fail-on-broken
+python tools/check_boards.py --resolved workday   # a spec, each value set or default
+python tools/check_boards.py --promote            # values 3+ specs set alike
 ```
 
 `.github/workflows/boards.yml` runs it nightly and publishes
@@ -927,7 +928,7 @@ identically to a dead one.
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
 | `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |
-| `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec read by one engine |
+| `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec, parsed into the pydantic models in `spec.py` and read by one engine |
 | `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/web search, CareerOneStop/NLx, USAJOBS, Getro network boards |
 | `src/ats/board/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
 | `src/ats/board/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |

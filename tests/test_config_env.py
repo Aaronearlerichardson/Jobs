@@ -1,7 +1,8 @@
-"""Environment handling in src/config/secrets.py (reached as `config.env`).
+"""Environment handling: src/config/secrets.py's Settings (reached as
+`config.SETTINGS`).
 
 A variable that EXISTS but is blank must read as unset. `os.environ.get`
-doesn't do that — it returns "" — which made an exported-but-empty
+doesn't do that -- it returns "" -- which made an exported-but-empty
 `ANTHROPIC_API_KEY` (a CI runner, a shell profile clearing it) look like a
 configured key: every `!= "YOUR_ANTHROPIC_API_KEY_HERE"` check flipped
 true, so the scorers authenticated with nothing instead of falling back.
@@ -9,47 +10,41 @@ true, so the scorers authenticated with nothing instead of falling back.
 
 import pathlib
 
+import pytest
+
 from src import config
+from src.config.secrets import read_env
 
 
-class TestEnvHelper:
-    def test_missing_returns_default(self, monkeypatch):
-        monkeypatch.delenv("SOME_UNSET_VAR", raising=False)
-        assert config.env("SOME_UNSET_VAR", "fallback") == "fallback"
-
-    def test_empty_is_treated_as_unset(self, monkeypatch):
-        monkeypatch.setenv("SOME_VAR", "")
-        assert config.env("SOME_VAR", "fallback") == "fallback"
-
-    def test_whitespace_is_treated_as_unset(self, monkeypatch):
-        monkeypatch.setenv("SOME_VAR", "   ")
-        assert config.env("SOME_VAR", "fallback") == "fallback"
+class TestEnvSettings:
+    @pytest.mark.parametrize("value", ["", "   "])
+    @pytest.mark.parametrize("name, default", [
+        ("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE"),
+        # An empty CLAUDE_MODEL would be sent to the API as the model id.
+        ("CLAUDE_MODEL", "claude-sonnet-5")])
+    def test_blank_is_unset(self, monkeypatch, name, default, value):
+        monkeypatch.setenv(name, value)
+        assert getattr(read_env(), name.lower()) == default
 
     def test_real_value_wins_and_is_trimmed(self, monkeypatch):
-        monkeypatch.setenv("SOME_VAR", "  sk-ant-xyz  ")
-        assert config.env("SOME_VAR", "fallback") == "sk-ant-xyz"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "  sk-ant-xyz  ")
+        monkeypatch.setenv("WEBUI_PORT", " 6000 ")
+        env = read_env()
+        assert (env.anthropic_api_key, env.webui_port) == ("sk-ant-xyz", 6000)
 
-    def test_no_default_yields_empty_string(self, monkeypatch):
-        monkeypatch.delenv("SOME_UNSET_VAR", raising=False)
-        assert config.env("SOME_UNSET_VAR") == ""
-
-
-class TestKeyDetection:
-    """The 'is a key configured?' test used across api.py, webapp
-    routes, and the server banner."""
+    def test_a_bad_value_names_the_variable_not_the_value(self, monkeypatch):
+        monkeypatch.setenv("WEBUI_PORT", "not-a-port")
+        monkeypatch.setenv("CLAUDE_CACHE_TTL", "forever")
+        with pytest.raises(ValueError) as e:
+            read_env()
+        msg = str(e.value)
+        assert "WEBUI_PORT" in msg and "CLAUDE_CACHE_TTL" in msg
+        assert "not-a-port" not in msg
 
     def test_placeholder_means_unconfigured(self):
+        """The 'is a key configured?' test used across api.py, webapp
+        routes, and the server banner."""
         assert config.ANTHROPIC_API_KEY  # never blank: blank -> placeholder
-
-    def test_blank_env_resolves_to_the_placeholder(self, monkeypatch):
-        monkeypatch.setenv("ANTHROPIC_API_KEY", "")
-        assert (config.env("ANTHROPIC_API_KEY", "YOUR_ANTHROPIC_API_KEY_HERE")
-                == "YOUR_ANTHROPIC_API_KEY_HERE")
-
-    def test_model_names_never_resolve_blank(self, monkeypatch):
-        # An empty CLAUDE_MODEL would be sent to the API as the model id.
-        monkeypatch.setenv("CLAUDE_MODEL", "")
-        assert config.env("CLAUDE_MODEL", "claude-sonnet-5") == "claude-sonnet-5"
 
 
 class TestCodeRoot:
@@ -80,12 +75,12 @@ class TestCodeRoot:
     def test_an_in_checkout_data_dir_wins_over_the_per_user_default(
             self, tmp_path, monkeypatch):
         from src.config import paths
-        monkeypatch.delenv("JOBS_DATA_DIR", raising=False)
+        monkeypatch.setattr(paths.SETTINGS, "jobs_data_dir", None)
         (tmp_path / "data").mkdir()
         assert paths._resolve_data_dir(tmp_path) == tmp_path / "data"
 
     def test_no_data_dir_and_no_store_falls_through_to_the_per_user_dir(
             self, tmp_path, monkeypatch):
         from src.config import paths
-        monkeypatch.delenv("JOBS_DATA_DIR", raising=False)
+        monkeypatch.setattr(paths.SETTINGS, "jobs_data_dir", None)
         assert paths._resolve_data_dir(tmp_path) == paths._platform_data_dir()

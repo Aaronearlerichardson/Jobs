@@ -3,7 +3,8 @@
 `BOARDS[ats]` says how a store row names a board, how its listing is read
 and mapped to rows, how one posting is read back, and how a posting's
 closure is judged. The engine that reads it is `src.ats.board` (its
-schema `src.ats.board.spec.validate_spec`); outside them, only
+schema the models in `src.ats.board.spec`, where each key's meaning and
+default are declared); outside them, only
 tests/test_boards_spec.py's NAMED_PLATFORMS may name a platform in `src/`.
 
 The literal is JSON-compatible on purpose (str, int, float, bool, None,
@@ -22,7 +23,7 @@ BOARDS = {
     "greenhouse": {
         "detect": [{"host": "greenhouse.io",
                     "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
-        "canary": {"name": "Databricks", "handle": "databricks", "min_jobs": 1},
+        "canary": {"name": "Databricks", "handle": "databricks"},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -31,7 +32,7 @@ BOARDS = {
         "listing": {
             "url": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=true",
             "probe_url": "https://boards-api.greenhouse.io/v1/boards/{slug}/jobs?content=false",
-            "decoder": {"kind": "json", "entries": "jobs"},
+            "decoder": {"entries": "jobs"},
             "fields": {
                 "id": {"format": "gh_{slug}_{id}"},
                 "title": "title",
@@ -54,7 +55,7 @@ BOARDS = {
     },
     "lever": {
         "detect": [{"host": "lever.co", "re": [r"(?i)jobs\.lever\.co/([a-z0-9_-]+)"]}],
-        "canary": {"name": "Veeva", "handle": "veeva", "min_jobs": 1},
+        "canary": {"name": "Veeva", "handle": "veeva"},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -62,7 +63,6 @@ BOARDS = {
                     "parts": ["slug", "jid"]},
         "listing": {
             "url": "https://api.lever.co/v0/postings/{slug}?mode=json",
-            "decoder": {"kind": "json", "entries": ""},
             "fields": {
                 "id": {"format": "lv_{slug}_{id}"},
                 "title": "text",
@@ -86,7 +86,7 @@ BOARDS = {
     },
     "ashby": {
         "detect": [{"host": "ashbyhq.com", "re": [r"(?i)jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)"]}],
-        "canary": {"name": "Vanta", "handle": "vanta", "min_jobs": 1},
+        "canary": {"name": "Vanta", "handle": "vanta"},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -95,7 +95,7 @@ BOARDS = {
         "listing": {
             "url": "https://api.ashbyhq.com/posting-api/job-board/{slug}",
             # The posting API says "jobs"; only the embed payload says "jobPostings".
-            "decoder": {"kind": "json", "entries": ["jobs", "jobPostings"]},
+            "decoder": {"entries": ["jobs", "jobPostings"]},
             "fields": {
                 "id": {"format": "ashby_{slug}_{id}"},
                 "title": "title",
@@ -116,7 +116,7 @@ BOARDS = {
     },
     "bamboohr": {
         "detect": [{"host": "bamboohr.com", "re": [r"(?i)([a-z0-9-]+)\.bamboohr\.com"]}],
-        "canary": {"name": "EMS Biomedical", "handle": "ems", "min_jobs": 1},
+        "canary": {"name": "EMS Biomedical", "handle": "ems"},
         "sweep": True,
         "prunable": True,
         "eager": True,
@@ -124,7 +124,7 @@ BOARDS = {
                     "parts": ["slug", "jid"]},
         "listing": {
             "url": "https://{slug}.bamboohr.com/careers/list",
-            "decoder": {"kind": "json", "entries": "result"},
+            "decoder": {"entries": "result"},
             "fields": {
                 "_loc": {"join": ["location.city", "location.state"], "sep": ", "},
                 "id": {"format": "bamboo_{slug}_{id}"},
@@ -152,13 +152,13 @@ BOARDS = {
     },
     "rippling": {
         "detect": [{"host": "rippling.com", "re": [r"(?i)ats\.rippling\.com/([a-z0-9][a-z0-9-]+)/jobs"]}],
-        "canary": {"name": "Blackrock Neurotech", "handle": "blackrockneurotech", "min_jobs": 1},
+        "canary": {"name": "Blackrock Neurotech", "handle": "blackrockneurotech"},
         "sweep": True,
         "eager": True,
         "job_ref": {"re": r"rippling\.com/([^/]+)/jobs/([0-9a-f-]{36})", "parts": ["slug", "jid"]},
         "listing": {
             "url": "https://api.rippling.com/platform/api/ats/v1/board/{slug}/jobs",
-            "decoder": {"kind": "json", "entries": ["", "jobs"]},
+            "decoder": {"entries": ["", "jobs"]},
             "fields": {
                 "id": {"format": "rippling_{slug}_{uuid:12}"},
                 "title": "name",
@@ -188,7 +188,7 @@ BOARDS = {
             "url": "https://{slug}.careers.hibob.com/api/job-ad",
             # The API 401s without a same-origin Referer.
             "headers": {"Referer": "https://{slug}.careers.hibob.com/"},
-            "decoder": {"kind": "json", "entries": "jobAdDetails"},
+            "decoder": {"entries": "jobAdDetails"},
             "fields": {
                 "id": {"format": "hibob_{slug}_{id:12}"},
                 "title": "title",
@@ -207,7 +207,7 @@ BOARDS = {
     "workable": {
         "detect": [{"host": "workable.com",
                     "re": [r"(?i)apply\.workable\.com/(?:api/v\d+/widget/accounts/)?([a-z0-9][a-z0-9_-]*)"]}],
-        "canary": {"name": "It Practice", "handle": "practicetek", "min_jobs": 1},
+        "canary": {"name": "It Practice", "handle": "practicetek"},
         # Not in the lightweight sweep (it seeds LOCAL); set "sweep" to add it.
         "eager": True,
         # The tenant-path posting URL names both coordinates; the listing's
@@ -216,7 +216,7 @@ BOARDS = {
                     "parts": ["slug", "jid"]},
         "listing": {
             "url": "https://apply.workable.com/api/v1/widget/accounts/{slug}",
-            "decoder": {"kind": "json", "entries": "jobs"},
+            "decoder": {"entries": "jobs"},
             "fields": {
                 "id": {"format": "workable_{slug}_{shortcode}"},
                 "title": "title",
@@ -248,7 +248,7 @@ BOARDS = {
         "detect": [{"host": "paylocity.com",
                     "re": [r"(?i)recruiting\.paylocity\.com/[Rr]ecruiting/[Jj]obs/All/([0-9a-fA-F-]{36})"]}],
         "canary": {"name": "United Imaging - North America",
-                   "handle": "d527ad39-680d-45fa-9178-38a81898aec2", "min_jobs": 1},
+                   "handle": "d527ad39-680d-45fa-9178-38a81898aec2"},
         "sweep": True,
         "eager": True,
         "job_ref": {"re": r"(?i)recruiting\.paylocity\.com/Recruiting/Jobs/Details/(\d+)",
@@ -286,19 +286,19 @@ BOARDS = {
         "detect": [{"host": "ultipro.com",
                     "re": [r"(?i)recruiting2?\.ultipro\.com/([A-Za-z0-9]+)/JobBoard/([0-9a-fA-F\-]{36})"]}],
         "canary": {"name": "Baylor Genetics",
-                   "handle": "BAY1006BML|0669eed3-5441-4f8e-a7b1-c5df596a4dfe", "min_jobs": 1},
+                   "handle": "BAY1006BML|0669eed3-5441-4f8e-a7b1-c5df596a4dfe"},
         "sweep": True,
         "prunable": True,
         "handle": {"parts": ["code", "guid"],
-                   # A board answers on one of two hosts; the other 404s.
                    "try": {"host": ["recruiting2", "recruiting"]},
-                   "accept": {"status_not": [404]}},
+                   "accept": {"status_not": [404]},
+                   "why": "a board answers on one of two hosts and the other 404s, 2026-09"},
         "listing": {
             "method": "POST",
             "url": "https://{host}.ultipro.com/{code}/JobBoard/{guid}/JobBoardView/LoadSearchResults",
             "json": {"opportunitySearch": {"Top": "$size", "Skip": "$offset", "QueryString": "",
                                            "OrderBy": [], "Filters": []}},
-            "decoder": {"kind": "json", "entries": "opportunities"},
+            "decoder": {"entries": "opportunities"},
             "pager": {"kind": "offset", "size": 100, "pages": 10, "total": "totalCount"},
             "fields": {
                 "id": {"format": "ultipro_{code}_{Id:12}"},
@@ -314,7 +314,6 @@ BOARDS = {
                 "department": "JobCategoryName",
             },
         },
-        "closure": {"via": "page"},
     },
     "adp": {
         # The host names no board: the two ids ride in the query string.
@@ -322,7 +321,7 @@ BOARDS = {
                     "re": [r"(?i)workforcenow\.adp\.com", r"(?i)[?&]cid=([0-9a-f-]{8,})",
                            r"(?i)[?&]ccid=([0-9A-Za-z_]+)"]}],
         "canary": {"name": "TARGAN Inc.",
-                   "handle": "9a6de238-e301-469b-8a29-d35b7eaeebd9|19000101_000001", "min_jobs": 1},
+                   "handle": "9a6de238-e301-469b-8a29-d35b7eaeebd9|19000101_000001"},
         "sweep": True,
         "eager": True,
         "handle": {"parts": ["cid", "ccid"]},
@@ -332,7 +331,7 @@ BOARDS = {
             "url": "https://workforcenow.adp.com/mascsr/default/careercenter/public/events/staffing/v1/job-requisitions",
             "params": {"cid": "{cid}", "ccId": "{ccid}", "locale": "en_US",
                        "$top": "$size", "$skip": "$offset"},
-            "decoder": {"kind": "json", "entries": "jobRequisitions"},
+            "decoder": {"entries": "jobRequisitions"},
             "pager": {"kind": "offset", "size": 50, "pages": 10, "total": "meta.totalNumber"},
             "fields": {
                 "id": {"format": "adp_{cid:8}_{itemID}"},
@@ -353,7 +352,7 @@ BOARDS = {
             "location": "never",
         },
         # A pulled requisition answers 200 with an empty record (2026-09-23).
-        "closure": {"via": "detail", "closed": {"falsy": "requisitionTitle"},
+        "closure": {"closed": {"falsy": "requisitionTitle"},
                     "open": {"truthy": "requisitionTitle"}},
     },
     "smartrecruiters": {
@@ -361,13 +360,13 @@ BOARDS = {
                     "re": [r"(?i)(?:careers|jobs)\.smartrecruiters\.com/([A-Za-z0-9_-]+)"]},
                    {"host": "smartrecruiters.com",
                     "re": [r"(?i)api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/"]}],
-        "canary": {"name": "Eurofins", "handle": "Eurofins", "min_jobs": 1},
+        "canary": {"name": "Eurofins", "handle": "Eurofins"},
         # Not in the lightweight sweep: boards run to thousands of rows.
         "job_ref": {"re": r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", "parts": ["slug", "id"]},
         "listing": {
             "url": "https://api.smartrecruiters.com/v1/companies/{slug}/postings",
             "params": {"limit": "$size", "offset": "$offset"},
-            "decoder": {"kind": "json", "entries": "content"},
+            "decoder": {"entries": "content"},
             "pager": {"kind": "offset", "size": 100, "pages": 10, "total": "totalFound"},
             "fields": {
                 "id": {"format": "sr_{slug}_{id}"},
@@ -411,16 +410,15 @@ BOARDS = {
                     "transform": ["lower", "int", None],
                     "blocklist": ["wday", "cxs", "api", "static", "assets", "login"]}],
         "canary": {"name": "ThermoFisher Scientific IT",
-                   "handle": "thermofisher|5|ThermoFisherCareers", "min_jobs": 1},
+                   "handle": "thermofisher|5|ThermoFisherCareers"},
         # Not in the lightweight sweep: boards run to thousands of rows and
         # are pulled scoped to the locality.
         "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
                    "parts": ["tenant", "pod", "site"],
-                   # The CXS path names the tenant's internal id: for a
-                   # hyphenated host usually the underscore form (the
-                   # hyphen form 422s).
                    "try": {"cxs_tenant": ["{tenant}", "{tenant|underscore}"]},
-                   "accept": {"status": [200], "total": True}},
+                   "accept": {"status": [200], "total": True},
+                   "why": "a hyphenated tenant's CXS path takes the underscore form; "
+                          "the hyphen form 422s, 2026-08"},
         # The URL's site slot can hold a locale; the company row's wins.
         "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+)\.wd(\d+)\.myworkdayjobs\.com"
                           r"(?:/[a-z]{2}(?:-[A-Za-z]{2})?)?/([^/?#]+)(/job/[^?#]*)",
@@ -431,11 +429,12 @@ BOARDS = {
             "json": {"appliedFacets": "$facets", "searchText": "$search_text",
                      "limit": "$size", "offset": "$offset"},
             "headers": {"Content-Type": "application/json"},
-            "decoder": {"kind": "json", "entries": "jobPostings"},
-            # Only page 0 reports the total. The API serves 2000 rows at
-            # most and reports a bigger board as 2000.
+            "decoder": {"entries": "jobPostings"},
+            # Only page 0 reports the total.
             "pager": {"kind": "offset", "size": 20, "pages": 60, "total": "total",
-                      "ceiling": 2000},
+                      "ceiling": 2000,
+                      "why": "the API serves 2000 rows at most and reports a bigger "
+                             "board as 2000, 2026-09"},
             "scope": {"kind": "facets", "facets": "facets", "param": "facetParameter",
                       "param_re": "(?i)location|country|region|city|state",
                       "values": "values", "id": "id", "label": "descriptor"},
@@ -454,10 +453,11 @@ BOARDS = {
                 "department": None,
             },
         },
-        # A multi-site posting lists as "<N> Locations"; its path names one site.
+        # A posting's path names one of its sites (`free`).
         "rescue": {"unknown": r"(?i)^\s*\d+\s+locations?\s*$", "cap": 150, "cache_days": 3,
                    "free": {"of": {"of": "externalPath", "transform": "group:^/job/([^/]+)/"},
-                            "transform": "dash_space"}},
+                            "transform": "dash_space"},
+                   "why": 'a multi-site posting lists as "N Locations", naming no place, 2026-08'},
         "detail": {
             "url": "https://{tenant}.wd{pod}.myworkdayjobs.com/wday/cxs/{cxs_tenant}/{site}{path}",
             "record": "jobPostingInfo",
@@ -468,11 +468,11 @@ BOARDS = {
                                 "when": {"any": [{"eq": ["remoteType", "Remote"]},
                                                  {"eq": ["remoteType", "Fully Remote"]}]}},
             },
-            "location": "if_unknown",
         },
-        # A pulled posting's record answers 200 without a title or a body.
         "closure": {"open": {"any": [{"truthy": "jobDescription"}, {"truthy": "title"}]},
-                    "unmatched": "no posting record"},
+                    "unmatched": "no posting record",
+                    "why": "a pulled posting's record answers 200 without a title or a body, "
+                           "2026-08"},
     },
     "infor": {
         # A board URL without the org id names no board. The /hcm/Jobs path
@@ -481,8 +481,7 @@ BOARDS = {
                     "re": [r"(?i)([a-z0-9-]+\.inforcloudsuite\.com)/hcm/Jobs\b",
                            r"(?i)csk\.HROrganization=([A-Za-z0-9_-]+)"],
                     "transform": ["lower", None]}],
-        "canary": {"name": "UNC Health", "handle": "css-unchealthunc-prd.inforcloudsuite.com|9999",
-                   "min_jobs": 1},
+        "canary": {"name": "UNC Health", "handle": "css-unchealthunc-prd.inforcloudsuite.com|9999"},
         "handle": {"parts": ["host", "org"]},
         # The posting key is a triple (org, requisition, posting revision),
         # URL-encoded into the path; the parts are named after the listing
@@ -496,7 +495,7 @@ BOARDS = {
                        "pagepanel": "JobsHomePage.Jobs.Jobs",
                        "csk.JobBoard": "EXTERNAL", "csk.HROrganization": "{org}"},
             # Every field is wrapped: {"value": ..., "size": ..., ...}.
-            "decoder": {"kind": "json", "entries": "dataViewSet.data[].fields", "values": "value"},
+            "decoder": {"entries": "dataViewSet.data[].fields", "values": "value"},
             # The next-page URL carries opaque record keys: rebuilt by hand
             # it silently re-serves page 1, so it is followed verbatim.
             "pager": {"kind": "cursor", "size": 500, "pages": 40,
@@ -522,7 +521,7 @@ BOARDS = {
                    "%28{org}%2C{JobRequisition}%2C{JobPosting}%29.JobPostingDisplay"
                    "?pageop=load&pagesize=1&dependentForm=true"
                    "&csk.JobBoard=EXTERNAL&csk.HROrganization={org}",
-            "decoder": {"kind": "json", "values": "value"},
+            "decoder": {"values": "value"},
             "fields": {
                 "description": {"of": "fields._op_PositionDescription_spc_translation_cp_",
                                 "transform": "html_text"},
@@ -531,7 +530,6 @@ BOARDS = {
                                           "_spc_translation_cp_", "transform": "before:|"},
                              "transform": "colon_location"},
             },
-            "location": "if_unknown",
         },
         # A pulled posting answers 200 either way: its record gone, or kept
         # with a posting-end date in the past (2026-09-21, live).
@@ -545,11 +543,10 @@ BOARDS = {
     },
     "jazzhr": {
         "detect": [{"host": "applytojob.com", "re": [r"(?i)([a-z0-9-]+)\.applytojob\.com"]}],
-        "canary": {"name": "Cyclotron Research Centre", "handle": "cyclotroninc", "min_jobs": 1},
+        "canary": {"name": "Cyclotron Research Centre", "handle": "cyclotroninc"},
         "sweep": True,
         "job_ref": {"re": r"(?i)^(https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)[^?#]*)",
                     "parts": ["link", "slug", "jid"]},
-        # The index links each posting's page and names nothing else.
         "listing": {
             "url": "https://{slug}.applytojob.com/",
             "decoder": {"kind": "html", "select": "a[href*='/apply/']"},
@@ -560,10 +557,11 @@ BOARDS = {
                 "department": None,
             },
         },
-        # So every row is its posting page's JSON-LD, 60 pages a pull.
-        "rescue": {"when": "always", "unknown": "^$", "cap": 60, "cache_days": 0,
+        # Every row is its posting page's JSON-LD, 60 pages a pull.
+        "rescue": {"when": "always", "unknown": "^$", "cap": 60,
                    "fields": ["id", "title", "url", "location", "description",
-                              "posted_at", "remote_hint"]},
+                              "posted_at", "remote_hint"],
+                   "why": "the index links each posting's page and names nothing else, 2026-06"},
         "detail": {
             "url": "{link}",
             "decoder": {"kind": "jsonld"},
@@ -577,12 +575,13 @@ BOARDS = {
                 "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
             },
         },
-        # The slug-free apply URL answers 410 once a posting is pulled.
-        "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}"},
+        "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}",
+                    "why": "a pulled posting's page still answers 200, its slug-free apply "
+                           "URL 410, 2026-09"},
     },
     "jobvite": {
         "detect": [{"host": "jobvite.com", "re": [r"(?i)jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)"]}],
-        "canary": {"name": "Neogenomics", "handle": "neogenomics", "min_jobs": 1},
+        "canary": {"name": "Neogenomics", "handle": "neogenomics"},
         "sweep": True,
         "eager": True,
         "handle": {"parts": ["tenant"]},
@@ -608,7 +607,9 @@ BOARDS = {
             },
             # Every row on one page; some tenants replace it with a landing
             # page listing nothing, which is why the search goes first.
-            {"url": "https://jobs.jobvite.com/{tenant|lower}/jobs", "params": None, "pager": None},
+            {"url": "https://jobs.jobvite.com/{tenant|lower}/jobs", "params": None, "pager": None,
+             "why": "a tenant whose search lists nothing may list every row here, "
+                    "2026-09 (inferred)"},
         ],
         "detail": {
             "url": "https://jobs.jobvite.com/{tenant}/job/{jid}",
@@ -624,8 +625,7 @@ BOARDS = {
     },
     "kula": {
         "detect": [{"host": "kula.ai", "re": [r"(?i)careers\.kula\.ai/([a-z0-9_-]+)"]}],
-        "canary": {"name": "Precision Neuroscience", "handle": "precision-neuroscience",
-                   "min_jobs": 1},
+        "canary": {"name": "Precision Neuroscience", "handle": "precision-neuroscience"},
         "sweep": True,
         "listing": {
             "url": "https://careers.kula.ai/{slug}",
@@ -647,7 +647,7 @@ BOARDS = {
         "detect": [{"host": "successfactors.",
                     "re": [r"(?i)([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)"]},
                    {"host": "sapsf."}],
-        "canary": {"name": "Duke University", "handle": "https://careers.duke.edu", "min_jobs": 1},
+        "canary": {"name": "Duke University", "handle": "https://careers.duke.edu"},
         # The board is the careers site itself, keyed on its URL.
         "handle": {"columns": ["careers_url"], "parts": ["base"]},
         "listing": {
@@ -688,7 +688,7 @@ BOARDS = {
     "icims": {
         "detect": [{"host": "icims.com", "re": [r"(?i)([a-z0-9-]+)\.icims\.com"]}],
         "canary": {"name": "FUJIFILM Healthcare Americas Corporation",
-                   "handle": "uscareers-fujifilm", "min_jobs": 1},
+                   "handle": "uscareers-fujifilm"},
         # A row naming no place is kept by a location filter its title passes.
         "unlocated": "title",
         "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
@@ -704,8 +704,9 @@ BOARDS = {
                 # (/jobs/intro, /jobs/login, the pager's), which name no posting.
                 "decoder": {"kind": "html", "select": "a.iCIMS_Anchor, a[href*='/jobs/']",
                             "context": "parent"},
-                # The first page takes no page number; tenants serve 20 or 50 a page.
-                "pager": {"kind": "page", "pages": 8, "bare_first": True},
+                # Tenants serve 20 or 50 a page.
+                "pager": {"kind": "page", "pages": 8, "bare_first": True,
+                          "why": "the first search page takes no page number, 2026-08"},
                 # A free-text place term some tenants answer with "No Results
                 # Found": the whole board is read then.
                 "scope": {"kind": "param", "params": {"searchLocation": "$locality_abbr"},
@@ -730,12 +731,13 @@ BOARDS = {
                     "department": None,
                 },
             },
-            # A JS-shell tenant lists every live posting in its sitemap, titled
-            # by the URL slug; some tenants' WAF 403s it.
+            # Titled by the URL slug; some tenants' WAF 403s it.
             {
                 "url": "https://{slug}.icims.com/sitemap.xml",
                 "params": None,
                 "pager": None,
+                "why": "a JS-shell tenant's search page lists nothing, its sitemap every "
+                       "live posting, 2026-08",
                 "decoder": {"kind": "html", "select": "loc"},
                 "fields": {
                     "_jid": {"of": "text", "transform": "group:/jobs/(\\d+)/[^/]+/job"},
@@ -752,10 +754,10 @@ BOARDS = {
                 },
             },
         ],
-        # Each posting's page names its place in JSON-LD (the listing seldom
-        # does); 150 reads a pull, a found place kept a week.
+        # From its JSON-LD; 150 reads a pull, a found place kept a week.
         "rescue": {"when": "always", "unknown": "^$", "cap": 150, "cache_days": 7,
-                   "fields": ["location", "description"]},
+                   "fields": ["location", "description"],
+                   "why": "the listing seldom names a place; each posting's page does, 2026-08"},
         "detail": {
             "url": "{link}?in_iframe=1",
             "headers": {"User-Agent": "$plain_user_agent"},
@@ -771,7 +773,7 @@ BOARDS = {
         # is the tenant's origin.
         "detect": [{"host": "peopleadmin.com", "re": [r"(?i)([a-z0-9-]+)\.peopleadmin\.com"],
                     "careers_url": "https://{slug}.peopleadmin.com"}],
-        "canary": {"name": "UNC Chapel Hill", "handle": "unc.peopleadmin.com", "min_jobs": 1},
+        "canary": {"name": "UNC Chapel Hill", "handle": "unc.peopleadmin.com"},
         # The board is the tenant's host, keyed on any URL on it.
         "handle": {"columns": ["careers_url"], "parts": ["base"]},
         # A tenant is one campus: a posting naming no place is on it.
@@ -803,14 +805,14 @@ BOARDS = {
                     "department": "author.name",
                 },
             },
-            # The tenant's default saved search, when the whole board lists nothing.
-            {"url": "https://{base|host}/postings/search.atom"},
+            {"url": "https://{base|host}/postings/search.atom",
+             "why": "a tenant whose whole-board feed lists nothing may serve its "
+                    "default saved search, 2026-09 (inferred)"},
         ],
         # No detail: a posting's page is under the host's robots disallow.
-        "closure": {"via": "page"},
     },
     "custom": {
-        "canary": {"name": "Microsoft", "handle": "https://microsoft.ai/careers/", "min_jobs": 1},
+        "canary": {"name": "Microsoft", "handle": "https://microsoft.ai/careers/"},
         "sweep": True,
         # A self-hosted careers page, read by the careers-page reader
         # (src.ats.board.custom).
@@ -829,15 +831,14 @@ BOARDS = {
         },
     },
     "wpjson": {
-        "canary": {"name": "restor3d", "handle": "https://www.restor3d.com/company/careers/",
-                   "min_jobs": 1},
+        "canary": {"name": "restor3d", "handle": "https://www.restor3d.com/company/careers/"},
         "sweep": True,
         # A WordPress theme's careers route, keyed on any page of the site.
         "handle": {"columns": ["careers_url"], "parts": ["site"]},
         "listing": {
             "url": "{site|origin}/wp-json/post-filters-archive/get-posts",
             "params": {"post_type": "career", "posts_per_page": "$size", "paged": "$page"},
-            "decoder": {"kind": "json", "entries": "posts"},
+            "decoder": {"entries": "posts"},
             # Every page declares the last.
             "pager": {"kind": "page", "size": 100, "pages": 50, "start": 1,
                       "declared": {"of": "max_num_pages", "transform": "int", "default": 1}},
@@ -868,7 +869,7 @@ BOARDS = {
         # The tenant's own site is the board, so no vendor host names it:
         # every page embeds its widget API origin, the handle.
         "detect": [{"re": [r'(?i)"widgetApiEndpoint"\s*:\s*"https?://([a-z0-9.-]+)/widgets"']}],
-        "canary": {"name": "PPD", "handle": "jobs.thermofisher.com", "min_jobs": 1},
+        "canary": {"name": "PPD", "handle": "jobs.thermofisher.com"},
         # The listing lives under a locale prefix only the board's root
         # redirect names (/us/en, /global/en, ...).
         "handle": {"follow": {"base": "{slug}"}},
@@ -881,11 +882,11 @@ BOARDS = {
             "params": {"from": "$offset", "size": "$size"},
             "decoder": {"kind": "json_in_html", "regex": r"phApp\.ddo\s*=\s*",
                         "entries": "eagerLoadRefineSearch.data.jobs"},
-            # The row order is unstable between requests: half-page overlap
-            # catches a row shifting across a page boundary. The server caps
-            # size at 500.
+            # The server caps size at 500.
             "pager": {"kind": "overlap", "size": 500, "step": 250, "pages": 40,
-                      "total": "eagerLoadRefineSearch.totalHits"},
+                      "total": "eagerLoadRefineSearch.totalHits",
+                      "why": "row order shifts between requests, carrying rows across page "
+                             "boundaries, 2026-09"},
             "fields": {
                 "_req": {"first": ["reqId", "jobId"]},
                 "_key": {"format": "{slug}", "transform": "host_key"},
@@ -937,6 +938,10 @@ BOARDS = {
 #: The spec that reads a careers page itself, no ATS signature on it: the
 #: sniffer's last resort, a board named by its URL alone.
 CAREERS_PAGE_ATS = "custom"
+
+#: The store columns naming a board whose spec sets no `handle.columns`:
+#: the default of src.ats.board.spec.Handle, and the store's.
+DEFAULT_HANDLE_COLUMNS = ("slug",)
 
 #: Job aggregators: hosts listing other employers' postings. A careers page
 #: never names one as its own board, and they bot-gate anonymous reads, so

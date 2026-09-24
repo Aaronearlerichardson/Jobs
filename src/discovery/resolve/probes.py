@@ -508,7 +508,7 @@ def probe_company(name, try_workday=True):
     """
     hit = None
     for slug in slug_guesses(name):
-        for ats in (b.name for b in BOARDS.values() if b.spec.get("guess")):
+        for ats in (b.name for b in BOARDS.values() if b.spec.guess):
             ok, count = board_for(ats).probe(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,

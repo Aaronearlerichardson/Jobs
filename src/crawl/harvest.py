@@ -69,7 +69,7 @@ _log = logging.getLogger(__name__)
 
 # Boards in flight at once. Each board is one host, and a board's own
 # requests are serial, so this is also the per-host politeness bound.
-DEFAULT_WORKERS = worker_count("HARVEST_WORKERS")
+DEFAULT_WORKERS = worker_count("harvest_workers")
 # Hydration is a detail GET per posting, config.HYDRATE_DELAY_S apart and
 # at most config.HYDRATE_CAP_PER_RUN per board per run: one host cut the
 # crawler off after 151 detail GETs at two per second (2026-09-10), and

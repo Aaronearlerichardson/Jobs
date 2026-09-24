@@ -5,9 +5,9 @@ modules — the technical-title regex and the exclude tables — resolved
 per-track from configuration instead:
 
   * `is_technical_role(title, t)` compiles `t["tech_title_regex"]`
-    (profile.toml [tracks.*], engine defaults in src/config/tracks.py) — the cheap
-    positive gate that keeps nurses/sales/admin titles away from any LLM
-    scoring spend.
+    (profile.toml [tracks.*], engine defaults in
+    src/config/profile_schema.py): the cheap positive gate that keeps
+    nurses/sales/admin titles away from any LLM scoring spend.
   * `exclude_reason(..., track_id=...)` reads the [exclude.<track_id>]
     tables (config.EXCLUDE_BY_TRACK) at call time — no hardcoded track key,
     so any user-defined track gets its own exclusion vocabulary. An absent

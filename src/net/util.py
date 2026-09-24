@@ -80,20 +80,20 @@ def locality_abbr():
     return (config.LOCALITY_STATE_SUFFIX or [""])[0].upper()
 
 
-def worker_count(env_var, floor=4):
-    """Default thread-pool size: n_cpus - 1, overridable via `env_var`.
+def worker_count(setting, floor=4):
+    """Thread-pool size: config.SETTINGS.<setting> (the CRAWLER_WORKERS,
+    DISCOVERY_WORKERS or HARVEST_WORKERS variable) when set, else
+    n_cpus - 1 and at least `floor`.
 
     Discovery and crawl fetching are network-I/O-bound (profiling a 677-
     company discovery run showed ~95% of wall time in socket/SSL reads and
     the headless browser, with the CPU near 10%). So threads mostly sit
     blocked on the network, and n_cpus-1 is a floor, not a ceiling — set
-    the env var higher (e.g. 32) to push more concurrent requests and
+    the variable higher (e.g. 32) to push more concurrent requests and
     saturate the link. Adding CPU cores does NOT raise throughput here.
     """
-    v = os.environ.get(env_var, "").strip()
-    if v.isdigit() and int(v) > 0:
-        return int(v)
-    return max((os.cpu_count() or 9) - 1, floor)
+    return (getattr(config.SETTINGS, setting)
+            or max((os.cpu_count() or 9) - 1, floor))
 
 
 _TAG_RE    = re.compile(r"<[^>]+>")

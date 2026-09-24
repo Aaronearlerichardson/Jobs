@@ -10,9 +10,12 @@ requests rather than roster rows -- which is why the shape filters
 (_looks_like_company, _is_nav_noise) run first.
 """
 
+from __future__ import annotations
+
 import re
 
 from src import config
+from src.claude.reply import Reply
 from src.match.names import junk_name_reason, name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
@@ -222,6 +225,12 @@ def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     return sorted(names)
 
 
+class CompanyNames(Reply):
+    """Employer names an LLM listed: the brainstorm below, and
+    paste_ingest.extract_names_llm."""
+    companies: list[str]
+
+
 def brainstorm_company_names(n=None):
     """One LLM call listing REAL employers matching the profile's region +
     domain — a stage-1 name source reaching companies that directory sites
@@ -234,8 +243,7 @@ def brainstorm_company_names(n=None):
     profile.toml [discovery] brainstorm_names tunes the count (0 disables).
     Without an API key it quietly contributes nothing."""
     if n is None:
-        cfg = getattr(config, "DISCOVERY_BRAINSTORM_NAMES", None)
-        n = 50 if cfg is None else int(cfg)   # explicit 0 means "off"
+        n = config.DISCOVERY_BRAINSTORM_NAMES
     if n <= 0:
         return []
     region = ", ".join((config.LOCALITY_SUBSTRINGS or [])[:6]) or "the target region"
@@ -245,8 +253,7 @@ def brainstorm_company_names(n=None):
     if cached is not None:
         return cached
     from src.claude.api import call_claude_json
-    system = ("You help maintain a job-search company roster. "
-              "Return ONLY valid JSON. No markdown, no commentary.")
+    system = "You help maintain a job-search company roster."
     user = (
         f"List up to {n} REAL employers likely to have offices, labs, or "
         f"significant operations in or near: {region}.\n"
@@ -254,11 +261,9 @@ def brainstorm_company_names(n=None):
         "Mix sizes and kinds: large employers, mid-size companies, startups, "
         "CROs, diagnostics and device makers, health-system technology arms, "
         "university spinouts. Use official company names only — no "
-        "descriptions, no locations, no commentary.\n"
-        'Return ONLY: {"companies": ["Name", "Name", ...]}')
-    r = call_claude_json(system, user, max_tokens=1600)
-    names = [str(x).strip() for x in (r.get("companies") or []) if str(x).strip()]
-    names = [x for x in names if 2 < len(x) < 60][:n]
+        "descriptions, no locations, no commentary.")
+    r = call_claude_json(system, user, max_tokens=1600, reply=CompanyNames)
+    names = [x for x in (r.companies if r else []) if 2 < len(x) < 60][:n]
     if names:
         ddg.cache_put(key, names)
     return names

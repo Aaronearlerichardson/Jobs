@@ -22,8 +22,8 @@ Wired into:
     `score_resume_fit(title, desc, location=...)` here for the FitResult
     (the rubric scores the profile, not résumé text).
   - src/config/profile.py:  loads the optional `[fit]` profile block (weights / gate
-    penalties / domain ladder / stack / region); omit it and the defaults
-    below apply.
+    penalties / domain ladder / stack / region); omit it and the schema's
+    defaults (src/config/profile_schema.py) apply.
   - store/__init__.py :  jobs table carries one column per axis (fit_domain/function/
     stack/seniority) plus fit_gates; FitResult.as_columns() produces them and
     store.update_job_scores() writes them. resume_fit_score stays the combined
@@ -36,6 +36,11 @@ import math
 import re
 from contextlib import closing
 from dataclasses import dataclass, field
+from typing import Annotated, Literal
+
+from pydantic import BeforeValidator
+
+from src.claude.reply import Reply, Unit, choice
 
 try:
     from src import config
@@ -61,7 +66,9 @@ except Exception:                      # no profile loaded
 
 
 # --------------------------------------------------------------------------- #
-#  Rubric taxonomy (defaults; override any of these from profile.toml [fit]).  #
+#  Rubric taxonomy. The profile's weights and penalties are config.FIT_*;      #
+#  these copies of the schema defaults serve the config-free calibration       #
+#  import (tests/test_fit.py holds them equal to the schema's).                #
 #  Kept to FOUR axes on purpose: averaging more axes regresses every role to   #
 #  the mean and quietly brings back the "everything looks similar" problem.    #
 #  Let the gates, not more axes, create the spread.                            #
@@ -99,16 +106,6 @@ DEFAULT_GATE_PENALTY = {
 }
 
 GATES = tuple(DEFAULT_GATE_PENALTY)
-
-
-def _effective_penalties():
-    """DEFAULT_GATE_PENALTY overlaid with any profile.toml [fit] gate_penalty
-    entries. MERGED, not replaced: a profile written before a gate existed
-    (e.g. one listing only geo/embedded/level/phd) must not silently disable
-    the newer gates by omission — penalties.get(gate, 1.0) would neutralize
-    them."""
-    override = (getattr(config, "FIT_GATE_PENALTY", None) or {}) if config else {}
-    return {**DEFAULT_GATE_PENALTY, **override}
 
 # The domain ladder, stack vocabulary, and region are the parts of the rubric
 # that are ABOUT YOU, so there is no honest hard-coded default for them. Set
@@ -317,8 +314,7 @@ def _disposition_block() -> str:
     (0 disables); silently empty when the store is unavailable."""
     global _DISPO_BLOCK_CACHE
     if _DISPO_BLOCK_CACHE is None:
-        n = getattr(config, "FIT_DISPOSITION_EXAMPLES", None) if config else 0
-        n = 3 if n is None else int(n)   # NOT _cfg(): 0 must mean "off"
+        n = config.FIT_DISPOSITION_EXAMPLES if config else 0
         block = ""
         if n > 0:
             try:
@@ -392,8 +388,7 @@ Judge from the job's ACTUAL responsibilities in the description, not its title.
 Return ONLY a JSON object with exactly:
 - "domain", "function", "stack", "seniority": numbers 0.00-1.00.
 - "gates": array of the gate names that are TRUE (empty array if none).
-- "reason": one short phrase (<= 14 words) naming the deciding factor.
-Return ONLY valid JSON. No markdown, no preamble."""
+- "reason": one short phrase (<= 14 words) naming the deciding factor."""
 
 
 def build_verify_prompt() -> str:
@@ -423,10 +418,60 @@ Return ONLY a JSON object with exactly:
   scale as a first-pass screen — a role squarely in the candidate's lane
   scores HIGH on those axes; gaps belong in "candidate_gaps" and "gates",
   never as blanket axis deductions.
-- "gates": ARRAY of the gate names that are TRUE (empty array if none) —
-  never an object of booleans.
-- "reason": one phrase, <= 14 words, naming the deciding factor.
-Return ONLY valid JSON. No markdown, no preamble."""
+- "gates": ARRAY of the gate names that are TRUE (empty array if none).
+- "reason": one phrase, <= 14 words, naming the deciding factor."""
+
+
+def _parse_gates(raw):
+    """The known gates a `gates` value trips, lower-cased: an array's
+    names, or a {gate: bool} object's truthy keys.
+
+    >>> _parse_gates(["geo", "vibes"]), _parse_gates({"Geo": 1, "phd": False})
+    (['geo'], ['geo'])
+
+    Notes:
+        Iterating the object as-is yields EVERY key: the first --verify-top
+        run marked all five gates on all 30 finalists that way.
+    """
+    if isinstance(raw, dict):
+        raw = [g for g, v in raw.items() if v]
+    if isinstance(raw, (list, tuple)):
+        return [n for g in raw if isinstance(g, str) and (n := g.lower()) in GATES]
+    return []
+
+
+# The schema tells the API the gate names; _parse_gates keeps the dict
+# tolerance for the legacy tool-call path, where nothing enforces it.
+Gates = Annotated[list[Literal[GATES]], BeforeValidator(_parse_gates)]
+
+SEAT_TYPES = ("ic-engineering", "ic-science", "management",
+              "program-product", "sales-field", "support-ops")
+
+
+class FitReply(Reply):
+    """The screen's answer: four axes, the tripped gates, and why."""
+    domain: Unit
+    function: Unit
+    stack: Unit
+    seniority: Unit
+    gates: Gates
+    reason: str
+
+    def axes(self):
+        return self.model_dump(include=set(AXES))
+
+
+class _Requirements(Reply):
+    years_required: float | None
+    seat_type: choice(*SEAT_TYPES)
+    must_haves: list[str]
+    candidate_gaps: list[str]
+
+
+class VerifyReply(FitReply, _Requirements):
+    """The deep pass's answer. The base order puts the requirements first,
+    where build_verify_prompt asks for them (pinned by
+    tests/test_fit.py::TestPrompts::test_verify_prompt_extracts_requirements)."""
 
 
 # A body shorter than this is a stub (a stored "Posted N days ago" string, a
@@ -678,12 +723,13 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
               f"for {title!r} - unscored (check the fetcher/hydration path)")
         return FitResult(score=None, reason="no description; unscored")
     user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
-    r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens)
-    if not r or "function" not in r:
+    r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens,
+                         reply=FitReply)
+    if r is None:
         # A call that never left the process -- no key, or the breaker
         # tripped on an expired one / an exhausted balance -- is the
         # SCORER being down, not a verdict on this posting, and both
-        # return {} exactly like a refusal does. Naming them apart is
+        # return None exactly like a refusal does. Naming them apart is
         # what keeps ops.maintenance's retry marker honest: it holds a
         # "refused" row for UNSCORED_RETRY_DAYS, so one billing hiccup
         # would otherwise park a whole backlog for a month (see
@@ -691,18 +737,16 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
         if api_disabled() or not have_api_key():
             return FitResult(score=None, reason="scorer unavailable")
         return FitResult(score=None, reason="unscored")
-    axes = {a: clamp_unit(r.get(a)) for a in AXES}
-    gates = _parse_gates(r.get("gates"))
+    axes = r.axes()
+    gates = list(r.gates)
     # Regex backstop on the FULL pre-clip text (clipping could elide it).
     if _clearance_required(description) and "clearance" not in gates:
         gates.append("clearance")
     # ...and its strip side, on the same full text plus the stored location.
     gates = apply_gate_overrides(gates, location=location,
                                  description=description)
-    weights = getattr(config, "FIT_WEIGHTS", None)
-    score = combine(axes, gates, weights, _effective_penalties())
-    return FitResult(score=score, axes=axes, gates=gates,
-                     reason=str(r.get("reason", "")).strip(),
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
+    return FitResult(score=score, axes=axes, gates=gates, reason=r.reason,
                      model=_cfg("CLAUDE_MODEL", ""))
 
 
@@ -719,10 +763,11 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
 #     level outcomes into the one generic "unscored" reason: a safety
 #     refusal (stop_reason=refusal, no text block at all), adaptive
 #     thinking exhausting max_tokens before any text lands
-#     (stop_reason=max_tokens), a non-JSON reply, and a non-fatal HTTP
-#     error each print their own line there and then return {} the same
-#     way. That collapse happens in a module this one does not own, so
-#     nothing on the FitResult can name the exact HTTP-level cause. It
+#     (stop_reason=max_tokens), a non-JSON reply, a reply failing the
+#     schema, and a non-fatal HTTP error each print their own line there
+#     and then return None the same way. That collapse happens in a
+#     module this one does not own, so nothing on the FitResult can name
+#     the exact HTTP-level cause. It
 #     doesn't need to: a caller that already guarantees a real body before
 #     calling in (score_resume_fit's own MIN_DESC_CHARS check ahead of the
 #     API call means the "no description" branch can't ALSO fire) knows
@@ -797,30 +842,28 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     # cover thinking + the JSON on 5-family models, hence the 3000 default.
     vmodel = verify_model()
     r = call_claude_json(build_verify_prompt(), user, max_tokens=max_tokens,
-                         model=vmodel, thinking=True)
-    if not r or "function" not in r:
+                         model=vmodel, thinking=True, reply=VerifyReply)
+    if r is None:
         return FitResult(score=None, reason="unverified")
-    axes = {a: clamp_unit(r.get(a)) for a in AXES}
-    gates = _parse_gates(r.get("gates"))
-    seat = str(r.get("seat_type") or "").strip().lower()
+    axes = r.axes()
+    gates = list(r.gates)
+    seat = r.seat_type
     if seat in ("management", "program-product") and "management" not in gates:
         gates.append("management")
     if _clearance_required(description) and "clearance" not in gates:
         gates.append("clearance")
     gates = apply_gate_overrides(gates, location=location,
                                  description=description)
-    score = combine(axes, gates, getattr(config, "FIT_WEIGHTS", None),
-                    _effective_penalties())
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
     bits = []
-    yrs = r.get("years_required")
-    if yrs:
-        bits.append(f"{yrs}+yrs")
+    if r.years_required:
+        bits.append(f"{r.years_required:g}+yrs")
     if seat:
         bits.append(seat)
-    gaps = [str(g).strip() for g in (r.get("candidate_gaps") or []) if str(g).strip()]
+    gaps = [g for g in r.candidate_gaps if g]
     if gaps:
         bits.append("gaps: " + "; ".join(gaps[:3]))
-    reason = f"{DEEP_MARKER} " + str(r.get("reason", "")).strip()
+    reason = f"{DEEP_MARKER} {r.reason}"
     if bits:
         reason += f" [{' | '.join(bits)}]"
     return FitResult(score=score, axes=axes, gates=gates, reason=reason,
@@ -854,42 +897,6 @@ def verify_model() -> str:
     later run can tell rows verified by THIS model from rows verified by
     an older one (or by nobody: fit_model is NULL on pre-column rows)."""
     return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
-
-
-def clamp_unit(x, default=0.0):
-    """A model's numeric field as a float in [0, 1], or `default` when it is
-    missing or not a number.
-
-    Three copies of this try/float/clamp/except had grown -- the two axis
-    readers here and the two scorers in src/claude/api.py -- differing only
-    in what they fall back to, so the fallback is the parameter:
-
-    >>> clamp_unit("0.5"), clamp_unit(1.7), clamp_unit(-2)
-    (0.5, 1.0, 0.0)
-    >>> clamp_unit(None), clamp_unit("abc", default=None)
-    (0.0, None)
-    """
-    try:
-        return max(0.0, min(1.0, float(x)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_gates(raw):
-    """Tripped-gate names from the model's `gates` field, defensively.
-
-    The contract is an ARRAY of the gate names that are TRUE — but a model
-    can plausibly return a {gate: bool} OBJECT instead (the rubric defines
-    each gate as '- \"x\": true if ...'). Iterating that dict yields its
-    KEYS, i.e. EVERY gate name, truthy or not — which is exactly how the
-    first --verify-top run marked all five gates on all 30 finalists and
-    crushed the whole top list to ~0.1x. Accept both shapes; on a dict,
-    keep only truthy values."""
-    if isinstance(raw, dict):
-        return [g for g, v in raw.items() if v and g in GATES]
-    if isinstance(raw, (list, tuple)):
-        return [g for g in raw if g in GATES]
-    return []
 
 
 # --------------------------------------------------------------------------- #

@@ -1,8 +1,8 @@
 """Where the code, the install and YOUR data live.
 
-A leaf: imports nothing from the repo, so anything (a bootstrap, a log
-opener, a build script) can learn the data directory without pulling in
-the profile, tags or the track tables.
+Imports only config.secrets (for the environment), so anything (a
+bootstrap, a log opener, a build script) can learn the data directory
+without pulling in the profile, tags or the track tables.
 
 Three roots:
   SCRIPT_DIR — where the CODE lives (the checkout root; the exe's dir
@@ -18,21 +18,16 @@ Three roots:
                `git pull`, a re-clone, or deleting the checkout.
 """
 
-import os
 import sys
 from pathlib import Path
+
+from .secrets import SETTINGS
 
 APP_NAME = "JobCrawler"
 
 # Current DB filename, then the pre-rename one — probed when deciding whether
 # a directory is an existing install.
 _DB_NAMES = ("jobs.db", "local_tech.db")
-
-
-def _env(name):
-    """A non-blank env var, else "" (the same blank-is-unset rule as
-    config.secrets.env, repeated here so this module stays a leaf)."""
-    return (os.environ.get(name) or "").strip()
 
 
 def _platform_data_dir():
@@ -43,12 +38,12 @@ def _platform_data_dir():
     Linux:   $XDG_DATA_HOME/job-crawler (default ~/.local/share/job-crawler)
     """
     if sys.platform == "win32":
-        base = _env("LOCALAPPDATA") or (Path.home() / "AppData" / "Local")
-        return Path(base) / APP_NAME
+        base = SETTINGS.localappdata or (Path.home() / "AppData" / "Local")
+        return base / APP_NAME
     if sys.platform == "darwin":
         return Path.home() / "Library" / "Application Support" / APP_NAME
-    base = _env("XDG_DATA_HOME") or (Path.home() / ".local" / "share")
-    return Path(base) / "job-crawler"
+    base = SETTINGS.xdg_data_home or (Path.home() / ".local" / "share")
+    return base / "job-crawler"
 
 
 def _looks_like_install(d):
@@ -68,9 +63,8 @@ def _resolve_data_dir(app_home):
     3. <app_home> itself, if a DB sits there — the legacy flat layout.
     4. The per-user OS data directory. The default for a fresh clone.
     """
-    override = _env("JOBS_DATA_DIR")
-    if override:
-        return Path(override).expanduser()
+    if SETTINGS.jobs_data_dir:
+        return SETTINGS.jobs_data_dir.expanduser()
     if (app_home / "data").is_dir():
         return app_home / "data"
     if any((app_home / n).exists() for n in _DB_NAMES):

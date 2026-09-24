@@ -29,6 +29,8 @@ candidate is then run through a blocklist tuned for job-posting boilerplate
 before it's ever surfaced.
 """
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys
@@ -47,6 +49,7 @@ from src.store import connect, get_companies  # noqa: E402
 # so a name already tracked under any spelling/punctuation is recognized as
 # the same company.
 from src.match.names import name_key as _norm_key  # noqa: E402
+from src.claude.reply import Reply  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -718,6 +721,10 @@ def harvest_from_store(conn, min_mentions=2, min_score=None, use_llm=False,
     return out
 
 
+class KeepList(Reply):
+    keep: list[str]
+
+
 def _llm_refine(candidates):
     """Optional second pass: ask Claude to drop anything in `candidates`
     that isn't really a distinct organization (catches shapes the regex
@@ -744,16 +751,10 @@ def _llm_refine(candidates):
     )
     names = [c["name"] for c in candidates]
     user = "Candidate names:\n" + "\n".join(f"- {n}" for n in names)
-    try:
-        data = call_claude_json(system, user, max_tokens=2000)
-    except Exception as e:
-        print(f"    [!] LLM refine failed ({type(e).__name__}: {e}); "
-              f"keeping the heuristic list unfiltered")
+    data = call_claude_json(system, user, max_tokens=2000, reply=KeepList)
+    if data is None or not data.keep:
         return candidates
-    keep = data.get("keep") if isinstance(data, dict) else None
-    if not keep:
-        return candidates
-    keep_keys = {_norm_key(n) for n in keep}
+    keep_keys = {_norm_key(n) for n in data.keep}
     return [c for c in candidates if _norm_key(c["name"]) in keep_keys]
 
 

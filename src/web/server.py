@@ -93,7 +93,7 @@ def main():
     the next free one (up to +10) is used."""
     import webbrowser
 
-    port = int(os.environ.get("WEBUI_PORT", "5533"))
+    port = config.SETTINGS.webui_port
     for a in sys.argv[1:]:
         if a.startswith("--port="):
             port = int(a.split("=", 1)[1])

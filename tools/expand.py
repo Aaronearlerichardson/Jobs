@@ -43,9 +43,7 @@ def print_expansion(term, expanded):
     print(f"  BCI Expansion: '{term}'")
     print(f"{bar}")
 
-    titles   = expanded.get("titles",   [])
-    keywords = expanded.get("keywords", [])
-    sectors  = expanded.get("sectors",  [])
+    titles, keywords, sectors = expanded.titles, expanded.keywords, expanded.sectors
 
     print(f"\n  JOB TITLES TO SEARCH ({len(titles)})")
     for t in titles:
@@ -72,8 +70,7 @@ def print_location_expansion(term, expanded):
     print(f"\n{bar}")
     print(f"  Location Expansion: '{term}'")
     print(f"{bar}")
-    include = expanded.get("include", [])
-    exclude = expanded.get("exclude", [])
+    include, exclude = expanded.include, expanded.exclude
 
     print(f"\n  LOCATION_INCLUDE additions ({len(include)})")
     known = {i.lower() for i in LOCATION_INCLUDE}
@@ -116,12 +113,12 @@ def generate_keyword_report(delay=0.5):
         expanded = expand_search(kw)
         if not expanded:
             continue
-        for t in expanded.get("titles", []):
-            all_titles.setdefault(t.strip(), []).append(kw)
-        for k in expanded.get("keywords", []):
-            all_keywords.setdefault(k.strip(), []).append(kw)
-        for s in expanded.get("sectors", []):
-            all_sectors.setdefault(s.strip(), []).append(kw)
+        for t in expanded.titles:
+            all_titles.setdefault(t, []).append(kw)
+        for k in expanded.keywords:
+            all_keywords.setdefault(k, []).append(kw)
+        for s in expanded.sectors:
+            all_sectors.setdefault(s, []).append(kw)
         time.sleep(delay)
 
     def sort_by_freq(d):

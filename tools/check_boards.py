@@ -4,6 +4,8 @@ the way our fetcher expects?
 
     python tools/check_boards.py                 # human-readable table
     python tools/check_boards.py --json out.json --markdown BOARDS.md
+    python tools/check_boards.py --resolved workday   # one spec, resolved
+    python tools/check_boards.py --promote            # default candidates
 
 Coverage percentage cannot answer this question. The fetchers swallow HTTP
 errors and return [] by design (one dead board must not abort a crawl), so a
@@ -34,6 +36,7 @@ import argparse
 import contextlib
 import io
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -47,21 +50,22 @@ from tools._harness import blame, console_utf8              # noqa: E402
 
 console_utf8()
 
-from src.ats.board import BOARDS                    # noqa: E402
+from pydantic import BaseModel                       # noqa: E402
+
+from src.ats.board import BOARDS, spec              # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
 
 def check_board(board):
     """Probe one platform's canary board and classify the outcome."""
-    canary = board.spec["canary"]
-    ats, name = board.name, canary.get("name", canary["handle"])
-    floor = canary.get("min_jobs", 1)
+    canary = board.spec.canary
+    ats, name, floor = board.name, canary.name, canary.min_jobs
     buf, started = io.StringIO(), time.monotonic()
     try:
         # The engine prints its diagnostics; capture them to classify.
         with contextlib.redirect_stdout(buf):
-            ok, n = board.alive(canary["handle"])
+            ok, n = board.alive(canary.handle)
         note = " ".join(buf.getvalue().split())
         if not ok and not note:
             note = "the board request failed"
@@ -81,6 +85,36 @@ def check_board(board):
 
     return {"ats": ats, "name": name, "status": status, "jobs": n,
             "detail": detail, "seconds": round(time.monotonic() - started, 1)}
+
+
+def _leaves(board):
+    """(path, value, set) for every key of a board's spec that is not
+    itself a model or a list of them (their own keys follow)."""
+    for path, value, given, _default in spec.walk(board.spec):
+        models = value if isinstance(value, tuple) and value else (value,)
+        if not all(isinstance(v, BaseModel) for v in models):
+            yield path, value, given
+
+
+def print_resolved(name):
+    """Every key of `name`'s spec with its value, marked set (the spec
+    gives it) or default."""
+    for path, value, given in _leaves(BOARDS[name]):
+        print(f"  {'set    ' if given else 'default'}  {path} = {json.dumps(value)}")
+
+
+def promotion_candidates(least=3):
+    """(path, value, platforms) for each key `least` or more specs set to
+    one value other than its default: a default worth promoting. A union's
+    `kind` picks a model, so it is left out."""
+    seen = {}
+    for board in BOARDS.values():
+        for path, value, given in _leaves(board):
+            if given and not path.endswith(".kind"):
+                key = (re.sub(r"\[\d+\]", "[]", path), json.dumps(value))
+                seen.setdefault(key, set()).add(board.name)
+    return sorted(((p, v, sorted(names)) for (p, v), names in seen.items()
+                   if len(names) >= least), key=lambda c: (-len(c[2]), c[0]))
 
 
 def render_markdown(results, checked_at):
@@ -122,10 +156,21 @@ def main():
                     help="write a shields.io endpoint JSON")
     ap.add_argument("--fail-on-broken", action="store_true",
                     help="exit 1 if any board is broken (blocked never fails)")
+    ap.add_argument("--resolved", metavar="PLATFORM", choices=sorted(BOARDS),
+                    help="print the platform's spec resolved, each value set or default")
+    ap.add_argument("--promote", action="store_true",
+                    help="list keys 3+ specs set to one non-default value")
     args = ap.parse_args()
+    if args.resolved:
+        print_resolved(args.resolved)
+        return 0
+    if args.promote:
+        for path, value, names in promotion_candidates():
+            print(f"  {len(names):2}  {path} = {value}  ({', '.join(names)})")
+        return 0
 
     results = []
-    for board in (b for b in BOARDS.values() if b.fetchable and "canary" in b.spec):
+    for board in (b for b in BOARDS.values() if b.fetchable and b.spec.canary):
         r = check_board(board)
         results.append(r)
         print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "

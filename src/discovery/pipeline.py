@@ -7,7 +7,6 @@ roster write. The resolution itself used to be a second, probe-first
 implementation living here; see validate_candidate for why it isn't any more.
 """
 
-import os
 import re
 import threading
 import time
@@ -15,8 +14,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.ats.board import board_for
-from src.claude.api import DISCOVER_SYSTEM, call_claude_json
-from src.config import REPORT_DIR
+from src.claude.api import (DISCOVER_SYSTEM, DiscoveredCompany, DiscoverReply,
+                            call_claude_json)
+from src.config import REPORT_DIR, SETTINGS
 from src.match.names import strip_suffixes
 from src.net.parallel import drain
 from src.net.util import worker_count
@@ -30,13 +30,12 @@ from .seeds import seed_candidates_for
 # against different hosts), so this is a network-concurrency knob, not a
 # CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
 # more concurrent requests. Tune down if you see 429s from a probe provider.
-_DISCOVERY_WORKERS = worker_count("DISCOVERY_WORKERS")
+_DISCOVERY_WORKERS = worker_count("discovery_workers")
 
 # Headless browsers for the parallel Workday JS fallback. Each is ~200-300MB
 # of RAM, so keep this modest; raise JS_BROWSERS to scrape more SPA careers
 # pages at once. Capped at the worker count (no point having idle browsers).
-_JS_BROWSERS = min(max(1, int(os.environ.get("JS_BROWSERS", "4"))),
-                   _DISCOVERY_WORKERS)
+_JS_BROWSERS = min(max(1, SETTINGS.js_browsers), _DISCOVERY_WORKERS)
 
 
 @dataclass
@@ -67,13 +66,9 @@ class Candidate:
 
 
 def candidate_from_dict(d):
-    return Candidate(
-        name        = d.get("name", "").strip(),
-        ats         = (d.get("ats") or "unknown").lower(),
-        slug_guess  = (d.get("slug_guess") or None),
-        careers_url = d.get("careers_url", "").strip(),
-        notes       = d.get("notes", "").strip(),
-    )
+    """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
+    a seed, or a directory name."""
+    return Candidate(**DiscoveredCompany.model_validate(d).model_dump())
 
 
 def _slug_str(ats, slug):
@@ -233,8 +228,10 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
 
 def discover(term):
     print(f"  > Asking Claude for companies in: {term!r}")
-    payload = call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000)
-    raw_companies = (payload or {}).get("companies", [])
+    payload = call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
+                               reply=DiscoverReply)
+    raw_companies = ([c.model_dump() for c in payload.companies]
+                     if payload else [])
     seeds = seed_candidates_for(term)
 
     if not payload and not seeds:
@@ -255,7 +252,8 @@ def discover(term):
     return {
         "term":        term,
         "companies":   validated,
-        "gated_sites": (payload or {}).get("gated_sites", []),
+        "gated_sites": ([g.model_dump() for g in payload.gated_sites]
+                        if payload else []),
     }
 
 

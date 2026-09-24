@@ -12,9 +12,9 @@ import math
 # _self: the config PACKAGE, which is what callers monkeypatch.
 # profile.py defines it; two identical copies is one too many for
 # a function whose whole job is naming one module.
-from .profile import MISSION_TIERS, _self, profile_section
+from .profile import MISSION_TIERS, PROFILE, _self
 
-_pol = profile_section("policy")
+_pol = PROFILE.policy
 
 # =========================================================================
 #  HTTP
@@ -55,9 +55,8 @@ BROWSER_UA = (
 # subdivisions worth surfacing. Kept ACTIVE, crawled through the keyword
 # filter (only aligned roles survive), and ranked at
 # MULTI_DIVISION_MISSION_FLOOR rather than their own low company score.
-MULTI_DIVISION_COMPANIES = {s.strip().lower()
-                            for s in _pol.get("multi_division", [])}
-MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.6))
+MULTI_DIVISION_COMPANIES = {s.strip().lower() for s in _pol.multi_division}
+MULTI_DIVISION_MISSION_FLOOR = _pol.multi_division_mission_floor
 
 # TITLE vocabulary that passes the division keyword gate at a conglomerate
 # the roster ALSO carries a `watch` tag for. The division gate
@@ -79,7 +78,7 @@ MULTI_DIVISION_MISSION_FLOOR = float(_pol.get("multi_division_mission_floor", 0.
 # "manager"). Empty (the default) leaves the division gate exactly as it
 # was for every company.
 WATCH_DIVISION_TITLES = tuple(s.strip().lower()
-                              for s in _pol.get("watch_division_titles", [])
+                              for s in _pol.watch_division_titles
                               if s.strip())
 
 
@@ -165,7 +164,7 @@ def is_active_mission(tier, name, include_missions=None):
 # "harvest every board" stays true -- just on this longer interval; the
 # predicate, the census behind the default and the --min-age-hours
 # interaction all live with the one reader, src.crawl.harvest.plan.
-HARVEST_OFFMISSION_HOURS = float(_pol.get("harvest_offmission_hours", 168))
+HARVEST_OFFMISSION_HOURS = _pol.harvest_offmission_hours
 
 
 def is_offmission_inactive(c):
@@ -226,7 +225,7 @@ def is_offmission_inactive(c):
 # actually observed, not just the one first flagged. An off-mission,
 # INACTIVE board (is_offmission_inactive) keeps its fetcher's own
 # narrower default instead -- see board_max_pages.
-BOARD_MAX_ROWS = int(_pol.get("board_max_rows", 3000))
+BOARD_MAX_ROWS = _pol.board_max_rows
 
 # One value per rule for every ATS board (src.ats.board.engine): the
 # pause between two listing pages; detail GETs a sweep pull may spend
@@ -294,7 +293,7 @@ def board_max_pages(company, page_size, offmission_pages):
 # obey its Crawl-delay. On by default — it costs one cached request per
 # host, and the endpoints this crawler uses are permissive (Lever, for
 # instance, publishes `Allow: /` with `Crawl-delay: 1`). See src/net/robots.py.
-RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
+RESPECT_ROBOTS = _pol.respect_robots
 
 # Hosts whose robots.txt is NOT consulted even while RESPECT_ROBOTS is on.
 # Crawl-delay pacing still applies. Entries are lowercase hostnames; a
@@ -303,15 +302,14 @@ RESPECT_ROBOTS = bool(_pol.get("respect_robots", True))
 # public postings API, an Atom feed — sitting on a host whose robots.txt
 # blanket-disallows `*` because it was written for the HTML site.
 ROBOTS_EXEMPT_HOSTS = tuple(
-    s.strip().lower() for s in _pol.get("robots_exempt_hosts", []) if s.strip())
+    s.strip().lower() for s in _pol.robots_exempt_hosts if s.strip())
 
 # Public resolvers the web-search client (src/net/ddg.py) switches to when
 # the search library's own resolver is refused. Seen with a VPN up alongside
 # a second connected adapter: the OS resolver works, the library's does not.
 # An empty list disables the fallback; the run then skips web search.
 SEARCH_DNS_FALLBACK = tuple(
-    s.strip() for s in _pol.get("search_dns_fallback", ["1.1.1.1", "8.8.8.8"])
-    if s.strip())
+    s.strip() for s in _pol.search_dns_fallback if s.strip())
 
 # robots.txt fetch timeouts, as (connect, read).
 #
@@ -331,8 +329,8 @@ SEARCH_DNS_FALLBACK = tuple(
 # two A records costs up to 2x before it gives up. That is the socket doing
 # the right thing (trying each address), and it is bounded by the record
 # count, so it is worth knowing about rather than working around.
-ROBOTS_CONNECT_TIMEOUT = float(_pol.get("robots_connect_timeout", 3.0))
-ROBOTS_READ_TIMEOUT    = float(_pol.get("robots_read_timeout", 10.0))
+ROBOTS_CONNECT_TIMEOUT = _pol.robots_connect_timeout
+ROBOTS_READ_TIMEOUT    = _pol.robots_read_timeout
 
 # Headless-browser resolution order for the JS probes. "" is Playwright's own
 # pinned build; the rest are `channel=` names for browsers already on the
@@ -341,5 +339,4 @@ ROBOTS_READ_TIMEOUT    = float(_pol.get("robots_read_timeout", 10.0))
 # work on CI runners and on a machine whose playwright package was upgraded
 # without re-fetching its browsers. Order matters: the pinned build first,
 # because it is the only one whose version we control.
-BROWSER_CHANNELS = [c or None for c in
-                    _pol.get("browser_channels", ["", "chrome", "msedge"])]
+BROWSER_CHANNELS = [c or None for c in _pol.browser_channels]

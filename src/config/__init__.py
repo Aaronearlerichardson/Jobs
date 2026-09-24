@@ -1,15 +1,17 @@
 """Central configuration for the job crawler.
 
-Your search criteria live in profile.toml (see profile.example.toml for
-the schema); secrets come from environment variables. This package turns
-both into the names the rest of the code reads:
+Your search criteria live in profile.toml (profile.example.toml documents
+it); secrets come from environment variables. Both are validated once, at
+import, and this package turns them into the names the rest of the code
+reads:
 
-    src/config/secrets.py   env vars: API keys, model names            (leaf)
-    src/config/paths.py     SCRIPT_DIR / APP_HOME / DATA_DIR, store     (leaf)
+    src/config/secrets.py   Settings: every env var, typed; API keys   (leaf)
+    src/config/paths.py     SCRIPT_DIR / APP_HOME / DATA_DIR, store
+    src/config/profile_schema.py  the profile's pydantic models + defaults
     src/config/profile.py   profile.toml loaded; keywords, locations,
                         candidate, résumé, fit, mission, locality,
-                        discovery; `profile_section(name)`
-    src/config/tracks.py    [tracks.*] tables + engine defaults -> UI_TRACKS
+                        discovery; PROFILE, the validated whole
+    src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
     src/config/boards.py    BOARDS: every per-platform ATS board fact, as data,
@@ -23,8 +25,8 @@ while a track runs, and a from-bound copy goes stale.
 """
 
 from .boards import (  # noqa: F401
-    BOARDS, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, FETCHABLE_HOSTS, SHARED_HOSTS,
-    hosts_re,
+    BOARDS, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, DEFAULT_HANDLE_COLUMNS,
+    FETCHABLE_HOSTS, SHARED_HOSTS, hosts_re,
 )
 from .paths import (  # noqa: F401
     APP_NAME, _resolve_data_dir,
@@ -47,7 +49,7 @@ from .policy import (  # noqa: F401
 )
 from .profile import (  # noqa: F401
     PROFILE_PATH, PROFILE_EXAMPLE_PATH, PROFILE_SOURCE,
-    _load_profile, profile_section,
+    _load_profile, PROFILE,
     CORE_KEYWORDS, DOMAIN_KEYWORDS, SKILL_KEYWORDS, INCLUDE_KEYWORDS,
     keyword_snapshot, restore_keywords, widen_keywords,
     EXCLUDE_PHRASES, EXCLUDE_TITLE_PHRASES, EXCLUDE_TITLE_EXEMPT_PHRASES,
@@ -73,7 +75,7 @@ from .profile import (  # noqa: F401
     DISCOVERY_PRIORITY_COMPANIES,
 )
 from .secrets import (  # noqa: F401
-    env, require_creds,
+    SETTINGS, require_creds,
     GMAIL_ADDRESS, GMAIL_APP_PASSWORD,
     ANTHROPIC_API_KEY, CLAUDE_MODEL, CLAUDE_VERIFY_MODEL,
     CAREERONESTOP_USER_ID, CAREERONESTOP_TOKEN,

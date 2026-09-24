@@ -1,16 +1,19 @@
 """Claude API wrapper + search-expansion prompts."""
 
+from __future__ import annotations
+
 import atexit
 import json
 import logging
-import os
 import re
 import threading
 import time
 
 import requests
+from pydantic import StrictBool, ValidationError
 
 from src import config
+from src.claude.reply import Reply, Unit, choice
 
 # A plain pooled session. The crawler's PoliteSession (src.net.http) was
 # used here before, which made core depend on scrapers and consulted
@@ -75,37 +78,24 @@ _EXPAND_SYSTEM = f"""You are a job-search strategist for this candidate:
 Given a job title, skill, or concept, return ONLY a JSON object with exactly three keys:
 - "titles": array of up to 12 alternative job-title strings to search for, matched to the candidate's reachable level.
 - "keywords": array of up to 12 technical keywords/skills/domain terms that surface more relevant listings.
-- "sectors": array of up to 12 company types, industry verticals, or named employers/labs where these roles exist.
-Return ONLY valid JSON. No markdown, no explanation, no preamble."""
+- "sectors": array of up to 12 company types, industry verticals, or named employers/labs where these roles exist."""
 
 
-_TECH_BAR_SCORE_SYSTEM = f"""You are a technical-hiring screener for this candidate:
-
-{_CANDIDATE}
-
-The candidate wants ANY role with a genuine TECHNICAL or QUANTITATIVE component — NOT only machine learning. Given a job posting (title + description), rate the role's TECHNICAL BAR on a 0.0-to-1.0 scale.
-
-Scoring rubric:
-- HIGH (0.75-1.0): the core work is hands-on technical — writing software; building or maintaining data pipelines, databases, ETL, or infrastructure; quantitative/statistical analysis; modeling, algorithms, or research; quality, test, validation, or systems engineering; data management or data engineering; bioinformatics/computational work. The person builds, engineers, analyzes, or rigorously tests.
-- MEDIUM (0.4-0.7): partially technical — an analyst/specialist who runs existing tools or queries rather than building them, or a role mixing technical tasks with coordination/admin.
-- LOW (0.0-0.35): little or no technical component — executing SOPs, coordination/monitoring, paperwork, manual data ENTRY, scheduling, patient care, recruiting, sales, marketing, or general people/project management without technical depth.
-
-Key distinctions: "data management" / "data engineering" / "quality engineering" / "test engineering" / "validation" / "analysis" are TECHNICAL (high-ish). "data ENTRY" / "coordination" / "monitoring" are NOT (low). Judge by the ACTUAL responsibilities, not the title or seniority.
-
-Also classify the employer's MISSION into exactly one tier:
-{_tier_enum()}
-
-Return ONLY a JSON object with exactly these keys:
-- "score": a number from 0.0 to 1.0 (two decimals) — the TECHNICAL BAR.
-- "mission": one of {", ".join(f'"{t}"' for t in _MISSION_TIERS)}.
-- "reason": one short phrase (<= 12 words) naming the deciding factor.
-Return ONLY valid JSON. No markdown, no preamble."""
+class ExpandReply(Reply):
+    titles: list[str]
+    keywords: list[str]
+    sectors: list[str]
 
 
 _LOCATION_EXPAND_SYSTEM = """You are a geographic search strategist. Given a location term (a city, region, country, or qualifier like "remote"), return ONLY a JSON object with exactly two keys:
 - "include": array of up to 15 related location strings that should ALSO match when filtering jobs for this area. Examples: for "North Carolina", include "NC", "Durham", "Raleigh", "Chapel Hill", "Research Triangle", "RTP". For "remote", include "work from home", "wfh", "fully remote", "distributed", "anywhere".
 - "exclude": array of up to 8 location strings that should be explicitly excluded when someone specifies this search. Examples: for "us only", include common offshore locations the user likely wants to filter out.
-Use lowercase unless the token is normally capitalized (country codes etc). Return ONLY valid JSON, no markdown, no explanation."""
+Use lowercase unless the token is normally capitalized (country codes etc)."""
+
+
+class LocationReply(Reply):
+    include: list[str]
+    exclude: list[str]
 
 
 DISCOVER_SYSTEM = f"""You are a technical recruiter who maps employers to ATS platforms. Given a sector, industry, or job concept, list companies that (a) plausibly hire for roles in that space and (b) are likely to post jobs publicly. The candidate you're sourcing for:
@@ -136,16 +126,52 @@ Return ONLY a JSON object with this exact shape:""" + r"""
 Rules:
 - Up to 15 companies. Prefer ones with roles the candidate above could realistically land.
 - slug_guess: best educated guess (typically the company name lowercased with hyphens). Use null if you really can't guess.
-- ats: "unknown" is fine if you're not sure.
-- Return ONLY valid JSON. No markdown, no commentary."""
+- ats: "unknown" is fine if you're not sure."""
 
 
-# 5-family models run ADAPTIVE THINKING when the `thinking` param is omitted,
-# and max_tokens caps thinking + response text TOGETHER — an unguarded upgrade
-# would let thinking eat a 300-token scoring budget and truncate the JSON.
-# For these models we explicitly disable thinking unless the caller opts in.
-_THINKING_DEFAULT_MODELS = ("claude-sonnet-5", "claude-opus-5",
-                            "claude-fable-5", "claude-mythos-5")
+_ATS_GUESSES = ("greenhouse", "lever", "ashby", "kula", "workday", "unknown")
+_GATED_SITES = ("linkedin", "indeed", "builtin", "wellfound")
+
+
+class DiscoveredCompany(Reply):
+    name: str
+    ats: choice(*_ATS_GUESSES)
+    slug_guess: str | None
+    careers_url: str
+    notes: str
+
+
+class GatedSite(Reply):
+    site: choice(*_GATED_SITES)
+    query: str
+    notes: str
+
+
+class DiscoverReply(Reply):
+    companies: list[DiscoveredCompany]
+    gated_sites: list[GatedSite]
+
+
+# 5-family models think when `thinking` is omitted, and max_tokens caps
+# thinking + response text TOGETHER, so thinking could eat a 300-token
+# scoring budget and truncate the JSON. When the caller does not ask for
+# thinking (docs build-with-claude/thinking-troubleshooting, 2026-09):
+# these accept {"type": "disabled"} (Opus 5 only at effort high or below,
+# its default, which build_payload leaves alone)...
+_THINKING_OPTIONAL_MODELS = ("claude-sonnet-5", "claude-opus-5")
+# ...and these always think and reject "disabled" with a 400, so they get
+# no `thinking` field and effort "low". Matched first: "claude-opus-5"
+# is a prefix of "claude-opus-5-5".
+_THINKING_ALWAYS_MODELS = ("claude-opus-5-5", "claude-fable-5",
+                           "claude-mythos-5")
+
+# Models without structured outputs (absent from the feature's
+# supportedModels, docs build-with-claude/structured-outputs, 2026-09).
+# They get the reply as a forced tool call instead; none of them thinks
+# unless asked, and build_payload never asks, so forcing is always allowed.
+_LEGACY_MODELS = ("claude-3", "claude-opus-4-0", "claude-opus-4-1",
+                  "claude-opus-4-2025", "claude-sonnet-4-0",
+                  "claude-sonnet-4-2025")
 
 
 # --------------------------------------------------------------------------- #
@@ -161,16 +187,12 @@ _THINKING_DEFAULT_MODELS = ("claude-sonnet-5", "claude-opus-5",
 #  Below the model's minimum cacheable prefix (1024 tokens on Sonnet 5, 512 on  #
 #  Opus 5) the API silently declines to cache and bills normally — no error and #
 #  no premium — so marking every call is safe. As of 2026-08 that means the     #
-#  fit screen (~1.5k tokens) and deep verify (~1.8k) cache; the tech-bar and    #
-#  mission prompts (~0.7k / ~0.5k) are under Sonnet 5's floor and simply don't. #
+#  fit screen (~1.5k tokens) and deep verify (~1.8k) cache; the mission         #
+#  prompt (~0.5k) is under Sonnet 5's floor and simply doesn't.                 #
 #                                                                              #
 #  CLAUDE_PROMPT_CACHE=0 disables; CLAUDE_CACHE_TTL=1h buys the 1-hour cache    #
 #  (2x writes) for runs whose calls are spread more than 5 minutes apart.       #
 # --------------------------------------------------------------------------- #
-
-_CACHE_ENABLED = os.environ.get("CLAUDE_PROMPT_CACHE", "1").lower() \
-    not in ("0", "false", "no", "off")
-_CACHE_TTL = os.environ.get("CLAUDE_CACHE_TTL", "5m").strip().lower()
 
 # Scoring runs inside ThreadPoolExecutor pools, and a cache entry is only
 # readable once the first response has started — N workers firing at once
@@ -193,18 +215,31 @@ def _system_field(system_prompt, cache=True):
     """`system` as a cache-marked block list, or the plain string when caching
     is off. One breakpoint, on the last (only) system block — that covers the
     whole tools->system prefix and leaves the varying user turn uncached."""
-    if not (cache and _CACHE_ENABLED and system_prompt):
+    if not (cache and config.SETTINGS.claude_prompt_cache and system_prompt):
         return system_prompt
     control = {"type": "ephemeral"}
-    if _CACHE_TTL == "1h":
+    if config.SETTINGS.claude_cache_ttl == "1h":
         control["ttl"] = "1h"
     return [{"type": "text", "text": system_prompt, "cache_control": control}]
 
 
 def build_payload(system_prompt, user_content, max_tokens=1000,
-                  model=None, thinking=False, cache=True):
+                  model=None, thinking=False, cache=True, *, reply=None):
     """The /v1/messages request body. Split out from the POST so the payload
-    shape (cache breakpoint placement, thinking guard) is testable offline."""
+    shape (cache breakpoint placement, thinking guard, reply schema) is
+    testable offline.
+
+    `reply` (a Reply subclass) holds the answer to its schema: structured
+    outputs (`output_config.format`), or a forced tool call on a
+    _LEGACY_MODELS model.
+
+    Notes:
+        Structured outputs add their own system prompt, and changing the
+        format invalidates the prompt cache; each system prompt here always
+        travels with the same reply shape, so the cached prefix stays
+        stable. Thinking is compatible: the grammar constrains only the
+        final text, not the thinking blocks (the verify pass relies on it).
+    """
     use_model = model or config.CLAUDE_MODEL
     payload = {
         "model":      use_model,
@@ -212,8 +247,21 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
         "system":     _system_field(system_prompt, cache),
         "messages":   [{"role": "user", "content": user_content}],
     }
-    if not thinking and use_model.startswith(_THINKING_DEFAULT_MODELS):
-        payload["thinking"] = {"type": "disabled"}
+    output = {}
+    if not thinking:
+        if use_model.startswith(_THINKING_ALWAYS_MODELS):
+            output["effort"] = "low"
+        elif use_model.startswith(_THINKING_OPTIONAL_MODELS):
+            payload["thinking"] = {"type": "disabled"}
+    if reply is not None:
+        schema = reply.model_json_schema()
+        if use_model.startswith(_LEGACY_MODELS):
+            payload["tools"] = [{"name": reply.__name__, "input_schema": schema}]
+            payload["tool_choice"] = {"type": "tool", "name": reply.__name__}
+        else:
+            output["format"] = {"type": "json_schema", "schema": schema}
+    if output:
+        payload["output_config"] = output
     return payload
 
 
@@ -283,7 +331,7 @@ def report_cache_stats(baseline=None):
 
 @atexit.register
 def _print_cache_stats_at_exit():
-    if os.environ.get("CLAUDE_USAGE_SUMMARY", "1") != "0":
+    if config.SETTINGS.claude_usage_summary:
         report_cache_stats()
 
 
@@ -292,7 +340,7 @@ def _print_cache_stats_at_exit():
 # revoked API key (401/403). Without a breaker each job's call fails
 # independently: the 2026-08-31 rescore burned 973 consecutive "credit balance
 # is too low" 400s over five minutes before finishing. Once tripped, every
-# later call in the process returns {} immediately without touching the API.
+# later call in the process returns None immediately without touching the API.
 _FATAL_LOCK = threading.Lock()
 _FATAL_MSG = None
 
@@ -321,7 +369,7 @@ def api_disabled():
 
 def have_api_key():
     """Whether an API key is configured at all. call_claude_json returns
-    {} without asking when it is not, exactly as it does for a refusal, so
+    None without asking when it is not, exactly as it does for a refusal, so
     a caller that has to tell "the model said nothing" apart from "we
     never asked" (src.claude.fit.score_resume_fit) asks here first.
 
@@ -351,14 +399,20 @@ def reset_breaker():
 
 
 def call_claude_json(system_prompt, user_content, max_tokens=1000,
-                     model=None, thinking=False, cache=True):
-    """POST to /v1/messages, return the JSON block from the text response.
+                     model=None, thinking=False, cache=True, *, reply):
+    """POST to /v1/messages and return Claude's answer as a `reply` (a Reply
+    subclass) instance, held to its schema (see build_payload).
+
+    None is the one "no answer": no key, a tripped breaker, an HTTP error,
+    no text, non-JSON, or an answer that fails `reply`'s validation, which
+    prints one line naming the failing fields.
 
     `model` overrides config.CLAUDE_MODEL for this call (the deep-verify
     pass runs a stronger model than the screen). `thinking=True` leaves the
     model's default adaptive thinking on (5-family models) — pair it with a
     max_tokens large enough for thinking + the JSON; the default False
-    pins thinking off so small structured calls can't be truncated by it.
+    turns thinking off (to effort low on models that always think) so it
+    does not eat a small structured call's budget.
     `cache=False` opts this call out of the system-prompt cache breakpoint
     (see the prompt-caching block above); the default is on everywhere.
 
@@ -372,15 +426,16 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         reached the session log."""
     if not have_api_key():
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
-        return {}
+        return None
     if _FATAL_MSG is not None:
         _log.debug("claude call skipped (breaker tripped): %s", _FATAL_MSG)
-        return {}
+        return None
     use_model = model or config.CLAUDE_MODEL
     payload = build_payload(system_prompt, user_content, max_tokens,
-                            use_model, thinking, cache)
+                            use_model, thinking, cache, reply=reply)
     lead = _claim_prefix(use_model, system_prompt) \
-        if (cache and _CACHE_ENABLED and system_prompt) else None
+        if (cache and config.SETTINGS.claude_prompt_cache and system_prompt) \
+        else None
     t0 = time.monotonic()
     try:
         for attempt in range(len(_RETRY_DELAYS) + 1):
@@ -414,25 +469,37 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
                    usage.get("output_tokens"),
                    usage.get("cache_read_input_tokens", 0),
                    r.status_code, time.monotonic() - t0)
-        text = next(
-            (b["text"] for b in data.get("content", []) if b.get("type") == "text"),
-            "",
-        )
-        cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-        if not cleaned:
-            # Two "no answer" shapes that aren't parse errors: adaptive
-            # thinking exhausting max_tokens before any text lands
-            # (stop_reason max_tokens — raise the caller's budget), and a
-            # safety refusal (stop_reason refusal — no text block at all).
-            print(f"  [!] Claude returned no text "
-                  f"(stop_reason={data.get('stop_reason')})")
-            return {}
-        # strict=False: the model occasionally emits a literal newline/tab
-        # INSIDE a JSON string value ("reason": "...line one
-        # line two..."), which strict json.loads rejects as "Invalid
-        # control character" and cost a company its mission score in the
-        # 2026-08-28 discover-local session. Lenient parsing reads it fine.
-        return json.loads(cleaned, strict=False)
+        blocks = data.get("content", [])
+        answer = next((b.get("input") for b in blocks
+                       if b.get("type") == "tool_use"), None)
+        if answer is None:
+            text = next((b["text"] for b in blocks
+                         if b.get("type") == "text"), "").strip()
+            if not text:
+                # Two "no answer" shapes that aren't parse errors: adaptive
+                # thinking exhausting max_tokens before any text lands
+                # (stop_reason max_tokens: raise the caller's budget), and
+                # a safety refusal (stop_reason refusal: no text block).
+                print(f"  [!] Claude returned no text "
+                      f"(stop_reason={data.get('stop_reason')})")
+                return None
+            # strict=False: the model occasionally emitted a literal
+            # newline/tab INSIDE a JSON string value, which strict
+            # json.loads rejects as "Invalid control character"; it cost a
+            # company its mission score in the 2026-08-28 discover-local
+            # session.
+            answer = json.loads(text, strict=False)
+        return reply.model_validate(answer)
+    except ValidationError as e:
+        errs = e.errors()
+        where = "; ".join(f"{'.'.join(map(str, x['loc'])) or '(root)'}: "
+                          f"{x['msg']}" for x in errs[:3])
+        more = f" (+{len(errs) - 3} more)" if len(errs) > 3 else ""
+        _log.debug("claude call failed: invalid %s in %.2fs",
+                   reply.__name__, time.monotonic() - t0)
+        print(f"  [!] Claude reply is not a valid {reply.__name__}: "
+              f"{where}{more}")
+        return None
     except requests.HTTPError as e:
         status = getattr(e.response, "status_code", None)
         body = getattr(e.response, "text", "")[:300]
@@ -443,17 +510,17 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
             _trip_fatal(f"HTTP {status}: {body!r}")
         else:
             print(f"  [!] Claude API error: {e}  body={body!r}")
-        return {}
+        return None
     except json.JSONDecodeError as e:
         _log.debug("claude call failed: non-JSON response in %.2fs",
                    time.monotonic() - t0)
         print(f"  [!] Claude returned non-JSON: {e}")
-        return {}
+        return None
     except Exception as e:
         _log.debug("claude call failed: %s in %.2fs",
                    type(e).__name__, time.monotonic() - t0)
         print(f"  [!] Claude call failed: {e}")
-        return {}
+        return None
     finally:
         # Release any threads waiting on this prefix — including on failure,
         # so one bad request can't stall a scoring pool for _GATE_WAIT_S.
@@ -462,20 +529,12 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
 
 
 def expand_search(term):
-    return call_claude_json(_EXPAND_SYSTEM, term)
+    return call_claude_json(_EXPAND_SYSTEM, term, reply=ExpandReply)
 
 
 def expand_location(term):
-    return call_claude_json(_LOCATION_EXPAND_SYSTEM, term)
+    return call_claude_json(_LOCATION_EXPAND_SYSTEM, term, reply=LocationReply)
 
-
-# --------------------------------------------------------------------------- #
-#  Technical-bar scorer (repurposes the --expand Claude call).                 #
-#                                                                              #
-#  Instead of expanding a term into more keywords, this asks Claude to score   #
-#  a single posting 0.0-1.0 on how much real model/algorithm/research work it  #
-#  involves (high) vs. SOP-execution / study-coordination / data-entry (low).  #
-# --------------------------------------------------------------------------- #
 
 _COMPANY_MISSION_SYSTEM = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
 
@@ -486,22 +545,23 @@ Return ONLY a JSON object with exactly:
 {_tier_enum()}
 - "score": 0.0-1.0 alignment with the candidate's target — pick within the band for the tier you chose:
 {_tier_bands()}
-- "reason": one short phrase (<= 12 words).
-Return ONLY valid JSON. No markdown, no preamble."""
+- "reason": one short phrase (<= 12 words)."""
+
+
+class MissionReply(Reply):
+    mission: choice(*_MISSION_TIERS)
+    score: Unit
+    reason: str
+
+    @property
+    def tier(self):
+        """`mission` when the profile names that tier, else None."""
+        return self.mission if self.mission in _MISSION_TIERS else None
 
 
 # Résumé-fit scoring lives in src/claude/fit.py (multi-axis rubric + gates);
 # callers import score_resume_fit from there. The old single-scalar prompt
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
-
-
-def _valid_tier(raw):
-    """A model's `mission` field as one of `_MISSION_TIERS`, or None when it
-    named something outside the profile's vocabulary. Shape validation on a
-    field NAME -- it never touches a numeric score. Both scorers below asked
-    this question, spelled the same way, twice."""
-    tier = str(raw).strip().lower()
-    return tier if tier in _MISSION_TIERS else None
 
 
 def score_company_mission(name, context=""):
@@ -516,14 +576,11 @@ def score_company_mission(name, context=""):
     if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
         return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
     user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
-    result = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120)
-    if not result or "mission" not in result:
+    r = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
+                         reply=MissionReply)
+    if r is None:
         return None, None, ""
-    from src.claude.fit import clamp_unit
-    tier = _valid_tier(result.get("mission", ""))
-    score = clamp_unit(result.get("score"), default=None)
-    reason = str(result.get("reason", "")).strip()
-    return tier, score, reason
+    return r.tier, r.score, r.reason
 
 
 _BOARD_OWNER_SYSTEM = (
@@ -540,6 +597,12 @@ _BOARD_OWNER_SYSTEM = (
     "them heavily when given. "
     'Reply with JSON only: {"same_employer": true|false, "reason": "<one line>"}'
 )
+
+
+class BoardOwnerReply(Reply):
+    same_employer: StrictBool
+    reason: str
+
 
 _BOARD_OWNER_CACHE = {}
 
@@ -570,30 +633,9 @@ def board_is_own(company, board, site="", titles=()):
     if titles:
         user += "\nSAMPLE JOB TITLES: " + " | ".join(
             t for t in list(titles)[:8] if t)
-    result = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150)
-    verdict = (bool(result["same_employer"])
-               if result and "same_employer" in result else None)
-    if verdict is not None:
-        _BOARD_OWNER_CACHE[key] = verdict
-    return verdict
-
-
-def score_technical_bar(title, description=""):
-    """
-    Return (score: float in [0,1], reason: str, mission: str|None) for one
-    posting, where mission is one of _MISSION_TIERS (None when unknown).
-
-    Falls back to ``(None, "", None)`` when the API key is unset or the call
-    fails, so callers can degrade to a heuristic without crashing.
-    """
-    from src.claude.fit import clamp_unit, clip_desc
-    desc = clip_desc(description or "")
-    user = f"TITLE: {title}\n\nDESCRIPTION:\n{desc or '(no description provided)'}"
-    result = call_claude_json(_TECH_BAR_SCORE_SYSTEM, user, max_tokens=120)
-    if not result or "score" not in result:
-        return None, "", None
-    score = clamp_unit(result["score"], default=None)
-    if score is None:
-        return None, "", None
-    return (score, str(result.get("reason", "")).strip(),
-            _valid_tier(result.get("mission", "")))
+    r = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
+                         reply=BoardOwnerReply)
+    if r is None:
+        return None
+    _BOARD_OWNER_CACHE[key] = r.same_employer
+    return r.same_employer

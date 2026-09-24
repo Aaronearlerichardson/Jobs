@@ -290,7 +290,8 @@ _SHARED_HOST_RE = config.hosts_re(config.SHARED_HOSTS)
 
 #: ats -> the store columns naming its board (config.BOARDS `handle.columns`,
 #: default the slug); a capture-only board is named by its careers_url.
-_BOARD_COLUMNS = {**{ats: tuple((s.get("handle") or {}).get("columns", ["slug"]))
+_BOARD_COLUMNS = {**{ats: tuple((s.get("handle") or {}).get(
+                         "columns", config.DEFAULT_HANDLE_COLUMNS))
                      for ats, s in config.BOARDS.items()},
                   CAPTURE_ATS: ("careers_url",)}
 
@@ -396,7 +397,7 @@ def board_key(r):
     """
     ats = r.get("ats")
     vals = [(r.get(c) or "").rstrip("/").lower() if c == "careers_url" else r.get(c)
-            for c in _BOARD_COLUMNS.get(ats, ("slug",))]
+            for c in _BOARD_COLUMNS.get(ats, config.DEFAULT_HANDLE_COLUMNS)]
     return (ats, *vals) if ats and vals[0] else None
 
 

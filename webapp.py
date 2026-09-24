@@ -9,10 +9,11 @@ static/) and its operations in src/ops/; this file only starts it.
 
 import sys
 
-from src.web.server import main
-
 if __name__ == "__main__":
     try:
+        # Imported inside the guard: a bad profile.toml or env var raises
+        # while config loads, and must reach the "Press Enter" hold below.
+        from src.web.server import main
         main()
     except SystemExit as e:
         if e.code:

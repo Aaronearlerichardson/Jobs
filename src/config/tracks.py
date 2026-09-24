@@ -4,8 +4,11 @@ what a table leaves out, and the built-in pair used when a profile has no
 
 Each track bundles a DB, a jobs.track value, ranking knobs, and the UI
 filter defaults that flip on switch (src/web/routes.py), plus the crawl
-methodology src/crawl/runner.py runs it with. The tables are data and live
-here; the building logic is src/config/track_build.py.
+methodology src/crawl/runner.py runs it with. The schema, the per-engine
+defaults and the built-in pair live in src/config/profile_schema.py
+(Track, ENGINE_DEFAULTS, DEFAULT_TRACKS); this module turns validated
+tracks into the runtime dicts. Code keys off the ENGINE a track resolves
+to, never off the user-chosen track id.
 
 Crawl-methodology keys, every one overridable in the track's own table:
   keyword_mode        "extend" (track keywords ADD to the global tiers) or
@@ -52,113 +55,62 @@ Crawl-methodology keys, every one overridable in the track's own table:
                       (weekly) retry -- see store.record_crawl_outcome
 """
 
-from src import tags
 from .paths import DATA_DIR
-from .profile import PROFILE_PATH, profile_section
-# Sibling, by its own name -- NOT `from src.config import track_build`,
-# which reaches the config PACKAGE while its __init__ is still running
-# to fetch a module sitting right here. That worked only by import
-# ordering, and an AST rewrite during the src/ move once turned the
-# same line into this module importing itself.
-from .track_build import build_tracks, default_track_id, mission_floor
+from .profile import PROFILE, PROFILE_PATH
+from .profile_schema import ENGINE_ALIASES, parse
 
-# The two built-in tracks, synthesized when [tracks] is absent so existing
-# installs work unchanged.
-_DEFAULT_TRACKS = {
-    "local": {
-        "label": "Local", "db": "jobs.db", "track": "local",
-        "engine": "local",
-        "rank_by": "fit", "min_mission": 0.2, "min_fit_default": 0.0,
-        "willing_to_move_default": False, "remote_requires_watch": True,
-        "default": True,
-    },
-    "remote": {
-        "label": "Remote", "db": "jobs.db", "track": "remote",
-        "engine": "sweep",
-        "rank_by": "fit", "min_mission": None, "min_fit_default": 0.5,
-        "willing_to_move_default": True, "remote_requires_watch": False,
-        "default": False,
-    },
-}
 
-# The default technical-title gate: a posting whose TITLE doesn't match this
-# never costs an API call. Deliberately broad and field-neutral — it is a
-# cheap "is this a technical seat at all?" filter, not your search. Narrow it
-# (or widen it for a non-engineering field) per track with `tech_title_regex`.
-#
-# The -informatic-/-statistic-/-epidemiolog- families are STEMS + `\w*`, not
-# whole words: the occupation noun is a suffix on the field name, so
-# "bioinformatics" wrapped in `\b` could never match "Bioinformatician" (Duke
-# Health's "Bioinformatician II", Durham, dropped on every track 2026-09-11).
-# `bioinformatic\w*` / `biostatistic\w*` are listed beside the unprefixed
-# stems because the leading `\b` cannot fall inside "bioinformatician".
-_DEFAULT_TECH_TITLE_REGEX = (
-    r"\b("
-    r"engineer|engineering|developer|develop|software|programmer|programming|"
-    r"architect|devops|sre|reliability|infrastructure|platform|security|"
-    r"data|database|analyst|analytics|quantitative|"
-    r"scientist|science|sciences|scientific|research|researcher|"
-    r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
-    r"simulation|computational|"
-    r"informatic\w*|bioinformatic\w*|statistic\w*|biostatistic\w*|"
-    r"epidemiolog\w*|"
-    r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
-    r"quality|validation|verification|qa|test|r&d|python"
-    r")\b"
-)
-
-# Crawl-methodology defaults per engine. The engine just picks which
-# behavior bundle applies when a key is absent from the track's table.
-_ENGINE_CRAWL_DEFAULTS = {
-    # "local" — a location-scoped crawl of the companies in your store. Asks
-    # each board for YOUR region, so it stays cheap on huge employers.
-    "local": {
-        "keyword_mode": "extend", "accept_remote": False,
-        "sources": {"store": True, "priority_companies": False,
-                    "aggregators": False, "websearch": False,
-                    "location_scoped": True},
-        "store_tag": None, "require_core_anchor": False, "geo_gate": True,
-        "remote_mission_floor": 0.85,
-        "verify_top": 15, "verify_floor": 0.25, "cost_guard": 0, "email": False,
-        "digest_min_fit": 0.4, "notify": False,
-        "exclude_gate": True, "dormant_after": 4, "dormant_days": 7,
-        "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
-    },
-    # "sweep" — a location-AGNOSTIC sweep: whole boards, plus aggregator feeds
-    # and web search, gated hard on your CORE keywords so the wider net
-    # doesn't flood the digest. (Named "neural" before v2 — see ENGINE_ALIASES.)
-    "sweep": {
-        "keyword_mode": "replace", "accept_remote": True,
-        "sources": {"store": True, "priority_companies": True,
-                    "aggregators": True, "websearch": True,
-                    "location_scoped": False},
-        "store_tag": tags.SWEEP, "require_core_anchor": True, "geo_gate": False,
-        "remote_mission_floor": 0.85,
-        "verify_top": 0, "verify_floor": 0.25, "cost_guard": 300, "email": False,
-        "digest_min_fit": 0.4, "notify": False,
-        "exclude_gate": False, "dormant_after": 4, "dormant_days": 7,
-        "tech_title_regex": _DEFAULT_TECH_TITLE_REGEX,
-    },
-}
-
-# Retired engine name -> current one, so a profile written against the old
-# names keeps working (see src/tags.py for the same treatment of store tags).
-ENGINE_ALIASES = {"neural": "sweep"}
-
-# Kept under its old name: tests and src/crawl/runner.py reach it via config.
-_mission_floor = mission_floor
+def _runtime(tid, t):
+    """A validated Track as the runtime dict every reader indexes."""
+    d = t.model_dump(exclude={"db"})
+    d.update(id=tid, label=t.label or tid,
+             track=t.track or tid.replace("_", "-"),
+             db_path=DATA_DIR / (t.db or f"{tid}.db"))
+    return d
 
 
 def _build_ui_tracks(raw):
-    """The profile's [tracks] table (or None -> the built-in pair) as
-    runtime track dicts. See src.config.track_build.build_tracks."""
-    return build_tracks(raw, data_dir=DATA_DIR,
-                        default_tracks=_DEFAULT_TRACKS,
-                        engine_defaults=_ENGINE_CRAWL_DEFAULTS,
-                        aliases=ENGINE_ALIASES)
+    """A [tracks] table (or None -> the built-in pair) as runtime track
+    dicts, validated like a profile's.
+
+    A track's engine fills every methodology key it leaves out (a blank
+    string counts as left out); retired engine names resolve; the id
+    supplies the label, track and db:
+
+    >>> t = _build_ui_tracks({"my_track": {
+    ...     "engine": "neural", "verify_top": 3, "store_tag": "",
+    ...     "sources": {"websearch": False}}})["my_track"]
+    >>> t["engine"], t["keyword_mode"], t["store_tag"], t["verify_top"]
+    ('sweep', 'replace', 'sweep', 3)
+    >>> t["label"], t["track"], t["db_path"].name
+    ('my_track', 'my-track', 'my_track.db')
+    >>> sorted(k for k, on in t["sources"].items() if on)
+    ['aggregators', 'priority_companies', 'store']
+
+    Notes:
+        A [tracks] section that is present but empty falls back to the
+        built-in pair too: `{}` is not a way to configure zero tracks.
+    """
+    return {tid: _runtime(tid, t)
+            for tid, t in parse({"tracks": raw or {}}).tracks.items()}
 
 
-UI_TRACKS = _build_ui_tracks(profile_section("tracks") or None)
+def default_track_id(tracks):
+    """The id of the track flagged `default`, else the first one, else
+    None for an empty table.
+
+    >>> default_track_id({"a": {"default": False}, "b": {"default": True}})
+    'b'
+    >>> default_track_id({"a": {"default": False}})
+    'a'
+    >>> default_track_id({}) is None
+    True
+    """
+    return next((tid for tid, t in tracks.items() if t["default"]),
+                next(iter(tracks), None))
+
+
+UI_TRACKS = {tid: _runtime(tid, t) for tid, t in PROFILE.tracks.items()}
 DEFAULT_TRACK = default_track_id(UI_TRACKS)
 
 

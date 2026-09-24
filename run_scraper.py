@@ -15,7 +15,7 @@ forwards here, so scheduled tasks keep working.
 Most flags are the CLI spelling of an operation in src/ops/registry.py —
 the same table the web UI's buttons run from — so a flag and a button pass
 the same parameters to the same function. The few commands below that are
-not registry ops (watch, mark, pipeline, export/import, score) are store
+not registry ops (watch, mark, pipeline, export/import) are store
 queries and edits with their own positional arguments.
 """
 
@@ -116,15 +116,6 @@ def _cmd_companies_io(args, t):
     conn.close()
 
 
-def _cmd_score(args, t):
-    from src.claude import score_technical_bar
-    score, reason, mission = score_technical_bar(args.score)
-    if score is None:
-        print("  [!] Scorer unavailable (set ANTHROPIC_API_KEY).")
-    else:
-        print(f"  technical-bar score: {score:.2f}  [{mission or 'mission?'}]  ({reason})")
-
-
 # One-shot commands, in precedence order: the first whose flag is set runs
 # and the process exits. `dest` is the argparse attribute that selects it.
 _COMMANDS = [
@@ -136,7 +127,6 @@ _COMMANDS = [
     ("prune", _op("prune", lambda a: {"offmission": a.prune_offmission})),
     ("export_companies", _cmd_companies_io),
     ("import_companies", _cmd_companies_io),
-    ("score", _cmd_score),
     ("nlx", _op("nlx", lambda a: {"companies": a.nlx})),
     ("reresolve_misses", _op("reresolve", lambda a: {
         "limit": a.reresolve_misses, "workers": a.workers, "days": a.miss_days,
@@ -274,10 +264,6 @@ def main(argv=None):
                     help="Ingest NLx feed postings for comma-separated employers")
     ap.add_argument("--db", metavar="PATH",
                     help="Override the store DB path (isolates concurrent runs)")
-    # ── scoring ─────────────────────────────────────────────────────────
-    # (keyword/location expansion is report-only: tools/expand.py)
-    ap.add_argument("--score", metavar="TEXT",
-                    help="Score one title/description on technical bar (0..1)")
     ap.add_argument("--where", action="store_true",
                     help="Print where this install keeps your profile and "
                          "data, then exit")

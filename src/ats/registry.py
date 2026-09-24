@@ -34,7 +34,7 @@ def seed_tag_for(ats):
     board = board_for(ats)
     if not board:
         return None
-    return tags.SWEEP if board.spec.get("sweep") else tags.LOCAL
+    return tags.SWEEP if board.spec.sweep else tags.LOCAL
 
 
 def sweep(ats, name, handle):
@@ -52,6 +52,6 @@ def iter_store_sources(companies):
     board."""
     for c in companies:
         board = board_for(c.get("ats"))
-        handle = board.handle(c) if board and board.spec.get("sweep") else None
+        handle = board.handle(c) if board and board.spec.sweep else None
         if handle:
             yield board.name, c["name"], handle, sweep(board.name, c["name"], handle)

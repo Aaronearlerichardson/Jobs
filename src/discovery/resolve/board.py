@@ -27,7 +27,9 @@ lives here and they live one level up.
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
+from src.ats.signatures import detect, pack
 
+from .identity import _foreign_board
 from .probes import probe_company
 from .websearch_board import _websearch_board
 
@@ -51,6 +53,17 @@ def _validate_board(comp):
     return len(allj), nc
 
 
+def _url_board(name, careers_url):
+    """(ats, handle, careers_url) of the fetchable board `careers_url`
+    itself names (`signatures.detect` on the URL), or None; a Workday
+    tenant that is another employer's (`identity._foreign_board`, as in
+    every other resolver step) names none."""
+    hit = detect("", careers_url, leads=False) if careers_url else None
+    if not hit or hit[1] == "workday" and _foreign_board(name, hit[2]):
+        return None
+    return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
+
+
 def resolve_board_sniff_first(name, careers_url="", websearch=True):
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
@@ -68,6 +81,9 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
     which caps it for the same reason), so a directory sweep of hundreds of
     names would spend most of its wall clock inside its backoff.
 
+    A careers_url on a vendor's host is read first: the board it names
+    itself (``via='sniff'``).
+
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
     a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
     a custom self-hosted board."""
@@ -79,6 +95,13 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
             return None
         return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
                 "count": total, "nc": nc, "via": via}
+
+    # 0) A careers_url on a vendor's host names its board outright; the
+    # sniff never fetches one (fetchpool.candidate_urls).
+    u = _url_board(name, careers_url)
+    hit = _mk(*u, "sniff") if u else None
+    if hit:
+        return hit
 
     # 1) Authoritative: detect the ATS embedded on the company's own careers page.
     # A `custom` sniff hit is held back rather than returned outright: a
@@ -135,7 +158,8 @@ def classify_miss(name, careers_url=""):
     resolves, the domain is dead, a careers page exists with no known ATS,
     or a candidate resolved to someone else's site) — sniffer.diagnose_no_board
     tells them apart, appended as the ':'-qualifier a rerun's miss_counts
-    already knows how to aggregate past (see src.store.miss_family).
+    already knows how to aggregate past (see src.store.miss_family). A
+    careers_url naming a board itself is that board, dead.
 
     Notes:
         Costs one extra careers-page sniff (plus diagnose_no_board's own,
@@ -144,6 +168,9 @@ def classify_miss(name, careers_url=""):
         a full discover_local pass.
     """
     from .sniffer import diagnose_no_board, sniff_careers_ats
+    u = _url_board(name, careers_url)
+    if u:
+        return f"board-dead:{u[0]}"
     try:
         lead = sniff_careers_ats(name, careers_url or "")
     except Exception as e:

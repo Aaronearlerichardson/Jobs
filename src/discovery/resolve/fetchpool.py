@@ -30,8 +30,8 @@ from src.net.util import host_of, origin_of
 _log = logging.getLogger("src.discovery.resolve.fetchpool")
 
 # A careers_url on a fetchable vendor's host names a board, not the
-# company's site: its board comes from the URL itself (signatures.detect),
-# never from sniffing it or its origin's careers paths.
+# company's site: resolve.board reads that board off the URL itself
+# (signatures.detect), so it is never sniffed, nor its origin's careers paths.
 _FETCHABLE_HOST_RE = config.hosts_re(config.FETCHABLE_HOSTS)
 
 

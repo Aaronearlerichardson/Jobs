@@ -15,15 +15,10 @@ from datetime import datetime
 import tomlkit
 
 from src import config
+from .profile_schema import problems
 
 BACKUP_DIR_NAME = "config_backups"
 BACKUP_KEEP = 20
-
-# Sections whose direct list-valued keys must be lists of strings. Sub-tables
-# (e.g. [keywords.local_tech]) are validated recursively with the same rule.
-_STR_LIST_SECTIONS = ("keywords", "exclude", "locations", "locality",
-                      "discovery")
-_REQUIRED_SECTIONS = ("keywords", "locations", "locality")
 
 
 def read_raw():
@@ -35,52 +30,15 @@ def read_raw():
     return "", None
 
 
-def _check_str_lists(errors, name, table):
-    for key, val in table.items():
-        if isinstance(val, dict):
-            _check_str_lists(errors, f"{name}.{key}", val)
-        elif isinstance(val, list):
-            # Arrays of tables (e.g. discovery.priority_companies) are fine;
-            # the string rule applies only to plain keyword-style lists.
-            if any(isinstance(x, dict) for x in val):
-                continue
-            if not all(isinstance(x, str) for x in val):
-                errors.append(f"[{name}] {key} must be a list of strings")
-
-
 def validate(text):
-    """Validate profile TOML text. Returns a list of human-readable error
-    strings; empty list = valid."""
+    """Profile TOML text checked against the profile schema, the same one
+    the loader applies: one 'path: problem' string per bad key (see
+    profile_schema.problems), [] when valid."""
     try:
         data = tomllib.loads(text)
     except tomllib.TOMLDecodeError as e:
         return [f"TOML syntax error: {e}"]
-
-    errors = [f"missing required section [{sec}]"
-              for sec in _REQUIRED_SECTIONS if sec not in data]
-
-    for sec in _STR_LIST_SECTIONS:
-        tbl = data.get(sec)
-        if isinstance(tbl, dict):
-            _check_str_lists(errors, sec, tbl)
-
-    fit = data.get("fit", {})
-    errors += [f"[fit] {group}.{k} must be a number in 0..1"
-               for group in ("weights", "gate_penalty")
-               for k, v in (fit.get(group) or {}).items()
-               if not isinstance(v, (int, float)) or not 0.0 <= v <= 1.0]
-
-    for i, tier in enumerate(data.get("mission", {}).get("tiers") or []):
-        band = tier.get("band")
-        if (not isinstance(band, list) or len(band) != 2
-                or not all(isinstance(b, (int, float)) for b in band)):
-            errors.append(f"[mission] tiers[{i}].band must be [lo, hi]")
-
-    errors += [f"[tracks.{tid}] db must be a non-empty filename"
-               for tid, t in (data.get("tracks") or {}).items()
-               if isinstance(t, dict) and not str(t.get("db") or "").strip()]
-
-    return errors
+    return problems(data)
 
 
 def apply_updates(updates):

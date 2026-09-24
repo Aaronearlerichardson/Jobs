@@ -515,7 +515,7 @@ def check(spec):
         raise ValueError(f"unknown transform {spec['transform']!r}")
     if "format" in spec:
         check_template(spec["format"])
-    for sub in spec.get("first", []) + spec.get("join", []):
+    for sub in (s for op in ("first", "join") if op in spec for s in spec[op]):
         check(sub)
     for key in ("of", "else", "do"):
         check(spec.get(key))

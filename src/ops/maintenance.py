@@ -1637,7 +1637,7 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     """
     # Board.alive, not the slug probe: an empty board is alive; dead means
     # the board REQUEST fails.
-    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.get("prunable")}
+    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.prunable}
 
     rows = [c for c in store.get_companies(conn, active_only=True)
             if c.get("ats") in PROBE and c.get("slug")]
@@ -2073,7 +2073,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 
 
 def _employer_atses():
-    return sorted(b.name for b in BOARDS.values() if b.spec.get("employer"))
+    return sorted(b.name for b in BOARDS.values() if b.spec.employer)
 
 
 def _employer_name(ats, slug):

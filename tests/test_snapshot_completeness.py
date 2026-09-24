@@ -221,6 +221,10 @@ def _engine(kind, handle=None, url="https://x.test/list", **pager):
     return board.Board("t", {**spec, **({"handle": handle} if handle else {})})
 
 
+#: An overlap pager's reason (the kind is a workaround).
+_SHIFTS = "rows shift between requests, 2026-09"
+
+
 def _items(ids):
     return [{"id": i, "title": "Data Engineer"} for i in ids]
 
@@ -286,13 +290,15 @@ class TestEnginePagers:
         collects every row once."""
         offset_board({0: [0, 1, 2, 3, 4, 5], 3: [5, 4, 8, 7, 6, 3], 6: [6, 7, 8, 9]},
                      total=10)
-        rows = _engine("overlap", size=6, step=3, pages=9, total="total").listing("h", "t h")
+        rows = _engine("overlap", size=6, step=3, pages=9, total="total",
+                       why=_SHIFTS).listing("h", "t h")
         assert sorted(r["id"] for r in rows) == sorted(f"t_{i}" for i in range(10))
         assert len(rows) == 10 and not http.snapshot_info()["capped"]
 
     def test_a_page_adding_nothing_new_ends_the_walk_capped(self, offset_board):
         calls = offset_board({0: [0, 1, 2, 3], 2: [0, 1, 2, 3]}, total=999)
-        rows = _engine("overlap", size=4, step=2, pages=9, total="total").listing("h", "t h")
+        rows = _engine("overlap", size=4, step=2, pages=9, total="total",
+                       why=_SHIFTS).listing("h", "t h")
         assert len(rows) == 4 and len(calls) == 2
         assert http.snapshot_info()["capped_total"] == 999
 

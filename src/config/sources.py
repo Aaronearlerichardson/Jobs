@@ -9,28 +9,22 @@ by your keywords), so they ship ON with sensible defaults. USAJOBS and
 Getro are OFF: one needs credentials, the other names a place.
 """
 
-from .profile import profile_section
+from .profile import PROFILE
 
-_src = profile_section("sources")
+_src = PROFILE.sources
 
 # Discourse forums with a jobs category — [sources].discourse
 # ({ label, url, category_id }). See profile.example.toml.
-DISCOURSE_BOARDS = [
-    (str(b.get("label") or b.get("url", "")), str(b.get("url", "")),
-     int(b.get("category_id", 0)))
-    for b in _src.get("discourse", [])
-    if b.get("url")
-]
+DISCOURSE_BOARDS = [(b.label or b.url, b.url, b.category_id)
+                    for b in _src.discourse]
 
 # Web searches for the sweep-style crawl (runner.build_sources, enabled by
 # [tracks.*].sources.websearch) — [sources].websearch
 # ({ label, query, max_results }). DuckDuckGo text search; each result URL is
 # parsed for JSON-LD JobPosting.
 WEBSEARCH_QUERIES: list[tuple] = [
-    (str(q.get("label") or q.get("query", ""))[:60], str(q.get("query", "")),
-     int(q.get("max_results", 12)))
-    for q in _src.get("websearch", [])
-    if q.get("query")
+    ((q.label or q.query)[:60], q.query, q.max_results)
+    for q in _src.websearch
 ]
 
 # =========================================================================
@@ -42,34 +36,31 @@ WEBSEARCH_QUERIES: list[tuple] = [
 # fetcher via is_relevant().
 
 # RemoteOK: single JSON endpoint at https://remoteok.com/api.
-REMOTEOK_ENABLED = bool(_src.get("remoteok", True))
+REMOTEOK_ENABLED = _src.remoteok
 
 # Remotive: https://remotive.com/api/remote-jobs (one category or all).
 # Categories: "software-dev", "data", "all-others", etc. None = all.
-REMOTIVE_ENABLED   = bool(_src.get("remotive", True))
-REMOTIVE_CATEGORY: str | None = _src.get("remotive_category") or None
+REMOTIVE_ENABLED   = _src.remotive
+REMOTIVE_CATEGORY: str | None = _src.remotive_category or None
 
 # Hacker News "Ask HN: Who is hiring?" monthly thread.
 # max_threads=2 covers the current + previous month's threads.
-HNHIRING_ENABLED     = bool(_src.get("hnhiring", True))
-HNHIRING_MAX_THREADS = int(_src.get("hnhiring_max_threads", 2))
+HNHIRING_ENABLED     = _src.hnhiring
+HNHIRING_MAX_THREADS = _src.hnhiring_max_threads
 
-# USAJOBS — [sources.usajobs] ({ enabled, keyword, location, radius, series,
-# results_per_page }). OFF by default, unlike the feeds above: it is the one
-# source needing credentials (USAJOBS_API_KEY / USAJOBS_EMAIL), and its
-# scope is a place rather than a topic, so there is no useful default
-# search. `series` is the real filter — occupational series codes; omit the
-# key for the technical set (see src/ats/feeds/usajobs.DEFAULT_SERIES).
-_usajobs = _src.get("usajobs", {})
-USAJOBS_ENABLED  = bool(_usajobs.get("enabled", False))
-USAJOBS_KEYWORD: str | None = _usajobs.get("keyword") or None
-USAJOBS_LOCATION: str | None = _usajobs.get("location") or None
-USAJOBS_RADIUS   = int(_usajobs.get("radius", 50))
-# Presence of the key, not truthiness — `series = []` deliberately means
-# "every series", which is different from "I didn't configure any".
-USAJOBS_SERIES: list[str] | None = ([str(s) for s in (_usajobs.get("series") or [])]
-                                   if "series" in _usajobs else None)
-USAJOBS_RESULTS_PER_PAGE = int(_usajobs.get("results_per_page", 250))
+# USAJOBS, [sources.usajobs]. OFF by default, unlike the feeds above: it is
+# the one source needing credentials (USAJOBS_API_KEY / USAJOBS_EMAIL), and
+# its scope is a place rather than a topic, so there is no useful default
+# search. `series` is the real filter: occupational series codes. None (key
+# omitted) means the technical set in src/ats/feeds/usajobs.DEFAULT_SERIES;
+# [] means every series.
+_usajobs = _src.usajobs
+USAJOBS_ENABLED  = _usajobs.enabled
+USAJOBS_KEYWORD: str | None = _usajobs.keyword or None
+USAJOBS_LOCATION: str | None = _usajobs.location or None
+USAJOBS_RADIUS   = _usajobs.radius
+USAJOBS_SERIES: list[str] | None = _usajobs.series
+USAJOBS_RESULTS_PER_PAGE = _usajobs.results_per_page
 
 # Getro network boards — [sources.getro] ({ enabled, boards, max_details }).
 # A VC portfolio or association board that lists many employers' openings
@@ -78,37 +69,13 @@ USAJOBS_RESULTS_PER_PAGE = int(_usajobs.get("results_per_page", 250))
 # board URLs (any page; only the host is used). `max_details` caps the
 # posting pages fetched per board per crawl (see src/ats/feeds/getro.py
 # — titles are screened before any page fetch).
-_getro = _src.get("getro", {})
-GETRO_ENABLED = bool(_getro.get("enabled", False))
-GETRO_BOARDS: list[str] = [str(b).strip() for b in (_getro.get("boards") or [])
-                           if str(b).strip()]
-GETRO_MAX_DETAILS = int(_getro.get("max_details", 150))
+_getro = _src.getro
+GETRO_ENABLED = _getro.enabled
+GETRO_BOARDS: list[str] = [b.strip() for b in _getro.boards if b.strip()]
+GETRO_MAX_DETAILS = _getro.max_details
 
-# Generic RSS/Atom feeds — [sources].rss ({ label, url, location }).
-# Defaults to broad remote-job feeds; replace with your field's feeds
-# (a society job board, a company blog's careers RSS, a niche aggregator).
-_DEFAULT_RSS_FEEDS: list[tuple[str, str, str]] = [
-    (
-        "WeWorkRemotely - Programming",
-        "https://weworkremotely.com/categories/remote-programming-jobs.rss",
-        "Remote",
-    ),
-    (
-        "WeWorkRemotely - All Other",
-        "https://weworkremotely.com/categories/all-other-remote-jobs.rss",
-        "Remote",
-    ),
-    (
-        "Jobicy - All Remote",
-        "https://jobicy.com/?feed=job_feed",
-        "Remote",
-    ),
-]
-# Presence of the key, not truthiness — `rss = []` deliberately means "no RSS
-# feeds", which is different from "I didn't configure any, use the defaults".
-RSS_FEEDS: list[tuple[str, str, str]] = ([
-    (str(f.get("label") or f.get("url", "")), str(f.get("url", "")),
-     str(f.get("location", "Remote")))
-    for f in (_src.get("rss") or [])
-    if f.get("url")
-] if "rss" in _src else _DEFAULT_RSS_FEEDS)
+# Generic RSS/Atom feeds, [sources].rss ({ label, url, location }). The
+# schema's default is a set of broad remote-job feeds; `rss = []` turns RSS
+# off, and a list of your own replaces them.
+RSS_FEEDS: list[tuple[str, str, str]] = [(f.label or f.url, f.url, f.location)
+                                         for f in _src.rss]

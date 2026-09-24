@@ -1,33 +1,92 @@
-"""Secrets and model names: environment variables, with placeholders for
-local development. Nothing here reads the profile or the filesystem.
+"""Every environment variable the app reads, as one typed Settings class,
+with placeholders for local development. Nothing here reads the profile.
 
     PowerShell:  $env:ANTHROPIC_API_KEY = "sk-ant-..."
     cmd.exe:     set ANTHROPIC_API_KEY=sk-ant-...
     bash/zsh:    export ANTHROPIC_API_KEY=sk-ant-...
 """
 
-import os
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated, Literal
+
+from pydantic import (BeforeValidator, Field, PositiveInt, ValidationError,
+                      model_validator)
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def env(name, default=""):
-    """An env var's value, treating BLANK as unset.
+class Settings(BaseSettings):
+    """The environment, typed: each field reads the variable of the same
+    name in upper case. A blank or whitespace-only value counts as unset,
+    and values are trimmed (tests/test_config_env.py).
 
-    `os.environ.get(name, default)` returns "" when the variable exists but
-    is empty — so `ANTHROPIC_API_KEY=""` (a CI runner exporting it, a shell
-    profile clearing it) read as "a key is configured" and the scorers tried
-    to authenticate with nothing instead of degrading to their offline
-    fallbacks. Blank means absent everywhere in this package.
-
-    >>> import os
-    >>> os.environ["_CFG_DOCTEST"] = "   "
-    >>> env("_CFG_DOCTEST", "fallback")
-    'fallback'
-    >>> os.environ["_CFG_DOCTEST"] = "  value  "
-    >>> env("_CFG_DOCTEST", "fallback")
-    'value'
-    >>> del os.environ["_CFG_DOCTEST"]
+    Notes:
+        Blank-is-unset because an exported-but-empty ANTHROPIC_API_KEY (a
+        CI runner, a shell profile clearing it) once read as "a key is
+        configured", and the scorers authenticated with nothing instead of
+        degrading to their offline fallbacks.
     """
-    return (os.environ.get(name) or "").strip() or default
+    model_config = SettingsConfigDict(extra="ignore")
+
+    # Digest email is opt-in and OFF until both are set; a blank
+    # GMAIL_ADDRESS disables emailing (src/digest/render.py).
+    gmail_address: str = ""
+    gmail_app_password: str = "YOUR_APP_PASSWORD_HERE"
+    anthropic_api_key: str = "YOUR_ANTHROPIC_API_KEY_HERE"
+    # Screen/mission/expansion calls. 5-family models think by default and
+    # max_tokens caps thinking+text together, so src/claude/api.py turns
+    # thinking off (or effort down) for these small structured-JSON calls.
+    claude_model: str = "claude-sonnet-5"
+    # Deep-verify pass over ranking finalists only (~15-30 calls a run).
+    claude_verify_model: str = "claude-opus-5"
+    # CLAUDE_PROMPT_CACHE=0 disables prompt caching; CLAUDE_CACHE_TTL=1h
+    # buys the 1-hour cache; CLAUDE_USAGE_SUMMARY=0 silences the exit line.
+    claude_prompt_cache: bool = True
+    claude_cache_ttl: Annotated[Literal["5m", "1h"],
+                                BeforeValidator(str.lower)] = "5m"
+    claude_usage_summary: bool = True
+    # CareerOneStop (DOL) Web API, the National Labor Exchange feed. Register
+    # at https://www.careeronestop.org/Developers/WebAPI/registration.aspx.
+    careeronestop_user_id: str = ""
+    careeronestop_token: str = ""
+    # USAJOBS Search API; register at https://developer.usajobs.gov/apirequest/
+    # USAJOBS_EMAIL must be the address the key was registered to. Search
+    # scope lives in profile [sources.usajobs].
+    usajobs_api_key: str = ""
+    usajobs_email: str = ""
+    # Where things live (src/config/paths.py, src/config/profile.py).
+    jobs_data_dir: Path | None = None
+    jobs_profile: Path | None = None
+    jobs_resume: Path | None = None
+    localappdata: Path | None = None
+    xdg_data_home: Path | None = None
+    # Web UI port (src/web/server.py; --port=N overrides).
+    webui_port: int = Field(5533, ge=1, le=65535)
+    # Thread-pool sizes; unset -> n_cpus - 1 (src/net/util.worker_count).
+    crawler_workers: PositiveInt | None = None
+    discovery_workers: PositiveInt | None = None
+    harvest_workers: PositiveInt | None = None
+    # Headless browsers for discovery's parallel JS fallback.
+    js_browsers: int = 4
+
+    @model_validator(mode="before")
+    @classmethod
+    def _blank_is_unset(cls, data):
+        return {k: v.strip() if isinstance(v, str) else v
+                for k, v in data.items()
+                if not (isinstance(v, str) and not v.strip())}
+
+
+def read_env():
+    """A fresh Settings from the environment, or ValueError naming every bad
+    variable (never its value: some are secrets)."""
+    try:
+        return Settings()
+    except ValidationError as e:
+        bad = "".join(f"\n  {x['loc'][0].upper()}: {x['msg']}" for x in
+                      e.errors(include_url=False, include_input=False))
+        raise ValueError(f"bad environment variable(s):{bad}") from None
 
 
 def require_creds(source, register_url, **values):
@@ -38,8 +97,8 @@ def require_creds(source, register_url, **values):
     OPT-IN: no key means the source sits out, like a board that is down, and
     the rest of the crawl runs. Each fetcher had written that rule out with
     its own wording, its own indent and its own idea of what to say -- and
-    with `env`'s blank-is-unset rule re-implemented by hand, so a variable
-    exported as "   " read as configured in one of them.
+    with Settings' blank-is-unset rule re-implemented by hand, so a
+    variable exported as "   " read as configured in one of them.
 
     `values` maps ENV VAR NAME -> the value the caller read from config (not
     read here: the fetchers take theirs off the config module so a test can
@@ -67,33 +126,14 @@ def require_creds(source, register_url, **values):
     return None
 
 
-# Digest email is opt-in and OFF until you set both of these — there is no
-# built-in address. Blank GMAIL_ADDRESS simply disables emailing (src/digest/render.py).
-GMAIL_ADDRESS      = env("GMAIL_ADDRESS")
-GMAIL_APP_PASSWORD = env("GMAIL_APP_PASSWORD", "YOUR_APP_PASSWORD_HERE")
-ANTHROPIC_API_KEY  = env("ANTHROPIC_API_KEY",  "YOUR_ANTHROPIC_API_KEY_HERE")
-# Screen/mission/expansion calls: Sonnet 5 — near-Opus quality at Sonnet
-# pricing ($3/$15 per MTok; intro $2/$10 through 2026-08-31, cheaper than the
-# Sonnet 4.6 it replaces). NOTE for 5-family models: thinking is ON by
-# default and max_tokens caps thinking+text together — src/claude/api.py
-# disables thinking for these small structured-JSON calls.
-CLAUDE_MODEL       = env("CLAUDE_MODEL", "claude-sonnet-5")
-# Deep-verify pass over ranking finalists only (~15-30 calls/run, judgment-
-# heavy): Opus 5 with adaptive thinking. $5/$25 per MTok, but bounded volume.
-CLAUDE_VERIFY_MODEL = env("CLAUDE_VERIFY_MODEL", "claude-opus-5")
+SETTINGS = read_env()
 
-# CareerOneStop (DOL) Web API — free key exposes the National Labor Exchange
-# (NLx) feed, where federal contractors must list openings (VEVRAA). Register
-# at https://www.careeronestop.org/Developers/WebAPI/registration.aspx; DOL
-# emails a UserId + token. Used by `python run_scraper.py --nlx "Meta,Google"`.
-CAREERONESTOP_USER_ID = env("CAREERONESTOP_USER_ID")
-CAREERONESTOP_TOKEN   = env("CAREERONESTOP_TOKEN")
-
-# USAJOBS Search API — free key covers every federal opening, which no other
-# source here can see (an agency lab runs no ATS and files nothing with the
-# state job bank). Register at https://developer.usajobs.gov/apirequest/;
-# OPM emails a key tied to the address you registered. USAJOBS_EMAIL must be
-# that same address — the API takes it as the User-Agent and rejects a key
-# sent with anything else. Search scope lives in profile [sources.usajobs].
-USAJOBS_API_KEY = env("USAJOBS_API_KEY")
-USAJOBS_EMAIL   = env("USAJOBS_EMAIL")
+GMAIL_ADDRESS = SETTINGS.gmail_address
+GMAIL_APP_PASSWORD = SETTINGS.gmail_app_password
+ANTHROPIC_API_KEY = SETTINGS.anthropic_api_key
+CLAUDE_MODEL = SETTINGS.claude_model
+CLAUDE_VERIFY_MODEL = SETTINGS.claude_verify_model
+CAREERONESTOP_USER_ID = SETTINGS.careeronestop_user_id
+CAREERONESTOP_TOKEN = SETTINGS.careeronestop_token
+USAJOBS_API_KEY = SETTINGS.usajobs_api_key
+USAJOBS_EMAIL = SETTINGS.usajobs_email

@@ -478,6 +478,9 @@ name_blocklist = []
 # after probe+sniff leave them unboarded (DDG rate-limits, so this is capped
 # rather than run over the whole gather). Omit for the built-in default (20).
 # websearch_cap = 20
+# How many company names the LLM brainstorm source proposes per discovery
+# run (each is verified downstream); 0 turns it off.
+# brainstorm_names = 50
 
 # Job aggregators / company-directory sites skipped when picking result URLs
 # to resolve during discovery (they're never the employer's own job board).
@@ -492,9 +495,9 @@ priority_companies = [
 ]
 
 # ---------------------------------------------------------------------------
-# Fit rubric (src/claude/fit.py) — optional; fit.py falls back to built-in defaults
-# when this whole block is absent. Tune it once your first digests are in and
-# you can see which axis is misjudging you.
+# Fit rubric (src/claude/fit.py): optional; every key has a working default.
+# Tune it once your first digests are in and you can see which axis is
+# misjudging you.
 # ---------------------------------------------------------------------------
 [fit]
 # Deterministic backstop for the "clearance" gate: verbs are the demand
@@ -503,3 +506,19 @@ priority_companies = [
 # (active/current + us/dod/top-secret/ts-sci/secret) when left empty.
 clearance_verbs = []
 clearance_qualifiers = []
+# Axis weights and gate penalties (each 0..1; defaults shown). List only the
+# entries you change: the rest keep their defaults, and an unknown name is
+# an error.
+# weights = { domain = 0.25, function = 0.34, stack = 0.33, seniority = 0.08 }
+# gate_penalty = { geo = 0.20, embedded = 0.40, level = 0.35, phd = 0.45, management = 0.35, clearance = 0.45 }
+# The domain ladder, your tool stack, and your region. Omitted, they are
+# derived from [keywords] and [locality].
+# domain_ladder = [
+#     { score = 1.00, terms = ["the exact subject matter you work on"] },
+#     { score = 0.15, terms = ["an unrelated field"] },
+# ]
+# stack_core = ["python", "sql"]
+# stack_anti = []
+# region_terms = []
+# How many of your own applied/dismissed decisions calibrate the scorer.
+# disposition_examples = 3

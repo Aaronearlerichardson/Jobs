@@ -854,6 +854,39 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
 
         assert hit["ats"] == "workday" and hit["nc"] == 6 and hit["via"] == "websearch"
 
+    def test_vendor_careers_url_names_its_board(self, monkeypatch):
+        """A careers_url on a fetchable vendor's host is read off the URL
+        itself (the sniff never fetches one); dead, it is that board's miss."""
+        for step in ("probe_company", "_websearch_board"):
+            monkeypatch.setattr(resolve_board, step,
+                                lambda *a, **k: pytest.fail("the URL names the board"))
+        monkeypatch.setattr(sniffer, "sniff_ats",
+                            lambda *a, **k: pytest.fail("the URL names the board"))
+        seen = []
+        monkeypatch.setattr(resolve_board, "_validate_board",
+                            lambda comp: seen.append(comp) or (12, 3))
+        url = "https://careers-acme.icims.com/jobs/search"
+
+        hit = resolve_board.resolve_board_sniff_first("Acme", url)
+
+        assert (hit["ats"], hit["slug"], hit["via"]) == ("icims", "careers-acme", "sniff")
+        assert seen[0]["slug"] == "careers-acme" and seen[0]["careers_url"] == url
+        assert resolve_board.classify_miss("Acme", url) == "board-dead:icims"
+
+    def test_vendor_careers_url_on_a_parent_tenant_is_not_the_board(self, monkeypatch):
+        """The URL step keeps every other step's parent-tenant guard: a
+        Workday careers_url on another employer's tenant is never fetched
+        as this company's board."""
+        monkeypatch.setattr("src.claude.api.board_is_own", lambda *a, **k: False)
+        monkeypatch.setattr(sniffer, "sniff_ats", lambda *a, **k: None)
+        for step in ("probe_company", "_websearch_board"):
+            monkeypatch.setattr(resolve_board, step, lambda *a, **k: None)
+        monkeypatch.setattr(resolve_board, "_validate_board",
+                            lambda comp: pytest.fail("a foreign board was fetched"))
+        url = "https://danaher.wd1.myworkdayjobs.com/DanaherJobs"
+
+        assert resolve_board.resolve_board_sniff_first("Genedata", url) is None
+
 
 class TestDiscoverLocalWebsearchPass:
     """Offline coverage for the Task 2 fix: discover_local's bulk pass now

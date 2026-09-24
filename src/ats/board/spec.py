@@ -1,315 +1,491 @@
-"""The schema of a `config.BOARDS` spec, and `validate_spec`, which enforces it.
+"""The schema of a `config.BOARDS` spec: frozen pydantic models, parsed once
+when the engine loads (`parse`). A key's meaning is its `Field` description
+and its default is declared on its model, nowhere else.
 
-`Board` (engine.py) validates every spec it is built from, so a spec that
-breaks the schema fails at import, not on the first board that reads it.
+A key that exists only because one platform misbehaves (a model's
+`WORKAROUNDS`, or a listing alternative after the first) needs a `why`,
+"reason, YYYY-MM", beside it.
 """
 
-import re
+from __future__ import annotations
 
+import re
+from typing import Annotated, Any, ClassVar, Literal, Union, get_args
+
+from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
+                      Discriminator, Field, Strict, StringConstraints, Tag,
+                      ValidationError, model_validator)
+
+from src import config
 from . import fields
 
-#: Top-level spec keys and what each holds; `validate_spec` enforces them.
-SPEC_KEYS = {
-    "sweep": bool,          # the lightweight sweep pulls it whole; seeds tags.SWEEP
-    "prunable": bool,       # prune_dead_boards may deactivate it; two 404s bury it
-    "guess": bool,          # discovery may guess its handle from a company name
-    "eager": bool,          # a whole-board pull reads each kept row's detail
-    "handle": dict,         # {"columns", "parts", "sep", "try", "accept",
-                            #  "follow"}: the store columns joined by sep;
-                            # `parts` names the pieces (default the columns);
-                            # `try` lists templates for one part, tried until
-                            # an answer `accept` allows ("status": those
-                            # statuses only; "status_not": none of these;
-                            # "total": a listing answer carries an int
-                            # total); `follow` maps a part to a URL template
-                            # it is the redirect target of; both settled
-                            # once per handle
-    "job_ref": dict,        # {"re", "parts"}: a stored posting URL -> handle
-                            # parts plus the posting's own ("jid", or the
-                            # listing entry keys its id reads)
-    "listing": (dict, list),  # {"url", "method", "params", "json", "headers",
-                            #  "probe_url", "decoder", "pager", "scope",
-                            #  "fields"}; a list is alternatives, tried in
-                            # order until one yields rows, each later one
-                            # taking what it does not set from the first
-    "rescue": dict,         # {"when", "unknown", "cap", "cache_days", "free",
-                            #  "fields"}: on a scoped pull ("when": "scoped",
-                            # the default) or every pull ("always"), a row
-                            # whose listed location matches `unknown` takes
-                            # its detail's `fields` (default ["location"]),
-                            # at most `cap` reads a pull, a location cached
-                            # `cache_days`; the field spec `free` is tried
-                            # against loc_re first
-    "detail": dict,         # {"url", "method", "params", "json", "headers",
-                            #  "decoder", "record", "fields", "location"}:
-                            # one posting read back
-    "closure": dict,        # {"via": "detail" | "listing" | "page", "url",
-                            #  "open", "closed", "unmatched"}: each a
-                            # condition, or a list of {"when", "why"} rules,
-                            # "why" a field spec naming the reason;
-                            # `unmatched` is the reason a readable answer
-                            # neither rule matches closes the posting; `url`
-                            # asks a posting's own endpoint in place of its
-                            # detail's
-    "employer": (str, dict),  # a field spec naming the employer on a listing entry
-    "unlocated": str,       # a location filter's verdict on a row naming no
-                            # place: "drop" (the default), "keep", or
-                            # "title" (the filter reads its title)
-    "detect": list,         # [{"re", "host", "transform", "blocklist",
-                            #   "careers_url"}]: how a URL or page names a
-                            # board (src.ats.signatures.detect); `re` lists
-                            # regexes that must all match, their groups the
-                            # handle's parts in order, each through its
-                            # `transform` (a fields.TRANSFORMS name or
-                            # None); a part in `blocklist` rejects a match;
-                            # `careers_url` rebuilds the board's URL from
-                            # the parts; `host` is the vendor's host, and an
-                            # entry with no `re` names only that
-    "canary": dict,         # {"name", "handle", "min_jobs"}: the public
-                            # board tools/check_boards.py probes
-}
-_LISTING_KEYS = {"url", "method", "params", "json", "headers", "probe_url",
-                 "decoder", "pager", "scope", "fields"}
-_DETAIL_KEYS = {"url", "method", "params", "json", "headers", "decoder",
-                "record", "fields", "location"}
-ROW_FIELDS = {"id", "title", "url", "location", "description", "posted_at",
-              "remote_hint", "department"}
-#: json: the payload itself; json_in_html: one JSON value found by `regex`;
-#: jsonld: {"postings"}, the page's schema.org JobPostings; html:
-#: {"elements", "page"} (decode.elements), or the careers-page reader's
-#: where `select` is "$job_links" (`custom.read_page`); atom: {"entries"}.
-#: Each kind's keys beside "kind", "entries" and "values".
-_DECODERS = {"json": set(), "json_in_html": {"regex"}, "jsonld": set(),
-             "html": {"select", "context", "cells", "base"}, "atom": set()}
-#: offset: "$offset" steps a page; overlap: it steps "step" < "size", so
-#: pages overlap; page: "$page" counts pages from "start" (left off the
-#: first page's request under "bare_first"; a page pager may leave `size`
-#: unknown); cursor: each page names the next ("next", ended by
-#: "has_next"). Any may set "ceiling", the most rows the server serves,
-#: or "declared", a field spec naming the last page on each page.
-_PAGERS = {"offset", "overlap", "page", "cursor"}
-_PAGER_KEYS = {"kind", "size", "step", "pages", "start", "bare_first", "next",
-               "has_next", "total", "ceiling", "declared"}
-#: A facets scope: the facet groups at `facets` on an unscoped first page,
-#: each group's (or value's) `param`, the groups whose param `param_re`
-#: matches, and each value's `values` (nested), `id` and `label`.
-_SCOPE_KEYS = {"kind", "facets", "param", "param_re", "values", "id", "label"}
-#: A param scope: `params` asked of the first listing, unpaged, in place of
-#: its own; `located`, the location a row it returned takes when it names
-#: none.
-_PARAM_SCOPE_KEYS = {"kind", "params", "located"}
-_RESCUE_KEYS = {"when", "unknown", "cap", "cache_days", "free", "fields"}
-_HANDLE_KEYS = {"columns", "parts", "sep", "try", "accept", "follow"}
-_ACCEPT_KEYS = {"status", "status_not", "total"}
-_CLOSURE_KEYS = {"via", "url", "open", "closed", "unmatched"}
-_VIAS = {"detail", "listing", "page"}
-_DETECT_KEYS = {"re", "host", "transform", "blocklist", "careers_url"}
-_CANARY_KEYS = {"name", "handle", "min_jobs"}
+RowField = Literal["id", "title", "url", "location", "description", "posted_at",
+                   "remote_hint", "department"]
+ROW_FIELDS = set(get_args(RowField))
 
 
-def validate_spec(name, spec):
-    """Raise ValueError when `spec` (a `config.BOARDS` entry) breaks the
-    schema: an unknown key, a wrong type, a regex that does not compile,
-    or a field spec the grammar cannot read.
+def _grammar(v):
+    fields.check(v)
+    return v
 
-    >>> validate_spec("x", {"sweep": True, "listing": {"url": "u", "fields": {"id": "id"}}})
-    >>> validate_spec("x", {"sweeps": True})
-    Traceback (most recent call last):
-    ...
-    ValueError: x: unknown key 'sweeps'
 
-    A listing closure reads the first page only, so it never pages:
+def _template(v):
+    fields.check_template(v)
+    return v
 
-    >>> validate_spec("x", {"listing": {"url": "u", "fields": {"id": "id"},
-    ...                                 "pager": {"kind": "offset", "size": 10}},
-    ...                     "closure": {"via": "listing"}})
-    Traceback (most recent call last):
-    ...
-    ValueError: x: closure.via listing reads one page: its listing cannot page
-    """
+
+def _regex(v):
     try:
-        _validate(spec)
-    except ValueError as e:
+        re.compile(v)
+    except re.error as e:
+        raise ValueError(f"bad regex: {e}") from None
+    return v
+
+
+def _condition(v):
+    fields.check({"const": 1, "when": v})
+    return v
+
+
+def _listed(v):
+    """A key taking one value or several: a lone value as a list of one."""
+    return [v] if isinstance(v, (str, dict)) else v
+
+
+def _ruled(v):
+    """A closure condition as its one rule; a rule list as it is."""
+    return [{"when": v}] if isinstance(v, dict) else v
+
+
+Str = Annotated[str, Strict()]
+Int = Annotated[int, Strict()]
+Bool = Annotated[bool, Strict()]
+Count = Annotated[int, Strict(), Field(ge=1)]
+Status = Annotated[int, Strict(), Field(ge=100, le=599)]
+Regex = Annotated[str, Strict(), AfterValidator(_regex)]
+Template = Annotated[str, Strict(), StringConstraints(min_length=1), AfterValidator(_template)]
+#: A field-grammar spec (fields.py): a path, a dict, or None.
+Grammar = Annotated[Any, AfterValidator(_grammar)]
+Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
+Why = Annotated[str, Strict(),
+                StringConstraints(pattern=r"^\S.*, 20\d\d-(0[1-9]|1[0-2])( \(inferred\))?$")]
+
+
+class _Spec(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class _Workaround(_Spec):
+    """A model whose `WORKAROUNDS` keys, when set, need its `why`; a `why`
+    with none set is refused too."""
+    WORKAROUNDS: ClassVar[tuple[str, ...]] = ()
+    why: Why | None = Field(None, description='Why a workaround key is set: "reason, YYYY-MM"')
+
+    @model_validator(mode="after")
+    def _explained(self):
+        used = [type(self).model_fields[k].alias or k for k in self.WORKAROUNDS
+                if k in self.model_fields_set]
+        if used and self.why is None:
+            raise ValueError(f'{", ".join(used)}: a workaround; say why ("reason, YYYY-MM")')
+        if self.why is not None and not used:
+            raise ValueError("why: explains a workaround key, and none is set")
+        return self
+
+
+class Canary(_Spec):
+    name: Str = Field(description="The employer the sample board belongs to")
+    handle: Str = Field(description="The sample board's handle")
+    min_jobs: Count = Field(1, description="The fewest postings a healthy board lists")
+
+
+class Detect(_Spec):
+    re: tuple[Regex, ...] = Field((), description="Regexes that must all match; their groups "
+                                                  "are the handle's parts, in order")
+    host: Str | None = Field(None, description="The vendor's host; an entry with no `re` "
+                                               "names only that")
+    transform: tuple[Str | None, ...] = Field((), description="A fields.TRANSFORMS name (or "
+                                                              "None) per group; default none")
+    blocklist: tuple[Str, ...] = Field((), description="Part values that reject a match")
+    careers_url: Template | None = Field(None, description="The board's URL, rebuilt from "
+                                                           "the parts")
+
+    @model_validator(mode="after")
+    def _groups(self):
+        groups = sum(re.compile(rx).groups for rx in self.re)
+        if not (self.re or self.host):
+            raise ValueError("detect: regexes, or a host")
+        if self.re and not groups:
+            raise ValueError("detect.re captures the handle")
+        if self.transform and (len(self.transform) != groups or any(
+                t is not None and t not in fields.TRANSFORMS for t in self.transform)):
+            raise ValueError("detect.transform: a known transform or None per group")
+        return self
+
+
+class JobRef(_Spec):
+    re: Regex = Field(description="Reads a stored posting URL")
+    parts: tuple[Str, ...] = Field(description="Its groups' names: handle parts, then the "
+                                               "posting's own (jid, or listing keys its id reads)")
+
+    @model_validator(mode="after")
+    def _named(self):
+        if re.compile(self.re).groups != len(self.parts):
+            raise ValueError("job_ref.parts must name every group")
+        return self
+
+
+class Accept(_Spec):
+    status: tuple[Status, ...] | None = Field(None, description="Only these statuses; default any")
+    status_not: tuple[Status, ...] = Field((), description="None of these statuses")
+    total: Bool = Field(False, description="A listing answer carries an int total")
+
+
+class Handle(_Workaround):
+    WORKAROUNDS = ("try_", "accept")
+    columns: tuple[Str, ...] = Field(config.DEFAULT_HANDLE_COLUMNS, min_length=1,
+                                     description="The store columns naming the board")
+    parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
+                                                   "columns")
+    sep: Str = Field("|", description="Joins the columns into one handle string")
+    try_: dict[Str, tuple[Template, ...]] = Field(
+        {}, alias="try", max_length=1,
+        description="One part's templates, tried until an answer `accept` allows; "
+                    "settled once per handle")
+    accept: Accept = Field(Accept(), description="The answers that settle a `try` value")
+    follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
+                                                       "its URL template; settled once per handle")
+
+    @property
+    def names(self):
+        return self.parts or self.columns
+
+
+class _Decoder(_Spec):
+    entries: Paths = Field(("",), description="Where the payload keeps its entries: the first "
+                                              "path holding a list")
+    values: Str | None = Field(None, description="Every dict holding this key stands for its value")
+
+    @property
+    def first(self):
+        """A detail answer's record unless `record` says: the first entry."""
+        return f"{self.entries[0]}[0]"
+
+
+class _Json(_Decoder):
+    @property
+    def first(self):
+        return ""
+
+
+class JsonDecoder(_Json):
+    kind: Literal["json"] = Field("json", description="The payload itself")
+
+
+class JsonInHtmlDecoder(_Json):
+    kind: Literal["json_in_html"] = Field(description="One JSON value on a page")
+    regex: Regex = Field(description="Ends just before the JSON")
+
+
+class JsonLdDecoder(_Decoder):
+    kind: Literal["jsonld"] = Field(description="The page's schema.org JobPostings")
+    entries: Paths = Field(("postings",), description="Where the decoded postings sit")
+
+
+class AtomDecoder(_Decoder):
+    kind: Literal["atom"] = Field(description="An Atom feed's entries")
+    entries: Paths = Field(("entries",), description="Where the decoded entries sit")
+
+
+class HtmlDecoder(_Decoder):
+    kind: Literal["html"] = Field(description="One entry per selected element (decode.elements)")
+    entries: Paths = Field(("elements",), description="Where the decoded elements sit")
+    select: Annotated[tuple[Template, ...], BeforeValidator(_listed)] = Field(
+        min_length=1, description='CSS templates tried in order until one finds any; '
+                                  '"$job_links": the careers-page reader (custom.read_page)')
+    context: Literal["parent", "lines"] | tuple[Str, ...] | None = Field(
+        None, description="The block around an element: its parent, the nearest of these "
+                          "tags, or the nearest holding two lines")
+    cells: dict[Str, Str] = Field({}, description="{name: CSS}: text found in the context")
+    base: Template | None = Field(None, description="Makes hrefs absolute; default the page")
+
+
+def _decoder_kind(v):
+    """A decoder's `kind`: a dict naming none is JsonDecoder's default."""
+    if isinstance(v, dict):
+        return v["kind"] if "kind" in v else JsonDecoder.model_fields["kind"].default
+    return getattr(v, "kind", None)
+
+
+Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
+                          Annotated[JsonInHtmlDecoder, Tag("json_in_html")],
+                          Annotated[JsonLdDecoder, Tag("jsonld")],
+                          Annotated[AtomDecoder, Tag("atom")],
+                          Annotated[HtmlDecoder, Tag("html")]],
+                    Discriminator(_decoder_kind)]
+
+
+class _Pager(_Workaround):
+    WORKAROUNDS = ("ceiling",)
+    size: Count = Field(description="Rows asked per page")
+    pages: Count = Field(1, description="The most pages a walk reads")
+    total: Grammar = Field(None, description="Names the board's total on the first page")
+    ceiling: Count | None = Field(None, description="The most rows the server serves: a total "
+                                                    "there ends nothing")
+    declared: Grammar = Field(None, description="Names the last page, on every page")
+
+    @property
+    def stride(self):
+        """Rows between one page's first row and the next's."""
+        return self.size
+
+    def number(self, n):
+        """Page `n`'s (from 0) own number."""
+        return n
+
+    def page(self, n):
+        """The "$page" value page `n` asks for."""
+        return self.number(n)
+
+    def offset(self, n, size):
+        """The "$offset" value page `n` of `size` rows asks for."""
+        return n * size
+
+
+class OffsetPager(_Pager):
+    kind: Literal["offset"] = Field(description='"$offset" steps a page')
+
+
+class OverlapPager(_Pager):
+    WORKAROUNDS = ("ceiling", "step")
+    kind: Literal["overlap"] = Field(description='"$offset" steps `step` < `size`: pages overlap')
+    step: Count = Field(description="Rows each page steps")
+
+    @model_validator(mode="after")
+    def _overlaps(self):
+        if self.step >= self.size:
+            raise ValueError("pager: an overlap steps less than a page")
+        return self
+
+    @property
+    def stride(self):
+        return self.step
+
+    def offset(self, n, size):
+        return n * self.step
+
+
+class PagePager(_Pager):
+    WORKAROUNDS = ("ceiling", "bare_first")
+    kind: Literal["page"] = Field(description='"$page" counts pages')
+    size: Count | None = Field(None, description="Rows a page holds, when known")
+    start: Annotated[Int, Field(ge=0)] = Field(0, description="The first page's number")
+    bare_first: Bool = Field(False, description="The first page's request names no page")
+
+    def number(self, n):
+        return self.start + n
+
+    def page(self, n):
+        return None if n == 0 and self.bare_first else self.start + n
+
+
+class CursorPager(_Pager):
+    kind: Literal["cursor"] = Field(description="Each page names the next, followed verbatim")
+    next: Str = Field(description="The path of a page's next-page URL")
+    has_next: Str = Field(description="The path of a page's more-to-come flag")
+
+
+Pager = Annotated[Union[OffsetPager, OverlapPager, PagePager, CursorPager],
+                  Field(discriminator="kind")]
+
+
+class FacetsScope(_Spec):
+    kind: Literal["facets"] = Field(description="Narrow by the facet values the area matches")
+    facets: Str = Field(description="The facet groups' path on an unscoped first page")
+    param: Str = Field(description="A group's (or value's) parameter name key")
+    param_re: Regex = Field(description="The groups whose parameter it matches")
+    values: Str = Field(description="A group's (or value's nested) values key")
+    id: Str = Field(description="A value's id key")
+    label: Str = Field(description="A value's label key, matched against the area")
+
+
+class ParamScope(_Spec):
+    kind: Literal["param"] = Field(description="Ask the first listing once, unpaged, with "
+                                               "`params` in place of its own")
+    params: dict[Str, Str] = Field(description="The scoped request's parameters")
+    located: Str | None = Field(None, description="The location a row naming none takes")
+
+
+Scope = Annotated[Union[FacetsScope, ParamScope], Field(discriminator="kind")]
+
+
+class _Request(_Spec):
+    url: Template = Field(description="The request's URL template")
+    method: Literal["GET", "POST"] = Field("GET", description="The HTTP method")
+    params: dict[Str, Str] | None = Field(None, description="Query parameters; a None one is "
+                                                            "left off")
+    json_: dict[Str, Any] | None = Field(None, alias="json", description="A JSON body template")
+    headers: dict[Str, Str] = Field({}, description="Over the shared request headers")
+    decoder: Decoder = Field(JsonDecoder(), description="Reads the response body")
+    fields: dict[Str, Grammar] = Field({}, description="Row field (or internal _field) -> "
+                                                       "field spec")
+
+    @model_validator(mode="after")
+    def _row_fields(self):
+        extra = sorted(k for k in self.fields if k not in ROW_FIELDS and not k.startswith("_"))
+        if extra:
+            raise ValueError(f"unknown field(s) {extra}")
+        return self
+
+
+class Listing(_Request):
+    probe_url: Template | None = Field(None, description="The URL a cheap read asks instead")
+    pager: Pager | None = Field(None, description="How pages step; none reads one page")
+    scope: Scope | None = Field(None, description="Narrows the listing to the locality")
+    why: Why | None = Field(None, description='Why this fallback alternative exists: '
+                                              '"reason, YYYY-MM"')
+
+
+class Detail(_Request):
+    record: Paths | None = Field(None, description="The record's paths in an answer; default "
+                                                   "the decoder's first entry")
+    location: Literal["always", "if_unknown", "never"] = Field(
+        "if_unknown", description="When the detail's location replaces the row's")
+
+
+class Rescue(_Spec):
+    when: Literal["scoped", "always"] = Field("scoped", description="On a scoped pull, or "
+                                                                    "every pull")
+    unknown: Regex = Field(description="A listed location it matches is filled from the detail")
+    cap: Count = Field(description="The most detail reads a pull spends")
+    cache_days: Annotated[Int, Field(ge=0)] = Field(0, description="Days a found location is "
+                                                                   "cached; 0 none")
+    free: Grammar = Field(None, description="Free text tried against the area first")
+    fields: tuple[RowField, ...] = Field(("location",), description="The row fields the "
+                                                                    "detail fills")
+    why: Why = Field(description='Why the listing needs rescuing: "reason, YYYY-MM"')
+
+
+class Rule(_Spec):
+    when: Annotated[dict[Str, Any], AfterValidator(_condition)] = Field(
+        description="A condition on the record")
+    why: Grammar = Field(None, description="Names the reason")
+
+
+Rules = Annotated[tuple[Rule, ...], BeforeValidator(_ruled)]
+
+
+class Closure(_Workaround):
+    WORKAROUNDS = ("url", "unmatched")
+    via: Literal["detail", "listing", "page"] | None = Field(
+        None, description="What judges a posting; default the detail where there is one, "
+                          "else its page")
+    url: Template | None = Field(None, description="Asked in place of the detail's URL")
+    open: Rules = Field((), description="A condition, or rules, proving the posting live")
+    closed: Rules = Field((), description="A condition, or rules, proving it closed")
+    unmatched: Str | None = Field(None, description="The reason a readable answer neither "
+                                                    "rule matches closes the posting")
+
+
+def _default_of(model, key):
+    """The default of `model`'s field named (or aliased) `key`; a marker
+    no value equals when there is no such field."""
+    info = next((f for n, f in model.model_fields.items() if key in (n, f.alias)), None)
+    return info.get_default(call_default_factory=True) if info else object()
+
+
+class BoardSpec(_Spec):
+    sweep: Bool = Field(False, description="The lightweight sweep pulls it whole")
+    prunable: Bool = Field(False, description="prune_dead_boards may deactivate it")
+    guess: Bool = Field(False, description="Discovery may guess its handle from a name")
+    eager: Bool = Field(False, description="A whole-board pull reads each kept row's detail")
+    handle: Handle = Field(Handle(), description="How a store row names the board")
+    job_ref: JobRef | None = Field(None, description="Reads a stored posting URL")
+    listing: tuple[Listing, ...] = Field(
+        (), description="Alternatives tried in order until one yields a posting, each later "
+                        "one taking what it does not set from the first")
+    rescue: Rescue | None = Field(None, description="Fills vague listed rows from the detail")
+    detail: Detail | None = Field(None, description="Reads one posting back")
+    closure: Closure = Field(Closure(), description="Judges a stored posting open or closed")
+    employer: Grammar = Field(None, description="Names the employer on a listing entry")
+    unlocated: Literal["drop", "keep", "title"] = Field(
+        "drop", description="A location filter's verdict on a row naming no place "
+                            '("title": on its title)')
+    detect: tuple[Detect, ...] = Field((), description="How a URL or page names the board")
+    canary: Canary | None = Field(None, description="The public board tools/check_boards.py "
+                                                    "probes")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alternatives(cls, data):
+        """A lone listing as the one alternative; a later one completed
+        from the first, a key it resets to its default left unset."""
+        listing = data.get("listing") if isinstance(data, dict) else None
+        if isinstance(listing, dict):
+            return {**data, "listing": [listing]}
+        if not (isinstance(listing, list) and listing
+                and all(isinstance(alt, dict) for alt in listing)):
+            return data
+        first = listing[0]
+        alts = [{**{k: v for k, v in first.items() if k not in alt},
+                 **{k: v for k, v in alt.items()
+                    if not (k in first and v == _default_of(Listing, k))}}
+                for alt in listing[1:]]
+        return {**data, "listing": [first, *alts]}
+
+    @model_validator(mode="after")
+    def _fallbacks_explained(self):
+        for i, alt in enumerate(self.listing):
+            if i == 0 and alt.why is not None:
+                raise ValueError("listing[0].why: the first alternative is no fallback")
+            if i and alt.why is None:
+                raise ValueError(f'listing[{i}]: a fallback; say why ("reason, YYYY-MM")')
+        return self
+
+    @model_validator(mode="after")
+    def _closure_servable(self):
+        if self.via == "detail" and not self.detail:
+            raise ValueError("closure.via detail needs a detail")
+        if self.via == "listing" and (not self.listing or any(a.pager for a in self.listing)):
+            raise ValueError("closure.via listing reads one page: its listing cannot page")
+        return self
+
+    @model_validator(mode="after")
+    def _rescue_servable(self):
+        scoped = self.listing and self.listing[0].scope
+        if self.rescue and not (self.detail and (scoped or self.rescue.when == "always")):
+            raise ValueError("rescue: a detail, and a scoped listing unless `when` is always")
+        return self
+
+    @property
+    def via(self):
+        """What judges a stored posting (`closure.via`, resolved)."""
+        return self.closure.via or self.default_via
+
+    @property
+    def default_via(self):
+        """`closure.via` unless set: the detail where there is one, else the page."""
+        return "detail" if self.detail else "page"
+
+
+def parse(name, raw):
+    """`raw`, a `config.BOARDS` entry, as a BoardSpec; ValueError naming
+    `name` and every broken key's path when it breaks the schema."""
+    try:
+        return BoardSpec.model_validate(raw)
+    except ValidationError as e:
         raise ValueError(f"{name}: {e}") from None
 
 
-def _validate(spec):
-    """`validate_spec` without the name prefix."""
-    for key, v in spec.items():
-        if key not in SPEC_KEYS:
-            raise ValueError(f"unknown key {key!r}")
-        if not isinstance(v, SPEC_KEYS[key]):
-            raise ValueError(f"{key} is {type(v).__name__}")
-    listings = alternatives(spec.get("listing"))
-    detail = spec.get("detail") or {}
-    for part in listings:
-        _check_part("listing", _LISTING_KEYS, part)
-        _check_pager(part.get("pager"))
-    _check_part("detail", _DETAIL_KEYS, detail)
-    _check_handle(spec.get("handle") or {})
-    scope = (listings[0] if listings else {}).get("scope")
-    if scope and not (scope.get("kind") == "facets" and set(scope) == _SCOPE_KEYS
-                      or scope.get("kind") == "param" and "params" in scope
-                      and set(scope) <= _PARAM_SCOPE_KEYS):
-        raise ValueError(f"listing.scope: a facets scope names {sorted(_SCOPE_KEYS)}, "
-                         f"a param scope `params` of {sorted(_PARAM_SCOPE_KEYS)}")
-    if spec.get("unlocated", "drop") not in ("drop", "keep", "title"):
-        raise ValueError("unlocated is drop, keep or title")
-    rescue = spec.get("rescue")
-    if rescue and (set(rescue) - _RESCUE_KEYS or not isinstance(rescue.get("cap"), int)
-                   or rescue.get("when", "scoped") not in ("scoped", "always")
-                   or set(rescue.get("fields") or []) - ROW_FIELDS
-                   or not ((scope or rescue.get("when") == "always") and detail)):
-        raise ValueError("rescue: a detail, a scoped listing unless `when` is always, an int cap")
-    _check_closure(spec.get("closure") or {}, listings, detail)
-    ref = spec.get("job_ref") or {}
-    for where, rx in (("job_ref.re", ref.get("re")),
-                      ("rescue.unknown", (rescue or {}).get("unknown")),
-                      ("listing.scope.param_re", (scope or {}).get("param_re"))):
-        _compiles(where, rx)
-    if ref and re.compile(ref["re"]).groups != len(ref["parts"]):
-        raise ValueError("job_ref.parts must name every group")
-    for t in [alt.get("url") or "" for alt in listings]:
-        fields.check_template(t)
-    fields.check((rescue or {}).get("free"))
-    if spec.get("employer"):
-        fields.check(spec["employer"])
-    for entry in spec.get("detect", []):
-        _check_detect(entry)
-    canary = spec.get("canary")
-    if canary is not None and (set(canary) - _CANARY_KEYS
-                               or not isinstance(canary.get("handle"), str)
-                               or not isinstance(canary.get("min_jobs", 1), int)):
-        raise ValueError(f"canary: a str handle, an int min_jobs, of {sorted(_CANARY_KEYS)}")
-
-
-def _compiles(where, rx):
-    """Raise ValueError when regex `rx` (None passes) does not compile."""
-    try:
-        if rx:
-            re.compile(rx)
-    except re.error as e:
-        raise ValueError(f"{where}: {e}") from None
-
-
-def _check_part(key, allowed, part):
-    """A listing alternative's or the detail's keys, fields and decoder."""
-    extra = set(part) - allowed
-    if extra:
-        raise ValueError(f"unknown {key} key(s) {sorted(extra)}")
-    extra = set(part.get("fields") or {}) - ROW_FIELDS
-    if any(not k.startswith("_") for k in extra):
-        raise ValueError(f"unknown {key} field(s) {sorted(extra)}")
-    for f in (part.get("fields") or {}).values():
-        fields.check(f)
-    dec = part.get("decoder") or {}
-    kind = dec.get("kind", "json")
-    if kind not in _DECODERS or set(dec) - {"kind", "entries", "values"} - _DECODERS[kind]:
-        raise ValueError(f"{key}.decoder: a known kind with its own keys")
-    if kind == "json_in_html":
-        if not isinstance(dec.get("regex"), str):
-            raise ValueError(f"{key}.decoder: json_in_html finds its JSON by a regex")
-        _compiles(f"{key}.decoder.regex", dec["regex"])
-    if kind == "html":
-        select = dec.get("select")
-        selects = select if isinstance(select, list) else [select]
-        if not select or not all(isinstance(s, str) and s for s in selects):
-            raise ValueError(f"{key}.decoder: an html decoder selects (a CSS template or a list)")
-        for s in selects:
-            fields.check_template(s)
-
-
-def _check_pager(pager):
-    """One listing alternative's pager."""
-    if not pager:
-        return
-    kind = pager.get("kind")
-    if kind not in _PAGERS or set(pager) - _PAGER_KEYS:
-        raise ValueError(f"listing.pager: a known kind, of {sorted(_PAGER_KEYS)}")
-    if not (pager.get("size") or kind == "page"):
-        raise ValueError("listing.pager needs a size")
-    if kind == "overlap" and not 0 < pager.get("step", 0) < pager["size"]:
-        raise ValueError("listing.pager: an overlap steps less than a page")
-    if kind != "overlap" and "step" in pager:
-        raise ValueError("listing.pager: only an overlap pager steps; an offset one steps a page")
-    if kind == "cursor" and not (pager.get("next") and pager.get("has_next")):
-        raise ValueError("listing.pager: a cursor needs next and has_next")
-    if not isinstance(pager.get("ceiling", 0), int):
-        raise ValueError("listing.pager.ceiling is a row count")
-    fields.check(pager.get("total"))
-    fields.check(pager.get("declared"))
-
-
-def _check_handle(hspec):
-    """The handle: its keys, one `try` part of templates, `accept`, `follow`."""
-    if set(hspec) - _HANDLE_KEYS:
-        raise ValueError(f"handle: of {sorted(_HANDLE_KEYS)}")
-    if not all(isinstance(v, str) for v in (hspec.get("follow") or {}).values()):
-        raise ValueError("handle.follow maps a part to a URL template")
-    tries = hspec.get("try")
-    if set(hspec.get("accept") or {}) - _ACCEPT_KEYS or tries is not None and (
-            len(tries) != 1 or not all(isinstance(t, list) for t in tries.values())):
-        raise ValueError("handle: one `try` part (a list of templates), "
-                         "`accept` of status, status_not, total")
-    for templates in (tries or {}).values():
-        for t in templates:
-            fields.check_template(t)
-
-
-def _check_closure(closure, listings, detail):
-    """The closure: its keys, a known `via` its spec can serve, its rules."""
-    if set(closure) - _CLOSURE_KEYS:
-        raise ValueError(f"closure: of {sorted(_CLOSURE_KEYS)}")
-    via = closure.get("via", "detail" if detail else "page")
-    if via not in _VIAS:
-        raise ValueError(f"closure.via is one of {sorted(_VIAS)}")
-    if via == "detail" and not detail:
-        raise ValueError("closure.via detail needs a detail")
-    if via == "listing" and (not listings or any(alt.get("pager") for alt in listings)):
-        raise ValueError("closure.via listing reads one page: its listing cannot page")
-    if not isinstance(closure.get("unmatched", ""), str):
-        raise ValueError("closure.unmatched is a reason")
-    fields.check_template(closure.get("url") or "")
-    for c in (closure.get(k) for k in ("open", "closed")):
-        for rule in rules(c):
-            if set(rule) - {"when", "why"} or "when" not in rule:
-                raise ValueError(f"closure rule {rule!r}")
-            fields.check({"const": 1, "when": rule["when"]})
-            fields.check(rule.get("why"))
-
-
-def _check_detect(entry):
-    """One `detect` entry: its keys, regexes that compile, a transform per group."""
-    if not isinstance(entry, dict) or set(entry) - _DETECT_KEYS:
-        raise ValueError(f"detect: an entry of {sorted(_DETECT_KEYS)}")
-    regexes = entry.get("re", [])
-    if not isinstance(regexes, list) or not (regexes or entry.get("host")):
-        raise ValueError("detect.re is a list of regexes (or the entry names a host)")
-    for rx in regexes:
-        _compiles("detect.re", rx)
-    groups = sum(re.compile(rx).groups for rx in regexes)
-    if regexes and not groups:
-        raise ValueError("detect.re captures the handle")
-    transforms = entry.get("transform", [None] * groups)
-    if len(transforms) != groups or any(t is not None and t not in fields.TRANSFORMS
-                                        for t in transforms):
-        raise ValueError("detect.transform: a known transform or None per group")
-    if not all(isinstance(v, str) for v in entry.get("blocklist", [])):
-        raise ValueError("detect.blocklist lists values")
-    fields.check_template(entry.get("careers_url") or "")
-
-
-def alternatives(listing):
-    """A spec's listing as its alternatives, each later one completed from
-    the first.
-
-    >>> alternatives([{"url": "a", "fields": {}}, {"url": "b"}])
-    [{'url': 'a', 'fields': {}}, {'url': 'b', 'fields': {}}]
-    """
-    alts = listing if isinstance(listing, list) else [listing] if listing else []
-    return [alt if i == 0 else {**alts[0], **alt} for i, alt in enumerate(alts)]
-
-
-def rules(c):
-    """A closure condition as its rule list: a list already, else one rule."""
-    return c if isinstance(c, list) else [{"when": c}] if c else []
+def walk(model, path=""):
+    """(path, value, set, default) for every key of `model` and of the
+    models under it, depth first; `set` when the spec gave the key."""
+    for name, info in type(model).model_fields.items():
+        key, value = f"{path}{info.alias or name}", getattr(model, name)
+        default = info.get_default(call_default_factory=True)
+        yield key, value, name in model.model_fields_set, default
+        if isinstance(value, BaseModel):
+            yield from walk(value, f"{key}.")
+        elif isinstance(value, tuple):
+            for i, sub in enumerate(value):
+                if isinstance(sub, BaseModel):
+                    yield from walk(sub, f"{key}[{i}].")
