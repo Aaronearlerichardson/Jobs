@@ -103,28 +103,53 @@ def _normalize_description(jp):
     return text_from_html(jp.get("description", "") or "")
 
 
-def _job_from_posting(jp, company_name, source_url):
-    title = (jp.get("title") or jp.get("name") or "").strip()
-    job_url = jp.get("url") or jp.get("mainEntityOfPage") or source_url
+def read_posting(jp, page_url=""):
+    """A JobPosting's values, plain: `title`, `url` (the posting's own, else
+    `page_url`), `location` ("" when it names none), `description` (text),
+    `posted_at` (as written), `key` (its identifier, else a stable id of
+    its URL) and `telecommute`.
+
+    >>> r = read_posting({"@type": "JobPosting", "title": " Eng ", "identifier": {"value": 7},
+    ...                   "jobLocationType": "TELECOMMUTE"}, "https://x.test/j/7")
+    >>> r["title"], r["url"], r["location"], r["key"], r["telecommute"]
+    ('Eng', 'https://x.test/j/7', 'Remote', '7', True)
+    """
+    job_url = jp.get("url") or jp.get("mainEntityOfPage") or page_url
     if isinstance(job_url, dict):
-        job_url = job_url.get("@id", source_url)
-    location = _normalize_location(jp)
-    description = _normalize_description(jp)
+        job_url = job_url.get("@id", page_url)
     identifier = jp.get("identifier")
     if isinstance(identifier, dict):
         identifier = identifier.get("value", "")
-    jid = str(identifier or stable_id(str(job_url)))
-    job = {
-        "id":          f"jsonld_{company_name.replace(' ', '_')}_{jid}",
-        "company":     company_name,
-        "title":       title,
-        "url":         str(job_url) if job_url else source_url,
-        "location":    location,
-        "description": description,
-        "posted_at":   _norm_posted(jp.get("datePosted")),
+    location = _normalize_location(jp)
+    return {
+        "title": str(jp.get("title") or jp.get("name") or "").strip(),
+        "url": str(job_url) if job_url else page_url,
+        "location": "" if location == "Unknown" else location,
+        "description": _normalize_description(jp),
+        "posted_at": jp.get("datePosted"),
+        "key": str(identifier or stable_id(str(job_url))),
+        # Structured remote signal: schema.org marks remote roles explicitly.
+        "telecommute": str(jp.get("jobLocationType", "")).upper() == "TELECOMMUTE",
     }
-    # Structured remote signal — schema.org marks remote roles explicitly.
-    if str(jp.get("jobLocationType", "")).upper() == "TELECOMMUTE":
+
+
+def postings(html, page_url=""):
+    """Every JobPosting on a page, as `read_posting` records."""
+    return [read_posting(o, page_url) for o in extract_jsonld(html) if is_jobposting(o)]
+
+
+def _job_from_posting(jp, company_name, source_url):
+    p = read_posting(jp, source_url)
+    job = {
+        "id":          f"jsonld_{company_name.replace(' ', '_')}_{p['key']}",
+        "company":     company_name,
+        "title":       p["title"],
+        "url":         p["url"],
+        "location":    p["location"] or "Unknown",
+        "description": p["description"],
+        "posted_at":   _norm_posted(p["posted_at"]),
+    }
+    if p["telecommute"]:
         job["remote_hint"] = "jsonld:telecommute"
     return job
 

@@ -282,12 +282,7 @@ def _row(job, company, stamp):
 
 
 def fetch_whole_board(company):
-    """The company's full listing, unfiltered. iCIMS is the one fetcher whose
-    default narrows a board even with no location regex (it sends the
-    locality as the search term), so it is called with that off."""
-    if company.get("ats") == "icims":
-        return company_fetch.fetch_icims_all(company["slug"], None,
-                                             search_location=None)
+    """The company's full listing, unfiltered."""
     return company_fetch.fetch_company(company, None)
 
 

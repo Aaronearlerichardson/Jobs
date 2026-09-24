@@ -480,6 +480,304 @@ BOARDS = {
                               {"of": "fields.PostingDateRange_prd_End", "transform": "ymd"}]}}],
                     "open": {"truthy": "fields"}},
     },
+    "jazzhr": {
+        "sweep": True,
+        "job_ref": {"re": r"(?i)^(https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)[^?#]*)",
+                    "parts": ["link", "slug", "jid"]},
+        # The index links each posting's page and names nothing else.
+        "listing": {
+            "url": "https://{slug}.applytojob.com/",
+            "decoder": {"kind": "html", "select": "a[href*='/apply/']"},
+            "fields": {
+                "_path": {"of": "href", "transform": "group:(/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+)"},
+                "id": {"format": "{_path}"},
+                "url": {"format": "https://{slug}.applytojob.com{_path}"},
+                "department": None,
+            },
+        },
+        # So every row is its posting page's JSON-LD, 60 pages a pull.
+        "rescue": {"when": "always", "unknown": "^$", "cap": 60, "cache_days": 0,
+                   "fields": ["id", "title", "url", "location", "description",
+                              "posted_at", "remote_hint"]},
+        "detail": {
+            "url": "{link}",
+            "decoder": {"kind": "jsonld"},
+            "fields": {
+                "id": {"format": "jsonld_{slug}_{key}"},
+                "title": "title",
+                "url": "url",
+                "location": {"of": "location", "default": "Unknown"},
+                "description": "description",
+                "posted_at": "posted_at",
+                "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
+            },
+        },
+        # The slug-free apply URL answers 410 once a posting is pulled.
+        "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}"},
+    },
+    "jobvite": {
+        "sweep": True,
+        "eager": True,
+        "handle": {"parts": ["tenant"]},
+        "job_ref": {"re": r"(?i)//jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)/job/([A-Za-z0-9]+)",
+                    "parts": ["tenant", "jid"]},
+        "listing": [
+            {
+                "url": "https://jobs.jobvite.com/{tenant|lower}/search",
+                "params": {"p": "$page"},
+                "decoder": {"kind": "html",
+                            "select": "a.jv-job-list-name[href*='/{tenant}/job/' i]",
+                            "context": ["li"], "cells": {"location": ".jv-job-list-location"}},
+                "pager": {"kind": "page", "size": 50, "pages": 20},
+                "fields": {
+                    "_tenant": {"format": "{tenant}", "transform": "lower"},
+                    "_jid": {"of": "href", "transform": "group:(?i)/job/([A-Za-z0-9]+)"},
+                    "id": {"format": "jv_{_tenant}_{_jid}"},
+                    "title": "text",
+                    "url": {"format": "https://jobs.jobvite.com/{_tenant}/job/{_jid}"},
+                    "location": "location",
+                    "department": None,
+                },
+            },
+            # Every row on one page; some tenants replace it with a landing
+            # page listing nothing, which is why the search goes first.
+            {"url": "https://jobs.jobvite.com/{tenant|lower}/jobs", "params": None, "pager": None},
+        ],
+        "detail": {
+            "url": "https://jobs.jobvite.com/{tenant}/job/{jid}",
+            "decoder": {"kind": "jsonld"},
+            "fields": {
+                "description": {"of": "description", "transform": "one_line"},
+                "location": "location",
+                "posted_at": "posted_at",
+                "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
+            },
+        },
+        "closure": {"via": "page"},
+    },
+    "kula": {
+        "sweep": True,
+        "listing": {
+            "url": "https://careers.kula.ai/{slug}",
+            # A row is an anchor and the nearest block around it holding two
+            # lines of text: department, title, location.
+            "decoder": {"kind": "html", "select": "a[href*='/{slug}/']", "context": "lines",
+                        "base": "https://careers.kula.ai"},
+            "fields": {
+                "_n": {"of": "url", "transform": "group:/(\\d+)/?$"},
+                "id": {"format": "kula_{slug}_{_n}"},
+                "title": {"first": ["lines[1]", "lines[0]"], "default": "Unknown"},
+                "url": "url",
+                "location": {"of": "lines[2]", "transform": "before:;", "default": "See posting"},
+                "department": {"of": "lines[0]", "when": {"truthy": "lines[1]"}},
+            },
+        },
+    },
+    "successfactors": {
+        # The board is the careers site itself, keyed on its URL.
+        "handle": {"columns": ["careers_url"], "parts": ["base"]},
+        "listing": {
+            "url": "{base|rstrip_slash}/search/?startrow={offset}",
+            "headers": {"Accept": "text/html"},
+            "decoder": {"kind": "html", "select": ["a.jobTitle-link", "a[href*='/job/']"],
+                        "context": ["tr", "li", "div"],
+                        "cells": {"cell": "[class*='jobLocation']"}, "base": "{base}"},
+            # The standard theme's "Results 1 - 25 of 621"; a custom skin
+            # may render none. A repeated page ends the walk: some tenants
+            # wrap back to earlier rows instead of running dry.
+            "pager": {"kind": "offset", "size": 25, "pages": 80,
+                      "total": {"of": {"of": "page", "transform": "group:(?s)class=\"paginationLabel\""
+                                                                  "[^>]*>.*?of\\s*<b>\\s*([\\d,]+)\\s*</b>"},
+                                "transform": "int"}},
+            "fields": {
+                # The /job/ slug can lead with "<City>,-<ST>-", spaces as hyphens.
+                "_path": {"of": "url", "transform": "unquote"},
+                "_city": {"of": "_path", "transform": "group:/job/(.+?),-[A-Z]{2}-"},
+                "_state": {"of": "_path", "transform": "group:/job/.+?,-([A-Z]{2})-"},
+                "_jid": {"first": [{"of": "url", "transform": "group:/job/[^/]+/(\\d+)"},
+                                   {"of": "url", "transform": "group:/job/([^/?#]+)"},
+                                   {"of": "url", "transform": "stable_id"}]},
+                "_key": {"format": "{base}", "transform": "alnum_tail:16"},
+                "id": {"format": "sf_{_key}_{_jid}", "when": {"truthy": "href"}},
+                "title": "text",
+                "url": "url",
+                # Else the theme's location cell, else a place in the row's
+                # text; either can carry a glued-on posting date.
+                "location": {"first": [
+                    {"format": "{_city|dash_space}, {_state}", "when": {"truthy": "_city"}},
+                    {"of": {"first": ["cell", {"of": "context", "transform": "snippet"}]},
+                     "transform": "cut_date_tail"}]},
+                "department": None,
+            },
+        },
+    },
+    "icims": {
+        # A row naming no place is kept by a location filter its title passes.
+        "unlocated": "title",
+        "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
+                    "parts": ["link"]},
+        "listing": [
+            {
+                "url": "https://{slug}.icims.com/jobs/search?ss=1&in_iframe=1",
+                "params": {"pr": "$page"},
+                # The WAF 405s a Chrome UA arriving without Chrome's client
+                # hints; a bare platform UA passes.
+                "headers": {"User-Agent": "$plain_user_agent"},
+                # The selector also finds the search shell's own links
+                # (/jobs/intro, /jobs/login, the pager's), which name no posting.
+                "decoder": {"kind": "html", "select": "a.iCIMS_Anchor, a[href*='/jobs/']",
+                            "context": "parent"},
+                # The first page takes no page number; tenants serve 20 or 50 a page.
+                "pager": {"kind": "page", "pages": 8, "bare_first": True},
+                # A free-text place term some tenants answer with "No Results
+                # Found": the whole board is read then.
+                "scope": {"kind": "param", "params": {"searchLocation": "$locality_abbr"},
+                          "located": "$locality_abbr"},
+                "fields": {
+                    "_jid": {"of": "href", "transform": "group:/jobs/(\\d+)/"},
+                    # The posting's own host names the tenant: a board kept under a
+                    # portal alias lists postings on the tenant's host.
+                    "_tenant": {"first": [
+                        {"of": {"of": "url", "transform": "group:(?i)^https?://([a-z0-9-]+)\\.icims\\.com"},
+                         "transform": "lower"},
+                        {"format": "{slug}"}]},
+                    "_path": {"of": "url", "transform": "group:^([^?#]*)"},
+                    # A screen-reader label leads the anchor's text.
+                    "_title": {"of": "raw", "transform": "strip_labels"},
+                    "id": {"format": "icims_{_tenant}_{_jid}", "when": {"truthy": "_title"}},
+                    "title": {"of": "_title", "when": {"truthy": "_jid"}},
+                    # One URL per posting: its path, and the flag selecting the
+                    # server-rendered document.
+                    "url": {"format": "{_path}?in_iframe=1", "when": {"truthy": "_jid"}},
+                    "location": {"of": "context", "transform": "loc_text"},
+                    "department": None,
+                },
+            },
+            # A JS-shell tenant lists every live posting in its sitemap, titled
+            # by the URL slug; some tenants' WAF 403s it.
+            {
+                "url": "https://{slug}.icims.com/sitemap.xml",
+                "params": None,
+                "pager": None,
+                "decoder": {"kind": "html", "select": "loc"},
+                "fields": {
+                    "_jid": {"of": "text", "transform": "group:/jobs/(\\d+)/[^/]+/job"},
+                    "_tenant": {"first": [
+                        {"of": {"of": "text", "transform": "group:(?i)^https?://([a-z0-9-]+)\\.icims\\.com"},
+                         "transform": "lower"},
+                        {"format": "{slug}"}]},
+                    "_path": {"of": "text", "transform": "group:^([^?#]*)"},
+                    "_slug": {"of": "text", "transform": "group:/jobs/\\d+/([^/]+)/job"},
+                    "id": {"format": "icims_{_tenant}_{_jid}"},
+                    "title": {"of": {"of": "_slug", "transform": "unquote"}, "transform": "dash_space"},
+                    "url": {"format": "{_path}?in_iframe=1", "when": {"truthy": "_jid"}},
+                    "department": None,
+                },
+            },
+        ],
+        # Each posting's page names its place in JSON-LD (the listing seldom
+        # does); 150 reads a pull, a found place kept a week.
+        "rescue": {"when": "always", "unknown": "^$", "cap": 150, "cache_days": 7,
+                   "fields": ["location", "description"]},
+        "detail": {
+            "url": "{link}?in_iframe=1",
+            "headers": {"User-Agent": "$plain_user_agent"},
+            "decoder": {"kind": "jsonld"},
+            "fields": {"description": "description", "location": "location"},
+        },
+        # A pulled posting's page answers 410.
+        "closure": {"via": "page"},
+    },
+    "peopleadmin": {
+        # The board is the tenant's host, keyed on any URL on it.
+        "handle": {"columns": ["careers_url"], "parts": ["base"]},
+        # A tenant is one campus: a posting naming no place is on it.
+        "unlocated": "keep",
+        "listing": [
+            {
+                "url": "https://{base|host}/postings/all_jobs.atom",
+                "headers": {"Accept": "application/atom+xml"},
+                "decoder": {"kind": "atom"},
+                "fields": {
+                    "_url": {"first": ["link@href", "id"]},
+                    "_key": {"of": {"format": "{base|host}"}, "transform": "host_key"},
+                    "_pid": {"first": [{"of": "_url", "transform": "group:/postings/(\\d+)"},
+                                       {"of": "_url", "transform": "stable_id"}]},
+                    "_title": {"of": "title", "transform": "one_line"},
+                    "id": {"format": "pa_{_key}_{_pid}"},
+                    "title": "_title",
+                    "url": "_url",
+                    # The place the title names, else the campus the feed's own
+                    # title names; a posting's body is not read for one.
+                    "location": {"first": [{"of": "_title", "transform": "place"},
+                                           {"of": "feed.title", "transform": "place"}]},
+                    "description": {"join": ["author.name",
+                                             {"of": {"first": ["content", "summary"]},
+                                              "transform": "html_text"}],
+                                    "sep": " | "},
+                    "posted_at": {"first": ["published", "updated"]},
+                    # The hiring department ("Epidemiology - 463501").
+                    "department": "author.name",
+                },
+            },
+            # The tenant's default saved search, when the whole board lists nothing.
+            {"url": "https://{base|host}/postings/search.atom"},
+        ],
+        # No detail: a posting's page is under the host's robots disallow.
+        "closure": {"via": "page"},
+    },
+    "custom": {
+        "sweep": True,
+        # A self-hosted careers page, read by the careers-page reader
+        # (src.ats.fetchers.custom).
+        "handle": {"columns": ["careers_url"], "parts": ["page"]},
+        "listing": {
+            "url": "{page}",
+            "decoder": {"kind": "html", "select": "$job_links"},
+            "fields": {
+                "_key": {"of": "url", "transform": "url_key:48"},
+                "id": {"format": "custom_{_key}"},
+                "title": "title",
+                "url": "url",
+                "location": "location",
+                "department": None,
+            },
+        },
+    },
+    "wpjson": {
+        "sweep": True,
+        # A WordPress theme's careers route, keyed on any page of the site.
+        "handle": {"columns": ["careers_url"], "parts": ["site"]},
+        "listing": {
+            "url": "{site|origin}/wp-json/post-filters-archive/get-posts",
+            "params": {"post_type": "career", "posts_per_page": "$size", "paged": "$page"},
+            "decoder": {"kind": "json", "entries": "posts"},
+            # Every page declares the last.
+            "pager": {"kind": "page", "size": 100, "pages": 50, "start": 1,
+                      "declared": {"of": "max_num_pages", "transform": "int", "default": 1}},
+            "fields": {
+                "_site": {"format": "{site|host_nowww}"},
+                "id": {"format": "wpjson_{_site}_{ID}"},
+                "title": {"of": "post_title", "transform": "one_line", "default": "Unknown"},
+                "url": {"first": ["link.url", "permalink"]},
+                "location": {"join": [{"of": "location.city", "transform": "one_line"},
+                                      {"of": "location.state", "transform": "one_line"}],
+                             "sep": ", ", "default": "See posting"},
+                "posted_at": "post_date",
+                "department": None,
+            },
+        },
+        # A posting's URL is its outbound apply page on the applicant
+        # portal's own host, so no job_ref: the detail reads the row's URL.
+        "detail": {
+            "url": "{url}",
+            "decoder": {"kind": "html",
+                        "select": ["#portalViewRequirement", "[class*='bmportalrequirementdetails']"]},
+            "fields": {"description": "text"},
+            "location": "never",
+        },
+        "closure": {"via": "page"},
+    },
     "phenom": {
         # The listing lives under a locale prefix only the board's root
         # redirect names (/us/en, /global/en, ...).

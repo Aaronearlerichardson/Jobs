@@ -7,10 +7,10 @@ companies table is the single roster (config.py seed lists retired 2026-07;
 manage the roster with discover.py, --add-board, or --import-companies).
 
 The seed TAG (src/tags.py) is the scope a newly added company gets, and it
-follows one rule: SWEEP for every ATS in LIGHTWEIGHT (a cheap JSON or
-single-page board the sweep pulls whole), LOCAL for the enterprise boards
-that are only worth querying per region (workday, successfactors,
-peopleadmin). Paylocity and UltiPro seeded LOCAL until 2026-09 because the
+follows one rule: SWEEP for every ATS in LIGHTWEIGHT (a spec setting
+`sweep`: a cheap board the sweep pulls whole), LOCAL for the boards that
+are only worth querying per region. Paylocity and UltiPro seeded LOCAL
+until 2026-09 because the
 first boards found on them belonged to one user's local search; the tag
 has meant crawl mechanics since the names were generalized, and both
 boards are pulled whole in one or two requests like the rest of
@@ -26,13 +26,6 @@ an ATS name this table lacks is simply skipped by iter_store_sources.
 from src import tags
 from src.match.filters import is_relevant
 
-from .fetchers import (
-    fetch_jazzhr,
-    fetch_jobvite,
-    fetch_kula,
-    fetch_peopleadmin,
-    fetch_successfactors,
-)
 from .fetchers.board import BOARDS, board_for
 
 
@@ -51,20 +44,12 @@ def _engine_entry(board):
 # profile's keyword filter is injected for the unvetted-board sweep. The
 # company-vetted path (fetchers/company.py) calls the same fetchers with
 # no gate and a location regex instead.
-ATS_REGISTRY = {
-    **{b.name: _engine_entry(b) for b in BOARDS.values() if b.fetchable},
-    "kula":       (lambda n, s: lambda: fetch_kula(n, s, gate=is_relevant), tags.SWEEP, 0.5),
-    "jazzhr":     (lambda n, s: lambda: fetch_jazzhr(n, s, gate=is_relevant), tags.SWEEP, 0.5),
-    "jobvite":    (lambda n, s: lambda: fetch_jobvite(s, n, gate=is_relevant), tags.SWEEP, 0.5),
-    "successfactors": (lambda n, s: lambda: fetch_successfactors(n, s, gate=is_relevant), tags.LOCAL, 1.0),
-    "peopleadmin":    (lambda n, s: lambda: fetch_peopleadmin(s, n, gate=is_relevant), tags.LOCAL, 1.0),
-}
+ATS_REGISTRY = {b.name: _engine_entry(b) for b in BOARDS.values() if b.fetchable}
 
 # ATSes whose store rows a location-agnostic ("sweep") track pulls whole,
 # and that seed the SWEEP tag: lightweight JSON APIs or single-page boards.
 # The heavyweight boards stay location-scoped and seed LOCAL.
-LIGHTWEIGHT = tuple(b.name for b in BOARDS.values() if b.spec.get("sweep")) + (
-    "kula", "jazzhr", "jobvite")
+LIGHTWEIGHT = tuple(b.name for b in BOARDS.values() if b.spec.get("sweep"))
 
 
 def seed_tag_for(ats):

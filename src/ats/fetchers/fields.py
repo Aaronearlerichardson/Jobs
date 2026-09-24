@@ -27,8 +27,11 @@ eq, contains, past, any, all.
 import html
 import re
 import time
+from urllib.parse import unquote
 
-from src.net.util import host_of, norm_posted_date, stable_id, text_from_html
+from src.match.locality import MONTH_ABBRS, location_snippet
+from src.net.util import (LOC_TEXT_RE, clean_field, host_of, norm_posted_date,
+                          origin_of, stable_id, text_from_html)
 
 
 def _text(v):
@@ -80,6 +83,19 @@ def _host(v):
     return host_of(v) if "://" in str(v) else str(v)
 
 
+def _host_part(v):
+    """The host in `v`, a URL or a bare host (with or without a path),
+    lowercased; "" when it names none.
+
+    >>> _host_part("unc.peopleadmin.com"), _host_part("https://Jobs.NCSU.edu/postings/all_jobs.atom")
+    ('unc.peopleadmin.com', 'jobs.ncsu.edu')
+    >>> _host_part("/postings/all_jobs.atom"), _host_part("")
+    ('', '')
+    """
+    m = re.match(r"^(?:[a-z][a-z0-9+.-]*://)?([^/?#]+)", str(v).strip(), re.I)
+    return m.group(1).lower() if m else ""
+
+
 def _host_key(v):
     """A URL's host, or a bare host, as one id-safe token: the whole host,
     since tenants on their own domains share a first label.
@@ -100,6 +116,83 @@ def _group(v, regex):
     return m.group(1) if m else None
 
 
+def _int(v):
+    """A count written with thousands separators as an int; None otherwise.
+
+    >>> _int("1,621"), _int(" 25 "), _int("n/a")
+    (1621, 25, None)
+    """
+    s = str(v).replace(",", "").strip()
+    return int(s) if s.isdigit() else None
+
+
+def _url_key(v, n):
+    """The last `n` characters of `v` lowercased, each run of anything but
+    letters and digits one "-".
+
+    >>> _url_key("https://x.org/Careers/Data_Engineer", "21")
+    'careers-data-engineer'
+    """
+    return re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):]
+
+
+def _alnum_tail(v, n):
+    """The last `n` lowercase letters and digits of `v`, all else dropped.
+
+    >>> _alnum_tail("https://careers.example.edu", "16")
+    'areersexampleedu'
+    """
+    return re.sub(r"[^a-z0-9]+", "", str(v).lower())[-int(n):]
+
+
+#: A posting date glued onto a location cell, and whatever follows it.
+_DATE_TAIL_RE = re.compile(
+    rf"\s+(?:{'|'.join(MONTH_ABBRS)})[a-z]*\.?\s+\d{{1,2}},\s*\d{{4}}\b.*$", re.I)
+
+
+def _cut_date_tail(v):
+    """The place, with a glued-on posting date and whatever follows it (a
+    theme's repeated title/location) cut off.
+
+    >>> _cut_date_tail("Durham, NC, US, 27710 Aug 31, 2026 Durham, NC")
+    'Durham, NC, US, 27710'
+    >>> _cut_date_tail("remote, IT Aug 26, 2026 7637 Europe, remote, I"), _cut_date_tail("Durham, NC")
+    ('remote, IT', 'Durham, NC')
+    """
+    return _DATE_TAIL_RE.sub("", str(v)).strip(" ,-")
+
+
+def _strip_labels(v):
+    r"""An anchor's text with the screen-reader label ahead of its title
+    ("Requisition Title", or a bare "Title" on its own line) dropped and
+    the whitespace collapsed. A bare "Title" is a label only when a line
+    break follows it.
+
+    >>> _strip_labels("Requisition Title Data Engineer"), _strip_labels("Title \n \nSr. Engineer")
+    ('Data Engineer', 'Sr. Engineer')
+    >>> _strip_labels("Title IX Coordinator"), _strip_labels("  Software   Developer ")
+    ('Title IX Coordinator', 'Software Developer')
+
+    Notes:
+        Three tenants stored 15 rows titled "Title \n \nSr. Process
+        Engineer" on 2026-09-01.
+    """
+    text = re.sub(r"^\s*Requisition Title\s*", "", str(v))
+    text = re.sub(r"^\s*Title\s*\n\s*", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _loc_text(v):
+    """The first "City, ST"-shaped phrase in `v` (net.util.LOC_TEXT_RE), or
+    None.
+
+    >>> _loc_text("Research Associate Durham, NC Full time"), _loc_text("Engineer")
+    ('Research Associate Durham, NC', None)
+    """
+    m = LOC_TEXT_RE.search(str(v))
+    return m.group(0).strip() if m else None
+
+
 TRANSFORMS = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
@@ -112,9 +205,25 @@ TRANSFORMS = {
     "colon_location": _colon_location,
     "host_key": _host_key,
     "host_label": lambda v: _host(v).split(".", 1)[0],
+    "host": _host_part,
+    "origin": lambda v: origin_of(str(v)),
+    # The site's origin without its scheme or a leading "www.".
+    "host_nowww": lambda v: re.sub(r"^https?://(www\.)?", "", origin_of(str(v))),
     "group": _group,
     "dash_space": lambda v: str(v).replace("-", " "),
     "underscore": lambda v: str(v).replace("-", "_"),
+    "lower": lambda v: str(v).lower(),
+    "unquote": lambda v: unquote(str(v)),
+    "rstrip_slash": lambda v: str(v).rstrip("/"),
+    "one_line": clean_field,
+    "int": _int,
+    "alnum_tail": _alnum_tail,
+    "snippet": location_snippet,
+    "place": lambda v: location_snippet(v, ""),
+    "loc_text": _loc_text,
+    "cut_date_tail": _cut_date_tail,
+    "strip_labels": _strip_labels,
+    "url_key": _url_key,
     # A stable id for an entry the listing gives none: never hash(),
     # which Python salts per process.
     "stable_id": stable_id,

@@ -1,6 +1,5 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
-import importlib
 import logging
 import queue
 import threading
@@ -12,7 +11,6 @@ from src.ats.fetchers.board import BOARDS, board_for
 from src.ats.signatures import extract_workday_triple
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
-from src.net.http import HEADERS, SESSION
 from .fetchpool import candidate_urls
 from .identity import _foreign_board, candidate_pages
 
@@ -107,87 +105,12 @@ def launch_chromium(pw, **kwargs):
 
 # ─── The slug probes ─────────────────────────────────────────────────────
 #
-# Every one of these answers the same question -- does this handle name a
-# real board, and how many postings are on it -- and returns the same
-# (ok, count) pair. Twelve of them had been written out longhand, five
-# lines of identical request-and-swallow around the one expression that
-# differed. Two builders now.
-#
-# The interesting per-ATS decision is `require_jobs`, and writing it out
-# twelve times is how it gets forgotten: SmartRecruiters answers 200 with
-# totalFound:0 for ANY slug, so a 200 alone is not proof of a board, and
-# every guessed slug "confirmed" with zero jobs until that was noticed.
-# It is a named argument here, visible in one column.
+# Every one answers the same question -- does this handle name a real
+# board, and how many postings are on it -- as an (ok, count) pair: the
+# board's one cheap listing read, ok when it lists a posting
+# (`Board.probe`).
 
-
-def _api_probe(url, count, *, require_jobs=False, accept=None, headers=None,
-               timeout=None, retries=0, backoff=1.0):
-    """Build a `(ok, n)` probe that GETs a URL and counts what came back.
-
-    `url` is a format string taking the handle, or a callable for a board
-    whose base URL is the fetcher's to know. `count(response, handle)`
-    returns the posting count; `accept(response)` replaces it for a board
-    that can only be recognised, not counted. Anything unexpected -- a bad
-    status, a timeout, malformed JSON -- is (False, 0): a probe reports,
-    it never raises at its caller.
-    """
-    def probe(handle):
-        for attempt in range(retries + 1):
-            try:
-                r = SESSION.get(url(handle) if callable(url)
-                                else url.format(handle),
-                                timeout=timeout or config.PROBE_TIMEOUT,
-                                headers={**HEADERS, **(headers or {})})
-                if r.status_code == 200:
-                    if accept is not None:
-                        return (True, 0) if accept(r) else (False, 0)
-                    n = count(r, handle)
-                    return (n > 0 if require_jobs else True, n)
-            except Exception:
-                pass
-            if attempt < retries:
-                time.sleep(backoff)
-        return (False, 0)
-    return probe
-
-
-def _fetcher(module):
-    """src.ats.fetchers.<module>, imported at probe time: probes.py is
-    pulled in by discovery paths that never fetch a board, and the fetcher
-    modules are not cheap."""
-    return importlib.import_module(f"src.ats.fetchers.{module}")
-
-
-# Kula serves a full HTML page (no JSON API) and throttles under probe
-# bursts -- a confirmed-live board can 4xx/timeout once during a parallel
-# discovery run. One retry with a short backoff recovers those without
-# slowing genuine misses much. Nothing on the page is countable, so a
-# substantial body is the whole signal.
-probe_kula = _api_probe(
-    "https://careers.kula.ai/{}", None,
-    accept=lambda r: len(r.text) > 1000, retries=1)
-
-# The fetcher's own posting-link pattern: every board also links
-# /apply/confirm/, which a looser pattern counted as two postings.
-probe_jazzhr = _api_probe(
-    lambda h: f"{_fetcher('jazzhr').board_url(h)}/",
-    lambda r, h: len(_fetcher("jazzhr").APPLY_RE.findall(r.text)),
-    require_jobs=True)
-
-probe_jobvite = _api_probe(
-    lambda h: f"{_fetcher('jobvite').BASE}/{h}/search?p=0",
-    lambda r, h: len(_fetcher("jobvite").parse_listing(r.text, h)),
-    require_jobs=True, timeout=10)
-
-
-PROBES = {
-    # A platform with a config.BOARDS spec probes through the engine:
-    # one cheap listing read, ok when it lists a posting.
-    **{b.name: b.probe for b in BOARDS.values() if b.fetchable},
-    "kula":       probe_kula,
-    "jazzhr":     probe_jazzhr,
-    "jobvite":    probe_jobvite,
-}
+PROBES = {b.name: b.probe for b in BOARDS.values() if b.fetchable}
 
 
 # ─── Workday (separate signature — needs name + careers URL hint) ────────

@@ -73,6 +73,13 @@ def default_search_text():
     return max(places, key=len) if places else ""
 
 
+def locality_abbr():
+    """The profile's first [locality] state suffix, upper-cased ("NC"): a
+    search term for a board that parses a state code. "" when none is
+    configured."""
+    return (config.LOCALITY_STATE_SUFFIX or [""])[0].upper()
+
+
 def worker_count(env_var, floor=4):
     """Default thread-pool size: n_cpus - 1, overridable via `env_var`.
 

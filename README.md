@@ -308,9 +308,9 @@ Some employers can't be crawled directly. Route by type:
   ```
 
   The listing is server-rendered HTML (`/search?p=N`, fifty rows a page;
-  `jobs.jobvite.com` publishes no robots.txt), and the `jobvite` fetcher
-  reads a posting's JSON-LD page only for the rows worth it, within a
-  per-crawl budget. Ids are `jv_<tenant>_<id>`.
+  `jobs.jobvite.com` publishes no robots.txt), and its `config.BOARDS`
+  spec reads a posting's JSON-LD page only for the rows worth it, within
+  the pull's detail budget. Ids are `jv_<tenant>_<id>`.
 - **Multi-division conglomerates** — list them in `[policy].multi_division`
   so their aligned subdivisions surface even though the company's overall
   mission scores low.
@@ -925,7 +925,8 @@ identically to a dead one.
 | `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
 | `src/ats/registry.py` | declarative ATS registry: store rows ↔ fetch thunks |
 | `src/ats/fetchers/` | board fetchers (17 ATSes incl. Jobvite, Phenom and Infor CloudSuite HCM + RSS/HN/RemoteOK/Remotive/web-search/JSON-LD/sitemap + CareerOneStop/NLx + USAJOBS + Getro network boards) |
-| `src/ats/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration + custom-board scraper |
+| `src/ats/fetchers/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
+| `src/ats/fetchers/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |
 | `src/crawl/page_capture.py` | parse captured LinkedIn / Indeed / metacareers / any-board HTML |
 | `src/discovery/` | sourcing: where company names come from (seeds, directories, pasted pages, search dorking), local sourcing and the pipeline; `apply.py` upserts into the store |
 | `src/discovery/resolve/` | resolution: name -> board. Candidate URLs, the identity guard, the careers-page sniffer, the ATS slug probes, the web-search fallback. Reads no store |

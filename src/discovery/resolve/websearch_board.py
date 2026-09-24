@@ -96,7 +96,7 @@ def _websearch_board(name, max_results=8):
       2. aggregators are skipped and self-hosted *custom* boards accepted,
          not just JSON-API ATSes.
     """
-    from src.ats.fetchers.company import custom_board_listing_url
+    from src.ats.fetchers.custom import custom_board_listing_url
 
     def _search(query):
         out = []

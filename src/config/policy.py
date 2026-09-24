@@ -26,6 +26,10 @@ USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# A bare platform UA, for hosts whose WAF refuses a Chrome UA that arrives
+# without Chrome's client-hint headers (a requests session claiming Chrome).
+PLAIN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
 # Per-request HTTP timeouts, as (connect, read), split because the two
 # phases fail for different reasons (see the robots pair below).
 # PROBE_TIMEOUT is for speculative requests (slug probes, name-guessed
@@ -242,6 +246,20 @@ BOARD_MEMO_S = 600.0
 HYDRATE_CAP_PER_RUN = 100
 HYDRATE_DELAY_S = 1.0
 LOCAL_COUNT_SAMPLE_PAGES = 5
+
+# The careers-page reader (src.ats.fetchers.custom): the job links a page
+# needs to be a board, the most characters a title and a location keep,
+# how long a detection verdict is reused, and the hosts never read as a
+# company's own board (job aggregators and ATS vendors; regex fragments).
+CAREERS_PAGE_MIN_LINKS = 3
+CAREERS_PAGE_TITLE_MAX = 90
+CAREERS_PAGE_LOCATION_MAX = 70
+BOARD_DETECT_CACHE_S = 6 * 3600
+CAREERS_PAGE_OFFSITE_HOSTS = (
+    "indeed", "linkedin", "glassdoor", "ziprecruiter", "simplyhired", "monster",
+    "dice", "greenhouse", r"lever\.co", "ashbyhq", "myworkdayjobs",
+    "smartrecruiters", "icims", "paylocity", "bamboohr", "jobvite",
+    r"google\.com", "builtin")
 
 
 def board_max_pages(company, page_size, offmission_pages):

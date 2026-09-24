@@ -1,74 +1,38 @@
 """
 Company-scoped fetching: ALL of a *mission-vetted* company's postings,
-optionally location-filtered, in one shape whatever the ATS.
+optionally location-filtered, in one shape whatever the ATS; and the
+readers for one stored posting.
 
 The company was already vetted (mission scored at discovery time, stored in
 src/store/__init__.py), so the whole board is pulled with no relevance gate and the
 caller's own filter chain decides. `fetch_company` dispatches a store row
-to the ATS's fetcher module (fetchers/<ats>.py, the same functions the
-unvetted-board sweep calls with `gate=is_relevant`) and `_adapt` puts the
-result in the company-fetch shape (`board.adapt`); a platform with a
-`config.BOARDS` spec is pulled by its engine, `board.Board.whole_board`:
+to its platform's engine, `board.Board.whole_board`, which reads the
+`config.BOARDS` spec:
 
     {"id", "title", "url", "location", "description", "ats",
      ["posted_at"], ["remote_hint"]}
 
-The module also keeps what has no fetcher module of its own: WordPress
-careers endpoints, self-hosted ("custom") careers pages and their board
-detection, and the per-URL description/title readers. The per-job
-open/closed probe is fetchers/probe.py.
+`hydrate_description` fills one stored posting through the engine that
+reads its URL, else from the posting's own page (`job_page_meta`). The
+per-job open/closed probe is fetchers/probe.py; the careers-page reader
+behind the `custom` spec is fetchers/custom.py.
 """
 
 import re
-from urllib.parse import unquote, urldefrag, urljoin
+from urllib.parse import unquote
 
-from bs4 import BeautifulSoup, SoupStrainer
+from bs4 import BeautifulSoup
 
 from src import config
-
-# Parse pages with lxml (2-3x faster than html.parser, and the gap widens with
-# page size). For paths that only need job/nav anchors (link counting and the
-# openings-hop) restrict parsing to <a> tags via SoupStrainer; anchors and
-# their descendants are preserved (find_job_links reads a title element inside
-# each <a>), which is all those callers touch. Paths that read an anchor's
-# surrounding container (location extraction in fetch_custom_careers) keep the
-# full tree via _get_soup.
-_ANCHORS_ONLY = SoupStrainer("a")
-
-from src.net.http import HEADERS, SESSION, fetch_failed, get_json
 from src.match.locality import NC_RE  # profile [locality]
-from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
-                          hashed_cache_path, host_of,
-                          json_cache_get, json_cache_put, norm_posted_date,
-                          origin_of)
-from . import icims
-from .board import BOARDS, adapt as _adapt, board_for, board_for_url, loc_ok
-from .html_scrape import fetch_kula, fetch_successfactors
-from .icims import fetch_icims_all
-from .jazzhr import fetch_jazzhr
-from .jobvite import fetch_jobvite
-from .peopleadmin import fetch_peopleadmin
+from src.net.http import HEADERS, PLAIN_HEADERS, SESSION
+from src.net.util import clean_field
+from .board import BOARDS, board_for, board_for_url
+from . import jsonld
 
 # JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
 # scoring prompt, so a long posting's requirements block survives end to end.
 _DESC_MAX = config.MAX_DESC_CHARS
-
-
-def fetch_peopleadmin_all(host, loc_re=None):
-    """Full PeopleAdmin board, adapted to the company-fetch shape.
-
-    `loc_re` is applied only to the postings whose text named a place. A
-    tenant's Atom entries carry no location field (see fetchers.peopleadmin),
-    so most postings have nothing for a location filter to match and gating
-    them would drop the whole campus, which a university board never
-    deserves, being local by construction.
-
-    See tests/test_fetcher_parsers.py::TestPeopleAdmin.
-    """
-    out = []
-    for j in fetch_peopleadmin(host, ""):
-        out += _adapt([j], "peopleadmin", loc_re if j.get("location") else None)
-    return out
 
 
 def _board_of(job):
@@ -106,39 +70,15 @@ def needs_detail(job):
 def hydrate_description(job, company=None):
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
-    store row, names its board), else the ATS's own detail reader, else
-    the posting's page.
+    store row, names its board), else from the posting's own page.
     """
     if not needs_detail(job):
         return job
     board = _board_of(job)
     if board:
         board.hydrate(job, company)
-    if job.get("ats") == "icims" and job.get("url"):
-        # The ?in_iframe=1 document is server-rendered with JSON-LD even on
-        # JS-shell tenants; it also names the posting's real location(s).
-        loc, desc = icims.job_meta(job["url"], need_desc=True)
-        if desc:
-            job["description"] = desc[:_DESC_MAX]
-        if loc and (job.get("location") or "").strip() in ("", icims.LOCAL_LABEL):
-            job["location"] = loc
-    elif job.get("ats") == "wpjson" and job.get("url"):
-        # Outbound apply page (an Arcoro/BirdDog portal). Server-rendered;
-        # the JD sits in #portalViewRequirement. The generic fallback below
-        # still runs on a miss (e.g. a WP permalink URL).
-        try:
-            html = SESSION.get(job["url"], headers=HEADERS).text
-            soup = BeautifulSoup(html, "lxml")
-            el = (soup.select_one("#portalViewRequirement")
-                  or soup.select_one('[class*="bmportalrequirementdetails"]'))
-            if el:
-                job["description"] = el.get_text(" ", strip=True)[:_DESC_MAX]
-        except Exception:
-            pass
-    # Generic fallback: any job with a detail URL whose ATS-specific branch
-    # didn't yield a body (SuccessFactors career sites whose slug is unknown,
-    # custom boards). Covers the empty-description rows that were silently
-    # unscorable.
+    # A posting no engine gave a body: its own page (a custom board's, a
+    # SuccessFactors site's).
     if not job.get("description") and job.get("url"):
         d = _description_from_job_url(job["url"])
         if d:
@@ -160,28 +100,26 @@ def job_page_meta(url):
     description (data-careersite-propertyid='description', the SAP SF
     frontends). Either field is '' on a miss. The title half exists for
     URL-only manual adds, which otherwise stored an empty title that
-    nothing downstream could score or rank."""
+    nothing downstream could score or rank. A page refused with 403/405 is
+    asked again with a bare platform UA (`PLAIN_HEADERS`), which WAFs that
+    refuse a Chrome UA without Chrome's client hints accept."""
     try:
         r = SESSION.get(url, headers=HEADERS,
                         allow_redirects=True)
         if r.status_code in (403, 405):
-            # WAFs (iCIMS) that reject a Chrome UA without Chrome's
-            # client-hint headers accept a plain platform UA, the same
-            # quirk fetchers/icims.py works around.
-            r = SESSION.get(url, allow_redirects=True, headers=icims.ICIMS_HEADERS)
+            r = SESSION.get(url, allow_redirects=True, headers=PLAIN_HEADERS)
         html = r.text
     except Exception:
         return "", ""
     title = desc = ""
     try:
-        from .jsonld import extract_jsonld, is_jobposting, _normalize_description
-        for obj in extract_jsonld(html):
-            if is_jobposting(obj):
-                title = str(obj.get("title") or obj.get("name") or "").strip()
-                d = _normalize_description(obj).strip()
-                if len(d) >= 120:
-                    desc = d[:_DESC_MAX]
-                break
+        p = next((jsonld.read_posting(o, url) for o in jsonld.extract_jsonld(html)
+                  if jsonld.is_jobposting(o)), None)
+        if p:
+            title = p["title"]
+            d = p["description"].strip()
+            if len(d) >= 120:
+                desc = d[:_DESC_MAX]
     except Exception:
         pass
     if title and desc:
@@ -243,276 +181,11 @@ def title_from_url_slug(url):
     return " ".join(w[:1].upper() + w[1:] for w in best)
 
 
-# --- custom (self-hosted) careers-board scraping -------------------------- #
-# A job-detail URL is /careers|jobs|positions|openings|roles|job/<slug>. But
-# index/nav pages share that shape ("/careers/open-positions"), so we exclude
-# generic slugs and nav-ish link text, and require a *specific* slug.
-_JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
-                          r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
-_NAV_SLUGS = {
-    "open-positions", "open-roles", "career-opportunities", "current-openings",
-    "job-openings", "openings", "opportunities", "jobs", "job", "careers",
-    "career", "apply", "application", "search", "all", "browse", "students",
-    "internships", "benefits", "culture", "life", "teams", "team", "departments",
-    "locations", "faq", "contact", "index", "home", "overview",
-}
-_NAV_TEXT_RE = re.compile(
-    r"^(careers?|jobs?|view (all|current|open)|open (positions?|roles?)|"
-    r"see (all|open)|apply|search|browse|all (jobs|openings|roles)|"
-    r"current openings|open positions|view (job )?openings|join( us)?|"
-    r"work (with|at) us|learn more|explore|opportunities|all roles)\b", re.I)
-_OPENINGS_HREF_RE = re.compile(
-    r"/(open-positions|open-roles|career-opportunities|current-openings|"
-    r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
-_OPENINGS_TEXT_RE = re.compile(
-    r"(current|open|view|see|all).{0,12}(opening|position|role|job)", re.I)
-
-
-def find_job_links(soup):
-    """Real job-posting links on a careers page (nav / index links filtered)."""
-    out, seen = [], set()
-    for a in soup.find_all("a", href=True):
-        m = _JOB_HREF_RE.search(a["href"])
-        if not m:
-            continue
-        slug = m.group(2).rstrip("/").split("/")[-1].split("?")[0].lower()
-        if slug in _NAV_SLUGS or len(slug) < 4:
-            continue
-        text = a.get_text(" ", strip=True)
-        if not text or len(text) < 4 or _NAV_TEXT_RE.match(text):
-            continue
-        if a["href"] in seen:
-            continue
-        seen.add(a["href"])
-        # Prefer a heading/title element for a clean title (some boards nest
-        # the title + location in one <a>); fall back to the full link text.
-        te = a.find(["h1", "h2", "h3", "h4", "h5"]) or a.select_one("[class*='title']")
-        title = te.get_text(" ", strip=True) if te else text
-        out.append((a, a["href"], title))
-    return out
-
-
-# Job aggregators / ATS hosts: never treat as a company's own custom board
-# (aggregators are handled by external ingestion; ATS hosts by the sniffer).
-_OFFSITE_RE = re.compile(
-    r"indeed|linkedin|glassdoor|ziprecruiter|simplyhired|monster|dice|"
-    r"greenhouse|lever\.co|ashbyhq|myworkdayjobs|smartrecruiters|icims|"
-    r"paylocity|bamboohr|jobvite|google\.com|builtin", re.I)
-
-
-def _openings_link(soup, page_url):
-    """A SAME-HOST 'see current openings' link to follow one hop, or None.
-    Won't follow off to an aggregator or an ATS: those aren't a custom board."""
-    host = host_of(page_url)
-    if not host:
-        return None
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        # Defragmented, so an "#open-positions" link reads as this page and
-        # the callers' no-self-hop check refuses it.
-        absu = urldefrag(urljoin(page_url, href)).url
-        if host_of(absu) != host:
-            continue  # off-domain: skip
-        if _OFFSITE_RE.search(absu):
-            continue
-        text = a.get_text(" ", strip=True).lower()
-        if _OPENINGS_HREF_RE.search(href) or _OPENINGS_TEXT_RE.search(text):
-            return absu
-    return None
-
-
-def _location_near(a, loc_re=None):
-    """
-    Best-effort location for a job link: search the link then its container.
-    Prefers a loc_re location when the container is multi-location, so a
-    role listed "Alameda, CA | Durham, NC" is kept as a Durham job.
-    """
-    for el in (a, a.parent, a.parent.parent if a.parent else None):
-        if el is None:
-            continue
-        text = el.get_text(" ", strip=True)
-        if loc_re is not None:
-            m = loc_re.search(text)
-            if m:
-                return m.group(0)
-        m = LOC_TEXT_RE.search(text)
-        if m:
-            return m.group(0)
-    return ""
-
-
-def _get_soup(url):
-    """GET `url` and parse it; None on a fetch exception or non-200
-    status, reported via fetch_failed: this is fetch_custom_careers'
-    board-listing fetch, where a silent 404 (a stale careers_url) read as
-    an empty board. Discovery probes use the silent `_get_anchor_soup`."""
-    try:
-        r = SESSION.get(url, headers=HEADERS)
-    except Exception as e:
-        fetch_failed(f"custom careers {url}", e)
-        return None
-    if r.status_code != 200:
-        fetch_failed(f"custom careers {url}", f"HTTP {r.status_code}")
-        return None
-    return BeautifulSoup(r.text, "lxml")
-
-
-def _get_anchor_soup(url):
-    """Like _get_soup but parses only <a> tags, for callers that just count
-    or scan job/openings links (no surrounding-container reads). Silent: a
-    probed page that is not a board is an expected answer."""
-    try:
-        r = SESSION.get(url, headers=HEADERS)
-        if r.status_code != 200:
-            return None
-        return BeautifulSoup(r.text, "lxml", parse_only=_ANCHORS_ONLY)
-    except Exception:
-        return None
-
-
-def fetch_custom_careers(careers_url, loc_re=None, _hop=True):
-    """
-    Scrape a self-hosted / custom careers board (no standard ATS).
-    Structure-agnostic: identifies real job-detail links (not nav), reads the
-    title from the link and the location from its surrounding container, and
-    follows a 'careers -> openings' link one hop when the landing page has no
-    postings.
-    """
-    soup = _get_soup(careers_url)
-    if soup is None:
-        return []
-    links = find_job_links(soup)
-    if len(links) < 3 and _hop:
-        op = _openings_link(soup, careers_url)
-        if op and op.rstrip("/") != careers_url.rstrip("/"):
-            return fetch_custom_careers(op, loc_re, _hop=False)
-    out, seen = [], set()
-    for a, href, title in links:
-        loc = clean_field(_location_near(a, loc_re))
-        if not loc_ok(loc_re, loc):
-            continue
-        url = urljoin(careers_url, href)
-        if url in seen:
-            continue
-        seen.add(url)
-        out.append({"id": f"custom_{re.sub(r'[^a-z0-9]+', '-', url.lower())[-48:]}",
-                    "title": clean_field(title)[:90], "url": url,
-                    "location": loc[:70],
-                    "description": "", "ats": "custom"})
-    return out
-
-
-# Short-TTL cache for board-detection results (the hottest app path). The same
-# careers URLs are re-checked within a run (sniffer + web-search fallback) and
-# across daily runs, each re-check costing a parse + an openings-hop GET. Cache
-# the outcome (listing URL, or None for "not a custom board") keyed by page URL.
-# TTL is deliberately SHORT so a board that later goes live, or one that goes
-# dead, is re-checked within the window rather than pinned by a stale negative.
-# Transient fetch failures are NOT cached (only decided outcomes), so a network
-# blip never suppresses a real board.
-_BOARD_CACHE_TTL = 6 * 3600      # seconds
-
-
-def _board_cache_path(url):
-    return hashed_cache_path(cache_dir("board"), url)
-
-
-def _board_cache_get(url):
-    """(listing_or_None,) on a live entry, or None on miss/expired/error.
-    The 1-tuple lets callers distinguish a cached negative from a miss."""
-    cached = json_cache_get(_board_cache_path(url), _BOARD_CACHE_TTL)
-    return None if cached is None else (cached.get("listing"),)
-
-
-def _board_cache_put(url, listing):
-    json_cache_put(_board_cache_path(url), {"listing": listing})
-
-
-def custom_board_listing_url(page_url, html=None):
-    """
-    If `page_url` (or the openings page it links to, one hop) is a real custom
-    job board (>=3 genuine job-detail links, not nav), return the URL that holds
-    the listings; else None. Used by the sniffer to detect + resolve the board.
-    """
-    if _OFFSITE_RE.search(page_url):
-        return None  # aggregator/ATS host is never a company's own custom board
-    cached = _board_cache_get(page_url)
-    if cached is not None:
-        return cached[0]
-    # Only job/openings anchors are inspected here, so parse <a> tags only.
-    soup = (BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY)
-            if html is not None else _get_anchor_soup(page_url))
-    if soup is None:
-        return None  # transient fetch failure: do NOT cache
-    result = None
-    if len(find_job_links(soup)) >= 3:
-        result = page_url
-    else:
-        op = _openings_link(soup, page_url)
-        if op and op.rstrip("/") != page_url.rstrip("/"):
-            s2 = _get_anchor_soup(op)
-            if s2 and len(find_job_links(s2)) >= 3:
-                result = op
-    _board_cache_put(page_url, result)
-    return result
-
-
-def fetch_wpjson_careers_all(base_url, loc_re=None):
-    """WordPress "post-filters-archive" careers endpoint:
-    {root}/wp-json/post-filters-archive/get-posts?post_type=career.
-
-    For sites whose careers grid AND per-job pages are all JS-rendered, so
-    neither fetch_custom_careers (no server-side anchors) nor the JSON-LD
-    path sees anything, but the theme's own REST route serves clean JSON.
-    The stored URL is the posting's outbound apply link (an Arcoro/BirdDog
-    portal page, server-rendered); hydrate_description's "wpjson" branch
-    pulls the JD text from it."""
-    root = origin_of(base_url)
-    if not root:
-        return []
-    host = re.sub(r"^https?://(www\.)?", "", root)
-    out, page = [], 1
-    while True:
-        d = get_json(f"{root}/wp-json/post-filters-archive/get-posts"
-                      f"?post_type=career&posts_per_page=100&paged={page}",
-                      f"wpjson {host}")
-        if not d:
-            break
-        for p in d.get("posts", []) or []:
-            loc_d = p.get("location") or {}
-            loc = ", ".join(x for x in (clean_field(loc_d.get("city")),
-                                        clean_field(loc_d.get("state")))
-                            if x) or "See posting"
-            if not loc_ok(loc_re, loc):
-                continue
-            url = ((p.get("link") or {}).get("url")) or p.get("permalink") or ""
-            out.append({"id": f"wpjson_{host}_{p.get('ID')}",
-                        "title": clean_field(p.get("post_title")) or "Unknown",
-                        "url": url, "location": loc, "description": "",
-                        "posted_at": norm_posted_date((p.get("post_date") or "")[:10]),
-                        "ats": "wpjson"})
-        if page >= int(d.get("max_num_pages") or 1):
-            break
-        page += 1
-    return out
-
-
 # --- dispatch ------------------------------------------------------------------ #
 
-# ats -> (store row, loc_re) -> company-shaped jobs. The rows are those of the
-# ATS's fetcher module, ungated, with the location filter applied on the
-# listing before any detail call (fetchers/board.py).
-FETCHERS = {
-    **{b.name: b.whole_board for b in BOARDS.values() if b.fetchable},
-    "jazzhr":          lambda c, lr: _adapt(fetch_jazzhr("", c["slug"], loc_re=lr), "jazzhr"),
-    "jobvite":         lambda c, lr: _adapt(fetch_jobvite(c["slug"], loc_re=lr), "jobvite"),
-    "kula":            lambda c, lr: _adapt(fetch_kula("", c["slug"], loc_re=lr), "kula"),
-    "icims":           lambda c, lr: _adapt(fetch_icims_all(c["slug"], lr), "icims"),
-    "successfactors":  lambda c, lr: _adapt(fetch_successfactors("", c["careers_url"], loc_re=lr), "successfactors"),
-    "peopleadmin":     lambda c, lr: fetch_peopleadmin_all(c["careers_url"], lr),
-    "custom":          lambda c, lr: fetch_custom_careers(c["careers_url"], lr),
-    "wpjson":          lambda c, lr: fetch_wpjson_careers_all(c["careers_url"], lr),
-}
+# ats -> (store row, loc_re) -> company-shaped jobs: every platform the
+# engine can pull.
+FETCHERS = {b.name: b.whole_board for b in BOARDS.values() if b.fetchable}
 
 
 def fetch_company(company, loc_re=None):
@@ -533,30 +206,16 @@ def fetch_company_nc(company):
 
 # --- title sampling ------------------------------------------------------------ #
 
-# ats -> (store row, n) -> job dicts, for the families whose FETCHERS entry
-# pays a request per posting or per page. A title sample wants the first
-# listing and nothing else, so these are the same fetchers with the detail
-# budget at zero and the pager at one page (or `n` postings, where the
-# listing IS the postings). An ATS not named here answers a listing in one
-# request and samples through FETCHERS unchanged.
-_TITLE_SAMPLERS = {
-    "jobvite":         lambda c, n: fetch_jobvite(c["slug"], max_details=0),
-    "jazzhr":          lambda c, n: fetch_jazzhr("", c["slug"], max_jobs=n),
-    "icims":           lambda c, n: fetch_icims_all(c["slug"], meta_cap=0),
-    "successfactors":  lambda c, n: fetch_successfactors(
-                           "", c["careers_url"], max_pages=1),
-}
-
-
 def sample_titles(company, n=6):
     """Up to `n` distinct posting titles from a store row's board, in board
     order: what the mission scorer is shown of an employer it has only a
     name for. [] when the board is unreadable, empty, or of an ATS with no
-    fetcher; never raises.
+    engine; never raises.
 
     `company` carries the store's board columns (`src.ats.coords.columns`;
     `from_hit` turns a resolver hit into them). The pull is listing-only: no
-    description, detail or location-rescue request is spent on a sample.
+    description, detail or location-rescue request is spent on a sample,
+    except where the posting pages are the listing (at most `n` of them).
 
     Notes:
         Until 2026-09-18 the sampler lived in src.discovery.local_sourcing
@@ -566,16 +225,10 @@ def sample_titles(company, n=6):
         board core-sound-imaging, a medical-imaging vendor's PACS product)
         came back `other` / 0.05 as a study-education platform.
     """
-    ats = company.get("ats")
-    board = board_for(ats)
+    board = board_for(company.get("ats"))
     try:
-        if board:
-            handle = board.handle(company)
-            jobs = board.listing(handle, cheap=True) if handle else []
-        elif ats in _TITLE_SAMPLERS:
-            jobs = _TITLE_SAMPLERS[ats](company, n)
-        else:
-            jobs = fetch_company(company)
+        handle = board.handle(company) if board else None
+        jobs = board.listing(handle, cheap=True, rescue_cap=n) if handle else []
     except Exception:
         return []
     titles, seen = [], set()

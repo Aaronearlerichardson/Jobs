@@ -20,13 +20,11 @@ import re
 from pathlib import Path
 
 import pytest
-from bs4 import BeautifulSoup
 
 from conftest import fake_response
 from src.match.filters import is_relevant
-from src.ats.fetchers import (board, company, discourse, getro,
-                              jobvite, peopleadmin, remoteok, remotive,
-                              usajobs)
+from src.ats.fetchers import (board, company, discourse, fields, getro,
+                              remoteok, remotive, usajobs)
 from src.ats.fetchers.board import BOARDS, board_for, board_for_url
 from src.discovery import apply
 from src.net import http
@@ -93,6 +91,13 @@ BOARD_FIXTURES = [
     ("infor", "css-unchealthunc-prd.inforcloudsuite.com|9999", "infor_job_list.json",
      "infor_job_detail.json"),
     ("phenom", "careers.example.org", "phenom_search_results.html", "phenom_job_detail.html"),
+    ("jazzhr", "paradromicsinc", "jazzhr_board.html", "jazzhr_detail.html"),
+    ("jobvite", "neogenomics", "jobvite_board.html", "jobvite_detail.html"),
+    ("kula", "precision-neuroscience", "kula_board.html", None),
+    ("successfactors", "https://careers.chiesi.com/", "successfactors_board.html", None),
+    ("icims", "uscareers-fujifilm", "icims_board.html", "icims_detail.html"),
+    ("custom", "https://careers.foundationmedicine.com/jobs/search", "custom_board.html", None),
+    ("wpjson", "https://www.restor3d.com/company/careers/", "wpjson_board.json", None),
 ]
 
 #: Where the root redirect lands for a board whose handle follows one
@@ -111,12 +116,16 @@ class TestSpecdBoardsReadTheirListings:
     recorded from each platform's fetcher module before the move to
     config.BOARDS, except where a row changed on purpose (paylocity: the
     detail page's body, not the listing's teaser; phenom: ids carry the
-    host, "phenom_<host_key>_<reqId>")."""
+    host, "phenom_<host_key>_<reqId>"; jobvite: title and location
+    clean_field-ed like every other sweep row; icims: no searchLocation
+    on an unscoped pull; custom and wpjson: their whole-board rows, which
+    had no sweep, in the sweep's shape)."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
-    def test_rows_match_the_recording(self, serve, monkeypatch, ats, handle,
-                                      listing, detail):
+    def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
+                                      handle, listing, detail):
         monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
         replies = ([fake_response(url=REDIRECTS[ats])] if ats in REDIRECTS else []) + [
             _fixture_response(listing),
             _fixture_response(detail) if detail else fake_response(status=404)]
@@ -138,6 +147,10 @@ class TestSpecdBoardsReadTheirListings:
         ("https://askbio.wd12.myworkdayjobs.com/en-US/AskBio/job/Durham-NC/Eng_R1",
          "2 Locations", "workday_detail.json",
          "USA - Pennsylvania - West Point; USA - New Jersey - Rahway"),
+        ("https://jobs.jobvite.com/neogenomics/job/oiiRyfwJ", "", "jobvite_detail.html",
+         "Ft Myers, Florida, United States"),
+        ("https://uscareers-fujifilm.icims.com/jobs/38896/national-security-manager/job"
+         "?in_iframe=1", "", "icims_detail.html", "Remote, US"),
     ]
 
     @pytest.mark.parametrize("url,listed,detail,location", HYDRATE)
@@ -176,117 +189,59 @@ class TestPeopleAdmin:
              '<feed xmlns="http://www.w3.org/2005/Atom">'
              '<title>Nowhere U: All Jobs</title></feed>')
 
-    @pytest.fixture
-    def unlocated(self, monkeypatch):
-        """Force every posting to come back with no location.
+    @staticmethod
+    def place(monkeypatch, where):
+        """Every posting names `where` ("" for none): the suite runs on
+        whatever profile is loaded, and `place` only recognises THAT
+        profile's places."""
+        monkeypatch.setitem(fields.TRANSFORMS, "place", lambda v: where)
 
-        The suite runs on whatever profile is loaded, and `location_snippet`
-        only recognises THAT profile's places — so the presence or absence
-        of a location can't be asserted from fixture prose alone.
-        """
-        monkeypatch.setattr(peopleadmin, "location_snippet",
-                            lambda text, default="See posting": default)
-
-    def test_parses_the_unc_feed(self, serve, match_everything):
+    def test_reads_both_tenants_feeds(self, serve, monkeypatch):
+        """NC State serves PeopleAdmin from its own hostname and is keyed on
+        its feed URL; ids carry the whole host, so the tenants cannot
+        collide. `<author><name>` (the hiring department) leads the body,
+        which arrives as escaped HTML and must not stay that way."""
+        self.place(monkeypatch, "")
         serve({"all_jobs.atom": load_text(self.UNC)})
-        jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        assert len(jobs) == 7
-        j = jobs[0]
-        assert j["title"] == "Surgical Oncologist Faculty Appointment"
-        assert j["url"] == "https://unc.peopleadmin.com/postings/323091"
-        assert j["company"] == "UNC"
-        assert j["posted_at"] == "2026-07-28"
-
-    def test_parses_the_nc_state_feed(self, serve, match_everything):
-        """NC State serves PeopleAdmin from its own hostname, and the
-        fetcher is handed the feed URL rather than a bare host."""
+        unc = board_for("peopleadmin").jobs("unc.peopleadmin.com", "UNC")
         serve({"all_jobs.atom": load_text(self.NCSU)})
-        jobs = peopleadmin.fetch_peopleadmin(
+        ncsu = board_for("peopleadmin").jobs(
             "https://jobs.ncsu.edu/postings/all_jobs.atom", "NC State")
-        assert len(jobs) == 8
-        assert all(j["url"].startswith("https://jobs.ncsu.edu/postings/")
-                   for j in jobs)
-
-    def test_job_ids_are_namespaced_by_tenant_host(self, serve,
-                                                   match_everything):
-        """Two tenants, two namespaces — `jobs.ncsu.edu` and any other
-        `jobs.<school>.edu` would collide on a first-label key."""
-        serve({"all_jobs.atom": load_text(self.UNC)})
-        unc = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        serve({"all_jobs.atom": load_text(self.NCSU)})
-        ncsu = peopleadmin.fetch_peopleadmin("jobs.ncsu.edu", "NC State")
-        assert unc[0]["id"] == "pa_unc_peopleadmin_com_323091"
+        assert (len(unc), len(ncsu)) == (7, 8)
+        j = unc[0]
+        assert (j["id"], j["title"], j["url"], j["posted_at"], j["location"]) == (
+            "pa_unc_peopleadmin_com_323091", "Surgical Oncologist Faculty Appointment",
+            "https://unc.peopleadmin.com/postings/323091", "2026-07-28", "")
+        assert j["description"].startswith("Surgery - Surgical Oncology - 414020")
+        assert "Position type: Faculty." in j["description"]
+        assert all("<" not in j["description"] for j in unc)
         assert ncsu[0]["id"] == "pa_jobs_ncsu_edu_230936"
-        assert not {j["id"] for j in unc} & {j["id"] for j in ncsu}
+        assert all(j["url"].startswith("https://jobs.ncsu.edu/postings/") for j in ncsu)
 
-    def test_prefers_all_jobs_over_search(self, serve,
-                                          match_everything):
+    def test_search_atom_answers_only_when_all_jobs_cannot(self, serve):
+        """An erroring or empty `all_jobs.atom` is a miss, not an answer: a
+        tenant still has a saved search."""
         calls = serve({"all_jobs.atom": load_text(self.UNC),
-                               "search.atom": load_text(self.NCSU)})
-        jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
+                       "search.atom": load_text(self.NCSU)})
+        assert len(board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
         assert calls == ["https://unc.peopleadmin.com/postings/all_jobs.atom"]
-        assert all("unc.peopleadmin.com" in j["url"] for j in jobs)
+        for miss in (404, self.EMPTY):
+            calls = serve({"all_jobs.atom": miss, "search.atom": load_text(self.UNC)})
+            assert len(board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
+            assert calls[-1].endswith("/postings/search.atom")
 
-    def test_falls_back_to_search_when_all_jobs_errors(self, serve,
-                                                       match_everything):
-        calls = serve({"all_jobs.atom": 404,
-                               "search.atom": load_text(self.UNC)})
-        jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        assert len(jobs) == 7
-        assert calls[-1].endswith("/postings/search.atom")
-
-    def test_falls_back_when_all_jobs_is_empty(self, serve,
-                                               match_everything):
-        """An empty feed is a miss, not an answer: a tenant that publishes
-        `all_jobs.atom` with nothing in it still has a saved search."""
-        calls = serve({"all_jobs.atom": self.EMPTY,
-                               "search.atom": load_text(self.UNC)})
-        assert len(peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")) == 7
-        assert len(calls) == 2
-
-    def test_description_carries_department_and_position_type(
-            self, serve, match_everything):
-        """`<author><name>` is the hiring department and the only structured
-        text an entry has; position type lives in the body prose. Both have
-        to reach the description, because that is all the keyword and title
-        gates get to read."""
+    def test_a_location_filter_passes_postings_naming_no_place(self, serve,
+                                                               monkeypatch):
+        """Unlocated postings are the campus's (`unlocated: keep`); one that
+        names a place is still filtered on it."""
         serve({"all_jobs.atom": load_text(self.UNC)})
-        jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        assert jobs[0]["description"].startswith(
-            "Surgery - Surgical Oncology - 414020")
-        assert "Position type: Faculty." in jobs[0]["description"]
-        # The body arrives as escaped HTML; it must not stay that way.
-        assert all("<" not in j["description"] for j in jobs)
-
-    def test_location_is_empty_when_nothing_names_a_place(
-            self, serve, match_everything, unlocated):
-        serve({"all_jobs.atom": load_text(self.UNC)})
-        jobs = peopleadmin.fetch_peopleadmin("unc.peopleadmin.com", "UNC")
-        assert jobs and all(j["location"] == "" for j in jobs)
-
-    def test_unlocated_postings_survive_a_location_filter(
-            self, serve, match_everything, unlocated):
-        """The whole board, through a filter that matches none of it."""
-        from src.ats.fetchers import company
-        serve({"all_jobs.atom": load_text(self.UNC)})
-        jobs = company.fetch_peopleadmin_all("unc.peopleadmin.com",
-                                             re.compile("nowhere-at-all"))
-        assert len(jobs) == 7
-        assert jobs[0]["ats"] == "peopleadmin"
-        assert jobs[0]["posted_at"] == "2026-07-28"
-
-    def test_located_postings_are_still_filtered(self, serve,
-                                                 match_everything, monkeypatch):
-        """Skipping the gate is about MISSING locations, not about opting
-        PeopleAdmin out of location filtering."""
-        from src.ats.fetchers import company
-        monkeypatch.setattr(peopleadmin, "location_snippet",
-                            lambda text, default="See posting": "Chapel Hill, NC")
-        serve({"all_jobs.atom": load_text(self.UNC)})
-        assert company.fetch_peopleadmin_all(
-            "unc.peopleadmin.com", re.compile("Raleigh")) == []
-        assert len(company.fetch_peopleadmin_all(
-            "unc.peopleadmin.com", re.compile("Chapel Hill"))) == 7
+        row = {"ats": "peopleadmin", "careers_url": "unc.peopleadmin.com"}
+        self.place(monkeypatch, "")
+        jobs = company.fetch_company(row, re.compile("nowhere-at-all"))
+        assert len(jobs) == 7 and jobs[0]["ats"] == "peopleadmin"
+        self.place(monkeypatch, "Chapel Hill, NC")
+        assert company.fetch_company(row, re.compile("Raleigh")) == []
+        assert len(company.fetch_company(row, re.compile("Chapel Hill"))) == 7
 
 
 class TestUsajobs:
@@ -740,136 +695,27 @@ class TestGetroAttribution:
 
 
 class TestJobvite:
-    """A Jobvite career site: a paged, server-rendered listing and JSON-LD
-    job pages. The listing supplies title and location; a page is fetched
-    only for the description, within a budget, relevant titles first.
-    """
+    """What the fixture contract above does not reach: the listing's
+    fallback page and the whole-board pull's in-area detail reads."""
 
-    @pytest.fixture
-    def acme(self, serve):
-        return serve({"search?p=0": load_text("jobvite_search_p0.html"),
-                     "search?p=1": load_text("jobvite_search_p1.html"),
-                     "search?p=2": load_text("jobvite_search_empty.html"),
-                     "/job/": load_text("jobvite_job.html")})
+    def test_a_dead_search_falls_back_to_the_jobs_page(self, serve):
+        """Listing alternatives: some tenants replace the search page with a
+        landing page, so the second listing answers."""
+        calls = serve({"search": 500, "/neogenomics/jobs": load_text("jobvite_board.html"),
+                       "/job/": load_text("jobvite_detail.html")})
+        jobs = company.fetch_company({"ats": "jobvite", "slug": "neogenomics"})
+        assert len(jobs) == 3 and [c.url.rsplit("/", 1)[-1] for c in calls[:2]] == [
+            "search", "jobs"]
 
-    def test_parses_every_page(self, acme, match_everything):
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
-        assert [j["id"] for j in jobs] == [
-            "jv_acme_oAaa1fwA", "jv_acme_oBbb2fwB",
-            "jv_acme_oCcc3fwC", "jv_acme_oDdd4fwD"]
-        j = jobs[0]
-        assert j["company"] == "Acme Labs"
-        assert j["title"] == "Data Engineer II"
-        assert j["url"] == "https://jobs.jobvite.com/acme/job/oAaa1fwA"
-        assert j["location"] == "Durham, North Carolina"
-
-    def test_stops_at_the_first_empty_page(self, acme, match_everything):
-        jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
-        assert [u for u in acme if "search?p=" in u] == [
-            "https://jobs.jobvite.com/acme/search?p=0",
-            "https://jobs.jobvite.com/acme/search?p=1",
-            "https://jobs.jobvite.com/acme/search?p=2"]
-
-    def test_the_page_supplies_description_and_date(self, acme,
-                                                     match_everything):
-        j = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=4,
-                                  detail_delay=0)[0]
-        assert "Python pipelines" in j["description"]
-        assert "<" not in j["description"]
-        assert j["posted_at"] == "2026-04-27"
-
-    def test_relevant_titles_get_their_page_first(self, acme):
-        jobs = jobvite.fetch_jobvite(
-            "acme", "Acme Labs", max_details=1, detail_delay=0,
-            gate=lambda t, d="": "data engineer" in t.lower())
-        assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA"]
-        assert [u for u in acme if "/job/" in u] == [
-            "https://jobs.jobvite.com/acme/job/oAaa1fwA"]
-
-    def test_a_generic_title_qualifies_on_its_page(self, acme):
-        jobs = jobvite.fetch_jobvite(
-            "acme", "Acme Labs", max_details=4, detail_delay=0,
-            gate=lambda t, d="": "python" in f"{t} {d}".lower())
-        assert "Lab Assistant (Temp)" in [j["title"] for j in jobs]
-
-    def test_a_dead_search_falls_back_to_the_jobs_page(self, serve,
-                                                        match_everything):
-        serve({"search?p=0": 500, "/acme/jobs": load_text("jobvite_search_p0.html")})
-        jobs = jobvite.fetch_jobvite("acme", "Acme Labs", max_details=0)
-        assert len(jobs) == 3
-
-    def test_nothing_reachable_returns_empty(self, serve, match_everything):
-        serve({})
-        assert jobvite.fetch_jobvite("acme", "Acme Labs") == []
-
-    def test_any_page_of_the_site_names_the_tenant(self, acme, match_everything):
-        jobs = jobvite.fetch_jobvite("https://jobs.jobvite.com/acme/search?p=1",
-                                     "Acme Labs", max_details=0)
-        assert len(jobs) == 4
-
-    def test_company_fetch_pays_only_for_in_region_pages(self, acme,
-                                                         match_everything):
-        from src.ats.fetchers import company
-        jobs = company.fetch_company({"ats": "jobvite", "slug": "acme"},
-                                     re.compile("Durham"))
-        assert [j["id"] for j in jobs] == ["jv_acme_oAaa1fwA", "jv_acme_oDdd4fwD"]
-        assert {j["ats"] for j in jobs} == {"jobvite"}
-        assert jobs[0]["posted_at"] == "2026-04-27"
-        assert sorted(u for u in acme if "/job/" in u) == [
-            "https://jobs.jobvite.com/acme/job/oAaa1fwA",
-            "https://jobs.jobvite.com/acme/job/oDdd4fwD"]
-
-    def test_the_registry_and_the_dispatch_table_know_jobvite(self):
-        from src.ats.fetchers import company
-        from src.ats.registry import ATS_REGISTRY, LIGHTWEIGHT
-        assert "jobvite" in ATS_REGISTRY and "jobvite" in LIGHTWEIGHT
-        assert "jobvite" in company.FETCHERS
-
-
-class TestFieldHygiene:
-    """A stored title or location never carries a newline, tab or a run of
-    spaces. The two paths clean at one choke point each -- board.board_jobs
-    for the sweep, company._adapt for the whole-board pull -- so these pin
-    the two builders in company.py that reach NEITHER, shaping the adapted
-    dict themselves.
-
-    124 open rows carried such a value on 2026-09-18; in the session log
-    they split triage's one-line DEBUG "drop" record into fragments
-    ("Calibration | local-tech=title" alone on a line).
-    """
-
-    def test_adapt_cleans_before_the_location_filter(self):
-        """The whole-board choke point, and the ORDER that matters: a
-        location wrapped across two lines has to be cleaned before loc_re
-        judges it, or an in-area posting is dropped on text nobody wrote."""
-        rows = [{"id": "wd_x_1", "title": "Data\n  Engineer",
-                 "url": "u", "location": "Durham,\tNC", "description": ""}]
-        out = company._adapt(rows, "workday", re.compile("Durham, NC"))
-        assert [(j["title"], j["location"]) for j in out] == \
-            [("Data Engineer", "Durham, NC")]
-
-    def test_wpjson_cleans_its_own_rows(self, serve):
-        serve(fake_response({"max_num_pages": 1, "posts": [
-            {"ID": 5, "post_title": "Research\nTechnician",
-             "link": {"url": "https://x.test/j/5"},
-             "location": {"city": "Durham\n", "state": "NC"}}]}))
-        j = company.fetch_wpjson_careers_all("https://x.test")[0]
-        assert j["title"] == "Research Technician"
-        assert j["location"] == "Durham, NC"
-
-    def test_custom_careers_cleans_its_own_rows(self, monkeypatch):
-        """The custom scraper reads a title out of anchor text, which is
-        where a wrapped template lands most often."""
-        html = ('<html><body><a href="/careers/imaging-scientist-7">Imaging\n   '
-                'Scientist</a></body></html>')
-        monkeypatch.setattr(company, "_get_soup",
-                            lambda *a, **k: BeautifulSoup(html, "html.parser"))
-        monkeypatch.setattr(company, "_location_near",
-                            lambda *a, **k: "Durham,\tNC")
-        out = company.fetch_custom_careers("https://x.test/careers",
-                                   _hop=False)
-        assert [(j["title"], j["location"]) for j in out] == \
-            [("Imaging Scientist", "Durham, NC")]
+    def test_company_fetch_pays_only_for_in_region_pages(self, serve):
+        calls = serve({"search": load_text("jobvite_board.html"),
+                       "/job/": load_text("jobvite_detail.html")})
+        jobs = company.fetch_company({"ats": "jobvite", "slug": "neogenomics"},
+                                     re.compile("Florida"))
+        assert [j["id"] for j in jobs] == ["jv_neogenomics_oiiRyfwJ"]
+        assert jobs[0]["posted_at"] == "2025-11-06" and jobs[0]["ats"] == "jobvite"
+        assert [c.url for c in calls if "/job/" in c.url] == [
+            "https://jobs.jobvite.com/neogenomics/job/oiiRyfwJ"]
 
 
 class TestOneFetcherPerAts:
@@ -879,11 +725,6 @@ class TestOneFetcherPerAts:
     parser. Two copies of the Ashby reader once drifted (see
     TestAshbyKeyAcrossCallSites); one implementation cannot.
     """
-
-    def test_every_registered_ats_has_a_company_dispatch(self):
-        from src.ats.fetchers import company
-        from src.ats.registry import ATS_REGISTRY
-        assert set(ATS_REGISTRY) <= set(company.FETCHERS)
 
     def test_the_seed_tag_follows_lightweight(self):
         from src import tags
@@ -926,9 +767,6 @@ class TestTitleSampling:
                 for i, name in enumerate(["PACS Support Engineer",
                                           "Imaging Software Developer",
                                           "PACS Support Engineer"])]
-
-    def test_every_sampler_is_a_company_dispatch(self):
-        assert set(company._TITLE_SAMPLERS) <= set(company.FETCHERS)
 
     def test_a_rippling_board_is_sampled_at_listing_cost(self, serve):
         urls = serve(fake_response(self.RIPPLING))

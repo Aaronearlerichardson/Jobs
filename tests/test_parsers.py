@@ -22,6 +22,7 @@ import src.discovery.resolve.probes as probes
 import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
 import src.ats.fetchers.company as company_fetch
+import src.ats.fetchers.custom as custom_fetch
 import src.ats.fetchers.probe as job_probe
 from src.net.util import norm_posted_date
 
@@ -34,7 +35,7 @@ class TestSniffer:
         assert {("lever", "bioagilytix"), ("greenhouse", "pendo")} <= set(boards)
 
     def test_custom_board_needs_real_job_links(self):
-        assert not sniffer._looks_like_custom_board("<a href='/careers/'>Careers</a>")
+        assert not custom_fetch.is_board_page("<a href='/careers/'>Careers</a>")
 
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
@@ -282,17 +283,17 @@ class TestCustomBoardLinks:
         html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
                 '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
                 '<a href="/careers/data-scientist-3">Data Scientist</a>')
-        links = company_fetch.find_job_links(BeautifulSoup(html, "html.parser"))
+        links = custom_fetch.find_job_links(BeautifulSoup(html, "html.parser"))
         assert len(links) == 3
 
     def test_nav_links_rejected(self):
         html = ('<a href="/careers/open-positions/">Careers</a>'
                 '<a href="/careers/career-opportunities/">View Current Job Openings</a>'
                 '<a href="/careers/career-opportunities/">Career Opportunities</a>')
-        assert company_fetch.find_job_links(BeautifulSoup(html, "html.parser")) == []
+        assert custom_fetch.find_job_links(BeautifulSoup(html, "html.parser")) == []
 
     def test_aggregator_host_is_never_a_custom_board(self):
-        assert company_fetch.custom_board_listing_url(
+        assert custom_fetch.custom_board_listing_url(
             "https://www.indeed.com/jobs?q=x", "<html></html>") is None
 
 
@@ -1401,9 +1402,12 @@ class TestApplyToStoreFetchability:
                                            "https://beta.example/careers")
         assert stored["mission_tier"] == "core-mission"
         assert (stored["local_job_count"], stored["total_job_count"]) == (2, 5)
-        assert {tags.LOCAL, tags.PENDING} <= set(stored["tags"].split(","))
+        # A custom board is one request, so it seeds the sweep (its spec's
+        # `sweep`, D14).
+        assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))
 
-    def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db):
+    def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
+                                                         serve):
         """Not just "no longer skipped": once the reviewer confirms it, the
         row is one the harvester picks up and fetch_company dispatches."""
         import src.store as store
@@ -1420,9 +1424,7 @@ class TestApplyToStoreFetchability:
             == ["Beta Custom"]
         # src.crawl.harvest.fetch_whole_board and the local track
         # (src.crawl.runner) both dispatch a roster row here.
-        seen = []
-        monkeypatch.setattr(company_fetch, "fetch_custom_careers",
-                            lambda url, loc_re=None, **k: seen.append(url) or [])
+        seen = serve("<html></html>")
         company_fetch.fetch_company(row, None)
         assert seen == ["https://beta.example/careers"]
 

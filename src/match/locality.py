@@ -210,8 +210,8 @@ _SNIPPET_ALTS = [token_pattern(t, SHORT_PLACE)
 # "Remote" always counts: it's a location on every board, in every field.
 _SNIPPET_ALTS.append(r"\bremote\b")
 
-# Shared with html_scrape's SF date-stripper (_SF_DATE_TAIL_RE) so the
-# vocabulary lives in one place.
+# Shared with the field grammar's cut_date_tail transform
+# (src/ats/fetchers/fields.py) so the vocabulary lives in one place.
 MONTH_ABBRS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug",
               "Sep", "Sept", "Oct", "Nov", "Dec")
 

@@ -1,12 +1,10 @@
 """The (ok, count) contract every ATS slug probe answers, and the
 three-valued verdict the per-JOB closure probe answers.
 
-A platform with a config.BOARDS spec probes through the engine
-(`Board.probe`: one cheap read, ok only when it lists a posting); the rest
-are built from probes._api_probe, where what matters per ATS is the
-`require_jobs` decision -- is a 200 proof of a board, or must it list
-something. It has been got wrong before: SmartRecruiters answers 200 with
-totalFound:0 for ANY slug, so every guessed slug "confirmed" with zero jobs.
+Every platform probes through the engine (`Board.probe`: one cheap read,
+ok only when it lists a posting). A 200 alone is no proof of a board:
+SmartRecruiters answers 200 with totalFound:0 for ANY slug, so every
+guessed slug once "confirmed" with zero jobs.
 
 The job probe (fetchers.probe.probe_job_open, driven by
 ops.check_closed_jobs) has the same shape of hidden decision, one per ATS
@@ -26,9 +24,8 @@ from conftest import fake_response, iso_days_ago, keep_store_open
 
 from src.ats.fetchers import probe as job_probe
 from src.ats.fetchers.board import board_for
-from src.ats.fetchers.icims import ICIMS_HEADERS
 from src.discovery.resolve import probes
-from src.net.http import HEADERS
+from src.net.http import HEADERS, PLAIN_HEADERS
 from src.ops import maintenance as ops
 from src.ops import roster
 import src.store as store
@@ -71,13 +68,18 @@ def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
     return ids
 
 
+def _ids(n):
+    """`n` listing entries: a posting is an entry with an id."""
+    return [{"id": i} for i in range(n)]
+
+
 class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, serve):
-        serve(fake_response({"jobs": [{}, {}, {}]}))
+        serve(fake_response({"jobs": _ids(3) + [{}]}))
         assert probes.PROBES["greenhouse"]("acme") == (True, 3)
 
     def test_lever_counts_a_bare_list(self, serve):
-        serve(fake_response([{}, {}]))
+        serve(fake_response(_ids(2)))
         assert probes.PROBES["lever"]("acme") == (True, 2)
 
     def test_lever_tolerates_a_non_list_payload(self, serve):
@@ -85,26 +87,22 @@ class TestAPresentBoardIsConfirmed:
         assert probes.PROBES["lever"]("acme") == (False, 0)
 
     def test_ashby_reads_the_posting_api_key(self, serve):
-        serve(fake_response({"jobs": [{}, {}], "jobPostings": []}))
+        serve(fake_response({"jobs": _ids(2), "jobPostings": []}))
         assert probes.PROBES["ashby"]("acme") == (True, 2)
 
     def test_ashby_falls_back_to_the_embed_key(self, serve):
-        serve(fake_response({"jobPostings": [{}]}))
+        serve(fake_response({"jobPostings": _ids(1)}))
         assert probes.PROBES["ashby"]("acme") == (True, 1)
 
     def test_bamboohr_asks_for_json(self, serve):
-        seen = serve(fake_response({"result": [{}, {}, {}, {}]}))
+        seen = serve(fake_response({"result": _ids(4)}))
         assert probes.PROBES["bamboohr"]("acme") == (True, 4)
         assert seen[-1].headers["Accept"] == "application/json"
 
     def test_jazzhr_counts_apply_links_in_the_page(self, serve):
         serve(fake_response(text="<a href='/apply/AbC123/Engineer'>x</a>"
                           "<a href='/apply/dEf456/Scientist'>y</a>"))
-        assert probes.probe_jazzhr("acme") == (True, 2)
-
-    def test_kula_accepts_a_substantial_page(self, serve):
-        serve(fake_response(text="x" * 1001))
-        assert probes.probe_kula("acme") == (True, 0)
+        assert probes.PROBES["jazzhr"]("acme") == (True, 2)
 
 
 class TestAnEmptyBoardIsAMiss:
@@ -128,11 +126,7 @@ class TestAnEmptyBoardIsAMiss:
     def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
         # Every JazzHR page links /apply/confirm/, postings or not.
         serve(fake_response(text="<a href='/apply/confirm/'>x</a>" * 2))
-        assert probes.probe_jazzhr("acme") == (False, 0)
-
-    def test_kula_rejects_a_stub_page(self, serve):
-        serve(fake_response(text="too short"))
-        assert probes.probe_kula("acme") == (False, 0)
+        assert probes.PROBES["jazzhr"]("acme") == (False, 0)
 
 
 class TestFailureIsReportedNeverRaised:
@@ -153,15 +147,9 @@ class TestFailureIsReportedNeverRaised:
         serve(OSError("connection reset"))
         assert probes.PROBES["greenhouse"]("acme") == (False, 0)
 
-    def test_kula_retries_once_before_giving_up(self, serve, monkeypatch):
+    def test_a_probe_does_not_retry(self, serve):
         calls = serve(OSError("throttled"))
-        monkeypatch.setattr(probes.time, "sleep", lambda s: None)
-        assert probes.probe_kula("acme") == (False, 0)
-        assert len(calls) == 2, "kula gets one retry; the others get none"
-
-    def test_the_others_do_not_retry(self, serve):
-        calls = serve(OSError("throttled"))
-        assert probes.PROBES["greenhouse"]("acme") == (False, 0)
+        assert probes.PROBES["kula"]("acme") == (False, 0)
         assert len(calls) == 1
 
 
@@ -765,13 +753,13 @@ class TestProbeIsDecisivePerFamily:
         assert job_probe.probe_job_open(WD_JOB)[0] is is_open
 
     def test_icims_sends_the_headers_its_waf_accepts(self, probe_http):
-        """iCIMS's WAF 405s the crawler's default Chrome-like UA (see
-        fetchers/icims.ICIMS_HEADERS); 17 of the 36 unverifiable probes on
-        2026-09-21 were that, not a dead posting."""
+        """iCIMS's WAF 405s the crawler's default Chrome-like UA; its spec's
+        detail headers name one it accepts. 17 of the 36 unverifiable probes
+        on 2026-09-21 were that 405, not a dead posting."""
         seen = probe_http({"careers-acme.icims.com": fake_response(url=ICIMS_JOB)})
         job_probe.probe_job_open(ICIMS_JOB)
         [sent] = [r.headers for r in seen]
-        assert sent["User-Agent"] == ICIMS_HEADERS["User-Agent"]
+        assert sent["User-Agent"] == PLAIN_HEADERS["User-Agent"]
         assert sent["User-Agent"] != HEADERS["User-Agent"]
 
     def test_a_pulled_icims_posting_answers_410(self, probe_http):

@@ -4,10 +4,9 @@
 `probe_family` names the ATS family that URL belongs to -- what
 `ops.check_closed_jobs` dispatches on and reports its outcomes under.
 
-This is a reader, not a fetcher: it shares nothing with the whole-board
-pull in `fetchers/company.py` (where it lived until 2026-09-22) beyond the
-per-ATS endpoint builder it asks, `jazzhr.board_url`. A platform with a
-`config.BOARDS` spec is asked through the engine (`Board.probe_job`).
+This is a reader, not a fetcher: a platform with a `config.BOARDS` spec
+is asked through the engine (`Board.probe_job`), and every other URL is
+judged from its own page.
 
 One rule runs through every branch: a row is closed ONLY on positive
 evidence. Every refusal a host can make -- 403, 405, 429, 5xx, a timeout,
@@ -22,9 +21,8 @@ import time
 import requests
 
 from src import config
-from src.net.http import HEADERS, JSON_HEADERS, SESSION, HostBreaker
+from src.net.http import HEADERS, SESSION, HostBreaker
 from src.net.util import clean_url
-from . import icims, jazzhr
 from .board import board_for_url
 
 _log = logging.getLogger(__name__)
@@ -47,19 +45,6 @@ _CLOSED_TEXT_RE = re.compile("|".join((
 _GATED_HOST_RE = re.compile(
     r"linkedin\.com|indeed\.com|glassdoor\.|ziprecruiter\.com|"
     r"simplyhired\.com|monster\.com", re.I)
-
-# Which ATS owns a stored job URL, and the (board handle, posting id) its
-# public API needs. Most platforms serve a PULLED posting's own page as an
-# ordinary HTTP 200 with no closure marker -- which is why 36 of the 37
-# probes on 2026-09-21 came back "unverifiable" -- so the question is put
-# to the endpoint the fetcher already reads (_FAMILY_PROBE) rather than to
-# the page.
-_JOB_URL_RE = {
-    "jazzhr":     re.compile(r"//([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)",
-                             re.I),
-    "icims":      re.compile(r"//([a-z0-9-]+)\.icims\.com/jobs/(\d+)/", re.I),
-}
-
 
 def probe_family(url):
     """The ATS family a stored job URL belongs to: what probe_job_open
@@ -87,35 +72,7 @@ def probe_family(url):
     if _GATED_HOST_RE.search(url):
         return "gated"
     board = board_for_url(url)
-    if board:
-        return board.name
-    for fam, rex in _JOB_URL_RE.items():
-        if rex.search(url):
-            return fam
-    return ""
-
-
-def _endpoint_verdict(api, family, headers=None):
-    """(is_open, reason) from an endpoint whose 404/410 PROVES the posting
-    is gone. Every other refusal -- 403, 405, 429, 5xx, a timeout -- is
-    unverifiable: a host declining to answer is not a closed posting.
-    """
-    try:
-        r = SESSION.get(api, headers=headers or JSON_HEADERS)
-    except Exception as e:
-        return None, f"{family} api error: {type(e).__name__}"
-    if r.status_code in (404, 410):
-        return False, f"{family} api HTTP {r.status_code}"
-    if r.status_code != 200:
-        return None, f"{family} api HTTP {r.status_code}"
-    return True, f"{family} api: posting live"
-
-
-def _probe_jazzhr(m):
-    # The slug-free apply URL: 410 once the posting is pulled, 200 while live.
-    return _endpoint_verdict(
-        f"{jazzhr.board_url(m.group(1))}/apply/{m.group(2)}", "jazzhr",
-        headers=HEADERS)
+    return board.name if board else ""
 
 
 # A job-detail host that refuses connections refuses every row on it: the
@@ -123,29 +80,6 @@ def _probe_jazzhr(m):
 # three in a row, within the board memo's window, its remaining rows are
 # skipped unasked. Three, not discovery's one: these hosts answered before.
 _DEAD_HOSTS = HostBreaker(ttl=config.BOARD_MEMO_S, trips=3)
-
-
-#: Per-family liveness checks, keyed as _JOB_URL_RE is; each takes that
-#: family's match over the job URL. iCIMS is absent on purpose -- its own
-#: detail page answers 410 for a pulled posting, it just needs the WAF's
-#: headers (_page_headers).
-_FAMILY_PROBE = {
-    "jazzhr":          _probe_jazzhr,
-}
-
-
-def _page_headers(url):
-    """Headers for a detail-page GET: iCIMS's own for an iCIMS posting
-    (fetchers/icims.ICIMS_HEADERS -- its WAF answers the crawler's default
-    UA with HTTP 405), the shared defaults for everything else. Pinned by
-    tests/test_probes.py::TestProbeIsDecisivePerFamily.
-
-    Notes:
-        17 of the 36 unverifiable probes on 2026-09-21 were that 405, not
-        a dead posting.
-    """
-    return (icims.ICIMS_HEADERS if _JOB_URL_RE["icims"].search(url or "")
-            else HEADERS)
 
 
 def probe_job_open(url, job_id=None):
@@ -163,14 +97,20 @@ def probe_job_open(url, job_id=None):
     The posting's own page is the LAST resort, not the first: Lever,
     Greenhouse, Ashby, BambooHR and SmartRecruiters all serve a pulled
     posting as a plain HTTP 200, so the URL goes to that platform's
-    public endpoint first (`Board.probe_job`, else `_FAMILY_PROBE`) and
-    only an indeterminate answer there falls through to the page.
+    public endpoint first (`Board.probe_job`) and only an indeterminate
+    answer there falls through to the page.
 
     A row is closed ONLY on positive evidence: 404/410 from one of those
     endpoints or from the page, an ATS "no longer available" notice, a
     past JSON-LD validThrough, a spec's `closure.closed` or `unmatched`
     rule, or an id absent from a non-empty board listing.
-    403/405/429/5xx/timeouts never close.
+    403/405/429/5xx/timeouts never close. The page is read with the
+    posting's platform's detail headers (`Board.page_headers`).
+
+    Notes:
+        17 of the 36 unverifiable probes on 2026-09-21 were a WAF's 405
+        to the default UA, not a dead posting; the platform's spec now
+        names the UA its WAF accepts.
     """
     if not url:
         return None, "no url"
@@ -190,16 +130,12 @@ def probe_job_open(url, job_id=None):
         is_open, fallback = board.probe_job(url, job_id)
         if is_open is not None:
             return is_open, fallback
-    fam = probe_family(url)
-    if fam in _FAMILY_PROBE:
-        is_open, fallback = _FAMILY_PROBE[fam](_JOB_URL_RE[fam].search(url))
-        if is_open is not None:
-            return is_open, fallback
 
     if _DEAD_HOSTS.dead(url):
         return None, "host unreachable this pass: skipped"
     try:
-        r = SESSION.get(url, headers=_page_headers(url), allow_redirects=True)
+        r = SESSION.get(url, headers=board.page_headers(url) if board else HEADERS,
+                        allow_redirects=True)
     except Exception as e:
         if isinstance(e, requests.ConnectionError):
             _DEAD_HOSTS.trip(url)

@@ -4,9 +4,8 @@ Every board-shaped ATS shares a shape: a listing yields rows; each row
 has an id, a title, a location and maybe an inline description; some
 have a per-posting detail call that is worth paying for only when the row
 survives the filters. What is genuinely per-platform (the endpoints, the
-row mapping, the detail call) lives in its `config.BOARDS` spec or, until
-it migrates, its own fetcher module; `board_jobs` does the rest, so the
-filter order is decided once:
+row mapping, the detail call) lives in its `config.BOARDS` spec;
+`board_jobs` does the rest, so the filter order is decided once:
 
   1. location (`loc_re`) on the LISTED location, before any detail call:
      an out-of-area posting costs one listing row and nothing more;
@@ -21,41 +20,34 @@ fetchers/company.py); the unvetted sweep passes `gate=is_relevant`.
 
 A row is a dict with `id`, `title`, `url`, `location`, `description` ("" when
 the listing carries none) and optionally `head` (the text the gate screens
-first; defaults to the title), `posted_at`, `remote_hint`, plus any
-"_"-prefixed keys the module's detail call needs, which are stripped from
-the output. A module yields None for a listing entry it cannot use.
+first; defaults to the title), `posted_at`, `remote_hint`, plus the spec's
+"_"-prefixed fields, which are stripped from the output.
 
 `title` and `location` are run through `net.util.clean_field` before
-anything else sees them (the gates, the store, the session log): a raw
-ATS payload's title or location can carry an embedded newline or tab -- a
-search-row template that wraps onto two lines, a location cell with a
-stray tab between city and state -- and 124 open rows already carry one
-(2026-09-18 audit). Stored verbatim, that character splits triage's one-line DEBUG
-"drop" record into fragments a session-log reader cannot tell from a new
-record ("Calibration | local-tech=title" on its own line).
-
-`clean_field` is applied at each of the two paths' own choke point, not in
-every fetcher module: `board_jobs` covers the unvetted SWEEP, and `adapt`
-the company-vetted WHOLE-BOARD pull (including iCIMS's, whose listing
-builder skips `board_jobs` and feeds `adapt` directly). The
-three builders inside company.py that shape the adapted dict
-themselves, and fetchers/peopleadmin.py, which is also reached by the
-sweep, call `clean_field` at their own row builders.
-The aggregator and feed fetchers (jsonld, rssfeed, getro, remotive,
-usajobs, ...) reach neither choke point; no open row from one of them
-carries a bad field today (2026-09-18 audit), so they are left alone
-rather than given a third copy of this rule.
+anything else sees them (the gates, the store, the session log), at each
+path's choke point: `board_jobs` for the unvetted SWEEP, `adapt` for the
+company-vetted WHOLE-BOARD pull. The aggregator and feed fetchers
+(jsonld, rssfeed, getro, remotive, usajobs, ...) reach neither.
 
 `Board` (below) is the one engine every spec'd platform runs on: it reads
 `config.BOARDS[ats]` and does the listing, the row mapping, the sweep and
 whole-board pulls, hydration, probes and closure verdicts for that
 platform, so no module outside the spec names one. `BOARDS` holds one per
 spec; `board_for(ats)` and `board_for_url(url)` find them.
+
+Notes:
+    2026-09-18 audit: 124 open rows carried an embedded newline or tab
+    (a search-row template wrapping onto two lines, a stray tab between
+    city and state), which split triage's one-line DEBUG "drop" record
+    into fragments. No open row from an aggregator or feed fetcher
+    carried one, so they were left alone rather than given a third copy
+    of the rule.
 """
 
 import json
 import re
 import time
+from urllib.parse import urljoin
 
 from bs4 import BeautifulSoup
 
@@ -64,9 +56,10 @@ from src.match.locality import location_unknown
 from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS, note_capped
 from src.net.util import (cache_dir, clean_field, default_search_text,
-                          hashed_cache_path, json_cache_get, json_cache_put)
+                          hashed_cache_path, json_cache_get, json_cache_put,
+                          locality_abbr)
 
-from . import fields
+from . import custom, fields, jsonld
 
 
 def loc_ok(loc_re, text):
@@ -224,24 +217,34 @@ SPEC_KEYS = {
     "job_ref": dict,        # {"re", "parts"}: a stored posting URL -> handle
                             # parts plus the posting's own ("jid", or the
                             # listing entry keys its id reads)
-    "listing": dict,        # {"url", "method", "params", "json", "headers",
+    "listing": (dict, list),  # {"url", "method", "params", "json", "headers",
                             #  "probe_url", "decoder", "pager", "scope",
-                            #  "fields"}
-    "rescue": dict,         # {"unknown", "cap", "cache_days", "free"}: on a
-                            # scoped pull, a row whose listed location
-                            # matches `unknown` takes its detail's, at most
-                            # `cap` reads a pull, cached `cache_days`; the
-                            # field spec `free` is tried against loc_re first
+                            #  "fields"}; a list is alternatives, tried in
+                            # order until one yields rows, each later one
+                            # taking what it does not set from the first
+    "rescue": dict,         # {"when", "unknown", "cap", "cache_days", "free",
+                            #  "fields"}: on a scoped pull ("when": "scoped",
+                            # the default) or every pull ("always"), a row
+                            # whose listed location matches `unknown` takes
+                            # its detail's `fields` (default ["location"]),
+                            # at most `cap` reads a pull, a location cached
+                            # `cache_days`; the field spec `free` is tried
+                            # against loc_re first
     "detail": dict,         # {"url", "method", "params", "json", "headers",
                             #  "decoder", "record", "fields", "location"}:
                             # one posting read back
-    "closure": dict,        # {"via": "detail" | "listing" | "page", "open",
-                            #  "closed", "unmatched"}: each a condition, or
-                            # a list of {"when", "why"} rules, "why" a field
-                            # spec naming the reason; `unmatched` is the
-                            # reason a readable answer neither rule matches
-                            # closes the posting
+    "closure": dict,        # {"via": "detail" | "listing" | "page", "url",
+                            #  "open", "closed", "unmatched"}: each a
+                            # condition, or a list of {"when", "why"} rules,
+                            # "why" a field spec naming the reason;
+                            # `unmatched` is the reason a readable answer
+                            # neither rule matches closes the posting; `url`
+                            # asks a posting's own endpoint in place of its
+                            # detail's
     "employer": (str, dict),  # a field spec naming the employer on a listing entry
+    "unlocated": str,       # a location filter's verdict on a row naming no
+                            # place: "drop" (the default), "keep", or
+                            # "title" (the filter reads its title)
 }
 _LISTING_KEYS = {"url", "method", "params", "json", "headers", "probe_url",
                  "decoder", "pager", "scope", "fields"}
@@ -249,20 +252,39 @@ _DETAIL_KEYS = {"url", "method", "params", "json", "headers", "decoder",
                 "record", "fields", "location"}
 _ROW_FIELDS = {"id", "title", "url", "location", "description", "posted_at",
                "remote_hint", "department"}
-_DECODERS = {"json", "json_in_html", "html"}
+#: json_in_html: one JSON value found by `regex`; jsonld: {"postings"}, the
+#: page's schema.org JobPostings; html: {"elements", "page"} (`_elements`),
+#: or the careers-page reader's where `select` is "$job_links"
+#: (`custom.read_page`); atom: {"entries"} (`_atom`).
+_DECODERS = {"json", "json_in_html", "jsonld", "html", "atom"}
+#: Where a decoder's entries sit unless `entries` says; a detail's record
+#: is the first of them unless `record` says.
+_ENTRIES = {"html": "elements", "jsonld": "postings", "atom": "entries"}
+_HTML_KEYS = {"kind", "entries", "select", "context", "cells", "base"}
 #: offset: "$offset" steps a page; overlap: it steps "step" < "size", so
-#: pages overlap; cursor: each page names the next ("next", ended by
-#: "has_next"). Any may set "ceiling", the most rows the server serves.
-_PAGERS = {"offset", "overlap", "cursor"}
+#: pages overlap; page: "$page" counts pages from "start" (left off the
+#: first page's request under "bare_first"; a page pager may leave `size`
+#: unknown); cursor: each page names the next ("next", ended by
+#: "has_next"). Any may set "ceiling", the most rows the server serves,
+#: or "declared", a field spec naming the last page on each page.
+_PAGERS = {"offset", "overlap", "page", "cursor"}
 #: A facets scope: the facet groups at `facets` on an unscoped first page,
 #: each group's (or value's) `param`, the groups whose param `param_re`
 #: matches, and each value's `values` (nested), `id` and `label`.
 _SCOPE_KEYS = {"kind", "facets", "param", "param_re", "values", "id", "label"}
-_RESCUE_KEYS = {"unknown", "cap", "cache_days", "free"}
+#: A param scope: `params` asked of the first listing, unpaged, in place of
+#: its own; `located`, the location a row it returned takes when it names
+#: none.
+_PARAM_SCOPE_KEYS = {"kind", "params", "located"}
+_RESCUE_KEYS = {"when", "unknown", "cap", "cache_days", "free", "fields"}
 _ACCEPT_KEYS = {"status", "status_not", "total"}
 #: The named request values every listing request can use, and their
-#: unscoped defaults ("$size" and "$offset" come from the pager).
-_NAMED = {"$facets": {}, "$search_text": ""}
+#: unscoped defaults ("$size", "$offset" and "$page" come from the pager).
+#: "$area" is the location regex a pull is filtered by, for a decoder that
+#: chooses among the places a row names; "$plain_user_agent" a bare
+#: platform UA, for a WAF refusing a Chrome UA without Chrome's client hints.
+_NAMED = {"$facets": {}, "$search_text": "", "$area": None,
+          "$plain_user_agent": config.PLAIN_USER_AGENT}
 
 #: Listings read for closure and deep verify: (ats, handle) -> (expires, entries).
 _MEMO = {}
@@ -289,37 +311,49 @@ def validate_spec(name, spec):
             bad(f"unknown key {key!r}")
         if not isinstance(v, SPEC_KEYS[key]):
             bad(f"{key} is {type(v).__name__}")
-    for key, allowed in (("listing", _LISTING_KEYS), ("detail", _DETAIL_KEYS)):
-        part = spec.get(key) or {}
+    listings = _alternatives(spec.get("listing"))
+    for key, allowed, part in ([("listing", _LISTING_KEYS, alt) for alt in listings]
+                               + [("detail", _DETAIL_KEYS, spec.get("detail") or {})]):
         extra = set(part) - allowed
         if extra:
             bad(f"unknown {key} key(s) {sorted(extra)}")
         extra = set(part.get("fields") or {}) - _ROW_FIELDS
         if any(not k.startswith("_") for k in extra):
             bad(f"unknown {key} field(s) {sorted(extra)}")
-        if (part.get("decoder") or {}).get("kind", "json") not in _DECODERS:
+        dec = part.get("decoder") or {}
+        if dec.get("kind", "json") not in _DECODERS:
             bad(f"{key}.decoder.kind")
-    pager = (spec.get("listing") or {}).get("pager")
-    if pager and (pager.get("kind") not in _PAGERS or not pager.get("size")):
-        bad("listing.pager needs a known kind and a size")
-    if pager and pager["kind"] == "overlap" and not 0 < pager.get("step", 0) < pager["size"]:
-        bad("listing.pager: an overlap steps less than a page")
-    if pager and pager["kind"] == "cursor" and not (pager.get("next") and pager.get("has_next")):
-        bad("listing.pager: a cursor needs next and has_next")
-    if pager and not isinstance(pager.get("ceiling", 0), int):
-        bad("listing.pager.ceiling is a row count")
+        if dec.get("kind") == "html" and (set(dec) - _HTML_KEYS or not dec.get("select")):
+            bad(f"{key}.decoder: an html decoder selects, of {sorted(_HTML_KEYS)}")
+        pager = part.get("pager")
+        if pager and (pager.get("kind") not in _PAGERS
+                      or not (pager.get("size") or pager["kind"] == "page")):
+            bad("listing.pager needs a known kind and a size")
+        if pager and pager["kind"] == "overlap" and not 0 < pager.get("step", 0) < pager["size"]:
+            bad("listing.pager: an overlap steps less than a page")
+        if pager and pager["kind"] == "cursor" and not (pager.get("next") and pager.get("has_next")):
+            bad("listing.pager: a cursor needs next and has_next")
+        if pager and not isinstance(pager.get("ceiling", 0), int):
+            bad("listing.pager.ceiling is a row count")
     hspec = spec.get("handle") or {}
     if not all(isinstance(v, str) for v in (hspec.get("follow") or {}).values()):
         bad("handle.follow maps a part to a URL template")
     if set(hspec.get("accept") or {}) - _ACCEPT_KEYS or len(hspec.get("try") or {}) > 1:
         bad("handle: one `try` part, `accept` of status, status_not, total")
-    scope = (spec.get("listing") or {}).get("scope")
-    if scope and (scope.get("kind") != "facets" or set(scope) != _SCOPE_KEYS):
-        bad(f"listing.scope: a facets scope names {sorted(_SCOPE_KEYS)}")
+    scope = (listings[0] if listings else {}).get("scope")
+    if scope and not (scope.get("kind") == "facets" and set(scope) == _SCOPE_KEYS
+                      or scope.get("kind") == "param" and "params" in scope
+                      and set(scope) <= _PARAM_SCOPE_KEYS):
+        bad(f"listing.scope: a facets scope names {sorted(_SCOPE_KEYS)}, "
+            f"a param scope `params` of {sorted(_PARAM_SCOPE_KEYS)}")
+    if spec.get("unlocated", "drop") not in ("drop", "keep", "title"):
+        bad("unlocated is drop, keep or title")
     rescue = spec.get("rescue")
     if rescue and (set(rescue) - _RESCUE_KEYS or not isinstance(rescue.get("cap"), int)
-                   or not (scope and spec.get("detail"))):
-        bad("rescue: a scoped listing and a detail, an int cap")
+                   or rescue.get("when", "scoped") not in ("scoped", "always")
+                   or set(rescue.get("fields") or []) - _ROW_FIELDS
+                   or not ((scope or rescue.get("when") == "always") and spec.get("detail"))):
+        bad("rescue: a detail, a scoped listing unless `when` is always, an int cap")
     if not isinstance((spec.get("closure") or {}).get("unmatched", ""), str):
         bad("closure.unmatched is a reason")
     ref = spec.get("job_ref") or {}
@@ -337,10 +371,15 @@ def validate_spec(name, spec):
         for templates in (hspec.get("try") or {}).values():
             for t in templates:
                 fields.check_template(t)
+        for t in [(spec.get("closure") or {}).get("url") or ""] + [
+                alt.get("url") or "" for alt in listings]:
+            fields.check_template(t)
         fields.check((rescue or {}).get("free"))
-        for key in ("listing", "detail"):
-            for f in ((spec.get(key) or {}).get("fields") or {}).values():
+        for part in listings + [spec.get("detail") or {}]:
+            for f in (part.get("fields") or {}).values():
                 fields.check(f)
+            fields.check((part.get("pager") or {}).get("total"))
+            fields.check((part.get("pager") or {}).get("declared"))
         for c in ((spec.get("closure") or {}).get(k) for k in ("open", "closed")):
             for rule in _rules(c):
                 if set(rule) - {"when", "why"} or "when" not in rule:
@@ -351,6 +390,17 @@ def validate_spec(name, spec):
             fields.check(spec["employer"])
     except ValueError as e:
         bad(str(e))
+
+
+def _alternatives(listing):
+    """A spec's listing as its alternatives, each later one completed from
+    the first.
+
+    >>> _alternatives([{"url": "a", "fields": {}}, {"url": "b"}])
+    [{'url': 'a', 'fields': {}}, {'url': 'b', 'fields': {}}]
+    """
+    alts = listing if isinstance(listing, list) else [listing] if listing else []
+    return [alt if i == 0 else {**alts[0], **alt} for i, alt in enumerate(alts)]
 
 
 def _fill(tpl, lookup, vals):
@@ -369,14 +419,113 @@ def _fill(tpl, lookup, vals):
     return tpl
 
 
-def _decode(dec, text):
-    """A non-JSON response body as data; None when it holds none. Raises
-    ValueError when embedded JSON will not parse."""
-    if dec.get("kind") == "json_in_html":
+def _decode(dec, text, parts, url, area=None, hop=True):
+    """A non-JSON response body (to `url`) as data; None when it holds
+    none. Raises ValueError when embedded JSON will not parse. `area` and
+    `hop` reach the careers-page reader (`custom.read_page`)."""
+    kind = dec.get("kind")
+    if kind == "json_in_html":
         m = re.search(dec["regex"], text)
         return json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
-    el = BeautifulSoup(text, "html.parser").select_one(dec["select"])
-    return {"text": el.get_text(" ", strip=True)} if el else None
+    if kind == "jsonld":
+        return {"postings": jsonld.postings(text, url)}
+    if kind == "atom":
+        return {"entries": _atom(text)}
+    if dec.get("select") == "$job_links":
+        return custom.read_page(text, url, area, hop)
+    return {"elements": _elements(dec, text, parts, url), "page": text}
+
+
+def _atom(text):
+    """An Atom feed's entries, each an `_xml_record` carrying its feed's own
+    elements under "feed" (an entry inherits its feed's metadata).
+
+    >>> feed = ('<feed xmlns="http://www.w3.org/2005/Atom"><title>State U: All Jobs</title>'
+    ...         '<entry><title>Chemist</title><link href="https://x.test/postings/7"/>'
+    ...         '<author><name>Chemistry</name></author></entry></feed>')
+    >>> _atom(feed)
+    [{'title': 'Chemist', 'link': '', 'link@href': 'https://x.test/postings/7', 'author': {'name': 'Chemistry'}, 'feed': {'title': 'State U: All Jobs'}}]
+    """
+    soup = BeautifulSoup(text, "xml")
+    root = soup.find("feed") or soup
+    feed = _xml_record(root, skip="entry")
+    return [{**_xml_record(e), "feed": feed} for e in soup.find_all("entry")]
+
+
+def _xml_record(el, skip=None):
+    """An XML element's children as a dict, the first of each name (but
+    `skip`): a child holding elements as its own record, else its text;
+    each attribute as "<name>@<attribute>"."""
+    out = {}
+    for child in el.find_all(recursive=False):
+        if child.name in out or child.name == skip:
+            continue
+        out[child.name] = (_xml_record(child) if child.find(True) is not None
+                           else child.get_text(" ", strip=True))
+        for attr, v in child.attrs.items():
+            out[f"{child.name}@{attr}"] = v
+    return out
+
+
+def _elements(dec, text, parts, url):
+    """One entry per element the html decoder's `select` finds (a CSS
+    template over the handle `parts`, or a list tried in order until one
+    finds any): its `text`, its `raw` text (unstripped, line breaks
+    kept), `href` and `url` (the href made absolute against `base`,
+    default the page). With a `context`, also that element's text
+    (`_context`), its `lines` where the context reads them, and each of
+    `cells`, {name: CSS}, the text of the first match inside it (None
+    when none).
+
+    >>> page = ('<ul><li><a class="j" href="/acme/job/1">Data Engineer</a>'
+    ...         '<p class="loc">Durham, NC</p></li></ul>')
+    >>> _elements({"select": "a.j[href*='/{slug}/']", "context": ["li"],
+    ...            "cells": {"loc": ".loc"}}, page, {"slug": "acme"}, "https://x.test/acme")
+    [{'text': 'Data Engineer', 'raw': 'Data Engineer', 'href': '/acme/job/1', 'url': 'https://x.test/acme/job/1', 'context': 'Data Engineer Durham, NC', 'loc': 'Durham, NC'}]
+    """
+    soup = BeautifulSoup(text, "html.parser")
+    found = []
+    for sel in dec["select"] if isinstance(dec["select"], list) else [dec["select"]]:
+        found = soup.select(fields.fmt(sel, parts.get))
+        if found:
+            break
+    base = fields.fmt(dec["base"], parts.get) if dec.get("base") else url
+    out = []
+    for el in found:
+        href = el.get("href") or ""
+        e = {"text": el.get_text(" ", strip=True), "raw": el.get_text(" "), "href": href,
+             "url": urljoin(base, href) if href else ""}
+        if "context" in dec or "cells" in dec:
+            ctx, lines = _context(el, dec.get("context", "parent"))
+            e["context"] = ctx.get_text(" ", strip=True) if ctx is not None else ""
+            if lines is not None:
+                e["lines"] = lines
+            for name, css in (dec.get("cells") or {}).items():
+                cell = ctx.select_one(css) if ctx is not None else None
+                e[name] = cell.get_text(" ", strip=True) if cell is not None else None
+        out.append(e)
+    return out
+
+
+def _context(el, how):
+    """(element, lines) around a matched element: its parent ("parent");
+    the nearest ancestor of the first of a list of tags that has one; or
+    ("lines") the nearest ancestor, at most eight up, whose text holds two
+    lines longer than three characters, with those lines (else None)."""
+    if how == "lines":
+        node, lines = el.parent, []
+        for _ in range(8):
+            if node is None:
+                break
+            lines = [ln.strip() for ln in node.get_text("\n").strip().split("\n")
+                     if len(ln.strip()) > 3]
+            if len(lines) >= 2:
+                break
+            node = node.parent
+        return node, lines
+    if isinstance(how, list):
+        return next((p for p in (el.find_parent(t) for t in how) if p is not None), None), None
+    return el.parent, None
 
 
 def _first_path(payload, wanted, kind):
@@ -401,6 +550,11 @@ def _unwrap(v, key):
     if isinstance(v, list):
         return [_unwrap(x, key) for x in v]
     return v
+
+
+def _postings(rows):
+    """Whether `rows` hold a posting: a row with an id."""
+    return any(r["id"] is not None for r in rows or [])
 
 
 def _rules(c):
@@ -458,7 +612,8 @@ class Board:
     def __init__(self, name, spec):
         validate_spec(name, spec)
         self.name, self.spec = name, spec
-        self.listing_spec = spec.get("listing") or {}
+        self._listings = _alternatives(spec.get("listing"))
+        self.listing_spec = self._listings[0] if self._listings else {}
         self.detail_spec = spec.get("detail") or {}
         self.fetchable = bool(self.listing_spec)
         self._hspec = spec.get("handle") or {}
@@ -507,10 +662,13 @@ class Board:
 
     # --- requests ----------------------------------------------------------
 
-    def _fetch(self, req, parts, vals=None, label=None, timeout=None, url=None):
+    def _fetch(self, req, parts, vals=None, label=None, timeout=None, url=None,
+               hop=True):
         """(status, payload, error) for one request built from `req` (the
         listing or detail spec) and the handle `parts`; `url`, a served
-        next-page URL, replaces the spec's URL and parameters verbatim."""
+        next-page URL, replaces the spec's URL and parameters verbatim. A
+        parameter whose value is None is left off. A page whose decoder
+        names another to read in its place (`hop`) is followed, once."""
         dec = req.get("decoder") or {}
         kind = dec.get("kind", "json")
         vals = {**_NAMED, **(vals or {})}
@@ -519,9 +677,12 @@ class Board:
         for key in ("params", "json") if url is None else ():
             if req.get(key):
                 kw[key] = _fill(req[key], parts.get, vals)
+        if kw.get("params"):
+            kw["params"] = {k: v for k, v in kw["params"].items() if v is not None}
         if timeout:
             kw["timeout"] = timeout
-        url, method = url or fields.fmt(req["url"], parts.get), req.get("method", "GET")
+        url = url or fields.fmt(req["url"], lambda k: parts[k] if k in parts else vals.get(f"${k}"))
+        method = req.get("method", "GET")
         if kind == "json":
             status, payload, err = http.request_json(method, url, label, **kw)
         else:
@@ -529,9 +690,11 @@ class Board:
             if err:
                 return status, None, err
             try:
-                payload = _decode(dec, r.text)
+                payload = _decode(dec, r.text, parts, url, vals["$area"], hop)
             except ValueError:
                 return status, None, http.failed(label, "unreadable response")
+            if isinstance(payload, dict) and payload.get("hop"):
+                return self._fetch(req, parts, vals, label, timeout, payload["hop"], False)
         if dec.get("values") and payload is not None:
             payload = _unwrap(payload, dec["values"])
         return status, payload, err
@@ -604,22 +767,23 @@ class Board:
             return True
         total = (req.get("pager") or {}).get("total")
         return bool(acc.get("total") and total
-                    and not isinstance(fields.path(payload, total), int))
+                    and not isinstance(fields.value(total, payload), int))
 
     # --- the listing -------------------------------------------------------
 
     def _label(self, handle, company_name=""):
         return f"{self.name} {company_name or handle}"
 
-    def _entries(self, payload):
+    def _entries(self, payload, spec=None):
         """The postings (dicts) in a listing payload: the first of the
-        spec's entry paths holding a list; a wrong shape is []."""
-        wanted = (self.listing_spec.get("decoder") or {}).get("entries", "")
+        listing's entry paths holding a list; a wrong shape is []."""
+        dec = (spec or self.listing_spec).get("decoder") or {}
+        wanted = dec.get("entries", _ENTRIES.get(dec.get("kind"), ""))
         return [e for e in _first_path(payload, wanted, list) or []
                 if isinstance(e, dict)]
 
-    def _row(self, parts, entry):
-        fs = self.listing_spec["fields"]
+    def _row(self, parts, entry, spec=None):
+        fs = (spec or self.listing_spec)["fields"]
         ctx = dict(parts)
         for k, s in fs.items():
             if k.startswith("_"):
@@ -644,33 +808,48 @@ class Board:
             row["_free"] = fields.value(free, entry, ctx) or ""
         return row
 
-    def _next(self, payload, parts):
+    def _next(self, payload, parts, spec):
         """A cursor page's next-page URL, to follow verbatim; None when it
         names none or points outside the listing's own directory (served
         data, not a promise)."""
-        nxt = fields.path(payload, self._pager["next"])
-        home = fields.fmt(self.listing_spec["url"], parts.get).rsplit("/", 1)[0] + "/"
+        nxt = fields.path(payload, spec["pager"]["next"])
+        home = fields.fmt(spec["url"], parts.get).rsplit("/", 1)[0] + "/"
         return nxt if isinstance(nxt, str) and nxt.lower().startswith(home.lower()) else None
 
     def _walk(self, handle, label=None, cheap=False, size=None, pages=None, vals=None,
               scoped=False):
-        """(rows, total) for the board, deduped by id; (None, None) when the
-        first request failed. `vals` fills named request values (`_NAMED`).
+        """(rows, total) from the first listing alternative whose walk
+        (`_walk_listing`) yields a posting, else the last one's answer."""
+        got = None, None
+        for spec in self._listings:
+            got = self._walk_listing(spec, handle, label, cheap, size, pages, vals, scoped)
+            if _postings(got[0]):
+                break
+        return got
+
+    def _walk_listing(self, spec, handle, label=None, cheap=False, size=None, pages=None,
+                      vals=None, scoped=False):
+        """(rows, total) for one listing; (None, None) when the first request
+        failed. A row whose id an earlier page gave is dropped, as is one
+        repeating a row of its own page verbatim (a page may list a posting
+        once per location; two copies of one row are one). `vals` fills
+        named request values (`_NAMED`).
         A later page's failure ends the walk with the rows so far
-        (reported, so the snapshot reads incomplete). The walk ends at an
-        empty page, at the total (else a short page: a server may serve
-        fewer than asked), or where a cursor's `has_next` says so; a total
-        at the pager's `ceiling` is the most the server reports, not the
+        (reported, so the snapshot reads incomplete). The walk ends at a
+        page listing no posting (no row with an id), at the total or the
+        page `declared` last (else a short page: a server may serve fewer
+        than asked), or where a cursor's `has_next` says so; a total at
+        the pager's `ceiling` is the most the server reports, not the
         board's size, so it ends nothing. The walk notes the snapshot
         capped when it stopped anywhere else (every page read with the
-        last still full, a page adding nothing new or a cursor refused by
-        `_next`) with no total proving it complete; when it holds fewer
-        rows than the total, unless `scoped` (a scope's total counts rows
-        the pull drops); and when rows or total reach the `ceiling`. The
-        capped total is the larger of total and rows, unknown on a scoped
-        pull short of the ceiling. `cheap` reads one page (or `pages`) of
-        `probe_url` at PROBE_TIMEOUT."""
-        spec, pager = self.listing_spec, self._pager
+        last still listing postings, a page adding no new posting or a
+        cursor refused by `_next`) with no total proving it complete; when
+        it holds fewer rows than the total, unless `scoped` (a scope's
+        total counts rows the pull drops); and when rows or total reach the
+        `ceiling`. The capped total is the larger of total and rows,
+        unknown on a scoped pull short of the ceiling. `cheap` reads one
+        page (or `pages`) of `probe_url` at PROBE_TIMEOUT."""
+        pager = spec.get("pager") or {}
         req = {**spec, "url": spec["probe_url"]} if cheap and spec.get("probe_url") else spec
         size = size or pager.get("size", 0)
         step = pager.get("step") or size
@@ -680,33 +859,43 @@ class Board:
         rows, seen, total, size_known, capped, url = [], set(), None, None, False, None
         for n in range(pages):
             page_label = f"{label} p{n}" if label and pager else label
+            number = pager.get("start", 0) + n
             parts, _status, payload, err = self._page(
-                req, handle, {**(vals or {}), "$size": size, "$offset": n * step},
+                req, handle, {**(vals or {}), "$size": size, "$offset": n * step,
+                              "$page": None if n == 0 and pager.get("bare_first") else number},
                 page_label, timeout, url)
             if err:
                 return (None, None) if n == 0 else (rows, total)
             if n == 0 and pager.get("total"):
-                t = fields.path(payload, pager["total"])
+                t = fields.value(pager["total"], payload)
                 total = t if isinstance(t, int) else None
                 size_known = None if total is not None and ceiling and total >= ceiling else total
-            entries = self._entries(payload)
-            new = [r for r in (self._row(parts, e) for e in entries)
-                   if r["id"] is None or r["id"] not in seen]
+            entries = self._entries(payload, spec)
+            listed = [self._row(parts, e, spec) for e in entries]
+            new, here = [], set()
+            for r in listed:
+                key = json.dumps(r, sort_keys=True, default=str)
+                if (r["id"] is None or r["id"] not in seen) and key not in here:
+                    here.add(key)
+                    new.append(r)
             seen.update(r["id"] for r in new)
             rows += new
             if not pager:
                 break
+            last = fields.value(pager["declared"], payload) if pager.get("declared") else None
             if pager["kind"] == "cursor":
                 if not fields.path(payload, pager["has_next"]):
                     break
-                url = self._next(payload, parts)
+                url = self._next(payload, parts, spec)
                 if not url:
                     capped = True
                     break
-            elif not entries or (len(rows) >= size_known if size_known is not None
-                                 else len(entries) < size):
+            elif not _postings(listed) or (
+                    not isinstance(last, int) or number >= last if pager.get("declared")
+                    else len(rows) >= size_known if size_known is not None
+                    else len(entries) < size):
                 break
-            if not new or n + 1 == pages:
+            if not _postings(new) or n + 1 == pages:
                 capped = True
                 break
             time.sleep(config.PAGE_DELAY_S)
@@ -718,10 +907,22 @@ class Board:
             note_capped(max(total, len(rows)) if known else None)
         return rows, total
 
-    def listing(self, handle, label=None, cheap=False):
-        """Every row on the board, mapped by the spec's fields; [] when the
-        listing failed (reported under `label` when given)."""
-        return self._walk(handle, label, cheap)[0] or []
+    def listing(self, handle, label=None, cheap=False, rescue_cap=None):
+        """Every row on the board, mapped by the spec's fields and, where
+        the rescue runs on every pull, filled from at most `rescue_cap`
+        details (default the rescue's cap); [] when the listing failed
+        (reported under `label` when given). A `cheap` read spends no
+        detail read unless the rescue fills the rows' titles."""
+        rows = self._walk(handle, label, cheap)[0] or []
+        if cheap and "title" not in (self.spec.get("rescue") or {}).get("fields", ["location"]):
+            return rows
+        return self._rescue_all(rows, label, rescue_cap)
+
+    def _rescue_all(self, rows, label, cap=None):
+        """`rows` through an "always" rescue, unscoped; else unchanged."""
+        if (self.spec.get("rescue") or {}).get("when") != "always":
+            return rows
+        return self._rescue(rows, None, False, True, label, cap)
 
     # --- the locality scope ------------------------------------------------
 
@@ -736,7 +937,7 @@ class Board:
             self.listing_spec, handle, {"$size": 1, "$offset": 0}, timeout=timeout)
         applied, total = {}, None
         if not err:
-            t = fields.path(payload, self._pager.get("total", ""))
+            t = fields.value(self._pager.get("total"), payload)
             total = t if isinstance(t, int) else None
             param_re = re.compile(sc["param_re"])
 
@@ -757,99 +958,183 @@ class Board:
         return {"$facets": {}, "$search_text": default_search_text()}, False, total
 
     def _pull(self, handle, label, loc_re=None, pages=None):
-        """(rows, loc_re left to apply). A spec with a `scope` narrows the
-        listing to a given `loc_re` server-side and returns only the rows
-        in its area (`_rescue`), leaving nothing to apply; a scope the
-        board ignored (`_scope_failed`) keeps listed and free-text matches
-        only. Otherwise the whole listing, and `loc_re`."""
-        if loc_re is None or not self.listing_spec.get("scope"):
-            return self._walk(handle, label, pages=pages)[0] or [], loc_re
-        vals, vouched, board_total = self._scope(handle, loc_re)
-        rows, total = self._walk(handle, label, pages=pages, vals=vals, scoped=True)
-        cap = self._pager["size"] * (pages or self._pager.get("pages", 1))
-        fetch = not _scope_failed(total, board_total, cap)
-        if not fetch:
-            print(f"    [!] {label}: locality scope came back unnarrowed ({total} of "
-                  f"{board_total or '?'} postings) - keeping listed-location matches "
-                  f"only, no detail rescue")
-        return self._rescue(rows or [], loc_re, vouched, fetch, label), None
+        """The board's rows in `loc_re`'s area (all of them when None). A
+        facets `scope` narrows the listing server-side and keeps the rows
+        its rescue shows in the area (`_rescue`); a scope the board ignored
+        (`_scope_failed`) keeps listed and free-text matches only. A param
+        scope asks the first listing once (`_scoped_walk`), the whole
+        listing read instead when that lists no posting. Otherwise the
+        whole listing; then an "always" rescue, and the area filter
+        (`_in_area`)."""
+        scope = self.listing_spec.get("scope") or {}
+        if loc_re is not None and scope.get("kind") == "facets":
+            vals, vouched, board_total = self._scope(handle, loc_re)
+            rows, total = self._walk(handle, label, pages=pages, vals=vals, scoped=True)
+            cap = self._pager["size"] * (pages or self._pager.get("pages", 1))
+            fetch = not _scope_failed(total, board_total, cap)
+            if not fetch:
+                print(f"    [!] {label}: locality scope came back unnarrowed ({total} of "
+                      f"{board_total or '?'} postings) - keeping listed-location matches "
+                      f"only, no detail rescue")
+            return self._rescue(rows or [], loc_re, vouched, fetch, label)
+        rows = (self._scoped_walk(handle, label, scope)
+                if loc_re is not None and scope.get("kind") == "param" else None)
+        if rows is None:
+            rows = self._walk(handle, label, pages=pages, vals={"$area": loc_re})[0] or []
+        return [r for r in self._rescue_all(rows, label) if self._in_area(r, loc_re)]
 
-    def _rescue(self, rows, loc_re, vouched, fetch, label):
+    def _scoped_walk(self, handle, label, scope):
+        """The rows of one unpaged request of the first listing asked with
+        the param `scope`'s `params` in place of its own, each naming no
+        place taking the scope's `located`; None when a param fills empty
+        or the answer lists no posting, [] when it failed (reported)."""
+        vals = {**_NAMED, "$locality_abbr": locality_abbr()}
+        if not all(_fill(scope["params"], {}.get, vals).values()):
+            return None
+        spec = {**self.listing_spec, "params": scope["params"], "pager": None}
+        rows = self._walk_listing(spec, handle, label, vals=vals)[0]
+        if rows is None or not _postings(rows):
+            return [] if rows is None else None
+        here = self._located()
+        for r in rows:
+            r["location"] = r["location"] or here
+        return rows
+
+    def _in_area(self, row, loc_re):
+        """Whether `row` passes `loc_re` (every row passes None): on its
+        location, cleaned; one naming no place by the spec's `unlocated`
+        rule ("drop", "keep", or "title": on its title)."""
+        loc = clean_field(row.get("location"))
+        if loc or loc_re is None:
+            return loc_ok(loc_re, loc)
+        how = self.spec.get("unlocated", "drop")
+        return how == "keep" or how == "title" and loc_ok(loc_re, clean_field(row.get("title")))
+
+    def _located(self):
+        """The location a param scope gives a row naming none; "" when none."""
+        located = (self.listing_spec.get("scope") or {}).get("located")
+        return _fill(located, {}.get, {"$locality_abbr": locality_abbr()}) if located else ""
+
+    def _unknown(self, location):
+        """Whether `location` names no place (`location_unknown`), or only
+        the `_located` label a param scope gave a row that named none."""
+        label = self._located()
+        return location_unknown(location) or bool(label) and (location or "").strip() == label
+
+    def _rescue(self, rows, loc_re, vouched, fetch, label, cap=None):
         """The rows in `loc_re`'s area, each carrying the location that
         shows it: the listed one; else the rescue's free text (the listed
         one after it in parentheses); else, where `fetch` allows and the
-        listed one matches `rescue.unknown`, the detail's (`_located`), at
-        most `rescue.cap` reads. Past the cap such a row stays on its
-        listed text when the scope `vouched` for it, else it is dropped. A
-        listed location that passes but matches `unknown` is expanded too,
-        within the cap."""
+        listed one matches `rescue.unknown`, the detail's (`_rescued`), at
+        most `cap` reads (default `rescue.cap`). Past the cap such a row
+        stays on its listed text when the scope `vouched` for it, else it
+        is dropped. A listed location that passes but matches `unknown` is
+        expanded too, within the cap; where the rescue fills a row's title,
+        one left past the cap is no posting, and the snapshot is noted
+        capped. A labelled pull says when the budget ran out."""
         rs = self.spec.get("rescue") or {}
         unknown = re.compile(rs["unknown"]) if fetch and rs else None
-        cap, spent, out = rs.get("cap", 0), 0, []
+        fill = rs.get("fields", ["location"])
+        cap = rs.get("cap", 0) if cap is None else cap
+        spent, left, out = 0, 0, []
         for row in rows:
             listed, free = row.get("location") or "", row.get("_free") or ""
             vague = bool(unknown and unknown.search(listed) and self.owns_url(row.get("url")))
             if loc_ok(loc_re, listed):
                 if vague and spent < cap:
                     spent += 1
-                    row["location"] = self._located(row["url"], True) or listed
+                    self._rescued(row, fill)
+                elif vague:
+                    left += 1
             elif loc_ok(loc_re, free):
                 row["location"] = f"{free} ({listed})" if listed else free
             elif not vague or (spent >= cap and not vouched):
                 continue
             elif spent < cap:
                 spent += 1
-                row["location"] = self._located(row["url"], True)
+                self._rescued(row, fill)
                 if not loc_ok(loc_re, row["location"]):
                     continue
             out.append(row)
-        if unknown and spent >= cap:
-            print(f"    [!] {label}: location detail budget ({cap}) spent; later rows "
+        if unknown and spent >= cap and label:
+            print(f"    [!] {label}: {'location ' if fill == ['location'] else ''}detail "
+                  f"budget ({cap}) spent; later rows "
                   f"{'kept unexpanded' if vouched else 'dropped'}")
+            if left and "title" in fill:
+                note_capped(len(rows))
         return out
 
-    def _located(self, url, report=False, company=None):
-        """The location the posting's detail names, "" on a miss; a found
-        one is cached for `rescue.cache_days`, keyed by the posting URL."""
+    def _rescued(self, row, fill):
+        """Fill `row` in place from its posting's detail: each field in
+        `fill` the detail names, the row's own kept where it names none.
+        The location comes through `_locate`: a cached one costs no read
+        and brings nothing else."""
+        loc, rec, fs, ctx = self._locate(row["url"], True)
+        if "location" in fill:
+            row["location"] = loc or row.get("location") or ""
+        for key in fill if rec else ():
+            v = fields.value(fs.get(key), rec, ctx) if key != "location" else None
+            v = fields.TRANSFORMS["date"](v) if key == "posted_at" else v
+            if v:
+                row[key] = v
+        if rec and fill != ["location"]:
+            time.sleep(config.PAGE_DELAY_S)
+
+    def _locate(self, url, report=False, company=None):
+        """(location, record, field specs, job_ref parts) for the posting
+        `url` names: the location its detail gives ("" on a miss) and the
+        record read, None when the location came from the cache, where a
+        found one stays `rescue.cache_days`, keyed by the posting URL."""
         days = (self.spec.get("rescue") or {}).get("cache_days")
         path = hashed_cache_path(cache_dir("loc"), url) if days else None
         hit = json_cache_get(path, days * 86400) if path else None
         if hit is not None:
-            return hit.get("location") or ""
-        rec, fs = self._posting(url, report, company)
-        loc = (fields.value(fs.get("location"), rec) or "") if rec else ""
+            return hit.get("location") or "", None, {}, {}
+        rec, fs, ctx = self._posting(url, report, company)
+        loc = (fields.value(fs.get("location"), rec, ctx) or "") if rec else ""
         if loc and path:
             json_cache_put(path, {"location": loc})
-        return loc
+        return loc, rec, fs, ctx
 
     # --- the pulls ---------------------------------------------------------
 
-    def _detail_rows(self):
-        """board_jobs' detail callback: a row's body from its detail."""
+    def _detail_rows(self, fill=False):
+        """board_jobs' detail callback: a row's body from its detail; with
+        `fill`, the row also takes the detail's other fields (`_apply`)."""
         if not self.detail_spec:
             return None
-        return lambda row: self.description_for(row.get("url"), report=True)
+        if not fill:
+            return lambda row: self.description_for(row.get("url"), report=True)
+
+        def read(row):
+            rec, fs, ctx = self._posting(row.get("url"), True)
+            if rec:
+                self._apply(row, rec, fs, ctx)
+            return row.get("description") or ""
+        return read
 
     def jobs(self, handle, company_name="", gate=None, loc_re=None):
         """The sweep: `board_jobs` over the listing (`_pull`), screened by
-        `gate`."""
-        rows, loc_re = self._pull(handle, self._label(handle, company_name), loc_re)
-        return board_jobs(rows, company_name, gate=gate, loc_re=loc_re,
-                          fetch_description=self._detail_rows())
+        `gate`; an `eager` platform's detail reads fill the row as the
+        whole-board pull's do."""
+        rows = self._pull(handle, self._label(handle, company_name), loc_re)
+        return board_jobs(rows, company_name, gate=gate,
+                          fetch_description=self._detail_rows(self.spec.get("eager")))
 
     def whole_board(self, company, loc_re=None):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
-        adapted, with each kept row's detail read where the spec is
-        `eager`."""
+        adapted, each kept row filled from its detail (`_apply`) where the
+        spec is `eager`. A pager of known page size reads up to
+        `config.board_max_pages`."""
         handle = self.handle(company)
         if not handle:
             return []
         pager = self._pager
         pages = (config.board_max_pages(company, pager.get("step") or pager["size"],
-                                        pager.get("pages", 1)) if pager else None)
-        rows, loc_re = self._pull(handle, self._label(handle), loc_re, pages)
-        eager = self._detail_rows() if self.spec.get("eager") else None
-        return adapt(board_jobs(rows, "", loc_re=loc_re, fetch_description=eager,
+                                        pager.get("pages", 1)) if pager.get("size") else None)
+        rows = self._pull(handle, self._label(handle), loc_re, pages)
+        eager = self._detail_rows(True) if self.spec.get("eager") else None
+        return adapt(board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,
                                 detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S),
                      self.name)
@@ -863,9 +1148,10 @@ class Board:
 
     def alive(self, handle):
         """(ok, n) where ok means the board request itself succeeded, empty
-        or not: the dead-board check."""
+        or not (the dead-board check), and n counts its postings."""
         rows, total = self._walk(handle, cheap=True, size=1)
-        return rows is not None, total if total is not None else len(rows or [])
+        n = sum(1 for r in rows or [] if r["id"] is not None)
+        return rows is not None, total if total is not None else n
 
     def local_count(self, handle, loc_re):
         """Postings on the board in `loc_re`'s area. Where the spec scopes,
@@ -874,7 +1160,7 @@ class Board:
         pages of a scoped spec) whose listed location or free text passes.
         0 when the board is unreadable."""
         pages = None
-        if self.listing_spec.get("scope"):
+        if (self.listing_spec.get("scope") or {}).get("kind") == "facets":
             vals, _vouched, board_total = self._scope(handle, loc_re, config.PROBE_TIMEOUT)
             rows, total = self._walk(handle, cheap=True, size=1, vals=vals)
             if rows is None:
@@ -936,35 +1222,43 @@ class Board:
         ref = self.job_ref(url)
         return self._row(self._parts(handle), ref)["id"] if ref else None
 
-    def detail(self, ref, report=False):
+    def detail(self, ref, report=False, url=None):
         """(status, record, error) for the posting `ref` names, through the
         handle's settled `try` parts (tried, where unsettled, as a listing
-        request is)."""
+        request is); `url`, a template, replaces the detail's."""
         handle = self._handle_of(ref)
         own = set(self._part_names) | set(self._hspec.get("follow") or {})
         label = " ".join(str(x) for x in (self.name, handle, "job",
                                           *(v for k, v in ref.items() if k not in own))
                          if x) if report else None
         parts = {**_VARIANTS.get((self.name, handle), {}), **ref}
-        _parts, status, payload, err = self._ask(self.detail_spec, handle, parts, label=label)
-        rec = _first_path(payload, self.detail_spec.get("record", ""), dict) if payload else None
+        req = {**self.detail_spec, "url": url} if url else self.detail_spec
+        _parts, status, payload, err = self._ask(req, handle, parts, label=label)
+        kind = (self.detail_spec.get("decoder") or {}).get("kind")
+        record = self.detail_spec.get("record", f"{_ENTRIES[kind]}[0]" if kind in _ENTRIES else "")
+        rec = _first_path(payload, record, dict) if payload else None
         return status, rec, err
 
     def _posting(self, url, report=False, company=None):
-        """(record, its field specs) for the posting `url` names (`job_ref`,
-        with `company`), read live: the detail endpoint, or the listing
-        entry where the platform has none. (None, {}) on any miss."""
+        """(record, its field specs, the posting's `job_ref` parts) for the
+        posting `url` names (with `company`), read live: the detail
+        endpoint, or the listing entry where the platform has none. A
+        platform with a detail but no `job_ref` (its posting URLs are on
+        any host) reads the URL it is handed, as the part `url`.
+        (None, {}, {}) on any miss."""
         ref = self.job_ref(url, company)
+        if ref is None and self._ref_re is None and self.detail_spec and url:
+            ref = {"url": url}
         if not ref:
-            return None, {}
+            return None, {}, {}
         if self.detail_spec:
-            return self.detail(ref, report)[1], self.detail_spec["fields"]
-        return self._member(ref), self.listing_spec["fields"]
+            return self.detail(ref, report)[1], self.detail_spec["fields"], ref
+        return self._member(ref), self.listing_spec["fields"], ref
 
     def description_for(self, url, report=False):
         """The posting's description, read live; "" on any miss."""
-        rec, fs = self._posting(url, report)
-        return (fields.value(fs.get("description"), rec) or "") if rec else ""
+        rec, fs, ctx = self._posting(url, report)
+        return (fields.value(fs.get("description"), rec, ctx) or "") if rec else ""
 
     @property
     def fills_location(self):
@@ -977,36 +1271,56 @@ class Board:
         for the row's URL."""
         if not job.get("description"):
             return True
-        return (self.fills_location and location_unknown(job.get("location"))
+        return (self.fills_location and self._unknown(job.get("location"))
                 and self.owns_url(job.get("url")))
 
     def hydrate(self, job, company=None):
-        """Fill, in place, what `needs_detail` says `job` lacks: the body,
-        the location as the spec's `detail.location` allows ("always",
-        "if_unknown" the default, or "never"), and a remote hint the row
-        lacks. A bodied row's location alone is read through `_located`
-        where the spec caches locations. `company`, the row's store row,
-        names the board (`job_ref`)."""
+        """Fill, in place, what `needs_detail` says `job` lacks (`_apply`),
+        a new body capped at MAX_DESC_CHARS. A bodied row's location alone
+        is read through `_locate` where the spec caches locations.
+        `company`, the row's store row, names the board (`job_ref`)."""
         if not self.needs_detail(job):
             return job
         if job.get("description") and (self.spec.get("rescue") or {}).get("cache_days"):
-            job["location"] = self._located(job.get("url"), True, company) or job.get("location")
+            job["location"] = (self._locate(job.get("url"), True, company)[0]
+                               or job.get("location"))
             return job
-        rec, fs = self._posting(job.get("url"), report=True, company=company)
-        if not rec:
-            return job
-        desc = fields.value(fs.get("description"), rec)
+        rec, fs, ctx = self._posting(job.get("url"), report=True, company=company)
+        if rec:
+            had = job.get("description")
+            self._apply(job, rec, fs, ctx)
+            if not had and job.get("description"):
+                job["description"] = job["description"][:config.MAX_DESC_CHARS]
+        return job
+
+    def _apply(self, job, rec, fs, ctx):
+        """Fill `job` in place from its posting's record: the body when it
+        has none; the location as `detail.location` allows ("always",
+        "if_unknown" the default: `_unknown`, or "never"); a remote hint and
+        a posting date it lacks. Only the body is read off a listing entry
+        (a platform with no detail)."""
+        desc = fields.value(fs.get("description"), rec, ctx)
         if desc and not job.get("description"):
-            job["description"] = desc[:config.MAX_DESC_CHARS]
+            job["description"] = desc
+        if not self.detail_spec:
+            return
         policy = self.detail_spec.get("location", "if_unknown")
-        loc = fields.value(fs.get("location"), rec) if self.detail_spec else None
+        loc = fields.value(fs.get("location"), rec, ctx)
         if loc and (policy == "always"
-                    or policy == "if_unknown" and location_unknown(job.get("location"))):
+                    or policy == "if_unknown" and self._unknown(job.get("location"))):
             job["location"] = loc
-        hint = fields.value(fs.get("remote_hint"), rec) if self.detail_spec else None
+        hint = fields.value(fs.get("remote_hint"), rec, ctx)
         if hint and not job.get("remote_hint"):
             job["remote_hint"] = hint
-        return job
+        posted = fields.TRANSFORMS["date"](fields.value(fs.get("posted_at"), rec, ctx))
+        if posted and not job.get("posted_at"):
+            job["posted_at"] = posted
+
+    def page_headers(self, url):
+        """The headers a posting's own page is read with: the detail's
+        (filled from the URL's `job_ref`) over the shared defaults."""
+        return {**HEADERS, **_fill(self.detail_spec.get("headers") or {},
+                                   (self.job_ref(url) or {}).get, _NAMED)}
 
     def probe_job(self, url, job_id=None):
         """(is_open, reason) for a stored posting URL: True live, False
@@ -1024,7 +1338,7 @@ class Board:
             if self._member(ref, job_id) is not None:
                 return True, f"{self.name} api: board lists it"
             return False, f"{self.name} api: board no longer lists it"
-        status, rec, err = self.detail(ref)
+        status, rec, err = self.detail(ref, url=self._closure.get("url"))
         if status is None:
             return None, f"{self.name} api error: {type(err).__name__}"
         if status in (404, 410):

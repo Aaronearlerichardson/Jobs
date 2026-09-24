@@ -18,7 +18,7 @@ import time
 from requests import Session
 from requests.adapters import HTTPAdapter
 
-from src.config import FETCH_TIMEOUT, USER_AGENT
+from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
 from src.net.util import host_of
 
 # File-only request trace (src/session_log.py installs the handler; there
@@ -41,6 +41,7 @@ HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 #: it inline; a header set that must agree across them belongs in one
 #: place, beside the UA it extends.
 JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
+PLAIN_HEADERS = {**HEADERS, "User-Agent": PLAIN_USER_AGENT}
 
 # Every request through SESSION waits this long (connect, read) unless the
 # call names its own `timeout=`; passing `timeout=None` also means this

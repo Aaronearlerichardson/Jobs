@@ -16,7 +16,6 @@ from conftest import fake_response
 from src import config
 from src.ats.fetchers import board
 from src.ats.fetchers import company as company_fetch
-from src.ats.fetchers import html_scrape as sf
 from src.ats.fetchers.board import board_for
 from src.net import http
 
@@ -354,65 +353,51 @@ def _sf_page_html(rows, total=None):
     return f"<html><body>{label}{anchors}</body></html>"
 
 
-class _SFPager:
-    """Serves `pages` (row-id lists) by `startrow`; past the end it repeats
-    the LAST page, as a wrapping tenant does."""
-
-    def __init__(self, pages, total=None):
-        self.pages, self.total = pages, total
-
-    def get(self, url, **kw):
+def _sf_pages(pages, total=None):
+    """A reply serving `pages` (row-id lists) by `startrow`; past the end it
+    repeats the LAST page, as a wrapping tenant does."""
+    def reply(url, **kw):
         startrow = int(re.search(r"startrow=(\d+)", url).group(1))
-        idx = min(startrow // 25, len(self.pages) - 1)
-        return fake_response(text=_sf_page_html(self.pages[idx], self.total))
+        return fake_response(text=_sf_page_html(pages[min(startrow // 25, len(pages) - 1)], total))
+    return reply
 
 
 class TestSuccessFactorsSnapshot:
+    """The page label's total is what proves a SuccessFactors walk whole."""
+
     @staticmethod
-    def walk(monkeypatch, pages, total, max_pages=80):
-        monkeypatch.setattr(sf, "SESSION", _SFPager(pages, total))
-        monkeypatch.setattr(sf.time, "sleep", lambda *a: None)
-        return list(sf._sf_rows("https://careers.example.edu", "Example",
-                                step=25, max_pages=max_pages))
+    def walk(serve, monkeypatch, pages, total):
+        monkeypatch.setattr(board.time, "sleep", lambda *a: None)
+        calls = serve(_sf_pages(pages, total))
+        return board_for("successfactors").listing("https://careers.example.edu", "t"), calls
 
-    def test_an_empty_page_after_the_whole_total_is_not_capped(
-            self, monkeypatch):
-        rows = self.walk(monkeypatch, [list(range(25)), list(range(25, 50)), []], 50)
-        assert len(rows) == 50
+    def test_reaching_the_labelled_total_is_not_capped(self, serve, monkeypatch):
+        rows, calls = self.walk(serve, monkeypatch, [list(range(25)), list(range(25, 50))], 50)
+        assert len(rows) == len(calls) * 25 == 50
         assert not http.snapshot_info()["capped"]
 
-    def test_an_empty_page_with_no_total_is_not_capped(self, monkeypatch):
-        """A custom skin with no pagination label: the empty page is
-        trusted as the board's end."""
-        assert len(self.walk(monkeypatch, [list(range(25)), []], None)) == 25
-        assert not http.snapshot_info()["capped"]
-
-    def test_a_repeated_page_short_of_the_total_is_capped(self, monkeypatch):
-        """Bayer's shape: every page repeats the first, 25 of 621."""
-        assert len(self.walk(monkeypatch, [list(range(25))] * 10, 621)) == 25
+    def test_a_repeated_page_short_of_the_total_is_capped(self, serve, monkeypatch):
+        """Bayer's shape: a page adding nothing new, 25 of 621."""
+        rows, _ = self.walk(serve, monkeypatch, [list(range(25))] * 10, 621)
+        assert len(rows) == 25
         assert http.snapshot_info()["capped_total"] == 621
 
-    def test_a_repeated_page_with_no_total_is_capped(self, monkeypatch):
-        assert len(self.walk(monkeypatch, [list(range(25))] * 5, None)) == 25
+    def test_a_repeated_page_with_no_total_is_capped(self, serve, monkeypatch):
+        rows, _ = self.walk(serve, monkeypatch, [list(range(25))] * 5, None)
         info = http.snapshot_info()
-        assert info["capped"] and info["capped_total"] is None
-
-    def test_reading_every_page_is_capped_even_if_the_total_matches(
-            self, monkeypatch):
-        pages = [list(range(p * 25, p * 25 + 25)) for p in range(4)]
-        assert len(self.walk(monkeypatch, pages, 100, max_pages=4)) == 100
-        assert http.snapshot_info()["capped"]
+        assert len(rows) == 25 and info["capped"] and info["capped_total"] is None
 
 
 class TestSuccessFactorsLocation:
-    """A slug-less tenant (URLs shaped "City-Title-ST-zip", no comma, so
-    _SF_LOC_SLUG_RE never matches) falls back to the row's own markup. The
-    standard theme repeats title/location/date in a hidden "visible-phone"
-    block and glues the posting date onto the row's flattened text, which
-    used to land in the stored location as-is ("<City>, ST, US, <zip> Aug
-    31, 2026 <City>, ST": 894 open rows on one tenant, 2026-09-17). The
-    theme's own `.jobLocation` cell avoids both; `_clean_sf_location` is the
-    backstop for a skin with no such cell (see its doctests).
+    """A slug-less tenant (URLs shaped "City-Title-ST-zip", no comma, so the
+    "<City>,-<ST>-" slug rule never matches) falls back to the row's own
+    markup. The standard theme repeats title/location/date in a hidden
+    "visible-phone" block and glues the posting date onto the row's
+    flattened text, which used to land in the stored location as-is
+    ("<City>, ST, US, <zip> Aug 31, 2026 <City>, ST": 894 open rows on one
+    tenant, 2026-09-17). The theme's own `.jobLocation` cell avoids both;
+    the cut_date_tail transform is the backstop for a skin with no such
+    cell (see fields._cut_date_tail's doctests).
     """
 
     @staticmethod
@@ -434,8 +419,7 @@ class TestSuccessFactorsLocation:
     def test_the_jobLocation_cell_wins_over_the_flattened_row_text(
             self, serve):
         serve(self._row_html("Springfield, IL, US, 62701"))
-        rows = list(sf._sf_rows("https://careers.example.edu", "Example",
-                                step=25, max_pages=1))
+        rows = board_for("successfactors").listing("https://careers.example.edu")
         assert len(rows) == 1
         assert rows[0]["location"] == "Springfield, IL, US, 62701"
 
@@ -448,7 +432,30 @@ class TestSuccessFactorsLocation:
                 f'<span>{local_addr} Sep 17, 2026 {local_addr}</span></td>'
                 '</tr></table></body></html>')
         serve(html)
-        rows = list(sf._sf_rows("https://careers.example.com", "Example",
-                                step=25, max_pages=1))
+        rows = board_for("successfactors").listing("https://careers.example.com")
         assert len(rows) == 1
         assert rows[0]["location"] == local_addr
+
+
+# --------------------------------------------------------------------------- #
+#  Posting pages as the listing (config.BOARDS rescue "when": "always")        #
+# --------------------------------------------------------------------------- #
+
+class TestPostingPagesAsTheListing:
+    """A board whose index names nothing but posting links (jazzhr): each
+    row is its posting page's JSON-LD, within the rescue's per-pull budget."""
+
+    def test_past_the_budget_the_pull_is_capped(self, serve, monkeypatch, capsys):
+        """A posting left unread is no row, so the snapshot is partial."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        spec = config.BOARDS["jazzhr"]
+        b = board.Board("jazzhr", {**spec, "rescue": {**spec["rescue"], "cap": 1}})
+        posting = ('<script type="application/ld+json">{"@type": "JobPosting", '
+                   '"title": "Data Engineer", "jobLocation": {"address": '
+                   '{"addressLocality": "Durham", "addressRegion": "NC"}}}</script>')
+        serve({"/apply/": posting, "applytojob.com/": "".join(
+            f"<a href='/apply/Id{i}/Posting-{i}'>x</a>" for i in range(3))})
+        rows = b.whole_board({"ats": "jazzhr", "slug": "acme"})
+        assert [(r["title"], r["location"]) for r in rows] == [("Data Engineer", "Durham, NC")]
+        assert http.snapshot_info()["capped_total"] == 3
+        assert "detail budget (1) spent" in capsys.readouterr().out

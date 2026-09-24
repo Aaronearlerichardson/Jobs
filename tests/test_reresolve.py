@@ -352,10 +352,11 @@ class TestPeopleAdminSignature:
                           "https://unc.peopleadmin.com")}
         assert keys == {("peopleadmin", "https://unc.peopleadmin.com")}
 
-    def test_the_packed_host_is_what_the_fetcher_reads(self):
-        from src.ats.fetchers.peopleadmin import feed_host
-        packed = ats_signatures.pack("peopleadmin", "unc", self.URL)
-        assert feed_host(packed["careers_url"]) == "unc.peopleadmin.com"
+    def test_the_packed_host_is_what_the_fetcher_reads(self, serve):
+        from src.ats.fetchers.company import fetch_company
+        calls = serve(fake_response(text=""))
+        fetch_company(ats_signatures.pack("peopleadmin", "unc", self.URL))
+        assert calls[0] == "https://unc.peopleadmin.com/postings/all_jobs.atom"
 
 
 class TestJobviteSignature:
@@ -376,9 +377,9 @@ class TestJobviteSignature:
             == ("jobvite", "acme")
 
     def test_the_packed_slug_is_what_the_fetcher_reads(self):
-        from src.ats.fetchers.jobvite import tenant_of
+        from src.ats.fetchers.board import board_for
         packed = ats_signatures.pack("jobvite", "acme", self.URL)
-        assert tenant_of(packed["slug"]) == "acme"
+        assert board_for("jobvite").handle(packed) == "acme"
 
 
 class TestARaisedResolutionIsReported:

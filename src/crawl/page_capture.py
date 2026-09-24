@@ -374,7 +374,7 @@ def _card_location(a, title=""):
 
 
 def parse_generic(soup, page_url=""):
-    from src.ats.fetchers.company import find_job_links
+    from src.ats.fetchers.custom import find_job_links
     jobs, seen = [], set()
 
     def _emit(a, href, title):

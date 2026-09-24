@@ -15,8 +15,6 @@ and identity guards in this package.
 
 import logging
 
-from bs4 import BeautifulSoup, SoupStrainer
-
 from src.ats.signatures import detect, pack
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import (_foreign_board, candidate_pages,
@@ -25,19 +23,6 @@ from .probes import PROBES
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.sniffer")
-
-_ANCHORS_ONLY = SoupStrainer("a")
-
-
-def _looks_like_custom_board(html_text):
-    """True if a page has several GENUINE job-detail links (nav/index links
-    filtered out) — i.e. a self-hosted careers board worth scraping."""
-    from src.ats.fetchers.company import find_job_links
-    try:
-        soup = BeautifulSoup(html_text, "lxml", parse_only=_ANCHORS_ONLY)
-    except Exception:
-        return False
-    return len(find_job_links(soup)) >= 3
 
 
 def _scan_root(name, careers_url=""):
@@ -94,7 +79,7 @@ def sniff_ats(name, careers_url=""):
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
-            from src.ats.fetchers.company import custom_board_listing_url
+            from src.ats.fetchers.custom import custom_board_listing_url
             listing = custom_board_listing_url(r.url, r.text)
             if listing:
                 custom = {"ats": "custom", "careers_url": listing}
@@ -214,7 +199,8 @@ def diagnose_no_board(name, careers_url=""):
         safe_hits.append(r)
     if not safe_hits:
         return "wrong-domain" if saw_risky_uncorroborated else "domain-unreachable"
-    if any(_looks_like_custom_board(r.text) for r in safe_hits):
+    from src.ats.fetchers.custom import is_board_page
+    if any(is_board_page(r.text) for r in safe_hits):
         return "careers-page-no-ats"
     return "site-only-no-careers"
 

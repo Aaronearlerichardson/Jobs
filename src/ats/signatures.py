@@ -36,7 +36,7 @@ ATS_LINK_PATTERNS = [
     # <tenant>.careers.hibob.com/api/job-ad; see config.BOARDS).
     ("hibob", re.compile(r"([a-z0-9][a-z0-9-]+)\.careers\.hibob\.com", re.I)),
     # Jobvite: tenant slug of jobs.jobvite.com/<tenant> (server-rendered
-    # listing + JSON-LD job pages — see fetchers/jobvite.py).
+    # listing + JSON-LD job pages; see config.BOARDS).
     ("jobvite", re.compile(r"jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)", re.I)),
     # Workable: the account slug in apply.workable.com/<slug> — the board
     # page and the tenant-path posting page (/<slug>/j/<shortcode>) both

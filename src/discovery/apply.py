@@ -85,13 +85,7 @@ def apply_to_store(result, dry_run: bool = False) -> list[str]:
         for c in confirmed:
             # "Can this row be fetched" is fetchers.company.FETCHERS, the table
             # fetch_company dispatches on and the one every other caller of the
-            # write path trusts (local_sourcing._hit_from_detection stores a
-            # custom board through it without asking anything else). NOT
-            # src.ats.registry.ATS_REGISTRY: that table schedules ONE crawl loop
-            # -- iter_store_sources' lightweight sweep -- and deliberately omits
-            # the families it does not schedule, `custom` among them. Gating
-            # here on it reported a confirmed self-hosted careers page and then
-            # threw it away.
+            # write path trusts.
             if c.ats not in company_fetch.FETCHERS:
                 summary.append(f"    [skip] {c.name}: no fetcher for ATS '{c.ats}'")
                 skipped += 1
