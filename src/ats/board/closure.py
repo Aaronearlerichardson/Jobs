@@ -18,10 +18,8 @@ import logging
 import re
 import time
 
-import requests
-
 from src import config
-from src.net.http import HEADERS, SESSION, HostBreaker
+from src.net.http import HEADERS, SESSION, HostBreaker, Unreachable
 from src.net.util import clean_url
 from .engine import board_for_url
 
@@ -135,7 +133,7 @@ def probe_job_open(url, job_id=None):
         r = SESSION.get(url, headers=board.page_headers(url) if board else HEADERS,
                         allow_redirects=True)
     except Exception as e:
-        if isinstance(e, requests.ConnectionError):
+        if isinstance(e, Unreachable):
             _DEAD_HOSTS.trip(url)
         return None, fallback or f"fetch error: {type(e).__name__}"
     if r.status_code in (404, 410):

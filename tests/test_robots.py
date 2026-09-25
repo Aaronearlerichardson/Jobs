@@ -1,6 +1,7 @@
-"""RFC 9309 path matching.
+"""RFC 9309 path matching, and the polite transport around it (net.http).
 
-Offline: every case parses a robots.txt body from a string. No host is
+Offline: every case parses a robots.txt body from a string, or answers
+the request from the test (conftest.serve, conftest.wire). No host is
 contacted, so these pin the MATCHER, not any site's current policy.
 
 Why this file exists: `urllib.robotparser` matches with
@@ -12,10 +13,18 @@ wildcard `Disallow:` patterns, which is the direction that would have us
 fetching paths a host asked us to leave alone.
 """
 
+import asyncio
+import logging
+import re
+import socket
 import time
+from types import SimpleNamespace
 
+import aiohttp
 import pytest
+import requests
 
+from src.net import http, robots
 from src.net.robots import _match_group, _pattern_to_re, parse_groups
 
 UA = "Mozilla/5.0 (Windows NT 10.0) Chrome/124.0.0.0 Safari/537.36"
@@ -83,32 +92,31 @@ class TestExemptHosts:
     @pytest.fixture
     def cache(self, monkeypatch):
         from src import config
-        from src.net.robots import RobotsCache, _HostRules
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
         monkeypatch.setattr(config, "ROBOTS_EXEMPT_HOSTS",
                             ("api.smartrecruiters.com", ".peopleadmin.com"),
                             raising=False)
-        c = RobotsCache()
+        c = robots.RobotsCache()
         fetched = []
 
-        def _blanket(origin):
+        async def _blanket(origin):
             fetched.append(origin)
-            return _HostRules(disallow_all=True)
+            return robots._HostRules(disallow_all=True)
 
         monkeypatch.setattr(c, "_fetch", _blanket)
         c.fetched = fetched
         return c
 
-    def test_exempt_host_is_allowed_without_a_robots_fetch(self, cache):
-        assert cache.allowed("https://api.smartrecruiters.com/v1/companies/x/postings")
+    async def test_exempt_host_is_allowed_without_a_robots_fetch(self, cache):
+        assert await cache.allowed("https://api.smartrecruiters.com/v1/companies/x/postings")
         assert cache.fetched == []
 
-    def test_dotted_entry_covers_subdomains_only(self, cache):
-        assert cache.allowed("https://unc.peopleadmin.com/postings/search.atom")
-        assert not cache.allowed("https://peopleadmin.com/postings/search.atom")
+    async def test_dotted_entry_covers_subdomains_only(self, cache):
+        assert await cache.allowed("https://unc.peopleadmin.com/postings/search.atom")
+        assert not await cache.allowed("https://peopleadmin.com/postings/search.atom")
 
-    def test_other_hosts_still_obey_their_robots(self, cache):
-        assert not cache.allowed("https://jobs.smartrecruiters.com/x")
+    async def test_other_hosts_still_obey_their_robots(self, cache):
+        assert not await cache.allowed("https://jobs.smartrecruiters.com/x")
         assert cache.fetched == ["https://jobs.smartrecruiters.com"]
 
 
@@ -153,9 +161,9 @@ class TestPatternCompiler:
 
 
 class TestFetchDeduplication:
-    """One robots.txt fetch per host, however many threads want it at once.
+    """One robots.txt fetch per host, however many requests want it at once.
 
-    A sniff fans ~8 candidate PATHS across one host concurrently. Each thread
+    A sniff fans ~8 candidate PATHS across one host concurrently. Each one
     used to miss the still-empty cache and fetch its own copy, so a single
     company cost 8 robots.txt requests per guessed domain — and 8 full
     timeouts when the host was one that hangs instead of refusing.
@@ -169,55 +177,55 @@ class TestFetchDeduplication:
     @staticmethod
     def _spy_cache(delay=0.05):
         """A RobotsCache whose network fetch is replaced by a call recorder."""
-        import threading
+        calls, cache = [], robots.RobotsCache()
 
-        from src.net import robots
-
-        calls, lock = [], threading.Lock()
-
-        def _fetch(self, origin):
-            with lock:
-                calls.append(origin)
-            time.sleep(delay)              # stand in for the round-trip
+        async def _fetch(origin):
+            calls.append(origin)
+            await asyncio.sleep(delay)          # stand in for the round-trip
             return robots._HostRules()
 
-        cache = robots.RobotsCache()
-        cache._fetch = _fetch.__get__(cache, robots.RobotsCache)
+        cache._fetch = _fetch
         return cache, calls
 
-    @staticmethod
-    def _hammer(cache, urls):
-        import threading
-
-        threads = [threading.Thread(target=cache.allowed, args=(u,)) for u in urls]
-        start = time.monotonic()
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        return time.monotonic() - start
-
-    def test_concurrent_paths_on_one_host_fetch_once(self):
+    async def test_concurrent_paths_on_one_host_fetch_once(self):
         cache, calls = self._spy_cache()
-        self._hammer(cache, [f"https://example.com{p}" for p in
-                             ("/careers", "/careers/open-positions", "/jobs", "/",
-                              "/careers/", "/company/careers", "/join", "/x")])
+        await asyncio.gather(*(cache.allowed(f"https://example.com{p}") for p in
+                               ("/careers", "/careers/open-positions", "/jobs", "/",
+                                "/careers/", "/company/careers", "/join", "/x")))
         assert calls == ["https://example.com"]
 
-    def test_distinct_hosts_still_fetch_in_parallel(self):
+    async def test_distinct_hosts_still_fetch_in_parallel(self):
         # The per-host gate must not serialize the crawl: 4 hosts x 0.2s
         # apiece completes in ~0.2s, not ~0.8s.
         cache, calls = self._spy_cache(delay=0.2)
-        elapsed = self._hammer(cache, [f"https://h{i}.example.com/careers"
-                                       for i in range(4)])
+        start = time.monotonic()
+        await asyncio.gather(*(cache.allowed(f"https://h{i}.example.com/careers")
+                               for i in range(4)))
         assert len(calls) == 4
-        assert elapsed < 0.6
+        assert time.monotonic() - start < 0.6
 
-    def test_cached_rules_are_reused_after_the_fetch(self):
+    async def test_cached_rules_are_reused_after_the_fetch(self):
         cache, calls = self._spy_cache()
         for _ in range(3):
-            cache.allowed("https://example.com/careers")
+            await cache.allowed("https://example.com/careers")
         assert len(calls) == 1
+
+
+async def test_crawl_delay_spaces_one_origin_only():
+    """The limiter robots.txt's Crawl-delay feeds (RobotsCache.wait_turn):
+    the next turn on an origin waits out the gap since the last one began,
+    and another origin's turn goes at once."""
+    limiter, at = http.HostLimiter(), {}
+
+    async def turn(url):
+        await limiter.wait(url, 0.2)
+        at[url] = time.monotonic()
+
+    t0 = time.monotonic()
+    await asyncio.gather(turn("https://a.example/1"), turn("https://a.example/2"),
+                         turn("https://b.example/1"))
+    assert at["https://b.example/1"] - t0 < 0.1
+    assert at["https://a.example/2"] - at["https://a.example/1"] >= 0.19
 
 
 class TestUnreachableHostReporting:
@@ -230,69 +238,32 @@ class TestUnreachableHostReporting:
     """
 
     @staticmethod
-    def _fetch_raising(exc, capsys):
-        import requests
-
-        from src.net import robots
-
-        cache = robots.RobotsCache()
-        original = requests.get
-        requests.get = lambda *a, **k: (_ for _ in ()).throw(exc)
-        try:
-            rules = cache._fetch("https://example.com")
-        finally:
-            requests.get = original
+    async def _fetch_raising(exc, serve, capsys):
+        serve(exc)
+        rules = await robots.RobotsCache()._fetch("https://example.com")
         return rules, capsys.readouterr().out
 
-    def test_nonexistent_host_is_silent(self, capsys):
-        import socket
-
-        import requests
-
-        exc = requests.exceptions.ConnectionError("nope")
-        exc.__cause__ = socket.gaierror(11001, "getaddrinfo failed")
-        rules, out = self._fetch_raising(exc, capsys)
-        assert out == ""
+    async def test_nonexistent_host_is_silent(self, wire, capsys):
+        """Through the transport: aiohttp's DNS error arrives as requests'
+        ConnectionError, the gaierror still on its chain."""
+        gai = socket.gaierror(11001, "getaddrinfo failed")
+        dns = aiohttp.ClientConnectorDNSError(
+            SimpleNamespace(host="example.com", port=443, ssl=True), gai)
+        dns.__cause__ = gai
+        wire(dns)
+        rules = await robots.RobotsCache()._fetch("https://example.com")
+        assert capsys.readouterr().out == ""
         assert rules.group is None and not rules.disallow_all   # still fails open
 
-    def test_live_server_we_could_not_ask_is_announced(self, capsys):
-        import requests
-
-        _, out = self._fetch_raising(requests.exceptions.SSLError("handshake"), capsys)
+    async def test_live_server_we_could_not_ask_is_announced(self, serve, capsys):
+        _, out = await self._fetch_raising(
+            requests.exceptions.SSLError("handshake"), serve, capsys)
         assert "proceeding without restrictions" in out
 
-    def test_timeout_to_a_resolving_host_is_announced(self, capsys):
-        import requests
-
-        _, out = self._fetch_raising(requests.exceptions.ConnectTimeout("slow"), capsys)
+    async def test_timeout_to_a_resolving_host_is_announced(self, serve, capsys):
+        _, out = await self._fetch_raising(
+            requests.exceptions.ConnectTimeout("slow"), serve, capsys)
         assert "proceeding without restrictions" in out
-
-
-class TestDnsFailureDetection:
-    def test_walks_the_wrapped_cause_chain(self):
-        import socket
-
-        from src.net.robots import _is_dns_failure
-
-        inner = socket.gaierror(11001, "getaddrinfo failed")
-        middle = OSError("Max retries exceeded")
-        middle.__cause__ = inner
-        outer = Exception("HTTPSConnectionPool(...)")
-        outer.__cause__ = middle
-        assert _is_dns_failure(outer)
-
-    def test_unrelated_errors_are_not_dns_failures(self):
-        from src.net.robots import _is_dns_failure
-
-        assert not _is_dns_failure(TimeoutError("timed out"))
-        assert not _is_dns_failure(None)
-
-    def test_survives_a_cyclic_exception_chain(self):
-        from src.net.robots import _is_dns_failure
-
-        a, b = Exception("a"), Exception("b")
-        a.__cause__, b.__cause__ = b, a
-        assert not _is_dns_failure(a)      # terminates rather than spinning
 
 
 class TestFetchTimeout:
@@ -308,45 +279,67 @@ class TestFetchTimeout:
     """
 
     @staticmethod
-    def _capture_timeout(monkeypatch):
-        import requests
-
-        from src.net import robots
-
+    async def _capture_timeout(serve):
         seen = {}
-
-        def fake_get(url, **kw):
-            seen["timeout"] = kw.get("timeout")
-            raise requests.exceptions.ConnectTimeout("nope")
-
-        monkeypatch.setattr(requests, "get", fake_get)
-        robots.RobotsCache()._fetch("https://example.com")
+        serve(lambda url, **kw: seen.update(timeout=kw.get("timeout"))
+              or requests.exceptions.ConnectTimeout("nope"))
+        await robots.RobotsCache()._fetch("https://example.com")
         return seen["timeout"]
 
-    def test_timeout_is_a_connect_read_pair(self, monkeypatch):
-        assert isinstance(self._capture_timeout(monkeypatch), tuple)
+    async def test_timeout_is_a_connect_read_pair(self, serve):
+        assert isinstance(await self._capture_timeout(serve), tuple)
 
-    def test_connect_is_shorter_than_read(self, monkeypatch):
-        connect, read = self._capture_timeout(monkeypatch)
+    async def test_connect_is_shorter_than_read(self, serve):
+        connect, read = await self._capture_timeout(serve)
         assert connect < read, "a short read timeout would abandon slow real servers"
 
-    def test_values_come_from_config(self, monkeypatch):
+    async def test_values_come_from_config(self, monkeypatch, serve):
         from src import config
         monkeypatch.setattr(config, "ROBOTS_CONNECT_TIMEOUT", 1.5, raising=False)
         monkeypatch.setattr(config, "ROBOTS_READ_TIMEOUT", 9.0, raising=False)
-        assert self._capture_timeout(monkeypatch) == (1.5, 9.0)
+        assert await self._capture_timeout(serve) == (1.5, 9.0)
 
-    def test_a_timeout_still_fails_open(self, monkeypatch):
+    async def test_a_timeout_still_fails_open(self, serve):
         """Giving up faster must not turn into giving up differently."""
-        import requests
-
-        from src.net import robots
-
-        monkeypatch.setattr(requests, "get", lambda url, **kw: (_ for _ in ()).throw(
-            requests.exceptions.ConnectTimeout("nope")))
-        rules = robots.RobotsCache()._fetch("https://example.com")
+        serve(requests.exceptions.ConnectTimeout("nope"))
+        rules = await robots.RobotsCache()._fetch("https://example.com")
         assert rules.group is None and not rules.disallow_all
-        assert robots.RobotsCache().allowed("https://example.com/careers") is True
+        assert await robots.RobotsCache().allowed("https://example.com/careers") is True
+
+
+class TestTransport:
+    """net.http's one request: requests' preparation, redirect rules and
+    reading, sent over aiohttp (the fake session: conftest.wire)."""
+
+    async def test_redirects_are_followed_as_requests_follows_them(self, wire):
+        """A 302 turns a POST into a bodiless GET on the joined URL, and a
+        loop stops where requests stops it."""
+        sent = wire((302, [(b"Location", b"/b?x=1")], b""),
+                    (200, [(b"Content-Type", b"application/json")], b'{"ok": 1}'))
+        r = await http.send("POST", "https://a.test/a", polite=False, json={"k": 1})
+        assert [(m, u, kw["data"]) for m, u, kw in sent] == [
+            ("POST", "https://a.test/a", b'{"k": 1}'),
+            ("GET", "https://a.test/b?x=1", None)]
+        assert (r.url, r.json(), len(r.history)) == ("https://a.test/b?x=1", {"ok": 1}, 1)
+        sent = wire(*[(302, [(b"Location", b"/again")], b"")] * (http.MAX_REDIRECTS + 1))
+        with pytest.raises(requests.TooManyRedirects):
+            await http.send("GET", "https://a.test/", polite=False)
+        assert len(sent) == http.MAX_REDIRECTS + 1
+
+    async def test_a_polite_request_carries_headers_and_leaves_a_trace(
+            self, wire, caplog, monkeypatch):
+        """HEADERS over requests' defaults, and the session log's one http
+        DEBUG line."""
+        from src import config
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", False, raising=False)
+        sent = wire((404, [], b""))
+        with caplog.at_level(logging.DEBUG, logger="http"):
+            r = await http.send("GET", "https://a.test/x")
+        headers = sent[0][2]["headers"]
+        assert (r.status_code, headers["User-Agent"], headers["Accept"]) == (
+            404, http.HEADERS["User-Agent"], "*/*")
+        assert re.fullmatch(r"GET https://a\.test/x -> 404 in \d+\.\d\ds",
+                            caplog.records[-1].getMessage())
 
 
 class TestJsProbeDisabledReporting:
@@ -531,47 +524,15 @@ class TestQuietSpeculativeProbes:
     line of log per guess and buried the notices that matter.
     """
 
-    @staticmethod
-    def _fetch_with(exc, capsys):
-        import requests
-
-        from src.net import robots
-
-        original = requests.get
-        requests.get = lambda *a, **k: (_ for _ in ()).throw(exc)
-        try:
-            return robots.RobotsCache()._fetch("https://example.com")
-        finally:
-            requests.get = original
-            capsys.readouterr()
-
-    def test_speculative_failures_are_silent(self, capsys):
-        import requests
-
-        from src.net import robots
-
-        original = requests.get
-        requests.get = lambda *a, **k: (_ for _ in ()).throw(
-            requests.exceptions.SSLError("handshake"))
-        try:
-            with robots.quiet():
-                robots.RobotsCache()._fetch("https://red.io")
-        finally:
-            requests.get = original
+    async def test_speculative_failures_are_silent(self, serve, capsys):
+        serve(requests.exceptions.SSLError("handshake"))
+        with robots.quiet():
+            await robots.RobotsCache()._fetch("https://red.io")
         assert capsys.readouterr().out == ""
 
-    def test_real_targets_still_report(self, capsys):
-        import requests
-
-        from src.net import robots
-
-        original = requests.get
-        requests.get = lambda *a, **k: (_ for _ in ()).throw(
-            requests.exceptions.SSLError("handshake"))
-        try:
-            robots.RobotsCache()._fetch("https://jobs.example.com")
-        finally:
-            requests.get = original
+    async def test_real_targets_still_report(self, serve, capsys):
+        serve(requests.exceptions.SSLError("handshake"))
+        await robots.RobotsCache()._fetch("https://jobs.example.com")
         assert "proceeding without restrictions" in capsys.readouterr().out
 
     def test_quiet_does_not_leak_past_its_block(self):
@@ -595,19 +556,9 @@ class TestQuietSpeculativeProbes:
             assert robots._quiet_depth == 1, "the inner exit silenced the outer block"
         assert robots._quiet_depth == 0
 
-    def test_quiet_never_changes_what_is_allowed(self, capsys):
+    async def test_quiet_never_changes_what_is_allowed(self, serve):
         """Silence is a logging decision, not a politeness one."""
-        import requests
-
-        from src.net import robots
-
-        original = requests.get
-        requests.get = lambda *a, **k: (_ for _ in ()).throw(
-            requests.exceptions.SSLError("handshake"))
-        try:
-            with robots.quiet():
-                rules = robots.RobotsCache()._fetch("https://red.io")
-        finally:
-            requests.get = original
-            capsys.readouterr()
+        serve(requests.exceptions.SSLError("handshake"))
+        with robots.quiet():
+            rules = await robots.RobotsCache()._fetch("https://red.io")
         assert rules.group is None and not rules.disallow_all   # still fails open

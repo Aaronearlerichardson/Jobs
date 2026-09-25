@@ -1,4 +1,7 @@
 requests>=2.31.0
+# The transport under net.http (requests stays as its model layer). No
+# aiodns: it does not run on Windows' default Proactor event loop.
+aiohttp>=3.11
 lxml>=5.0.0
 # Board specs' HTML selectors are CSS, compiled to XPath (:has needs 1.2).
 cssselect>=1.2

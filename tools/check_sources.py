@@ -52,7 +52,7 @@ from tools._harness import BLOCKED_RE, blame, console_utf8   # noqa: E402
 console_utf8()
 
 from src import config                                       # noqa: E402
-from src.net.http import SESSION, HEADERS          # noqa: E402
+from src.net.http import SESSION, HEADERS, SyncSession, run_sync  # noqa: E402
 from src.net.robots import CACHE as ROBOTS         # noqa: E402
 from src.net.util import origin_of                # noqa: E402
 
@@ -147,13 +147,12 @@ def probe_robots(label, url):
     started = time.monotonic()
     code, note = None, ""
     try:
-        # Plain requests, NOT the crawler's SESSION: the session is
+        # A plain session, NOT the crawler's SESSION: the session is
         # robots-aware, so on a host with `Disallow: /` it refuses to fetch
         # the very robots.txt we are trying to read, and the probe reports a
         # transport failure for what is actually a policy decision.
-        import requests
-        r = requests.get(f"{origin}/robots.txt", timeout=12, headers=HEADERS,
-                         allow_redirects=True)
+        r = SyncSession(polite=False).get(f"{origin}/robots.txt", timeout=12,
+                                          headers=HEADERS, allow_redirects=True)
         code = r.status_code
         body = r.text if r.status_code < 400 else ""
     except Exception as e:
@@ -161,8 +160,8 @@ def probe_robots(label, url):
 
     # The crawler's own decision, through the same cache the crawl uses.
     try:
-        allowed = ROBOTS.allowed(url)
-        delay = ROBOTS.crawl_delay(url)
+        allowed = run_sync(ROBOTS.allowed(url))
+        delay = run_sync(ROBOTS.crawl_delay(url))
     except Exception as e:
         allowed, delay, note = True, None, note or f"{type(e).__name__}: {e}"
 

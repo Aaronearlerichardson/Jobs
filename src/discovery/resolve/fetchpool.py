@@ -17,12 +17,10 @@ import threading
 import time
 from concurrent.futures import wait as fut_wait
 
-import requests
-
 from src import config
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
-from src.net.http import HEADERS, SESSION, HostBreaker
+from src.net.http import HEADERS, SESSION, HostBreaker, Unreachable
 from src.net.parallel import pool
 from src.net.util import host_of, origin_of
 
@@ -188,9 +186,9 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
     try:
         r = SESSION.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
         resp = r if r.status_code == 200 and len(r.text) >= 300 else None
-    except requests.exceptions.ConnectionError:
-        # requests' ConnectionError covers DNS failure, SSLError and
-        # ConnectTimeout; ReadTimeout is a Timeout, not a ConnectionError.
+    except Unreachable:
+        # Unreachable (requests' ConnectionError) covers DNS failure,
+        # SSLError and ConnectTimeout; ReadTimeout is a Timeout, not one.
         _DEAD_HOSTS.trip(url)
         return None
     except Exception:

@@ -9,10 +9,18 @@ cities, keywords, or track names.
 Nothing in the suite may touch the Claude API or the network.
 """
 
+import asyncio
+import contextlib
+import gc
+import inspect
 import json
+import logging
+import socket
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import requests
@@ -20,6 +28,25 @@ import requests
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:                      # importable as `pytest tests`
     sys.path.insert(0, str(ROOT))
+
+if sys.platform == "win32":
+    # Every event loop's self-pipe is a socket.socketpair, which Windows
+    # builds by connecting a loopback socket: a guard that patches
+    # socket.connect to keep the suite offline (pytest -p nonet) would stop
+    # any loop from starting. The pair is made with the connect restored.
+    _socketpair = socket.socketpair
+
+    def _loopback_pair(*args, **kw):
+        guard = socket.socket.__dict__.get("connect")
+        if guard is None:
+            return _socketpair(*args, **kw)
+        del socket.socket.connect
+        try:
+            return _socketpair(*args, **kw)
+        finally:
+            socket.socket.connect = guard
+
+    socket.socketpair = _loopback_pair
 
 from src import config as _config                           # noqa: E402
 import src.session_log as _session_log            # noqa: E402
@@ -31,6 +58,57 @@ import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
 import src.claude.api as _claude                    # noqa: E402
 import src.ops.scoring as _scoring                  # noqa: E402
 from src.net import http as _http                   # noqa: E402
+from src.net import robots as _robots               # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_network(monkeypatch):
+    """A request no test answered fails instead of leaving the machine.
+    Needed beside `-p nonet`: the network loop's sockets connect without
+    socket.connect, which nonet patches."""
+    def _refuse():
+        raise AssertionError("test reached the network")
+    monkeypatch.setattr(_http, "_session", _refuse)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _network_loop_debug():
+    """The network loop runs in asyncio debug mode, as pytest.ini's
+    asyncio_debug runs pytest-asyncio's loops."""
+    async def _debug():
+        asyncio.get_running_loop().set_debug(True)
+    _http.run_sync(_debug())
+
+
+@pytest.fixture(autouse=True)
+def loop_blocks():
+    """Fails the test when a callback held an event loop past 100 ms, which
+    asyncio's debug mode logs: a blocking call hidden in async code stalls
+    every request at once. The garbage collector's pauses, which can land
+    in any callback on any thread, are not counted. Yields the records it
+    caught, for the test that proves it can see one."""
+    seen, paused, began = [], [0.0], [0.0]
+
+    def _collector(phase, _info):
+        if phase == "start":
+            began[0] = time.perf_counter()
+        else:
+            paused[0] += time.perf_counter() - began[0]
+
+    catch = logging.Handler(logging.WARNING)
+    catch.emit = seen.append
+    log = logging.getLogger("asyncio")
+    log.addHandler(catch)
+    gc.callbacks.append(_collector)
+    try:
+        yield seen
+    finally:
+        gc.callbacks.remove(_collector)
+        log.removeHandler(catch)
+    slow = [r.getMessage() for r in seen if str(r.msg).startswith("Executing")
+            and r.args[-1] - paused[0] > 0.1]
+    if slow:
+        pytest.fail(f"a callback blocked an event loop: {slow}")
 
 
 @pytest.fixture(autouse=True)
@@ -46,12 +124,15 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _fresh_run_state(monkeypatch):
     """Per-run memos start empty in every test: both dead-host breakers,
-    discovery's page memo and DNS cache, the board engine's listing memo
-    and settled handle variants, the board-owner verdicts, and the rows a
-    deep verify gave up on."""
+    the robots.txt cache and the per-host limiter (whose tasks and locks
+    belong to one event loop), discovery's page memo and DNS cache, the
+    board engine's listing memo and settled handle variants, the
+    board-owner verdicts, and the rows a deep verify gave up on."""
     for mod in (_fetchpool, _job_probe):
         old = mod._DEAD_HOSTS
         monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
+    monkeypatch.setattr(_robots, "CACHE", _robots.RobotsCache())
+    monkeypatch.setattr(_http, "LIMITER", _http.HostLimiter())
     monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
     monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
     monkeypatch.setattr(_board, "_VARIANTS", {})
@@ -421,18 +502,19 @@ class Request(str):
 
 @pytest.fixture
 def serve(monkeypatch):
-    """Answer SESSION's GETs and POSTs from the test, never the network:
-    `serve(reply)` installs `reply` and returns the log of `Request`s.
+    """Answer every request from the test, never the network: `serve(reply)`
+    installs `reply` and returns the log of `Request`s.
 
     `reply` is a response (fake_response); an Exception, raised; a str
-    body or an int status; a callable(url, **kw) returning any of these; a
+    body or an int status; a callable(url, **kw) returning any of these,
+    run off the loop as the network would be, or an async one, awaited; a
     {fragment: reply} dict, routed on the first fragment found in the URL
     and its query (none found is a 404, or an AssertionError with
     `strict=True`); or a list served front first, its last item repeating
     -- the caller's own list, so a test may append after installing.
 
-    Patches net.http.SESSION, the one every fetcher shares; `session=`
-    names another (claude.api keeps its own).
+    Replaces net.http.send, which every request reaches: SESSION's,
+    claude.api's, robots.txt's, sync or async.
     """
     def _resolve(reply, url, full, kw, strict):
         if isinstance(reply, list):
@@ -455,23 +537,47 @@ def serve(monkeypatch):
             return _resolve(reply(url, **kw), url, full, kw, strict)
         return reply
 
-    def _install(reply, session=None, strict=False):
+    def _install(reply, strict=False):
         log = []
 
-        def _method(name):
-            def _call(url, *args, **kw):
-                params = dict(kw.get("params") or {})
-                full = url + ("?" + "&".join(f"{k}={v}" for k, v in params.items())
-                              if params else "")
-                req = Request(full)
-                req.url, req.method, req.params, req.kw = url, name, params, kw
-                req.headers = dict(kw.get("headers") or {})
-                log.append(req)
-                return _resolve(reply, url, full, kw, strict)
-            return _call
+        async def _send(method, url, *, polite=True, **kw):
+            params = dict(kw.get("params") or {})
+            full = url + ("?" + "&".join(f"{k}={v}" for k, v in params.items())
+                          if params else "")
+            req = Request(full)
+            req.url, req.method, req.params, req.kw = url, method.upper(), params, kw
+            req.headers = dict(kw.get("headers") or {})
+            log.append(req)
+            got = await asyncio.to_thread(_resolve, reply, url, full, kw, strict)
+            return await got if inspect.isawaitable(got) else got
 
-        target = session or _http.SESSION
-        monkeypatch.setattr(target, "get", _method("GET"))
-        monkeypatch.setattr(target, "post", _method("POST"))
+        monkeypatch.setattr(_http, "send", _send)
         return log
+    return _install
+
+
+@pytest.fixture
+def wire(monkeypatch):
+    """Answer the aiohttp session's requests, for net.http's own transport
+    (everything else uses `serve`): `wire(*replies)` queues replies, each
+    (status, [(name, value) bytes pairs], body bytes) or an exception to
+    raise, and returns the log of (method, url, keywords) sent."""
+    def _install(*replies):
+        queue, sent = iter(replies), []
+
+        @contextlib.asynccontextmanager
+        async def request(method, url, **kw):
+            sent.append((method, str(url), kw))
+            got = next(queue)
+            if isinstance(got, BaseException):
+                raise got
+            status, raw_headers, body = got
+
+            async def read():
+                return body
+            yield SimpleNamespace(status=status, raw_headers=raw_headers, read=read,
+                                  reason="OK" if status < 400 else "Error")
+
+        monkeypatch.setattr(_http, "_session", lambda: SimpleNamespace(request=request))
+        return sent
     return _install

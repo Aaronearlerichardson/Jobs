@@ -3,6 +3,8 @@
 
 pytest>=8.0
 pytest-cov>=5.0
+# Runs the `async def` tests (pytest.ini: asyncio_mode = auto).
+pytest-asyncio>=1.0
 # The CI lint is `flake8 --select=F`: pyflakes' checks, but honouring
 # `# noqa`, which the src/ re-export facades rely on.
 flake8>=7.0

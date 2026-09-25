@@ -1,6 +1,7 @@
 """The background harvester and the store changes that let it share the
 file with the crawl and the web UI."""
 
+import asyncio
 import signal
 import sqlite3
 import threading
@@ -614,13 +615,26 @@ def _ctrl_c():
 @pytest.mark.skipif(signal.getsignal(signal.SIGINT) is not signal.default_int_handler,
                     reason="SIGINT is not Python's KeyboardInterrupt here")
 @pytest.mark.parametrize("entry", ["harvest.run", "drain", "fan_out", "fetch_all"])
-def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry):
-    """Two items run, blocked, and Ctrl+C lands while the caller waits on
-    them: the six still queued never run. harvest.run and drain_or_abandon
-    used to leave them queued, and the interpreter's exit ran every one
-    (2026-09-17 reresolve log: requests after the KeyboardInterrupt)."""
-    lock, release, both = threading.Lock(), threading.Event(), threading.Barrier(2)
+def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
+    """Two items run, each waiting on a request, and Ctrl+C lands while the
+    caller waits on them: both requests are cancelled, and the six items
+    still queued never run. harvest.run and drain_or_abandon used to leave
+    them queued, and the interpreter's exit ran every one (2026-09-17
+    reresolve log: requests after the KeyboardInterrupt)."""
+    lock, flying, cancelled = threading.Lock(), [], []
     started, ran = [], []
+
+    async def hang(url, **kw):
+        flying.append(url)
+        if len(flying) == 2:
+            _ctrl_c()
+        try:
+            await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            cancelled.append(url)
+            raise
+
+    serve(hang)
 
     def work(name):
         with lock:
@@ -629,9 +643,7 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry):
         if queued:
             ran.append(name)
         else:
-            if both.wait(5) == 0:
-                _ctrl_c()
-            release.wait(5)
+            http.SESSION.get(f"https://{name.replace(' ', '')}.test/")
         return []
 
     names = [f"Board {i}" for i in range(8)]
@@ -651,14 +663,13 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry):
             [(n, "x", lambda n=n: work(n)) for n in names], max_workers=2),
     }[entry]
     before = set(threading.enumerate())
-    try:
-        with pytest.raises(KeyboardInterrupt):
-            run()
-    finally:
-        release.set()
-        for t in set(threading.enumerate()) - before:
+    with pytest.raises(KeyboardInterrupt):
+        run()
+    for t in set(threading.enumerate()) - before:
+        if not t.name.startswith("asyncio"):    # serve's, kept by the loop
             t.join(5)
     assert (len(started), ran) == (2, [])
+    assert sorted(cancelled) == sorted(flying) and len(flying) == 2
 
 
 def test_dead_board_status_line_names_the_last_error_and_warns(

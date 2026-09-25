@@ -37,10 +37,10 @@ _OK = fake_response({
 
 @pytest.fixture
 def api(monkeypatch, serve):
-    """Stub the API's own session; returns the list of responses to serve
+    """Stub the API's requests; returns the list of responses to serve
     (see conftest.serve) and the request log."""
     responses = []
-    calls = serve(responses, session=claude.SESSION)
+    calls = serve(responses)
     monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude, "_FATAL_MSG", None)
     monkeypatch.setattr(claude.time, "sleep", lambda s: None)

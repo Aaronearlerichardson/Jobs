@@ -590,9 +590,9 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
                   f"of {fetched} fetched - board churning")
         _log.debug("board %s stats %s", c.get("name"), s)
 
-    # Abandoned boards keep their thread until the process exits: the pool
-    # never joins them, and cancels the boards not yet started however
-    # this block ends (Ctrl+C included).
+    # Abandoned boards keep their thread until the pool's exit cancels the
+    # request each waits on: the pool never joins them, and cancels the
+    # boards not yet started however this block ends (Ctrl+C included).
     with pool(max_workers, "harvest") as ex:
         futs = {}
         for c in boards:

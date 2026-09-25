@@ -7,9 +7,10 @@ it is what separates a well-behaved crawler from an abusive one, and "we
 parse and honor robots.txt" answers most of the responsible-crawling
 question in one line.
 
-Fetched once per host and cached. Thread-safe: crawls run several hosts
-through a pool, and the per-host crawl delay has to serialize requests to
-the SAME host without blocking the others.
+Fetched once per host and cached, on the network loop (net.http): the
+requests that want one host's rules at once share one fetch, and the
+per-host crawl delay (net.http.LIMITER) spaces requests to the SAME host
+without holding up the others.
 
 Failure semantics follow RFC 9309 §2.3.1:
   * 2xx            -> parse and obey.
@@ -45,6 +46,7 @@ RobotFileParser is still used for `Crawl-delay` (its parsing of that is
 fine, and it is not part of the RFC's matching rules).
 """
 
+import asyncio
 import contextlib
 import re
 import socket
@@ -54,8 +56,7 @@ from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
 from src import config
-from .http import HEADERS
-from .parallel import SingleFlight
+from . import http
 from .util import host_of, origin_of
 
 # How long a parsed robots.txt stays good before we re-fetch it.
@@ -178,9 +179,20 @@ def _is_dns_failure(exc, _depth=6):
     """True when `exc` bottoms out in a name-resolution error — i.e. the host
     does not exist, as opposed to a server that refused, hung, or failed TLS.
 
-    requests wraps the cause rather than exposing it, so this walks the chain
-    (`ConnectionError <- MaxRetryError <- NameResolutionError <- gaierror`).
-    Depth-bounded: an exception chain can be cyclic.
+    The failure arrives wrapped (net.http raises requests' ConnectionError
+    from aiohttp's DNS error, from the gaierror), so this walks the chain:
+
+    >>> wrapped = OSError("Cannot connect to host")
+    >>> wrapped.__cause__ = socket.gaierror(11001, "getaddrinfo failed")
+    >>> _is_dns_failure(wrapped), _is_dns_failure(TimeoutError("timed out"))
+    (True, False)
+
+    Depth-bounded, because an exception chain can be cyclic:
+
+    >>> a, b = Exception("a"), Exception("b")
+    >>> a.__cause__, b.__cause__ = b, a
+    >>> _is_dns_failure(a)
+    False
     """
     seen = set()
     while exc is not None and _depth > 0 and id(exc) not in seen:
@@ -193,16 +205,13 @@ def _is_dns_failure(exc, _depth=6):
 
 
 class _HostRules:
-    __slots__ = ("parser", "group", "disallow_all", "sitemaps",
-                 "last_request", "lock")
+    __slots__ = ("parser", "group", "disallow_all", "sitemaps")
 
     def __init__(self, parser=None, group=None, disallow_all=False, sitemaps=()):
         self.parser = parser          # RobotFileParser: Crawl-delay only
         self.group = group            # _Group: the RFC-compliant matcher
         self.disallow_all = disallow_all
         self.sitemaps = list(sitemaps)
-        self.last_request = 0.0
-        self.lock = threading.Lock()      # serializes THIS host's pacing
 
 
 class RobotsCache:
@@ -211,20 +220,17 @@ class RobotsCache:
     def __init__(self, user_agent=None, ttl=CACHE_TTL_SECONDS):
         self.user_agent = user_agent or config.USER_AGENT
         self.ttl = ttl
-        self._hosts = SingleFlight()      # origin -> _HostRules
+        self._fetches = {}      # origin -> (started, the fetch's Task)
 
     # -- internals --------------------------------------------------------
 
-    def _fetch(self, origin):
+    async def _fetch(self, origin):
         """Fetch + parse one host's robots.txt. Never raises."""
-        # Imported here: http.py builds the session that this module is
-        # wired into, so importing it at module scope would be circular.
-        import requests
         try:
-            r = requests.get(f"{origin}/robots.txt",
-                             timeout=(config.ROBOTS_CONNECT_TIMEOUT,
-                                      config.ROBOTS_READ_TIMEOUT),
-                             headers=HEADERS, allow_redirects=True)
+            r = await http.send("GET", f"{origin}/robots.txt", polite=False,
+                                timeout=(config.ROBOTS_CONNECT_TIMEOUT,
+                                         config.ROBOTS_READ_TIMEOUT),
+                                headers=http.HEADERS, allow_redirects=True)
         except Exception as e:
             # "Proceeding without restrictions" is a claim about how we treat
             # a SERVER we could not ask. A hostname that does not resolve has
@@ -250,16 +256,22 @@ class RobotsCache:
                     if ln.strip().lower().startswith("sitemap:")]
         return _HostRules(parser=parser, group=group, sitemaps=sitemaps)
 
-    def _rules(self, url):
+    async def _rules(self, url):
         origin = origin_of(url)
         if not origin:
             return None
-        # One fetch per origin, even when threads arrive together. A sniff
+        # One fetch per origin, even when requests arrive together. A sniff
         # fans ~8 candidate PATHS across the same host at once; without this
         # every one of them missed the still-empty cache and fetched its own
         # copy of robots.txt — 8x the requests, and 8x the wait when the host
-        # is one that hangs until the timeout.
-        return self._hosts.do(origin, lambda: self._fetch(origin), ttl=self.ttl)
+        # is one that hangs until the timeout. Shielded: a caller that is
+        # cancelled leaves the fetch to the others.
+        got = self._fetches.get(origin)
+        if got is None or time.monotonic() - got[0] >= self.ttl:
+            got = self._fetches[origin] = (
+                time.monotonic(),
+                asyncio.get_running_loop().create_task(self._fetch(origin)))
+        return await asyncio.shield(got[1])
 
     # -- public API -------------------------------------------------------
 
@@ -293,7 +305,7 @@ class RobotsCache:
                 return True
         return False
 
-    def allowed(self, url):
+    async def allowed(self, url):
         """May we fetch `url`? True when robots is absent/permissive, or
         when the host is exempted in the profile (see host_exempt) — the
         exemption skips the robots.txt fetch for that request entirely,
@@ -302,7 +314,7 @@ class RobotsCache:
             return True
         if self.host_exempt(url):
             return True
-        rules = self._rules(url)
+        rules = await self._rules(url)
         if rules is None or rules.group is None:
             return not (rules and rules.disallow_all)
         try:
@@ -314,9 +326,9 @@ class RobotsCache:
         except Exception:
             return True
 
-    def crawl_delay(self, url):
+    async def crawl_delay(self, url):
         """Seconds this host asks us to wait between requests, or None."""
-        rules = self._rules(url)
+        rules = await self._rules(url)
         if not rules or rules.parser is None:
             return None
         try:
@@ -325,31 +337,21 @@ class RobotsCache:
         except Exception:
             return None
 
-    def sitemaps(self, url):
+    async def sitemaps(self, url):
         """Sitemap URLs the host advertises — a discovery hint, since this
         is exactly where sites publish them."""
-        rules = self._rules(url)
+        rules = await self._rules(url)
         return list(rules.sitemaps) if rules else []
 
-    def wait_turn(self, url):
-        """Sleep as long as this host's Crawl-delay requires.
-
-        Per-host lock: two threads hitting the SAME host queue up, while
-        other hosts keep going in parallel.
-        """
+    async def wait_turn(self, url):
+        """Wait as long as this host's Crawl-delay requires (a turn on
+        net.http.LIMITER): requests to the SAME host queue up, while other
+        hosts keep going."""
         if not getattr(config, "RESPECT_ROBOTS", True):
             return
-        rules = self._rules(url)
-        if rules is None:
-            return
-        delay = self.crawl_delay(url)
-        if not delay:
-            return
-        with rules.lock:
-            gap = time.monotonic() - rules.last_request
-            if gap < delay:
-                time.sleep(delay - gap)
-            rules.last_request = time.monotonic()
+        delay = await self.crawl_delay(url)
+        if delay:
+            await http.LIMITER.wait(url, delay)
 
 
 class RobotsDisallowed(Exception):
@@ -360,5 +362,5 @@ class RobotsDisallowed(Exception):
 
 
 # Process-wide cache: one robots.txt per host per hour, however many
-# fetchers and threads are running.
+# fetchers are running.
 CACHE = RobotsCache()

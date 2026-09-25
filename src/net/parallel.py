@@ -36,13 +36,15 @@ def pool(max_workers, name=""):
     """A thread pool whose queued work is cancelled however the block ends.
 
     A return, an exception and Ctrl+C alike: an item that has not started
-    never does, and nothing waits for one that has (tests/test_harvest.py::
+    never does, nothing waits for one that has, and the request a running
+    one waits on is cancelled, as is every one it starts later
+    (net.http.abandon; tests/test_harvest.py::
     test_ctrl_c_mid_wait_never_starts_the_queued_work). Every pool is built
     here (tests/test_invariants.py::POOL_OWNERS).
 
     Notes:
-        A running item cannot be interrupted: it runs to its own end on its
-        thread, each request in it bounded by its timeout, and the
+        A running item cannot be interrupted between requests: it runs on
+        its thread until its next request raises CancelledError, and the
         interpreter's exit waits for it (harvest.py leaves through os._exit
         instead). `with ThreadPoolExecutor()` joins on the way out, and the
         stdlib worker runs every QUEUED item before it looks at the
@@ -50,12 +52,15 @@ def pool(max_workers, name=""):
         queue only after a loop that ended normally, so Ctrl+C left the
         whole queue running (2026-09-17 reresolve log).
     """
+    workers = []        # a list: a worker may start while abandon reads it
     ex = ThreadPoolExecutor(max_workers=max(1, max_workers),
-                            thread_name_prefix=name)
+                            thread_name_prefix=name,
+                            initializer=lambda: workers.append(threading.current_thread()))
     try:
         yield ex
     finally:
         ex.shutdown(wait=False, cancel_futures=True)
+        http.abandon(workers)
 
 
 def _settled(futs, label, abandoned, stall_s=None, budget_s=None):

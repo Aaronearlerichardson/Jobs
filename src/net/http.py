@@ -1,25 +1,42 @@
-"""Shared HTTP defaults.
+"""The one way out to the network.
 
-A single module-level `SESSION` gives every fetcher connection pooling and
-keep-alive, so repeated hits to the same host (greenhouse/lever/ashby/workday
-probes, board pagination) reuse one TCP+TLS connection instead of paying a
-fresh handshake per request. Call sites use `SESSION.get(...)` /
-`SESSION.post(...)` and inherit DEFAULT_TIMEOUT; `HEADERS` stays exported
-because many call sites still pass `headers=HEADERS` explicitly (redundant:
-the session already carries them as defaults) and robots.py builds its own
-requests from it.
+Every request, from a thread or a coroutine, goes through `send`: one
+aiohttp session on one event loop, the network loop. Until every caller
+is async the loop runs on a daemon thread, a thread reaches it through
+`run_sync`, and `SESSION` is requests.Session's get and post over it.
+
+requests stays as the model layer only: it prepares each request (URL,
+params, body, headers), rules on each redirect, and reads each reply (a
+real requests.Response), so what is sent and what is read are what
+requests sent and read. Its own I/O is never used
+(tests/test_invariants.py).
 """
 
+import asyncio
+import atexit
+import concurrent.futures
+import contextvars
 import logging
+import ssl
 import sys
 import threading
 import time
+import weakref
+from datetime import timedelta
+from functools import partial
 
-from requests import Session
-from requests.adapters import HTTPAdapter
+import aiohttp
+import requests
+from requests import certs
+from requests.cookies import RequestsCookieJar
+from requests.sessions import SessionRedirectMixin, merge_setting
+from requests.structures import CaseInsensitiveDict
+from requests.utils import default_headers, get_encoding_from_headers
+from urllib3.util.ssl_ import create_urllib3_context
+from yarl import URL
 
 from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
-from src.net.util import host_of
+from src.net.util import host_of, origin_of
 
 # File-only request trace (src/session_log.py installs the handler; there
 # is no console handler, so this never reaches the terminal). One record
@@ -43,60 +60,501 @@ HEADERS = {"User-Agent": USER_AGENT, "Accept-Encoding": "gzip, deflate"}
 JSON_HEADERS = {**HEADERS, "Accept": "application/json"}
 PLAIN_HEADERS = {**HEADERS, "User-Agent": PLAIN_USER_AGENT}
 
-# Every request through SESSION waits this long (connect, read) unless the
-# call names its own `timeout=`; passing `timeout=None` also means this
-# default, never "wait forever". Fetchers therefore need no timeout
-# constant of their own; discovery probes still pass PROBE_TIMEOUT.
+# Every request waits this long (connect, read) unless the call names its
+# own `timeout=`; passing `timeout=None` also means this default, never
+# "wait forever". Fetchers therefore need no timeout constant of their
+# own; discovery probes still pass PROBE_TIMEOUT.
 DEFAULT_TIMEOUT = FETCH_TIMEOUT
 
+#: The headers under every request's own: a bare requests session's, and
+#: the crawler's (the same with HEADERS on top).
+_BARE_HEADERS = default_headers()
+_CRAWLER_HEADERS = merge_setting(HEADERS, _BARE_HEADERS,
+                                 dict_class=CaseInsensitiveDict)
 
-class PoliteSession(Session):
-    """A Session that consults robots.txt before every request.
+#: requests.Session's redirect limit.
+MAX_REDIRECTS = 30
 
-    Doing it here rather than in each fetcher means one chokepoint for the
-    whole crawler: every call site inherits the check, the per-host
-    `Crawl-delay` pacing, and connection pooling, and there's no way to add
-    a fetcher that quietly skips them.
+#: What a failed request raises: requests' own classes (see _raised).
+#: Unreachable is requests.ConnectionError: a name that does not resolve,
+#: a refusal, a failed TLS handshake or a connect timeout.
+HTTPError = requests.HTTPError
+Unreachable = requests.ConnectionError
 
-    A disallowed path raises RobotsDisallowed rather than returning a fake
-    response — fetchers already try/except their requests and report the
-    reason, so it shows up in the crawl log like any other fetch failure.
-    Set `[policy] respect_robots = false` in profile.toml to disable (the
-    check, not the pooling).
+
+# --------------------------------------------------------------------------- #
+#  The network loop                                                           #
+# --------------------------------------------------------------------------- #
+
+_LOOP = None                    # the network loop, once started
+_LOOP_THREAD = None
+_START = threading.Lock()
+#: thread -> the task its run_sync waits on. Read and written on the loop.
+_WAITS = {}
+#: Threads whose pool left them running (see abandon).
+_ABANDONED = weakref.WeakSet()
+
+
+def _loop():
+    """The network loop, started on its daemon thread at first use and
+    stopped at interpreter exit."""
+    global _LOOP, _LOOP_THREAD
+    with _START:
+        if _LOOP is None:
+            _LOOP = asyncio.new_event_loop()
+            _LOOP_THREAD = threading.Thread(target=_LOOP.run_forever,
+                                            name="net-loop", daemon=True)
+            _LOOP_THREAD.start()
+            atexit.register(_shutdown)
+        return _LOOP
+
+
+def run_sync(coro):
+    """`coro`'s result, run on the network loop while this thread waits.
+
+    For code that is not async yet; tests/test_invariants.py keeps it out
+    of async code. The task runs in a copy of this thread's context, and
+    a fetch failure it reports counts here:
+
+    >>> async def dead():
+    ...     return fetch_failed("board", "timeout", indent=0)
+    >>> reset_fetch_failures(); run_sync(dead()); fetch_failures()
+    [!] board: timeout
+    []
+    1
+
+    On the loop itself it could only deadlock, so it refuses:
+
+    >>> async def nested():
+    ...     return run_sync(dead())
+    >>> run_sync(nested())
+    Traceback (most recent call last):
+    RuntimeError: run_sync on the network loop: await the coroutine instead
+
+    The task's exception is raised here, and anything else that ends the
+    wait (Ctrl+C) cancels the task.
+
+    Notes:
+        A ContextVar set inside the task changes the copy, never this
+        thread's context; the fetch accounting is a holder object for
+        that reason (see _account).
+
+        Not asyncio.run_coroutine_threadsafe: its cancelled future raises
+        concurrent.futures.CancelledError, an Exception, which the
+        fetchers' `except Exception` would swallow, so an abandoned board
+        could store a short snapshot as a whole one.
     """
+    try:
+        loop, me = _loop(), threading.current_thread()
+        if me is _LOOP_THREAD:
+            raise RuntimeError("run_sync on the network loop: await the coroutine instead")
+    except BaseException:
+        coro.close()
+        raise
+    _account()
+    ctx, done = contextvars.copy_context(), concurrent.futures.Future()
 
-    def request(self, method, url, *args, **kwargs):
-        if kwargs.get("timeout") is None:
-            kwargs["timeout"] = DEFAULT_TIMEOUT
-        # Imported lazily: robots.py imports HEADERS from this module.
-        from .robots import CACHE, RobotsDisallowed
-        if not CACHE.allowed(url):
-            _log.debug("%s %s -> robots.txt disallow", method, url)
-            raise RobotsDisallowed(f"robots.txt disallows {url}")
-        CACHE.wait_turn(url)               # honor Crawl-delay, per host
-        try:
-            r = super().request(method, url, *args, **kwargs)
-        except Exception as e:
-            _log.debug("%s %s -> %s", method, url, type(e).__name__)
-            raise
-        _log.debug("%s %s -> %s in %.2fs", method, url, r.status_code,
-                   r.elapsed.total_seconds())
-        return r
+    def start():
+        if me in _ABANDONED:
+            coro.close()
+            done.set_exception(asyncio.CancelledError())
+            return
+        task = _WAITS[me] = loop.create_task(coro, context=ctx)
+        task.add_done_callback(partial(_settle, me, done))
 
-
-def _build_session():
-    s = PoliteSession()
-    s.headers.update(HEADERS)
-    # Pool a handful of connections per host; discovery probes fan across a
-    # few ATS hosts and re-hit each many times. max_retries=0 keeps failure
-    # semantics identical to the old bare requests.get (callers try/except).
-    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16, max_retries=0)
-    s.mount("https://", adapter)
-    s.mount("http://", adapter)
-    return s
+    loop.call_soon_threadsafe(start)
+    try:
+        return done.result()
+    except BaseException:
+        if not done.done():
+            loop.call_soon_threadsafe(_cancel, (me,))
+        raise
 
 
-SESSION = _build_session()
+def _settle(thread, done, task):
+    """Hand `task`'s outcome to `thread`, waiting in run_sync."""
+    if _WAITS.get(thread) is task:
+        del _WAITS[thread]
+    if task.cancelled():
+        done.set_exception(asyncio.CancelledError())
+    elif task.exception() is not None:
+        done.set_exception(task.exception())
+    else:
+        done.set_result(task.result())
+
+
+def _cancel(threads):
+    """Cancel the tasks `threads` wait on in run_sync. On the loop."""
+    for thread in threads:
+        task = _WAITS.get(thread)
+        if task is not None:
+            task.cancel()
+
+
+def abandon(threads):
+    """Cancel the request each of `threads` waits on in run_sync, and
+    fail every one they start later with CancelledError: net.parallel's
+    pool calls it for the work its block leaves running
+    (tests/test_harvest.py::test_ctrl_c_mid_wait_never_starts_the_queued_work)."""
+    threads = tuple(threads)
+    _ABANDONED.update(threads)
+    if threads and _LOOP is not None:
+        _LOOP.call_soon_threadsafe(_cancel, threads)
+
+
+def _shutdown():
+    """Close the session and stop the loop: at interpreter exit, so no
+    "Unclosed client session" warning is printed."""
+    global _LOOP, _SESSION
+    if _LOOP is None:
+        return
+    session, _SESSION = _SESSION, None
+    try:
+        if session is not None:
+            run_sync(session.close())
+    finally:
+        _LOOP.call_soon_threadsafe(_LOOP.stop)
+        _LOOP_THREAD.join(5)
+        if not _LOOP_THREAD.is_alive():
+            _LOOP.close()
+        _LOOP = None
+
+
+# --------------------------------------------------------------------------- #
+#  One request                                                                #
+# --------------------------------------------------------------------------- #
+
+_SESSION = None
+
+
+def _session():
+    """The one aiohttp session, made on the network loop at first use.
+
+    Notes:
+        What requests did, where it matters: its CA bundle and TLS
+        context (requests' adapter builds the same one), a cookie jar
+        that takes IP-address hosts and sends values unquoted, header
+        lines up to http.client's 64 KiB. trust_env stays False: no proxy
+        or CA-bundle environment variables, where requests read them.
+    """
+    global _SESSION
+    if _SESSION is None:
+        tls = create_urllib3_context()
+        tls.load_verify_locations(certs.where())
+        tls.sslobject_class = _Handshake
+        _SESSION = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=100, ssl=tls,
+                                           keepalive_timeout=30,
+                                           ttl_dns_cache=300),
+            timeout=_timeout(DEFAULT_TIMEOUT),
+            cookie_jar=aiohttp.CookieJar(unsafe=True, quote_cookie=False),
+            max_line_size=65536, max_field_size=65536)
+    return _SESSION
+
+
+def _timeout(t):
+    """aiohttp's timeout for requests' `timeout=`: a (connect, read) pair,
+    one number for both, or None for DEFAULT_TIMEOUT.
+
+    >>> t = _timeout((3.0, 10.0))
+    >>> t.sock_connect, t.sock_read, t.total
+    (3.0, 10.0, None)
+    >>> _timeout(None).sock_read == DEFAULT_TIMEOUT[1]
+    True
+    """
+    t = DEFAULT_TIMEOUT if t is None else t
+    connect, read = t if isinstance(t, tuple) else (t, t)
+    return aiohttp.ClientTimeout(total=None, connect=None,
+                                 sock_connect=connect, sock_read=read)
+
+
+def _prepare(method, url, polite=True, headers=None, params=None, data=None,
+             json=None):
+    """The request requests would send: the URL with its params encoded,
+    the body, and `headers` over the session's own (a bare requests
+    session's, with HEADERS on top when `polite`).
+
+    >>> p = _prepare("get", "https://A.example/a b", params={"q": "x y"})
+    >>> p.method, p.url
+    ('GET', 'https://a.example/a%20b?q=x+y')
+    >>> _prepare("POST", "https://a.example/", json={"k": 1}).body
+    b'{"k": 1}'
+
+    A None header drops the session's:
+
+    >>> h = _prepare("GET", "https://a.example/", headers={"Accept": None}).headers
+    >>> h["User-Agent"] == USER_AGENT, "Accept" in h
+    (True, False)
+    """
+    p = requests.PreparedRequest()
+    p.prepare(method=method, url=url, params=params or {}, data=data or {},
+              json=json,
+              headers=merge_setting(headers,
+                                    _CRAWLER_HEADERS if polite else _BARE_HEADERS,
+                                    dict_class=CaseInsensitiveDict))
+    return p
+
+
+def _headers(raw):
+    """A reply's raw header pairs as requests reads them: latin-1, a
+    repeated name's values joined by ", " under its first spelling.
+
+    >>> list(_headers([(b"Set-Cookie", b"a=1"), (b"set-cookie", b"b=2")]).items())
+    [('Set-Cookie', 'a=1, b=2')]
+    """
+    joined = {}
+    for k, v in raw:
+        k, v = k.decode("latin-1"), v.decode("latin-1")
+        got = joined.get(k.lower())
+        joined[k.lower()] = (got[0], f"{got[1]}, {v}") if got else (k, v)
+    return CaseInsensitiveDict(dict(joined.values()))
+
+
+def _reply(req, status, reason, raw_headers, content, elapsed=0.0):
+    """The requests.Response to `req`, built as requests builds it, so
+    `.text`, `.json()` and `raise_for_status()` are requests' own: text
+    with no charset reads as ISO-8859-1.
+
+    >>> r = _reply(_prepare("GET", "https://a.example/"), 200, "OK",
+    ...            [(b"Content-Type", b"text/html")], "é".encode())
+    >>> r.url, r.encoding, r.text
+    ('https://a.example/', 'ISO-8859-1', 'Ã©')
+    """
+    r = requests.Response()
+    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req
+    r.headers = _headers(raw_headers)
+    r.encoding = get_encoding_from_headers(r.headers)
+    r._content, r._content_consumed = content, True
+    r.elapsed = timedelta(seconds=elapsed)
+    return r
+
+
+#: aiohttp's failures, most specific first, and the requests class each
+#: is raised as.
+_ERRORS = (
+    (aiohttp.ConnectionTimeoutError, requests.ConnectTimeout),
+    (aiohttp.ServerTimeoutError, requests.ReadTimeout),
+    (aiohttp.ClientSSLError, requests.exceptions.SSLError),
+    (aiohttp.NonHttpUrlClientError, requests.exceptions.InvalidSchema),
+    (aiohttp.InvalidURL, requests.exceptions.InvalidURL),
+    (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
+    (TimeoutError, requests.Timeout),
+    ((OSError, aiohttp.ClientError), requests.ConnectionError),
+)
+
+
+def _raised(e, req=None, handshaking=False):
+    """The requests exception for aiohttp's `e`, carrying `e`.
+
+    >>> _raised(aiohttp.SocketTimeoutError("read timed out"))
+    ReadTimeout(SocketTimeoutError('read timed out'))
+    >>> type(_raised(aiohttp.ServerDisconnectedError())).__name__
+    'ConnectionError'
+
+    aiohttp's connect timeout also covers the TLS handshake, which urllib3
+    times with the same budget but reports as a read timeout (the host did
+    answer). So does this, once the handshake has begun:
+
+    >>> type(_raised(aiohttp.ConnectionTimeoutError(), handshaking=True)).__name__
+    'ReadTimeout'
+    """
+    if handshaking and isinstance(e, aiohttp.ConnectionTimeoutError):
+        return requests.ReadTimeout(e, request=req)
+    return next(cls for kind, cls in _ERRORS if isinstance(e, kind))(e, request=req)
+
+
+#: Each hop's [handshake begun]: _Handshake sets it, in the context of the
+#: task that made the connection.
+_HANDSHAKING = contextvars.ContextVar("handshaking")
+
+
+class _Handshake(ssl.SSLObject):
+    """The session's TLS object. Its handshake beginning means the TCP
+    connection was made, which it notes for _raised."""
+
+    def do_handshake(self):
+        began = _HANDSHAKING.get(None)
+        if began:
+            began[0] = True
+        return super().do_handshake()
+
+
+class _Redirects(SessionRedirectMixin):
+    """requests' redirect rules without a Session: resolve_redirects(...,
+    yield_requests=True) names the next request and sends nothing."""
+
+    max_redirects, trust_env, cookies = MAX_REDIRECTS, False, RequestsCookieJar()
+
+
+_REDIRECTS = _Redirects()
+
+
+async def _hop(req, timeout):
+    """The requests.Response to the prepared `req`, redirects unfollowed."""
+    body = req.body.encode("latin-1") if isinstance(req.body, str) else req.body
+    began = [False]
+    _HANDSHAKING.set(began)
+    t0 = time.monotonic()
+    try:
+        async with _session().request(req.method, URL(req.url, encoded=True),
+                                      headers=req.headers, data=body,
+                                      allow_redirects=False,
+                                      timeout=timeout) as resp:
+            elapsed = time.monotonic() - t0
+            content = await resp.read()
+    except (aiohttp.ClientError, OSError) as e:
+        raise _raised(e, req, began[0]) from e
+    return _reply(req, resp.status, resp.reason, resp.raw_headers, content,
+                  elapsed)
+
+
+async def _exchange(method, url, polite=True, timeout=None,
+                    allow_redirects=True, **kw):
+    """The requests.Response requests would return for one request (its
+    keywords: headers, params, data, json), redirects followed by
+    requests' rules, MAX_REDIRECTS at most
+    (tests/test_robots.py::TestTransport)."""
+    req, hops, limit = _prepare(method, url, polite, **kw), [], _timeout(timeout)
+    r = await _hop(req, limit)
+    while allow_redirects and r.is_redirect:
+        if len(hops) >= MAX_REDIRECTS:
+            raise requests.TooManyRedirects(
+                f"Exceeded {MAX_REDIRECTS} redirects.", response=r)
+        hops.append(r)
+        req = next(_REDIRECTS.resolve_redirects(r, req, yield_requests=True))
+        r = await _hop(req, limit)
+    r.history = hops
+    return r
+
+
+async def send(method, url, *, polite=True, **kw):
+    """The requests.Response for one request, taking requests' keywords
+    (headers, params, data, json, timeout, allow_redirects).
+
+    A polite request is the crawler's: robots.txt may refuse it
+    (RobotsDisallowed, raised rather than faked, so it reaches the crawl
+    log like any fetch failure), it waits its host's Crawl-delay, and it
+    leaves one DEBUG line on the "http" logger. A plain one is what a bare
+    requests session sends: its headers, no robots.txt, no trace.
+
+    Notes:
+        One chokepoint for the whole crawler: every call site inherits the
+        robots check, the pacing and the pooling, and no fetcher can
+        quietly skip them. `[policy] respect_robots = false` turns the
+        check off (not the pooling).
+    """
+    method = method.upper()
+    if not polite:
+        return await _exchange(method, url, polite=False, **kw)
+    # Imported here: robots.py imports this module.
+    from .robots import CACHE, RobotsDisallowed
+    if not await CACHE.allowed(url):
+        _log.debug("%s %s -> robots.txt disallow", method, url)
+        raise RobotsDisallowed(f"robots.txt disallows {url}")
+    await CACHE.wait_turn(url)
+    try:
+        r = await _exchange(method, url, **kw)
+    except Exception as e:
+        _log.debug("%s %s -> %s", method, url, type(e).__name__)
+        raise
+    _log.debug("%s %s -> %s in %.2fs", method, url, r.status_code,
+               r.elapsed.total_seconds())
+    return r
+
+
+class HostLimiter:
+    """Spaces the turns on one origin: `await wait(url, gap)` returns once
+    the last turn on url's origin is `gap` seconds old, holding only the
+    calls queued behind it on that origin
+    (tests/test_robots.py::test_crawl_delay_spaces_one_origin_only)."""
+
+    def __init__(self):
+        self._origins = {}      # origin -> [asyncio.Lock, next turn (monotonic)]
+
+    async def wait(self, url, gap):
+        """Wait for url's origin's turn, then book the next `gap` on."""
+        slot = self._origins.setdefault(origin_of(url), [asyncio.Lock(), 0.0])
+        async with slot[0]:
+            await asyncio.sleep(slot[1] - time.monotonic())
+            slot[1] = time.monotonic() + gap
+
+
+#: The process's one limiter: robots.txt's Crawl-delay feeds it.
+LIMITER = HostLimiter()
+
+
+class SyncSession:
+    """requests.Session's get and post over `send`, for the threads that
+    are not async yet: each call blocks its thread in run_sync and returns
+    the requests.Response. `polite` is send's."""
+
+    def __init__(self, polite=True):
+        self.polite = polite
+
+    def get(self, url, **kw):
+        return run_sync(send("GET", url, polite=self.polite, **kw))
+
+    def post(self, url, **kw):
+        return run_sync(send("POST", url, polite=self.polite, **kw))
+
+
+#: The crawler's session: every fetcher's requests are polite.
+SESSION = SyncSession()
+
+
+async def arequest(method, url, label=None, **kw):
+    """(status, response, error) for one polite request, HEADERS under the
+    call's own.
+
+    `error` is None on success, else "HTTP n" (status >= 400) or the raised
+    exception (`status` and `response` None); it is reported through
+    `fetch_failed` under `label` when a label is given. A caller judging a
+    status itself (a closure probe reading 404 as "gone") passes no label.
+    """
+    try:
+        r = await send(method, url, headers={**HEADERS, **kw.pop("headers", {})},
+                       **kw)
+    except Exception as e:
+        return None, None, failed(label, e)
+    if r.status_code >= 400:
+        return r.status_code, r, failed(label, f"HTTP {r.status_code}")
+    return r.status_code, r, None
+
+
+def request(method, url, label=None, **kw):
+    """arequest's (status, response, error), for a thread."""
+    return run_sync(arequest(method, url, label, **kw))
+
+
+def _json_of(status, r, err, label):
+    """request_json's answer from request's: "empty response" and
+    "non-JSON response" are errors too."""
+    if err:
+        return status, None, err
+    if not r.content.strip():
+        return status, None, failed(label, "empty response")
+    try:
+        return status, r.json(), None
+    except ValueError:
+        return status, None, failed(label, "non-JSON response")
+
+
+async def arequest_json(method, url, label=None, **kw):
+    """(status, payload, error) for one JSON request: `arequest`'s, plus
+    "empty response" and "non-JSON response" as errors."""
+    return _json_of(*await arequest(method, url, label, **kw), label)
+
+
+def request_json(method, url, label=None, **kw):
+    """arequest_json's answer, for a thread; the JSON is decoded on this
+    thread, off the loop."""
+    return _json_of(*request(method, url, label, **kw), label)
+
+
+async def aget_json(url, label, default=None, **kw):
+    """get_json, awaited."""
+    _status, data, err = await arequest_json("GET", url, label, **kw)
+    return default if err else data
 
 
 def get_json(url, label, default=None, **kw):
@@ -114,9 +572,9 @@ def get_json(url, label, default=None, **kw):
     what the caller wants back: [] for a board listing, None for a detail
     payload the caller checks.
 
-    No doctest: the exception-path wording is requests' own, which changes
-    between versions. tests/test_fetcher_parsers.py pins the contract
-    through the fetchers instead.
+    No doctest: the exception-path wording is the transport's own, which
+    changes between versions. tests/test_fetcher_parsers.py pins the
+    contract through the fetchers instead.
 
     Notes:
         Nine fetchers wrote this out, three of them having already named
@@ -126,37 +584,9 @@ def get_json(url, label, default=None, **kw):
     return default if err else data
 
 
-def request(method, url, label=None, **kw):
-    """(status, response, error) for one request through SESSION.
-
-    `error` is None on success, else "HTTP n" (status >= 400) or the raised
-    exception (`status` and `response` None); it is reported through
-    `fetch_failed` under `label` when a label is given. A caller judging a
-    status itself (a closure probe reading 404 as "gone") passes no label.
-    """
-    try:
-        r = getattr(SESSION, method.lower())(
-            url, headers={**HEADERS, **kw.pop("headers", {})}, **kw)
-    except Exception as e:
-        return None, None, failed(label, e)
-    if r.status_code >= 400:
-        return r.status_code, r, failed(label, f"HTTP {r.status_code}")
-    return r.status_code, r, None
-
-
-def request_json(method, url, label=None, **kw):
-    """(status, payload, error) for one JSON request: `request`'s, plus
-    "empty response" and "non-JSON response" as errors."""
-    status, r, err = request(method, url, label, **kw)
-    if err:
-        return status, None, err
-    if not r.content.strip():
-        return status, None, failed(label, "empty response")
-    try:
-        return status, r.json(), None
-    except ValueError:
-        return status, None, failed(label, "non-JSON response")
-
+# --------------------------------------------------------------------------- #
+#  Fetch accounting                                                           #
+# --------------------------------------------------------------------------- #
 
 def failed(label, err):
     """`err`, reported through `fetch_failed` when there is a `label`:
@@ -167,9 +597,30 @@ def failed(label, err):
     return err
 
 
-#: Per-THREAD count of fetch failures, because the harvester runs one board
-#: per worker thread and the question is always "did THIS board fail?".
-_FAILED = threading.local()
+class _Account:
+    """One fetch attempt's accounting (see snapshot_info)."""
+
+    __slots__ = ("n", "last", "capped", "total")
+
+    def __init__(self):
+        self.n, self.last, self.capped, self.total = 0, None, False, None
+
+
+#: The current fetch attempt's accounting. A thread starts with an empty
+#: context of its own and keeps it across a pool's work items, so this is
+#: per thread under the pools, as threading.local was, and per task under
+#: asyncio.
+_ACCOUNT = contextvars.ContextVar("fetch_account")
+
+
+def _account():
+    """This context's accounting, made on first use. A holder, not values:
+    run_sync's task runs in a copy of the context, and still counts here."""
+    acct = _ACCOUNT.get(None)
+    if acct is None:
+        acct = _Account()
+        _ACCOUNT.set(acct)
+    return acct
 
 
 def fetch_failed(label, err, indent=4):
@@ -182,7 +633,7 @@ def fetch_failed(label, err, indent=4):
 
     Returns [] so a soft-failing fetcher can `return fetch_failed(...)`;
     call it as a statement where the failure path breaks or continues.
-    Also remembers `label: err` as this thread's last failure (see
+    Also remembers `label: err` as this context's last failure (see
     snapshot_info's `last_error`).
 
     Notes:
@@ -194,34 +645,28 @@ def fetch_failed(label, err, indent=4):
         harvest run of the last 25 logs, not one of them recorded as
         anything but an ordinary empty board.
     """
-    _FAILED.n = getattr(_FAILED, "n", 0) + 1
-    _FAILED.last = f"{label}: {err}"
+    acct = _account()
+    acct.n += 1
+    acct.last = f"{label}: {err}"
     sys.stdout.write(f"{' ' * indent}[!] {label}: {err}\n")
     return []
 
 
 def fetch_failures():
-    """Fetch failures reported on this thread since the last reset."""
-    return getattr(_FAILED, "n", 0)
-
-
-#: Per-THREAD "the pager stopped before the board's end" marker, beside
-#: _FAILED and for the same reason.
-_CAPPED = threading.local()
+    """Fetch failures reported in this context since the last reset."""
+    return _account().n
 
 
 def reset_fetch_failures():
-    """Start this thread's fetch accounting from zero: the failure count,
+    """Start this context's fetch accounting from zero: the failure count,
     the last-failure message, and the capped marker. One call per fetch
-    attempt, on the thread that runs it (crawl.harvest.harvest_board,
+    attempt, where it runs (crawl.harvest.harvest_board,
     net.parallel.fetch_all)."""
-    _FAILED.n = 0
-    _FAILED.last = None
-    _CAPPED.hit, _CAPPED.total = False, None
+    _ACCOUNT.set(_Account())
 
 
 def note_capped(total=None):
-    """Record that this thread's snapshot was truncated: the board lists
+    """Record that this context's snapshot was truncated: the board lists
     more than the pull returned. `total` is the board size the API
     reported, None when it reported none.
 
@@ -239,11 +684,12 @@ def note_capped(total=None):
         row missing from it is no evidence the posting closed. See
         store.sync_job_statuses's `capped` argument.
     """
-    _CAPPED.hit, _CAPPED.total = True, total
+    acct = _account()
+    acct.capped, acct.total = True, total
 
 
 def snapshot_info():
-    """This thread's fetch accounting since the last reset, as the callers
+    """This context's fetch accounting since the last reset, as the callers
     record it: the failure count, whether the snapshot is INCOMPLETE (a
     fetch failed partway) or CAPPED (truncated without an error), and the
     LAST failure reported (None when there was none).
@@ -259,11 +705,11 @@ def snapshot_info():
     >>> note_capped(50); snapshot_info()
     {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None, 'last_error': 'board p3: timeout'}
     """
-    n = fetch_failures()
-    capped = getattr(_CAPPED, "hit", False) and not n
-    return {"fetch_errors": n, "incomplete": n > 0, "capped": capped,
-            "capped_total": getattr(_CAPPED, "total", None) if capped else None,
-            "last_error": getattr(_FAILED, "last", None)}
+    acct = _account()
+    capped = acct.capped and not acct.n
+    return {"fetch_errors": acct.n, "incomplete": acct.n > 0, "capped": capped,
+            "capped_total": acct.total if capped else None,
+            "last_error": acct.last}
 
 
 class HostBreaker:

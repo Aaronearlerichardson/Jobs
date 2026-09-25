@@ -9,18 +9,17 @@ import re
 import threading
 import time
 
-import requests
 from pydantic import StrictBool, ValidationError
 
 from src import config
 from src.claude.reply import Reply, Unit, choice
+from src.net import http
 from src.net.parallel import SingleFlight
 
-# A plain pooled session. The crawler's PoliteSession (src.net.http) was
-# used here before, which made core depend on scrapers and consulted
-# robots.txt before every API call for nothing: the Anthropic endpoint is
-# not a crawl target.
-SESSION = requests.Session()
+# A plain session (net.http's polite=False): no robots.txt before every API
+# call, no Crawl-delay and no crawl trace -- the Anthropic endpoint is not
+# a crawl target -- and a bare requests session's headers.
+SESSION = http.SyncSession(polite=False)
 
 # File-only per-call trace (session log DEBUG channel — never printed).
 _log = logging.getLogger("claude")
@@ -428,9 +427,9 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     included.
 
     Notes:
-        This session bypasses net.http on purpose (robots and crawl-delay
-        do not apply to the API), so without that record API latency never
-        reached the session log."""
+        This session skips net.http's crawl trace on purpose (robots and
+        crawl-delay do not apply to the API), so without that record API
+        latency never reached the session log."""
     if not have_api_key():
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return None
@@ -507,7 +506,7 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         print(f"  [!] Claude reply is not a valid {reply.__name__}: "
               f"{where}{more}")
         return None
-    except requests.HTTPError as e:
+    except http.HTTPError as e:
         status = getattr(e.response, "status_code", None)
         body = getattr(e.response, "text", "")[:300]
         _log.debug("claude call failed: HTTP %s in %.2fs",

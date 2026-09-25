@@ -15,8 +15,11 @@ real store.
 """
 
 import ast
+import asyncio
 import builtins
+import functools
 import re
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -48,6 +51,12 @@ def source_files():
         if "__pycache__" in p.parts:
             continue
         yield p.relative_to(ROOT).as_posix(), p.read_text(encoding="utf-8")
+
+
+@functools.cache
+def _parsed():
+    """source_files() as (rel, tree), parsed once."""
+    return [(rel, ast.parse(src)) for rel, src in source_files()]
 
 
 # --------------------------------------------------------------------------- #
@@ -255,8 +264,8 @@ def find_inline_rule_sites():
                 hits.add((rel, here))
             walk(child, here)
 
-    for rel, src in source_files():
-        walk(ast.parse(src, filename=rel), None)
+    for rel, tree in _parsed():
+        walk(tree, None)
     return hits
 
 
@@ -721,9 +730,9 @@ def test_compiled_code_has_no_assert_or_debug():
     """build_app.py compiles with -O, which strips `assert` statements and
     `if __debug__:` blocks, so src/ and the root scripts may use neither."""
     found = sorted(
-        (rel, n.lineno) for rel, src in source_files()
+        (rel, n.lineno) for rel, tree in _parsed()
         if not rel.startswith("tools/")
-        for n in ast.walk(ast.parse(src))
+        for n in ast.walk(tree)
         if isinstance(n, ast.Assert)
         or (isinstance(n, ast.Name) and n.id == "__debug__"))
     assert not found, (f"assert/__debug__ at {found}: -O would drop them. "
@@ -755,7 +764,7 @@ def test_pydantic_models_keep_their_annotations_as_strings():
         Found 2026-09-24 building JobHarvester.exe (config.secrets.Settings,
         then profile_schema.Methodology).
     """
-    trees = {rel: ast.parse(src) for rel, src in source_files()}
+    trees = dict(_parsed())
     modules = {rel for rel, _ in _model_classes(trees)}
     assert "src/ats/board/spec.py" in modules, "the model scan found nothing"
     bare = sorted(rel for rel in modules
@@ -777,9 +786,9 @@ def test_the_environment_is_read_only_through_config_settings():
     environment (typed, trimmed, blank-is-unset); everything else reads
     config.SETTINGS."""
     found = sorted(
-        (rel, n.lineno) for rel, src in source_files()
+        (rel, n.lineno) for rel, tree in _parsed()
         if not rel.startswith("src/config/")
-        for n in ast.walk(ast.parse(src))
+        for n in ast.walk(tree)
         if (isinstance(n, ast.Attribute) and n.attr in ("environ", "getenv"))
         or (isinstance(n, ast.Name) and n.id in ("environ", "getenv")))
     assert not found, (f"environment read at {found}: add a field to "
@@ -824,9 +833,178 @@ def test_src_imports_point_down_the_layers():
                if p.name not in ("__init__.py", "__pycache__")
                and (p.is_dir() or p.suffix == ".py")}
     assert on_disk == set(LAYERS), f"place {on_disk ^ set(LAYERS)} in LAYERS"
-    up = sorted({(rel, u) for rel, src in source_files()
+    up = sorted({(rel, u) for rel, tree in _parsed()
                  if rel.startswith("src/") and rel.count("/") >= 1
                  and rel != "src/__init__.py"
-                 for u in _imported_units(rel, ast.parse(src))
+                 for u in _imported_units(rel, tree)
                  if rank[u] > rank[rel.split("/")[1].removesuffix(".py")]})
     assert not up, f"imports pointing up the layers: {up}"
+
+
+# --------------------------------------------------------------------------- #
+#  9. Async code                                                              #
+# --------------------------------------------------------------------------- #
+#
+# An event loop runs every request at once, so a mistake that cost one
+# thread its time now costs all of them: a blocking call stalls every
+# request, a swallowed cancellation keeps work running after Ctrl+C, a task
+# nobody holds can be collected mid-flight.
+
+def _dotted(node):
+    """'a.b.c' for a Name or Attribute chain, else None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    return ".".join([node.id, *reversed(parts)]) if isinstance(node, ast.Name) else None
+
+
+def _async_bodies(tree):
+    """(async def, the nodes of its body outside any nested def)."""
+    return [(fn, _own_nodes(fn)) for fn in ast.walk(tree)
+            if isinstance(fn, ast.AsyncFunctionDef)]
+
+
+#: What an `async def` may not touch: a thread's sleep, sqlite3, threads
+#: and executors block the loop, and run_sync and the sync session wait on
+#: the very loop they would be running on.
+BLOCKING = ("time.sleep", "sqlite3", "threading", "concurrent.futures",
+            "ThreadPoolExecutor", "ProcessPoolExecutor", "run_sync",
+            "SESSION", "SyncSession")
+
+#: requests' and urllib3's own I/O: nothing calls it, because every request
+#: goes through net.http.send.
+_REQUESTS_IO = re.compile(r"(requests|urllib3)(\.\w+)*\.(Session|session|get|post|put|"
+                          r"patch|delete|head|options|request|adapters|PoolManager|"
+                          r"urlopen)\b")
+
+
+def _blocking(tree):
+    """{(async def, name)} for each BLOCKING name an async body uses."""
+    def banned(dotted):
+        parts = dotted.split(".")
+        return any(parts[i:i + len(b)] == b for b in (x.split(".") for x in BLOCKING)
+                   for i in range(len(parts)))
+    return {(fn.name, d) for fn, nodes in _async_bodies(tree) for n in nodes
+            if isinstance(n, (ast.Name, ast.Attribute)) and (d := _dotted(n)) and banned(d)}
+
+
+def _requests_uses(rel, tree):
+    """[(line, what)] for each import of requests or urllib3 outside
+    net/http, and each use of their I/O anywhere."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            names = [a.name for a in n.names]
+        elif isinstance(n, ast.ImportFrom) and n.module and not n.level:
+            names = [f"{n.module}.{a.name}" for a in n.names]
+        else:
+            if isinstance(n, ast.Attribute) and _REQUESTS_IO.match(_dotted(n) or ""):
+                out.append((n.lineno, _dotted(n)))
+            continue
+        out += [(n.lineno, name) for name in names
+                if _REQUESTS_IO.match(name) or (rel != "src/net/http.py"
+                                                and name.split(".")[0] in ("requests", "urllib3"))]
+    return out
+
+
+def test_async_code_never_blocks():
+    """Invariant 1: no BLOCKING name in an async body; requests and urllib3
+    imported only by net/http, which uses them as models (preparing a
+    request, reading a reply) and never for I/O."""
+    snippet = ("import time\nasync def f():\n    time.sleep(1)\n    run_sync(g())\n"
+               "def g():\n    time.sleep(1)\n")
+    assert _blocking(ast.parse(snippet)) == {("f", "time.sleep"), ("f", "run_sync")}
+    assert _requests_uses("x.py", ast.parse("import requests\nrequests.get('u')\n")) == [
+        (1, "requests"), (2, "requests.get")]
+    blocked = sorted((rel, *hit) for rel, tree in _parsed() for hit in _blocking(tree))
+    assert not blocked, (f"{blocked}: an async def blocks its event loop there. Await "
+                         "the async version, or asyncio.to_thread a call with none.")
+    uses = sorted((rel, *u) for rel, tree in _parsed() for u in _requests_uses(rel, tree))
+    assert not uses, (f"{uses}: requests is net.http's model layer only. Send through "
+                      "net.http (SESSION, request, send) and catch http.HTTPError / "
+                      "http.Unreachable.")
+
+
+def test_the_one_client_session_is_made_in_net_http_with_a_timeout():
+    """Invariant 2: one aiohttp ClientSession, built in net/http with a
+    default timeout, so every network wait is bounded."""
+    made = [(rel, n) for rel, tree in _parsed() for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and (_dotted(n.func) or "").endswith("ClientSession")]
+    assert [rel for rel, _ in made] == ["src/net/http.py"], (
+        f"ClientSession built at {[rel for rel, _ in made]}: use net.http's one session.")
+    assert all(any(k.arg == "timeout" for k in n.keywords) for _, n in made), (
+        "net.http's ClientSession lost its timeout=: a network wait is unbounded.")
+
+
+#: Modules allowed to catch CancelledError, and why: the boundaries where
+#: async code meets a caller that is not.
+CANCEL_BOUNDARIES = {}
+
+
+def _cancel_catches(rel, tree):
+    """[(line, why)] for each handler that swallows cancellation: a bare
+    `except:` or `except BaseException` with no `raise`, and `except
+    CancelledError` outside CANCEL_BOUNDARIES."""
+    out = []
+    for h in ast.walk(tree):
+        if not isinstance(h, ast.ExceptHandler):
+            continue
+        caught = ({_dotted(t) or "" for t in getattr(h.type, "elts", [h.type])}
+                  if h.type else {"BaseException"})
+        if "BaseException" in caught and not any(
+                isinstance(s, ast.Raise) and s.exc is None for s in ast.walk(h)):
+            out.append((h.lineno, "swallows BaseException"))
+        if rel not in CANCEL_BOUNDARIES and any(c.endswith("CancelledError") for c in caught):
+            out.append((h.lineno, "catches CancelledError"))
+    return sorted(out)
+
+
+def test_nothing_swallows_cancellation():
+    """Invariant 3: cancellation (Ctrl+C, a pass budget) reaches the code
+    that started the work, on a thread too: run_sync raises it there for
+    an abandoned pool's request, and a handler that kept it would let a
+    cut-off board store a short snapshot."""
+    snippet = ("def f():\n    try:\n        pass\n    except BaseException:\n"
+               "        pass\n    try:\n        pass\n    except (OSError, CancelledError):\n"
+               "        raise\n")
+    assert _cancel_catches("x.py", ast.parse(snippet)) == [
+        (4, "swallows BaseException"), (8, "catches CancelledError")]
+    found = sorted((rel, *c) for rel, tree in _parsed() for c in _cancel_catches(rel, tree))
+    assert not found, (f"{found}: re-raise, or catch Exception, which CancelledError "
+                       "is not; a boundary goes in CANCEL_BOUNDARIES with its reason.")
+
+
+def _dropped_tasks(tree):
+    """Lines that throw a create_task / ensure_future result away, except
+    onto a TaskGroup the code opened (`async with TaskGroup() as tg`)."""
+    groups = {item.optional_vars.id for n in ast.walk(tree) if isinstance(n, ast.AsyncWith)
+              for item in n.items if isinstance(item.optional_vars, ast.Name)
+              and (_dotted(getattr(item.context_expr, "func", None)) or "").endswith("TaskGroup")}
+    return sorted(n.lineno for n in ast.walk(tree)
+                  if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+                  and (d := _dotted(n.value.func) or "").split(".")[-1]
+                  in ("create_task", "ensure_future")
+                  and d.rpartition(".")[0] not in groups)
+
+
+def test_every_task_is_kept():
+    """Invariant 4: the event loop holds its tasks weakly, so a task nobody
+    keeps can vanish mid-flight. Keep the result, or start it on a
+    TaskGroup."""
+    snippet = ("async def f(loop):\n    loop.create_task(g())\n"
+               "    async with asyncio.TaskGroup() as tg:\n        tg.create_task(g())\n")
+    assert _dropped_tasks(ast.parse(snippet)) == [2]
+    dropped = sorted((rel, line) for rel, tree in _parsed() for line in _dropped_tasks(tree))
+    assert not dropped, f"{dropped}: a task started and not kept. Keep it or use a TaskGroup."
+
+
+async def test_a_blocked_loop_fails_the_test(loop_blocks):
+    """Invariant 5: async tests run in asyncio's debug mode (pytest.ini),
+    which logs a callback that holds the loop past 100 ms, and
+    conftest.loop_blocks fails the test for it. This one blocks on purpose
+    and takes the record back."""
+    time.sleep(0.15)
+    await asyncio.sleep(0)
+    assert any(str(r.msg).startswith("Executing") for r in loop_blocks)
+    loop_blocks.clear()
