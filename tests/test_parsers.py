@@ -601,25 +601,21 @@ class TestResolutionStallWatchdog:
     UI's one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
     finished in 8 minutes; the 60th hung for over an hour and wedged the op
     slot until the app was restarted. The shared helper behind add_names and
-    discover_local's sniff/websearch passes is
-    src.net.parallel.drain_or_abandon."""
+    discover_local's sniff/websearch passes is src.net.parallel.drain."""
 
-    def test_drain_or_abandon_abandons_only_the_stuck_future(self, monkeypatch):
+    def test_drain_abandons_only_the_stuck_item(self, monkeypatch):
         import threading
-        from concurrent.futures import ThreadPoolExecutor
         from src.net import parallel
 
         monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
         release = threading.Event()
         consumed, stalled = [], []
-        ex = ThreadPoolExecutor(max_workers=2)
-        futs = {ex.submit(lambda: "ok"): "fast",
-                ex.submit(release.wait, 10): "slow"}
         try:
-            parallel.drain_or_abandon(
-                ex, futs,
+            parallel.drain(
+                ["fast", "slow"],
+                lambda n: "ok" if n == "fast" else release.wait(10),
                 lambda fut, n: consumed.append((n, fut.result())),
-                stalled.append)
+                stalled.append, max_workers=2)
         finally:
             release.set()
         assert consumed == [("fast", "ok")]

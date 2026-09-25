@@ -37,6 +37,17 @@ PLAIN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PROBE_TIMEOUT = (3.0, 10.0)
 FETCH_TIMEOUT = (5.0, 25.0)
 
+# Wall-clock budget of one pool pass, seconds: fetch_all's, and a fan_out's
+# where the caller passes one (net.parallel). Past it, work still queued is
+# cancelled and work still running is abandoned. About ten times the
+# slowest pass in the 2026-09-10..24 session logs, so only a wedged pass
+# meets one: a crawl's source fetch took at most 334 s (17 crawls); triage
+# hydration 158 s (21 passes), triage scoring 115 s (20, up to the 300-row
+# cap), a deep-verify round 136 s (18) and the closed-URL probe 27 s (8
+# passes of up to 100 rows) share PASS_BUDGET_S.
+FETCH_BUDGET_S = 3600.0
+PASS_BUDGET_S = 1800.0
+
 # Gated-site capture (Playwright). Keep roughly current — a stale UA is a
 # red flag to fingerprinters.
 BROWSER_UA = (

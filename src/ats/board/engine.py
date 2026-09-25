@@ -54,6 +54,7 @@ from src import config
 from src.match.locality import location_unknown
 from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS
+from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put)
 
@@ -209,11 +210,13 @@ _NAMED = {"$facets": {}, "$search_text": "", "$area": None,
 #: The report net.http files for a 404 answer (`Board.gone`).
 _HTTP_404 = re.compile(r"\bHTTP 404\b")
 
-#: Listings read for closure and deep verify: (ats, handle) -> (expires, entries).
-_MEMO = {}
+#: Listings read for closure and deep verify, (ats, handle) -> entries,
+#: each read once while concurrent readers of that board wait for it.
+_MEMO = SingleFlight()
 #: The handle parts `handle.try` and `handle.follow` settled on:
-#: (ats, handle) -> {part: value}.
+#: (ats, handle) -> {part: value}; `_SETTLING` holds a handle's `try`.
 _VARIANTS = {}
+_SETTLING = SingleFlight()
 
 
 def _fill(tpl, lookup, vals):
@@ -463,11 +466,21 @@ class Board:
         template over `parts` (quietly), until an answer `_wrong` does not
         reject; one without an error settles it. When none does, the first
         refusal (no answer, 403, 405, 429, 5xx) is the answer: one value's
-        404 never outweighs another's timeout."""
+        404 never outweighs another's timeout. One caller per handle tries
+        at a time; one that waited asks once with the value it settled."""
         key = (self.name, str(handle))
-        tries = {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS.get(key, {})}
-        if not tries:
-            return (parts, *self._fetch(req, parts, vals, label, timeout, url))
+        if self._unsettled(key):
+            with _SETTLING.hold(key):
+                tries = self._unsettled(key)
+                if tries:
+                    return self._settle(key, tries, req, parts, vals, label, timeout, url)
+            parts = {**parts, **_VARIANTS[key]}
+        return (parts, *self._fetch(req, parts, vals, label, timeout, url))
+
+    def _unsettled(self, key):
+        return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS.get(key, {})}
+
+    def _settle(self, key, tries, req, parts, vals, label, timeout, url):
         (name, values), = tries.items()
         refused = None
         for v in dict.fromkeys(fields.fmt(t, parts.get) for t in values):
@@ -812,16 +825,13 @@ class Board:
     def _listing_entries(self, handle):
         """The raw first-page listing entries, memoized for
         config.BOARD_MEMO_S so a board with many stale rows is read once
-        per pass. None when the listing is unreadable or empty."""
-        key = (self.name, handle)
-        hit = _MEMO.get(key)
-        if hit and hit[0] > time.time():
-            return hit[1]
-        _parts, _s, payload, err = self._page(
-            self.listing_spec, handle, page_vals(self._pager, 0, page_size(self._pager)))
-        entries = None if err else decode.entries(payload, self.listing_spec.decoder) or None
-        _MEMO[key] = (time.time() + config.BOARD_MEMO_S, entries)
-        return entries
+        per pass, however many callers ask at once. None when the listing
+        is unreadable or empty."""
+        def read():
+            _parts, _s, payload, err = self._page(
+                self.listing_spec, handle, page_vals(self._pager, 0, page_size(self._pager)))
+            return None if err else decode.entries(payload, self.listing_spec.decoder) or None
+        return _MEMO.do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
 
     def _member(self, ref, job_id=None):
         """The listing entry for the posting `ref` names: by the posting id

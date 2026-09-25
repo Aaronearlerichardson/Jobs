@@ -164,7 +164,6 @@ def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):
     verdict is None (keep the hit, cache nothing), and one line names the
     field."""
     responses, calls = api
-    monkeypatch.setattr(claude, "_BOARD_OWNER_CACHE", {})
     responses.append(fake_response({"content": [{
         "type": "text", "text": '{"same_employer": "false", "reason": "x"}'}]}))
     assert claude.board_is_own("Ripple Neuro", "greenhouse:ripple") is None

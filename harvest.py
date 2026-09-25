@@ -307,6 +307,7 @@ def main(argv=None):
         finally:
             session_log.finish()
 
+    stopped = False
     try:
         if args.once:
             one_pass()
@@ -314,9 +315,11 @@ def main(argv=None):
             run_forever(one_pass, args.every)
     except KeyboardInterrupt:
         print("\n  stopped")
-    if stalled[0]:
-        # Abandoned boards still own a thread; a normal exit would wait on
-        # them. Everything is committed and the logs are closed, so leave.
+        stopped = True
+    if stalled[0] or stopped:
+        # Abandoned boards, and the ones Ctrl+C left running, still own a
+        # thread that a normal exit would wait on. The logs are closed and
+        # what a board has not committed rolls back (SQLite), so leave.
         sys.stdout.flush()
         os._exit(0)
     return 0

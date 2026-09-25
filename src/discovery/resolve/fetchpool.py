@@ -15,7 +15,6 @@ import logging
 import socket
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as fut_wait
 
 import requests
@@ -24,6 +23,7 @@ from src import config
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net.http import HEADERS, SESSION, HostBreaker
+from src.net.parallel import pool
 from src.net.util import host_of, origin_of
 
 # File-only diagnostics (session log DEBUG channel — never printed).
@@ -250,14 +250,13 @@ def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
                         time.time() - _DNS_CACHE[h][0] < _DEAD_HOST_TTL)]
     slow = set()
     if todo:
-        ex = ThreadPoolExecutor(max_workers=min(8, len(todo)))
-        futs = {ex.submit(_resolves, h): h for h in todo}
-        _done, pending = fut_wait(futs, timeout=timeout)
+        with pool(min(8, len(todo))) as ex:
+            futs = {ex.submit(_resolves, h): h for h in todo}
+            _done, pending = fut_wait(futs, timeout=timeout)
         for f in pending:
             slow.add(futs[f])
             _log.debug("skip host %s this pass: resolver silent for %.0fs",
                        futs[f], timeout)
-        ex.shutdown(wait=False, cancel_futures=True)
     return [u for u in urls
             if host_of(u) not in slow and not _DEAD_HOSTS.dead(u)]
 
@@ -279,6 +278,6 @@ def _fetch_all(urls):
     if not live:
         return out
     with robots.quiet():
-        with ThreadPoolExecutor(max_workers=min(8, len(live))) as pool:
-            out.update(zip(live, pool.map(_fetch_page, live)))
+        with pool(min(8, len(live))) as ex:
+            out.update(zip(live, ex.map(_fetch_page, live)))
     return out

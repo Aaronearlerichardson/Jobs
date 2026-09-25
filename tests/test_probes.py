@@ -662,12 +662,16 @@ class TestProbeIsDecisivePerFamily:
 
     def test_one_ashby_board_fetch_serves_every_row_on_it(self, probe_http):
         """A company with many stale rows must not re-fetch its board once
-        per row."""
-        seen = probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
-            {"jobs": [{"id": "aaaaaaaa-0000-0000-0000-000000000000"}]})})
-        for _ in range(4):
-            job_probe.probe_job_open(ASHBY_JOB)
-        assert len(seen) == 1
+        per row, even when the probe pool asks for all of them at once:
+        the memo used to fill only after the first read landed."""
+        from src.net.parallel import fan_out
+        rows = [ASHBY_JOB[:-2] + f"{i:02d}" for i in range(8)]
+        listing = {"jobs": [{"id": rows[0].rsplit("/", 1)[1]}]}
+        seen = probe_http({FAMILY_API[ASHBY_JOB]: lambda url, **kw:
+                           time.sleep(0.2) or fake_response(listing)})
+        verdicts = sorted(o for o, _ in fan_out(rows, job_probe.probe_job_open,
+                                                max_workers=8))
+        assert (len(seen), verdicts) == (1, [False] * 7 + [True])
 
     def test_smartrecruiters_closes_on_the_active_flag(self, probe_http):
         """SmartRecruiters keeps serving a pulled posting at HTTP 200, so

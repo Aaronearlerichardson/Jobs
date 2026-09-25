@@ -10,9 +10,14 @@ Results are returned in input order so callers can process priority
 sources first and keep dedupe deterministic regardless of completion
 """
 
-from concurrent.futures import (FIRST_COMPLETED, ThreadPoolExecutor,
-                                as_completed, wait as fut_wait)
+import sys
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, as_completed
+from concurrent.futures import wait as fut_wait
+from contextlib import contextmanager
 
+from src import config
 from . import http
 from .util import worker_count
 
@@ -26,66 +31,90 @@ DEFAULT_WORKERS = worker_count("crawler_workers")
 RESOLVE_STALL_S = 300.0
 
 
-def drain_or_abandon(ex, futs, consume, stalled):
-    """Drain `futs` ({future: label}) through consume(future, label); if no
-    future completes within RESOLVE_STALL_S, report each remaining label to
-    stalled(label) instead and shut the executor down WITHOUT joining its
-    threads. The one watchdog every discovery pool runs under.
+@contextmanager
+def pool(max_workers, name=""):
+    """A thread pool whose queued work is cancelled however the block ends.
+
+    A return, an exception and Ctrl+C alike: an item that has not started
+    never does, and nothing waits for one that has (tests/test_harvest.py::
+    test_ctrl_c_mid_wait_never_starts_the_queued_work). Every pool is built
+    here (tests/test_invariants.py::POOL_OWNERS).
 
     Notes:
-        The `with ThreadPoolExecutor(...)` form joins every worker on exit,
-        so one wedged resolution (fetch_company_nc on a sprawling "custom
-        board" is bounded per request, not in total) used to hold the web
-        UI's one-op-at-a-time slot until the app was restarted - 2026-08-28:
-        an add-names run finished 59 of 60 names in 8 minutes, then hung
-        >1h on the last. Behavior is enforced by tests/test_parsers.py::
-        TestResolutionStallWatchdog.
+        A running item cannot be interrupted: it runs to its own end on its
+        thread, each request in it bounded by its timeout, and the
+        interpreter's exit waits for it (harvest.py leaves through os._exit
+        instead). `with ThreadPoolExecutor()` joins on the way out, and the
+        stdlib worker runs every QUEUED item before it looks at the
+        shutdown flag; harvest.run and drain_or_abandon cancelled their
+        queue only after a loop that ended normally, so Ctrl+C left the
+        whole queue running (2026-09-17 reresolve log).
     """
+    ex = ThreadPoolExecutor(max_workers=max(1, max_workers),
+                            thread_name_prefix=name)
+    try:
+        yield ex
+    finally:
+        ex.shutdown(wait=False, cancel_futures=True)
+
+
+def _settled(futs, label, abandoned, stall_s=None, budget_s=None):
+    """Each future of `futs` ({future: item}) as it completes, until none
+    completes for `stall_s` or, given `budget_s`, that long has passed.
+    Every one left then is reported as abandoned under label(item) and
+    handed to abandoned(item); the caller's pool cancels the queued ones."""
+    if stall_s is None and budget_s is None:
+        # One waiter for the whole pass: the loop below installs one per
+        # pending future per wait, O(n^2) over a large unbounded fan_out.
+        yield from as_completed(futs)
+        return
+    end = None if budget_s is None else time.monotonic() + budget_s
     pending = set(futs)
     while pending:
-        done, pending = fut_wait(pending, timeout=RESOLVE_STALL_S,
+        wait_s = stall_s if end is None else max(0.0, end - time.monotonic())
+        done, pending = fut_wait(pending, timeout=wait_s,
                                  return_when=FIRST_COMPLETED)
-        if not done:
+        yield from done
+        if not done and (end is None or time.monotonic() >= end):
+            why = (f"no progress in {stall_s:g}s" if end is None
+                   else f"past its {budget_s:g}s budget")
             for fut in pending:
-                n = futs[fut]
-                print(f"    [!] {n}: no progress in {RESOLVE_STALL_S:.0f}s "
-                      f"- abandoned")
-                stalled(n)
-            break
-        for fut in done:
-            consume(fut, futs[fut])
-    ex.shutdown(wait=False, cancel_futures=True)
+                sys.stdout.write(f"    [!] {label(futs[fut])}: {why} - abandoned\n")
+                abandoned(futs[fut])
+            return
 
 
 def drain(items, fn, consume, stalled, label=str,
           max_workers=DEFAULT_WORKERS):
     """`fan_out`'s sibling for work that can WEDGE rather than fail.
 
-    Builds the pool, submits `fn` over `items`, and runs the whole thing
-    under `drain_or_abandon`'s stall watchdog: `consume(future, label)`
-    per completion, `stalled(label)` for anything still unstarted when
-    nothing has completed for RESOLVE_STALL_S.
+    Runs `fn` over `items` in a pool: `consume(future, label)` per
+    completion, on the caller's thread. When nothing completes for
+    RESOLVE_STALL_S, each item left is reported, passed to
+    `stalled(label)` and abandoned (see `pool`).
 
     The choice between this and `fan_out` is whether the work can hang: a
     bounded API call cannot, a company resolution chaining page fetches
     can.
 
     Notes:
-        Six call sites wrote the two-line preamble out (construct the
-        executor, build the {future: label} dict) and then threw the
-        executor away. The hang is real: 2026-08-28 resolved 59 of 60
-        names in 8 minutes, then spent >1h on the last.
+        Only a stall watchdog frees the caller: fetch_company_nc on a
+        sprawling "custom board" is bounded per request, not in total,
+        and 2026-08-28 resolved 59 of 60 names in 8 minutes, then held the
+        web UI's one-op slot >1h on the last. Enforced by
+        tests/test_parsers.py::TestResolutionStallWatchdog.
     """
     items = list(items)
     if not items:
         return
-    ex = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items))))
-    drain_or_abandon(ex, {ex.submit(fn, x): label(x) for x in items},
-                     consume, stalled)
+    with pool(min(max_workers, len(items))) as ex:
+        futs = {ex.submit(fn, x): label(x) for x in items}
+        for fut in _settled(futs, str, stalled, stall_s=RESOLVE_STALL_S):
+            consume(fut, futs[fut])
 
 
 def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
-            with_item=False, on_error=None):
+            with_item=False, on_error=None, budget_s=None, on_abandon=None):
     """Run `fn` over every item in a thread pool; yield what came back.
 
     Results arrive in COMPLETION order, on the caller's thread, so a
@@ -114,22 +143,28 @@ def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     the item itself is the interesting part of the message; `on_error(item,
     exc)` replaces the reporting entirely.
 
-    A consumer may `break` out: whatever has not started is cancelled and
-    the pool is NOT joined, so a caller that has decided to stop (the deep
-    verify's API breaker, say) returns at once rather than waiting out
-    every queued call. `with ThreadPoolExecutor(...)` cannot do that -- its
-    exit always joins -- which is why the one call site that needed to stop
-    early had to reach in and shut the executor down by hand.
+    `budget_s` bounds the whole pass. Past it, each item not yet done is
+    reported abandoned, passed to `on_abandon(item)` and never yielded, so
+    a consumer that writes only what it is handed records nothing for it:
+
+    >>> import threading
+    >>> hung = threading.Event()
+    >>> list(fan_out([1, 0], lambda n: n or hung.wait(), str, budget_s=0.2))
+        [!] 0: past its 0.2s budget - abandoned
+    [1]
+    >>> hung.set()
+
+    A consumer may `break` out; the pool's rule (see `pool`) applies.
     """
     items = list(items)
     if not items:
         return
-    name = label if isinstance(label, str) else "fan"
-    ex = ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(items))),
-                            thread_name_prefix=name)
-    try:
+    what = label if callable(label) else (lambda _item: label)
+    with pool(min(max_workers, len(items)),
+              label if isinstance(label, str) else "fan") as ex:
         futs = {ex.submit(fn, item): item for item in items}
-        for fut in as_completed(futs):
+        for fut in _settled(futs, what, on_abandon or (lambda _item: None),
+                            budget_s=budget_s):
             item = futs[fut]
             try:
                 result = fut.result()
@@ -137,14 +172,9 @@ def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
                 if on_error:
                     on_error(item, e)
                 else:
-                    what = label(item) if callable(label) else label
-                    print(f"    [!] {what} error: {e}")
+                    print(f"    [!] {what(item)} error: {e}")
                 continue
             yield (item, result) if with_item else result
-    finally:
-        # Reached on normal completion (nothing left running, so this is a
-        # no-op) and on a break/throw/close (where it is the point).
-        ex.shutdown(wait=False, cancel_futures=True)
 
 
 def _accounted(thunk):
@@ -156,7 +186,8 @@ def _accounted(thunk):
     return jobs, http.snapshot_info()
 
 
-def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):
+def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
+              budget_s=None):
     """Run every (name, platform, thunk) source concurrently.
 
     Returns a list aligned with `sources`: each element is
@@ -181,15 +212,31 @@ def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):
     >>> fetch_all([("dead", "x", boom)])
     [([], OSError('refused'), None)]
 
+    So is a source still unfinished when `budget_s` (default
+    config.FETCH_BUDGET_S) runs out: it is reported abandoned, and no
+    caller reconciles or closes anything from it.
+
+    >>> import threading
+    >>> hung = threading.Event()
+    >>> fetch_all([("slow", "x", hung.wait)], budget_s=0.2)
+        [!] slow: past its 0.2s budget - abandoned
+    [([], TimeoutError('past its 0.2s budget'), None)]
+    >>> hung.set()
+
     `on_done(name, platform, jobs, error)` fires on the caller's thread
     as each source completes (completion order), for progress output.
     """
+    budget_s = config.FETCH_BUDGET_S if budget_s is None else budget_s
     results = [([], None, None)] * len(sources)
-    with ThreadPoolExecutor(max_workers=max_workers,
-                            thread_name_prefix="fetch") as pool:
-        futures = {pool.submit(_accounted, spec[2]): i
+
+    def _abandon(i):
+        results[i] = ([], TimeoutError(f"past its {budget_s:g}s budget"), None)
+
+    with pool(max_workers, "fetch") as ex:
+        futures = {ex.submit(_accounted, spec[2]): i
                    for i, spec in enumerate(sources)}
-        for fut in as_completed(futures):
+        for fut in _settled(futures, lambda i: sources[i][0], _abandon,
+                            budget_s=budget_s):
             i = futures[fut]
             name, platform, _ = sources[i]
             try:
@@ -200,3 +247,56 @@ def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None):
             if on_done:
                 on_done(name, platform, jobs, err)
     return results
+
+
+class SingleFlight:
+    """A per-key memo that concurrent callers of one key fill ONCE.
+
+    `do(key, make, ttl)` returns the value kept for `key`, else make()'s:
+    a caller arriving while another runs make() for the same key waits
+    for it and reads the value it kept. A value is kept for `ttl` seconds
+    (for good when None), and only when `keep(value)` holds; with nothing
+    kept, each caller runs make() itself, one at a time.
+
+    >>> calls = []
+    >>> memo = SingleFlight(keep=lambda v: v is not None)
+    >>> [memo.do("k", lambda: calls.append(1) or "v") for _ in "ab"], len(calls)
+    (['v', 'v'], 1)
+    >>> [memo.do("n", lambda: calls.append(1)) for _ in "ab"], len(calls)
+    ([None, None], 3)
+
+    `hold(key)` is the lock a maker of `key` holds, for a value kept
+    somewhere else (the board engine's settled handle parts).
+    """
+
+    def __init__(self, keep=None):
+        self._keep = keep
+        self._memo = {}                 # key -> (expires or None, value)
+        self._locks = {}
+        self._guard = threading.Lock()
+
+    def clear(self):
+        """Forget every kept value."""
+        self._memo.clear()
+
+    def hold(self, key):
+        """The lock one maker of `key` holds at a time."""
+        with self._guard:
+            return self._locks.setdefault(key, threading.Lock())
+
+    def _kept(self, key):
+        got = self._memo.get(key)
+        return got if got and (got[0] is None or time.monotonic() < got[0]) else None
+
+    def do(self, key, make, ttl=None):
+        """The value kept for `key`, else make()'s (see the class)."""
+        got = self._kept(key)
+        if got is None:
+            with self.hold(key):
+                got = self._kept(key)
+                if got is None:
+                    value = make()
+                    got = (None if ttl is None else time.monotonic() + ttl, value)
+                    if self._keep is None or self._keep(value):
+                        self._memo[key] = got
+        return got[1]

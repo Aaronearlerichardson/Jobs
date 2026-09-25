@@ -19,7 +19,7 @@ from src import config
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.signatures import detect, pack
-from .fetchpool import ROOT_PATTERNS, candidate_urls
+from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
                        foreign_board)
 from .probes import SCANNED, confirm, slug_keyed
@@ -214,78 +214,3 @@ def diagnose_no_board(name, careers_url=""):
     if any(is_board_page(r.text) for r in safe_hits):
         return "careers-page-no-ats"
     return "site-only-no-careers"
-
-
-# ─── Headless-browser sniffer (JS-rendered careers pages) ────────────────
-
-class JsSniffer:
-    """
-    Headless-browser ATS sniffer for JS-rendered careers pages (Teleflex,
-    Siemens Healthineers, etc.) whose ATS link only appears after JS runs.
-    Reuses one browser across calls. Degrades to no-op if Playwright is
-    missing. Use as a context manager; call from a single thread.
-    """
-
-    def __init__(self):
-        self._pw = self._browser = self._page = None
-        self._ok = True
-
-    def _ensure(self):
-        if self._page or not self._ok:
-            return self._page
-        try:
-            from playwright.sync_api import sync_playwright
-            from src.config import BROWSER_UA
-            from .probes import launch_chromium
-            self._pw = sync_playwright().start()
-            self._browser, _ = launch_chromium(self._pw, headless=True)
-            self._page = self._browser.new_context(
-                user_agent=BROWSER_UA, viewport={"width": 1440, "height": 900},
-                locale="en-US").new_page()
-        except Exception as e:
-            # Same one-shot reporting as the JS scan probe: a missing
-            # browser is one condition, not one per instance.
-            from .probes import _js_launch_hint, _report_js_disabled
-            _report_js_disabled(f"careers-page sniff: {_js_launch_hint(e)}")
-            self._ok = False
-        return self._page
-
-    def sniff(self, name, careers_url=""):
-        page = self._ensure()
-        if not page:
-            return None
-        for url in candidate_urls(name, careers_url):
-            # Fetched by the browser, not the pool, so this one cannot use
-            # candidate_pages -- but the identity check is the same rule.
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=20000)
-            except Exception:
-                continue
-            for _ in range(2):
-                try:
-                    content = page.content()
-                    hit = detect(content, page.url, leads=False)
-                except Exception:
-                    content, hit = "", None
-                if hit:
-                    if not corroborated(url, name, content):
-                        break
-                    return pack(hit[1], hit[2], page.url)
-                try:
-                    page.wait_for_load_state("networkidle", timeout=6000)
-                except Exception:
-                    break
-        return None
-
-    def close(self):
-        for obj in (self._browser, self._pw):
-            try:
-                obj and (obj.close() if obj is self._browser else obj.stop())
-            except Exception:
-                pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *a):
-        self.close()

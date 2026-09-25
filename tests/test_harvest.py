@@ -1,6 +1,7 @@
 """The background harvester and the store changes that let it share the
 file with the crawl and the web UI."""
 
+import signal
 import sqlite3
 import threading
 
@@ -12,7 +13,7 @@ from src import config, store
 from src.claude import api as claude_api
 from src.match import gates
 from src.crawl import harvest
-from src.net import http
+from src.net import http, parallel
 
 
 def _job(i, desc=""):
@@ -599,6 +600,65 @@ def test_run_abandons_a_stalled_board(tmp_path):
                     stall_s=0.0, poll_s=0.1)
     release.set()
     assert s["stalled"] == 1 and s["ok"] == 0
+
+
+def _ctrl_c():
+    """What a console Ctrl+C does: SIGINT to the main thread, which wakes
+    the wait it is blocked in."""
+    if hasattr(signal, "pthread_kill"):
+        signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+    else:
+        signal.raise_signal(signal.SIGINT)
+
+
+@pytest.mark.skipif(signal.getsignal(signal.SIGINT) is not signal.default_int_handler,
+                    reason="SIGINT is not Python's KeyboardInterrupt here")
+@pytest.mark.parametrize("entry", ["harvest.run", "drain", "fan_out", "fetch_all"])
+def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry):
+    """Two items run, blocked, and Ctrl+C lands while the caller waits on
+    them: the six still queued never run. harvest.run and drain_or_abandon
+    used to leave them queued, and the interpreter's exit ran every one
+    (2026-09-17 reresolve log: requests after the KeyboardInterrupt)."""
+    lock, release, both = threading.Lock(), threading.Event(), threading.Barrier(2)
+    started, ran = [], []
+
+    def work(name):
+        with lock:
+            started.append(name)
+            queued = len(started) > 2
+        if queued:
+            ran.append(name)
+        else:
+            if both.wait(5) == 0:
+                _ctrl_c()
+            release.wait(5)
+        return []
+
+    names = [f"Board {i}" for i in range(8)]
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    for n in names:
+        _company(conn, n)
+    conn.close()
+    run = {
+        "harvest.run": lambda: harvest.run(
+            db_path=db, max_workers=2, poll_s=5.0, triage=False,
+            board_fn=make_board_fn(before=lambda c: work(c["name"]))),
+        "drain": lambda: parallel.drain(names, work, lambda f, n: None,
+                                        lambda n: None, max_workers=2),
+        "fan_out": lambda: list(parallel.fan_out(names, work, max_workers=2)),
+        "fetch_all": lambda: parallel.fetch_all(
+            [(n, "x", lambda n=n: work(n)) for n in names], max_workers=2),
+    }[entry]
+    before = set(threading.enumerate())
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            run()
+    finally:
+        release.set()
+        for t in set(threading.enumerate()) - before:
+            t.join(5)
+    assert (len(started), ran) == (2, [])
 
 
 def test_dead_board_status_line_names_the_last_error_and_warns(

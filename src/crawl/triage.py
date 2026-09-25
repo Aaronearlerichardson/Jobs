@@ -507,10 +507,17 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
     n_todo = sum(len(js) for js in todo.values())
     print(f"  hydrating {n_todo} row(s) needing detail across "
           f"{len(todo)} board(s), {max_workers} at a time...")
+
+    def _abandoned(cid):
+        # Nothing stored or stamped: the rows wait for the next pass.
+        for j in todo[cid]:
+            waiting[j["id"]] = "hydration abandoned past the pass budget"
+
     for cid, st in fan_out(
             list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
             lambda cid: f"{companies[cid]['name']}: hydrate",
-            max_workers, with_item=True):
+            max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
+            on_abandon=_abandoned):
         summary["hydrated"] += st.get("hydrated", 0)
         for j in todo[cid]:
             r = survivors[j["id"]][1]
@@ -601,8 +608,12 @@ def _score(final, summary, score_cap, fit, max_workers):
         print(f"  scoring {len(to_score)} survivor(s) against the profile"
               + (f" ({len(over_cap)} over the {score_cap}/pass cap wait "
                  f"for the next pass)" if over_cap else "") + "...")
+        # A row abandoned past the budget waits for the next pass, as a row
+        # over the cap does.
         for r, res in fan_out([x[1] for x in to_score], _score_one,
-                              "scoring", max(2, min(max_workers, 6))):
+                              "scoring", max(2, min(max_workers, 6)),
+                              budget_s=config.PASS_BUDGET_S,
+                              on_abandon=lambda r: over_cap.add(r["job_id"])):
             if res.score is not None:
                 scores[r["job_id"]] = res
                 summary["scored"] += 1

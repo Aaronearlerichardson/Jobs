@@ -55,6 +55,7 @@ from urllib.robotparser import RobotFileParser
 
 from src import config
 from .http import HEADERS
+from .parallel import SingleFlight
 from .util import host_of, origin_of
 
 # How long a parsed robots.txt stays good before we re-fetch it.
@@ -192,13 +193,12 @@ def _is_dns_failure(exc, _depth=6):
 
 
 class _HostRules:
-    __slots__ = ("parser", "group", "fetched_at", "disallow_all", "sitemaps",
+    __slots__ = ("parser", "group", "disallow_all", "sitemaps",
                  "last_request", "lock")
 
     def __init__(self, parser=None, group=None, disallow_all=False, sitemaps=()):
         self.parser = parser          # RobotFileParser: Crawl-delay only
         self.group = group            # _Group: the RFC-compliant matcher
-        self.fetched_at = time.time()
         self.disallow_all = disallow_all
         self.sitemaps = list(sitemaps)
         self.last_request = 0.0
@@ -211,9 +211,7 @@ class RobotsCache:
     def __init__(self, user_agent=None, ttl=CACHE_TTL_SECONDS):
         self.user_agent = user_agent or config.USER_AGENT
         self.ttl = ttl
-        self._hosts = {}
-        self._lock = threading.Lock()     # guards the dicts themselves
-        self._inflight = {}               # origin -> lock, one fetcher per host
+        self._hosts = SingleFlight()      # origin -> _HostRules
 
     # -- internals --------------------------------------------------------
 
@@ -252,34 +250,16 @@ class RobotsCache:
                     if ln.strip().lower().startswith("sitemap:")]
         return _HostRules(parser=parser, group=group, sitemaps=sitemaps)
 
-    def _fresh(self, origin):
-        """The cached rules for `origin` if still within the TTL, else None."""
-        with self._lock:
-            rules = self._hosts.get(origin)
-        return rules if rules and (time.time() - rules.fetched_at) < self.ttl else None
-
     def _rules(self, url):
         origin = origin_of(url)
         if not origin:
             return None
-        rules = self._fresh(origin)
-        if rules:
-            return rules
-        with self._lock:
-            gate = self._inflight.setdefault(origin, threading.Lock())
         # One fetch per origin, even when threads arrive together. A sniff
         # fans ~8 candidate PATHS across the same host at once; without this
         # every one of them missed the still-empty cache and fetched its own
         # copy of robots.txt — 8x the requests, and 8x the wait when the host
         # is one that hangs until the timeout.
-        with gate:
-            rules = self._fresh(origin)            # a waiter's fetch may have landed
-            if rules:
-                return rules
-            fresh = self._fetch(origin)            # outside self._lock: network
-            with self._lock:
-                self._hosts[origin] = fresh
-            return fresh
+        return self._hosts.do(origin, lambda: self._fetch(origin), ttl=self.ttl)
 
     # -- public API -------------------------------------------------------
 

@@ -28,6 +28,8 @@ import src.crawl.runner as _runner                  # noqa: E402
 import src.ats.board.engine as _board             # noqa: E402
 import src.ats.board.closure as _job_probe         # noqa: E402
 import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
+import src.claude.api as _claude                    # noqa: E402
+import src.ops.scoring as _scoring                  # noqa: E402
 from src.net import http as _http                   # noqa: E402
 
 
@@ -44,15 +46,18 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _fresh_run_state(monkeypatch):
     """Per-run memos start empty in every test: both dead-host breakers,
-    discovery's page memo and DNS cache, and the board engine's listing
-    memo and settled handle variants."""
+    discovery's page memo and DNS cache, the board engine's listing memo
+    and settled handle variants, the board-owner verdicts, and the rows a
+    deep verify gave up on."""
     for mod in (_fetchpool, _job_probe):
         old = mod._DEAD_HOSTS
         monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
     monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
     monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
-    monkeypatch.setattr(_board, "_MEMO", {})
     monkeypatch.setattr(_board, "_VARIANTS", {})
+    monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
+    _board._MEMO.clear()
+    _claude._BOARD_OWNER_CACHE.clear()
 
 
 # --------------------------------------------------------------------------- #

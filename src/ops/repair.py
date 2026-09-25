@@ -317,7 +317,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         substitute for that look.
 
         Resolution runs through the same stall watchdog every other bulk
-        resolution path uses (src.net.parallel.drain_or_abandon):
+        resolution path uses (src.net.parallel.drain):
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """

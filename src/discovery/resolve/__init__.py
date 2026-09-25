@@ -6,8 +6,7 @@
                          domain-token guard, the one walk over a company's
                          candidate pages that applies it, and the HQ
                          signal for "in your area at all?"
-    sniffer.py           read the ATS off a careers page (+ a headless
-                         browser fallback for JS-rendered ones)
+    sniffer.py           read the ATS off a careers page
     probes.py            confirm a handle names a live board and count it;
                          and, a layer up, probe a NAME by guessing slugs
                          (or scanning its pages, `discovery.scan`) and

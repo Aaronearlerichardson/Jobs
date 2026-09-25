@@ -5,6 +5,7 @@ import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 
+from src import config
 from src import store
 from src.ats.board import company as company_fetch
 from src.ats.board import closure
@@ -393,8 +394,14 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
         now = datetime.now()
         n_closed = n_live = n_unknown = n_parked = 0
         counts, reasons = defaultdict(Counter), defaultdict(Counter)
-        for r, (is_open, reason) in fan_out(rows, _probe, "probe",
-                                            max_workers, with_item=True):
+        # An abandoned probe is never yielded, so it closes nothing and
+        # records no outcome: the row waits for the next pass as it was.
+        abandoned = []
+        for r, (is_open, reason) in fan_out(
+                rows, _probe,
+                lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",
+                max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
+                on_abandon=abandoned.append):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
             bucket = _probe_label(r["url"])
             reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1
@@ -417,7 +424,9 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
                     print(f"    [give-up] {label} {streak} unverifiable "
                           f"probes; not probing again ({reason})")
         print(f"  {n_closed} closed, {n_live} confirmed live, "
-              f"{n_unknown} unverifiable (left open) of {len(rows)} probed.")
+              f"{n_unknown} unverifiable (left open)"
+              + (f", {len(abandoned)} abandoned (left open)" if abandoned else "")
+              + f" of {len(rows)} probed.")
         for line in _probe_tally_lines(counts, reasons):
             print(line)
         if n_parked:

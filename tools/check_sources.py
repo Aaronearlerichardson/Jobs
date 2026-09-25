@@ -438,10 +438,10 @@ def probe_roster(limit=None, workers=8):
     """Probe every ACTIVE board in the store. This is the practical 404 pass:
     discovery imports leave stale slugs behind, companies get acquired, and
     boards move — all of which show up here as broken."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
     from src import store
     from src.ats.board import BOARDS, board_for
     from src.ats.registry import sweep
+    from src.net.parallel import fan_out
 
     with contextlib.closing(store.connect()) as conn:
         rows = [dict(r) for r in conn.execute(
@@ -480,13 +480,11 @@ def probe_roster(limit=None, workers=8):
     real_stdout = sys.stdout
     sys.stdout = _ThreadCapture(real_stdout)
     try:
-        with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {ex.submit(one, r): r for r in todo}
-            for i, fut in enumerate(as_completed(futs), 1):
-                out.append(fut.result())
-                if i % 25 == 0:
-                    # This thread has no buffer, so it passes through.
-                    print(f"    ...{i}/{len(todo)} boards probed")
+        for i, res in enumerate(fan_out(todo, one, "roster probe", workers), 1):
+            out.append(res)
+            if i % 25 == 0:
+                # This thread has no buffer, so it passes through.
+                print(f"    ...{i}/{len(todo)} boards probed")
     finally:
         sys.stdout = real_stdout
     if skipped:

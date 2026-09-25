@@ -14,6 +14,7 @@ from pydantic import StrictBool, ValidationError
 
 from src import config
 from src.claude.reply import Reply, Unit, choice
+from src.net.parallel import SingleFlight
 
 # A plain pooled session. The crawler's PoliteSession (src.net.http) was
 # used here before, which made core depend on scrapers and consulted
@@ -610,7 +611,9 @@ class BoardOwnerReply(Reply):
     reason: str
 
 
-_BOARD_OWNER_CACHE = {}
+#: Verdicts per (company, board) for the process; concurrent askers of one
+#: pair wait for the first one's paid call. A None is never kept.
+_BOARD_OWNER_CACHE = SingleFlight(keep=lambda verdict: verdict is not None)
 
 
 def board_is_own(company, board, site="", titles=()):
@@ -618,7 +621,7 @@ def board_is_own(company, board, site="", titles=()):
     `company`'s own hiring board? None when the API is unavailable or the
     reply is malformed — callers keep the hit on None (offline behavior
     unchanged) and only reject on a clear False. Verdicts are cached per
-    (company, board) for the process.
+    (company, board) for the process, one call per pair however many ask.
 
     Notes:
         Consulted only for collision-prone resolutions, a board on a
@@ -630,18 +633,15 @@ def board_is_own(company, board, site="", titles=()):
         forever. `titles` (sample postings from the board) is the decisive
         evidence for slug collisions.
     """
+    def ask():
+        user = f"COMPANY: {company}\nBOARD: {board}"
+        if site:
+            user += f"\nBOARD DISPLAY NAME / SITE: {site}"
+        if titles:
+            user += "\nSAMPLE JOB TITLES: " + " | ".join(
+                t for t in list(titles)[:8] if t)
+        r = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
+                             reply=BoardOwnerReply)
+        return None if r is None else r.same_employer
     key = (str(company).lower(), str(board).lower())
-    if key in _BOARD_OWNER_CACHE:
-        return _BOARD_OWNER_CACHE[key]
-    user = f"COMPANY: {company}\nBOARD: {board}"
-    if site:
-        user += f"\nBOARD DISPLAY NAME / SITE: {site}"
-    if titles:
-        user += "\nSAMPLE JOB TITLES: " + " | ".join(
-            t for t in list(titles)[:8] if t)
-    r = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
-                         reply=BoardOwnerReply)
-    if r is None:
-        return None
-    _BOARD_OWNER_CACHE[key] = r.same_employer
-    return r.same_employer
+    return _BOARD_OWNER_CACHE.do(key, ask)

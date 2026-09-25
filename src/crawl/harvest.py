@@ -48,7 +48,7 @@ STALL_S is abandoned rather than allowed to wedge the run.
 import logging
 import threading
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED
 from concurrent.futures import wait as fut_wait
 from contextlib import closing
 from datetime import datetime, timedelta
@@ -62,6 +62,7 @@ from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
+from src.net.parallel import pool
 from src.net.util import worker_count
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
@@ -589,54 +590,53 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
                   f"of {fetched} fetched - board churning")
         _log.debug("board %s stats %s", c.get("name"), s)
 
-    ex = ThreadPoolExecutor(max_workers=max_workers,
-                            thread_name_prefix="harvest")
-    futs = {}
-    for c in boards:
-        cid = c.get("id") or c.get("name")
-        futs[ex.submit(board_fn, c, db_path, progress=_tick(cid),
-                       hydrate=hydrate)] = c
-    pending = set(futs)
-    while pending:
-        done, pending = fut_wait(pending, timeout=poll_s,
-                                 return_when=FIRST_COMPLETED)
-        for fut in done:
-            c = futs[fut]
-            try:
-                s = fut.result()
-            except Exception as e:              # noqa: BLE001 - reported
-                s = {"err": f"{type(e).__name__}: {e}", "fetched": 0,
-                     "new": 0, "hydrated": 0, "closed": 0, "reopened": 0,
-                     "secs": 0.0}
-            _report(c, s)
-            if s["err"]:
-                summary["err"] += 1
-            else:
-                summary["ok"] += 1
-                if _soft_failed(s):
-                    summary["dead"] += 1
-            for k in ("fetched", "new", "hydrated", "closed", "reopened"):
-                summary[k] += s[k]
-        now = time.monotonic()
-        out_of_time = deadline is not None and now >= deadline
-        for fut in list(pending):
-            c = futs[fut]
+    # Abandoned boards keep their thread until the process exits: the pool
+    # never joins them, and cancels the boards not yet started however
+    # this block ends (Ctrl+C included).
+    with pool(max_workers, "harvest") as ex:
+        futs = {}
+        for c in boards:
             cid = c.get("id") or c.get("name")
-            if not fut.running():
-                if out_of_time and fut.cancel():
+            futs[ex.submit(board_fn, c, db_path, progress=_tick(cid),
+                           hydrate=hydrate)] = c
+        pending = set(futs)
+        while pending:
+            done, pending = fut_wait(pending, timeout=poll_s,
+                                     return_when=FIRST_COMPLETED)
+            for fut in done:
+                c = futs[fut]
+                try:
+                    s = fut.result()
+                except Exception as e:              # noqa: BLE001 - reported
+                    s = {"err": f"{type(e).__name__}: {e}", "fetched": 0,
+                         "new": 0, "hydrated": 0, "closed": 0, "reopened": 0,
+                         "secs": 0.0}
+                _report(c, s)
+                if s["err"]:
+                    summary["err"] += 1
+                else:
+                    summary["ok"] += 1
+                    if _soft_failed(s):
+                        summary["dead"] += 1
+                for k in ("fetched", "new", "hydrated", "closed", "reopened"):
+                    summary[k] += s[k]
+            now = time.monotonic()
+            out_of_time = deadline is not None and now >= deadline
+            for fut in list(pending):
+                c = futs[fut]
+                cid = c.get("id") or c.get("name")
+                if not fut.running():
+                    if out_of_time and fut.cancel():
+                        pending.discard(fut)
+                    continue
+                with lock:
+                    started = last_progress.setdefault(cid, now)
+                if out_of_time or now - started > stall_s:
+                    why = ("run out of time" if out_of_time
+                           else f"no progress in {stall_s:.0f}s")
+                    print(f"  [!] {c['name']} ({c['ats']}): {why} - abandoned")
+                    summary["stalled"] += 1
                     pending.discard(fut)
-                continue
-            with lock:
-                started = last_progress.setdefault(cid, now)
-            if out_of_time or now - started > stall_s:
-                why = ("run out of time" if out_of_time
-                       else f"no progress in {stall_s:.0f}s")
-                print(f"  [!] {c['name']} ({c['ats']}): {why} - abandoned")
-                summary["stalled"] += 1
-                pending.discard(fut)
-    # Abandoned boards keep their thread until the process exits; never
-    # join them, or one wedged board holds the whole run hostage.
-    ex.shutdown(wait=False, cancel_futures=True)
 
     summary["secs"] = time.monotonic() - t_start
     skipped = summary["boards"] - summary["ok"] - summary["err"] \

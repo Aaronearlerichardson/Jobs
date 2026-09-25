@@ -83,8 +83,8 @@ def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
     """Run one fallback resolver over `todo`, appending to `hits` (nc>0) or
     `misses` (anything else), under the stall watchdog.
 
-    drain_or_abandon, not a plain pool: one wedged resolution used to hold
-    the web UI's single op slot until the app was restarted.
+    drain, not a plain pool: one wedged resolution used to hold the web
+    UI's single op slot until the app was restarted.
     """
     def _done(fut, n):
         h = fut.result()
@@ -882,7 +882,7 @@ def resolve_leads(max_workers=8,
 
         def _stalled(name):
             # A lead whose domains blackhole becomes a recorded miss, not a
-            # hung command (src.net.parallel.drain_or_abandon).
+            # hung command (src.net.parallel.drain).
             record_miss(conn, name, "fetch-error:stalled",
                         source=by_name[name].get("source"))
 

@@ -315,6 +315,11 @@ def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
 # deep read (Tempus 0.19 -> 0.18, several NVIDIA 0.20-0.22).
 VERIFY_HEAD = 25
 
+# Rows whose deep-verify call had started when a pool abandoned it past
+# config.PASS_BUDGET_S. That paid call may still land on its thread, so this
+# process never asks for them again; they keep their first-pass score.
+_GIVEN_UP = set()
+
 
 def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                force=False):
@@ -365,7 +370,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     done_ids = set()   # verified THIS run: never stale again, even under force
 
     def _stale(r):
-        if r["job_id"] in done_ids:
+        if r["job_id"] in done_ids or r["job_id"] in _GIVEN_UP:
             return False
         if force or not is_deep_verified(r.get("fit_reason")):
             return True
@@ -412,19 +417,27 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                   + f" with {current} (round {rnd + 1}/{rounds}"
                   f"{', forced' if force else ''})...")
 
+            started = set()
+
             def _one(r):
                 # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
                 # verify call hit an exhausted credit balance). A row the API
                 # can no longer score doesn't need its live JD fetched.
                 if api_disabled():
                     return r, None, FitResult(score=None, reason="api disabled")
+                started.add(r["job_id"])
                 text = _live_jd(r)
                 return r, text, verify_fit(r["title"], text,
                                            location=r.get("location") or "")
 
             n_scored = n_crushed = 0
             halted = None
-            for r, text, res in fan_out(todo, _one, "verify", max_workers):
+            abandoned = []
+            for r, text, res in fan_out(
+                    todo, _one,
+                    lambda r: f"verify {r['company_name']}: {(r['title'] or '')[:40]}",
+                    max_workers, budget_s=config.PASS_BUDGET_S,
+                    on_abandon=abandoned.append):
                 if res.score is None:
                     halted = api_disabled()
                     if halted:
@@ -465,6 +478,15 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                 print(f"  [!] deep verify halted: Claude API disabled for this run "
                       f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
                       f"first-pass score")
+                break
+            if abandoned:
+                # A queued row was cancelled, never paid for: the next pass asks.
+                paid = {r["job_id"] for r in abandoned} & started
+                _GIVEN_UP.update(paid)
+                print(f"  [!] deep verify halted: {len(abandoned)} finalist(s) "
+                      f"past the {config.PASS_BUDGET_S:g}s budget keep their "
+                      f"first-pass score; the {len(paid)} whose call had "
+                      f"started are not asked again")
                 break
             # Tripwire: the two passes disagreeing WHOLESALE is a calibration or
             # parsing defect, not information. Stop instead of compounding.

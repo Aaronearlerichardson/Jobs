@@ -340,13 +340,12 @@ def build_command(name=None):
         cmd += [f"--noinclude-custom-mode={p}:error" for p in HARVEST_FORBID]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_LAZY]
         # Ctrl+C in the harvester's console reaches the compiled child as a
-        # KeyboardInterrupt, and harvest.py's clean path then returns from
-        # main() -- which waits on the harvest ThreadPoolExecutor's
-        # non-daemon threads at interpreter exit. An in-flight board fetch
-        # is bounded by config.policy.FETCH_TIMEOUT = (5.0, 25.0), i.e. up
-        # to 30 s of connect + read. The onefile launcher's default grace
-        # time is 5000 ms, so the default hard-killed the child mid-commit.
-        # 35 s clears one whole request with margin.
+        # KeyboardInterrupt: harvest.py cancels the boards not yet started,
+        # closes its session log and leaves through os._exit, never waiting
+        # on a running board. The onefile launcher's default grace time
+        # (5000 ms) hard-killed the child mid-commit back when that exit
+        # still waited on in-flight fetches (config.FETCH_TIMEOUT, up to
+        # 30 s each); 35 s keeps the margin.
         cmd += ["--onefile-child-grace-time=35000"]
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
                 if not src.startswith("src/web/")]
