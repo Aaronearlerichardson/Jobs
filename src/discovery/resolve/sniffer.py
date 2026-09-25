@@ -8,7 +8,7 @@ collisions), fetch the company's likely careers page(s) and detect which ATS
 is embedded, extracting the *exact* slug/tenant/GUID from the embed link.
 
 The pieces it is built from live one layer down and are shared with the
-Workday probes: the signature tables and `detect`/`pack` in
+scanning probes: the signature tables and `detect`/`pack` in
 src.ats.signatures, and the candidate-URL generation, per-run fetch memo
 and identity guards in this package.
 """
@@ -16,11 +16,13 @@ and identity guards in this package.
 import logging
 
 from src import config
+from src.ats import coords
+from src.ats.board import board_for
 from src.ats.signatures import detect, pack
 from .fetchpool import ROOT_PATTERNS, candidate_urls
-from .identity import (_foreign_board, candidate_pages,
-                       candidate_responses, corroborated)
-from .probes import confirm
+from .identity import (candidate_pages, candidate_responses, corroborated,
+                       foreign_board)
+from .probes import SCANNED, confirm, slug_keyed
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.sniffer")
@@ -43,7 +45,7 @@ def _scan_root(name, careers_url=""):
                              cap=None):
         hit = detect(r.text, r.url, leads=False)
         if hit:
-            if hit[1] == "workday" and _foreign_board(name, hit[2]):
+            if foreign_board(name, hit[1], hit[2]):
                 continue
             return pack(hit[1], hit[2], r.url)
     return None
@@ -61,7 +63,7 @@ def sniff_ats(name, careers_url=""):
         n_pages += 1
         hit = detect(r.text, r.url, leads=False)
         if hit:
-            if hit[1] == "workday" and _foreign_board(name, hit[2]):
+            if foreign_board(name, hit[1], hit[2]):
                 hit = None     # keep scanning; the custom fallback may
             else:               # still capture the company's OWN listings
                 _log.debug("sniff %s: %s %r found on %s",
@@ -87,19 +89,39 @@ def sniff_ats(name, careers_url=""):
     return custom
 
 
+def _confirmed(ats, slug, page_url, tried):
+    """A live posting count for a detection on `page_url` (probes.confirm),
+    or None. Asked once per board (`tried` memoizes it), at the careers URL
+    `pack` gives, and only where no other probe counts the board and the
+    detection names it: a SCANNED platform's is probe_scan's to count, and
+    a spec keying its board on a careers URL its `detect` does not rebuild
+    (from the slug or the page) has just the page that carried the
+    signature, which names none."""
+    b = board_for(ats)
+    if not b or ats in SCANNED or not (slug_keyed(b) or b.careers_url(slug, page_url)):
+        return None
+    curl = pack(ats, slug, page_url)["careers_url"]
+    key = (ats, b.handle(coords.columns(ats, slug, curl)))
+    if key not in tried:
+        tried[key] = confirm(ats, slug, curl)
+    return tried[key]
+
+
 def sniff_careers_ats(name, careers_url=""):
-    """Pipeline style: prefer coordinates we can CONFIRM with a live count;
-    otherwise surface the highest-priority detection as a lead."""
+    """Pipeline style: prefer coordinates we can CONFIRM with a live count
+    (`_confirmed`); otherwise surface the highest-priority detection as a
+    lead."""
     lead = None  # first (highest-priority) unconfirmable detection seen
+    tried = {}
     for r in candidate_pages(name, careers_url):
         hit = detect(r.text, r.url)
         if not hit:
             continue
         kind, ats, slug = hit
-        if ats == "workday" and _foreign_board(name, slug):
+        if foreign_board(name, ats, slug):
             continue
-        if kind == "fetchable" and ats != "workday":
-            count = confirm(ats, slug, pack(ats, slug, r.url)["careers_url"])
+        if kind == "fetchable":
+            count = _confirmed(ats, slug, r.url, tried)
             if count is not None:
                 return {"confirmed": True, "ats": ats, "slug": slug,
                         "count": count, "source_url": r.url}
@@ -114,7 +136,7 @@ def sniff_careers_ats(name, careers_url=""):
     root_hit = _scan_root(name, careers_url)
     if root_hit:
         ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
-        count = confirm(ats, slug, root_hit["careers_url"]) if ats != "workday" else None
+        count = _confirmed(ats, slug, root_hit["careers_url"], tried)
         if count is not None:
             return {"confirmed": True, "ats": ats, "slug": slug,
                     "count": count, "source_url": root_hit["careers_url"]}
@@ -223,7 +245,7 @@ class JsSniffer:
                 user_agent=BROWSER_UA, viewport={"width": 1440, "height": 900},
                 locale="en-US").new_page()
         except Exception as e:
-            # Same one-shot reporting as the Workday JS probe — a missing
+            # Same one-shot reporting as the JS scan probe — a missing
             # browser is one condition, not one per instance.
             from .probes import _js_launch_hint, _report_js_disabled
             _report_js_disabled(f"careers-page sniff: {_js_launch_hint(e)}")

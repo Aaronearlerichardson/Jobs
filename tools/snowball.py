@@ -228,14 +228,13 @@ def extract_candidates(text):
 
 # Job-board / aggregator / ATS platform names: these show up constantly in
 # postings ("Apply on LinkedIn", "powered by Greenhouse") but are never the
-# adjacent employer the task is after.
-_AGGREGATORS = {
-    "linkedin", "indeed", "glassdoor", "ziprecruiter", "monster", "handshake",
-    "greenhouse", "lever", "ashby", "workday", "icims", "bamboohr",
-    "smartrecruiters", "jobvite", "taleo", "successfactors", "breezy",
-    "builtin", "wellfound", "angellist", "themuse", "simplyhired",
-    "careerbuilder", "dice", "hired", "getro",
-}
+# adjacent employer the task is after. The ATS vendors are every
+# config.BOARDS spec that detects one; the job sites are the aggregator
+# hosts' names, plus the ones no config lists.
+_AGGREGATORS = ({name for name, spec in config.BOARDS.items() if spec.get("detect")}
+                | {host.split(".")[0] for host in config.AGGREGATOR_HOSTS}
+                | {"handshake", "wellfound", "angellist", "themuse",
+                   "careerbuilder", "hired", "getro"})
 
 # Benefits/insurance/retirement providers: named constantly in the standard
 # "our benefits include..." paragraph, never a partner or parent company.

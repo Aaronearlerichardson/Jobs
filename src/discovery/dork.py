@@ -18,10 +18,12 @@ from src import config
 from src import store
 from src import tags as company_tags
 from src.ats import coords
+from src.ats.board import BOARDS
 from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
 from src.discovery.resolve.identity import nc_hq_signal
+from src.discovery.resolve.probes import BOARD_URL_HOSTS, slug_keyed
 from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 
@@ -76,10 +78,13 @@ def _rotate_terms(terms, group_size, index):
 
 
 def build_dork_queries(rotation=0):
-    """The dork query set for rotation index `rotation`. DDG chokes on long
-    `site:` + big OR-group queries (returns nothing), so the site-scoped
-    dorks use a SHORT locality clause (top few terms of that rotation's
-    slice); the free-text sweep can afford more. `rotation=0` is the
+    """The dork query set for rotation index `rotation`: one `site:` dork
+    per vendor host where a URL names a board (probes.BOARD_URL_HOSTS), a
+    host whose spec sets `discovery.narrow` searched by name with the
+    profile's domain keywords instead, then a free-text sweep. DDG chokes on long `site:` + big OR-group
+    queries (returns nothing), so the site-scoped dorks use a SHORT
+    locality clause (top few terms of that rotation's slice); the
+    free-text sweep can afford more. `rotation=0` is the
     original fixed top-4/top-8 selection; each further index rotates onto
     the next slice of the profile's locality vocabulary (see
     `_rotate_terms`), so successive sweeps explore beyond the same 25
@@ -99,17 +104,9 @@ def build_dork_queries(rotation=0):
     """
     loc_site = _or_group(_rotate_terms(_LOCALITY_TERMS, 4, rotation), n=4)
     loc_wide = _or_group(_rotate_terms(_LOCALITY_TERMS, 8, rotation), n=8)
-    queries = [
-        f'site:boards.greenhouse.io {loc_site}',
-        f'site:job-boards.greenhouse.io {loc_site}',
-        f'site:jobs.lever.co {loc_site}',
-        f'site:jobs.ashbyhq.com {loc_site}',
-        f'site:jobs.smartrecruiters.com {loc_site}',
-        f'site:jobs.jobvite.com {loc_site}',
-        f'site:*.icims.com {loc_site}',
-        f'site:*.bamboohr.com/careers {loc_site}',
-        f'"myworkdayjobs.com" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else ""),
-    ]
+    narrow = {d.host for b in BOARDS.values() if b.spec.discovery.narrow for d in b.spec.detect}
+    queries = [f'"{host}" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else "") if host in narrow
+               else f'site:{host} {loc_site}' for host in BOARD_URL_HOSTS]
     if _CORE:
         # Bullseye sweep — target companies are often on custom boards /
         # non-.com domains that name-guessing misses.
@@ -153,20 +150,22 @@ def extract_boards_from_urls(urls):
     []
 
     Nor is a vendor's own site or an embed/asset path of a board URL form
-    (src.ats.signatures.BAD_SLUGS):
+    (src.ats.signatures.BAD_SLUGS), nor a board keyed on its careers URL,
+    which a slug does not name:
 
     >>> extract_boards_from_urls(["https://www.bamboohr.com/",
-    ...                           "https://boards.greenhouse.io/embed/job_board/js?for=x"])
+    ...                           "https://boards.greenhouse.io/embed/job_board/js?for=x",
+    ...                           "https://unc.peopleadmin.com/postings/123"])
     []
     """
     out, seen = [], set()
     for u in urls:
         hit = detect("", u, leads=False)
         # A lead (Taleo, Eightfold, ...) has no fetchable coordinates, and a
-        # hosted PeopleAdmin tenant is keyed on its careers_url rather than
-        # its slug (src.store.board_key): an (ats, slug) handle for one
-        # would mint a row with no board identity.
-        if not hit or hit[1] == "peopleadmin":
+        # board keyed on its careers URL (src.store.board_key) has no slug:
+        # an (ats, slug) handle for one would mint a row with no board
+        # identity.
+        if not hit or not slug_keyed(BOARDS[hit[1]]):
             continue
         _, ats, slug = hit
         key = (ats, str(slug))
@@ -177,14 +176,10 @@ def extract_boards_from_urls(urls):
 
 
 def _existing_boards(conn):
-    rows = conn.execute("SELECT ats, slug, wd_tenant, wd_pod, wd_site FROM companies").fetchall()
-    have = set()
-    for r in rows:
-        if r["ats"] == "workday" and r["wd_tenant"]:
-            have.add(("workday", str((r["wd_tenant"], r["wd_pod"], r["wd_site"]))))
-        elif r["slug"]:
-            have.add((r["ats"], r["slug"]))
-    return have
+    """The roster's boards, as `store.board_key` names them."""
+    rows = conn.execute("SELECT ats, slug, wd_tenant, wd_pod, wd_site, careers_url "
+                        "FROM companies").fetchall()
+    return {k for k in (store.board_key(dict(r)) for r in rows) if k}
 
 
 def harvest_urls(urls, verbose=True):
@@ -204,16 +199,15 @@ def harvest_urls(urls, verbose=True):
         have = _existing_boards(conn)
         added = 0
         for ats, slug in boards:
-            key = ("workday", str(slug)) if ats == "workday" else (ats, slug)
-            if key in have:
-                continue
             comp = coords.columns(ats, slug)
+            if store.board_key(comp) in have:
+                continue
             try:
                 jobs = company_fetch.fetch_company_nc(comp)
             except Exception:
                 jobs = []
             nc = len(jobs)
-            name = (slug[0] if ats == "workday" else slug).replace("-", " ").title()
+            name = coords.board_slug(comp).replace("-", " ").title()
             # Add even with 0 current NC openings IF we can confirm an NC HQ/office
             # (so a daily run catches their next NC posting) — but not otherwise,
             # else non-NC companies that merely mention NC would pollute the roster.

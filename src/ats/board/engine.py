@@ -53,14 +53,13 @@ import time
 from src import config
 from src.match.locality import location_unknown
 from src.net import http
-from src.net.http import HEADERS, JSON_HEADERS, note_capped
+from src.net.http import HEADERS, JSON_HEADERS
 from src.net.util import (cache_dir, clean_field, default_search_text,
-                          hashed_cache_path, json_cache_get, json_cache_put,
-                          locality_abbr)
+                          hashed_cache_path, json_cache_get, json_cache_put)
 
 from . import decode, fields, pager
 from .pager import page_size, page_vals, postings, scope_failed, total_of
-from .spec import ROW_FIELDS, Listing, ParamScope, parse
+from .spec import ROW_FIELDS, Listing, parse
 
 
 def loc_ok(loc_re, text):
@@ -207,6 +206,9 @@ def adapt(jobs, ats, loc_re=None):
 _NAMED = {"$facets": {}, "$search_text": "", "$area": None,
           "$plain_user_agent": config.PLAIN_USER_AGENT}
 
+#: The report net.http files for a 404 answer (`Board.gone`).
+_HTTP_404 = re.compile(r"\bHTTP 404\b")
+
 #: Listings read for closure and deep verify: (ats, handle) -> (expires, entries).
 _MEMO = {}
 #: The handle parts `handle.try` and `handle.follow` settled on:
@@ -317,8 +319,6 @@ class Board:
         self._listing_fields = _readers(self.listing_spec.fields if self.listing_spec else {})
         self._detail_fields = _readers(self.detail_spec.fields if self.detail_spec else {})
         self._unknown_re = re.compile(rescue.unknown) if rescue else None
-        scope = self.listing_spec.scope if self.listing_spec else None
-        self._located_tpl = scope.located if isinstance(scope, ParamScope) else None
         self._detectors = [_detector(d) for d in spec.detect if d.re]
         self._careers_url = next((d.careers_url for d in spec.detect if d.careers_url), None)
 
@@ -379,10 +379,12 @@ class Board:
                 return tuple(parts) if self.multi_column else self._sep.join(parts)
         return None
 
-    def careers_url(self, slug):
-        """The board's URL rebuilt from a detection's `slug` (the spec's
-        `detect.careers_url`), or None where the spec rebuilds none."""
-        return fields.fmt(self._careers_url, {"slug": slug}.get) if self._careers_url else None
+    def careers_url(self, slug, page=""):
+        """The board's URL rebuilt from a detection's `slug` and the `page`
+        that carried it (the spec's `detect.careers_url`), or None where the
+        spec rebuilds none."""
+        return (fields.fmt(self._careers_url, {"slug": slug, "page": page}.get)
+                if self._careers_url else None)
 
     def _handle_of(self, ref):
         return self._sep.join(ref.get(p, "") for p in self._part_names)
@@ -394,15 +396,18 @@ class Board:
         """(status, payload, error) for one request built from `req` (the
         listing or detail spec) and the handle `parts`; `url`, a served
         next-page URL, replaces the spec's URL and parameters verbatim. A
-        parameter whose value is None is left off. A page whose decoder
-        names another to read in its place (`hop`) is followed, once."""
+        parameter given the applied facets ("$facets") carries the values
+        applied under its own name; one whose value is None is left off. A
+        page whose decoder names another to read in its place (`hop`) is
+        followed, once."""
         dec = req.decoder
         vals = {**_NAMED, **(vals or {})}
         kw = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
                           **_fill(req.headers, parts.get, vals)}}
         if url is None and req.params:
-            kw["params"] = {k: v for k, v in _fill(req.params, parts.get, vals).items()
-                            if v is not None}
+            params = {k: v.get(k) if isinstance(v, dict) else v
+                      for k, v in _fill(req.params, parts.get, vals).items()}
+            kw["params"] = {k: v for k, v in params.items() if v is not None}
         if url is None and req.json_:
             kw["json"] = _fill(req.json_, parts.get, vals)
         if timeout:
@@ -498,11 +503,12 @@ class Board:
         return f"{self.name} {company_name or handle}"
 
     def _walk(self, handle, label=None, cheap=False, size=None, pages=None, vals=None,
-              scoped=False):
+              scoped=False, first=False):
         """(rows, total) from the first listing alternative whose walk
-        (`_walk_listing`) yields a posting, else the last one's answer."""
+        (`_walk_listing`) yields a posting, else the last one's answer; only
+        the first alternative's when `first`."""
         got = None, None
-        for spec, row in zip(self._listings, self._rows):
+        for spec, row in list(zip(self._listings, self._rows))[:1 if first else None]:
             got = self._walk_listing(spec, row, handle, label, cheap, size, pages, vals, scoped)
             if postings(got[0]):
                 break
@@ -535,9 +541,9 @@ class Board:
         the rescue runs on every pull, filled from at most `rescue_cap`
         details (default the rescue's cap); [] when the listing failed
         (reported under `label` when given). A `cheap` read spends no
-        detail read unless the rescue fills the rows' titles."""
+        detail read."""
         rows = self._walk(handle, label, cheap)[0] or []
-        if cheap and not (self._always and "title" in self._rescue_spec.fields):
+        if cheap:
             return rows
         return self._rescue_all(rows, label, rescue_cap)
 
@@ -581,67 +587,35 @@ class Board:
 
     def _pull(self, handle, label, loc_re=None, pages=None):
         """The board's rows in `loc_re`'s area (all of them when None). A
-        facets `scope` narrows the listing server-side and keeps the rows
-        its rescue shows in the area (`_rescue`); a scope the board ignored
-        (`pager.scope_failed`) keeps listed and free-text matches only. A
-        param scope asks the first listing once (`_scoped_walk`), the whole
-        listing read instead when that lists no posting. Otherwise the
-        whole listing; then an "always" rescue, and the area filter
-        (`_in_area`)."""
+        facets `scope` narrows the listing server-side (the first
+        alternative only, where the facets vouch) and keeps the rows its
+        rescue shows in the area (`_rescue`); a scope the board ignored
+        (`pager.scope_failed`) keeps listed and free-text matches only.
+        Otherwise the whole listing; then an "always" rescue, and the area
+        filter (`_in_area`)."""
         scope = self.listing_spec.scope
-        if loc_re is not None and scope and scope.kind == "facets":
+        if loc_re is not None and scope:
             vals, vouched, board_total = self._scope(handle, loc_re)
-            rows, total = self._walk(handle, label, pages=pages, vals=vals, scoped=True)
-            cap = self._pager.size * (pages or self._pager.pages)
+            rows, total = self._walk(handle, label, pages=pages, vals=vals, scoped=True,
+                                     first=vouched)
+            cap = page_size(self._pager) * (pages or self._pager.pages)
             fetch = not scope_failed(total, board_total, cap)
             if not fetch:
                 print(f"    [!] {label}: locality scope came back unnarrowed ({total} of "
                       f"{board_total or '?'} postings) - keeping listed-location matches "
                       f"only, no detail rescue")
             return self._rescue(rows or [], loc_re, vouched, fetch, label)
-        rows = (self._scoped_walk(handle, label, scope)
-                if loc_re is not None and scope and scope.kind == "param" else None)
-        if rows is None:
-            rows = self._walk(handle, label, pages=pages, vals={"$area": loc_re})[0] or []
+        rows = self._walk(handle, label, pages=pages, vals={"$area": loc_re})[0] or []
         return [r for r in self._rescue_all(rows, label) if self._in_area(r, loc_re)]
-
-    def _scoped_walk(self, handle, label, scope):
-        """The rows of one unpaged request of the first listing asked with
-        the param `scope`'s `params` in place of its own, each naming no
-        place taking the scope's `located`; None when a param fills empty
-        or the answer lists no posting, [] when it failed (reported)."""
-        vals = {**_NAMED, "$locality_abbr": locality_abbr()}
-        if not all(_fill(scope.params, {}.get, vals).values()):
-            return None
-        spec = self.listing_spec.model_copy(update={"params": scope.params, "pager": None})
-        rows = self._walk_listing(spec, self._rows[0], handle, label, vals=vals)[0]
-        if rows is None or not postings(rows):
-            return [] if rows is None else None
-        here = self._located()
-        for r in rows:
-            r["location"] = r["location"] or here
-        return rows
 
     def _in_area(self, row, loc_re):
         """Whether `row` passes `loc_re` (every row passes None): on its
         location, cleaned; one naming no place by the spec's `unlocated`
-        rule ("drop", "keep", or "title": on its title)."""
+        rule ("drop" or "keep")."""
         loc = clean_field(row.get("location"))
         if loc or loc_re is None:
             return loc_ok(loc_re, loc)
-        how = self.spec.unlocated
-        return how == "keep" or how == "title" and loc_ok(loc_re, clean_field(row.get("title")))
-
-    def _located(self):
-        """The location a param scope gives a row naming none; "" when none."""
-        located = self._located_tpl
-        return _fill(located, {}.get, {"$locality_abbr": locality_abbr()}) if located else ""
-
-    def _unknown(self, location):
-        """Whether `location` names no place (`location_unknown`), or only
-        the `_located` label a param scope gave a row that named none."""
-        label = self._located()
-        return location_unknown(location) or bool(label) and (location or "").strip() == label
+        return self.spec.unlocated == "keep"
 
     def _rescue(self, rows, loc_re, vouched, fetch, label, cap=None):
         """The rows in `loc_re`'s area, each carrying the location that
@@ -651,14 +625,13 @@ class Board:
         most `cap` reads (default `rescue.cap`). Past the cap such a row
         stays on its listed text when the scope `vouched` for it, else it
         is dropped. A listed location that passes but matches `unknown` is
-        expanded too, within the cap; where the rescue fills a row's title,
-        one left past the cap is no posting, and the snapshot is noted
-        capped. A labelled pull says when the budget ran out."""
+        expanded too, within the cap, and kept on its listed text past it.
+        A labelled pull says when the budget ran out."""
         unknown = self._unknown_re if fetch else None
         rescue = self._rescue_spec
         fill = rescue.fields if rescue else ()
         cap = (rescue.cap if rescue else 0) if cap is None else cap
-        spent, left, out = 0, 0, []
+        spent, out = 0, []
         for row in rows:
             listed, free = row.get("location") or "", row.get("_free") or ""
             vague = bool(unknown and unknown.search(listed) and self.owns_url(row.get("url")))
@@ -666,8 +639,6 @@ class Board:
                 if vague and spent < cap:
                     spent += 1
                     self._rescued(row, fill)
-                elif vague:
-                    left += 1
             elif loc_ok(loc_re, free):
                 row["location"] = f"{free} ({listed})" if listed else free
             elif not vague or (spent >= cap and not vouched):
@@ -681,9 +652,7 @@ class Board:
         if unknown and spent >= cap and label:
             print(f"    [!] {label}: {'location ' if fill == ('location',) else ''}detail "
                   f"budget ({cap}) spent; later rows "
-                  f"{'kept unexpanded' if vouched else 'dropped'}")
-            if left and "title" in fill:
-                note_capped(len(rows))
+                  f"{'kept unexpanded' if vouched or loc_re is None else 'dropped'}")
         return out
 
     def _rescued(self, row, fill):
@@ -774,19 +743,35 @@ class Board:
         n = sum(1 for r in rows or [] if r["id"] is not None)
         return rows is not None, total if total is not None else n
 
+    def gone(self, error):
+        """Whether `error`, a failed listing read's report, proves the board
+        does not exist: an HTTP 404 on a `prunable` spec.
+
+        Notes:
+            Greenhouse harvard and cognitotherapeutics 404'd in the
+            2026-09-22 harvest and in both web-UI crawls after it, each a
+            live GET the three-day grace (store.HARVEST_DEAD_AFTER_DAYS)
+            would have kept spending. Workday is not prunable: its tenants
+            404 transiently.
+        """
+        return self.spec.prunable and bool(_HTTP_404.search(error or ""))
+
     def local_count(self, handle, loc_re):
         """Postings on the board in `loc_re`'s area. Where the spec scopes,
-        the scoped total, unless the board ignored the scope; then, and on
-        every other spec, the rows of a cheap read (LOCAL_COUNT_SAMPLE_PAGES
-        pages of a scoped spec) whose listed location or free text passes.
-        0 when the board is unreadable."""
+        the scoped total (where the facets vouch but the board reports none,
+        the postings on the first scoped page), unless the board ignored the
+        scope; then, and on every other spec, the rows of a cheap read
+        (LOCAL_COUNT_SAMPLE_PAGES pages of a scoped spec) whose listed
+        location or free text passes. 0 when the board is unreadable."""
         pages, scope = None, self.listing_spec.scope
-        if scope and scope.kind == "facets":
-            vals, _vouched, board_total = self._scope(handle, loc_re, config.PROBE_TIMEOUT)
-            rows, total = self._walk(handle, cheap=True, size=1, vals=vals)
+        if scope:
+            vals, vouched, board_total = self._scope(handle, loc_re, config.PROBE_TIMEOUT)
+            rows, total = self._walk(handle, cheap=True, size=1, vals=vals, first=vouched)
             if rows is None:
                 return 0
-            if not scope_failed(total, board_total, self._pager.size * self._pager.pages):
+            if total is None and vouched:
+                return sum(1 for r in rows if r["id"] is not None)
+            if not scope_failed(total, board_total, page_size(self._pager) * self._pager.pages):
                 return total or 0
             pages = config.LOCAL_COUNT_SAMPLE_PAGES
         rows = self._walk(handle, cheap=True, pages=pages)[0] or []
@@ -887,7 +872,7 @@ class Board:
         for the row's URL."""
         if not job.get("description"):
             return True
-        return (self.fills_location and self._unknown(job.get("location"))
+        return (self.fills_location and location_unknown(job.get("location"))
                 and self.owns_url(job.get("url")))
 
     def hydrate(self, job, company=None):
@@ -912,7 +897,7 @@ class Board:
     def _apply(self, job, rec, fs, ctx):
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",
-        "if_unknown": `_unknown`, or "never", the default); a remote hint and
+        "if_unknown": `location_unknown`, or "never", the default); a remote hint and
         a posting date it lacks. Only the body is read off a listing entry
         (a platform with no detail)."""
         desc = fs["description"](rec, ctx)
@@ -923,7 +908,7 @@ class Board:
         policy = self.detail_spec.location
         loc = fs["location"](rec, ctx)
         if loc and (policy == "always"
-                    or policy == "if_unknown" and self._unknown(job.get("location"))):
+                    or policy == "if_unknown" and location_unknown(job.get("location"))):
             job["location"] = loc
         hint = fs["remote_hint"](rec, ctx)
         if hint and not job.get("remote_hint"):

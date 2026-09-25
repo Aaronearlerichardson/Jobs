@@ -4,15 +4,17 @@ discovery path applies to a detection before trusting it.
 Two failure shapes, both seen in real runs: a candidate URL built from a
 truncated or generic domain token reached an unrelated company's site
 (`_risky_token_in_url` / `_corroborates`), and a careers page linked a
-parent conglomerate's shared Workday tenant (`_tenant_affinity` /
-`_foreign_board`). Shared by the sniffer, the Workday probes and the
-web-search resolver, so it depends on nothing in this package.
+parent conglomerate's shared board (`_affinity` / `foreign_board`, on the
+platforms whose spec sets `discovery.shared`). Shared by the sniffer, the
+scanning probes and the web-search resolver, so it depends on nothing in
+this package.
 """
 
 import re
 import sys
 
 from src import config
+from src.ats.board import BOARDS
 from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net.http import HEADERS, SESSION
@@ -89,41 +91,46 @@ def _corroborates(text, name, skip_token=""):
     return any(w in blob for w in words)
 
 
-# Tokens that appear in tenant/site strings for structural reasons and say
+# Tokens that appear in a handle's parts for structural reasons and say
 # nothing about WHOSE board it is.
 _BOARD_GENERIC = {"jobs", "job", "careers", "career", "external", "site",
                   "portal", "search", "global", "en", "us", "www", "com"}
 _NAME_GENERIC = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
                  "the", "and", "of", "gmbh", "ag", "sa"}
 
-# (name, tenant) pairs whose foreign-board verdict was already printed this
+# (name, ats, board) whose foreign-board verdict was already printed this
 # process — the verdicts themselves are cached in src.claude.
 _FOREIGN_ANNOUNCED = set()
 
 
-def _tenant_affinity(name, triple):
-    """True if a sniffed Workday (tenant, pod, site) shares an identity
-    token with the company name — tenant OR site, either direction, or a
-    4+-char shared prefix (tenants abbreviate: 'vhr-unither').
+def _words(parts):
+    """A handle's parts that can name an employer: the numeric ones (a
+    server pod) dropped."""
+    return [str(p) for p in parts if p is not None and not str(p).isdigit()]
 
-    >>> _tenant_affinity("KBI Biopharma", ("jsrglobal", 1, "KBI_Biopharma"))
+
+def _affinity(name, parts):
+    """True if a detected handle's `parts` share an identity token with the
+    company name — any part, either direction, or a 4+-char shared prefix
+    (tenants abbreviate: 'vhr-unither').
+
+    >>> _affinity("KBI Biopharma", ("jsrglobal", 1, "KBI_Biopharma"))
     True
-    >>> _tenant_affinity("Bioventus", ("osv-bioventus", 501, "External"))
+    >>> _affinity("Bioventus", ("osv-bioventus", 501, "External"))
     True
-    >>> _tenant_affinity("United Therapeutics", ("vhr-unither", 5, "External"))
+    >>> _affinity("United Therapeutics", ("vhr-unither", 5, "External"))
     True
 
     No affinity does NOT mean wrong — Merck & Co. really posts on tenant
     'msd' — it means "cannot be confirmed from the strings alone", which is
-    what routes the hit to _foreign_board's LLM check:
+    what routes the hit to foreign_board's LLM check:
 
-    >>> _tenant_affinity("Genedata", ("danaher", 1, "DanaherJobs"))
+    >>> _affinity("Genedata", ("danaher", 1, "DanaherJobs"))
     False
-    >>> _tenant_affinity("Merck & Co.", ("msd", 5, "SearchJobs"))
+    >>> _affinity("Merck & Co.", ("msd", 5, "SearchJobs"))
     False
     """
-    tenant, _, site = triple
-    board = f"{tenant} {re.sub(r'([a-z])([A-Z])', r'\\1 \\2', str(site))}"
+    board = " ".join(re.sub(r'([a-z])([A-Z])', r'\1 \2', w) for w in _words(parts))
     board_toks = [t for t in re.findall(r"[a-z0-9]+", board.lower())
                   if len(t) >= 3 and t not in _BOARD_GENERIC]
     name_words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
@@ -143,11 +150,12 @@ def _tenant_affinity(name, triple):
     return False
 
 
-def _foreign_board(name, triple):
-    """True when a sniffed Workday triple should NOT be attributed to
-    `name`: the strings share no identity token AND the LLM judges the
-    tenant to be another employer's (typically a parent conglomerate's
-    shared board).
+def foreign_board(name, ats, handle):
+    """True when `handle`, a board of `ats` detected for `name`, should NOT
+    be attributed to it: `ats`'s spec says a board can be a parent
+    company's (`discovery.shared`), the handle's parts share no identity
+    token with the name, AND the LLM judges it another employer's. The one
+    check every resolver step applies to a detection.
 
     Notes:
         Genedata's careers page legitimately links to Danaher's
@@ -159,28 +167,33 @@ def _foreign_board(name, triple):
         offline behavior — with no API key the verdict is unknown and the
         hit is kept, flagged in the log for a human glance).
     """
-    if _tenant_affinity(name, triple):
+    board = BOARDS.get(ats)
+    if not (board and board.spec.discovery.shared):
+        return False
+    words = _words(handle if isinstance(handle, (tuple, list))
+                   else str(handle).split(board.spec.handle.sep))
+    if not words or _affinity(name, words):
         return False
     from src.claude.api import board_is_own
-    own = board_is_own(name, triple[0], triple[2])
+    own = board_is_own(name, words[0], " ".join(words[1:]))
     # Announce each (name, board) verdict ONCE — the sniff scans many
     # candidate URLs that embed the same board link, and the 2026-08-28
     # discover log repeated the same skip line 3x per company. Single write,
     # not print(): this runs on sniff worker threads, and print()'s separate
     # text/newline writes let another thread splice its line into this one.
-    key = (name, triple[0])
+    key = (name, ats, words[0])
     if own is False:
         if key not in _FOREIGN_ANNOUNCED:
             _FOREIGN_ANNOUNCED.add(key)
             sys.stdout.write(
-                f"    [!] {name}: sniffed Workday board {triple[0]}/"
-                f"{triple[2]} belongs to another employer (parent/shared "
-                f"board) - skipped\n")
+                f"    [!] {name}: sniffed {ats} board {'/'.join(words)} "
+                f"belongs to another employer (parent/shared board) - "
+                f"skipped\n")
         return True
     if own is None and key not in _FOREIGN_ANNOUNCED:
         _FOREIGN_ANNOUNCED.add(key)
         sys.stdout.write(
-            f"    [?] {name}: Workday tenant {triple[0]!r} shares no token "
+            f"    [?] {name}: {ats} board {words[0]!r} shares no token "
             f"with the name and can't be verified offline - keeping; worth "
             f"a human glance\n")
     return False
@@ -197,7 +210,7 @@ def _foreign_board(name, triple):
 # did not answer, and skip the ones reached only through a risky domain
 # token that the page does not corroborate.
 #
-# They had already come apart. probe_workday built and scanned its own
+# They had already come apart. The Workday probe built and scanned its own
 # list with neither the corroboration check nor the foreign-board check,
 # so a hit the sniffer rejected was accepted there; the docstring saying
 # "Same guards on both paths now" is the repair, made by hand, that this

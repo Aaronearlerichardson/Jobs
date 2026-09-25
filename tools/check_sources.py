@@ -440,7 +440,7 @@ def probe_roster(limit=None, workers=8):
     boards move — all of which show up here as broken."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from src import store
-    from src.ats.board import board_for
+    from src.ats.board import BOARDS, board_for
     from src.ats.registry import sweep
 
     with contextlib.closing(store.connect()) as conn:
@@ -448,13 +448,14 @@ def probe_roster(limit=None, workers=8):
             "SELECT name, ats, slug, careers_url, wd_tenant, wd_pod, wd_site "
             "FROM companies WHERE active=1 AND ats IS NOT NULL ORDER BY name")]
 
-    # Paginating platforms would walk thousands of postings to prove one
-    # endpoint is alive. The single-request ATSes are the ones worth probing
-    # in bulk; the rest are covered by check_boards.py's per-platform canary.
-    cheap = {"greenhouse", "lever", "ashby", "bamboohr", "jazzhr", "kula",
-             "rippling", "adp", "smartrecruiters"}
+    # Probed in bulk: the platforms whose spec sets `sweep`, cheap boards
+    # the lightweight sweep pulls whole anyway. The rest would page through
+    # thousands of postings to prove one endpoint is alive; they are covered
+    # by check_boards.py's per-platform canary.
+    cheap = {b.name for b in BOARDS.values() if b.spec.sweep}
     todo = [r for r in rows if r["ats"] in cheap][:limit]
     skipped = len(rows) - len(todo)
+    paged = "/".join(sorted({r["ats"] for r in rows} - cheap))
 
     def one(row):
         board = board_for(row["ats"])
@@ -490,7 +491,7 @@ def probe_roster(limit=None, workers=8):
         sys.stdout = real_stdout
     if skipped:
         out.append({"section": "roster", "name": f"({skipped} paginating boards)",
-                    "ats": "workday/sf/ultipro/...", "status": SKIPPED,
+                    "ats": paged, "status": SKIPPED,
                     "detail": "not bulk-probed; see tools/check_boards.py",
                     "seconds": 0.0})
     return out

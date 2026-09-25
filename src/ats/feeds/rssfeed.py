@@ -12,10 +12,8 @@ WeWorkRemotely feeds:
 
 import re
 
-from bs4 import BeautifulSoup
-
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import stable_id, strip_html
+from src.net.util import parse_markup, stable_id, strip_html
 
 # WWR titles take either shape:
 #   "Company Name: Role Title"            (current convention)
@@ -76,8 +74,7 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
     except Exception as e:
         return fetch_failed(f"RSS {source_label}", e)
 
-    # Use the xml parser; lxml is already a dep for sitemap.
-    soup = BeautifulSoup(r.content, "xml")
+    soup = parse_markup(r.content, xml=True)
     items = soup.find_all("item") or soup.find_all("entry")
     jobs = []
     for it in items[:max_items]:

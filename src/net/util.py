@@ -73,13 +73,6 @@ def default_search_text():
     return max(places, key=len) if places else ""
 
 
-def locality_abbr():
-    """The profile's first [locality] state suffix, upper-cased ("NC"): a
-    search term for a board that parses a state code. "" when none is
-    configured."""
-    return (config.LOCALITY_STATE_SUFFIX or [""])[0].upper()
-
-
 def worker_count(setting, floor=4):
     """Thread-pool size: config.SETTINGS.<setting> (the CRAWLER_WORKERS,
     DISCOVERY_WORKERS or HARVEST_WORKERS variable) when set, else
@@ -171,6 +164,22 @@ def strip_html(s):
     if not s:
         return ""
     return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(str(s)))).strip()
+
+
+def parse_markup(markup, xml=False):
+    """`markup` (str or bytes) as a BeautifulSoup tree: lxml's HTML parser,
+    or its XML parser when `xml` (a feed: HTML reads <link> as a void tag
+    and loses its URL). The one parser choice in src/.
+
+    >>> parse_markup("<rss><item><link>https://x.test/1</link></item></rss>", xml=True).link.text
+    'https://x.test/1'
+
+    Notes:
+        bs4 is imported here, not at module level: it costs about 170 ms,
+        and most importers of this module never parse markup.
+    """
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(markup, "xml" if xml else "lxml")
 
 
 def clean_field(text):

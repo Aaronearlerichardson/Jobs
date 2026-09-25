@@ -169,7 +169,7 @@ def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
             pass
 
     monkeypatch.setattr(probes, "JS_PROBE_BUDGET_S", 0.1)
-    with probes.WorkdayJsProbe() as js:
+    with probes.JsScanProbe() as js:
         monkeypatch.setattr(js, "_ensure_page", HungPage)
         stuck = js._executor
         t0 = time.monotonic()

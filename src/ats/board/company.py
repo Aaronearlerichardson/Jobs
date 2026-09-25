@@ -21,12 +21,10 @@ behind the `custom` spec is board/custom.py.
 import re
 from urllib.parse import unquote
 
-from bs4 import BeautifulSoup
-
 from src import config
 from src.match.locality import NC_RE  # profile [locality]
 from src.net.http import HEADERS, PLAIN_HEADERS, SESSION
-from src.net.util import clean_field
+from src.net.util import clean_field, parse_markup
 from .engine import board_for, board_for_url
 from . import jsonld
 
@@ -125,7 +123,7 @@ def job_page_meta(url):
     if title and desc:
         return title, desc
     try:
-        soup = BeautifulSoup(html, "lxml")
+        soup = parse_markup(html)
         if not title:
             og = soup.find("meta", attrs={"property": "og:title"})
             raw = (og.get("content") if og else "") or \

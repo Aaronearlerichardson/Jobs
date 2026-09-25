@@ -3,9 +3,9 @@
 `BOARDS[ats]` says how a store row names a board, how its listing is read
 and mapped to rows, how one posting is read back, and how a posting's
 closure is judged. The engine that reads it is `src.ats.board` (its
-schema the models in `src.ats.board.spec`, where each key's meaning and
-default are declared); outside them, only
-tests/test_boards_spec.py's NAMED_PLATFORMS may name a platform in `src/`.
+default the models in `src.ats.board.spec`, where each key's meaning and
+default are declared); outside them, no module in `src/` names a platform
+(tests/test_boards_spec.py).
 
 The literal is JSON-compatible on purpose (str, int, float, bool, None,
 list, dict; regexes as strings): tests/test_invariants.py pins
@@ -398,6 +398,10 @@ BOARDS = {
                     "blocklist": ["wday", "cxs", "api", "static", "assets", "login"]}],
         "canary": {"name": "ThermoFisher Scientific IT",
                    "handle": "thermofisher|5|ThermoFisherCareers"},
+        # A (tenant, pod, site) triple no name guess reaches; a parent's
+        # tenant can list its subsidiaries' postings (Danaher's, Genedata's);
+        # the host serves most large employers.
+        "discovery": {"scan": True, "shared": True, "narrow": True},
         # Not in the lightweight sweep: boards run to thousands of rows and
         # are pulled scoped to the locality.
         "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
@@ -538,26 +542,29 @@ BOARDS = {
                     "parts": ["link", "slug", "jid"]},
         "listing": {
             "url": "https://{slug}.applytojob.com/",
-            "decoder": {"kind": "html", "select": "a[href*='/apply/']"},
+            "decoder": {"kind": "html", "select": "a[href*='/apply/']", "context": ["li"],
+                        "cells": {"location": "li:has(.fa-map-marker)"}},
             "fields": {
                 "_path": {"of": "href", "transform": "group:(/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+)"},
-                "id": {"format": "{_path}"},
-                "url": {"format": "https://{slug}.applytojob.com{_path}"},
+                "_url": {"format": "https://{slug}.applytojob.com{_path}"},
+                # The key a posting's JSON-LD gives it: none names an
+                # identifier, so its URL's.
+                "_key": {"of": "_url", "transform": "stable_id"},
+                "id": {"format": "jsonld_{slug}_{_key}", "when": {"truthy": "_path"}},
+                "title": {"of": "text", "when": {"truthy": "_path"}},
+                "url": "_url",
+                "location": "location",
                 "department": None,
             },
         },
-        # Every row is its posting page's JSON-LD, 60 pages a pull.
-        "rescue": {"when": "always", "unknown": "^$", "cap": 60,
-                   "fields": ["id", "title", "url", "location", "description",
-                              "posted_at", "remote_hint"],
-                   "why": "the index links each posting's page and names nothing else, 2026-06"},
+        # Each posting page's JSON-LD, where it carries one, 60 pages a pull.
+        "rescue": {"when": "always", "unknown": "", "cap": 60,
+                   "fields": ["location", "description", "posted_at", "remote_hint"],
+                   "why": "the index names no body or date; a posting's JSON-LD does, 2026-09"},
         "detail": {
             "url": "{link}",
             "decoder": {"kind": "jsonld"},
             "fields": {
-                "id": {"format": "jsonld_{slug}_{key}"},
-                "title": "title",
-                "url": "url",
                 "location": {"of": "location", "default": "Unknown"},
                 "description": "description",
                 "posted_at": "posted_at",
@@ -635,8 +642,11 @@ BOARDS = {
         },
     },
     "successfactors": {
+        # A signature names the vendor's asset host; the board is the site
+        # that carried it.
         "detect": [{"host": "successfactors.",
-                    "re": [r"(?i)([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)"]},
+                    "re": [r"(?i)([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)"],
+                    "careers_url": "{page|origin}"},
                    {"host": "sapsf."}],
         "canary": {"name": "Duke University", "handle": "https://careers.duke.edu"},
         # The board is the careers site itself, keyed on its URL.
@@ -649,16 +659,21 @@ BOARDS = {
                         "cells": {"cell": "[class*='jobLocation']"}, "base": "{base}"},
             # The standard theme's "Results 1 - 25 of 621"; a custom skin
             # may render none. A repeated page ends the walk: some tenants
-            # wrap back to earlier rows instead of running dry.
-            "pager": {"kind": "offset", "size": 25, "pages": 80,
+            # wrap back to earlier rows instead of running dry. No size: a
+            # tenant serves 10, 25 or 100 rows a page, its own choice.
+            "pager": {"kind": "offset", "pages": 80,
                       "total": {"of": {"of": "page", "transform": "group:(?s)class=\"paginationLabel\""
                                                                   "[^>]*>.*?of\\s*<b>\\s*([\\d,]+)\\s*</b>"},
                                 "transform": "int"}},
             "fields": {
-                # The /job/ slug can lead with "<City>,-<ST>-", spaces as hyphens.
+                # The /job/ slug can lead with "<City>,-<ST>-", spaces as
+                # hyphens, just ahead of the title's first word; a ",-XX-"
+                # inside a title is no place.
                 "_path": {"of": "url", "transform": "unquote"},
-                "_city": {"of": "_path", "transform": "group:/job/(.+?),-[A-Z]{2}-"},
-                "_state": {"of": "_path", "transform": "group:/job/.+?,-([A-Z]{2})-"},
+                "_city": {"of": "_path", "transform": "group:/job/([^/,]+?),-[A-Z]{2}-"},
+                "_state": {"of": "_path", "transform": "group:/job/[^/,]+?,-([A-Z]{2})-"},
+                "_word": {"of": "text", "transform": "group:(\\w+)"},
+                "_lead": {"format": ",-{_state}-{_word}"},
                 "_jid": {"first": [{"of": "url", "transform": "group:/job/[^/]+/(\\d+)"},
                                    {"of": "url", "transform": "group:/job/([^/?#]+)"},
                                    {"of": "url", "transform": "stable_id"}]},
@@ -669,7 +684,8 @@ BOARDS = {
                 # Else the theme's location cell, else a place in the row's
                 # text; either can carry a glued-on posting date.
                 "location": {"first": [
-                    {"format": "{_city|dash_space}, {_state}", "when": {"truthy": "_city"}},
+                    {"format": "{_city|dash_space}, {_state}",
+                     "when": {"contains": ["_path", "$_lead"]}},
                     {"of": {"first": ["cell", {"of": "context", "transform": "snippet"}]},
                      "transform": "cut_date_tail"}]},
                 "department": None,
@@ -680,28 +696,28 @@ BOARDS = {
         "detect": [{"host": "icims.com", "re": [r"(?i)([a-z0-9-]+)\.icims\.com"]}],
         "canary": {"name": "FUJIFILM Healthcare Americas Corporation",
                    "handle": "uscareers-fujifilm"},
-        # A row naming no place is kept by a location filter its title passes.
-        "unlocated": "title",
         "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
                     "parts": ["link"]},
         "listing": [
             {
                 "url": "https://{slug}.icims.com/jobs/search?ss=1&in_iframe=1",
-                "params": {"pr": "$page"},
+                "params": {"pr": "$page", "searchLocation": "$facets"},
                 # The WAF 405s a Chrome UA arriving without Chrome's client
                 # hints; a bare platform UA passes.
                 "headers": {"User-Agent": "$plain_user_agent"},
                 # The selector also finds the search shell's own links
                 # (/jobs/intro, /jobs/login, the pager's), which name no posting.
                 "decoder": {"kind": "html", "select": "a.iCIMS_Anchor, a[href*='/jobs/']",
-                            "context": "parent"},
+                            "context": "parent", "selects": True},
                 # Tenants serve 20 or 50 a page.
                 "pager": {"kind": "page", "pages": 8, "bare_first": True,
                           "why": "the first search page takes no page number, 2026-08"},
-                # A free-text place term some tenants answer with "No Results
-                # Found": the whole board is read then.
-                "scope": {"kind": "param", "params": {"searchLocation": "$locality_abbr"},
-                          "located": "$locality_abbr"},
+                # The search form's location options ("12781-12817-Durham")
+                # whose label names the area, asked together; a tenant
+                # offering none is read whole.
+                "scope": {"kind": "facets", "facets": "selects", "param": "name",
+                          "param_re": "^searchLocation$", "values": "options", "id": "value",
+                          "label": "label"},
                 "fields": {
                     "_jid": {"of": "href", "transform": "group:/jobs/(\\d+)/"},
                     # The posting's own host names the tenant: a board kept under a

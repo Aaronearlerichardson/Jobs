@@ -107,13 +107,16 @@ def pack(ats, slug, careers_url):
     >>> pack("workday", ("acme", 5, "External"), "")["triple"]
     ('acme', 5, 'External')
 
-    A spec whose `detect` rebuilds the board's URL (PeopleAdmin: keyed on
-    `careers_url`, src.store.board_key) gets it from the slug, so whichever
+    A spec whose `detect` rebuilds the board's URL (keyed on `careers_url`,
+    src.store.board_key) gets it from the slug or the page, so whichever
     page of the tenant carried the signature, the board comes out the same:
 
     >>> pack("peopleadmin", "unc",
     ...      "https://unc.peopleadmin.com/postings/search?x=1")["careers_url"]
     'https://unc.peopleadmin.com'
+    >>> pack("successfactors", "performancemanager4",
+    ...      "https://careers.acme.org/search/?q=eng")["careers_url"]
+    'https://careers.acme.org'
 
     Nothing else is rewritten, including a PeopleAdmin tenant on its own
     hostname, which never matches the signature and reaches the store by
@@ -123,7 +126,7 @@ def pack(ats, slug, careers_url):
     'https://jobs.ncsu.edu/'
     """
     b = board_for(ats)
-    rebuilt = b.careers_url(slug) if b and slug else None
+    rebuilt = b.careers_url(slug, careers_url) if b and slug else None
     out = {"ats": ats, "careers_url": rebuilt or careers_url}
     out["triple" if b and b.multi_column else "slug"] = slug
     return out

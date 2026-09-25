@@ -107,7 +107,8 @@ class Detect(_Spec):
                                                               "None) per group; default none")
     blocklist: tuple[Str, ...] = Field((), description="Part values that reject a match")
     careers_url: Template | None = Field(None, description="The board's URL, rebuilt from "
-                                                           "the parts")
+                                                           "the parts or the {page} that "
+                                                           "carried the signature")
 
     @model_validator(mode="after")
     def _groups(self):
@@ -208,6 +209,8 @@ class HtmlDecoder(_Decoder):
                           "tags, or the nearest holding two lines")
     cells: dict[Str, Str] = Field({}, description="{name: CSS}: text found in the context")
     base: Template | None = Field(None, description="Makes hrefs absolute; default the page")
+    selects: Bool = Field(False, description='Also the page\'s <select> fields, as "selects": '
+                                             '[{name, options: [{value, label}]}]')
 
 
 def _decoder_kind(v):
@@ -254,6 +257,9 @@ class _Pager(_Workaround):
 
 class OffsetPager(_Pager):
     kind: Literal["offset"] = Field(description='"$offset" steps a page')
+    size: Count | None = Field(None, description="Rows asked per page; unset, the server sizes "
+                                                 "its pages and each steps by the postings the "
+                                                 "first served")
 
 
 class OverlapPager(_Pager):
@@ -299,7 +305,7 @@ Pager = Annotated[Union[OffsetPager, OverlapPager, PagePager, CursorPager],
                   Field(discriminator="kind")]
 
 
-class FacetsScope(_Spec):
+class Scope(_Spec):
     kind: Literal["facets"] = Field(description="Narrow by the facet values the area matches")
     facets: Str = Field(description="The facet groups' path on an unscoped first page")
     param: Str = Field(description="A group's (or value's) parameter name key")
@@ -307,16 +313,6 @@ class FacetsScope(_Spec):
     values: Str = Field(description="A group's (or value's nested) values key")
     id: Str = Field(description="A value's id key")
     label: Str = Field(description="A value's label key, matched against the area")
-
-
-class ParamScope(_Spec):
-    kind: Literal["param"] = Field(description="Ask the first listing once, unpaged, with "
-                                               "`params` in place of its own")
-    params: dict[Str, Str] = Field(description="The scoped request's parameters")
-    located: Str | None = Field(None, description="The location a row naming none takes")
-
-
-Scope = Annotated[Union[FacetsScope, ParamScope], Field(discriminator="kind")]
 
 
 class _Request(_Spec):
@@ -394,6 +390,18 @@ def _default_of(model, key):
     return info.get_default(call_default_factory=True) if info else object()
 
 
+class Discovery(_Spec):
+    scan: Bool = Field(False, description="No name guess reaches the handle: discovery reads it "
+                                          "off the company's careers pages, fetched and then "
+                                          "rendered in a headless browser")
+    shared: Bool = Field(False, description="A board can be a parent company's, serving its "
+                                            "subsidiaries: one sharing no token with the "
+                                            "company's name is asked who owns it")
+    narrow: Bool = Field(False, description="The vendor's host serves so many employers that a "
+                                            "bare site: search of it is noise: the dork "
+                                            "searches it with the profile's domain keywords")
+
+
 class BoardSpec(_Spec):
     sweep: Bool = Field(False, description="The lightweight sweep pulls it whole")
     prunable: Bool = Field(False, description="prune_dead_boards may deactivate it")
@@ -408,12 +416,12 @@ class BoardSpec(_Spec):
     detail: Detail | None = Field(None, description="Reads one posting back")
     closure: Closure = Field(Closure(), description="Judges a stored posting open or closed")
     employer: Grammar = Field(None, description="Names the employer on a listing entry")
-    unlocated: Literal["drop", "keep", "title"] = Field(
-        "drop", description="A location filter's verdict on a row naming no place "
-                            '("title": on its title)')
+    unlocated: Literal["drop", "keep"] = Field(
+        "drop", description="A location filter's verdict on a row naming no place")
     detect: tuple[Detect, ...] = Field((), description="How a URL or page names the board")
     canary: Canary | None = Field(None, description="The public board tools/check_boards.py "
                                                     "probes")
+    discovery: Discovery = Field(Discovery(), description="How discovery finds and vets a board")
 
     @model_validator(mode="before")
     @classmethod

@@ -98,6 +98,13 @@ class LocationReply(Reply):
     exclude: list[str]
 
 
+#: The platforms the model may name: those discovery reaches from a company
+#: name alone, by a guessed handle (`guess`) or one read off its careers
+#: pages (`discovery.scan`).
+_ATS_GUESSES = (*(ats for ats, spec in config.BOARDS.items()
+                  if spec.get("guess") or spec.get("discovery", {}).get("scan")),
+                "unknown")
+
 DISCOVER_SYSTEM = f"""You are a technical recruiter who maps employers to ATS platforms. Given a sector, industry, or job concept, list companies that (a) plausibly hire for roles in that space and (b) are likely to post jobs publicly. The candidate you're sourcing for:
 
 {_CANDIDATE}
@@ -108,7 +115,7 @@ Return ONLY a JSON object with this exact shape:""" + r"""
   "companies": [
     {
       "name": "Full company name",
-      "ats": "greenhouse" | "lever" | "ashby" | "kula" | "workday" | "unknown",
+      "ats": """ + " | ".join(f'"{a}"' for a in _ATS_GUESSES) + r""",
       "slug_guess": "likely-slug-on-that-ats-or-null",
       "careers_url": "https://…",
       "notes": "One short sentence on why this company fits."
@@ -129,7 +136,6 @@ Rules:
 - ats: "unknown" is fine if you're not sure."""
 
 
-_ATS_GUESSES = ("greenhouse", "lever", "ashby", "kula", "workday", "unknown")
 _GATED_SITES = ("linkedin", "indeed", "builtin", "wellfound")
 
 
@@ -615,9 +621,9 @@ def board_is_own(company, board, site="", titles=()):
     (company, board) for the process.
 
     Notes:
-        Consulted only for collision-prone resolutions — a Workday tenant
-        sharing no token with the name
-        (src.discovery.resolve.identity._foreign_board) — so this costs a
+        Consulted only for collision-prone resolutions — a board on a
+        platform whose spec sets `discovery.shared` sharing no token with the
+        name (src.discovery.resolve.identity.foreign_board) — so this costs a
         call on the rare suspect, not per resolve. The
         asymmetric default matters: a wrong "keep" mislabels one company
         until a human looks, a wrong "reject" silently loses a real board

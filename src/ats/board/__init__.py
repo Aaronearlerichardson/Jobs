@@ -13,8 +13,7 @@ spec by one engine.
                 hydrated (`fetch_company`, `hydrate_description`)
     closure.py  one stored posting's open/closed verdict (`probe_job_open`)
 
-Outside this package and config/boards.py, a platform is named in src/
-only where tests/test_boards_spec.py's NAMED_PLATFORMS allows.
+No module outside config/boards.py names a platform.
 """
 
 from .engine import BOARDS, board_for, board_for_url  # noqa: F401

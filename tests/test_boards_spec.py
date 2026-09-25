@@ -18,24 +18,6 @@ from src.ats.registry import seed_tag_for
 
 ROOT = Path(__file__).resolve().parent.parent
 
-#: Where a platform may still be named outside config/boards.py, and why.
-#: Every entry is discovery's Workday strategy: a Workday handle is a
-#: (tenant, pod, site) triple no name guess reaches, so discovery scans
-#: careers pages and a headless browser for it and guards a parent
-#: company's shared tenant; a spec key for that strategy is follow-up work.
-#: dork.py also skips PeopleAdmin URL hits (a tenant's search pages name
-#: no one board).
-NAMED_PLATFORMS = {
-    "src/discovery/apply.py": {"workday"},
-    "src/discovery/dork.py": {"workday", "peopleadmin"},
-    "src/discovery/local_sourcing.py": {"workday"},
-    "src/discovery/pipeline.py": {"workday"},
-    "src/discovery/resolve/board.py": {"workday"},
-    "src/discovery/resolve/probes.py": {"workday"},
-    "src/discovery/resolve/sniffer.py": {"workday"},
-    "src/discovery/resolve/websearch_board.py": {"workday"},
-}
-
 
 _WHY = "a quirk, 2026-09"
 _L = {"url": "https://x.test/{slug}", "fields": {"id": "id"}}
@@ -67,7 +49,7 @@ REFUSED = [
     _listing(decoder={"kind": "json_in_html"}),
     _listing(decoder={"kind": "json_in_html", "regex": "("}),
     _listing(decoder={"kind": "html"}), _listing(decoder={"kind": "html", "select": ""}),
-    _pager(kind="scroll", size=1), _pager(kind="offset"), _pager(kind="offset", size=0),
+    _pager(kind="scroll", size=1), _pager(kind="offset", size=0),
     _pager(kind="offset", size=2, step=1), _pager(kind="overlap", size=2, step=2, why=_WHY),
     _pager(kind="cursor", size=2), _pager(kind="offset", size=2, ceiling="2000", why=_WHY),
     _pager(kind="offset", size=2, ceiling=2000), _pager(kind="offset", size=2, why=_WHY),
@@ -154,13 +136,12 @@ def _literals(path):
 
 
 def test_no_platform_names_in_src():
-    """No `config.BOARDS` key is a string literal in src/ats, src/store,
-    src/discovery or src/crawl, outside config/boards.py and the
-    NAMED_PLATFORMS allowlist; nor does the allowlist outlive its need."""
+    """No `config.BOARDS` key is a string literal anywhere in src/ but
+    config/boards.py: a platform's rules are its spec's data."""
     named = {}
-    for top in ("ats", "store", "discovery", "crawl"):
-        for path in (ROOT / "src" / top).rglob("*.py"):
-            hits = _literals(path) & set(config.BOARDS)
-            if hits:
-                named[path.relative_to(ROOT).as_posix()] = hits
-    assert named == NAMED_PLATFORMS
+    for path in (ROOT / "src").rglob("*.py"):
+        rel = path.relative_to(ROOT).as_posix()
+        hits = _literals(path) & set(config.BOARDS) if rel != "src/config/boards.py" else None
+        if hits:
+            named[rel] = hits
+    assert named == {}

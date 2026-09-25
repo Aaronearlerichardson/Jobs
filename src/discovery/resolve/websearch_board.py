@@ -6,8 +6,8 @@ Third and last step of board.resolve_board_sniff_first. Two guards
 keep a search result from becoming the wrong employer's board: job
 aggregators are skipped outright (_is_aggregator), and a hit is taken only
 when its slug or host plausibly belongs to the name (_slug_matches_name /
-_host_matches_name), with the shared parent-tenant check on Workday
-(identity._foreign_board).
+_host_matches_name), with the shared parent-board check
+(identity.foreign_board).
 """
 
 import re
@@ -17,7 +17,8 @@ from src.ats.signatures import detect, pack
 from src.match.names import name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
-from .identity import _foreign_board
+from .identity import foreign_board
+from .probes import BOARD_URL_HOSTS
 
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing
@@ -73,7 +74,7 @@ def _slug_matches_name(slug, name):
     """True if a web-searched ATS slug/tenant plausibly belongs to the
     company — guards against the dork surfacing an unrelated board (e.g.
     'Novamed' -> the 'nc' NC-government Workday tenant)."""
-    s = slug[0] if isinstance(slug, tuple) else slug   # workday tenant, else slug
+    s = slug[0] if isinstance(slug, tuple) else slug   # a handle's first part
     s = name_key(str(s or ""))
     if len(s) < 3:
         return False
@@ -130,12 +131,12 @@ def _websearch_board(name, max_results=8):
             hit = detect(r.text, r.url, leads=False)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
-            # An own-page Workday embed can still be a parent conglomerate's
-            # shared board (seqirus.com links to CSL's 'csl' tenant), which
+            # An own-page embed can still be a parent conglomerate's shared
+            # board (seqirus.com links to CSL's 'csl' Workday tenant), which
             # would attribute every sibling company's jobs to this one —
             # same guard as the sniffer.
             if hit and (own or _slug_matches_name(hit[2], name)):
-                if not (hit[1] == "workday" and _foreign_board(name, hit[2])):
+                if not foreign_board(name, hit[1], hit[2]):
                     return pack(hit[1], hit[2], r.url)
             # Custom self-hosted board: only on the company's OWN domain —
             # otherwise a third-party jobs site with ≥3 listings
@@ -148,8 +149,9 @@ def _websearch_board(name, max_results=8):
 
     # Dork for a direct ATS board first (cheap win, avoids the second query
     # when it lands); fall back to a general careers search only if it misses.
-    ats_hint = ("myworkdayjobs OR greenhouse OR lever OR ashbyhq OR icims "
-                "OR smartrecruiters OR bamboohr OR workday")
+    # One term per vendor host a board URL names ("greenhouse" for
+    # greenhouse.io).
+    ats_hint = " OR ".join(dict.fromkeys(h.split(".")[0] for h in BOARD_URL_HOSTS))
     seen = set()
     for query in (f'"{name}" jobs ({ats_hint})', f'"{name}" careers'):
         fresh = [u for u in _search(query) if u not in seen]

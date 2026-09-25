@@ -6,7 +6,6 @@ from datetime import datetime, timedelta
 
 import pytest
 import requests
-from bs4 import BeautifulSoup
 
 import src.digest.render as digest
 import src.discovery.dork as dork
@@ -23,7 +22,7 @@ from src.ats import signatures as ats_signatures
 import src.ats.board.company as company_fetch
 import src.ats.board.custom as custom_fetch
 import src.ats.board.closure as job_probe
-from src.net.util import norm_posted_date
+from src.net.util import norm_posted_date, parse_markup
 
 
 class TestSniffer:
@@ -63,6 +62,20 @@ class TestSniffer:
                             lambda name, careers_url, **kw: iter([page]))
         assert sniffer.sniff_ats("Example Health") == {
             "ats": "phenom", "slug": "careers.example-health.org", "careers_url": root}
+
+    def test_confirms_a_board_its_page_names_at_the_page_origin(self, monkeypatch):
+        """A signature naming only the vendor (a SuccessFactors asset host)
+        makes the site that carried it the board, confirmed at its origin:
+        where `pack` puts it."""
+        root = "https://careers.example-health.org/go/jobs/1/"
+        page = fake_response(text='<script src="https://rmkcdn.successfactors.com/j.js">'
+                                  '</script>', url=root)
+        monkeypatch.setattr(sniffer, "candidate_pages",
+                            lambda name, careers_url, **kw: iter([page]))
+        asked = []
+        monkeypatch.setattr(sniffer, "confirm", lambda *a: asked.append(a) or 4)
+        assert sniffer.sniff_careers_ats("Example Health")["confirmed"]
+        assert asked == [("successfactors", "rmkcdn", "https://careers.example-health.org")]
 
 
 def _stub_fetch_all(monkeypatch, mapping):
@@ -277,14 +290,15 @@ class TestCustomBoardLinks:
         html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
                 '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
                 '<a href="/careers/data-scientist-3">Data Scientist</a>')
-        links = custom_fetch.find_job_links(BeautifulSoup(html, "html.parser"))
+        links = custom_fetch.find_job_links(parse_markup(html))
         assert len(links) == 3
 
     def test_nav_links_rejected(self):
         html = ('<a href="/careers/open-positions/">Careers</a>'
                 '<a href="/careers/career-opportunities/">View Current Job Openings</a>'
-                '<a href="/careers/career-opportunities/">Career Opportunities</a>')
-        assert custom_fetch.find_job_links(BeautifulSoup(html, "html.parser")) == []
+                '<a href="/careers/career-opportunities/">Career Opportunities</a>'
+                '<a href="/jobs/login?loginOnly=1">External Candidate Login</a>')
+        assert custom_fetch.find_job_links(parse_markup(html)) == []
 
     def test_aggregator_host_is_never_a_custom_board(self):
         assert custom_fetch.custom_board_listing_url(
@@ -396,8 +410,8 @@ class TestDiscoveryWiring:
     def test_probe_pool_coexists_unlaunched(self):
         # Lazy launch: a K-browser pool can be built and torn down without
         # ever starting a browser.
-        from src.discovery.resolve.probes import WorkdayJsProbePool
-        with WorkdayJsProbePool(3) as pool:
+        from src.discovery.resolve.probes import JsScanProbePool
+        with JsScanProbePool(3) as pool:
             assert pool.size == 3 and not pool.launched
 
 
@@ -763,7 +777,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
         calls = {"probe": 0, "websearch": 0}
 
-        def _probe(name, try_workday=True):
+        def _probe(name, scan=True):
             calls["probe"] += 1
             return None
 
@@ -819,7 +833,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
         monkeypatch.setattr(
             resolve_board, "probe_company",
-            lambda name, try_workday=True: {
+            lambda name, scan=True: {
                 "name": name, "ats": "greenhouse", "slug": "acme",
                 "count": 10, "nc": 4})
         monkeypatch.setattr(
@@ -876,7 +890,8 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_vendor_careers_url_on_a_parent_tenant_is_not_the_board(self, monkeypatch):
         """The URL step keeps every other step's parent-tenant guard: a
         Workday careers_url on another employer's tenant is never fetched
-        as this company's board."""
+        as this company's board. A platform whose spec does not set
+        `discovery.shared` is never asked."""
         monkeypatch.setattr("src.claude.api.board_is_own", lambda *a, **k: False)
         monkeypatch.setattr(sniffer, "sniff_ats", lambda *a, **k: None)
         for step in ("probe_company", "_websearch_board"):
@@ -886,6 +901,29 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         url = "https://danaher.wd1.myworkdayjobs.com/DanaherJobs"
 
         assert resolve_board.resolve_board_sniff_first("Genedata", url) is None
+        assert not identity.foreign_board("Genedata", "greenhouse", "danaher")
+
+    def test_an_unreadable_board_is_no_dead_board(self, monkeypatch, serve):
+        """A board whose fetch fails while it is validated is a transient
+        miss, never board-dead (which closes a roster row's postings); a
+        prunable platform's listing 404 is dead, and a live board with
+        nothing local is no-local-jobs."""
+        monkeypatch.setattr(sniffer, "sniff_ats", lambda *a, **k: None)
+        for step in ("probe_company", "_websearch_board"):
+            monkeypatch.setattr(resolve_board, step, lambda *a, **k: None)
+        url = "https://boards.greenhouse.io/acme"
+        board = {"ats": "greenhouse", "slug": "acme"}
+
+        serve(requests.exceptions.ReadTimeout("slow"))
+        assert resolve_board.resolve_or_miss("Acme", url) == (
+            None, "fetch-error:unreadable-greenhouse")
+        assert resolve_board.read_local(board)[2] == "fetch-error:unreadable-greenhouse"
+        serve(404)
+        assert resolve_board.resolve_or_miss("Acme", url) == (None, "board-dead:greenhouse")
+        assert resolve_board.read_local(board)[2] == "board-dead:greenhouse"
+        serve(fake_response({"jobs": [{"id": 1, "title": "Eng", "absolute_url": url,
+                                       "location": {"name": "Paris, France"}}]}))
+        assert resolve_board.read_local(board) == ([], 1, "no-local-jobs")
 
 
 class TestDiscoverLocalWebsearchPass:
@@ -1267,7 +1305,7 @@ class TestValidateCandidateResolutionOrder:
         monkeypatch.setattr(sniffer, "sniff_ats",
                             lambda name, careers_url="": sniff)
         monkeypatch.setattr(resolve_board, "probe_company",
-                            lambda name, try_workday=True: probe)
+                            lambda name, scan=True: probe)
         monkeypatch.setattr(resolve_board, "_websearch_board",
                             lambda name, max_results=8: None)
         monkeypatch.setattr(

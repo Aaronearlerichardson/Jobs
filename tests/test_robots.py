@@ -352,7 +352,7 @@ class TestFetchTimeout:
 class TestJsProbeDisabledReporting:
     """A missing headless browser is one condition, reported once.
 
-    The JS fallback runs several WorkdayJsProbe instances in parallel, each
+    The JS fallback runs several JsScanProbe instances in parallel, each
     holding its own enabled flag. Playwright's launch error embeds a ten-line
     ASCII banner telling you to run `playwright install`, so four probes
     printed forty lines of identical advice — and the sniffer's browser path
@@ -381,7 +381,7 @@ class TestJsProbeDisabledReporting:
         assert probes._report_js_disabled("second") is False
         assert probes._report_js_disabled("third") is False
         out = capsys.readouterr().out
-        assert out.count("JS workday probe disabled") == 1
+        assert out.count("JS scan probe disabled") == 1
         assert "second" not in out and "third" not in out
 
     def test_concurrent_callers_report_once(self, capsys):
@@ -401,7 +401,7 @@ class TestJsProbeDisabledReporting:
         for t in threads:
             t.join()
         assert results.count(True) == 1
-        assert capsys.readouterr().out.count("JS workday probe disabled") == 1
+        assert capsys.readouterr().out.count("JS scan probe disabled") == 1
 
     def test_missing_browser_hint_is_actionable_and_one_line(self):
         from src.discovery.resolve.probes import _js_launch_hint
@@ -422,7 +422,7 @@ class TestJsProbeDisabledReporting:
         assert probes._report_js_disabled("failure one") is True
         probes._clear_js_disabled()               # what a successful launch does
         assert probes._report_js_disabled("failure two") is True
-        assert capsys.readouterr().out.count("JS workday probe disabled") == 2
+        assert capsys.readouterr().out.count("JS scan probe disabled") == 2
 
 
 class TestChromiumChannelFallback:

@@ -10,7 +10,8 @@
                          browser fallback for JS-rendered ones)
     probes.py            confirm a handle names a live board and count it;
                          and, a layer up, probe a NAME by guessing slugs
-                         and counting its local postings
+                         (or scanning its pages, `discovery.scan`) and
+                         counting its local postings
     websearch_board.py   the same question asked of a search engine
     board.py             the top: name -> validated board, or the miss
                          reason that explains why not
@@ -30,7 +31,7 @@ building the graph.
 from .board import classify_miss, resolve_board_sniff_first, resolve_or_miss
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import candidate_pages, corroborated, nc_hq_signal
-from .probes import probe_company, probe_workday
+from .probes import probe_company, probe_scan
 from .sniffer import diagnose_no_board, sniff_ats, sniff_careers_ats
 
 __all__ = [
@@ -40,7 +41,7 @@ __all__ = [
     "corroborated",
     "nc_hq_signal",
     "probe_company",
-    "probe_workday",
+    "probe_scan",
     "diagnose_no_board",
     "sniff_ats",
     "sniff_careers_ats",

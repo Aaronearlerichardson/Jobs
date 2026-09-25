@@ -36,8 +36,8 @@ from src.ats import coords
 from src.ats.board import company as company_fetch
 from src.match.names import name_key
 from src.net.parallel import drain, fan_out
-from .name_sources import MAJORS_WORKDAY, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import resolve_or_miss, resolved
+from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
+from .resolve.board import read_local, resolve_or_miss, resolved
 from .resolve.probes import _nc_count, probe_company
 from .resolve.websearch_board import _websearch_board
 
@@ -64,25 +64,19 @@ def _hit_from_detection(name, det):
     The two fallback passes each wrote this out, and had drifted: only the
     websearch copy special-cased a `custom` board. Coordinates go through
     src.ats.coords now (the rule for every other board write in the repo),
-    which handles Workday's triple, a plain slug and a careers-URL-only
+    which handles a multi-column handle, a plain slug and a careers-URL-only
     custom board without a branch per caller.
 
-    The `reason` rides along and is popped by the caller when nc>0:
-    coordinates that read empty are a DEAD board, which is a different
-    miss from a name nothing could be found for.
+    The `reason` rides along and is popped by the caller when nc>0: a live
+    board with nothing local, a DEAD board and an unreadable one
+    (resolve.board.read_local) are each a different miss from a name
+    nothing could be found for.
     """
-    from src.ats.board import company as company_fetch
     ats = det["ats"]
-    slug = det["triple"] if ats == "workday" else det.get("slug")
-    try:
-        jobs = company_fetch.fetch_company_nc(
-            coords.columns(ats, slug, det.get("careers_url")))
-    except Exception:
-        jobs = []
-    nc = len(jobs)
-    return {"name": name, "ats": ats, "slug": slug, "count": nc, "nc": nc,
-            "careers_url": det.get("careers_url"),
-            "reason": "board-dead:" + ats}
+    slug = det.get("triple", det.get("slug"))
+    jobs, total, reason = read_local(coords.columns(ats, slug, det.get("careers_url")))
+    return {"name": name, "ats": ats, "slug": slug, "count": len(jobs) or total,
+            "nc": len(jobs), "careers_url": det.get("careers_url"), "reason": reason}
 
 
 def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
@@ -111,9 +105,9 @@ def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
 def _probe_pass(names, max_workers):
     """Name-guessed slug probes over every candidate. The cheap first pass:
     no page fetched, just the platforms' own APIs."""
-    n_wd = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
+    n_scan = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
     print(f"  probing {len(names)} candidate compan(ies) for live ATS boards "
-          f"({n_wd} with Workday fallback)...")
+          f"({n_scan} with the careers-page scan)...")
     # A probe that raises is now reported and skipped rather than ending
     # the pass -- this was the last pool in src/ with a bare fut.result(),
     # the same shape as the prune_dead_boards bug.
@@ -122,14 +116,14 @@ def _probe_pass(names, max_workers):
                                "probe", max_workers) if h]
 
 
-def _js_workday_pass(hits, max_workers):
-    """Re-probe the MAJORS that got no board, with a headless browser.
+def _js_scan_pass(hits, max_workers):
+    """Re-probe the MAJORS that got no board, with a headless browser
+    (probes.JsScanProbe).
 
-    Big employers often have React/SPA careers pages whose
-    myworkdayjobs.com link only appears after JS runs, so the static probe
-    misses them entirely.
+    Big employers often have React/SPA careers pages whose board link only
+    appears after JS runs, so the static probe misses them entirely.
     """
-    missed = _boardless(MAJORS_WORKDAY, hits)
+    missed = _boardless(MAJORS, hits)
     import importlib.util
     if importlib.util.find_spec("playwright.sync_api") is None:
         if missed:
@@ -138,7 +132,7 @@ def _js_workday_pass(hits, max_workers):
         return
     if not missed:
         return
-    from .resolve.probes import WorkdayJsProbePool
+    from .resolve.probes import JsScanProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
     # exactly one page load; the serial design existed for sync-
     # Playwright's thread affinity, not politeness. Each probe instance
@@ -153,15 +147,15 @@ def _js_workday_pass(hits, max_workers):
     k = min(4, len(missed))
     print(f"  JS-probing {len(missed)} major(s) with no static board "
           f"({k} parallel browser(s))...")
-    with WorkdayJsProbePool(k) as pool:
+    with JsScanProbePool(k) as pool:
 
         def _js_one(name):
             t0 = time.monotonic()
-            wd, outcome = pool.probe(name)
+            meta, outcome = pool.probe(name)
             if outcome == "hit":
-                triple = (wd["tenant"], wd["wd_pod"], wd["site"])
-                return {"name": name, "ats": "workday", "slug": triple,
-                        "count": wd["count"], "nc": _nc_count("workday", triple)}
+                ats, slug = meta["ats"], meta["slug"]
+                return {"name": name, "ats": ats, "slug": slug,
+                        "count": meta["count"], "nc": _nc_count(ats, slug)}
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 
@@ -173,8 +167,9 @@ def _js_workday_pass(hits, max_workers):
                              f"    [!] JS probe failed for {n!r}: {e}")):
             if "nc" in h:
                 hits.append(h)
-                t, p, s = h["slug"]
-                print(f"    [JS-OK] {h['name']:30} {t}/{p}/{s}  "
+                slug = h["slug"]
+                shown = "/".join(map(str, slug)) if isinstance(slug, tuple) else slug
+                print(f"    [JS-OK] {h['name']:30} {shown}  "
                       f"nc={h['nc']}/{h['count']}")
             else:
                 print(f"    [JS-MISS] {h['name']:28} {h['reason']}  "
@@ -311,7 +306,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     ones before it could not board (_boardless):
 
       1. _probe_pass       name-guessed slugs against the platform APIs
-      2. _js_workday_pass  headless browser, MAJORS only (``js_majors``)
+      2. _js_scan_pass     headless browser, MAJORS only (``js_majors``)
       3. _sniff_pass       fetch the careers page and read the ATS off it
       4. _websearch_pass   search the web for one, capped (``websearch``)
 
@@ -334,7 +329,7 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
     misses = []
     hits = _probe_pass(names, max_workers)
     if js_majors:
-        _js_workday_pass(hits, max_workers)
+        _js_scan_pass(hits, max_workers)
     if sniff:
         _sniff_pass(names, hits, misses, max_workers)
     if websearch:
@@ -684,13 +679,11 @@ def add_board(name, url, capture=False):
         return None
 
     ats = found["ats"]
-    # `slug` is the Workday triple, or the URL as a fallback label for the
-    # printout below; the COORDINATE for every other platform is the sniffed
-    # one.
-    slug = tuple(found["triple"]) if ats == "workday" else found.get("slug") or url
-    board = coords.columns(
-        ats, slug if ats == "workday" else found.get("slug"),
-        found.get("careers_url") or url, name=name)
+    # The sniffed handle (a tuple where it spans several columns); the URL
+    # labels the printout below when there is none.
+    handle = found.get("triple", found.get("slug"))
+    slug = handle or url
+    board = coords.columns(ats, handle, found.get("careers_url") or url, name=name)
     try:
         nc = len(company_fetch.fetch_company(board, company_fetch.NC_RE))
     except Exception:
@@ -832,10 +825,9 @@ def _miss_row(m):
     if not ats:
         return row
     row["ats"] = ats
-    if ats == "workday" and isinstance(m.get("slug"), tuple):
-        row["wd_tenant"], row["wd_pod"], row["wd_site"] = m["slug"]
-    elif m.get("slug"):
-        row["slug"] = m["slug"]
+    if m.get("slug"):
+        row.update((k, v) for k, v in coords.columns(ats, m["slug"]).items()
+                   if v is not None)
     if m.get("careers_url"):
         row["careers_url"] = m["careers_url"]
     if m.get("count"):

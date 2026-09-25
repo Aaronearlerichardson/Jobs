@@ -46,7 +46,6 @@ STALL_S is abandoned rather than allowed to wedge the run.
 """
 
 import logging
-import re
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor
@@ -57,6 +56,7 @@ from datetime import datetime, timedelta
 from src import config
 from src import store
 from src.ats.coords import slug_named
+from src.ats.board import board_for
 from src.ats.board import company as company_fetch
 from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
@@ -98,15 +98,6 @@ MIN_AGE_HOURS = 6.0
 # side, this bounds the probe side the same way.
 CLOSED_PROBE_STALE_DAYS = 7
 CLOSED_PROBE_LIMIT = 100
-# ATS families whose public boards API answers 404 only for a board that
-# does not exist, so a second one is a verdict, not a blip. Greenhouse
-# harvard and cognitotherapeutics 404'd in the 2026-09-22 harvest AND in
-# both web-UI crawls after it, each a live GET the three-day grace
-# (store.HARVEST_DEAD_AFTER_DAYS) would have kept spending. Workday is out:
-# its tenants 404 transiently. The crawl (src.crawl.runner) reads this too.
-DEFINITIVE_404_ATS = frozenset(
-    ats for ats, spec in config.BOARDS.items() if spec.get("prunable"))
-_HTTP_404 = re.compile(r"\bHTTP 404\b")
 
 
 # --------------------------------------------------------------------------- #
@@ -299,14 +290,15 @@ def _soft_failed(stats):
 
 
 def bury_404_board(conn, company, error):
-    """Mark `company` 'board-dead:<ats>' and deactivate it when `error` is
-    an HTTP 404 from a DEFINITIVE_404_ATS listing; the caller has already
-    seen the board fail once before. Returns the reason written, else None.
+    """Mark `company` 'board-dead:<ats>' and deactivate it when `error`
+    proves its board gone (`Board.gone`); the caller has already seen the
+    board fail once before. Returns the reason written, else None.
 
     Deactivated exactly as mark_harvested's promotion is, which is what
     lets reresolve_misses re-check it."""
     ats = company.get("ats")
-    if ats not in DEFINITIVE_404_ATS or not _HTTP_404.search(error or ""):
+    board = board_for(ats)
+    if not (board and board.gone(error)):
         return None
     reason = f"board-dead:{ats}"
     store.deactivate_company(conn, company["id"])

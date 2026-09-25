@@ -6,8 +6,7 @@ import json
 import re
 from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
-
+from src.net.util import parse_markup
 from . import custom, fields, jsonld
 
 
@@ -25,7 +24,11 @@ def decode(dec, text, parts, url, area=None, hop=True):
         return {"entries": _atom(text)}
     if dec.select == ("$job_links",):
         return custom.read_page(text, url, area, hop)
-    return {"elements": elements(dec, text, parts, url), "page": text}
+    soup = parse_markup(text)
+    payload = {"elements": elements(dec, soup, parts, url), "page": text}
+    if dec.selects:
+        payload["selects"] = _selects(soup)
+    return payload
 
 
 def entries(payload, dec):
@@ -53,7 +56,7 @@ def _atom(text):
     >>> _atom(feed)
     [{'title': 'Chemist', 'link': '', 'link@href': 'https://x.test/postings/7', 'author': {'name': 'Chemistry'}, 'feed': {'title': 'State U: All Jobs'}}]
     """
-    soup = BeautifulSoup(text, "xml")
+    soup = parse_markup(text, xml=True)
     root = soup.find("feed") or soup
     feed = _xml_record(root, skip="entry")
     return [{**_xml_record(e), "feed": feed} for e in soup.find_all("entry")]
@@ -74,7 +77,15 @@ def _xml_record(el, skip=None):
     return out
 
 
-def elements(dec, text, parts, url):
+def _selects(soup):
+    """The page's <select> fields: [{"name", "options": [{"value", "label"}]}]."""
+    return [{"name": s.get("name") or "",
+             "options": [{"value": o.get("value") or "", "label": o.get_text(" ", strip=True)}
+                         for o in s.find_all("option")]}
+            for s in soup.find_all("select")]
+
+
+def elements(dec, soup, parts, url):
     """One entry per element the html decoder's `select` finds (a CSS
     template over the handle `parts`, or a list tried in order until one
     finds any): its `text`, its `raw` text (unstripped, line breaks
@@ -89,10 +100,9 @@ def elements(dec, text, parts, url):
     ...         '<p class="loc">Durham, NC</p></li></ul>')
     >>> dec = HtmlDecoder(kind="html", select="a.j[href*='/{slug}/']", context=["li"],
     ...                   cells={"loc": ".loc"})
-    >>> elements(dec, page, {"slug": "acme"}, "https://x.test/acme")
+    >>> elements(dec, parse_markup(page), {"slug": "acme"}, "https://x.test/acme")
     [{'text': 'Data Engineer', 'raw': 'Data Engineer', 'href': '/acme/job/1', 'url': 'https://x.test/acme/job/1', 'context': 'Data Engineer Durham, NC', 'loc': 'Durham, NC'}]
     """
-    soup = BeautifulSoup(text, "html.parser")
     found = []
     for sel in dec.select:
         found = soup.select(fields.fmt(sel, parts.get))

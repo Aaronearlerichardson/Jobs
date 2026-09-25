@@ -17,10 +17,8 @@ import json
 import re
 from urllib.parse import urljoin
 
-from bs4 import BeautifulSoup
-
 from src import config
-from src.net.util import host_of, stable_id, strip_html
+from src.net.util import host_of, parse_markup, stable_id, strip_html
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
 _LI_CURRENT_RE = re.compile(r"currentJobId=(\d+)")
@@ -425,7 +423,7 @@ def page_url(html, url=""):
     """
     if url:
         return url
-    return _canonical_url(BeautifulSoup(html, "html.parser"))
+    return _canonical_url(parse_markup(html))
 
 
 def parse_page(url, html):
@@ -433,7 +431,7 @@ def parse_page(url, html):
     de-duplicated by job id, site-specific hits first. When `url` is empty
     (Ctrl+S saves carry none), the site is detected from the canonical URL
     or distinctive DOM markers instead."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = parse_markup(html)
     if not url:
         url = _canonical_url(soup)
     low = (url or "").lower()

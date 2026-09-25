@@ -448,20 +448,24 @@ class TestSuccessFactorsLocation:
 # --------------------------------------------------------------------------- #
 
 class TestPostingPagesAsTheListing:
-    """A board whose index names nothing but posting links (jazzhr): each
-    row is its posting page's JSON-LD, within the rescue's per-pull budget."""
+    """A board whose index names each posting and links its page (jazzhr):
+    the page's JSON-LD fills the rest, within the rescue's per-pull budget."""
 
-    def test_past_the_budget_the_pull_is_capped(self, serve, monkeypatch, capsys):
-        """A posting left unread is no row, so the snapshot is partial."""
+    def test_past_the_budget_a_row_keeps_what_the_index_names(self, serve, monkeypatch,
+                                                              capsys):
+        """A posting left unread is still a row, so the snapshot is whole."""
         monkeypatch.setattr(board.time, "sleep", lambda s: None)
         spec = config.BOARDS["jazzhr"]
         b = board.Board("jazzhr", {**spec, "rescue": {**spec["rescue"], "cap": 1}})
         posting = ('<script type="application/ld+json">{"@type": "JobPosting", '
-                   '"title": "Data Engineer", "jobLocation": {"address": '
-                   '{"addressLocality": "Durham", "addressRegion": "NC"}}}</script>')
+                   '"title": "Data Engineer", "description": "Build pipelines.", '
+                   '"jobLocation": {"address": {"addressLocality": "Durham", '
+                   '"addressRegion": "NC"}}}</script>')
         serve({"/apply/": posting, "applytojob.com/": "".join(
-            f"<a href='/apply/Id{i}/Posting-{i}'>x</a>" for i in range(3))})
+            f"<li><a href='/apply/Id{i}/Posting-{i}'>Posting {i}</a></li>" for i in range(3))})
         rows = b.whole_board({"ats": "jazzhr", "slug": "acme"})
-        assert [(r["title"], r["location"]) for r in rows] == [("Data Engineer", "Durham, NC")]
-        assert http.snapshot_info()["capped_total"] == 3
-        assert "detail budget (1) spent" in capsys.readouterr().out
+        assert [(r["title"], r["location"], r["description"]) for r in rows] == [
+            ("Posting 0", "Durham, NC", "Build pipelines."), ("Posting 1", "", ""),
+            ("Posting 2", "", "")]
+        assert not http.snapshot_info()["capped"]
+        assert "detail budget (1) spent; later rows kept unexpanded" in capsys.readouterr().out

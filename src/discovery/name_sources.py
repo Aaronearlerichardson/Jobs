@@ -20,12 +20,12 @@ from src.match.names import junk_name_reason, name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
 
-# Seed employers + Workday-fallback majors + drop-list all come from the
+# Seed employers + careers-page-scan majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
 
 SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps notes
-MAJORS_WORKDAY = config.DISCOVERY_WORKDAY_MAJORS
-_MAJORS_KEYS = {name_key(m) for m in MAJORS_WORKDAY}
+MAJORS = config.DISCOVERY_WORKDAY_MAJORS       # worth the slow scan (probe_scan)
+_MAJORS_KEYS = {name_key(m) for m in MAJORS}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
@@ -271,9 +271,9 @@ def brainstorm_company_names(n=None):
 
 def gather_names(extra=None):
     """Union of all name sources, de-duplicated case-insensitively:
-    profile seeds + Workday majors + configured directory scrapes + web-search
+    profile seeds + majors + configured directory scrapes + web-search
     harvesting + an LLM region/domain brainstorm + any explicit `extra`."""
-    sources = [SEED_COMPANIES, MAJORS_WORKDAY]
+    sources = [SEED_COMPANIES, MAJORS]
     sources += [scrape_directory_names(url)
                 for url in config.DISCOVERY_DIRECTORY_URLS]
     harvested = harvest_search_names(config.DISCOVERY_NAME_SEARCH_QUERIES)

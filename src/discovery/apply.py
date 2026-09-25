@@ -18,15 +18,17 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import board_for
+from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 
 
 def _candidate_hit(c):
     """A confirmed Candidate as the resolver-shaped hit dict the store write
-    path takes, or None when its coordinates are malformed. Workday's
-    't|p|s' string goes back to the (tenant, pod, site) triple src.ats.coords
-    spells out as columns.
+    path takes, or None when its coordinates are malformed. A handle
+    spanning several store columns ('t|p|s', Workday's) goes back to the
+    tuple src.ats.coords spells out as columns, each part typed as the
+    spec's `detect` types it (Workday's pod an int).
 
     What counts as coordinates is ``src.store.board_key``, the store's own
     rule for which column identifies a board -- the slug for most families,
@@ -37,11 +39,14 @@ def _candidate_hit(c):
     that for a real careers page on no known platform).
     """
     slug = (c.slug_guess or "").strip() or None
-    if c.ats == "workday":
-        parts = (slug or "").split("|")
-        if len(parts) != 3 or not parts[1].isdigit():
+    board = board_for(c.ats)
+    if board and board.multi_column:
+        parts = (slug or "").split(board.spec.handle.sep)
+        kinds = next((d.transform for d in board.spec.detect if d.transform),
+                     (None,) * len(parts))
+        slug = tuple(TRANSFORMS[k](p) if k else p for p, k in zip(parts, kinds))
+        if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in slug):
             return None
-        slug = (parts[0], int(parts[1]), parts[2])
     hit = {"name": c.name, "ats": c.ats, "slug": slug,
            "careers_url": c.careers_url or None,
            "count": c.job_count, "nc": c.nc}

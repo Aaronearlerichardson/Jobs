@@ -11,7 +11,8 @@ else here is what it is built from.
     classify_miss               when none of that worked, which of the
                                 store's MISS_REASONS codes explains it
     _validate_board             the live fetch that rejects a slug guess
-                                landing on an empty or nonexistent board
+                                landing on an empty or nonexistent board;
+                                one that fails rejects nothing (read_board)
 
 Order matters and is the point: a probe-first resolver guessed slugs from
 the name before looking at the company's own site, and false-positived
@@ -28,38 +29,77 @@ from src import config
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.signatures import detect, pack
+from src.match.locality import NC_RE
+from src.net import http
 
-from .identity import _foreign_board
+from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import _websearch_board
 
 
-def _validate_board(comp):
-    """Fetch a resolved board and return (total, nc) live job counts. A board
-    that returns zero jobs is treated as dead/wrong by the caller — this is
-    what rejects a slug-guess that resolves to an empty or nonexistent board."""
+def read_board(comp, loc_re=None):
+    """A resolved board's postings (`company.fetch_company` over its store
+    columns `comp`), or None when the fetch failed and read nothing.
+
+    A failed fetch (a timeout, a refusal, a 5xx) is no evidence the board
+    is empty, so a caller never files it dead: closure's positive-evidence
+    rule (src.ats.board.closure). A listing 404 that proves the board
+    gone (`Board.gone`) reads as empty.
+    """
     from src.ats.board import company as company_fetch
+    before = http.fetch_failures()
     try:
-        allj = company_fetch.fetch_company(comp, None)
+        rows = company_fetch.fetch_company(comp, loc_re)
     except Exception:
-        return 0, 0
-    if not allj:
-        return 0, 0
-    try:
-        nc = sum(1 for j in allj
-                 if company_fetch.NC_RE.search(j.get("location", "") or ""))
-    except Exception:
-        nc = 0
-    return len(allj), nc
+        return None
+    if rows or http.fetch_failures() == before:
+        return rows
+    board = board_for(comp.get("ats"))
+    return rows if board and board.gone(http.snapshot_info()["last_error"]) else None
+
+
+def read_local(comp):
+    """(local postings, board total, miss reason) for a detected board:
+    its postings in your [locality] (`read_board` with NC_RE); when there
+    are none, why, in src.store.MISS_REASONS words. The read failed:
+    ``fetch-error:unreadable-<ats>``. The board lists postings elsewhere
+    (its cheap listing read, `Board.alive`, counts them): ``no-local-jobs``.
+    It answered with none, or `read_board`'s definitive 404:
+    ``board-dead:<ats>``. The total is 0 unless that cheap read counted it.
+    """
+    ats = comp.get("ats")
+    before = http.fetch_failures()
+    rows = read_board(comp, NC_RE)
+    if rows:
+        return rows, 0, None
+    if rows is None:
+        return [], 0, f"fetch-error:unreadable-{ats}"
+    board = board_for(ats)
+    handle = board.handle(comp) if board and http.fetch_failures() == before else None
+    ok, n = board.alive(handle) if handle else (True, 0)
+    if n > 0:
+        return [], n, "no-local-jobs"
+    return [], 0, f"board-dead:{ats}" if ok else f"fetch-error:unreadable-{ats}"
+
+
+def _validate_board(comp):
+    """(total, nc) live posting counts of a resolved board, None when
+    `read_board` cannot read it. A board that lists nothing is dead or
+    wrong to the caller: what rejects a slug guess landing on an empty or
+    nonexistent board."""
+    allj = read_board(comp)
+    if allj is None:
+        return None
+    return len(allj), sum(1 for j in allj if NC_RE.search(j.get("location") or ""))
 
 
 def _url_board(name, careers_url):
     """(ats, handle, careers_url) of the fetchable board `careers_url`
-    itself names (`signatures.detect` on the URL), or None; a Workday
-    tenant that is another employer's (`identity._foreign_board`, as in
-    every other resolver step) names none."""
+    itself names (`signatures.detect` on the URL), or None; a board that
+    is another employer's (`identity.foreign_board`, as in every other
+    resolver step) names none."""
     hit = detect("", careers_url, leads=False) if careers_url else None
-    if not hit or hit[1] == "workday" and _foreign_board(name, hit[2]):
+    if not hit or foreign_board(name, hit[1], hit[2]):
         return None
     return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
 
@@ -85,23 +125,37 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
     itself (``via='sniff'``).
 
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
-    a (tenant, pod, site) triple for Workday, the GUID/slug otherwise, None for
-    a custom self-hosted board."""
+    a tuple where the handle spans several store columns (Workday's (tenant,
+    pod, site)), the GUID/slug otherwise, None for a custom self-hosted board."""
+    return _resolve(name, careers_url, websearch)[0]
+
+
+def _resolve(name, careers_url="", websearch=True):
+    """resolve_board_sniff_first's hit, and the ats of the first board it
+    detected but could not read (`read_board`), else None."""
     from .sniffer import sniff_ats
+    unread = []
 
     def _mk(ats, slug, curl, via):
-        total, nc = _validate_board(coords.columns(ats, slug, curl))
+        counts = _validate_board(coords.columns(ats, slug, curl))
+        if counts is None:
+            unread.append(ats)
+            return None
+        total, nc = counts
         if total <= 0:
             return None
         return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
                 "count": total, "nc": nc, "via": via}
+
+    def _out(hit):
+        return hit, (unread[0] if unread and not hit else None)
 
     # 0) A careers_url on a vendor's host names its board outright; the
     # sniff never fetches one (fetchpool.candidate_urls).
     u = _url_board(name, careers_url)
     hit = _mk(*u, "sniff") if u else None
     if hit:
-        return hit
+        return _out(hit)
 
     # 1) Authoritative: detect the ATS embedded on the company's own careers page.
     # A `custom` sniff hit is held back rather than returned outright: a
@@ -119,15 +173,16 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
         hit = _mk(s["ats"], s.get("triple", s.get("slug")), s.get("careers_url"), "sniff")
         if hit:
             if s["ats"] != config.CAREERS_PAGE_ATS or hit["nc"] > 0:
-                return hit
+                return _out(hit)
             fallback = hit
 
-    # 2) Fallback: name-guessed slug/Workday probe (collision risk -> validated).
-    p = probe_company(name, try_workday=True)
+    # 2) Fallback: name-guessed slugs, then the scanned platforms' probe
+    #    (collision risk -> validated).
+    p = probe_company(name, scan=True)
     if p:
         hit = _mk(p["ats"], p["slug"], p.get("careers_url"), "probe")
         if hit:
-            return hit
+            return _out(hit)
 
     # 3) Web-search fallback: find the careers page for names whose domain the
     #    sniffer can't guess (acronyms, hyphenated or product-named domains --
@@ -139,10 +194,10 @@ def resolve_board_sniff_first(name, careers_url="", websearch=True):
     if w:
         hit = _mk(w["ats"], w.get("triple", w.get("slug")), w.get("careers_url"), "websearch")
         if hit:
-            return hit
+            return _out(hit)
 
     # Nothing better than the weak custom sniff turned up: it beats a miss.
-    return fallback
+    return _out(fallback)
 
 
 def classify_miss(name, careers_url=""):
@@ -193,7 +248,9 @@ def resolve_or_miss(name, careers_url=""):
     Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
     no hit is a failed resolution (see classify_miss); a hit WITH a reason is
     a live, readable board that simply has no openings in your [locality]
-    (``no-local-jobs``) — worth keeping, not worth crawling today.
+    (``no-local-jobs``) — worth keeping, not worth crawling today. A board
+    found but unreadable (`read_board`) is ``fetch-error:unreadable-<ats>``,
+    a transient, never ``board-dead``.
 
     Notes:
         The single entry point for "attempt a company, and record the
@@ -201,9 +258,11 @@ def resolve_or_miss(name, careers_url=""):
         src.store.record_miss so a rerun can skip, retry or report it.
     """
     try:
-        hit = resolve_board_sniff_first(name, careers_url or "")
+        hit, unread = _resolve(name, careers_url or "")
     except Exception as e:
         return None, f"fetch-error:{type(e).__name__}"
+    if unread:
+        return None, f"fetch-error:unreadable-{unread}"
     if not hit:
         return None, classify_miss(name, careers_url)
     if not hit.get("nc"):

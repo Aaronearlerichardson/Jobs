@@ -120,7 +120,9 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
     and answers (parts, payload, error); `rows_of(parts, payload)` maps a
     page to (its entry count, its rows); rows are deduplicated (`_fresh`).
     `size` and `pages` override the pager's; a `cheap` read is one page
-    unless `pages` says.
+    unless `pages` says. An offset pager with no size counts a page's
+    postings (distinct ids) as its entries, the first page's count
+    stepping the offset.
 
     A later page's failure ends the walk with the rows so far (reported,
     so the snapshot reads incomplete). The walk ends at a page listing no
@@ -138,6 +140,7 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
     pager = spec.pager
     size = size or page_size(pager)
     pages = 1 if not pager else pages or (1 if cheap else pager.pages)
+    served = not size and pager is not None and pager.kind == "offset"
     ceiling = pager.ceiling if pager else None
     rows, seen, total, size_known, capped, url = [], set(), None, None, False, None
     for n in range(pages):
@@ -148,6 +151,9 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
             total = total_of(pager, payload)
             size_known = None if total is not None and ceiling and total >= ceiling else total
         n_entries, listed = rows_of(parts, payload)
+        if served:
+            n_entries = len({r["id"] for r in listed if r["id"] is not None})
+            size = size or n_entries
         new = _fresh(listed, seen)
         rows += new
         if not pager:

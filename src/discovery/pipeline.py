@@ -21,7 +21,7 @@ from src.match.names import strip_suffixes
 from src.net.parallel import drain
 from src.net.util import worker_count
 from .resolve.board import resolve_board_sniff_first
-from .resolve.probes import WorkdayJsProbePool
+from .resolve.probes import SCANNED, JsScanProbePool
 from .resolve.sniffer import sniff_careers_ats
 from .seeds import seed_candidates_for
 
@@ -32,7 +32,7 @@ from .seeds import seed_candidates_for
 # more concurrent requests. Tune down if you see 429s from a probe provider.
 _DISCOVERY_WORKERS = worker_count("discovery_workers")
 
-# Headless browsers for the parallel Workday JS fallback. Each is ~200-300MB
+# Headless browsers for the parallel JS scan fallback. Each is ~200-300MB
 # of RAM, so keep this modest; raise JS_BROWSERS to scrape more SPA careers
 # pages at once. Capped at the worker count (no point having idle browsers).
 _JS_BROWSERS = min(max(1, SETTINGS.js_browsers), _DISCOVERY_WORKERS)
@@ -45,7 +45,7 @@ class Candidate:
     # In: the model's guessed handle, which nothing probes any more -- the
     # resolver derives its own from the name (match.names.slug_guesses) and
     # prefers what the company's careers page actually says. Out: the
-    # RESOLVED handle, '|'-joined for Workday (see _slug_str), None for a
+    # RESOLVED handle, joined where it spans columns (see _slug_str), None for a
     # self-hosted board keyed on its URL.
     slug_guess: str | None
     careers_url: str
@@ -57,7 +57,7 @@ class Candidate:
     nc: int = 0
     # How the board was found: "sniff" (read off the company's own careers
     # page), "probe" (a name-guessed slug), "websearch", or "js" (the
-    # headless Workday scrape). Empty while unconfirmed.
+    # headless careers-page scan). Empty while unconfirmed.
     via: str = ""
     tried_slugs: list[str] = field(default_factory=list)
     # Set when the candidate is unconfirmed but its careers page links to a
@@ -73,8 +73,9 @@ def candidate_from_dict(d):
 
 def _slug_str(ats, slug):
     """A resolver hit's handle as the single string `Candidate.slug_guess`,
-    the report and `apply_to_store` all carry: Workday's (tenant, pod, site)
-    triple joined with '|', the plain slug for everything else, None for a
+    the report and `apply_to_store` all carry: a handle spanning several
+    store columns (Workday's (tenant, pod, site)) joined with its spec's
+    `handle.sep`, the plain slug for everything else, None for a
     self-hosted board whose only coordinate is its URL.
 
     >>> _slug_str("workday", ("acme", 5, "External"))
@@ -84,8 +85,8 @@ def _slug_str(ats, slug):
     >>> _slug_str("custom", None) is None
     True
     """
-    if ats == "workday" and isinstance(slug, (tuple, list)) and len(slug) == 3:
-        return "|".join(str(p) for p in slug)
+    if isinstance(slug, (tuple, list)):
+        return board_for(ats).spec.handle.sep.join(map(str, slug))
     return slug or None
 
 
@@ -99,7 +100,7 @@ _VIA_NOTES = {
     "probe":     "name-guessed slug, not read off the company's own site "
                  "- confirm identity",
     "websearch": "found by web search, not on the company's own site",
-    "js":        "headless Workday scrape - confirm identity",
+    "js":        "headless careers-page scan - confirm identity",
 }
 
 
@@ -150,8 +151,8 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         Two things the shared resolver does not do are kept here as
         fallbacks: a detection-only LEAD (an ATS we can recognize but not
         fetch -- Eightfold, Dayforce, iCIMS), worth reporting so the user can
-        add the board by hand; and the headless-browser Workday scrape, for
-        SPA careers pages whose myworkdayjobs link only exists once JS has
+        add the board by hand; and the headless-browser scan (JsScanProbe),
+        for SPA careers pages whose board link only exists once JS has
         run.
 
         `websearch=False` skips the resolver's search step for a bulk sweep
@@ -187,10 +188,10 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
         c.tried_slugs.append(f"[lead:{sniff['ats']} <- {sniff['source_url']}]")
 
-    # Workday fallback for SPA careers pages: the myworkdayjobs link is only
+    # Scan fallback for SPA careers pages: a SCANNED board's link is only
     # inserted into the DOM after JS runs, so nothing the resolver fetches can
     # see it. Skipped when a lead already identified the platform.
-    if js_probe is not None and c.ats in ("unknown", "workday") and not c.ats_lead:
+    if js_probe is not None and (c.ats == "unknown" or c.ats in SCANNED) and not c.ats_lead:
         # Noisy hint to the user — browser launches are slow, and they'll
         # otherwise wonder why discover() is suddenly pausing.
         marker = "[js]" if js_probe.launched else "[js init]"
@@ -200,12 +201,12 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         time.sleep(delay)
         if meta:
             c.confirmed  = True
-            c.ats        = "workday"
-            c.slug_guess = f"{meta['tenant']}|{meta['wd_pod']}|{meta['site']}"
+            c.ats        = meta["ats"]
+            c.slug_guess = _slug_str(meta["ats"], meta["slug"])
             c.job_count  = meta["count"]
             c.via        = "js"
             c.tried_slugs.append(
-                f"[workday:{meta['tenant']}.wd{meta['wd_pod']}/{meta['site']}"
+                f"[{c.ats}:{c.slug_guess}"
                 + ("" if meta["validated"] else " ~unvalidated")
                 + "]"
             )
@@ -262,7 +263,7 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
     input order. Shared by Claude-driven discover() and name-list-driven
     discover_companies().
 
-    use_js gates the headless-browser Workday fallback. A single browser is
+    use_js gates the headless-browser scan fallback. A single browser is
     single-threaded (Playwright greenlet affinity), so the fallback runs as
     a POOL of _JS_BROWSERS browsers — candidates that need it borrow a free
     one and only block when all are busy, instead of all queuing on one.
@@ -314,7 +315,7 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
         idx, cand = fut.result()
         validated[idx] = cand
 
-    js_probe = WorkdayJsProbePool(_JS_BROWSERS) if use_js else None
+    js_probe = JsScanProbePool(_JS_BROWSERS) if use_js else None
     try:
         drain(list(enumerate(candidate_dicts)),
               lambda irc: _worker(irc[0], irc[1], js_probe),
@@ -340,7 +341,7 @@ def discover_companies(candidate_dicts, term, use_js=False):
     same result shape as discover().
 
     use_js defaults False: bulk directory sweeps are dominated by the
-    single-threaded browser fallback, and few entries are Workday SPAs.
+    single-threaded browser fallback, and few entries are SPA careers pages.
     Pass use_js=True for a smaller, thorough pass. It also picks the
     resolver's web-search step, for the same reason — a directory sweep of
     several hundred names would spend most of its wall clock inside the

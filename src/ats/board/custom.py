@@ -2,9 +2,10 @@
 structure-agnostically.
 
 A job-detail link is /careers|jobs|positions|openings|roles|job/<slug>, but
-index and nav pages share that shape ("/careers/open-positions"), so
-generic slugs and nav-ish link text are refused and a specific slug is
-required (`find_job_links`). A page with too few such links names its
+index, nav and login pages share that shape ("/careers/open-positions",
+"/jobs/login"), so generic slugs, nav-ish link text and links in the
+site's navigation are refused and a specific slug is required
+(`find_job_links`). A page with too few such links names its
 "current openings" page, one hop away, on the same host (`read_page`).
 
 The `custom` spec reads a board through `read_page` (the html decoder's
@@ -16,17 +17,11 @@ is a board at all. The reader's constants live in config
 import re
 from urllib.parse import urldefrag, urljoin
 
-from bs4 import BeautifulSoup, SoupStrainer
-
 from src import config
 from src.net.http import HEADERS, SESSION
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           hashed_cache_path, host_of, json_cache_get,
-                          json_cache_put)
-
-# Link counting and the openings hop only touch anchors (and the title
-# element inside one), so those parses keep <a> tags only.
-_ANCHORS_ONLY = SoupStrainer("a")
+                          json_cache_put, parse_markup)
 
 _JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
                           r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
@@ -36,7 +31,12 @@ _NAV_SLUGS = {
     "career", "apply", "application", "search", "all", "browse", "students",
     "internships", "benefits", "culture", "life", "teams", "team", "departments",
     "locations", "faq", "contact", "index", "home", "overview",
+    "login", "logon", "signin", "sign-in",
 }
+#: A class or id naming site navigation: "navbar", "sub-nav", "menu-item",
+#: "header__nav", "topnavigation".
+_NAV_BLOCK_RE = re.compile(r"(?i)(?:^|[-_])(?:top|sub|main|site|desk|mobile|global)?"
+                           r"(?:nav|navbar|navigation|menu)s?(?:$|[-_])")
 _NAV_TEXT_RE = re.compile(
     r"^(careers?|jobs?|view (all|current|open)|open (positions?|roles?)|"
     r"see (all|open)|apply|search|browse|all (jobs|openings|roles)|"
@@ -50,12 +50,23 @@ _OPENINGS_TEXT_RE = re.compile(
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 
 
+def _in_navigation(a):
+    """Whether anchor `a` sits in the site's navigation: a <nav>, or an
+    element whose class or id names a nav bar or menu (`_NAV_BLOCK_RE`)."""
+    return any(el.name == "nav" or any(_NAV_BLOCK_RE.search(t)
+                                       for t in (*(el.get("class") or ()), el.get("id") or ""))
+               for el in a.parents)
+
+
 def find_job_links(soup):
     """(anchor, href, title) for each real job-posting link on a careers
-    page, nav and index links filtered, one per href. The title is the
-    anchor's heading (or [class*=title]) element's text, else its own."""
-    out, seen = [], set()
-    for a in soup.find_all("a", href=True):
+    page, one per href: nav, login and index links filtered, and any href
+    the site's navigation links (`_in_navigation`), a section of the site
+    wherever the page repeats it. The title is the anchor's heading (or
+    [class*=title]) element's text, else its own."""
+    anchors = soup.find_all("a", href=True)
+    out, seen = [], {a["href"] for a in anchors if _in_navigation(a)}
+    for a in anchors:
         m = _JOB_HREF_RE.search(a["href"])
         if not m:
             continue
@@ -126,7 +137,7 @@ def read_page(html, page_url, area=None, hop=True):
     >>> read_page(page, "https://x.test/careers", hop=False)["elements"]
     [{'title': 'Data Engineer', 'href': '/careers/data-engineer-7', 'url': 'https://x.test/careers/data-engineer-7', 'location': 'Data Engineer Durham, NC'}]
     """
-    soup = BeautifulSoup(html, "lxml")
+    soup = parse_markup(html)
     links = find_job_links(soup)
     target = _hop_target(soup, page_url) if hop and len(links) < config.CAREERS_PAGE_MIN_LINKS else None
     if target:
@@ -150,7 +161,7 @@ def _anchor_soup(url):
         r = SESSION.get(url, headers=HEADERS)
         if r.status_code != 200:
             return None
-        return BeautifulSoup(r.text, "lxml", parse_only=_ANCHORS_ONLY)
+        return parse_markup(r.text)
     except Exception:
         return None
 
@@ -163,7 +174,7 @@ def is_board_page(html):
     """Whether a page's `html` holds CAREERS_PAGE_MIN_LINKS genuine job
     links; False when it will not parse."""
     try:
-        return _is_board(BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY))
+        return _is_board(parse_markup(html))
     except Exception:
         return False
 
@@ -184,7 +195,7 @@ def custom_board_listing_url(page_url, html=None):
     cached = json_cache_get(path, config.BOARD_DETECT_CACHE_S)
     if cached is not None:
         return cached.get("listing")
-    soup = (BeautifulSoup(html, "lxml", parse_only=_ANCHORS_ONLY)
+    soup = (parse_markup(html)
             if html is not None else _anchor_soup(page_url))
     if soup is None:
         return None

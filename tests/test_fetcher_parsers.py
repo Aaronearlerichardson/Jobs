@@ -71,7 +71,9 @@ def usajobs_pages(serve):
 
 
 #: Spec'd platforms with a recorded listing: (ats, handle, listing fixture,
-#: detail fixture or None). Trimmed real responses.
+#: detail fixture or None). Trimmed real responses. A listing given as
+#: {URL fragment: fixture} answers each request by the first fragment its
+#: URL holds.
 BOARD_FIXTURES = [
     ("greenhouse", "databricks", "greenhouse_board.json", None),
     ("lever", "veeva", "lever_board.json", None),
@@ -91,10 +93,14 @@ BOARD_FIXTURES = [
     ("infor", "css-unchealthunc-prd.inforcloudsuite.com|9999", "infor_job_list.json",
      "infor_job_detail.json"),
     ("phenom", "careers.example.org", "phenom_search_results.html", "phenom_job_detail.html"),
-    ("jazzhr", "paradromicsinc", "jazzhr_board.html", "jazzhr_detail.html"),
+    ("jazzhr", "paradromicsinc", {"/apply/JW9uu3rCh2/": "jazzhr_detail_nold.html",
+                                  "/apply/": "jazzhr_detail.html",
+                                  "applytojob.com/": "jazzhr_board.html"}, None),
     ("jobvite", "neogenomics", "jobvite_board.html", "jobvite_detail.html"),
     ("kula", "precision-neuroscience", "kula_board.html", None),
-    ("successfactors", "https://careers.chiesi.com/", "successfactors_board.html", None),
+    ("successfactors", "https://careers.chiesi.com/",
+     {"startrow=0": "successfactors_board.html", "startrow=3": "successfactors_board_p2.html"},
+     None),
     ("icims", "uscareers-fujifilm", "icims_board.html", "icims_detail.html"),
     ("custom", "https://careers.foundationmedicine.com/jobs/search", "custom_board.html", None),
     ("wpjson", "https://www.restor3d.com/company/careers/", "wpjson_board.json", None),
@@ -119,18 +125,40 @@ class TestSpecdBoardsReadTheirListings:
     host, "phenom_<host_key>_<reqId>"; jobvite: title and location
     clean_field-ed like every other sweep row; icims: no searchLocation
     on an unscoped pull; custom and wpjson: their whole-board rows, which
-    had no sweep, in the sweep's shape)."""
+    had no sweep, in the sweep's shape; jazzhr: a posting whose page has
+    no JSON-LD kept as the index names it; successfactors: pages stepped by
+    the rows the tenant serves, a place read off the slug only where it
+    leads the title)."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
     def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
                                       handle, listing, detail):
         monkeypatch.setattr(board.time, "sleep", lambda s: None)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
-        replies = ([fake_response(url=REDIRECTS[ats])] if ats in REDIRECTS else []) + [
-            _fixture_response(listing),
-            _fixture_response(detail) if detail else fake_response(status=404)]
-        serve(replies)
+        if isinstance(listing, dict):
+            serve({fragment: _fixture_response(name) for fragment, name in listing.items()})
+        else:
+            serve(([fake_response(url=REDIRECTS[ats])] if ats in REDIRECTS else []) + [
+                _fixture_response(listing),
+                _fixture_response(detail) if detail else fake_response(status=404)])
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
+
+    def test_a_located_pull_asks_the_search_forms_area_options(self, serve, monkeypatch,
+                                                               tmp_path):
+        """A search reading no free-text place (iCIMS lists nothing for
+        searchLocation=NC) is scoped by its form's own location options:
+        every one whose label the area matches, asked together."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
+        log = serve({"searchLocation": _fixture_response("icims_board_located.html"),
+                     "/jobs/search": _fixture_response("icims_board.html"),
+                     "/jobs/388": _fixture_response("icims_detail_located.html")})
+        rows = board_for("icims").jobs("uscareers-fujifilm", "Acme", loc_re=re.compile(r"\bNC\b"))
+        assert next(r.params["searchLocation"] for r in log if "searchLocation" in r.params) == [
+            "12781--Holly Springs, NC", "12781-12817-Durham", "12781-12817-Holly Springs"]
+        assert [(r["id"], r["location"]) for r in rows] == [
+            ("icims_uscareers-fujifilm_38891", "Holly Springs, NC, US"),
+            ("icims_uscareers-fujifilm_38885", "Holly Springs, NC, US")]
 
     #: (stored URL, listed location, detail fixture, the location after):
     #: `detail.location` "always" replaces a listed one, "if_unknown" only

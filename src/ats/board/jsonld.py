@@ -14,11 +14,9 @@ Use it two ways:
 import json
 import re
 
-from bs4 import BeautifulSoup
-
 from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
-from src.net.util import stable_id, text_from_html
+from src.net.util import parse_markup, stable_id, text_from_html
 
 _JOB_URL_HINTS = re.compile(
     r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
@@ -27,7 +25,7 @@ _JOB_URL_HINTS = re.compile(
 
 def extract_jsonld(html):
     """Find every <script type=application/ld+json> block; return parsed objects."""
-    soup = BeautifulSoup(html, "html.parser")
+    soup = parse_markup(html)
     out = []
     for script in soup.find_all("script", type="application/ld+json"):
         txt = script.string or script.get_text()
