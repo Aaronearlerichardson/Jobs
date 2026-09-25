@@ -317,7 +317,8 @@ VERIFY_HEAD = 25
 
 # Rows whose deep-verify call had started when a pool abandoned it past
 # config.PASS_BUDGET_S. That paid call may still land on its thread, so this
-# process never asks for them again; they keep their first-pass score.
+# process asks for them again only under `force`; they keep their first-pass
+# score.
 _GIVEN_UP = set()
 
 
@@ -346,7 +347,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     'unverified'. Costs at most top_n x rounds API calls per
     run, and only for rows that changed since their last verification or
     were verified by an older model (fit_model NULL counts as older).
-    `force=True` re-verifies every finalist regardless, floor or not
+    `force=True` re-verifies every finalist regardless, floor or not, and
+    rows an earlier round abandoned past its budget
     (candidates are still capped at top_n; force does not widen the
     round's own budget).
 
@@ -370,7 +372,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
     done_ids = set()   # verified THIS run: never stale again, even under force
 
     def _stale(r):
-        if r["job_id"] in done_ids or r["job_id"] in _GIVEN_UP:
+        if r["job_id"] in done_ids or (r["job_id"] in _GIVEN_UP and not force):
             return False
         if force or not is_deep_verified(r.get("fit_reason")):
             return True

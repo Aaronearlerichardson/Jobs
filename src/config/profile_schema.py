@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import (AfterValidator, AliasChoices, BaseModel, BeforeValidator,
+from pydantic import (AfterValidator, BaseModel, BeforeValidator,
                       ConfigDict, Field, ValidationError, ValidationInfo,
                       field_validator, model_validator)
 
@@ -391,10 +391,8 @@ class Discovery(_Table):
     seed_companies: list[Annotated[SeedCompany, BeforeValidator(
         lambda v: {"name": v} if isinstance(v, str) else v)]] = []
     seed_triggers: list[str] = []
-    # Big employers worth the slow careers-page scan (`discovery.scan`);
-    # "workday_majors" is its old name.
-    scan_majors: list[str] = Field([], validation_alias=AliasChoices("scan_majors",
-                                                                     "workday_majors"))
+    # Big employers worth the slow careers-page scan (`discovery.scan`).
+    scan_majors: list[str] = []
     directory_urls: list[str] = []
     name_search_queries: list[str] = []
     brainstorm_names: Count = 50

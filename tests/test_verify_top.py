@@ -113,11 +113,11 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                          ).fetchone()["fit_reason"]
         assert cur == "deep: current"            # untouched
 
-    def test_a_call_abandoned_past_the_budget_is_never_asked_again(
+    def test_a_call_abandoned_past_the_budget_is_asked_again_only_when_forced(
             self, db, add_job, local_track, monkeypatch, capsys):
         """A verify call still running when its round's budget runs out is
-        abandoned: it is paid for, so it is neither counted nor asked again,
-        and its row keeps its first-pass score. The rows queued behind it
+        abandoned: it is paid for, so it is neither counted nor asked again
+        unless forced, and its row keeps its first-pass score. The rows queued behind it
         were never asked, so the next pass asks them."""
         import threading
         from src import config
@@ -148,6 +148,8 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                 "score; the 1 whose call had started") in out
         assert tuple(db.execute("SELECT resume_fit_score, fit_model FROM jobs "
                                 "WHERE job_id='gh_acme_fresh'").fetchone()) == (0.9, None)
+        ops.verify_top(top_n=10, max_workers=1, conn=db, t=t, force=True)
+        assert calls.count("Data Engineer gh_acme_fresh") == 2
 
     def test_force_re_verifies_every_finalist(
             self, db, add_job, local_track, monkeypatch):
