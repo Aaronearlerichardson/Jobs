@@ -33,9 +33,11 @@ PLAIN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # PROBE_TIMEOUT is for speculative requests (slug probes, name-guessed
 # careers pages, board counts), where a dead host should cost little and
 # most answers are 404s. FETCH_TIMEOUT is for a board or page known to
-# exist, where a slow real server is worth waiting for.
+# exist, where a slow real server is worth waiting for. Its read wait was
+# 25 s until 2026-09-25: 10 of 101k harvest GETs ran out (BambooHR details,
+# Greenhouse), and a host that never answers stalls in connect instead.
 PROBE_TIMEOUT = (3.0, 10.0)
-FETCH_TIMEOUT = (5.0, 25.0)
+FETCH_TIMEOUT = (5.0, 60.0)
 
 # Wall-clock budget of one pool pass, seconds: fetch_all's, and a fan_out's
 # where the caller passes one (net.parallel). Past it, work still queued is

@@ -21,7 +21,7 @@ from src import config
 from src.net.http import HEADERS, SESSION
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
                           hashed_cache_path, host_of, json_cache_get,
-                          json_cache_put, parse_markup)
+                          json_cache_put, node_text, parse_markup, xpath)
 
 _JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
                           r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
@@ -53,60 +53,70 @@ _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 def _in_navigation(a):
     """Whether anchor `a` sits in the site's navigation: a <nav>, or an
     element whose class or id names a nav bar or menu (`_NAV_BLOCK_RE`)."""
-    return any(el.name == "nav" or any(_NAV_BLOCK_RE.search(t)
-                                       for t in (*(el.get("class") or ()), el.get("id") or ""))
-               for el in a.parents)
+    return any(el.tag == "nav" or any(_NAV_BLOCK_RE.search(t)
+                                      for t in (*(el.get("class") or "").split(), el.get("id") or ""))
+               for el in a.iterancestors())
 
 
-def find_job_links(soup):
+def find_job_links(tree):
     """(anchor, href, title) for each real job-posting link on a careers
-    page, one per href: nav, login and index links filtered, and any href
-    the site's navigation links (`_in_navigation`), a section of the site
-    wherever the page repeats it. The title is the anchor's heading (or
-    [class*=title]) element's text, else its own."""
-    anchors = soup.find_all("a", href=True)
-    out, seen = [], {a["href"] for a in anchors if _in_navigation(a)}
+    page's parsed `tree`, one per href: nav, login and index links filtered,
+    and any href the site's navigation links (`_in_navigation`), a section
+    of the site wherever the page repeats it. The title is the anchor's
+    heading (or title-classed) element's text, else its own.
+
+    >>> page = ('<a href="/careers/facilities-engineer-88"><h3>Facilities Engineer</h3> Apply</a>'
+    ...         '<a href="/careers/open-positions/">View Current Job Openings</a>'
+    ...         '<a href="/jobs/login?loginOnly=1">External Candidate Login</a>')
+    >>> [(href, title) for _a, href, title in find_job_links(parse_markup(page))]
+    [('/careers/facilities-engineer-88', 'Facilities Engineer')]
+    """
+    anchors = xpath("//a[@href]")(tree)
+    out, seen = [], {a.get("href") for a in anchors if _in_navigation(a)}
     for a in anchors:
-        m = _JOB_HREF_RE.search(a["href"])
+        href = a.get("href")
+        m = _JOB_HREF_RE.search(href)
         if not m:
             continue
         slug = m.group(2).rstrip("/").split("/")[-1].split("?")[0].lower()
         if slug in _NAV_SLUGS or len(slug) < 4:
             continue
-        text = a.get_text(" ", strip=True)
+        text = node_text(a)
         if not text or len(text) < 4 or _NAV_TEXT_RE.match(text):
             continue
-        if a["href"] in seen:
+        if href in seen:
             continue
-        seen.add(a["href"])
-        te = a.find(["h1", "h2", "h3", "h4", "h5"]) or a.select_one("[class*='title']")
-        title = te.get_text(" ", strip=True) if te else text
-        out.append((a, a["href"], title))
+        seen.add(href)
+        te = next(a.iterdescendants("h1", "h2", "h3", "h4", "h5"), None)
+        if te is None:
+            te = next(iter(xpath(".//*[contains(@class, 'title')]")(a)), None)
+        title = node_text(te) if te is not None else text
+        out.append((a, href, title))
     return out
 
 
-def _openings_link(soup, page_url):
+def _openings_link(tree, page_url):
     """A same-host "see current openings" link, defragmented, or None. Never
     an aggregator's or an ATS vendor's: those are not a custom board."""
     host = host_of(page_url)
     if not host:
         return None
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
+    for a in xpath("//a[@href]")(tree):
+        href = a.get("href")
         # Defragmented, so an "#open-positions" link reads as this page and
         # the callers' no-self-hop check refuses it.
         absu = urldefrag(urljoin(page_url, href)).url
         if host_of(absu) != host or _OFFSITE_RE.search(absu):
             continue
-        text = a.get_text(" ", strip=True).lower()
+        text = node_text(a).lower()
         if _OPENINGS_HREF_RE.search(href) or _OPENINGS_TEXT_RE.search(text):
             return absu
     return None
 
 
-def _hop_target(soup, page_url):
+def _hop_target(tree, page_url):
     """The openings page to read in place of `page_url`, or None."""
-    op = _openings_link(soup, page_url)
+    op = _openings_link(tree, page_url)
     return op if op and op.rstrip("/") != page_url.rstrip("/") else None
 
 
@@ -115,31 +125,31 @@ def _location_near(a, area=None):
     else its grandparent. Where `area` (a location regex) matches in that
     element its match wins, so a role listed "Alameda, CA | Durham, NC" is
     kept as a Durham job."""
-    for el in (a, a.parent, a.parent.parent if a.parent else None):
+    parent = a.getparent()
+    for el in (a, parent, parent.getparent() if parent is not None else None):
         if el is None:
             continue
-        text = el.get_text(" ", strip=True)
+        text = node_text(el)
         m = (area.search(text) if area is not None else None) or LOC_TEXT_RE.search(text)
         if m:
             return m.group(0)
     return ""
 
 
-def read_page(html, page_url, area=None, hop=True):
-    """A careers page as the html decoder's payload: {"elements"}, one per
-    job link (its `title`, `href`, absolute `url` and `location`, read
-    `_location_near` with `area`), or {"hop"}, the openings page to read
-    instead when the page holds fewer than CAREERS_PAGE_MIN_LINKS links
-    (only while `hop`).
+def read_page(tree, page_url, area=None, hop=True):
+    """A careers page's parsed `tree` as the html decoder's payload:
+    {"elements"}, one per job link (its `title`, `href`, absolute `url` and
+    `location`, read `_location_near` with `area`), or {"hop"}, the
+    openings page to read instead when the page holds fewer than
+    CAREERS_PAGE_MIN_LINKS links (only while `hop`).
 
     >>> page = ('<ul><li><a href="/careers/data-engineer-7">Data Engineer</a> Durham, NC</li>'
     ...         '<li><a href="/careers/open-positions/">Careers</a></li></ul>')
-    >>> read_page(page, "https://x.test/careers", hop=False)["elements"]
+    >>> read_page(parse_markup(page), "https://x.test/careers", hop=False)["elements"]
     [{'title': 'Data Engineer', 'href': '/careers/data-engineer-7', 'url': 'https://x.test/careers/data-engineer-7', 'location': 'Data Engineer Durham, NC'}]
     """
-    soup = parse_markup(html)
-    links = find_job_links(soup)
-    target = _hop_target(soup, page_url) if hop and len(links) < config.CAREERS_PAGE_MIN_LINKS else None
+    links = find_job_links(tree)
+    target = _hop_target(tree, page_url) if hop and len(links) < config.CAREERS_PAGE_MIN_LINKS else None
     if target:
         return {"hop": target}
     out, seen = [], set()
@@ -154,25 +164,29 @@ def read_page(html, page_url, area=None, hop=True):
     return {"elements": out}
 
 
-def _anchor_soup(url):
-    """`url`'s anchors, parsed; None on any failure. Silent: a probed page
+def _page_tree(url):
+    """`url`'s page, parsed; None on any failure. Silent: a probed page
     that is not a board is an expected answer."""
     try:
         r = SESSION.get(url, headers=HEADERS)
         if r.status_code != 200:
             return None
-        return parse_markup(r.text)
+        return parse_markup(r.text, url=url)
     except Exception:
         return None
 
 
-def _is_board(soup):
-    return len(find_job_links(soup)) >= config.CAREERS_PAGE_MIN_LINKS
+def _is_board(tree):
+    return len(find_job_links(tree)) >= config.CAREERS_PAGE_MIN_LINKS
 
 
 def is_board_page(html):
     """Whether a page's `html` holds CAREERS_PAGE_MIN_LINKS genuine job
-    links; False when it will not parse."""
+    links; False when it will not parse.
+
+    >>> is_board_page("<a href='/careers/'>Careers</a>")
+    False
+    """
     try:
         return _is_board(parse_markup(html))
     except Exception:
@@ -188,6 +202,9 @@ def custom_board_listing_url(page_url, html=None):
     A decided verdict is cached BOARD_DETECT_CACHE_S per page URL (short,
     so a board going live or dead is re-checked soon); a failed fetch is
     not cached.
+
+    >>> custom_board_listing_url("https://www.indeed.com/jobs?q=x", "<html></html>") is None
+    True
     """
     if _OFFSITE_RE.search(page_url):
         return None
@@ -195,14 +212,14 @@ def custom_board_listing_url(page_url, html=None):
     cached = json_cache_get(path, config.BOARD_DETECT_CACHE_S)
     if cached is not None:
         return cached.get("listing")
-    soup = (parse_markup(html)
-            if html is not None else _anchor_soup(page_url))
-    if soup is None:
+    tree = (parse_markup(html, url=page_url)
+            if html is not None else _page_tree(page_url))
+    if tree is None:
         return None
-    result = page_url if _is_board(soup) else None
-    target = None if result else _hop_target(soup, page_url)
+    result = page_url if _is_board(tree) else None
+    target = None if result else _hop_target(tree, page_url)
     if target:
-        s2 = _anchor_soup(target)
-        result = target if s2 is not None and _is_board(s2) else None
+        t2 = _page_tree(target)
+        result = target if t2 is not None and _is_board(t2) else None
     json_cache_put(path, {"listing": result})
     return result

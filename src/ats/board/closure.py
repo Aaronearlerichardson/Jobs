@@ -148,7 +148,7 @@ def probe_job_open(url, job_id=None):
         return False, f"page says {m.group(0)[:50]!r}"
     try:
         from .jsonld import extract_jsonld, is_jobposting
-        for obj in extract_jsonld(html):
+        for obj in extract_jsonld(html, url):
             if is_jobposting(obj):
                 vt = str(obj.get("validThrough") or "")[:10]
                 if vt and vt < time.strftime("%Y-%m-%d"):

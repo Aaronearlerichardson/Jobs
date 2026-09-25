@@ -18,7 +18,7 @@ import re
 from urllib.parse import urljoin
 
 from src import config
-from src.net.util import host_of, parse_markup, stable_id, strip_html
+from src.net.util import host_of, node_text, parse_markup, stable_id, strip_html, xpath
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
 _LI_CURRENT_RE = re.compile(r"currentJobId=(\d+)")
@@ -26,15 +26,32 @@ _INDEED_JK_RE = re.compile(r"[?&]jk=([0-9a-f]+)", re.I)
 
 
 def _txt(el):
-    return re.sub(r"\s+", " ", el.get_text(" ", strip=True)) if el else ""
+    return re.sub(r"\s+", " ", node_text(el)) if el is not None else ""
 
 
-def _sel(scope, *selectors):
-    for sel in selectors:
-        el = scope.select_one(sel)
-        if el and _txt(el):
+def _first(scope, path):
+    """The first element XPath `path` finds from `scope`, or None."""
+    hit = xpath(path)(scope)
+    return hit[0] if hit else None
+
+
+def _sel(scope, *paths):
+    for path in paths:
+        el = _first(scope, path)
+        if el is not None and _txt(el):
             return _txt(el)
     return ""
+
+
+def _class(name):
+    """An XPath test: the element's class attribute lists `name`."""
+    return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
+
+
+def _first_string(tree, rx):
+    """The first text node in `tree` (script text included) that `rx`
+    searches, or None."""
+    return next((s for s in tree.xpath("//text()") if rx.search(s)), None)
 
 
 # Aggregator / ATS / social hosts — a URL on one of these is NOT the
@@ -94,15 +111,27 @@ def _split_company_loc(text):
     return company.strip(), location.strip()
 
 
-def parse_linkedin(soup, page_url=""):
+def parse_linkedin(tree, page_url=""):
+    """A LinkedIn page's jobs: its job anchors and guest cards, and a
+    detail page's own posting.
+
+    >>> page = ('<li><a href="/jobs/view/123/"><span>Data Engineer</span>'
+    ...         '<span>Acme \\u00b7 Durham, NC</span></a></li>')
+    >>> [(j["id"], j["title"], j["company"], j["location"]) for j in parse_linkedin(parse_markup(page))]
+    [('linkedin_123', 'Data Engineer', 'Acme', 'Durham, NC')]
+    >>> page = ('<title>Data Engineer | Acme | LinkedIn</title><p>Durham, NC (Hybrid)</p>'
+    ...         '<div><h2>About the job</h2><p>' + 'Build pipelines. ' * 30 + '</p></div>')
+    >>> [(j["company"], j["location"], j["description"][:30]) for j in parse_linkedin(parse_markup(page))]
+    [('Acme', 'Durham, NC (Hybrid)', 'About the job Build pipelines.')]
+    """
     jobs = []
     # Job anchors (generations 1 + 2). Visible strings first; classic-card
     # selectors as fallback for the older markup.
-    for a in soup.select("a[href*='/jobs/view/']"):
+    for a in xpath("//a[contains(@href, '/jobs/view/')]")(tree):
         m = _LI_VIEW_RE.search(a.get("href", ""))
         if not m:
             continue
-        parts = list(a.stripped_strings)
+        parts = node_text(a, None)
         if not parts or _NONTITLE_RE.match(parts[0]):
             continue
         title = re.sub(r"(.+?)\1$", r"\1", parts[0])   # LinkedIn doubles titles
@@ -111,49 +140,56 @@ def parse_linkedin(soup, page_url=""):
             if "\u00b7" in p:
                 company, location = _split_company_loc(p)
                 break
-        card = a.find_parent("li") or a.parent
+        card = next(a.iterancestors("li"), None)
+        if card is None:
+            card = a.getparent()
         if not company and card is not None:
-            company = _sel(card, ".artdeco-entity-lockup__subtitle",
-                           ".job-card-container__primary-description",
-                           "h4.base-search-card__subtitle")
-            location = location or _sel(card, ".job-card-container__metadata-wrapper li",
-                                        ".artdeco-entity-lockup__caption",
-                                        "span.job-search-card__location")
+            company = _sel(card, f".//*[{_class('artdeco-entity-lockup__subtitle')}]",
+                           f".//*[{_class('job-card-container__primary-description')}]",
+                           f".//h4[{_class('base-search-card__subtitle')}]")
+            location = location or _sel(
+                card, f".//li[ancestor::*[{_class('job-card-container__metadata-wrapper')}]]",
+                f".//*[{_class('artdeco-entity-lockup__caption')}]",
+                f".//span[{_class('job-search-card__location')}]")
         j = _job(f"linkedin_{m.group(1)}", title, company,
                  f"https://www.linkedin.com/jobs/view/{m.group(1)}/", location)
         if j:
             jobs.append(j)
 
     # Guest cards (generation 3): title/company live outside the anchor.
-    for c in soup.select("div.base-card"):
-        a = c.select_one("a[href*='/jobs/view/']")
-        if not a:
+    for c in xpath(f"//div[{_class('base-card')}]")(tree):
+        a = _first(c, ".//a[contains(@href, '/jobs/view/')]")
+        if a is None:
             continue
         m = _LI_VIEW_RE.search(a.get("href", ""))
-        title = _sel(c, "h3.base-search-card__title")
+        title = _sel(c, f".//h3[{_class('base-search-card__title')}]")
         j = _job(f"linkedin_{m.group(1)}" if m else f"linkedin_{stable_id(title)}",
-                 title, _sel(c, "h4.base-search-card__subtitle"),
-                 a.get("href", "").split("?")[0], _sel(c, "span.job-search-card__location"))
+                 title, _sel(c, f".//h4[{_class('base-search-card__subtitle')}]"),
+                 a.get("href", "").split("?")[0],
+                 _sel(c, f".//span[{_class('job-search-card__location')}]"))
         if j:
             jobs.append(j)
 
     # Detail page: <title> is "Job Title | Company | LinkedIn" (with an
     # unread-count "(9) " prefix on live DOM). No stable numeric id is
     # recoverable, so the id hashes title+company.
-    t = soup.title.get_text(" ", strip=True) if soup.title else ""
+    te = _first(tree, "//title")
+    t = node_text(te) if te is not None else ""
     tm = re.match(r"^(?:\(\d+\)\s*)?(.+?)\s*\|\s*(.+?)\s*\|\s*LinkedIn$", t)
     if tm:
         title, company = tm.group(1), tm.group(2)
-        loc_el = soup.find(string=_MODE_RE)
+        loc_el = _first_string(tree, _MODE_RE)
         location = re.sub(r"\s+", " ", str(loc_el)).strip() if loc_el else ""
-        desc, marker = "", soup.find(string=re.compile(r"^\s*About the job\s*$"))
-        sec = marker.find_parent() if marker else None
+        desc, marker = "", _first_string(tree, re.compile(r"^\s*About the job\s*$"))
+        # The element holding the marker: a tail's is its element's parent.
+        sec = None if marker is None else \
+            marker.getparent() if marker.is_text else marker.getparent().getparent()
         for _ in range(5):
-            if sec is None or len(sec.get_text(" ", strip=True)) > 400:
+            if sec is None or len(node_text(sec)) > 400:
                 break
-            sec = sec.parent
+            sec = sec.getparent()
         if sec is not None:
-            desc = sec.get_text(" ", strip=True)
+            desc = node_text(sec)
         j = _job(f"linkedin_{stable_id(title, company)}", title, company,
                  page_url or "", location, desc)
         if j:
@@ -172,19 +208,30 @@ def parse_linkedin(soup, page_url=""):
 
 # ─── Indeed ──────────────────────────────────────────────────────────────
 
-def parse_indeed(soup, page_url=""):
+def parse_indeed(tree, page_url=""):
+    """An Indeed results page's job cards.
+
+    >>> page = ('<div class="job_seen_beacon"><h2><a href="/viewjob?jk=ab12">Data Engineer</a></h2>'
+    ...         '<span data-testid="company-name">Acme</span>'
+    ...         '<div data-testid="text-location">Durham, NC</div></div>')
+    >>> [(j["id"], j["title"], j["company"], j["url"], j["location"])
+    ...  for j in parse_indeed(parse_markup(page))]
+    [('indeed_ab12', 'Data Engineer', 'Acme', 'https://www.indeed.com/viewjob?jk=ab12', 'Durham, NC')]
+    """
     jobs = []
-    for c in soup.select("div.job_seen_beacon, td.resultContent"):
-        a = c.select_one("h2 a[href], a.jcs-JobTitle")
-        if not a:
+    for c in xpath(f"//div[{_class('job_seen_beacon')}] | //td[{_class('resultContent')}]")(tree):
+        a = _first(c, f".//a[@href][ancestor::h2] | .//a[{_class('jcs-JobTitle')}]")
+        if a is None:
             continue
         href = a.get("href", "")
         m = _INDEED_JK_RE.search(href) or re.search(r"jk=([0-9a-f]+)", str(a.get("data-jk", "")))
         jid = (m.group(1) if m else a.get("data-jk")) or stable_id(href, _txt(a))
         j = _job(f"indeed_{jid}", _txt(a),
-                 _sel(c, "[data-testid='company-name']", "span.companyName"),
+                 _sel(c, ".//*[@data-testid='company-name']",
+                      f".//span[{_class('companyName')}]"),
                  href if href.startswith("http") else f"https://www.indeed.com{href}",
-                 _sel(c, "[data-testid='text-location']", "div.companyLocation"))
+                 _sel(c, ".//*[@data-testid='text-location']",
+                      f".//div[{_class('companyLocation')}]"))
         if j:
             jobs.append(j)
     return jobs
@@ -207,26 +254,31 @@ _META_LOC_RE = re.compile(
     r"|Remote(?:,\s*[A-Za-z .]+)?|Multiple Locations)")
 
 
-def parse_metacareers(soup, page_url=""):
+def parse_metacareers(tree, page_url=""):
+    """A metacareers page's job cards, and a detail page's own posting.
+
+    >>> page = ('<div><a href="/profile/job_details/42/">Research Scientist</a>'
+    ...         '<span>Menlo Park, CA</span></div>')
+    >>> [(j["id"], j["title"], j["location"]) for j in parse_metacareers(parse_markup(page))]
+    [('meta_42', 'Research Scientist', 'Menlo Park, CA')]
+    """
     jobs, seen = [], set()
     # Listing/search page: one card per job, each linking to a job_details URL.
-    for a in soup.select("a[href*='/profile/job_details/']"):
+    for a in xpath("//a[contains(@href, '/profile/job_details/')]")(tree):
         m = _META_JOB_RE.search(a.get("href", ""))
         if not m or m.group(1) in seen:
             continue
         jid = m.group(1)
         seen.add(jid)
-        card = a.find_parent(["div", "li"]) or a
-        strings = [s for s in a.stripped_strings if not _NONTITLE_RE.match(s)]
+        card = next(a.iterancestors("div", "li"), a)
+        strings = [s for s in node_text(a, None) if not _NONTITLE_RE.match(s)]
         title = strings[0] if strings else ""
         if not title:
-            te = card.find(["h1", "h2", "h3", "h4"])
-            title = _txt(te) if te else ""
+            title = _txt(next(card.iterdescendants("h1", "h2", "h3", "h4"), None))
         # Search for the location in the card text with the TITLE removed —
         # titles like "Engineer, Reality Labs" carry their own comma and would
         # otherwise bleed into the greedy "City, ST" match.
-        rest = card.get_text(" ", strip=True).replace(title, " ", 1) if title else \
-            card.get_text(" ", strip=True)
+        rest = node_text(card).replace(title, " ", 1) if title else node_text(card)
         lm = _META_LOC_RE.search(rest)
         j = _job(f"meta_{jid}", title, "Meta",
                  f"https://www.metacareers.com/profile/job_details/{jid}/",
@@ -238,14 +290,14 @@ def parse_metacareers(soup, page_url=""):
     dm = _META_JOB_RE.search(page_url or "")
     if dm:
         jid = dm.group(1)
-        og = soup.select_one("meta[property='og:title'][content]")
-        raw = (og.get("content") if og else "") or \
-            (soup.title.get_text(" ", strip=True) if soup.title else "")
+        og = _first(tree, "//meta[@property='og:title'][@content]")
+        te = _first(tree, "//title")
+        raw = (og.get("content") if og is not None else "") or \
+            (node_text(te) if te is not None else "")
         title = re.sub(r"\s*[|\-–—]\s*Meta\b.*$", "", raw).strip() or raw
-        ogd = soup.select_one("meta[property='og:description'][content]")
-        desc = ogd.get("content", "") if ogd else ""
-        body = soup.get_text(" ", strip=True).replace(title, " ", 1) if title else \
-            soup.get_text(" ", strip=True)
+        ogd = _first(tree, "//meta[@property='og:description'][@content]")
+        desc = ogd.get("content", "") if ogd is not None else ""
+        body = node_text(tree).replace(title, " ", 1) if title else node_text(tree)
         lm = _META_LOC_RE.search(body)
         j = _job(f"meta_{jid}", title, "Meta",
                  f"https://www.metacareers.com/profile/job_details/{jid}/",
@@ -263,11 +315,22 @@ def parse_metacareers(soup, page_url=""):
 
 # ─── Generic (JSON-LD + job-link sweep + job-card sweep) ─────────────────
 
-def parse_jsonld(soup, page_url=""):
+def parse_jsonld(tree, page_url=""):
+    """A page's schema.org JobPostings, the employer's own site kept as
+    `company_url`.
+
+    >>> page = ('<script type="application/ld+json">{"@type": "JobPosting", "title": "Chemist",'
+    ...         ' "url": "https://x.test/j/1", "hiringOrganization": {"name": "Acme", "sameAs":'
+    ...         ' "https://acme.example/about"}, "jobLocation": {"address": {"addressLocality":'
+    ...         ' "Durham", "addressRegion": "NC"}}}</script>')
+    >>> [(j["title"], j["company"], j["location"], j["company_url"])
+    ...  for j in parse_jsonld(parse_markup(page))]
+    [('Chemist', 'Acme', 'Durham, NC', 'https://acme.example')]
+    """
     jobs = []
-    for tag in soup.find_all("script", type="application/ld+json"):
+    for tag in xpath("//script[@type='application/ld+json']")(tree):
         try:
-            data = json.loads(tag.string or "")
+            data = json.loads(tag.text or "")
         except Exception:
             continue
         items = data if isinstance(data, list) else \
@@ -334,17 +397,19 @@ def _card_scopes(a):
     each cell). A whole results list would lend a neighbour's location to a
     card that has none."""
     yield a
-    if a.parent is not None:
-        yield a.parent
-        gp = a.parent.parent
-        if gp is not None and len({x["href"] for x in gp.find_all("a", href=True)}) == 1:
+    parent = a.getparent()
+    if parent is not None:
+        yield parent
+        gp = parent.getparent()
+        if gp is not None and len(set(xpath(".//a/@href")(gp))) == 1:
             yield gp
 
 
 def _card_title(a):
-    te = a.find(["h1", "h2", "h3", "h4", "h5"]) or a.select_one(
-        "[data-ui*='title'], [class*='title']")
-    return _txt(te) if te else ""
+    te = next(a.iterdescendants("h1", "h2", "h3", "h4", "h5"), None)
+    if te is None:
+        te = _first(a, ".//*[contains(@data-ui, 'title') or contains(@class, 'title')]")
+    return _txt(te)
 
 
 def _card_location(a, title=""):
@@ -352,14 +417,14 @@ def _card_location(a, title=""):
     whole text is a place ("Cambridge, MA", "Remote"), else the first place
     named in the card's text once the title is taken out of it."""
     for scope in _card_scopes(a):
-        for el in scope.find_all(["li", "span", "td", "div", "p", "small"]):
+        for el in scope.iterdescendants("li", "span", "td", "div", "p", "small"):
             t = _txt(el)
             if not t or len(t) > 60 or (title and title in t):
                 continue
             if _LOC_RE.fullmatch(t):
                 return t
     for scope in _card_scopes(a):
-        text = scope.get_text(" ", strip=True)
+        text = node_text(scope)
         if title:
             text = text.replace(title, " ", 1)
         m = _LOC_RE.search(text)
@@ -368,7 +433,7 @@ def _card_location(a, title=""):
     return ""
 
 
-def parse_generic(soup, page_url=""):
+def parse_generic(tree, page_url=""):
     from src.ats.board.custom import find_job_links
     jobs, seen = [], set()
 
@@ -383,11 +448,11 @@ def parse_generic(soup, page_url=""):
         if j:
             jobs.append(j)
 
-    for a, href, title in find_job_links(soup):
+    for a, href, title in find_job_links(tree):
         _emit(a, href, title)
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"].split("?")[0]
+    for a in xpath("//a[@href]")(tree):
+        href = a.get("href").split("?")[0]
         host = host_of(urljoin(page_url or "", href))
         if _JOB_ID_PATH_RE.search(href):
             pass
@@ -396,16 +461,17 @@ def parse_generic(soup, page_url=""):
             continue
         title = _card_title(a) or _txt(a)
         if len(title) >= 4 and not _NONTITLE_RE.match(title):
-            _emit(a, a["href"], title)
+            _emit(a, a.get("href"), title)
     return jobs
 
 
 # ─── Entry point ─────────────────────────────────────────────────────────
 
-def _canonical_url(soup):
-    el = soup.select_one("link[rel='canonical'][href]") \
-        or soup.select_one("meta[property='og:url'][content]")
-    return (el.get("href") or el.get("content") or "") if el else ""
+def _canonical_url(tree):
+    el = _first(tree, "//link[normalize-space(@rel)='canonical'][@href]")
+    if el is None:
+        el = _first(tree, "//meta[@property='og:url'][@content]")
+    return (el.get("href") or el.get("content") or "") if el is not None else ""
 
 
 def page_url(html, url=""):
@@ -430,21 +496,37 @@ def parse_page(url, html):
     """Parse captured page HTML -> (jobs, source_label). Layered parsers;
     de-duplicated by job id, site-specific hits first. When `url` is empty
     (Ctrl+S saves carry none), the site is detected from the canonical URL
-    or distinctive DOM markers instead."""
-    soup = parse_markup(html)
+    or distinctive DOM markers instead.
+
+    An id-tailed card with a heading is a posting only on a job-board host
+    (or a /j/ path); a card naming no place borrows none from a neighbour:
+
+    >>> parse_page("", '<link rel="canonical" href="https://www.acme.com/news">'
+    ...            '<a href="https://www.acme.com/press/10001"><h2>New office</h2></a>')
+    ([], 'page')
+    >>> jobs, _ = parse_page("", '<link rel="canonical" href="https://jobs.acme.org/search"><ul>'
+    ...     '<li><a href="/jobs/1001-analyst">Analyst</a> <span>Durham, NC</span></li>'
+    ...     '<li><a href="/jobs/1002-engineer">Engineer</a></li></ul>')
+    >>> [(j["title"], j["location"]) for j in jobs]
+    [('Analyst', 'Durham, NC'), ('Engineer', '')]
+    """
+    tree = parse_markup(html, url=url)
     if not url:
-        url = _canonical_url(soup)
+        url = _canonical_url(tree)
     low = (url or "").lower()
     if not low.startswith("http"):
-        t = soup.title.get_text(strip=True) if soup.title else ""
-        if t.endswith("LinkedIn") or soup.select_one(
-                "a[href*='linkedin.com/jobs/view/'], [data-occludable-job-id], "
-                ".job-card-container, .base-search-card__title") or \
-                soup.select_one("link[href*='licdn.com'], img[src*='licdn.com']"):
+        te = _first(tree, "//title")
+        t = node_text(te, "") if te is not None else ""
+        if t.endswith("LinkedIn") or _first(
+                tree, "//a[contains(@href, 'linkedin.com/jobs/view/')] | //*[@data-occludable-job-id]"
+                f" | //*[{_class('job-card-container')}] | //*[{_class('base-search-card__title')}]"
+                " | //link[contains(@href, 'licdn.com')] | //img[contains(@src, 'licdn.com')]") \
+                is not None:
             low = "linkedin."
-        elif soup.select_one("div.job_seen_beacon, a.jcs-JobTitle"):
+        elif _first(tree, f"//div[{_class('job_seen_beacon')}] | //a[{_class('jcs-JobTitle')}]") \
+                is not None:
             low = "indeed."
-        elif soup.select_one("a[href*='/profile/job_details/']"):
+        elif _first(tree, "//a[contains(@href, '/profile/job_details/')]") is not None:
             low = "metacareers."
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
@@ -460,7 +542,7 @@ def parse_page(url, html):
     by_id = {}
     for layer in layers:
         try:
-            found = layer(soup, url)
+            found = layer(tree, url)
         except Exception as e:
             print(f"    [!] {layer.__name__}: {e}")
             found = []

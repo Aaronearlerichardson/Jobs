@@ -603,7 +603,7 @@ BOARDS = {
                 "url": "https://jobs.jobvite.com/{tenant|lower}/search",
                 "params": {"p": "$page"},
                 "decoder": {"kind": "html",
-                            "select": "a.jv-job-list-name[href*='/{tenant}/job/' i]",
+                            "select": "a.jv-job-list-name[href*='/{tenant}/job/']",
                             "context": ["li"], "cells": {"location": ".jv-job-list-location"}},
                 "pager": {"kind": "page", "size": 50, "pages": 20},
                 "fields": {
@@ -727,11 +727,11 @@ BOARDS = {
                 "decoder": {"kind": "html", "select": "a.iCIMS_Anchor, a[href*='/jobs/']",
                             "context": ["li", "div"], "selects": True,
                             "cells": {
-                                "place": ".field-label:-soup-contains('Location') + span, "
-                                         "dt:-soup-contains('Location') + dd",
-                                "city": "dt:has(.glyphicons-map-marker):-soup-contains('City') + dd",
-                                "state": "dt:has(.glyphicons-map-marker):-soup-contains('State') + dd",
-                                "country": "dt:has(.glyphicons-map-marker):-soup-contains('Country')"
+                                "place": ".field-label:contains('Location') + span, "
+                                         "dt:contains('Location') + dd",
+                                "city": "dt:has(.glyphicons-map-marker):contains('City') + dd",
+                                "state": "dt:has(.glyphicons-map-marker):contains('State') + dd",
+                                "country": "dt:has(.glyphicons-map-marker):contains('Country')"
                                            " + dd"}},
                 # Tenants serve 20 or 50 a page.
                 "pager": {"kind": "page", "pages": 8, "bare_first": True,

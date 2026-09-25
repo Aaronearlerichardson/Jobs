@@ -928,7 +928,7 @@ identically to a dead one.
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
 | `src/ops/` | the operations, by family: `status.py` (status sync, closed-probe), `scoring.py` (self-heal, rescore, deep-verify), `backfill.py`, `ingest.py` (external ingest, manual adds), `repair.py` (dead boards, re-resolution, slug renames), `rekey.py`, `roster.py` (composite targets); `maintenance.py` holds what they share |
 | `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |
-| `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec, parsed into the pydantic models in `spec.py` and read by one engine |
+| `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec, parsed into the pydantic models in `spec.py` and read by one engine; an html decoder's selectors are CSS in cssselect's dialect (`:contains`, not soupsieve's `:-soup-contains`) |
 | `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/web search, CareerOneStop/NLx, USAJOBS, Getro network boards |
 | `src/ats/board/company.py` | company-vetted, location-scoped pulls + lazy description hydration, dispatched to the board engine |
 | `src/ats/board/custom.py` | the careers-page reader behind the `custom` spec and discovery's custom-board detection |

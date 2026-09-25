@@ -24,7 +24,7 @@ from urllib.parse import unquote
 from src import config
 from src.match.locality import NC_RE  # profile [locality]
 from src.net.http import HEADERS, PLAIN_HEADERS, SESSION
-from src.net.util import clean_field, parse_markup
+from src.net.util import clean_field, node_text, parse_markup, xpath
 from .engine import board_for, board_for_url
 from . import jsonld
 
@@ -90,6 +90,22 @@ def _description_from_job_url(url):
     return job_page_meta(url)[1]
 
 
+#: A posting page's JD container, the first of these found.
+_DESC_PATHS = (
+    "//*[@data-careersite-propertyid='description']",
+    "//*[@data-careersite-propertyid='jobdescription']",
+    # Custom boards that name the JD container ("_flow job-description").
+    # Kept specific ('job-description'/'jobDescription', not a bare
+    # 'description') so a short company tagline can't match.
+    "//*[contains(@class, 'job-description')]",
+    "//*[contains(@class, 'jobDescription')]",
+    # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template wraps the
+    # posting in .jobDisplay. Last in the chain: it carries a little page
+    # chrome, so the precise containers win.
+    "//*[contains(@class, 'jobDisplay')]",
+)
+
+
 def job_page_meta(url):
     """(title, description) read off a job's own detail page, vendor-
     agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
@@ -111,7 +127,7 @@ def job_page_meta(url):
         return "", ""
     title = desc = ""
     try:
-        p = next((jsonld.read_posting(o, url) for o in jsonld.extract_jsonld(html)
+        p = next((jsonld.read_posting(o, url) for o in jsonld.extract_jsonld(html, url)
                   if jsonld.is_jobposting(o)), None)
         if p:
             title = p["title"]
@@ -123,27 +139,17 @@ def job_page_meta(url):
     if title and desc:
         return title, desc
     try:
-        soup = parse_markup(html)
+        tree = parse_markup(html, url=url)
         if not title:
-            og = soup.find("meta", attrs={"property": "og:title"})
-            raw = (og.get("content") if og else "") or \
-                (soup.title.get_text(" ") if soup.title else "")
+            og = next(iter(xpath("//meta[@property='og:title']")(tree)), None)
+            te = next(iter(xpath("//title")(tree)), None)
+            raw = (og.get("content") if og is not None else "") or \
+                (node_text(te, " ", strip=False) if te is not None else "")
             title = re.sub(r"\s+", " ", raw or "").split(" | ")[0].strip()
         if not desc:
-            el = (soup.select_one('[data-careersite-propertyid="description"]')
-                  or soup.select_one('[data-careersite-propertyid="jobdescription"]')
-                  # Custom boards that name the JD container ("_flow
-                  # job-description"). Kept specific ('job-description'/
-                  # 'jobDescription', not a bare 'description') so a short
-                  # company tagline can't match.
-                  or soup.select_one('[class*="job-description"]')
-                  or soup.select_one('[class*="jobDescription"]')
-                  # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template
-                  # wraps the posting in .jobDisplay. Last in the chain: it
-                  # carries a little page chrome, so the precise containers win.
-                  or soup.select_one('[class*="jobDisplay"]'))
-            if el:
-                d = el.get_text(" ", strip=True)
+            el = next((hit for path in _DESC_PATHS for hit in xpath(path)(tree)[:1]), None)
+            if el is not None:
+                d = node_text(el)
                 if len(d) >= 120:
                     desc = d[:_DESC_MAX]
     except Exception:

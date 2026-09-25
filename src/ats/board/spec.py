@@ -12,12 +12,13 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any, ClassVar, Literal, Union, get_args
 
+from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Discriminator, Field, Strict, StringConstraints, Tag,
                       ValidationError, model_validator)
 
 from src import config
-from . import fields
+from . import decode, fields
 
 RowField = Literal["id", "title", "url", "location", "description", "posted_at",
                    "remote_hint", "department"]
@@ -39,6 +40,24 @@ def _regex(v):
         re.compile(v)
     except re.error as e:
         raise ValueError(f"bad regex: {e}") from None
+    return v
+
+
+def _css(v):
+    """`v` once it compiles as CSS in cssselect's dialect, each {placeholder}
+    a sample value; the "$job_links" sentinel passes.
+
+    >>> _css("li:has(.loc) a[href*='/{slug}/']")
+    "li:has(.loc) a[href*='/{slug}/']"
+    >>> _css("dt:-soup-contains('City') + dd")
+    Traceback (most recent call last):
+    ValueError: bad CSS: The pseudo-class :-soup-contains() is unknown
+    """
+    if v != "$job_links":
+        try:
+            decode.css(fields.fmt(v, lambda _name: "x"))
+        except SelectorError as e:
+            raise ValueError(f"bad CSS: {e}") from None
     return v
 
 
@@ -64,6 +83,8 @@ Count = Annotated[int, Strict(), Field(ge=1)]
 Status = Annotated[int, Strict(), Field(ge=100, le=599)]
 Regex = Annotated[str, Strict(), AfterValidator(_regex)]
 Template = Annotated[str, Strict(), StringConstraints(min_length=1), AfterValidator(_template)]
+#: A CSS selector template, compiled as the spec loads (`decode.css`).
+Css = Annotated[Template, AfterValidator(_css)]
 #: A field-grammar spec (fields.py): a path, a dict, or None.
 Grammar = Annotated[Any, AfterValidator(_grammar)]
 Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
@@ -193,7 +214,7 @@ class JsonInHtmlDecoder(_Json):
 class JsonLdDecoder(_Decoder):
     kind: Literal["jsonld"] = Field(description="The page's schema.org JobPostings")
     entries: Paths = Field(("postings",), description="Where the decoded postings sit")
-    cells: dict[Str, Str] = Field({}, description='{name: CSS}: a page naming no posting, as '
+    cells: dict[Str, Css] = Field({}, description='{name: CSS}: a page naming no posting, as '
                                                   '"page", the text of each')
 
 
@@ -205,13 +226,14 @@ class AtomDecoder(_Decoder):
 class HtmlDecoder(_Decoder):
     kind: Literal["html"] = Field(description="One entry per selected element (decode.elements)")
     entries: Paths = Field(("elements",), description="Where the decoded elements sit")
-    select: Annotated[tuple[Template, ...], BeforeValidator(_listed)] = Field(
-        min_length=1, description='CSS templates tried in order until one finds any; '
+    select: Annotated[tuple[Css, ...], BeforeValidator(_listed)] = Field(
+        min_length=1, description="CSS templates (cssselect's dialect: :contains, not "
+                                  ':-soup-contains) tried in order until one finds any; '
                                   '"$job_links": the careers-page reader (custom.read_page)')
     context: Literal["parent", "lines"] | tuple[Str, ...] | None = Field(
         None, description="The block around an element: its parent, the nearest of these "
                           "tags, or the nearest holding two lines")
-    cells: dict[Str, Str] = Field({}, description="{name: CSS}: text found in the context")
+    cells: dict[Str, Css] = Field({}, description="{name: CSS}: text found in the context")
     base: Template | None = Field(None, description="Makes hrefs absolute; default the page")
     selects: Bool = Field(False, description='Also the page\'s <select> fields, as "selects": '
                                              '[{name, options: [{value, label}]}]')

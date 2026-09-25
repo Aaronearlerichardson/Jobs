@@ -1,15 +1,22 @@
 """Small shared helpers."""
 
+import functools
 import hashlib
 import html
 import json
+import logging
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
+from lxml import etree
+
 from src import config
+
+_log = logging.getLogger(__name__)
 
 # City, ST  |  City, State  |  Remote — a location as a careers page prints
 # it, for reading one off a listing row's text (custom boards, iCIMS).
@@ -166,20 +173,145 @@ def strip_html(s):
     return _SPACE_RE.sub(" ", _TAG_RE.sub(" ", html.unescape(str(s)))).strip()
 
 
-def parse_markup(markup, xml=False):
-    """`markup` (str or bytes) as a BeautifulSoup tree: lxml's HTML parser,
-    or its XML parser when `xml` (a feed: HTML reads <link> as a void tag
-    and loses its URL). The one parser choice in src/.
+#: Per thread: its parsers and compiled XPath (`_parser`, `xpath`).
+_local = threading.local()
 
-    >>> parse_markup("<rss><item><link>https://x.test/1</link></item></rss>", xml=True).link.text
+
+def _parser(xml, utf8):
+    """This thread's lxml parser, XML (recovering, no entities, no network)
+    or HTML, told its input is UTF-8 when `utf8`. Threads sharing one parser
+    take turns, so each keeps its own; the async CPU-parse wrapper builds on
+    this."""
+    name = ("xml" if xml else "html") + ("8" if utf8 else "")
+    p = getattr(_local, name, None)
+    if p is None:
+        enc = "utf-8" if utf8 else None
+        # huge_tree: without it the HTML tree builder stops, silently, at 256
+        # levels of nesting or a 10 MB text node. Not for XML, where it would
+        # also lift libxml2's entity-expansion limits.
+        p = (etree.XMLParser(recover=True, resolve_entities=False, no_network=True,
+                             encoding=enc) if xml
+             else etree.HTMLParser(huge_tree=True, encoding=enc))
+        setattr(_local, name, p)
+    return p
+
+
+def parse_markup(markup, xml=False, url=""):
+    """`markup` (str or bytes) as an lxml tree, its root element: HTML, or
+    XML when `xml` (a feed: HTML reads <link> as a void tag and loses its
+    URL). The one parser choice in src/.
+
+    Blank markup is an empty document (a childless <html>). HTML lxml
+    cannot parse, or gives up on partway (a fatal error), is parsed by
+    html5lib instead; XML lxml cannot parse is an empty document. Either is
+    logged with `url`'s host and the reason.
+
+    >>> parse_markup("<rss><item><link>https://x.test/1</link></item></rss>", xml=True).findtext(".//link")
     'https://x.test/1'
+    >>> len(parse_markup(" \\n")), len(parse_markup('<b class="x\\x00"></b><a href="/2">').findall(".//a"))
+    (0, 1)
+    >>> len(parse_markup(b'<b class="x\\x00"></b><a href="/2">').findall(".//a")), len(parse_markup(
+    ...     b"<svg\\x00><title>t</title></svg>").findall(".//title"))
+    (1, 1)
 
     Notes:
-        bs4 is imported here, not at module level: it costs about 170 ms,
-        and most importers of this module never parse markup.
+        A str is parsed as its UTF-8 bytes: lxml refuses a str carrying an
+        XML encoding declaration, and a <meta charset> must not re-decode
+        text already decoded. Bytes are the parser's to decode. A NUL in a
+        str reads as U+FFFD, as the HTML standard has it: lxml's tree
+        builder dropped the rest of a careers page after one in a class
+        attribute (2026-09). html5lib's SVG and MathML elements lose their
+        namespace, as lxml's HTML parser has none.
     """
-    from bs4 import BeautifulSoup
-    return BeautifulSoup(markup, "xml" if xml else "lxml")
+    if not markup or markup.isspace():
+        return etree.Element("html")
+    utf8 = isinstance(markup, str)
+    parser = _parser(xml, utf8)
+    try:
+        root = etree.fromstring(markup.replace("\x00", "\ufffd").encode("utf-8", "replace")
+                                if utf8 else markup, parser)
+    except (etree.LxmlError, ValueError, LookupError) as e:
+        reason = f"lxml: {e}"
+    else:
+        fatal = None if xml else parser.error_log.filter_from_fatals()
+        if root is not None and not fatal:
+            return root
+        reason = f"lxml gave up: {fatal[0].message.strip()}" if fatal else "lxml found no document"
+    host = host_of(url) or "?"
+    if xml:
+        _log.info("unreadable XML from %s: %s", host, reason)
+        return etree.Element("html")
+    _log.info("html5lib parse of %s: %s", host, reason)
+    root = _html5lib().parse(markup, treebuilder="lxml", namespaceHTMLElements=False).getroot()
+    for el in root.iter(etree.Element):
+        if el.tag[0] == "{":
+            el.tag = el.tag.split("}", 1)[1]
+    return root
+
+
+@functools.cache
+def _html5lib():
+    """html5lib, imported on first use (about 120 ms), its warnings about
+    names it had to coerce silenced."""
+    import warnings
+
+    import html5lib
+    from html5lib.constants import DataLossWarning
+    warnings.filterwarnings("ignore", category=DataLossWarning)
+    return html5lib
+
+
+def xpath(expr):
+    """`expr`, an XPath 1.0 expression, compiled (plain-str results) once
+    per thread: threads sharing one compiled expression take turns. Raises
+    lxml's XPathSyntaxError when it will not compile.
+
+    >>> xpath("//a[contains(@href, $part)]/@href")(parse_markup("<a href='/x/1'><a href='/y/2'>"),
+    ...                                            part="/y/")
+    ['/y/2']
+    """
+    cache = getattr(_local, "xpaths", None)
+    if cache is None:
+        cache = _local.xpaths = {}
+    xp = cache.get(expr)
+    if xp is None:
+        xp = cache[expr] = etree.XPath(expr, smart_strings=False)
+    return xp
+
+
+#: The elements whose text node_text skips.
+_NO_TEXT = frozenset(("script", "style", "template", "rt", "rp"))
+
+
+def node_text(el, sep=" ", strip=True):
+    r"""`el`'s text: its text nodes, none inside script, style, template or
+    a ruby annotation, each stripped and the blank ones dropped when
+    `strip`, joined by `sep` (a list when `sep` is None).
+
+    >>> p = parse_markup("<p> Data <b>Engineer</b><script>x()</script>\n</p>").find(".//p")
+    >>> node_text(p), node_text(p, "|", strip=False), node_text(p, None)
+    ('Data Engineer', ' Data |Engineer|\n', ['Data', 'Engineer'])
+
+    Notes:
+        BeautifulSoup's get_text(sep, strip), which the page readers were
+        written against, bar its folding of a whitespace-only string to
+        one space or newline. A walk, not XPath: an `ancestor::` test per
+        text node ran 14x slower over the recorded pages.
+    """
+    parts = []
+    if next(el.iterancestors(*_NO_TEXT), None) is None:
+        walk = etree.iterwalk(el, events=("start", "end", "comment", "pi"))
+        for event, node in walk:
+            if event != "start":
+                if node is not el and node.tail:
+                    parts.append(node.tail)
+            elif node.tag in _NO_TEXT:
+                walk.skip_subtree()
+            elif node.text:
+                parts.append(node.text)
+    if strip:
+        parts = [s for s in map(str.strip, parts) if s]
+    return parts if sep is None else sep.join(parts)
 
 
 def clean_field(text):

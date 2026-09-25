@@ -13,7 +13,12 @@ WeWorkRemotely feeds:
 import re
 
 from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import parse_markup, stable_id, strip_html
+from src.net.util import node_text, parse_markup, stable_id, strip_html, xpath
+
+#: The elements named $name, in any namespace (an Atom feed's are in its own).
+_NAMED = "//*[local-name()=$name]"
+#: An item's body, the first of these it has.
+_BODIES = ("description", "summary", "content")
 
 # WWR titles take either shape:
 #   "Company Name: Role Title"            (current convention)
@@ -57,6 +62,19 @@ def _parse_title(title):
     return t, "", ""
 
 
+def _find(item, name):
+    """(element, its text) for `item`'s first descendant named `name` in any
+    namespace; (None, "") when it has none.
+
+    >>> entry = parse_markup('<entry xmlns="http://www.w3.org/2005/Atom"><title>Chemist</title>'
+    ...                      '<link href="https://x.test/7"/></entry>', xml=True)
+    >>> _find(entry, "title")[1], _find(entry, "link")[0].get("href"), _find(entry, "guid")
+    ('Chemist', 'https://x.test/7', (None, ''))
+    """
+    hit = xpath("." + _NAMED)(item, name=name)
+    return (hit[0], node_text(hit[0], "", strip=False)) if hit else (None, "")
+
+
 def fetch_rss(source_label, url, default_location="Remote", max_items=200,
               remote_board=False, gate=None):
     """
@@ -74,29 +92,30 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
     except Exception as e:
         return fetch_failed(f"RSS {source_label}", e)
 
-    soup = parse_markup(r.content, xml=True)
-    items = soup.find_all("item") or soup.find_all("entry")
+    root = parse_markup(r.content, xml=True, url=url)
+    items = xpath(_NAMED)(root, name="item") or xpath(_NAMED)(root, name="entry")
     jobs = []
     for it in items[:max_items]:
-        raw_title = (it.title.text if it.title else "") or ""
-        link_tag  = it.find("link")
-        if link_tag and link_tag.text:
-            link = link_tag.text.strip()
-        elif link_tag and link_tag.get("href"):
+        _, raw_title = _find(it, "title")
+        # An RSS <link> holds its URL; an Atom one names it in href.
+        link_tag, link_text = _find(it, "link")
+        if link_text:
+            link = link_text.strip()
+        elif link_tag is not None and link_tag.get("href"):
             link = link_tag.get("href")
         else:
             link = ""
-        guid = (it.guid.text if it.guid else "") or link or raw_title
+        guid = _find(it, "guid")[1] or link or raw_title
 
-        desc_tag = it.find("description") or it.find("summary") or it.find("content")
-        desc     = strip_html(desc_tag.text) if desc_tag else ""
+        desc = next((strip_html(text) for el, text in (_find(it, n) for n in _BODIES)
+                     if el is not None), "")
 
         role, company, region = _parse_title(raw_title)
 
         # WWR-specific: prefer <region> tag over parsed region
-        region_tag = it.find("region")
-        if region_tag and region_tag.text:
-            region = region_tag.text.strip()
+        region_text = _find(it, "region")[1]
+        if region_text:
+            region = region_text.strip()
 
         location = region or default_location
 

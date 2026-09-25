@@ -2,12 +2,18 @@
 (`spec.Decoder`), and a decoded payload's entries and a detail's record.
 """
 
+import functools
 import json
 import re
 from urllib.parse import urljoin
 
-from src.net.util import parse_markup
+from cssselect import HTMLTranslator
+from lxml import etree
+
+from src.net.util import node_text, parse_markup, xpath
 from . import custom, fields, jsonld
+
+_CSS = HTMLTranslator()
 
 
 def decode(dec, text, parts, url, area=None, hop=True):
@@ -22,15 +28,15 @@ def decode(dec, text, parts, url, area=None, hop=True):
         found = jsonld.postings(text, url)
         if found or not dec.cells:
             return {"postings": found}
-        return {"postings": [], "page": _cells(parse_markup(text), dec.cells)}
+        return {"postings": [], "page": _cells(parse_markup(text, url=url), dec.cells)}
     if kind == "atom":
-        return {"entries": _atom(text)}
+        return {"entries": _atom(text, url)}
+    tree = parse_markup(text, url=url)
     if dec.select == ("$job_links",):
-        return custom.read_page(text, url, area, hop)
-    soup = parse_markup(text)
-    payload = {"elements": elements(dec, soup, parts, url), "page": text}
+        return custom.read_page(tree, url, area, hop)
+    payload = {"elements": elements(dec, tree, parts, url), "page": text}
     if dec.selects:
-        payload["selects"] = _selects(soup)
+        payload["selects"] = _selects(tree)
     return payload
 
 
@@ -49,7 +55,7 @@ def record(payload, detail):
                       dict)
 
 
-def _atom(text):
+def _atom(text, url=""):
     """An Atom feed's entries, each an `_xml_record` carrying its feed's own
     elements under "feed" (an entry inherits its feed's metadata).
 
@@ -59,36 +65,41 @@ def _atom(text):
     >>> _atom(feed)
     [{'title': 'Chemist', 'link': '', 'link@href': 'https://x.test/postings/7', 'author': {'name': 'Chemistry'}, 'feed': {'title': 'State U: All Jobs'}}]
     """
-    soup = parse_markup(text, xml=True)
-    root = soup.find("feed") or soup
-    feed = _xml_record(root, skip="entry")
-    return [{**_xml_record(e), "feed": feed} for e in soup.find_all("entry")]
+    root = parse_markup(text, xml=True, url=url)
+    feed = _xml_record(next(iter(xpath("descendant-or-self::*[local-name()='feed']")(root)), root),
+                       skip="entry")
+    return [{**_xml_record(e), "feed": feed} for e in xpath("//*[local-name()='entry']")(root)]
 
 
 def _xml_record(el, skip=None):
-    """An XML element's children as a dict, the first of each name (but
-    `skip`): a child holding elements as its own record, else its text;
-    each attribute as "<name>@<attribute>"."""
+    """An XML element's children as a dict, the first of each local name
+    (but `skip`): a child holding elements as its own record, else its
+    text; each attribute as "<name>@<attribute>"."""
     out = {}
-    for child in el.find_all(recursive=False):
-        if child.name in out or child.name == skip:
+    for child in el.iterchildren(etree.Element):
+        name = etree.QName(child).localname
+        if name in out or name == skip:
             continue
-        out[child.name] = (_xml_record(child) if child.find(True) is not None
-                           else child.get_text(" ", strip=True))
-        for attr, v in child.attrs.items():
-            out[f"{child.name}@{attr}"] = v
+        out[name] = (_xml_record(child) if next(child.iterchildren(etree.Element), None) is not None
+                     else node_text(child))
+        for attr, v in child.attrib.items():
+            out[f"{name}@{etree.QName(attr).localname}"] = v
     return out
 
 
-def _selects(soup):
-    """The page's <select> fields: [{"name", "options": [{"value", "label"}]}]."""
+def _selects(tree):
+    """The page's <select> fields: [{"name", "options": [{"value", "label"}]}].
+
+    >>> _selects(parse_markup('<select name="loc"><option value="7-Durham"> Durham, NC</select>'))
+    [{'name': 'loc', 'options': [{'value': '7-Durham', 'label': 'Durham, NC'}]}]
+    """
     return [{"name": s.get("name") or "",
-             "options": [{"value": o.get("value") or "", "label": o.get_text(" ", strip=True)}
-                         for o in s.find_all("option")]}
-            for s in soup.find_all("select")]
+             "options": [{"value": o.get("value") or "", "label": node_text(o)}
+                         for o in s.iterdescendants("option")]}
+            for s in tree.iter("select")]
 
 
-def elements(dec, soup, parts, url):
+def elements(dec, tree, parts, url):
     """One entry per element the html decoder's `select` finds (a CSS
     template over the handle `parts`, or a list tried in order until one
     finds any): its `text`, its `raw` text (unstripped, line breaks
@@ -108,18 +119,18 @@ def elements(dec, soup, parts, url):
     """
     found = []
     for sel in dec.select:
-        found = soup.select(fields.fmt(sel, parts.get))
+        found = css(fields.fmt(sel, parts.get))(tree)
         if found:
             break
     base = fields.fmt(dec.base, parts.get) if dec.base else url
     out = []
     for el in found:
         href = el.get("href") or ""
-        e = {"text": el.get_text(" ", strip=True), "raw": el.get_text(" "), "href": href,
+        e = {"text": node_text(el), "raw": node_text(el, " ", strip=False), "href": href,
              "url": urljoin(base, href) if href else ""}
         if dec.context is not None or dec.cells:
             ctx, lines = _context(el, dec.context or "parent")
-            e["context"] = ctx.get_text(" ", strip=True) if ctx is not None else ""
+            e["context"] = node_text(ctx) if ctx is not None else ""
             if lines is not None:
                 e["lines"] = lines
             e.update(_cells(ctx, dec.cells))
@@ -130,31 +141,61 @@ def elements(dec, soup, parts, url):
 def _cells(node, cells):
     """{name: the text of `cells[name]`'s first match inside `node`}, None
     where it has none."""
-    found = {name: node.select_one(css) if node is not None else None
-             for name, css in cells.items()}
-    return {name: el.get_text(" ", strip=True) if el is not None else None
-            for name, el in found.items()}
+    out = {}
+    for name, sel in cells.items():
+        hit = css(sel, relative=True)(node) if node is not None else []
+        out[name] = node_text(hit[0]) if hit else None
+    return out
+
+
+@functools.cache
+def _css_xpath(selector, relative):
+    return _CSS.css_to_xpath(selector, prefix="descendant::" if relative else "descendant-or-self::")
+
+
+def css(selector, relative=False):
+    """`selector`, CSS in cssselect's HTML dialect, as this thread's
+    compiled XPath (`net.util.xpath`): matching the element it runs on
+    and everything below (from the root, the whole document), or only
+    what is below when `relative`. Raises cssselect's SelectorError on CSS
+    the dialect cannot read.
+
+    >>> page = parse_markup('<ul><li><a href="/job/1">A</a><p class="loc">Durham</p></li>'
+    ...                     '<li><a href="/job/2">B</a></li></ul>')
+    >>> [a.get("href") for a in css("li:has(.loc) a[href*='/job/']")(page)]
+    ['/job/1']
+    >>> len(css("li")(page.find(".//li"))), css("li", relative=True)(page.find(".//li"))
+    (1, [])
+    """
+    return xpath(_css_xpath(selector, relative))
 
 
 def _context(el, how):
     """(element, lines) around a matched element: its parent ("parent");
     the nearest ancestor of the first of a list of tags that has one; or
     ("lines") the nearest ancestor, at most eight up, whose text holds two
-    lines longer than three characters, with those lines (else None)."""
+    lines longer than three characters, with those lines (else None).
+
+    >>> a = parse_markup("<li><div><p>Research</p>\\n<p><a>Data Engineer</a></p>\\n"
+    ...                  "<p>Durham, NC</p></div></li>").find(".//a")
+    >>> _context(a, "lines")[1], _context(a, ("li", "div"))[0].tag
+    (['Research', 'Data Engineer', 'Durham, NC'], 'li')
+    """
     if how == "lines":
-        node, lines = el.parent, []
+        node, lines = el.getparent(), []
         for _ in range(8):
             if node is None:
                 break
-            lines = [ln.strip() for ln in node.get_text("\n").strip().split("\n")
+            lines = [ln.strip() for ln in node_text(node, "\n", strip=False).strip().split("\n")
                      if len(ln.strip()) > 3]
             if len(lines) >= 2:
                 break
-            node = node.parent
+            node = node.getparent()
         return node, lines
     if isinstance(how, tuple):
-        return next((p for p in (el.find_parent(t) for t in how) if p is not None), None), None
-    return el.parent, None
+        return next((p for p in (next(el.iterancestors(t), None) for t in how)
+                     if p is not None), None), None
+    return el.getparent(), None
 
 
 def first_path(payload, wanted, kind):

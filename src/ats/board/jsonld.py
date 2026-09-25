@@ -16,19 +16,25 @@ import re
 
 from src.net.http import HEADERS, SESSION, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
-from src.net.util import parse_markup, stable_id, text_from_html
+from src.net.util import parse_markup, stable_id, text_from_html, xpath
 
 _JOB_URL_HINTS = re.compile(
     r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
 )
 
 
-def extract_jsonld(html):
-    """Find every <script type=application/ld+json> block; return parsed objects."""
-    soup = parse_markup(html)
+def extract_jsonld(html, url=""):
+    """Find every <script type=application/ld+json> block in the page at
+    `url`; return parsed objects, a list's items and an @graph's members
+    each one; a trailing comma is forgiven.
+
+    >>> extract_jsonld('<script type="application/ld+json">{"@graph": [{"@type": "JobPosting",'
+    ...                ' "title": "Chemist",}]}</script>')
+    [{'@type': 'JobPosting', 'title': 'Chemist'}]
+    """
     out = []
-    for script in soup.find_all("script", type="application/ld+json"):
-        txt = script.string or script.get_text()
+    for script in xpath("//script[@type='application/ld+json']")(parse_markup(html, url=url)):
+        txt = script.text
         if not txt:
             continue
         txt = txt.strip().lstrip("\ufeff")
@@ -133,7 +139,7 @@ def read_posting(jp, page_url=""):
 
 def postings(html, page_url=""):
     """Every JobPosting on a page, as `read_posting` records."""
-    return [read_posting(o, page_url) for o in extract_jsonld(html) if is_jobposting(o)]
+    return [read_posting(o, page_url) for o in extract_jsonld(html, page_url) if is_jobposting(o)]
 
 
 def _job_from_posting(jp, company_name, source_url):
@@ -161,7 +167,7 @@ def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
         return fetch_failed(f"JSON-LD {company_name} {page_url}", e)
 
     jobs = []
-    for obj in extract_jsonld(r.text):
+    for obj in extract_jsonld(r.text, page_url):
         if not is_jobposting(obj):
             continue
         job = _job_from_posting(obj, company_name, page_url)

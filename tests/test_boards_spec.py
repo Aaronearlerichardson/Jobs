@@ -49,6 +49,8 @@ REFUSED = [
     _listing(decoder={"kind": "json_in_html"}),
     _listing(decoder={"kind": "json_in_html", "regex": "("}),
     _listing(decoder={"kind": "html"}), _listing(decoder={"kind": "html", "select": ""}),
+    _listing(decoder={"kind": "html", "select": "a[href*='/{slug}/' i]"}),
+    _listing(decoder={"kind": "jsonld", "cells": {"d": "dt:-soup-contains('Pay') + dd"}}),
     _pager(kind="scroll", size=1), _pager(kind="offset", size=0),
     _pager(kind="offset", size=2, step=1), _pager(kind="overlap", size=2, step=2, why=_WHY),
     _pager(kind="cursor", size=2), _pager(kind="offset", size=2, ceiling="2000", why=_WHY),

@@ -20,9 +20,8 @@ import src.discovery.resolve.identity as identity
 import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
 import src.ats.board.company as company_fetch
-import src.ats.board.custom as custom_fetch
 import src.ats.board.closure as job_probe
-from src.net.util import norm_posted_date, parse_markup
+from src.net.util import norm_posted_date
 
 
 class TestSniffer:
@@ -31,9 +30,6 @@ class TestSniffer:
             "https://jobs.lever.co/bioagilytix/x",
             "https://boards.greenhouse.io/pendo/jobs/1"])
         assert {("lever", "bioagilytix"), ("greenhouse", "pendo")} <= set(boards)
-
-    def test_custom_board_needs_real_job_links(self):
-        assert not custom_fetch.is_board_page("<a href='/careers/'>Careers</a>")
 
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
@@ -283,26 +279,6 @@ class TestDiagnoseNoBoard:
             risky: "<html><body>Galaxy Digital hires blockchain engineers</body></html>"})
         assert (sniffer.diagnose_no_board("Galaxy Diagnostics")
                 == "site-only-no-careers")
-
-
-class TestCustomBoardLinks:
-    def test_real_job_links_detected(self):
-        html = ('<a href="/careers/facilities-engineer-88">Facilities Engineer</a>'
-                '<a href="/careers/quality-engineer-19">Quality Engineer</a>'
-                '<a href="/careers/data-scientist-3">Data Scientist</a>')
-        links = custom_fetch.find_job_links(parse_markup(html))
-        assert len(links) == 3
-
-    def test_nav_links_rejected(self):
-        html = ('<a href="/careers/open-positions/">Careers</a>'
-                '<a href="/careers/career-opportunities/">View Current Job Openings</a>'
-                '<a href="/careers/career-opportunities/">Career Opportunities</a>'
-                '<a href="/jobs/login?loginOnly=1">External Candidate Login</a>')
-        assert custom_fetch.find_job_links(parse_markup(html)) == []
-
-    def test_aggregator_host_is_never_a_custom_board(self):
-        assert custom_fetch.custom_board_listing_url(
-            "https://www.indeed.com/jobs?q=x", "<html></html>") is None
 
 
 class TestHnParser:

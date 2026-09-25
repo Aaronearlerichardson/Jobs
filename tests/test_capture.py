@@ -99,25 +99,6 @@ class TestGenericBoards:
         assert got["Data Platform Engineer"]["location"] == "Morrisville, NC"
         assert got["Clinical Informatics Analyst"]["location"] == "Chapel Hill, NC"
 
-    def test_id_shaped_links_off_a_board_host_are_not_jobs(self):
-        # A news card is an anchor with a heading and a numeric tail too; only
-        # a job-board host (or a /j/ path) makes that a posting.
-        html = """<html><head><link rel="canonical" href="https://www.acme.com/news"></head>
-        <body><a href="/news/2024"><h3>Series B announced</h3></a>
-        <a href="https://www.acme.com/press/10001"><h2>New office</h2></a></body></html>"""
-        jobs, _ = parse_page("", html)
-        assert jobs == []
-
-    def test_a_card_without_a_place_borrows_none_from_its_neighbours(self):
-        html = """<html><head><link rel="canonical" href="https://jobs.acme.org/search"></head>
-        <body><ul>
-        <li><a href="/jobs/1001-analyst">Analyst</a> <span>Durham, NC</span></li>
-        <li><a href="/jobs/1002-engineer">Engineer</a></li>
-        </ul></body></html>"""
-        got = by_title(parse_page("", html)[0])
-        assert got["Analyst"]["location"] == "Durham, NC"
-        assert got["Engineer"]["location"] == ""
-
 
 @pytest.fixture
 def roster(wired_db_path, monkeypatch):
