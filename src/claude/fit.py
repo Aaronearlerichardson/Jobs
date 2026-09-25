@@ -32,6 +32,7 @@ Wired into:
 
 from __future__ import annotations
 
+import asyncio
 import math
 import re
 from contextlib import closing
@@ -44,10 +45,12 @@ from src.claude.reply import Reply, Unit, choice
 
 try:
     from src import config
-    from src.claude.api import api_disabled, call_claude_json, have_api_key
+    from src.claude.api import acall_claude_json, api_disabled, have_api_key
+    from src.net.http import run_sync
 except Exception:                      # importable standalone for calibration
     config = None
-    call_claude_json = None
+    acall_claude_json = None
+    run_sync = asyncio.run
     api_disabled = lambda: None        # noqa: E731
     have_api_key = lambda: False       # noqa: E731
 
@@ -704,14 +707,29 @@ def _user_turn(title, location, body_label, body):
     return f"JOB TITLE: {title}\n{loc_line}{body_label}:\n{body}"
 
 
-def score_resume_fit(title: str, description: str = "", *, location: str = "",
-                     max_tokens=300) -> FitResult:
+def _gated(r, gates, reason, model, description, location):
+    """Both scorers' FitResult for reply `r` and its `gates`, after the
+    clearance backstop and the gate overrides."""
+    # Regex backstop on the FULL pre-clip text (clipping could elide it)...
+    if _clearance_required(description) and "clearance" not in gates:
+        gates.append("clearance")
+    # ...and its strip side, on the same full text plus the stored location.
+    gates = apply_gate_overrides(gates, location=location,
+                                 description=description)
+    axes = r.axes()
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
+    return FitResult(score=score, axes=axes, gates=gates, reason=reason,
+                     model=model)
+
+
+async def ascore_resume_fit(title: str, description: str = "", *,
+                            location: str = "", max_tokens=300) -> FitResult:
     """Score one posting. Returns a None-scored result when the API is
     unavailable OR when there is no real description to assess (callers treat a
     None score as 'don't rank this'), so unscorable rows drop out instead of
     floating at a fabricated cap. `location` rides in the user turn (see
     _user_turn)."""
-    if call_claude_json is None:
+    if acall_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
@@ -723,8 +741,9 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
               f"for {title!r} - unscored (check the fetcher/hydration path)")
         return FitResult(score=None, reason="no description; unscored")
     user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
-    r = call_claude_json(build_system_prompt(), user, max_tokens=max_tokens,
-                         reply=FitReply)
+    # Built off the loop: the first build reads the store (_disposition_block).
+    r = await acall_claude_json(await asyncio.to_thread(build_system_prompt),
+                                user, max_tokens=max_tokens, reply=FitReply)
     if r is None:
         # A call that never left the process -- no key, or the breaker
         # tripped on an expired one / an exhausted balance -- is the
@@ -737,17 +756,15 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
         if api_disabled() or not have_api_key():
             return FitResult(score=None, reason="scorer unavailable")
         return FitResult(score=None, reason="unscored")
-    axes = r.axes()
-    gates = list(r.gates)
-    # Regex backstop on the FULL pre-clip text (clipping could elide it).
-    if _clearance_required(description) and "clearance" not in gates:
-        gates.append("clearance")
-    # ...and its strip side, on the same full text plus the stored location.
-    gates = apply_gate_overrides(gates, location=location,
-                                 description=description)
-    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
-    return FitResult(score=score, axes=axes, gates=gates, reason=r.reason,
-                     model=_cfg("CLAUDE_MODEL", ""))
+    return _gated(r, list(r.gates), r.reason, _cfg("CLAUDE_MODEL", ""),
+                  description, location)
+
+
+def score_resume_fit(title: str, description: str = "", *, location: str = "",
+                     max_tokens=300) -> FitResult:
+    """ascore_resume_fit's answer, for a thread."""
+    return run_sync(ascore_resume_fit(title, description, location=location,
+                                      max_tokens=max_tokens))
 
 
 # The two "gave up without a score" reasons score_resume_fit's own None-score
@@ -811,8 +828,8 @@ def unscored_cause(reason):
 DEEP_MARKER = "deep:"
 
 
-def verify_fit(title: str, description: str = "", *, location: str = "",
-               max_tokens=8000) -> FitResult:
+async def averify_fit(title: str, description: str = "", *, location: str = "",
+                      max_tokens=8000) -> FitResult:
     """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
     but run on the (near-)full posting text with an explicit requirements
     extraction step first — years required, seat type, must-haves, and the
@@ -828,7 +845,7 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     rows the CURRENT verify model has already checked — with years/seat/
     gaps folded into the reason for the digest. A None score means unverifiable
     (no API, no text): callers must keep the first-pass score."""
-    if call_claude_json is None:
+    if acall_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
@@ -839,22 +856,17 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     user = _user_turn(title, location, "FULL JOB POSTING", desc)
     # Finalists get the stronger verify model WITH adaptive thinking left on
     # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
-    # cover thinking + the JSON on 5-family models, hence the 3000 default.
+    # cover thinking + the JSON on 5-family models, hence the 8000 default.
     vmodel = verify_model()
-    r = call_claude_json(build_verify_prompt(), user, max_tokens=max_tokens,
-                         model=vmodel, thinking=True, reply=VerifyReply)
+    r = await acall_claude_json(await asyncio.to_thread(build_verify_prompt),
+                                user, max_tokens=max_tokens, model=vmodel,
+                                thinking=True, reply=VerifyReply)
     if r is None:
         return FitResult(score=None, reason="unverified")
-    axes = r.axes()
     gates = list(r.gates)
     seat = r.seat_type
     if seat in ("management", "program-product") and "management" not in gates:
         gates.append("management")
-    if _clearance_required(description) and "clearance" not in gates:
-        gates.append("clearance")
-    gates = apply_gate_overrides(gates, location=location,
-                                 description=description)
-    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
     bits = []
     if r.years_required:
         bits.append(f"{r.years_required:g}+yrs")
@@ -866,8 +878,14 @@ def verify_fit(title: str, description: str = "", *, location: str = "",
     reason = f"{DEEP_MARKER} {r.reason}"
     if bits:
         reason += f" [{' | '.join(bits)}]"
-    return FitResult(score=score, axes=axes, gates=gates, reason=reason,
-                     model=vmodel)
+    return _gated(r, gates, reason, vmodel, description, location)
+
+
+def verify_fit(title: str, description: str = "", *, location: str = "",
+               max_tokens=8000) -> FitResult:
+    """averify_fit's answer, for a thread."""
+    return run_sync(averify_fit(title, description, location=location,
+                                max_tokens=max_tokens))
 
 
 def is_deep_verified(fit_reason) -> bool:

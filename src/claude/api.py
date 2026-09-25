@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import contextlib
 import json
 import logging
 import re
@@ -15,11 +17,6 @@ from src import config
 from src.claude.reply import Reply, Unit, choice
 from src.net import http
 from src.net.parallel import SingleFlight
-
-# A plain session (net.http's polite=False): no robots.txt before every API
-# call, no Crawl-delay and no crawl trace -- the Anthropic endpoint is not
-# a crawl target -- and a bare requests session's headers.
-SESSION = http.SyncSession(polite=False)
 
 # File-only per-call trace (session log DEBUG channel — never printed).
 _log = logging.getLogger("claude")
@@ -166,8 +163,9 @@ class DiscoverReply(Reply):
 # its default, which build_payload leaves alone)...
 _THINKING_OPTIONAL_MODELS = ("claude-sonnet-5", "claude-opus-5")
 # ...and these always think and reject "disabled" with a 400, so they get
-# no `thinking` field and effort "low". Matched first: "claude-opus-5"
-# is a prefix of "claude-opus-5-5".
+# no `thinking` field, effort "low", and room for that thinking on top of
+# the caller's max_tokens (see build_payload). Matched first:
+# "claude-opus-5" is a prefix of "claude-opus-5-5".
 _THINKING_ALWAYS_MODELS = ("claude-opus-5-5", "claude-fable-5",
                            "claude-mythos-5")
 
@@ -200,14 +198,12 @@ _LEGACY_MODELS = ("claude-3", "claude-opus-4-0", "claude-opus-4-1",
 #  (2x writes) for runs whose calls are spread more than 5 minutes apart.       #
 # --------------------------------------------------------------------------- #
 
-# Scoring runs inside ThreadPoolExecutor pools, and a cache entry is only
-# readable once the first response has started — N workers firing at once
-# would each pay a full-price write of the same prefix. The first caller for a
-# given (model, system) claims the prefix and the rest wait for it to land, so
-# the pool pays one write and N-1 reads. Bounded: if the leader hangs or errors
-# the followers go ahead anyway and just miss the cache.
-_GATE_WAIT_S = 90
-_GATE_LOCK = threading.Lock()
+# Scoring fans out (every call a coroutine on the network loop), and a cache
+# entry is only readable once the first response has started — N calls firing
+# at once would each pay a full-price write of the same prefix. The first
+# caller for a given (model, system) claims the prefix and the rest wait for
+# it to land, so the fan-out pays one write and N-1 reads. Bounded: if the
+# leader hangs or errors the followers go ahead anyway and just miss the cache.
 _PREFIX_GATES = {}
 
 # Cumulative token accounting, so cache behaviour is observable rather than
@@ -256,6 +252,11 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
     output = {}
     if not thinking:
         if use_model.startswith(_THINKING_ALWAYS_MODELS):
+            # max_tokens is the only cap on their thinking (budget_tokens
+            # 400s too), and callers size it for the reply alone (120-300
+            # tokens for a score): headroom for low-effort thinking, billed
+            # only as used and bounded by config.CLAUDE_TIMEOUT.
+            payload["max_tokens"] += config.CLAUDE_THINKING_HEADROOM
             output["effort"] = "low"
         elif use_model.startswith(_THINKING_OPTIONAL_MODELS):
             payload["thinking"] = {"type": "disabled"}
@@ -271,18 +272,18 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
     return payload
 
 
-def _claim_prefix(model, system_prompt):
-    """First caller for this prefix leads (returns the Event it must set when
-    its request finishes); everyone else waits for the leader, then proceeds.
-    Returns (event_to_set_or_None)."""
+async def _claim_prefix(model, system_prompt):
+    """The first caller for this prefix leads: it gets the Event to set when
+    its request finishes. Everyone else waits for the leader,
+    config.CLAUDE_GATE_WAIT_S at most, and gets None."""
     key = (model, hash(system_prompt))
-    with _GATE_LOCK:
-        event = _PREFIX_GATES.get(key)
-        if event is None:
-            event = threading.Event()
-            _PREFIX_GATES[key] = event
-            return event
-    event.wait(timeout=_GATE_WAIT_S)
+    event = _PREFIX_GATES.get(key)
+    if event is None:
+        event = _PREFIX_GATES[key] = asyncio.Event()
+        return event
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(config.CLAUDE_GATE_WAIT_S):
+            await event.wait()
     return None
 
 
@@ -352,7 +353,6 @@ _FATAL_MSG = None
 
 # Transient statuses worth one short retry ladder (529 = overloaded_error).
 _RETRY_STATUSES = (429, 500, 502, 503, 529)
-_RETRY_DELAYS = (2.0, 8.0)
 
 
 def _trip_fatal(msg):
@@ -404,8 +404,8 @@ def reset_breaker():
         _FATAL_MSG = None
 
 
-def call_claude_json(system_prompt, user_content, max_tokens=1000,
-                     model=None, thinking=False, cache=True, *, reply):
+async def acall_claude_json(system_prompt, user_content, max_tokens=1000,
+                            model=None, thinking=False, cache=True, *, reply):
     """POST to /v1/messages and return Claude's answer as a `reply` (a Reply
     subclass) instance, held to its schema (see build_payload).
 
@@ -427,9 +427,10 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     included.
 
     Notes:
-        This session skips net.http's crawl trace on purpose (robots and
-        crawl-delay do not apply to the API), so without that record API
-        latency never reached the session log."""
+        The POST is plain (net.http's polite=False): no robots.txt, no
+        Crawl-delay and no crawl trace, since the endpoint is not a crawl
+        target, and a bare requests session's headers. Without this
+        record API latency never reached the session log."""
     if not have_api_key():
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return None
@@ -439,30 +440,31 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
     use_model = model or config.CLAUDE_MODEL
     payload = build_payload(system_prompt, user_content, max_tokens,
                             use_model, thinking, cache, reply=reply)
-    lead = _claim_prefix(use_model, system_prompt) \
+    lead = await _claim_prefix(use_model, system_prompt) \
         if (cache and config.SETTINGS.claude_prompt_cache and system_prompt) \
         else None
-    t0 = time.monotonic()
+    t0, delays = time.monotonic(), config.CLAUDE_RETRY_DELAYS_S
     try:
-        for attempt in range(len(_RETRY_DELAYS) + 1):
-            r = SESSION.post(
-                "https://api.anthropic.com/v1/messages",
+        for attempt in range(len(delays) + 1):
+            r = await http.send(
+                "POST", "https://api.anthropic.com/v1/messages",
+                polite=False,
                 headers={
                     "x-api-key":         config.ANTHROPIC_API_KEY,
                     "anthropic-version": "2023-06-01",
                     "content-type":      "application/json",
                 },
                 json=payload,
-                timeout=120,
+                timeout=config.CLAUDE_TIMEOUT,
             )
-            if r.status_code in _RETRY_STATUSES and attempt < len(_RETRY_DELAYS):
+            if r.status_code in _RETRY_STATUSES and attempt < len(delays):
                 try:
                     delay = float(r.headers.get("retry-after", ""))
                 except ValueError:
-                    delay = _RETRY_DELAYS[attempt]
+                    delay = delays[attempt]
                 _log.debug("claude %s -> retrying in %.0fs (attempt %d)",
                            r.status_code, delay, attempt + 1)
-                time.sleep(min(delay, 60.0))
+                await asyncio.sleep(min(delay, 60.0))
                 continue
             break
         r.raise_for_status()
@@ -528,10 +530,18 @@ def call_claude_json(system_prompt, user_content, max_tokens=1000,
         print(f"  [!] Claude call failed: {e}")
         return None
     finally:
-        # Release any threads waiting on this prefix — including on failure,
-        # so one bad request can't stall a scoring pool for _GATE_WAIT_S.
+        # Release any calls waiting on this prefix — including on failure,
+        # so one bad request can't stall a scoring fan-out for the gate wait.
         if lead is not None:
             lead.set()
+
+
+def call_claude_json(system_prompt, user_content, max_tokens=1000,
+                     model=None, thinking=False, cache=True, *, reply):
+    """acall_claude_json's answer, for a thread."""
+    return http.run_sync(acall_claude_json(system_prompt, user_content,
+                                           max_tokens, model, thinking, cache,
+                                           reply=reply))
 
 
 def expand_search(term):
@@ -570,7 +580,7 @@ class MissionReply(Reply):
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
-def score_company_mission(name, context=""):
+async def ascore_company_mission(name, context=""):
     """Return (mission_tier|None, score|None, reason) for an employer."""
     # Deterministic bullseye anchor (profile [mission].bullseye_regex), checked
     # BEFORE the LLM: a company whose NAME is the candidate's exact target is
@@ -582,11 +592,16 @@ def score_company_mission(name, context=""):
     if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
         return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
     user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
-    r = call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
-                         reply=MissionReply)
+    r = await acall_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
+                                reply=MissionReply)
     if r is None:
         return None, None, ""
     return r.tier, r.score, r.reason
+
+
+def score_company_mission(name, context=""):
+    """ascore_company_mission's answer, for a thread."""
+    return http.run_sync(ascore_company_mission(name, context))
 
 
 _BOARD_OWNER_SYSTEM = (
@@ -631,6 +646,9 @@ def board_is_own(company, board, site="", titles=()):
         until a human looks, a wrong "reject" silently loses a real board
         forever. `titles` (sample postings from the board) is the decisive
         evidence for slug collisions.
+
+        A thread's function still: its memo is net.parallel's thread
+        single-flight.
     """
     def ask():
         user = f"COMPANY: {company}\nBOARD: {board}"

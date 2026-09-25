@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 import pytest
 import requests
 
-from conftest import fake_response, iso_days_ago, keep_store_open
+from conftest import answer, fake_response, iso_days_ago, keep_store_open
 
 from src.ats.board import closure as job_probe
 from src.ats.board import board_for
@@ -238,16 +238,18 @@ class TestSelfHealRetryMarker:
 
     @staticmethod
     def _stub_refusal(monkeypatch):
-        """Every call_claude_json call behaves like a refusal: no answer,
+        """Every acall_claude_json call behaves like a refusal: no answer,
         which is what score_resume_fit turns into reason="unscored"."""
         import src.claude.fit as fit_module
         calls = []
+
+        async def refuse(*a, **k):
+            calls.append(1)
         # A configured key, so the empty reply reads as the MODEL saying
         # nothing rather than as the scorer being offline (which is not a
         # verdict on the posting and must never mark a row).
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-        monkeypatch.setattr(fit_module, "call_claude_json",
-                            lambda *a, **k: calls.append(1))
+        monkeypatch.setattr(fit_module, "acall_claude_json", refuse)
         return calls
 
     def test_an_offline_scorer_marks_nothing(self, db, add_job, monkeypatch):
@@ -344,7 +346,7 @@ class TestSelfHealRetryMarker:
         db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
                   (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
-        monkeypatch.setattr(fit_module, "call_claude_json", lambda *a, **k: (
+        monkeypatch.setattr(fit_module, "acall_claude_json", answer(
             fit_module.FitReply(domain=0.5, function=0.5, stack=0.5,
                                 seniority=0.5, gates=[], reason="fits")))
 

@@ -3,6 +3,7 @@ assertion is about prompt construction, clipping, and arithmetic."""
 
 import pytest
 
+from conftest import answer
 import src.claude.api as claude
 import src.claude.fit as fit
 from src.config.profile_schema import FitWeights, GatePenalty
@@ -141,9 +142,9 @@ class TestGateOverrides:
                            fit.config.FIT_GATE_PENALTY)
 
     def test_score_resume_fit_applies_it(self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.FitReply(
+        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.FitReply(
             domain=.8, function=.8, stack=.7, seniority=1.0,
-            gates=["geo", "clearance"], reason="good lane"))
+            gates=["geo", "clearance"], reason="good lane")))
         body = ("Build neural data pipelines. " * 20
                 + "Applicants must be eligible to obtain a U.S. security "
                   "clearance.")
@@ -154,19 +155,19 @@ class TestGateOverrides:
 
     def test_verify_fit_applies_it_without_disarming_its_own_backstops(
             self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.VerifyReply(
+        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.VerifyReply(
             years_required=None, seat_type="management", must_haves=[],
             candidate_gaps=[], domain=.8, function=.8, stack=.7,
-            seniority=1.0, gates=["geo"], reason="deep"))
+            seniority=1.0, gates=["geo"], reason="deep")))
         res = fit.verify_fit("Program Lead", "x " * 200, location=local_addr)
         assert res.gates == ["management"]      # geo stripped, seat gate kept
 
     def test_the_add_side_backstop_still_wins(self, monkeypatch, local_addr):
         # A local posting that really does demand an active clearance keeps
         # it: the strip must not undo the regex that just added it.
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: fit.FitReply(
+        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.FitReply(
             domain=.8, function=.8, stack=.7, seniority=1.0,
-            gates=[], reason="cleared shop"))
+            gates=[], reason="cleared shop")))
         body = ("Signal processing work. " * 20
                 + "Must hold an active TS/SCI clearance; eligibility to "
                   "upgrade is a plus.")
@@ -195,7 +196,7 @@ class TestUnscoredCause:
         # REFUSED class (rather than needing the exact HTTP-level cause
         # from src.claude.api) sound.
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: None)
+        monkeypatch.setattr(fit, "acall_claude_json", answer(None))
         res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
         assert res.score is None
         assert fit.unscored_cause(res.reason) == "refused"
@@ -205,7 +206,7 @@ class TestUnscoredCause:
         # None WITHOUT asking the model. Reporting those as "unscored" would
         # let ops.scoring's retry marker hold a perfectly scorable row
         # for UNSCORED_RETRY_DAYS over one billing hiccup.
-        monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: None)
+        monkeypatch.setattr(fit, "acall_claude_json", answer(None))
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY",
                             "YOUR_ANTHROPIC_API_KEY_HERE")
         res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
@@ -239,11 +240,11 @@ class TestPrompts:
         # and that it never reaches the cached system prompt.
         seen = {}
 
-        def fake(system, user, **kw):
+        async def fake(system, user, **kw):
             seen.update(system=system, user=user)
             return None                     # -> unscored, score None
 
-        monkeypatch.setattr(fit, "call_claude_json", fake)
+        monkeypatch.setattr(fit, "acall_claude_json", fake)
         body = "x" * (fit.MIN_DESC_CHARS + 10)
         scorer("ML Engineer", body, location="Nowhereville, TX")
         assert "JOB LOCATION (stored): Nowhereville, TX\n" in seen["user"]

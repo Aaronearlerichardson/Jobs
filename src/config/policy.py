@@ -50,6 +50,15 @@ FETCH_TIMEOUT = (5.0, 60.0)
 FETCH_BUDGET_S = 3600.0
 PASS_BUDGET_S = 1800.0
 
+# max_tokens room for always-on thinking above the reply's own budget.
+CLAUDE_THINKING_HEADROOM = 4000
+# Claude API (connect, read) timeout: a reply sends nothing until it is done.
+CLAUDE_TIMEOUT = 120
+# Seconds a call waits for its prompt's first call: one cache write per fan-out.
+CLAUDE_GATE_WAIT_S = 90
+# Seconds before each retry of a transient 429/5xx: such blips clear fast.
+CLAUDE_RETRY_DELAYS_S = (2.0, 8.0)
+
 # Gated-site capture (Playwright). Keep roughly current — a stale UA is a
 # red flag to fingerprinters.
 BROWSER_UA = (

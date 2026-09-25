@@ -2,7 +2,7 @@
 and the transient-status retry ladder, plus the per-call latency record, the
 usage footer every call feeds, the reply schema every call is held to, and
 the thinking setting each model family accepts.
-All offline -- SESSION is stubbed.
+All offline -- the transport (net.http.send) is stubbed.
 
 Why the breaker exists: the 2026-08-31 rescore run hit "credit balance is too
 low" (HTTP 400) and, because every job's call failed independently, hammered
@@ -43,7 +43,7 @@ def api(monkeypatch, serve):
     calls = serve(responses)
     monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setattr(claude, "_FATAL_MSG", None)
-    monkeypatch.setattr(claude.time, "sleep", lambda s: None)
+    monkeypatch.setattr("src.config.CLAUDE_RETRY_DELAYS_S", (0.0, 0.0))
     return responses, calls
 
 
@@ -85,10 +85,10 @@ def test_persistent_500_gives_up_without_tripping(api):
     responses, calls = api
     responses.append(fake_response(status=500, text="overloaded"))
     assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
-    assert len(calls) == 1 + len(claude._RETRY_DELAYS)
+    assert len(calls) == 1 + len(claude.config.CLAUDE_RETRY_DELAYS_S)
     # 5xx is transient — the next call must still reach the API.
     claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-    assert len(calls) == 2 * (1 + len(claude._RETRY_DELAYS))
+    assert len(calls) == 2 * (1 + len(claude.config.CLAUDE_RETRY_DELAYS_S))
 
 
 def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
@@ -117,9 +117,9 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
      r"^claude call failed: RuntimeError in \d+\.\d\ds$"),
 ], ids=["ok", "http-400", "exception"])
 def test_every_call_logs_its_outcome_and_elapsed(api, caplog, reply, logged):
-    """API latency used to be invisible: call_claude_json posts through its
-    own plain SESSION, never net.http's per-request DEBUG trace (robots /
-    Crawl-delay do not apply to the API), so a slow or failing call left no
+    """API latency used to be invisible: call_claude_json posts plain
+    (polite=False), never through net.http's per-request DEBUG trace (robots
+    / Crawl-delay do not apply to the API), so a slow or failing call left no
     timing anywhere in the session log."""
     responses, _ = api
     responses.append(reply)
@@ -142,8 +142,10 @@ def test_each_model_family_gets_the_request_it_accepts():
     """Thinking the caller did not ask for, per the docs' per-model table
     (build-with-claude/thinking-troubleshooting, 2026-09): off where
     "disabled" is accepted, effort low where thinking is always on (those
-    400 on "disabled"), untouched where it is off by default. Thinking
-    asked for is the model's default everywhere."""
+    400 on "disabled"), untouched where it is off by default. Where it is
+    always on, max_tokens (which caps thinking and reply together) gains
+    room beyond the reply's budget. Thinking asked for is the model's
+    default everywhere, within the caller's max_tokens."""
     fmt = {"format": {"type": "json_schema", "schema": _Ok.model_json_schema()}}
     off, low = {"type": "disabled"}, {"effort": "low", **fmt}
     for model, want in {
@@ -152,10 +154,12 @@ def test_each_model_family_gets_the_request_it_accepts():
             "claude-fable-5-1": (None, low), "claude-mythos-5-1": (None, low),
             "claude-opus-4-8": (None, fmt),
             "claude-sonnet-4-0": (None, None)}.items():   # forced tool call
-        p = claude.build_payload("S", "U", model=model, reply=_Ok)
+        p = claude.build_payload("S", "U", 300, model=model, reply=_Ok)
         assert (p.get("thinking"), p.get("output_config")) == want, model
-        p = claude.build_payload("S", "U", model=model, thinking=True, reply=_Ok)
+        assert (p["max_tokens"] > 300) == (want[1] == low), model
+        p = claude.build_payload("S", "U", 300, model=model, thinking=True, reply=_Ok)
         assert "thinking" not in p and "effort" not in p.get("output_config", {}), model
+        assert p["max_tokens"] == 300, model
 
 
 def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):

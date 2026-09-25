@@ -127,7 +127,8 @@ def _fresh_run_state(monkeypatch):
     the robots.txt cache and the per-host limiter (whose tasks and locks
     belong to one event loop), discovery's page memo and DNS cache, the
     board engine's listing memo and settled handle variants, the
-    board-owner verdicts, and the rows a deep verify gave up on."""
+    board-owner verdicts, the prompt-cache gates (asyncio Events, bound to
+    one loop), and the rows a deep verify gave up on."""
     for mod in (_fetchpool, _job_probe):
         old = mod._DEAD_HOSTS
         monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
@@ -137,6 +138,7 @@ def _fresh_run_state(monkeypatch):
     monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
     monkeypatch.setattr(_board, "_VARIANTS", {})
     monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
+    monkeypatch.setattr(_claude, "_PREFIX_GATES", {})
     _board._MEMO.clear()
     _claude._BOARD_OWNER_CACHE.clear()
 
@@ -492,6 +494,14 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
             return body.encode() if content is None else content
 
     return _Response()
+
+
+def answer(value):
+    """A coroutine function returning `value` whatever it is called with:
+    the stand-in for an awaited callee (src.claude.fit.acall_claude_json)."""
+    async def reply(*_a, **_kw):
+        return value
+    return reply
 
 
 class Request(str):
