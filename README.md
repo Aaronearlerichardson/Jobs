@@ -762,7 +762,7 @@ Everything personal lives in `profile.toml` on your machine;
 | `[mission]` | employer mission tiers (name, definition, score band, active) + the bullseye pin |
 | `[locality]` | what counts as "local" (`src/match/locality.py`) |
 | `[sources]` | non-company feeds: RemoteOK/Remotive/HN toggles, RSS feeds, Discourse forums, web-search queries, USAJOBS (`[sources.usajobs]`), Getro network boards (`[sources.getro]`) |
-| `[discovery]` | seed companies, Workday majors, directory URLs, web-search name queries, priority companies |
+| `[discovery]` | seed companies, scan majors, directory URLs, web-search name queries, priority companies |
 
 **Relevance model:** a job passes if it hits any `core` term, OR a `domain` +
 `skill` pair. Keep `core` narrow (high-signal); let `domain`+`skill` pull in

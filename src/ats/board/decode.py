@@ -19,7 +19,10 @@ def decode(dec, text, parts, url, area=None, hop=True):
         m = re.search(dec.regex, text)
         return json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
     if kind == "jsonld":
-        return {"postings": jsonld.postings(text, url)}
+        found = jsonld.postings(text, url)
+        if found or not dec.cells:
+            return {"postings": found}
+        return {"postings": [], "page": _cells(parse_markup(text), dec.cells)}
     if kind == "atom":
         return {"entries": _atom(text)}
     if dec.select == ("$job_links",):
@@ -119,11 +122,18 @@ def elements(dec, soup, parts, url):
             e["context"] = ctx.get_text(" ", strip=True) if ctx is not None else ""
             if lines is not None:
                 e["lines"] = lines
-            for name, css in dec.cells.items():
-                cell = ctx.select_one(css) if ctx is not None else None
-                e[name] = cell.get_text(" ", strip=True) if cell is not None else None
+            e.update(_cells(ctx, dec.cells))
         out.append(e)
     return out
+
+
+def _cells(node, cells):
+    """{name: the text of `cells[name]`'s first match inside `node`}, None
+    where it has none."""
+    found = {name: node.select_one(css) if node is not None else None
+             for name, css in cells.items()}
+    return {name: el.get_text(" ", strip=True) if el is not None else None
+            for name, el in found.items()}
 
 
 def _context(el, how):

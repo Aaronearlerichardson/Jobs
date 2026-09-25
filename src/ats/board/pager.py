@@ -7,6 +7,7 @@ callbacks, so it knows nothing of handles, headers or decoders.
 """
 
 import json
+import math
 import time
 
 from src import config
@@ -19,11 +20,13 @@ def page_vals(pager, n, size):
     """The named request values for page `n` (from 0) of `size` rows, a
     listing without a pager reading page 0.
 
-    >>> from .spec import OverlapPager, PagePager
+    >>> from .spec import OffsetPager, OverlapPager, PagePager
     >>> page_vals(None, 0, 1)
     {'$size': 1, '$offset': 0, '$page': 0}
     >>> page_vals(PagePager(kind="page", start=1), 2, 100)
     {'$size': 100, '$offset': 200, '$page': 3}
+    >>> page_vals(OffsetPager(kind="offset", size=50, start=1), 1, 50)["$offset"]
+    51
     >>> why = "rows shift, 2026-09"
     >>> page_vals(OverlapPager(kind="overlap", size=500, step=250, why=why), 1, 500)["$offset"]
     250
@@ -38,6 +41,12 @@ def page_vals(pager, n, size):
 def page_size(pager):
     """Rows a pager asks per page; 0 when unknown or unpaged."""
     return (pager.size or 0) if pager else 0
+
+
+def page_cap(pager, budget, step):
+    """The most pages a walk stepping `step` rows reads: the pager's
+    `pages`, widened to cover the row budget `budget` where one is given."""
+    return max(pager.pages, math.ceil(budget / step)) if budget and step else pager.pages
 
 
 def total_of(pager, payload):
@@ -113,16 +122,22 @@ def _fresh(listed, seen):
     return new
 
 
-def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
+def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False, budget=None):
     """(rows, total) for one listing `spec`; (None, None) when the first
     request failed. `ask(n, vals, url)` makes page `n`'s request with the
     named values `vals` (`page_vals`), or follows a cursor's served `url`,
     and answers (parts, payload, error); `rows_of(parts, payload)` maps a
     page to (its entry count, its rows); rows are deduplicated (`_fresh`).
     `size` and `pages` override the pager's; a `cheap` read is one page
-    unless `pages` says. An offset pager with no size counts a page's
-    postings (distinct ids) as its entries, the first page's count
-    stepping the offset.
+    unless `pages` says; else a row `budget` widens the pager's page cap
+    at the step the walk takes (`page_cap`).
+
+    An offset pager with no size learns it: a page's postings (distinct
+    ids) are its entries and the first page's count is the size. The walk
+    steps by it where that page reports the board's total, else by one row
+    less: pages overlap by a row, so the last page of a board of two or
+    more postings is always short, and a server wrapping back past its end
+    does not read as capped.
 
     A later page's failure ends the walk with the rows so far (reported,
     so the snapshot reads incomplete). The walk ends at a page listing no
@@ -138,22 +153,27 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
     unknown on a scoped pull short of the ceiling. A `cheap` walk notes
     nothing."""
     pager = spec.pager
-    size = size or page_size(pager)
-    pages = 1 if not pager else pages or (1 if cheap else pager.pages)
-    served = not size and pager is not None and pager.kind == "offset"
+    size = step = size or page_size(pager)
+    learn = not size and pager is not None and pager.kind == "offset"
+    widen = not (pages or cheap)
+    pages = 1 if not pager else pages or (1 if cheap else page_cap(pager, budget,
+                                                                   size and pager.stride))
     ceiling = pager.ceiling if pager else None
-    rows, seen, total, size_known, capped, url = [], set(), None, None, False, None
-    for n in range(pages):
-        parts, payload, err = ask(n, page_vals(pager, n, size), url)
+    rows, seen, total, size_known, capped, url, n = [], set(), None, None, False, None, 0
+    while True:
+        parts, payload, err = ask(n, page_vals(pager, n, step), url)
         if err:
             return (None, None) if n == 0 else (rows, total)
         if n == 0 and pager and pager.total:
             total = total_of(pager, payload)
             size_known = None if total is not None and ceiling and total >= ceiling else total
         n_entries, listed = rows_of(parts, payload)
-        if served:
+        if learn:
             n_entries = len({r["id"] for r in listed if r["id"] is not None})
-            size = size or n_entries
+            if n == 0:
+                size = n_entries
+                step = size - 1 if size_known is None and size > 1 else size
+                pages = page_cap(pager, budget, step) if widen else pages
         new = _fresh(listed, seen)
         rows += new
         if not pager:
@@ -169,10 +189,11 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False):
         elif not postings(listed) or ended(pager, payload, pager.number(n), rows,
                                            size_known, n_entries, size):
             break
-        if not postings(new) or n + 1 == pages:
+        if not postings(new) or n + 1 >= pages:
             capped = True
             break
         time.sleep(config.PAGE_DELAY_S)
+        n += 1
     at_ceiling = bool(ceiling) and max(total or 0, len(rows)) >= ceiling
     complete = size_known is not None and len(rows) >= size_known
     short = size_known is not None and len(rows) < size_known and not scoped

@@ -58,7 +58,7 @@ from src.net.util import (cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put)
 
 from . import decode, fields, pager
-from .pager import page_size, page_vals, postings, scope_failed, total_of
+from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
 from .spec import ROW_FIELDS, Listing, parse
 
 
@@ -503,23 +503,25 @@ class Board:
         return f"{self.name} {company_name or handle}"
 
     def _walk(self, handle, label=None, cheap=False, size=None, pages=None, vals=None,
-              scoped=False, first=False):
+              scoped=False, first=False, budget=None):
         """(rows, total) from the first listing alternative whose walk
         (`_walk_listing`) yields a posting, else the last one's answer; only
         the first alternative's when `first`."""
         got = None, None
         for spec, row in list(zip(self._listings, self._rows))[:1 if first else None]:
-            got = self._walk_listing(spec, row, handle, label, cheap, size, pages, vals, scoped)
+            got = self._walk_listing(spec, row, handle, label, cheap, size, pages, vals, scoped,
+                                     budget)
             if postings(got[0]):
                 break
         return got
 
     def _walk_listing(self, spec, row, handle, label=None, cheap=False, size=None, pages=None,
-                      vals=None, scoped=False):
+                      vals=None, scoped=False, budget=None):
         """`pager.walk` over one listing `spec`, its entries mapped by `row`:
         (rows, total), (None, None) when the first request failed. `vals`
         fills named request values (`_NAMED`); `cheap` reads one page (or
-        `pages`) of `probe_url` at PROBE_TIMEOUT."""
+        `pages`) of `probe_url` at PROBE_TIMEOUT; `budget` rows widen the
+        page cap."""
         paged = spec.pager is not None
         req = spec.model_copy(update={"url": spec.probe_url}) if cheap and spec.probe_url else spec
         timeout = config.PROBE_TIMEOUT if cheap else None
@@ -534,7 +536,7 @@ class Board:
         def rows_of(parts, payload):
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
-        return pager.walk(spec, ask, rows_of, size, pages, cheap, scoped)
+        return pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
 
     def listing(self, handle, label=None, cheap=False, rescue_cap=None):
         """Every row on the board, mapped by the spec's fields and, where
@@ -585,27 +587,29 @@ class Board:
             return {"$facets": applied, "$search_text": ""}, True, total
         return {"$facets": {}, "$search_text": default_search_text()}, False, total
 
-    def _pull(self, handle, label, loc_re=None, pages=None):
-        """The board's rows in `loc_re`'s area (all of them when None). A
+    def _pull(self, handle, label, loc_re=None, budget=None):
+        """The board's rows in `loc_re`'s area (all of them when None), the
+        walk's page cap widened to cover `budget` rows where given. A
         facets `scope` narrows the listing server-side (the first
-        alternative only, where the facets vouch) and keeps the rows its
-        rescue shows in the area (`_rescue`); a scope the board ignored
-        (`pager.scope_failed`) keeps listed and free-text matches only.
+        alternative only, where the facets vouch) and keeps every row they
+        vouched for, else the rows `_rescue` shows in the area; a scope the
+        board ignored (`pager.scope_failed`) keeps listed and free-text
+        matches only.
         Otherwise the whole listing; then an "always" rescue, and the area
         filter (`_in_area`)."""
         scope = self.listing_spec.scope
         if loc_re is not None and scope:
             vals, vouched, board_total = self._scope(handle, loc_re)
-            rows, total = self._walk(handle, label, pages=pages, vals=vals, scoped=True,
-                                     first=vouched)
-            cap = page_size(self._pager) * (pages or self._pager.pages)
+            rows, total = self._walk(handle, label, vals=vals, scoped=True, first=vouched,
+                                     budget=budget)
+            cap = page_size(self._pager) * page_cap(self._pager, budget, self._pager.stride)
             fetch = not scope_failed(total, board_total, cap)
             if not fetch:
                 print(f"    [!] {label}: locality scope came back unnarrowed ({total} of "
                       f"{board_total or '?'} postings) - keeping listed-location matches "
                       f"only, no detail rescue")
-            return self._rescue(rows or [], loc_re, vouched, fetch, label)
-        rows = self._walk(handle, label, pages=pages, vals={"$area": loc_re})[0] or []
+            return self._rescue(rows or [], loc_re, vouched and fetch, fetch, label)
+        rows = self._walk(handle, label, vals={"$area": loc_re}, budget=budget)[0] or []
         return [r for r in self._rescue_all(rows, label) if self._in_area(r, loc_re)]
 
     def _in_area(self, row, loc_re):
@@ -622,11 +626,12 @@ class Board:
         shows it: the listed one; else the rescue's free text (the listed
         one after it in parentheses); else, where `fetch` allows and the
         listed one matches `rescue.unknown`, the detail's (`_rescued`), at
-        most `cap` reads (default `rescue.cap`). Past the cap such a row
-        stays on its listed text when the scope `vouched` for it, else it
-        is dropped. A listed location that passes but matches `unknown` is
-        expanded too, within the cap, and kept on its listed text past it.
-        A labelled pull says when the budget ran out."""
+        most `cap` reads (default `rescue.cap`). A row the scope `vouched`
+        for (the board's own area search listed it) is kept whatever its
+        location reads, past the cap on its listed text. A listed location
+        that passes but matches `unknown` is expanded too, within the cap,
+        and kept on its listed text past it. A labelled pull says when the
+        budget ran out."""
         unknown = self._unknown_re if fetch else None
         rescue = self._rescue_spec
         fill = rescue.fields if rescue else ()
@@ -641,13 +646,13 @@ class Board:
                     self._rescued(row, fill)
             elif loc_ok(loc_re, free):
                 row["location"] = f"{free} ({listed})" if listed else free
-            elif not vague or (spent >= cap and not vouched):
-                continue
-            elif spent < cap:
+            elif vague and spent < cap:
                 spent += 1
                 self._rescued(row, fill)
-                if not loc_ok(loc_re, row["location"]):
+                if not (vouched or loc_ok(loc_re, row["location"])):
                     continue
+            elif not vouched:
+                continue
             out.append(row)
         if unknown and spent >= cap and label:
             print(f"    [!] {label}: {'location ' if fill == ('location',) else ''}detail "
@@ -715,14 +720,12 @@ class Board:
     def whole_board(self, company, loc_re=None):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
-        spec is `eager`. A pager of known page size reads up to
-        `config.board_max_pages`."""
+        spec is `eager`. The walk reads up to the board's row budget
+        (`config.board_max_rows`)."""
         handle = self.handle(company)
         if not handle:
             return []
-        p = self._pager
-        pages = config.board_max_pages(company, p.stride, p.pages) if p and p.size else None
-        rows = self._pull(handle, self._label(handle), loc_re, pages)
+        rows = self._pull(handle, self._label(handle), loc_re, config.board_max_rows(company))
         eager = self._detail_rows(True) if self.spec.eager else None
         return adapt(board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,
@@ -736,10 +739,11 @@ class Board:
         n = self.alive(handle)[1]
         return n > 0, n
 
-    def alive(self, handle):
+    def alive(self, handle, label=None):
         """(ok, n) where ok means the board request itself succeeded, empty
-        or not (the dead-board check), and n counts its postings."""
-        rows, total = self._walk(handle, cheap=True, size=1)
+        or not (the dead-board check), and n counts its postings; a failed
+        request is reported under `label` when given."""
+        rows, total = self._walk(handle, label, cheap=True, size=1)
         n = sum(1 for r in rows or [] if r["id"] is not None)
         return rows is not None, total if total is not None else n
 
@@ -760,10 +764,11 @@ class Board:
         """Postings on the board in `loc_re`'s area. Where the spec scopes,
         the scoped total (where the facets vouch but the board reports none,
         the postings on the first scoped page), unless the board ignored the
-        scope; then, and on every other spec, the rows of a cheap read
-        (LOCAL_COUNT_SAMPLE_PAGES pages of a scoped spec) whose listed
-        location or free text passes. 0 when the board is unreadable."""
-        pages, scope = None, self.listing_spec.scope
+        scope or reports no total the facets vouch for; then, and on every
+        other spec, the rows of a cheap read of LOCAL_COUNT_SAMPLE_PAGES
+        pages whose listed location or free text passes. 0 when the board
+        is unreadable."""
+        scope = self.listing_spec.scope
         if scope:
             vals, vouched, board_total = self._scope(handle, loc_re, config.PROBE_TIMEOUT)
             rows, total = self._walk(handle, cheap=True, size=1, vals=vals, first=vouched)
@@ -771,10 +776,10 @@ class Board:
                 return 0
             if total is None and vouched:
                 return sum(1 for r in rows if r["id"] is not None)
-            if not scope_failed(total, board_total, page_size(self._pager) * self._pager.pages):
-                return total or 0
-            pages = config.LOCAL_COUNT_SAMPLE_PAGES
-        rows = self._walk(handle, cheap=True, pages=pages)[0] or []
+            cap = page_size(self._pager) * self._pager.pages
+            if total is not None and not scope_failed(total, board_total, cap):
+                return total
+        rows = self._walk(handle, cheap=True, pages=config.LOCAL_COUNT_SAMPLE_PAGES)[0] or []
         return sum(1 for r in rows
                    if loc_ok(loc_re, r["location"]) or loc_ok(loc_re, r.get("_free") or ""))
 

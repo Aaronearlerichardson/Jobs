@@ -67,6 +67,8 @@ Template = Annotated[str, Strict(), StringConstraints(min_length=1), AfterValida
 #: A field-grammar spec (fields.py): a path, a dict, or None.
 Grammar = Annotated[Any, AfterValidator(_grammar)]
 Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
+#: Search terms each placed among every platform's: [position, text] pairs.
+Ranked = tuple[tuple[Int, Str], ...]
 Why = Annotated[str, Strict(),
                 StringConstraints(pattern=r"^\S.*, 20\d\d-(0[1-9]|1[0-2])( \(inferred\))?$")]
 
@@ -191,6 +193,8 @@ class JsonInHtmlDecoder(_Json):
 class JsonLdDecoder(_Decoder):
     kind: Literal["jsonld"] = Field(description="The page's schema.org JobPostings")
     entries: Paths = Field(("postings",), description="Where the decoded postings sit")
+    cells: dict[Str, Str] = Field({}, description='{name: CSS}: a page naming no posting, as '
+                                                  '"page", the text of each')
 
 
 class AtomDecoder(_Decoder):
@@ -258,8 +262,11 @@ class _Pager(_Workaround):
 class OffsetPager(_Pager):
     kind: Literal["offset"] = Field(description='"$offset" steps a page')
     size: Count | None = Field(None, description="Rows asked per page; unset, the server sizes "
-                                                 "its pages and each steps by the postings the "
-                                                 "first served")
+                                                 "its pages and the walk learns it (pager.walk)")
+    start: Annotated[Int, Field(ge=0)] = Field(0, description="The first row's offset")
+
+    def offset(self, n, size):
+        return self.start + n * size
 
 
 class OverlapPager(_Pager):
@@ -399,7 +406,12 @@ class Discovery(_Spec):
                                             "company's name is asked who owns it")
     narrow: Bool = Field(False, description="The vendor's host serves so many employers that a "
                                             "bare site: search of it is noise: the dork "
-                                            "searches it with the profile's domain keywords")
+                                            "searches its `search` forms by name, with the "
+                                            "profile's domain keywords")
+    search: Ranked = Field((), description="The host forms the dork searches with site:, "
+                                           "every platform's in position order")
+    hint: Ranked = Field((), description="The vendor terms the web-search resolver ORs into "
+                                         "its board query, every platform's in position order")
 
 
 class BoardSpec(_Spec):

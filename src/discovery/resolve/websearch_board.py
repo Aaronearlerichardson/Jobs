@@ -13,12 +13,12 @@ _host_matches_name), with the shared parent-board check
 import re
 
 from src import config
+from src.ats.board import BOARDS
 from src.ats.signatures import detect, pack
 from src.match.names import name_key
 from src.net import ddg
 from src.net.http import HEADERS, SESSION
 from .identity import foreign_board
-from .probes import BOARD_URL_HOSTS
 
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing
@@ -37,6 +37,11 @@ _DEFAULT_AGGREGATOR_HOSTS = (
 _AGGREGATOR_HOSTS = tuple(
     getattr(config, "DISCOVERY_AGGREGATOR_HOSTS", None) or _DEFAULT_AGGREGATOR_HOSTS
 )
+
+
+#: The vendor terms the first board query ORs together: every spec's
+#: `discovery.hint`, in position order.
+_HINT = " OR ".join(t for _, t in sorted(p for b in BOARDS.values() for p in b.spec.discovery.hint))
 
 
 def _is_aggregator(url):
@@ -149,11 +154,8 @@ def _websearch_board(name, max_results=8):
 
     # Dork for a direct ATS board first (cheap win, avoids the second query
     # when it lands); fall back to a general careers search only if it misses.
-    # One term per vendor host a board URL names ("greenhouse" for
-    # greenhouse.io).
-    ats_hint = " OR ".join(dict.fromkeys(h.split(".")[0] for h in BOARD_URL_HOSTS))
     seen = set()
-    for query in (f'"{name}" jobs ({ats_hint})', f'"{name}" careers'):
+    for query in (f'"{name}" jobs ({_HINT})', f'"{name}" careers'):
         fresh = [u for u in _search(query) if u not in seen]
         seen.update(fresh)
         hit = _resolve(fresh)

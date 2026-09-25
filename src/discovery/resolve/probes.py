@@ -122,14 +122,6 @@ def slug_keyed(board):
     return "careers_url" not in board.spec.handle.columns
 
 
-#: The vendor hosts where a URL names a board by itself: every fetchable,
-#: `slug_keyed` spec's `detect` hosts, in spec order. What the dork and the
-#: web-search resolver search.
-BOARD_URL_HOSTS = tuple(dict.fromkeys(d.host for b in BOARDS.values()
-                                      if b.fetchable and slug_keyed(b)
-                                      for d in b.spec.detect if d.host))
-
-
 def confirm(ats, slug, careers_url=None):
     """A live posting count for detected coordinates, or None: the board's
     probe on the handle they name as store columns (`coords.columns`), so
@@ -196,7 +188,7 @@ def probe_scan(name: str, careers_url: str = ""):
 # ─── JS-rendered scan probe (fallback for SPA careers pages) ─────────────
 #
 # Many Fortune-500 careers pages (NetApp, Cisco, Syneos, Precision
-# BioSciences, WillowTree, etc.) are React/Angular SPAs — the board link
+# BioSciences, WillowTree, etc.) are React/Angular SPAs: the board link
 # is only inserted into the DOM after JS runs, so the static probe_scan
 # above can't see it.
 #
@@ -440,7 +432,7 @@ class JsScanProbe:
 class JsScanProbePool:
     """K headless browsers running JS scan scrapes in parallel.
 
-    A single JsScanProbe is single-threaded by necessity — Playwright's
+    A single JsScanProbe is single-threaded by necessity: Playwright's
     sync API pins its greenlet to one thread, so one instance serializes
     every scrape onto one browser. But nothing stops running SEVERAL
     instances at once: each owns its own Playwright + browser + thread, so
@@ -501,8 +493,8 @@ def _nc_count(ats, slug):
 
 def probe_company(name, scan=True):
     """
-    Probe every platform whose spec sets ``guess`` (fast) then — only if
-    ``scan`` — the SCANNED platforms (probe_scan, the slow careers-page
+    Probe every platform whose spec sets ``guess`` (fast) then, only if
+    ``scan``, the SCANNED platforms (probe_scan, the slow careers-page
     fallback), then VERIFY the board has NC-area jobs (kills false-positive
     slug collisions and enforces local relevance).
     Returns a hit dict with an ``nc`` count, or None.

@@ -10,9 +10,9 @@ else here is what it is built from.
                                 live fetch
     classify_miss               when none of that worked, which of the
                                 store's MISS_REASONS codes explains it
-    _validate_board             the live fetch that rejects a slug guess
-                                landing on an empty or nonexistent board;
-                                one that fails rejects nothing (read_board)
+    _validate_board             the cheap live read that rejects a slug
+                                guess landing on an empty or nonexistent
+                                board; one that fails rejects nothing
 
 Order matters and is the point: a probe-first resolver guessed slugs from
 the name before looking at the company's own site, and false-positived
@@ -83,14 +83,21 @@ def read_local(comp):
 
 
 def _validate_board(comp):
-    """(total, nc) live posting counts of a resolved board, None when
-    `read_board` cannot read it. A board that lists nothing is dead or
-    wrong to the caller: what rejects a slug guess landing on an empty or
+    """(total, nc) live posting counts of a resolved board from its cheap
+    reads, as `probe_company` counts a guess: `Board.alive` (the listing's
+    own total where it reports one) and `Board.local_count`. None when the
+    read failed; (0, 0) when it proved the board gone (`Board.gone`) or the
+    columns name no board. A board that lists nothing is dead or wrong to
+    the caller: what rejects a slug guess landing on an empty or
     nonexistent board."""
-    allj = read_board(comp)
-    if allj is None:
-        return None
-    return len(allj), sum(1 for j in allj if NC_RE.search(j.get("location") or ""))
+    board = board_for(comp.get("ats"))
+    handle = board.handle(comp) if board else None
+    if not handle:
+        return 0, 0
+    ok, total = board.alive(handle, f"{board.name} {handle}")
+    if not ok:
+        return (0, 0) if board.gone(http.snapshot_info()["last_error"]) else None
+    return total, board.local_count(handle, NC_RE) if total else 0
 
 
 def _url_board(name, careers_url):
@@ -248,7 +255,7 @@ def resolve_or_miss(name, careers_url=""):
     Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
     no hit is a failed resolution (see classify_miss); a hit WITH a reason is
     a live, readable board that simply has no openings in your [locality]
-    (``no-local-jobs``) — worth keeping, not worth crawling today. A board
+    (``no-local-jobs``): worth keeping, not worth crawling today. A board
     found but unreadable (`read_board`) is ``fetch-error:unreadable-<ats>``,
     a transient, never ``board-dead``.
 

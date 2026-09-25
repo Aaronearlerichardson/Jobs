@@ -24,6 +24,8 @@ BOARDS = {
         "detect": [{"host": "greenhouse.io",
                     "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
         "canary": {"name": "Databricks", "handle": "databricks"},
+        "discovery": {"search": [[1, "boards.greenhouse.io"], [2, "job-boards.greenhouse.io"]],
+                      "hint": [[2, "greenhouse"]]},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -54,6 +56,7 @@ BOARDS = {
     "lever": {
         "detect": [{"host": "lever.co", "re": [r"(?i)jobs\.lever\.co/([a-z0-9_-]+)"]}],
         "canary": {"name": "Veeva", "handle": "veeva"},
+        "discovery": {"search": [[3, "jobs.lever.co"]], "hint": [[3, "lever"]]},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -83,6 +86,7 @@ BOARDS = {
     "ashby": {
         "detect": [{"host": "ashbyhq.com", "re": [r"(?i)jobs\.ashbyhq\.com/([a-zA-Z0-9_-]+)"]}],
         "canary": {"name": "Vanta", "handle": "vanta"},
+        "discovery": {"search": [[4, "jobs.ashbyhq.com"]], "hint": [[4, "ashbyhq"]]},
         "sweep": True,
         "prunable": True,
         "guess": True,
@@ -112,6 +116,7 @@ BOARDS = {
     "bamboohr": {
         "detect": [{"host": "bamboohr.com", "re": [r"(?i)([a-z0-9-]+)\.bamboohr\.com"]}],
         "canary": {"name": "EMS Biomedical", "handle": "ems"},
+        "discovery": {"search": [[8, "*.bamboohr.com/careers"]], "hint": [[7, "bamboohr"]]},
         "sweep": True,
         "prunable": True,
         "eager": True,
@@ -321,7 +326,8 @@ BOARDS = {
             "params": {"cid": "{cid}", "ccId": "{ccid}", "locale": "en_US",
                        "$top": "$size", "$skip": "$offset"},
             "decoder": {"entries": "jobRequisitions"},
-            "pager": {"kind": "offset", "size": 50, "total": "meta.totalNumber"},
+            # "$skip" counts from 1: 0 reads one row short, and a one-row ask nothing.
+            "pager": {"kind": "offset", "size": 50, "start": 1, "total": "meta.totalNumber"},
             "fields": {
                 "id": {"format": "adp_{cid:8}_{itemID}"},
                 "title": "requisitionTitle",
@@ -349,6 +355,7 @@ BOARDS = {
                    {"host": "smartrecruiters.com",
                     "re": [r"(?i)api\.smartrecruiters\.com/v1/companies/([A-Za-z0-9]+)/"]}],
         "canary": {"name": "Eurofins", "handle": "Eurofins"},
+        "discovery": {"search": [[5, "jobs.smartrecruiters.com"]], "hint": [[6, "smartrecruiters"]]},
         # Not in the lightweight sweep: boards run to thousands of rows.
         "job_ref": {"re": r"smartrecruiters\.com/([A-Za-z0-9_.-]+)/(\d+)", "parts": ["slug", "id"]},
         "listing": {
@@ -401,7 +408,9 @@ BOARDS = {
         # A (tenant, pod, site) triple no name guess reaches; a parent's
         # tenant can list its subsidiaries' postings (Danaher's, Genedata's);
         # the host serves most large employers.
-        "discovery": {"scan": True, "shared": True, "narrow": True},
+        "discovery": {"scan": True, "shared": True, "narrow": True,
+                      "search": [[9, "myworkdayjobs.com"]],
+                      "hint": [[1, "myworkdayjobs"], [8, "workday"]]},
         # Not in the lightweight sweep: boards run to thousands of rows and
         # are pulled scoped to the locality.
         "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
@@ -563,9 +572,13 @@ BOARDS = {
                    "why": "the index names no body or date; a posting's JSON-LD does, 2026-09"},
         "detail": {
             "url": "{link}",
-            "decoder": {"kind": "jsonld"},
+            # A page with no JSON-LD posting: its body container.
+            "decoder": {"kind": "jsonld", "cells": {"description": "#job-description"}},
+            "record": ["postings[0]", "page"],
             "fields": {
-                "location": {"of": "location", "default": "Unknown"},
+                # "Unknown" where a posting names no place; a bare page names none.
+                "location": {"first": ["location",
+                                       {"const": "Unknown", "when": {"truthy": "title"}}]},
                 "description": "description",
                 "posted_at": "posted_at",
                 "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
@@ -579,6 +592,7 @@ BOARDS = {
     "jobvite": {
         "detect": [{"host": "jobvite.com", "re": [r"(?i)jobs\.jobvite\.com/([a-z0-9][a-z0-9_-]*)"]}],
         "canary": {"name": "Neogenomics", "handle": "neogenomics"},
+        "discovery": {"search": [[6, "jobs.jobvite.com"]]},
         "sweep": True,
         "eager": True,
         "handle": {"parts": ["tenant"]},
@@ -694,6 +708,7 @@ BOARDS = {
     },
     "icims": {
         "detect": [{"host": "icims.com", "re": [r"(?i)([a-z0-9-]+)\.icims\.com"]}],
+        "discovery": {"search": [[7, "*.icims.com"]], "hint": [[5, "icims"]]},
         "canary": {"name": "FUJIFILM Healthcare Americas Corporation",
                    "handle": "uscareers-fujifilm"},
         "job_ref": {"re": r"(?i)^(https?://[a-z0-9-]+\.icims\.com/jobs/\d+/[^?#]*)",
@@ -707,8 +722,17 @@ BOARDS = {
                 "headers": {"User-Agent": "$plain_user_agent"},
                 # The selector also finds the search shell's own links
                 # (/jobs/intro, /jobs/login, the pager's), which name no posting.
+                # A row's location column is a "Location"-labelled header or
+                # field, or the map-marked city, state and country fields.
                 "decoder": {"kind": "html", "select": "a.iCIMS_Anchor, a[href*='/jobs/']",
-                            "context": "parent", "selects": True},
+                            "context": ["li", "div"], "selects": True,
+                            "cells": {
+                                "place": ".field-label:-soup-contains('Location') + span, "
+                                         "dt:-soup-contains('Location') + dd",
+                                "city": "dt:has(.glyphicons-map-marker):-soup-contains('City') + dd",
+                                "state": "dt:has(.glyphicons-map-marker):-soup-contains('State') + dd",
+                                "country": "dt:has(.glyphicons-map-marker):-soup-contains('Country')"
+                                           " + dd"}},
                 # Tenants serve 20 or 50 a page.
                 "pager": {"kind": "page", "pages": 8, "bare_first": True,
                           "why": "the first search page takes no page number, 2026-08"},
@@ -734,7 +758,8 @@ BOARDS = {
                     # One URL per posting: its path, and the flag selecting the
                     # server-rendered document.
                     "url": {"format": "{_path}?in_iframe=1", "when": {"truthy": "_jid"}},
-                    "location": {"of": "context", "transform": "loc_text"},
+                    "location": {"first": [{"join": ["city", "state", "country"], "sep": ", "},
+                                           "place"]},
                     "department": None,
                 },
             },

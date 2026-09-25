@@ -249,7 +249,7 @@ harvest_offmission_hours = 168
 # Rows a mission-worth-it Workday or SmartRecruiters whole-board pull
 # reads before giving up. Default 3000, which carries headroom above the
 # biggest board measured live -- see src/config/policy.py's BOARD_MAX_ROWS
-# for that measurement and board_max_pages for the page arithmetic. A board
+# for that measurement and board_max_rows for the budget rule. A board
 # that is BOTH off-mission and itself inactive (the SAME rule
 # harvest_offmission_hours above uses) keeps its fetcher's own narrower
 # default instead: one a track's own mission gate discards on every triage
@@ -460,7 +460,7 @@ seed_companies = [
 # Optional: only merge those seeds into discovery runs whose term mentions one
 # of these (usually your region). Omit to always merge them.
 seed_triggers = []
-workday_majors = []          # big employers to also try via the Workday fallback
+scan_majors = []             # big employers worth the slow careers-page scan
 directory_urls = []          # e.g. a local chamber/association "/company/<slug>/" directory
 # The main recall lever — searches whose results are harvested for names, then
 # probed. Tailor to your region/field.

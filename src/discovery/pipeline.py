@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from src.ats import coords
 from src.ats.board import board_for
 from src.claude.api import (DISCOVER_SYSTEM, DiscoveredCompany, DiscoverReply,
                             call_claude_json)
@@ -45,8 +46,8 @@ class Candidate:
     # In: the model's guessed handle, which nothing probes any more -- the
     # resolver derives its own from the name (match.names.slug_guesses) and
     # prefers what the company's careers page actually says. Out: the
-    # RESOLVED handle, joined where it spans columns (see _slug_str), None for a
-    # self-hosted board keyed on its URL.
+    # RESOLVED handle, joined where it spans columns (coords.slug_text),
+    # None for a self-hosted board keyed on its URL.
     slug_guess: str | None
     careers_url: str
     notes: str
@@ -69,25 +70,6 @@ def candidate_from_dict(d):
     """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
     a seed, or a directory name."""
     return Candidate(**DiscoveredCompany.model_validate(d).model_dump())
-
-
-def _slug_str(ats, slug):
-    """A resolver hit's handle as the single string `Candidate.slug_guess`,
-    the report and `apply_to_store` all carry: a handle spanning several
-    store columns (Workday's (tenant, pod, site)) joined with its spec's
-    `handle.sep`, the plain slug for everything else, None for a
-    self-hosted board whose only coordinate is its URL.
-
-    >>> _slug_str("workday", ("acme", 5, "External"))
-    'acme|5|External'
-    >>> _slug_str("greenhouse", "acmebio")
-    'acmebio'
-    >>> _slug_str("custom", None) is None
-    True
-    """
-    if isinstance(slug, (tuple, list)):
-        return board_for(ats).spec.handle.sep.join(map(str, slug))
-    return slug or None
 
 
 #: Why a confirmed board still deserves a human glance, keyed by HOW it was
@@ -164,7 +146,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
     if hit:
         c.confirmed   = True
         c.ats         = hit["ats"]
-        c.slug_guess  = _slug_str(hit["ats"], hit.get("slug"))
+        c.slug_guess  = coords.slug_text(hit["ats"], hit.get("slug"))
         c.job_count   = hit.get("count") or 0
         c.nc          = hit.get("nc") or 0
         c.via         = hit.get("via") or ""
@@ -202,7 +184,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         if meta:
             c.confirmed  = True
             c.ats        = meta["ats"]
-            c.slug_guess = _slug_str(meta["ats"], meta["slug"])
+            c.slug_guess = coords.slug_text(meta["ats"], meta["slug"])
             c.job_count  = meta["count"]
             c.via        = "js"
             c.tried_slugs.append(

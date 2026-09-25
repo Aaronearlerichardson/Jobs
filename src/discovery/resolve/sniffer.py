@@ -126,8 +126,7 @@ def sniff_careers_ats(name, careers_url=""):
                 return {"confirmed": True, "ats": ats, "slug": slug,
                         "count": count, "source_url": r.url}
         if lead is None:
-            lead_slug = "|".join(map(str, slug)) if isinstance(slug, tuple) else slug
-            lead = {"confirmed": False, "ats": ats, "slug": lead_slug,
+            lead = {"confirmed": False, "ats": ats, "slug": coords.slug_text(ats, slug),
                     "source_url": r.url}
     if lead:
         return lead
@@ -140,8 +139,7 @@ def sniff_careers_ats(name, careers_url=""):
         if count is not None:
             return {"confirmed": True, "ats": ats, "slug": slug,
                     "count": count, "source_url": root_hit["careers_url"]}
-        slug_str = "|".join(map(str, slug)) if isinstance(slug, tuple) else slug
-        return {"confirmed": False, "ats": ats, "slug": slug_str,
+        return {"confirmed": False, "ats": ats, "slug": coords.slug_text(ats, slug),
                 "source_url": root_hit["careers_url"]}
     return None
 
@@ -245,7 +243,7 @@ class JsSniffer:
                 user_agent=BROWSER_UA, viewport={"width": 1440, "height": 900},
                 locale="en-US").new_page()
         except Exception as e:
-            # Same one-shot reporting as the JS scan probe — a missing
+            # Same one-shot reporting as the JS scan probe: a missing
             # browser is one condition, not one per instance.
             from .probes import _js_launch_hint, _report_js_disabled
             _report_js_disabled(f"careers-page sniff: {_js_launch_hint(e)}")

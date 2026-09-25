@@ -23,7 +23,7 @@ from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
 from src.discovery.resolve.identity import nc_hq_signal
-from src.discovery.resolve.probes import BOARD_URL_HOSTS, slug_keyed
+from src.discovery.resolve.probes import slug_keyed
 from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 
@@ -77,13 +77,18 @@ def _rotate_terms(terms, group_size, index):
     return [terms[(start + i) % n] for i in range(group_size)]
 
 
+#: (position, host form, narrow) for every spec's `discovery.search` form.
+_SITES = sorted((at, host, b.spec.discovery.narrow)
+                for b in BOARDS.values() for at, host in b.spec.discovery.search)
+
+
 def build_dork_queries(rotation=0):
     """The dork query set for rotation index `rotation`: one `site:` dork
-    per vendor host where a URL names a board (probes.BOARD_URL_HOSTS), a
-    host whose spec sets `discovery.narrow` searched by name with the
-    profile's domain keywords instead, then a free-text sweep. DDG chokes on long `site:` + big OR-group
-    queries (returns nothing), so the site-scoped dorks use a SHORT
-    locality clause (top few terms of that rotation's slice); the
+    per host form a spec's `discovery.search` names, in position order (a
+    `discovery.narrow` spec's searched by name with the profile's domain
+    keywords instead), then a free-text sweep. DDG chokes on long `site:` +
+    big OR-group queries (returns nothing), so the site-scoped dorks use a
+    SHORT locality clause (top few terms of that rotation's slice); the
     free-text sweep can afford more. `rotation=0` is the
     original fixed top-4/top-8 selection; each further index rotates onto
     the next slice of the profile's locality vocabulary (see
@@ -104,9 +109,8 @@ def build_dork_queries(rotation=0):
     """
     loc_site = _or_group(_rotate_terms(_LOCALITY_TERMS, 4, rotation), n=4)
     loc_wide = _or_group(_rotate_terms(_LOCALITY_TERMS, 8, rotation), n=8)
-    narrow = {d.host for b in BOARDS.values() if b.spec.discovery.narrow for d in b.spec.detect}
-    queries = [f'"{host}" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else "") if host in narrow
-               else f'site:{host} {loc_site}' for host in BOARD_URL_HOSTS]
+    queries = [f'"{host}" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else "") if narrow
+               else f'site:{host} {loc_site}' for _, host, narrow in _SITES]
     if _CORE:
         # Bullseye sweep — target companies are often on custom boards /
         # non-.com domains that name-guessing misses.

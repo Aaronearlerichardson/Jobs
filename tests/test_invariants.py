@@ -157,7 +157,7 @@ class TestOffmissionInactiveIsNotTheActivationRule:
         punished for it.
       * is_offmission_inactive only ever narrows a CADENCE
         (harvest.plan's HARVEST_OFFMISSION_HOURS) or a BUDGET
-        (config.board_max_pages). An unscored row reads as off-mission
+        (config.board_max_rows). An unscored row reads as off-mission
         there: nobody has bothered to score it, so it does not earn the
         frequent, wide read.
     """

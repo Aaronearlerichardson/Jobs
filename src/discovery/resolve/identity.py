@@ -111,7 +111,7 @@ def _words(parts):
 
 def _affinity(name, parts):
     """True if a detected handle's `parts` share an identity token with the
-    company name — any part, either direction, or a 4+-char shared prefix
+    company name: any part, either direction, or a 4+-char shared prefix
     (tenants abbreviate: 'vhr-unither').
 
     >>> _affinity("KBI Biopharma", ("jsrglobal", 1, "KBI_Biopharma"))

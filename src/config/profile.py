@@ -286,7 +286,7 @@ DISCOVERY_SEED_COMPANIES = [{"name": s.name, "notes": s.notes.strip()}
 DISCOVERY_SEED_NAMES         = [s["name"] for s in DISCOVERY_SEED_COMPANIES]
 # Discovery terms that pull the seeds in (empty = always). See src/discovery/seeds.py.
 DISCOVERY_SEED_TRIGGERS      = list(_dsc.seed_triggers)
-DISCOVERY_WORKDAY_MAJORS     = list(_dsc.workday_majors)
+DISCOVERY_SCAN_MAJORS        = list(_dsc.scan_majors)
 DISCOVERY_DIRECTORY_URLS     = list(_dsc.directory_urls)
 DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.name_search_queries)
 # LLM name-brainstorm source for discovery (names verified downstream, so

@@ -7,8 +7,6 @@ not here. Manage it with discover.py --local / --add-board, or
 run_scraper.py --import-companies roster.json.
 """
 
-import math
-
 # _self: the config PACKAGE, which is what callers monkeypatch.
 # profile.py defines it; two identical copies is one too many for
 # a function whose whole job is naming one module.
@@ -172,7 +170,7 @@ def is_offmission_inactive(c):
     tier the profile marks inactive, or never mission-scored at all) AND
     itself inactive -- the one predicate both the harvester's long-interval
     cadence (HARVEST_OFFMISSION_HOURS, read by src.crawl.harvest.plan) and
-    its page-budget gate (board_max_pages, below) key off, so a board
+    its row-budget gate (board_max_rows, below) key off, so a board
     triage's own mission gate discards anyway is never also read on the
     wider, slower page budget. A NULL tier reads as off-mission HERE
     (unlike is_active_mission, where an unscored company is treated as
@@ -199,7 +197,7 @@ def is_offmission_inactive(c):
 
         Moved here from src.crawl.harvest (whose plan() calls it for
         the off-mission harvest cadence) so src.ats.board.company could
-        read the SAME rule for board_max_pages without importing crawl --
+        read the SAME rule for board_max_rows without importing crawl --
         ats sits BELOW crawl in the import DAG. The asymmetry with
         is_active_mission above -- an unscored row is ACTIVE but is
         off-mission for a cadence or a budget -- is pinned in
@@ -216,15 +214,15 @@ def is_offmission_inactive(c):
 # =========================================================================
 
 # Rows a mission-worth-it Workday or SmartRecruiters whole-board pull reads
-# before giving up (see board_max_pages, below, and each fetcher's own
-# max_pages parameter). Default 3,000: a live measurement across the ten
+# before giving up (see board_max_rows, below, and each pager's own
+# `pages`). Default 3,000: a live measurement across the ten
 # biggest Workday/SmartRecruiters boards (2026-09-18, see the Phase 4
 # harvest worker's report) found ThermoFisher's DEDUPED distinct-posting
 # count at ~2,815 -- bigger than Eurofins's previously-assumed high-water
 # mark of 2,579 -- so the default carries headroom above the biggest board
 # actually observed, not just the one first flagged. An off-mission,
 # INACTIVE board (is_offmission_inactive) keeps its fetcher's own
-# narrower default instead -- see board_max_pages.
+# narrower default instead -- see board_max_rows.
 BOARD_MAX_ROWS = _pol.board_max_rows
 
 # One value per rule for every ATS board (src.ats.board.engine): the
@@ -241,7 +239,7 @@ WHOLE_BOARD_DETAIL_DELAY_S = 0.15
 BOARD_MEMO_S = 600.0
 # Stored rows one board may hydrate per harvest or triage run, the pause
 # between two of those detail GETs, and the pages a local count samples
-# when a board ignores its locality scope.
+# where it cannot ask the board for its area.
 HYDRATE_CAP_PER_RUN = 100
 HYDRATE_DELAY_S = 1.0
 LOCAL_COUNT_SAMPLE_PAGES = 5
@@ -256,21 +254,19 @@ CAREERS_PAGE_LOCATION_MAX = 70
 BOARD_DETECT_CACHE_S = 6 * 3600
 
 
-def board_max_pages(company, page_size, offmission_pages):
-    """max_pages for a paged whole-board listing pull:
-    BOARD_MAX_ROWS's wider budget (in pages of `page_size`) for a
-    mission-worth-it board, or `offmission_pages` -- the fetcher's own
-    narrower default -- for one is_offmission_inactive. The SAME
-    gate the harvester's cadence already uses for these boards, not a
-    second rule: one a track's own mission gate discards on every triage
-    pass never earns the wider, slower read either.
+def board_max_rows(company):
+    """The row budget of a whole-board listing pull: BOARD_MAX_ROWS for a
+    mission-worth-it board, None (the pager's own page budget) for one
+    is_offmission_inactive. The SAME gate the harvester's cadence already
+    uses for these boards, not a second rule: one a track's own mission
+    gate discards on every triage pass never earns the wider, slower read
+    either. The walk turns it into pages at the step it takes
+    (src.ats.board.pager.page_cap).
 
-    >>> mission = {"active": 1, "mission_tier": "adjacent"}
-    >>> board_max_pages(mission, 20, 60) >= 60
+    >>> board_max_rows({"active": 1, "mission_tier": "adjacent"}) == BOARD_MAX_ROWS
     True
-    >>> stale = {"active": 0, "mission_tier": "other"}
-    >>> board_max_pages(stale, 20, 60)
-    60
+    >>> board_max_rows({"active": 0, "mission_tier": "other"}) is None
+    True
 
     Notes:
         2026-09-18 census (live store): 25 Workday/SmartRecruiters boards
@@ -280,13 +276,10 @@ def board_max_pages(company, page_size, offmission_pages):
         on the 17 that a track can actually surface; the 8 keep today's
         narrower read rather than paying it for nothing.
     """
-    if is_offmission_inactive(company):
-        return offmission_pages
     # Through the PACKAGE, not this module's own global -- same rule as
     # is_active_mission's _self().is_multi_division(name) above: a test
     # that patches config.BOARD_MAX_ROWS must actually reach this read.
-    wide_pages = math.ceil(_self().BOARD_MAX_ROWS / page_size)
-    return max(offmission_pages, wide_pages)
+    return None if is_offmission_inactive(company) else _self().BOARD_MAX_ROWS
 
 
 # Honor robots.txt: skip paths a host asks crawlers to leave alone, and

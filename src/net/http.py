@@ -227,7 +227,7 @@ def note_capped(total=None):
 
     A pager calls this, instead of raising, when it stops anywhere but the
     board's honest end: fewer rows than a known total, every page up to
-    max_pages read with the last one still full, or a repeated page with no
+    its page cap read with the last one still full, or a repeated page with no
     total to prove the walk complete. A fetcher that never calls it reads
     as uncapped.
 

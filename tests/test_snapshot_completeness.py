@@ -126,7 +126,7 @@ class TestWorkdaySnapshot:
     ])
     def test_the_page_budget_widens_for_a_mission_worth_it_board(
             self, cxs, monkeypatch, company, rows):
-        """config.board_max_pages: BOARD_MAX_ROWS for a board a track can
+        """config.board_max_rows: BOARD_MAX_ROWS for a board a track can
         surface, the spec's own page budget for one off-mission and
         inactive."""
         cxs(_postings(1300))
@@ -163,6 +163,15 @@ class TestWorkdayScope:
         out = board_for("workday").whole_board(WD, NC_RE)
         assert [j["location"] for j in out] == ["US, NC, Durham"]
         assert [c.method for c in calls].count("GET") == 1
+
+    def test_a_row_the_scope_vouched_for_is_kept_wherever_it_reads(self, cxs):
+        """The board's own area search listed it: a listed or detail place
+        outside the area drops nothing."""
+        cxs(_postings(30, "US, TX, Austin"), detail="US, CA, Santa Clara",
+            scoped=[_posting("US, CA, Santa Clara", "/job/US-CA/Eng_A"),
+                    _posting("2 Locations", "/job/US-CA/Eng_B")])
+        out = board_for("workday").whole_board(WD, NC_RE)
+        assert [j["location"] for j in out] == ["US, CA, Santa Clara"] * 2
 
     def test_the_rescue_has_a_per_pull_budget(self, cxs, capsys):
         """Past `rescue.cap`, a row the facet vouched for stays on its
@@ -246,6 +255,20 @@ def offset_board(serve, monkeypatch):
     return _install
 
 
+def _sized_by_server(serve, n, per_page=5, past="empty", total=None):
+    """`serve` a board of `n` rows by row offset, `per_page` a page as the
+    server chooses; past the end, "empty" or "wrap" (the first page again);
+    "ignore" serves the first page at every offset."""
+    first = list(range(min(n, per_page)))
+
+    def reply(url, params=None, **kw):
+        o = params["o"]
+        ids = (first if past == "ignore" or (o >= n and past == "wrap")
+               else list(range(o, min(n, o + per_page))))
+        return fake_response({"total": total, "items": _items(ids)})
+    return serve(reply)
+
+
 class TestEnginePagers:
     """What the engine's page walk reports about its snapshot, per pager
     kind: the rows a whole-board pull returns, and whether they are the
@@ -301,6 +324,32 @@ class TestEnginePagers:
                        why=_SHIFTS).listing("h", "t h")
         assert len(rows) == 4 and len(calls) == 2
         assert http.snapshot_info()["capped_total"] == 999
+
+    @pytest.mark.parametrize("n,total,past,pages,read,capped", [
+        (12, 12, "wrap", 9, 12, False),     # a known total ends the walk
+        (10, 12, "empty", 9, 10, True),     # an empty page ends it
+        (12, None, "ignore", 9, 5, True),   # a repeated page ends it
+        (99, None, "empty", 3, 13, True),   # the page bound ends it
+        (3, None, "wrap", 9, 3, False),     # a small board wrapping past its end
+    ])
+    def test_a_learned_page_size_ends_every_walk(self, serve, monkeypatch, n, total, past,
+                                                  pages, read, capped):
+        """An offset pager with no size steps by the first page's count, one
+        row less with no total: the overlap row makes the last page short."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        _sized_by_server(serve, n, past=past, total=total)
+        rows = _engine("offset", pages=pages, total="total").listing("h", "t h")
+        assert len(rows) == read and http.snapshot_info()["capped"] is capped
+
+    def test_a_learned_page_size_widens_to_the_row_budget(self, serve, monkeypatch):
+        """A mission-worth-it board reads BOARD_MAX_ROWS at the step the
+        server serves, not the spec's page count."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 40)
+        calls = _sized_by_server(serve, 99, total=99)
+        b = _engine("offset", pages=2, total="total")
+        assert len(b.whole_board({"slug": "h", "active": 1, "mission_tier": "adjacent"})) == 40
+        assert len(calls) == 8
 
     def test_a_cursor_is_followed_verbatim(self, serve):
         """The next-page URL carries opaque keys (rebuilt by hand, it
@@ -387,11 +436,6 @@ class TestSuccessFactorsSnapshot:
         rows, _ = self.walk(serve, monkeypatch, [list(range(25))] * 10, 621)
         assert len(rows) == 25
         assert http.snapshot_info()["capped_total"] == 621
-
-    def test_a_repeated_page_with_no_total_is_capped(self, serve, monkeypatch):
-        rows, _ = self.walk(serve, monkeypatch, [list(range(25))] * 5, None)
-        info = http.snapshot_info()
-        assert len(rows) == 25 and info["capped"] and info["capped_total"] is None
 
 
 class TestSuccessFactorsLocation:

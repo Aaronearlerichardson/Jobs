@@ -137,7 +137,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
 
     A board that is config.is_offmission_inactive -- the one
     off-mission/inactive rule, shared with the whole-board page budget
-    (config.board_max_pages, read by src.ats.board.company) and
+    (config.board_max_rows, read by src.ats.board.engine) and
     defined in config.policy because ats sits BELOW crawl in the import
     DAG -- waits the longer config.HARVEST_OFFMISSION_HOURS instead of
     `min_age_hours`. Such a board is still fetched every pass, per the

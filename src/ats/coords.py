@@ -81,6 +81,21 @@ def columns(ats, slug=None, careers_url=None, name=None, **extra):
     return out
 
 
+def slug_text(ats, slug):
+    """A detection's handle as one string: a handle spanning several store
+    columns (Workday's (tenant, pod, site)) joined with its spec's
+    `handle.sep`, the plain slug for everything else, None for none.
+
+    >>> slug_text("workday", ("acme", 5, "External"))
+    'acme|5|External'
+    >>> slug_text("greenhouse", "acmebio"), slug_text("custom", None)
+    ('acmebio', None)
+    """
+    if isinstance(slug, (tuple, list)):
+        return _handle(ats)[1].join(map(str, slug))
+    return slug or None
+
+
 def board_slug(company):
     """The one string that names this board on its own host, independent of
     which coordinate column carries it: the first of its handle's columns

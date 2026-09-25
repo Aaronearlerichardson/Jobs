@@ -621,9 +621,9 @@ def board_is_own(company, board, site="", titles=()):
     (company, board) for the process.
 
     Notes:
-        Consulted only for collision-prone resolutions — a board on a
+        Consulted only for collision-prone resolutions, a board on a
         platform whose spec sets `discovery.shared` sharing no token with the
-        name (src.discovery.resolve.identity.foreign_board) — so this costs a
+        name (src.discovery.resolve.identity.foreign_board), so this costs a
         call on the rare suspect, not per resolve. The
         asymmetric default matters: a wrong "keep" mislabels one company
         until a human looks, a wrong "reject" silently loses a real board

@@ -124,11 +124,12 @@ class TestSpecdBoardsReadTheirListings:
     detail page's body, not the listing's teaser; phenom: ids carry the
     host, "phenom_<host_key>_<reqId>"; jobvite: title and location
     clean_field-ed like every other sweep row; icims: no searchLocation
-    on an unscoped pull; custom and wpjson: their whole-board rows, which
-    had no sweep, in the sweep's shape; jazzhr: a posting whose page has
-    no JSON-LD kept as the index names it; successfactors: pages stepped by
-    the rows the tenant serves, a place read off the slug only where it
-    leads the title)."""
+    on an unscoped pull, a place from the row's location column or the
+    posting page, never the title; custom and wpjson: their whole-board
+    rows, which had no sweep, in the sweep's shape; jazzhr: a posting
+    whose page has no JSON-LD kept as the index names it, its body the
+    page's; successfactors: pages stepped by the rows the tenant serves, a
+    place read off the slug only where it leads the title)."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
     def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
@@ -142,6 +143,49 @@ class TestSpecdBoardsReadTheirListings:
                 _fixture_response(listing),
                 _fixture_response(detail) if detail else fake_response(status=404)])
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
+
+    def test_an_icims_row_reads_its_location_column(self, serve, monkeypatch, tmp_path):
+        """A tenant's column is a labelled header, a labelled field, or the
+        map-marked city, state and country; a row with none takes the
+        posting page's, never a place-shaped title."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
+
+        def card(n, title, fields=""):
+            return (f'<li class="iCIMS_JobCardItem"><div class="row">{fields}'
+                    f'<div class="title"><a class="iCIMS_Anchor" href="https://acme.icims.com'
+                    f'/jobs/{n}/x/job"><h3>{title}</h3></a></div></div></li>')
+
+        def dd(label, value, marker='<span class="glyphicons-map-marker"></span>'):
+            return (f'<dl><dt>{marker}<span class="field-label">{label}</span></dt>'
+                    f'<dd><span>{value}</span></dd></dl>')
+        page = "<ul>" + "".join([
+            card(1, "Chemist", '<div class="header"><span class="field-label">Location</span>'
+                               '<span>US-NC-Morrisville</span></div>'),
+            card(2, "Engineer", dd("Job Locations", "US-NC-Winston-Salem", "")),
+            card(3, "Analyst", dd("Country (Full Name)", "United States")
+                 + dd("Primary Location : State/Province", "North Carolina")
+                 + dd("City", "Cary HQ")),
+            card(4, "Manager, Risk, Fraud")]) + "</ul>"
+        serve({"/jobs/search": fake_response(text=page),
+               "/jobs/4/": _fixture_response("icims_detail.html")})
+        assert [r["location"] for r in board_for("icims").listing("acme")] == [
+            "US-NC-Morrisville", "US-NC-Winston-Salem", "Cary HQ, North Carolina, United States",
+            "Remote, US"]
+
+    def test_a_tenant_with_no_area_option_counts_its_listed_places(self, serve, monkeypatch,
+                                                                  tmp_path):
+        """Nothing vouches for a scope that reports no total: the local count
+        samples the listing's own location column, not 0."""
+        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
+        page = "<ul>" + "".join(
+            f'<li><div class="header"><span class="field-label">Location</span><span>{loc}'
+            f'</span></div><a class="iCIMS_Anchor" href="https://acme.icims.com/jobs/{n}/x/job">'
+            f'<h3>Chemist</h3></a></li>'
+            for n, loc in ((1, "US-NC-Durham"), (2, "US-TX-Austin"))) + "</ul>"
+        serve({"/jobs/search": fake_response(text=page)})
+        assert board_for("icims").local_count("acme", re.compile(r"\bNC\b")) == 1
 
     def test_a_located_pull_asks_the_search_forms_area_options(self, serve, monkeypatch,
                                                                tmp_path):

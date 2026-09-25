@@ -1,7 +1,7 @@
 """Where candidate employer NAMES come from, before any of them is resolved
 to a board.
 
-Profile seeds and Workday majors, `/company/<slug>/` links on directory and
+Profile seeds and scan majors, `/company/<slug>/` links on directory and
 listicle pages (RTP.org, Built In, chamber directories), web-search
 harvesting of such pages, and an LLM brainstorm of the profile's region and
 domain, unioned by gather_names. Every name still has to survive the
@@ -24,7 +24,7 @@ from src.net.http import HEADERS, SESSION
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
 
 SEED_COMPANIES = config.DISCOVERY_SEED_NAMES   # names only; seeds.py keeps notes
-MAJORS = config.DISCOVERY_WORKDAY_MAJORS       # worth the slow scan (probe_scan)
+MAJORS = config.DISCOVERY_SCAN_MAJORS          # worth the slow scan (probe_scan)
 _MAJORS_KEYS = {name_key(m) for m in MAJORS}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
