@@ -7,7 +7,7 @@ SmartRecruiters answers 200 with totalFound:0 for ANY slug, so every
 guessed slug once "confirmed" with zero jobs.
 
 The job probe (board.closure.probe_job_open, driven by
-ops.check_closed_jobs) has the same shape of hidden decision, one per ATS
+status.check_closed_jobs) has the same shape of hidden decision, one per ATS
 family: which answer counts as PROOF the posting is gone. Getting it
 wrong in either direction is silent -- too strict and the op closes
 nothing (2026-09-21: 1 closed, 0 live, 36 unverifiable of 37), too loose
@@ -27,8 +27,7 @@ from src.ats.board import closure as job_probe
 from src.ats.board import board_for
 from src.discovery.resolve import probes
 from src.net.http import HEADERS, PLAIN_HEADERS
-from src.ops import maintenance as ops
-from src.ops import roster
+from src.ops import repair, roster, scoring, status
 import src.store as store
 
 
@@ -191,7 +190,7 @@ def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
 
 
 class TestPruneNamesWhatItDeactivates:
-    """ops.prune_dead_boards acts on these probes; its session log must
+    """repair.prune_dead_boards acts on these probes; its session log must
     say how many boards it probed and name every company it deactivates."""
 
     @staticmethod
@@ -223,7 +222,7 @@ class TestPruneNamesWhatItDeactivates:
                       mission_tier="other", mission_score=0.05)
         monkeypatch.setattr(board_for("lever"), "alive", lambda slug: (True, 5))
 
-        assert ops.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
+        assert repair.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
 
         [line] = [ln for ln in capsys.readouterr().out.splitlines()
                   if "[other]" in ln]
@@ -234,7 +233,7 @@ class TestPruneNamesWhatItDeactivates:
 class TestSelfHealRetryMarker:
     """self_heal_unscored must not re-ask Claude about a row forever once it
     has already refused (2026-09: the same 3-7 NC State rows re-refused on
-    every crawl for weeks). ops._unscored_marker / ops._unscored_due, driven
+    every crawl for weeks). scoring._unscored_marker / scoring._unscored_due, driven
     end to end through self_heal_unscored itself."""
 
     @staticmethod
@@ -259,7 +258,7 @@ class TestSelfHealRetryMarker:
         monkeypatch.setattr(fit_module, "api_disabled", lambda: "HTTP 401")
         jid = add_job("j1", description="x" * 300, fit=None)
 
-        assert ops.self_heal_unscored(db, "resume", "local-tech") == 0
+        assert scoring.self_heal_unscored(db, "resume", "local-tech") == 0
 
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
@@ -270,7 +269,7 @@ class TestSelfHealRetryMarker:
         calls = self._stub_refusal(monkeypatch)
         jid = add_job("j1", description="x" * 300, fit=None)
 
-        n = ops.self_heal_unscored(db, "resume", "local-tech")
+        n = scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert n == 0
         assert len(calls) == 1
@@ -283,10 +282,10 @@ class TestSelfHealRetryMarker:
             self, db, add_job, monkeypatch):
         calls = self._stub_refusal(monkeypatch)
         add_job("j1", description="x" * 300, fit=None)
-        ops.self_heal_unscored(db, "resume", "local-tech")
+        scoring.self_heal_unscored(db, "resume", "local-tech")
         assert len(calls) == 1
 
-        n = ops.self_heal_unscored(db, "resume", "local-tech")   # same day, same body
+        n = scoring.self_heal_unscored(db, "resume", "local-tech")   # same day, same body
 
         assert n == 0
         assert len(calls) == 1, "a fresh REFUSED marker must not be re-asked"
@@ -299,7 +298,7 @@ class TestSelfHealRetryMarker:
                   (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
 
-        ops.self_heal_unscored(db, "resume", "local-tech")
+        scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert len(calls) == 1, "30+ days on, the same row is due again"
 
@@ -312,7 +311,7 @@ class TestSelfHealRetryMarker:
             (f"unscored:refused:300:{datetime.now().date()}", "y" * 450, jid))
         db.commit()
 
-        ops.self_heal_unscored(db, "resume", "local-tech")
+        scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert len(calls) == 1, "a body that grew is due even on the same day"
 
@@ -334,7 +333,7 @@ class TestSelfHealRetryMarker:
              "   " + body + "   ", jid))          # same content, padded
         db.commit()
 
-        ops.self_heal_unscored(db, "resume", "local-tech")
+        scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert calls == [], "padding whitespace alone must not trigger a retry"
 
@@ -349,7 +348,7 @@ class TestSelfHealRetryMarker:
             fit_module.FitReply(domain=0.5, function=0.5, stack=0.5,
                                 seniority=0.5, gates=[], reason="fits")))
 
-        n = ops.self_heal_unscored(db, "resume", "local-tech")
+        n = scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert n == 1
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
@@ -360,17 +359,17 @@ class TestSelfHealRetryMarker:
 
 class TestRescoreAllUsesTheSharedUnscoredMarker:
     """rescore_all's bodyless-row branch shares self_heal_unscored's own
-    vocabulary (ops._unscored_marker) instead of a bare, undated string, so
+    vocabulary (scoring._unscored_marker) instead of a bare, undated string, so
     the store has one shape for "nothing to score here" everywhere it
     appears."""
 
     def test_a_bodyless_row_gets_the_shared_marker(
             self, db, add_job, monkeypatch):
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(ops, "resume_text", lambda: "resume")
+        monkeypatch.setattr(scoring, "resume_text", lambda: "resume")
         jid = add_job("j1", description="too short", fit=0.4)
 
-        ops.rescore_all()
+        scoring.rescore_all()
 
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
@@ -379,7 +378,7 @@ class TestRescoreAllUsesTheSharedUnscoredMarker:
 
 
 class TestDeadBoardClosure:
-    """check_closed_jobs's board-dead sweep: ops._dead_board_open_rows plus
+    """check_closed_jobs's board-dead sweep: status._dead_board_open_rows plus
     the closure loop inside check_closed_jobs itself. Judi Health (47 open
     rows, miss_reason board-dead:greenhouse since 2026-09-11) is the live
     case this was written for."""
@@ -393,12 +392,12 @@ class TestDeadBoardClosure:
         def _probe(url, job_id=None):
             probed.append(url)
             return (None, "n/a")
-        monkeypatch.setattr(ops.closure, "probe_job_open", _probe)
+        monkeypatch.setattr(status.closure, "probe_job_open", _probe)
 
         # stale_days=999 keeps this row OUT of the URL-probe population
         # entirely (last_seen is only 20 days old) -- proving the closure
         # is a SEPARATE step, not a side effect of probing.
-        n = ops.check_closed_jobs(conn=db, stale_days=999)
+        n = status.check_closed_jobs(conn=db, stale_days=999)
 
         assert n == 1
         assert probed == [], "closed by inference; no URL should be fetched"
@@ -411,10 +410,10 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
                            days_stale=400)
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "n/a"))
 
-        ops.check_closed_jobs(conn=db, stale_days=999)
+        status.check_closed_jobs(conn=db, stale_days=999)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -424,10 +423,10 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Ats Gap", ats=None,
                            miss_reason="ats-unsupported:ukg", days_stale=400)
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "n/a"))
 
-        ops.check_closed_jobs(conn=db, stale_days=999)
+        status.check_closed_jobs(conn=db, stale_days=999)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -447,11 +446,11 @@ class TestClosedProbeRotation:
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "gated"))
 
         for _ in range(3):
-            ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
+            status.check_closed_jobs(conn=db, stale_days=1, limit=100)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
@@ -460,10 +459,10 @@ class TestClosedProbeRotation:
 
     def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
         seed_stale(db, n=250)
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: (None, "gated"))
 
-        ops.check_closed_jobs(conn=db, stale_days=1, limit=100)
+        status.check_closed_jobs(conn=db, stale_days=1, limit=100)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
@@ -475,7 +474,7 @@ class TestClosedProbeGiveUp:
     """Rotation alone still re-probes a row that can NEVER be verified --
     a bot-gated host, a JS-only detail page, an ATS with no closure signal,
     a company with no resolved board at all -- for as long as it stays
-    open. ops.CLOSED_PROBE_GIVE_UP consecutive unverifiable answers
+    open. status.CLOSED_PROBE_GIVE_UP consecutive unverifiable answers
     (jobs.probe_streak) take it out of the selection instead, without
     closing it."""
 
@@ -487,12 +486,12 @@ class TestClosedProbeGiveUp:
         def _probe(url, job_id=None):
             probed.append(url)
             return verdict
-        monkeypatch.setattr(ops.closure, "probe_job_open", _probe)
+        monkeypatch.setattr(status.closure, "probe_job_open", _probe)
         return probed
 
     def _run(self, db, n):
         for _ in range(n):
-            ops.check_closed_jobs(conn=db, stale_days=1)
+            status.check_closed_jobs(conn=db, stale_days=1)
 
     def _streak(self, db, job_id="Acme-j0"):
         return db.execute("SELECT COALESCE(probe_streak, 0) AS s FROM jobs "
@@ -503,13 +502,13 @@ class TestClosedProbeGiveUp:
         [jid] = seed_stale(db)
         probed = self._answer(monkeypatch, (None, "gated"))
 
-        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
-        assert len(probed) == ops.CLOSED_PROBE_GIVE_UP
-        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP
+        self._run(db, status.CLOSED_PROBE_GIVE_UP)
+        assert len(probed) == status.CLOSED_PROBE_GIVE_UP
+        assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP
 
         self._run(db, 3)                      # three further passes
 
-        assert len(probed) == ops.CLOSED_PROBE_GIVE_UP, \
+        assert len(probed) == status.CLOSED_PROBE_GIVE_UP, \
             "a given-up row must never be selected again"
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -531,8 +530,8 @@ class TestClosedProbeGiveUp:
     def test_a_confirmed_live_probe_resets_the_streak(self, db, monkeypatch):
         seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, ops.CLOSED_PROBE_GIVE_UP - 1)
-        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP - 1
+        self._run(db, status.CLOSED_PROBE_GIVE_UP - 1)
+        assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP - 1
 
         probed = self._answer(monkeypatch, (True, "200"))
         self._run(db, 1)
@@ -548,8 +547,8 @@ class TestClosedProbeGiveUp:
             self, db, monkeypatch):
         [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
-        assert self._streak(db) == ops.CLOSED_PROBE_GIVE_UP
+        self._run(db, status.CLOSED_PROBE_GIVE_UP)
+        assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP
 
         # The board lists it again: store.touch_job is the sighting, and
         # the probe history behind it is stale.
@@ -563,14 +562,14 @@ class TestClosedProbeGiveUp:
         closure path still reaches it."""
         [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, ops.CLOSED_PROBE_GIVE_UP)
+        self._run(db, status.CLOSED_PROBE_GIVE_UP)
         db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
-                   (iso_days_ago(ops.DEAD_BOARD_CLOSE_DAYS + 6), jid))
+                   (iso_days_ago(status.DEAD_BOARD_CLOSE_DAYS + 6), jid))
         db.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
                    "WHERE name='Acme'")
         db.commit()
 
-        ops.check_closed_jobs(conn=db, stale_days=1)
+        status.check_closed_jobs(conn=db, stale_days=1)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -839,7 +838,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
     @staticmethod
     def _probed(monkeypatch):
         urls = []
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: urls.append(url) or (None, "gated"))
         return urls
 
@@ -850,7 +849,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
         [jid] = seed_stale(db, "Walked", harvested=iso_days_ago(2))
         urls = self._probed(monkeypatch)
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
@@ -862,7 +861,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
                    active=0, mission_tier="other")
         urls = self._probed(monkeypatch)
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         assert urls == []
         assert "1 skipped: board not walked since" in capsys.readouterr().out
@@ -871,7 +870,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
         [jid] = seed_stale(db, "No Board", ats=None, harvested=None)
         urls = self._probed(monkeypatch)
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
@@ -883,7 +882,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
                            miss_reason="no-board-found")
         urls = self._probed(monkeypatch)
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
@@ -903,10 +902,10 @@ class TestProbeOutcomesAreReportedPerFamily:
                     ICIMS_JOB: (None, "HTTP 405"),
                     "https://www.linkedin.com/jobs/view/1":
                         (None, "bot-gated aggregator host")}
-        monkeypatch.setattr(ops.closure, "probe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             lambda url, job_id=None: verdicts[url])
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         out = capsys.readouterr().out
         assert "1 closed, 1 confirmed live, 2 unverifiable" in out
@@ -921,10 +920,10 @@ class TestProbeOutcomesAreReportedPerFamily:
         seed_stale(db, harvested=iso_days_ago(1),
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
-            ops.closure, "probe_job_open",
+            status.closure, "probe_job_open",
             lambda url, job_id=None: (False, f"page says {url[-12:]!r}"))
 
-        ops.check_closed_jobs(conn=db, stale_days=7)
+        status.check_closed_jobs(conn=db, stale_days=7)
 
         assert "icims            2 closed [page says ... x2]" in \
             capsys.readouterr().out

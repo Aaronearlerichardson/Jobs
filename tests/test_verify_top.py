@@ -12,7 +12,7 @@ Offline: the verifier and the live-JD fetch are stubbed.
 
 from src import store
 from src.claude import fit
-from src.ops import maintenance as ops
+from src.ops import scoring as ops
 
 
 def _use_model(monkeypatch, name):
@@ -159,13 +159,10 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
 
 class TestWebOpPassesTheTickBox:
-    def test_verify_op_forwards_force(self, monkeypatch):
-        from src.ops import background as web_ops
+    def test_verify_op_forwards_force(self, patch_op):
+        from src.dispatch import background as web_ops
         seen = {}
-        # The registry resolves "src.ops.maintenance:verify_top_cli" at call time,
-        # so patching the target module is enough.
-        monkeypatch.setattr("src.ops.maintenance.verify_top_cli",
-                            lambda **kw: seen.update(kw))
+        patch_op("verify", lambda **kw: seen.update(kw))
         web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
         assert seen["force"] is True and seen["top_n"] == 5
         web_ops.OPS["verify"]["fn"]({"top": "5"})

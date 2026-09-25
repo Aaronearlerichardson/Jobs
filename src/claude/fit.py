@@ -18,7 +18,7 @@ combiner is a weighted geometric mean -- the same imbalance-punishing shape
 store.combined_score() already uses -- times the worst gate multiplier.
 
 Wired into:
-  - crawl/runner.py, crawl/triage.py, ops/maintenance.py: call
+  - crawl/runner.py, crawl/triage.py, ops/maintenance.py, ops/scoring.py: call
     `score_resume_fit(title, desc, location=...)` here for the FitResult
     (the rubric scores the profile, not résumé text).
   - src/config/profile.py:  loads the optional `[fit]` profile block (weights / gate
@@ -730,7 +730,7 @@ def score_resume_fit(title: str, description: str = "", *, location: str = "",
         # tripped on an expired one / an exhausted balance -- is the
         # SCORER being down, not a verdict on this posting, and both
         # return None exactly like a refusal does. Naming them apart is
-        # what keeps ops.maintenance's retry marker honest: it holds a
+        # what keeps ops.scoring's retry marker honest: it holds a
         # "refused" row for UNSCORED_RETRY_DAYS, so one billing hiccup
         # would otherwise park a whole backlog for a month (see
         # fit.unscored_cause, which maps only the verdict reasons).
@@ -783,7 +783,7 @@ _UNSCORED_CAUSES = {
 }
 
 # The distinct causes above, derived rather than re-listed: the retry
-# marker src.ops.maintenance writes into fit_reason spells one of these,
+# marker src.ops.scoring writes into fit_reason spells one of these,
 # and its parser builds its alternation from this tuple instead of keeping
 # a second copy of the vocabulary in step by hand.
 UNSCORED_CAUSES = tuple(dict.fromkeys(_UNSCORED_CAUSES.values()))

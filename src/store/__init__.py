@@ -53,7 +53,7 @@ from .jobs import (  # noqa: F401
 )
 from .pipeline import (  # noqa: F401
     DISPOSITIONS, RANKING_EXCLUDED_DISPOSITIONS, LIVE_DISPOSITIONS,
-    APPLIED_DISPOSITIONS, PIPELINE_FIELDS, OUTCOME_REASONS, FIT_BANDS,
+    APPLIED_DISPOSITIONS, PipelineFields, OUTCOME_REASONS, FIT_BANDS,
     set_job_status, set_disposition, get_pipeline, update_pipeline_fields,
     conversion_report, followups_due,
 )

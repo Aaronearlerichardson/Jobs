@@ -176,7 +176,7 @@ _MIGRATIONS = {
         # Consecutive closure probes that could NOT verify the row either
         # way (bot-gated host, JS-only page, an ATS with no closure signal,
         # a probe that raised). The companies-side empty_streak, one level
-        # down: src.ops.maintenance.check_closed_jobs stops selecting a row
+        # down: src.ops.status.check_closed_jobs stops selecting a row
         # at CLOSED_PROBE_GIVE_UP, and any live sighting -- a probe that
         # confirms it open, a board that lists it again -- resets it to 0.
         # NULL reads as 0, so existing rows need no backfill.

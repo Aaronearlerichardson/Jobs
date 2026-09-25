@@ -22,7 +22,7 @@ from src import tags
 from src.ats import signatures as ats_signatures
 from src.discovery import local_sourcing
 from src.discovery.resolve import board as resolve_board
-from src.ops import maintenance as ops
+from src.ops import ingest, rekey, repair
 
 
 def _miss(db, name, reason, **fields):
@@ -43,7 +43,7 @@ def _silent(db, name, harvested_days_ago=1, **fields):
 
 class TestReresolveSelection:
     """Which rows a bounded pass picks up. The families and the ordering are
-    doctested on ops._reresolve_candidates; these are the cases a doctest
+    doctested on repair._reresolve_candidates; these are the cases a doctest
     cannot stage."""
 
     def test_an_active_row_is_never_retried(self, db):
@@ -53,7 +53,7 @@ class TestReresolveSelection:
                                   "slug": "guardant", "active": 1})
         db.execute("UPDATE companies SET miss_reason='board-dead:lever' "
                    "WHERE name='Guardant'")
-        assert ops._reresolve_candidates(db) == []
+        assert repair._reresolve_candidates(db) == []
 
     def test_only_the_two_retryable_families_are_selected(self, db):
         for name, reason in [("Emmes", "no-board-found"),
@@ -62,7 +62,7 @@ class TestReresolveSelection:
                              ("Locus", "ats-unsupported:ukg"),
                              ("Axoft", "fetch-error:ReadTimeout")]:
             _miss(db, name, reason)
-        assert sorted(c["name"] for c in ops._reresolve_candidates(db)) == [
+        assert sorted(c["name"] for c in repair._reresolve_candidates(db)) == [
             "Advarra", "Emmes"]
 
     def test_days_filter_keeps_only_older_misses(self, db):
@@ -70,13 +70,13 @@ class TestReresolveSelection:
         _miss(db, "Advarra", "no-board-found")
         db.execute("UPDATE companies SET miss_at='2020-01-01' "
                    "WHERE name='Advarra'")
-        assert [c["name"] for c in ops._reresolve_candidates(db, days=7)] == [
+        assert [c["name"] for c in repair._reresolve_candidates(db, days=7)] == [
             "Advarra"]
 
     def test_names_filter_narrows_rather_than_widens(self, db):
         _miss(db, "Emmes", "no-board-found")
         _miss(db, "Chiesi", "no-local-jobs")
-        assert [c["name"] for c in ops._reresolve_candidates(
+        assert [c["name"] for c in repair._reresolve_candidates(
             db, names=["EMMES", "Chiesi"])] == ["Emmes"]
 
     def test_limit_takes_the_oldest_misses_first(self, db):
@@ -84,7 +84,7 @@ class TestReresolveSelection:
             _miss(db, name, "no-board-found")
         db.execute("UPDATE companies SET miss_at='2020-01-01' "
                    "WHERE name='Axoft'")
-        assert [c["name"] for c in ops._reresolve_candidates(db, limit=1)] == [
+        assert [c["name"] for c in repair._reresolve_candidates(db, limit=1)] == [
             "Axoft"]
 
 
@@ -96,13 +96,13 @@ class TestSilentBoardFamily:
     def test_a_row_older_than_the_created_at_column_is_selected(self, db):
         _silent(db, "Legacy")
         db.execute("UPDATE companies SET created_at=NULL WHERE name='Legacy'")
-        assert [c["name"] for c in ops._reresolve_candidates(
-            db, families=(ops.SILENT_FAMILY,))] == ["Legacy"]
+        assert [c["name"] for c in repair._reresolve_candidates(
+            db, families=(repair.SILENT_FAMILY,))] == ["Legacy"]
 
     def test_a_board_last_harvested_long_ago_is_not_selected(self, db):
         _silent(db, "Abandoned", harvested_days_ago=30)
-        assert ops._reresolve_candidates(
-            db, families=(ops.SILENT_FAMILY,)) == []
+        assert repair._reresolve_candidates(
+            db, families=(repair.SILENT_FAMILY,)) == []
 
 
 class TestReresolveWrites:
@@ -128,7 +128,7 @@ class TestReresolveWrites:
                                   "https://emmes.com/careers",
                                   "count": 40, "nc": 4, "via": "sniff"}, None))
 
-        assert len(ops.reresolve_misses(conn=db, max_workers=1, t=self.T)) == 1
+        assert len(repair.reresolve_misses(conn=db, max_workers=1, t=self.T)) == 1
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Emmes'").fetchone())
@@ -152,8 +152,8 @@ class TestReresolveWrites:
                                   "https://quiet.example/careers",
                                   "count": 12, "nc": 2, "via": "sniff"}, None))
 
-        written = ops.reresolve_misses(conn=db, max_workers=1, t=self.T,
-                                       families=[ops.SILENT_FAMILY])
+        written = repair.reresolve_misses(conn=db, max_workers=1, t=self.T,
+                                       families=[repair.SILENT_FAMILY])
 
         assert len(written) == 1
         row = dict(db.execute(
@@ -180,9 +180,9 @@ class TestReresolveWrites:
             raise AssertionError("a preview never pays for a mission score")
         monkeypatch.setattr("src.claude.api.score_company_mission", no_score)
 
-        written = ops.reresolve_misses(
+        written = repair.reresolve_misses(
             conn=db, max_workers=1, t=self.T, commit=False,
-            families=ops.RERESOLVE_FAMILIES + (ops.SILENT_FAMILY,))
+            families=repair.RERESOLVE_FAMILIES + (repair.SILENT_FAMILY,))
 
         assert [b["slug"] for b in written] == ["quiet-new"]
         assert [dict(r) for r in db.execute(
@@ -190,7 +190,7 @@ class TestReresolveWrites:
 
     def test_an_unknown_family_is_refused(self, db):
         with pytest.raises(ValueError):
-            ops.reresolve_misses(conn=db, t=self.T, families=["silent"])
+            repair.reresolve_misses(conn=db, t=self.T, families=["silent"])
 
     def test_stale_coordinates_do_not_survive_a_new_board(self, db, monkeypatch):
         # upsert_company drops None values so it can never erase a stored
@@ -202,7 +202,7 @@ class TestReresolveWrites:
                                   "careers_url": None,
                                   "count": 12, "nc": 3, "via": "sniff"}, None))
 
-        ops.reresolve_misses(conn=db, max_workers=1, t=self.T)
+        repair.reresolve_misses(conn=db, max_workers=1, t=self.T)
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Advarra'").fetchone())
@@ -218,7 +218,7 @@ class TestReresolveWrites:
                    "WHERE name='Emmes'")
         self._wire(monkeypatch, (None, "no-board-found:domain-unreachable"))
 
-        assert ops.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
+        assert repair.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Emmes'").fetchone())
@@ -240,7 +240,7 @@ class TestReresolveWrites:
                                   "careers_url": "https://www.sas.com/careers",
                                   "count": 150, "nc": 30, "via": "sniff"}, None))
 
-        assert ops.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
+        assert repair.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
 
         assert "[dup]" in capsys.readouterr().out
         row = dict(db.execute(
@@ -250,7 +250,7 @@ class TestReresolveWrites:
             "re-stamped, so a bounded rerun moves past it"
 
     def test_nothing_to_do_is_not_an_error(self, db, capsys):
-        assert ops.reresolve_misses(conn=db, t=self.T) == []
+        assert repair.reresolve_misses(conn=db, t=self.T) == []
         assert "no re-resolvable misses" in capsys.readouterr().out
 
 
@@ -273,9 +273,9 @@ class TestManualAddUsesTheSharedResolver:
                             lambda *a, **k: True)
         # No crawl, no ingest, no résumé read — this test is about the
         # resolver call, and all three would reach the disk or the network.
-        monkeypatch.setattr(ops, "ingest_external_jobs", lambda *a, **k: 1)
-        monkeypatch.setattr(ops, "crawl_company", lambda *a, **k: (0, 0, 0))
-        monkeypatch.setattr(ops, "resume_text", lambda *a, **k: "")
+        monkeypatch.setattr(ingest, "ingest_external_jobs", lambda *a, **k: 1)
+        monkeypatch.setattr(ingest, "crawl_company", lambda *a, **k: (0, 0, 0))
+        monkeypatch.setattr(ingest, "resume_text", lambda *a, **k: "")
 
     def test_the_probe_first_resolver_is_gone(self):
         assert not hasattr(local_sourcing, "resolve_company_board"), \
@@ -291,7 +291,7 @@ class TestManualAddUsesTheSharedResolver:
                    seen)
         t = {"db_path": tmp_path / "t.db"}
 
-        out = ops.add_manual_job("https://emmes.com/jobs/1", "Data Engineer",
+        out = ingest.add_manual_job("https://emmes.com/jobs/1", "Data Engineer",
                                  "Emmes", "Durham, NC", t=t)
 
         assert seen == ["Emmes"]
@@ -310,7 +310,7 @@ class TestManualAddUsesTheSharedResolver:
                    seen)
         t = {"db_path": tmp_path / "t.db"}
 
-        out = ops.add_manual_job("https://axoft.com/jobs/1", "Data Engineer",
+        out = ingest.add_manual_job("https://axoft.com/jobs/1", "Data Engineer",
                                  "Axoft", "Durham, NC", t=t)
 
         assert out["board"] is False
@@ -322,7 +322,7 @@ class TestManualAddUsesTheSharedResolver:
         assert row["active"] == 0
         # Which is exactly what a later re-resolution pass selects on.
         conn = store.connect(t["db_path"])
-        assert [c["name"] for c in ops._reresolve_candidates(conn)] == ["Axoft"]
+        assert [c["name"] for c in repair._reresolve_candidates(conn)] == ["Axoft"]
         conn.close()
 
 
@@ -450,7 +450,7 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        out = ops.rename_slug_boards(conn=db, commit=True)
+        out = repair.rename_slug_boards(conn=db, commit=True)
 
         assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
@@ -460,7 +460,7 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        out = ops.rename_slug_boards(conn=db, commit=False)
+        out = repair.rename_slug_boards(conn=db, commit=False)
 
         assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
@@ -479,7 +479,7 @@ class TestRenameSlugBoards:
                       source="local_sourcing")
         self._stub_readers(serve, ceribell="Ceribell, Inc")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "Ceribell"
 
@@ -488,13 +488,13 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Precision for Medicine", "greenhouse", "pfm")
         self._stub_readers(serve, pfm="Precision for Medicine")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
 
     def test_an_empty_payload_answer_is_skipped(self, db, serve, capsys):
         self._slug_co(db, "Resultspt", "greenhouse", "resultspt")
         self._stub_readers(serve)   # every slug answers ""
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
         assert "no employer name" in capsys.readouterr().out
 
     def test_a_junk_payload_name_is_rejected_not_written(
@@ -504,7 +504,7 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Science37", "greenhouse", "science37")
         self._stub_readers(serve, science37="Science 37")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
         out = capsys.readouterr().out
         assert "rejected" in out and "numbered-duplicate" in out
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
@@ -515,7 +515,7 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Eurofins", "smartrecruiters", "Eurofins")
         self._stub_readers(serve, Eurofins="Eurofins")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
 
     def test_a_name_that_would_collide_with_another_company_is_rejected(
             self, db, serve, capsys):
@@ -525,7 +525,7 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Corticaneuro", "greenhouse", "corticaneuro")
         self._stub_readers(serve, corticaneuro="Cortica")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
         assert "collides" in capsys.readouterr().out
         row = db.execute(
             "SELECT name FROM companies WHERE name='Corticaneuro'").fetchone()
@@ -536,7 +536,7 @@ class TestRenameSlugBoards:
                       active=0)
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
 
     def test_an_unsupported_ats_is_not_a_candidate(self, db, monkeypatch):
         # Workday/Lever/Ashby carry no reliable board-level employer field
@@ -546,7 +546,7 @@ class TestRenameSlugBoards:
         store.upsert_company(db, {"name": "Lifestance", "ats": "lever",
                                   "slug": "lifestance", "active": 1,
                                   "source": "ats_dork"})
-        assert ops.rename_slug_boards(conn=db, commit=True) == []
+        assert repair.rename_slug_boards(conn=db, commit=True) == []
 
 
 class TestRekeyJobs:
@@ -584,13 +584,13 @@ class TestRekeyJobs:
 
     def test_the_preview_sorts_every_row_and_writes_nothing(self, db, rows):
         before = self._ids(db)
-        assert ops.rekey_jobs("phenom", conn=db) == {
+        assert rekey.rekey_jobs("phenom", conn=db) == {
             "unchanged": 2, "rekey": 2, "merge": 1, "conflict": 1,
             "cross-tenant": 1, "unresolvable": 1}
         assert self._ids(db) == before
 
     def test_apply_rekeys_and_merges_one_posting_into_one_row(self, db, rows):
-        ops.rekey_jobs("phenom", commit=True, conn=db)
+        rekey.rekey_jobs("phenom", commit=True, conn=db)
         assert self._ids(db) == sorted([
             "phenom_careers_a_org_1", "phenom_careers_a_org_2", "phenom_3",
             "phenom_careers_a_org_3", "wd_x_1", "phenom_4",

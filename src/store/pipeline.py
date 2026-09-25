@@ -10,8 +10,15 @@ whichever side loads first fail. The one helper a body needs is imported
 inside the function.
 """
 
-from datetime import datetime
+from __future__ import annotations
 
+from datetime import datetime
+from typing import Annotated, Literal
+
+from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
+                      ValidationError)
+
+from src.config.profile_schema import error_lines
 from .schema import apply_update, sql
 
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
@@ -30,11 +37,6 @@ LIVE_DISPOSITIONS = ("applied", "interviewing")
 # conversion_report divides by; `saved` and `dismissed` never applied.
 APPLIED_DISPOSITIONS = ("applied", "interviewing", "rejected")
 
-# The user-editable application-tracking columns. update_pipeline_fields
-# writes these and nothing else, so an API caller cannot reach `disposition`
-# (which has its own validated path) or any scorer-owned column through it.
-PIPELINE_FIELDS = ("followup_at", "contact", "referral", "outcome_reason")
-
 # How an application ENDED, as a closed vocabulary rather than free text: the
 # free-text note already exists for nuance, and a fixed set is what lets
 # conversion_report tell "never answered" from "interviewed and lost".
@@ -44,6 +46,30 @@ OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
 # The resume_fit_score bands conversion_report groups by: (name, low, high),
 # half-open on the high side, ordered low to high.
 FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
+
+
+def _blank_is_null(v):
+    return (v.strip() or None) if isinstance(v, str) else v
+
+
+_Text = Annotated[str | None, BeforeValidator(_blank_is_null)]
+
+
+class PipelineFields(BaseModel):
+    """The user-editable application-tracking columns, as stored: text
+    stripped with a blank as NULL, `referral` as 0/1, `outcome_reason` one
+    of OUTCOME_REASONS. Any other key is refused, so a caller cannot reach
+    `disposition` (which has its own validated path) or a scorer-owned
+    column through update_pipeline_fields."""
+    model_config = ConfigDict(extra="forbid")
+
+    followup_at: _Text = None
+    contact: _Text = None
+    referral: Annotated[bool | None,
+                        PlainSerializer(int, when_used="unless-none")] = None
+    outcome_reason: Annotated[Literal[OUTCOME_REASONS] | None,
+                              BeforeValidator(_blank_is_null)] = None
+
 
 def set_job_status(conn, job_id, status):
     """Mark one job 'open' or 'closed' directly (closed_at maintained)."""
@@ -120,13 +146,10 @@ def get_pipeline(conn):
 
 
 def update_pipeline_fields(conn, job_id, **fields):
-    """Write the application-tracking columns (PIPELINE_FIELDS) on one job.
-
-    Any other column name is refused rather than written, empty strings
-    normalize to NULL, `referral` to 0/1, and `outcome_reason` must be one of
-    OUTCOME_REASONS. Returns (row, error) like set_disposition — the updated
-    job on success, a printable message otherwise. See
-    tests/test_store.py::TestPipelineTracking.
+    """Write the given application-tracking columns (PipelineFields) on one
+    job. Returns (row, error) like set_disposition: the updated job on
+    success, otherwise a printable message with one 'field: problem' per
+    bad key. See tests/test_store.py::TestPipelineTracking.
 
     Notes:
         The whitelist is the point: this is reachable from the browser, and a
@@ -134,23 +157,14 @@ def update_pipeline_fields(conn, job_id, **fields):
         typo — or a crafted request — overwrite a scorer-owned column such as
         resume_fit_score or the validated `disposition` itself.
     """
-    unknown = sorted(set(fields) - set(PIPELINE_FIELDS))
-    if unknown:
-        return None, (f"unknown pipeline field(s) {', '.join(unknown)} — "
-                      f"writable: {', '.join(PIPELINE_FIELDS)}")
+    try:
+        sets = PipelineFields.model_validate(fields).model_dump(
+            exclude_unset=True)
+    except ValidationError as e:
+        return None, "; ".join(error_lines(e))
     if conn.execute("SELECT 1 FROM jobs WHERE job_id=?",
                     (job_id,)).fetchone() is None:
         return None, f"no job matches {job_id!r}"
-    sets = {}
-    for k, v in fields.items():
-        if k == "referral":
-            sets[k] = None if v is None else int(bool(v))
-            continue
-        v = (str(v).strip() if v is not None else "") or None
-        if k == "outcome_reason" and v is not None and v not in OUTCOME_REASONS:
-            return None, (f"unknown outcome_reason {v!r} — use one of "
-                          f"{', '.join(OUTCOME_REASONS)}")
-        sets[k] = v
     apply_update(conn, "jobs", "job_id", job_id, sets)
     return dict(conn.execute("SELECT * FROM jobs WHERE job_id=?",
                              (job_id,)).fetchone()), None

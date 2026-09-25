@@ -1,11 +1,10 @@
-"""Composite operation targets for src/ops/registry.py.
+"""Composite operation targets for src/dispatch/registry.py.
 
 Each function here is the glue that used to be spelled out inline in one
 front end (open the track's store, call a maintenance function, close and
 report) and re-spelled slightly differently in another. Anything that is
 a single existing function is targeted directly by the registry; only
-multi-step operations live here. Imports are lazy so that importing the
-registry stays cheap.
+multi-step operations live here.
 
 The store is opened through maintenance.track_store, the same helper the
 maintenance ops use. These three used to open it themselves, and resolved
@@ -31,7 +30,8 @@ def dedup(t=None):
 def prune(offmission=False, t=None):
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
-    from src.ops.maintenance import prune_dead_boards, track_store
+    from src.ops.maintenance import track_store
+    from src.ops.repair import prune_dead_boards
     with track_store(t) as conn:
         n_dead, n_off = prune_dead_boards(
             conn, deactivate_offmission=bool(offmission))
@@ -53,7 +53,7 @@ def ingest_nlx(companies, t=None):
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""
     from src.ats.feeds.careeronestop import fetch_nlx_company
-    from src.ops.maintenance import ingest_external_jobs
+    from src.ops.ingest import ingest_external_jobs
     if not companies:
         print("  [!] give a comma-separated list of employer names")
         return 0

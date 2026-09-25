@@ -926,7 +926,7 @@ identically to a dead one.
 | `config/` / `profile.toml` | plumbing (secrets, paths, profile load, track tables, policy, sources; `import config` re-exports it all) vs. all search criteria |
 | `src/config/bootstrap.py` | first-run setup: seeds your profile, reports where data lives |
 | `src/crawl/runner.py` | THE crawl pipeline — one runner for every track, methodology from `[tracks.*]` |
-| `src/ops/maintenance.py` | track-agnostic maintenance: status sync, deep-verify, closed-probe, rescore, backfills, ingest, manual adds |
+| `src/ops/` | the operations, by family: `status.py` (status sync, closed-probe), `scoring.py` (self-heal, rescore, deep-verify), `backfill.py`, `ingest.py` (external ingest, manual adds), `repair.py` (dead boards, re-resolution, slug renames), `rekey.py`, `roster.py` (composite targets); `maintenance.py` holds what they share |
 | `src/ats/registry.py` | the ATS sweep: which store rows it pulls whole, and a new board's seed tag |
 | `src/ats/board/` | the board engine: every ATS platform (22 incl. Workday, Phenom and Infor CloudSuite HCM) is a `config.BOARDS` spec, parsed into the pydantic models in `spec.py` and read by one engine |
 | `src/ats/feeds/` | the feed fetchers: RSS/HN/RemoteOK/Remotive/web search, CareerOneStop/NLx, USAJOBS, Getro network boards |
@@ -942,7 +942,7 @@ identically to a dead one.
 | `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; ranked + matches digest renderers |
 | `src/match/filters.py` / `locality.py` | keyword tiers; locality, remote eligibility and US eligibility — all profile-driven |
 | `src/web/` | Flask package: `routes.py`, `server.py`, `templates/` + `static/` |
-| `src/ops/` | every operation a front end can run: `registry.py` (the one table), `maintenance.py`, `roster.py`, `background.py` (the web UI's runner) |
+| `src/dispatch/` | how a front end runs an operation by name: `registry.py` (the one table the UI buttons and CLI flags share), `background.py` (the web UI's runner) |
 | `src/net/parallel.py` | thread-pool source fetching and `fan_out`, the one pool every op/crawl/discovery fan-out runs under (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
 | `src/net/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |

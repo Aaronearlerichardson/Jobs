@@ -14,14 +14,14 @@ Usage:
     python discover.py --local          # employers in your [locality]
 
 Every flag except --from-bciwiki is the CLI spelling of an operation in
-src/ops/registry.py, the same table the web UI's roster buttons run from.
+src/dispatch/registry.py, the same table the web UI's roster buttons run from.
 """
 
 import argparse
 import sys
 
 from src import config
-from src.ops import registry
+from src.dispatch import registry
 
 
 def _op(name, params):
@@ -148,18 +148,21 @@ def main():
     from src.config import bootstrap
     bootstrap.ensure_profile()
 
-    for dest, handler in _COMMANDS:
-        if getattr(args, dest):
-            handler(args)
-            return
+    try:
+        for dest, handler in _COMMANDS:
+            if getattr(args, dest):
+                handler(args)
+                return
 
-    if not args.term:
-        ap.print_help()
-        sys.exit(1)
+        if not args.term:
+            ap.print_help()
+            sys.exit(1)
 
-    registry.invoke("discover-term", {
-        "term": args.term, "no_report": args.no_report, "dry_run": args.dry_run},
-        track=None)
+        registry.invoke("discover-term", {
+            "term": args.term, "no_report": args.no_report,
+            "dry_run": args.dry_run}, track=None)
+    except registry.ParamError as e:
+        ap.error(str(e))
 
 
 if __name__ == "__main__":

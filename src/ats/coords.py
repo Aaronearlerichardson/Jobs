@@ -120,7 +120,7 @@ def slug_named(company):
     slug/tenant AND was named from that slug in the first place -- the one
     rule behind the HARVEST SUMMARY's "still named after their own
     slug/tenant" tally (src.crawl.harvest.run) and the op that repairs
-    those rows (src.ops.maintenance.rename_slug_boards).
+    those rows (src.ops.repair.rename_slug_boards).
 
     >>> slug_named({"name": "Aah", "ats": "workday", "wd_tenant": "aah",
     ...             "source": "ats_dork"})

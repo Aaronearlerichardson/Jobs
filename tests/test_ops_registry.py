@@ -3,13 +3,12 @@
 Three front ends used to carry their own dispatch over the same functions
 and drifted (a UI helper was lost in a refactor while its button survived;
 the CLI and the UI passed different defaults to one call). These tests pin
-the properties that make a single table safe: every target resolves,
-every front end reaches the registry, and the params each front end
-passes are the ones the target accepts.
+the properties that make a single table safe: every front end reaches the
+registry, and the params each front end passes are the ones the target
+accepts.
 """
 
 import inspect
-import sys
 from types import SimpleNamespace
 
 import pytest
@@ -17,8 +16,15 @@ import pytest
 from src import config
 import discover
 import run_scraper
-from src.ops import registry
-from src.ops.registry import OMIT, Param, build_kwargs
+from src.dispatch import registry
+
+
+def _kwargs(model, always=False):
+    """The target keywords `model` can pass; `always` keeps only those it
+    passes on every call (not left out while absent)."""
+    names = {n for n, f in model.model_fields.items()
+             if n != "track" and not (always and f.exclude_if)}
+    return names | ({model.track_kw} if model.track_kw else set())
 
 
 class TestTable:
@@ -26,32 +32,25 @@ class TestTable:
         for name, e in registry.REGISTRY.items():
             assert set(e) >= {"label", "engine", "target", "params"}, name
             assert e["engine"] in (None, "local", "sweep"), name
-            assert ":" in e["target"], name
-            assert all(isinstance(p, Param) for p in e["params"]), name
-
-    def test_every_target_resolves_to_a_callable(self):
-        for name, e in registry.REGISTRY.items():
-            assert callable(registry.resolve(e["target"])), name
+            assert callable(e["target"]), name
+            assert issubclass(e["params"], registry.OpParams), name
 
     def test_every_param_names_a_real_keyword_of_its_target(self):
-        """A typo in a Param.kw would surface only when someone clicked
+        """A typo in a field name would surface only when someone clicked
         the button: the call would raise TypeError inside the op thread."""
         for name, e in registry.REGISTRY.items():
-            sig = inspect.signature(registry.resolve(e["target"]))
+            sig = inspect.signature(e["target"])
             accepts_any = any(p.kind is inspect.Parameter.VAR_KEYWORD
                               for p in sig.parameters.values())
-            for p in e["params"]:
-                kw = p.kw or p.key
+            for kw in _kwargs(e["params"]):
                 assert accepts_any or kw in sig.parameters, (name, kw)
 
     def test_required_target_arguments_are_always_supplied(self):
-        """A target parameter with no default must come from a Param that
-        always produces a value (a default, or a kind that never omits)."""
-        never_omits = {"track", "db_path", "veto", "assert", "not"}
+        """A target parameter with no default must come from a field that
+        is passed on every call."""
         for name, e in registry.REGISTRY.items():
-            sig = inspect.signature(registry.resolve(e["target"]))
-            supplied = {(p.kw or p.key) for p in e["params"]
-                        if p.default is not OMIT or p.kind in never_omits}
+            sig = inspect.signature(e["target"])
+            supplied = _kwargs(e["params"], always=True)
             required = {n for n, prm in sig.parameters.items()
                         if prm.default is inspect.Parameter.empty
                         and prm.kind not in (inspect.Parameter.VAR_KEYWORD,
@@ -72,88 +71,36 @@ class TestTable:
         assert "probe" in label and "dead" in label
 
 
-class TestPackaging:
-    """Every target module has to be INSIDE the compiled UI binary.
-
-    Targets are strings resolved with importlib, so no import statement
-    reaches them and Nuitka's import graph cannot see them either.
-    build_app.py therefore derives its `--include-module=` list from this
-    table's source. While that list was written by hand it went stale, and
-    the failure only showed up in a build nobody can press a button in
-    during CI: JobCrawlerUI.exe built from 5525f88 answered the first
-    operation started from the web UI with "operation failed:
-    ModuleNotFoundError: No module named 'src.crawl'" (2026-09-11).
-
-    The other half of the guarantee -- that each "module:attr" names a real
-    callable, not just a real module -- is
-    `TestTable.test_every_target_resolves_to_a_callable` above.
-    """
-
-    @staticmethod
-    def _include_list():
-        """build_app's UI includes, imported with a neutral argv.
-
-        build_app reads sys.argv at import time to pick the --target, and
-        under pytest sys.argv is the pytest command line.
-        """
-        argv, sys.argv = sys.argv, [sys.argv[0]]
-        try:
-            import build_app
-        finally:
-            sys.argv = argv
-        return set(build_app.include_modules())
-
-    def test_every_target_module_ships_in_the_ui_binary(self):
-        included = self._include_list()
-        for name, e in registry.REGISTRY.items():
-            assert e["target"].partition(":")[0] in included, name
-
-    def test_the_derived_list_names_nothing_else(self):
-        """A parser that over-collected would pad every UI build with
-        modules no operation asks for, and would hide the opposite bug."""
-        assert self._include_list() == {e["target"].partition(":")[0]
-                                        for e in registry.REGISTRY.values()}
-
-
 class TestInvoke:
-    def test_resolves_the_track_from_params_or_the_default(self, monkeypatch):
+    def test_resolves_the_track_from_params_or_the_default(self, patch_op):
         seen = {}
-        monkeypatch.setattr("src.ops.maintenance.sync_status_all",
-                            lambda **kw: seen.update(kw))
+        patch_op("sync", lambda **kw: seen.update(kw))
         registry.invoke("sync", {"top": "7"})
         assert seen == {"top_n": 7, "t": config.UI_TRACKS[config.DEFAULT_TRACK]}
         registry.invoke("sync", {}, track=None)
         assert seen == {"top_n": 15, "t": None}
 
-    def test_honors_a_monkeypatched_target_at_call_time(self, monkeypatch):
-        """Targets are looked up when invoked, not captured at import, so
-        tests (and reloads) see the current function."""
-        calls = []
-        monkeypatch.setattr("src.ops.roster.dedup", lambda **kw: calls.append(kw))
-        registry.invoke("dedup", {}, track=None)
-        assert calls == [{"t": None}]
-
     def test_unknown_op_raises(self):
         with pytest.raises(KeyError):
             registry.invoke("no-such-op", {})
 
+    def test_blank_is_absent_but_false_is_a_value(self, patch_op):
+        """A blank web field takes the default (a blank `workers` leaves
+        max_workers to the target); argparse's False for an unset
+        store_true flag is a real value (rescore's described_only)."""
+        seen = {}
+        patch_op("rescore", lambda **kw: seen.update(kw))
+        registry.invoke("rescore", {"described_only": False, "workers": ""},
+                        track=None)
+        assert seen == {"described_only": False, "t": None}
 
-class TestParamCoercion:
-    def test_blank_web_fields_fall_back_like_the_old_int_helper(self):
-        spec = [Param("limit", kind="int", default=None),
-                Param("top", "top_n", "int", 15)]
-        assert build_kwargs(spec, {"limit": "", "top": ""}, None) == \
-            {"limit": None, "top_n": 15}
-
-    def test_absent_without_default_is_omitted(self):
-        assert build_kwargs([Param("workers", "max_workers", "int")], {}, None) == {}
-
-    def test_explicit_false_is_a_value_not_an_absence(self):
-        """argparse hands over False for an unset store_true flag; that is
-        a real value and must reach the target (rescore's described_only)."""
-        spec = [Param("described_only", kind="bool", default=True)]
-        assert build_kwargs(spec, {"described_only": False}, None) == \
-            {"described_only": False}
+    def test_bad_params_fail_by_key_before_the_target_runs(self, patch_op):
+        seen = []
+        patch_op("check-closed", lambda **kw: seen.append(kw))
+        with pytest.raises(registry.ParamError) as err:
+            registry.invoke("check-closed", {"limit": "many", "stale": 3})
+        assert [ln.split(":")[0] for ln in err.value.lines] == ["limit", "stale"]
+        assert seen == []
 
 
 class TestWebView:
@@ -161,14 +108,13 @@ class TestWebView:
         from src import web
         assert set(web.OPS) == set(registry.ui_ops())
         for name, o in web.OPS.items():
-            assert set(o) == {"label", "engine", "fn"}, name
+            assert set(o) == {"label", "engine", "params", "fn"}, name
             assert o["label"] == registry.REGISTRY[name]["label"]
 
-    def test_fn_runs_the_registry_with_the_posted_params(self, monkeypatch):
+    def test_fn_runs_the_registry_with_the_posted_params(self, patch_op):
         from src import web
         seen = {}
-        monkeypatch.setattr("src.ops.maintenance.check_closed_jobs",
-                            lambda **kw: seen.update(kw))
+        patch_op("check-closed", lambda **kw: seen.update(kw))
         web.OPS["check-closed"]["fn"]({"stale_days": "3", "limit": "",
                                           "track": config.DEFAULT_TRACK})
         assert seen["stale_days"] == 3 and seen["limit"] is None

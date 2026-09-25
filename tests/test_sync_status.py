@@ -13,7 +13,7 @@ strength of a failed fetch — but it has to be visible.
 """
 
 import src.store as store
-from src.ops import maintenance as ops
+from src.ops import status as ops
 
 
 class TestSyncStatusReportsSkippedBoards:

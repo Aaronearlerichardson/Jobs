@@ -4,7 +4,7 @@
     python webapp.py            ->  http://127.0.0.1:5533
 
 The application lives in src/web/ (routes.py, server.py, templates/,
-static/) and its operations in src/ops/; this file only starts it.
+static/) and its operations in src/dispatch/; this file only starts it.
 """
 
 import sys

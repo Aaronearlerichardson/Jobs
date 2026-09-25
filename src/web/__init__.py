@@ -1,8 +1,8 @@
 """Flask web UI package for the job crawler.
 
-Layout: routes.py (the /api/* endpoints + the SPA), ops.py (the background
-operation registry + runner), server.py (port logic, graceful self-restart,
-main()). The SPA lives in templates/index.html + static/css|js. Root-level
+Layout: routes.py (the /api/* endpoints + the SPA), server.py (port logic,
+graceful self-restart, main()); the operation table and its runner are
+src/dispatch/. The SPA lives in templates/index.html + static/css|js. Root-level
 webapp.py is the thin launch entry (`python webapp.py`).
 
 Single-user by design — one operation at a time, same SQLite stores as the
@@ -37,7 +37,7 @@ from . import routes  # noqa: E402  — registers the @app routes
 
 # Re-exports: the public surface tests and tooling poke at. Listed in
 # __all__ so they read as deliberate rather than as stray imports.
-from src.ops.background import OPS  # noqa: E402
+from src.dispatch.background import OPS  # noqa: E402
 from .routes import _geo_tag  # noqa: E402
 from .server import main  # noqa: E402
 

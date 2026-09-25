@@ -17,6 +17,9 @@ Never imports store/__init__ at load time (that module imports this one).
 
 import re
 from datetime import datetime, timedelta
+from typing import Any
+
+from pydantic import ConfigDict, Field, TypeAdapter, create_model
 
 from src import config
 
@@ -548,18 +551,23 @@ def export_companies(conn, path):
 
 def import_companies(conn, path):
     """Upsert companies from an export_companies JSON file (idempotent;
-    tags merge, existing mission scores survive None fields)."""
-    import json
-    with open(path, encoding="utf-8") as f:
-        rows = json.load(f)
-    n = 0
+    tags merge, existing mission scores survive None fields).
+
+    Every row must be an object with a non-empty `name` and only columns
+    the companies table has; otherwise pydantic.ValidationError names each
+    bad row path and nothing is written. Columns an upsert never writes
+    (id, the crawl schedule) are accepted and ignored.
+    """
+    known = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
+    known.discard("name")
+    row = create_model("CompanyRow", __config__=ConfigDict(extra="forbid"),
+                       name=(str, Field(min_length=1)),
+                       **dict.fromkeys(sorted(known), (Any, None)))
+    with open(path, "rb") as f:
+        rows = TypeAdapter(list[row]).validate_json(f.read())
     for r in rows:
-        if not isinstance(r, dict) or not r.get("name"):
-            continue
-        r.pop("id", None)
-        upsert_company(conn, r)
-        n += 1
-    return n
+        upsert_company(conn, r.model_dump(exclude_unset=True))
+    return len(rows)
 
 
 def set_company_tag(conn, name, tag, add=True):
@@ -821,7 +829,7 @@ _HARVEST_FETCH_ERROR = "fetch-error:harvest"
 
 # Consecutive calendar days a board may carry _HARVEST_FETCH_ERROR before
 # mark_harvested promotes it to 'board-dead:<ats>' -- the same family
-# src.ops.maintenance.RERESOLVE_FAMILIES retries and harvestable_companies
+# src.ops.repair.RERESOLVE_FAMILIES retries and harvestable_companies
 # skips (_NO_BOARD_PREFIXES above).
 HARVEST_DEAD_AFTER_DAYS = 3
 
@@ -850,8 +858,9 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
     genuinely different failure is overwritten. A row already carrying
     _HARVEST_FETCH_ERROR for >= HARVEST_DEAD_AFTER_DAYS days is promoted
     to 'board-dead:<its ats>' instead (and deactivated, the same as a manually
-    pruned dead board -- see src.ops.maintenance.prune's deactivate_company
-    call -- which is what lets reresolve_misses pick it back up).
+    pruned dead board -- see src.ops.repair.prune_dead_boards's
+    deactivate_company call -- which is what lets reresolve_misses pick it
+    back up).
 
     Harvest never touches empty_streak/crawl_state -- those belong to the
     crawl's own dormancy bookkeeping (record_crawl_outcome).
@@ -875,7 +884,7 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
         record_miss's own inactive-by-construction misses do -- so a
         promoted row that stayed active would never reach
         reresolve_misses at all; (2) this mirrors the existing manual
-        path for the same verdict (src.ops.maintenance.prune's
+        path for the same verdict (src.ops.repair.prune_dead_boards's
         deactivate_company on a dead board probe). Three straight days
         of a board answering with nothing is treated as at least as
         strong evidence as that single live probe.
@@ -954,7 +963,7 @@ def reactivate_company(conn, company_id):
 
 def deactivate_company(conn, company_id, note=None):
     """Flip one company's `active` switch off, optionally recording why in
-    `notes`. The primitive behind src.ops.maintenance.prune_dead_boards; the
+    `notes`. The primitive behind src.ops.repair.prune_dead_boards; the
     decision (probe the board, apply the off-mission policy) lives there,
     only the write lives here.
 

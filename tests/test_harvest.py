@@ -705,6 +705,7 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     from src import config
     from src.crawl import runner
     from src.ops import maintenance as ops
+    from src.ops import scoring
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", mission_score=0.9, tags="local")
@@ -743,7 +744,7 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     monkeypatch.setattr(ops, "score_resume_fit",
                         lambda title, description="", *, location="",
                         max_tokens=300: R())
-    monkeypatch.setattr(ops, "self_heal_unscored", lambda *a, **k: 0)
+    monkeypatch.setattr(scoring, "self_heal_unscored", lambda *a, **k: 0)
     runner.run_track(t, fit=True, commit=True, send=False, verify=False,
                      websearch=False)
     conn = store.connect(db)

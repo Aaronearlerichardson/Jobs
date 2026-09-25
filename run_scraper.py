@@ -12,8 +12,8 @@ Tracks come from your profile's [tracks.*] tables — the ids are whatever you
 named them, and a track's jobs.track value works too. The old crawler.py
 forwards here, so scheduled tasks keep working.
 
-Most flags are the CLI spelling of an operation in src/ops/registry.py —
-the same table the web UI's buttons run from — so a flag and a button pass
+Most flags are the CLI spelling of an operation in src/dispatch/registry.py,
+the same table the web UI's buttons run from, so a flag and a button pass
 the same parameters to the same function. The few commands below that are
 not registry ops (watch, mark, pipeline, export/import) are store
 queries and edits with their own positional arguments.
@@ -23,7 +23,7 @@ import argparse
 import sys
 
 from src import config
-from src.ops import registry
+from src.dispatch import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -105,15 +105,24 @@ def _cmd_pipeline(args, t):
 
 
 def _cmd_companies_io(args, t):
+    from pydantic import ValidationError
     from src import store
+    from src.config.profile_schema import error_lines
     conn = _store(t)
-    if args.export_companies:
-        n = store.export_companies(conn, args.export_companies)
-        print(f"  exported {n} compan(ies) -> {args.export_companies}")
-    if args.import_companies:
-        n = store.import_companies(conn, args.import_companies)
-        print(f"  imported/refreshed {n} compan(ies) from {args.import_companies}")
-    conn.close()
+    try:
+        if args.export_companies:
+            n = store.export_companies(conn, args.export_companies)
+            print(f"  exported {n} compan(ies) -> {args.export_companies}")
+        if args.import_companies:
+            n = store.import_companies(conn, args.import_companies)
+            print(f"  imported/refreshed {n} compan(ies) from {args.import_companies}")
+    except ValidationError as e:
+        print(f"  [!] {args.import_companies}: nothing imported")
+        for line in error_lines(e):
+            print(f"    {line}")
+        raise SystemExit(1) from None
+    finally:
+        conn.close()
 
 
 # One-shot commands, in precedence order: the first whose flag is set runs
@@ -286,19 +295,23 @@ def main(argv=None):
         if t is not None:
             t = dict(t, db_path=Path(args.db))
 
-    # ── one-shot store / roster / maintenance commands ──────────────────
-    for dest, handler in _COMMANDS:
-        if _selected(args, dest):
-            handler(args, t)
-            return
+    try:
+        # ── one-shot store / roster / maintenance commands ──────────────
+        for dest, handler in _COMMANDS:
+            if _selected(args, dest):
+                handler(args, t)
+                return
 
-    # ── the crawl (daily refresh): one track, or every configured track ──
-    params = {"no_fit": args.no_fit, "preview": args.preview, "send": args.send,
-              "no_verify": args.no_verify, "no_websearch": args.no_websearch,
-              "confirm_cost": args.confirm_cost, "workers": args.workers,
-              "top": args.top, "samples": args.samples}
-    for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
-        registry.invoke("crawl", params, track=tcfg)
+        # ── the crawl (daily refresh): one track, or every configured track
+        params = {"no_fit": args.no_fit, "preview": args.preview,
+                  "send": args.send, "no_verify": args.no_verify,
+                  "no_websearch": args.no_websearch,
+                  "confirm_cost": args.confirm_cost, "workers": args.workers,
+                  "top": args.top, "samples": args.samples}
+        for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
+            registry.invoke("crawl", params, track=tcfg)
+    except registry.ParamError as e:
+        ap.error(str(e))
 
 
 if __name__ == "__main__":

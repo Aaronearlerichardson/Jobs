@@ -492,14 +492,20 @@ def _line(err):
     return f"{path}: {msg}" if path else msg
 
 
+def error_lines(err):
+    """A pydantic ValidationError as one 'path: problem' line per error,
+    never quoting the bad value (see `problems`)."""
+    return [_line(x) for x in err.errors(include_url=False,
+                                         include_input=False)]
+
+
 def parse(raw, source="profile"):
     """`raw` (a parsed profile.toml) as a validated Profile, or ProfileError
     listing every bad key path (the lines `problems` returns)."""
     try:
         return Profile.model_validate(raw)
     except ValidationError as e:
-        raise ProfileError(source, [_line(x) for x in e.errors(
-            include_url=False, include_input=False)]) from None
+        raise ProfileError(source, error_lines(e)) from None
 
 
 def problems(raw):

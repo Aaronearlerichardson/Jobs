@@ -274,6 +274,20 @@ def wired_db_path(tmp_path, monkeypatch):
     return db_path
 
 
+@pytest.fixture
+def patch_op(monkeypatch):
+    """`patch_op(name, fn)` runs `fn` as operation `name`'s target.
+
+    The registry holds function references, so patching the target's module
+    does not reach it; every front end calls through the entry instead.
+    """
+    from src.dispatch import registry
+
+    def _patch(name, fn):
+        monkeypatch.setitem(registry.REGISTRY[name], "target", fn)
+    return _patch
+
+
 # --------------------------------------------------------------------------- #
 #  Store plumbing the tests share
 # --------------------------------------------------------------------------- #

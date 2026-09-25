@@ -92,7 +92,7 @@ def test_persistent_500_gives_up_without_tripping(api):
 
 
 def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
-    """The web UI runs many operations in one process (src/ops/background._run_op).
+    """The web UI runs many operations in one process (src/dispatch/background._run_op).
     On 2026-09-09 a crawl tripped the breaker on an exhausted balance and the
     next two verify runs skipped every call silently — the banner prints once
     per trip. Re-arming per operation makes a topped-up balance take effect

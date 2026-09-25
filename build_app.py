@@ -70,16 +70,11 @@ binary compiles cleanly and then dies on `import sqlite3` with
 libcrypto, ...) never made it in (JobHarvester.exe, 2026-09-10).
 """
 
-import ast
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).parent
-
-#: The operation table whose "module:function" target strings the UI's
-#: --include-module list is derived from (see include_modules() below).
-REGISTRY_PY = ROOT / "src" / "ops" / "registry.py"
 
 # --target NAME -> (entry script, Windows output name, other-platform name).
 # The two binaries share the crawler packages but not the rest: see
@@ -190,74 +185,10 @@ PACKAGE_CONFIG = "jobs.nuitka-package.config.yml"
 # (2026-09-11).
 PACKAGES = ["playwright", "fake_useragent"]
 
-# Modules that must ship even though NO import statement reaches them, so
-# Nuitka cannot see them and neither can the import graph
-# `python tools/entrydeps.py` walks.
-#
-# src/ops/registry.py declares every operation a front end can start, and
-# names its target as a "src.ops.roster:prune" STRING resolved with importlib
-# at call time. That indirection is worth keeping -- making the 21 targets
-# real imports costs 700 ms and 363 extra modules (bs4, lxml, requests) on
-# every CLI invocation, measured -- but it is invisible to every static tool,
-# Nuitka's import graph included.
-#
-# Both targets used to say --include-package=src, which covered this by
-# shipping all 95 src modules. It also dragged in src/crawl/page_capture.py
-# (473 lines only capture.py reaches, and capture.py is not compiled) and put
-# --include-package=src in direct contradiction with
-# --nofollow-import-to=src.web below. cc86d84 dropped it for a hand-written
-# list of the modules believed to be unreachable otherwise, on the count that
-# 93 of 95 were reachable by real imports.
-#
-# That count was right about imports and wrong about the binary, and the way
-# it was wrong is why this list is no longer written by hand: on 2026-09-11
-# JobCrawlerUI.exe (built from 5525f88) died on the first operation started
-# from the web UI with "[!] operation failed: ModuleNotFoundError: No module
-# named 'src.crawl'". `python tools/entrydeps.py webapp.py --modules` names
-# ZERO src.crawl modules and, out of src/ops, only src.ops, src.ops.background
-# and src.ops.registry -- so the compiled UI contained no crawler at all, and
-# running the crawl is the UI's whole job. src.ops.maintenance (eight of the
-# targets) was in the same position, shipping only if Nuitka happened to
-# follow src.ops.roster's function-level imports.
-#
-# A hand-written list goes stale the first time someone adds an operation, and
-# nothing fails until a button is pressed in a compiled build -- which is not
-# something the test suite or CI can press. Deriving the list from the
-# registry's own source is the only form of it that cannot drift: add a
-# target, and the next build ships its module. We read that source with `ast`
-# rather than importing it, because importing src.ops.registry imports
-# src.config, which loads the profile and touches the user's data directory;
-# a build script (and a doctest) must do neither.
-
-
-def registry_targets(source):
-    """The module half of every "module:attr" operation target in `source`.
-
-    Sorted and de-duplicated, so two builds of the same tree get the same
-    flags in the same order.
-
-    >>> registry_targets('R = {"a": {"target": "src.ops.roster:prune"},'
-    ...                  '     "b": {"target": "src.crawl.runner:run_track"},'
-    ...                  '     "c": {"target": "src.ops.roster:dedup"}}')
-    ['src.crawl.runner', 'src.ops.roster']
-    >>> registry_targets('R = {"a": {"label": "Crawl", "engine": None}}')
-    []
-    """
-    mods = set()
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Dict):
-            continue
-        for key, value in zip(node.keys, node.values):
-            if (isinstance(key, ast.Constant) and key.value == "target"
-                    and isinstance(value, ast.Constant)
-                    and isinstance(value.value, str) and ":" in value.value):
-                mods.add(value.value.partition(":")[0])
-    return sorted(mods)
-
-
-def include_modules(path=REGISTRY_PY):
-    """registry_targets() of the registry source on disk."""
-    return registry_targets(Path(path).read_text(encoding="utf-8"))
+# No --include-module list: src/dispatch/registry.py names each operation's
+# target as a real import, so Nuitka follows it like any other. While the
+# targets were "module:function" strings the UI build shipped no src.crawl
+# (ModuleNotFoundError on the first op started, 2026-09-11).
 
 # Packages whose non-Python files must ship too, and that Nuitka does not
 # already know about itself.
@@ -405,18 +336,6 @@ def build_command(name=None):
     # and one flag for both keeps the file the single place those
     # declarations live.
     cmd += [f"--user-package-configuration-file={PACKAGE_CONFIG}"]
-    # Only the UI gets the registry-derived includes, because only the UI
-    # resolves a target string: registry.invoke() is called from
-    # src/ops/background.py (the UI's op runner), run_scraper.py and
-    # discover.py, and `python tools/entrydeps.py harvest.py --modules` lists
-    # no src.ops.background -- out of src/ops it reaches only src.ops,
-    # src.ops.maintenance and src.ops.registry. src.ops.registry IS in that
-    # list, but only because src/ops/__init__.py re-exports it and every
-    # `from src.ops import maintenance` therefore runs it; the harvester
-    # imports src.crawl.harvest and calls it directly and never looks an
-    # operation up by name. So the --include-module=src.ops.roster this
-    # target used to carry was dead config: nothing in a whole-board pull
-    # can reach roster, by import or by string.
     if name == "harvest":
         cmd += [f"--noinclude-custom-mode={p}:error" for p in HARVEST_FORBID]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_LAZY]
@@ -432,7 +351,6 @@ def build_command(name=None):
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
                 if not src.startswith("src/web/")]
     else:
-        cmd += [f"--include-module={m}" for m in include_modules()]
         cmd += [f"--include-package={p}" for p in PACKAGES]
         cmd += [f"--include-package-data={p}" for p in DATA_PACKAGES]
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES]

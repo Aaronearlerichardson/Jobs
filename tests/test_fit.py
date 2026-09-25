@@ -175,7 +175,7 @@ class TestGateOverrides:
 
 
 class TestUnscoredCause:
-    """The vocabulary src.ops.maintenance's retry-marker system keys off:
+    """The vocabulary src.ops.scoring's retry-marker system keys off:
     the two "gave up without a score" reasons score_resume_fit hands back,
     each mapped to what a retry policy needs (does this body just need to
     GROW, or might the exact same call succeed later)."""
@@ -203,7 +203,7 @@ class TestUnscoredCause:
     def test_a_scorer_that_never_asked_is_not_a_refusal(self, monkeypatch):
         # No key, and a tripped breaker, both make call_claude_json return
         # None WITHOUT asking the model. Reporting those as "unscored" would
-        # let ops.maintenance's retry marker hold a perfectly scorable row
+        # let ops.scoring's retry marker hold a perfectly scorable row
         # for UNSCORED_RETRY_DAYS over one billing hiccup.
         monkeypatch.setattr(fit, "call_claude_json", lambda *a, **k: None)
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY",

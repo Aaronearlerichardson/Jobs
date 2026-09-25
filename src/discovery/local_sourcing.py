@@ -469,8 +469,8 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
         the store (which stamps it on insert anyway). add_board is not a
         fifth: a board the user registered by URL is written active
         regardless of mission tier, and carries no total count. The two
-        copies in src/ops/maintenance.py (add_job's manual add, which writes
-        straight to the roster, and reresolve_misses, which clears the old
+        copies in src/ops (ingest.add_manual_job, which writes straight to
+        the roster, and repair.reresolve_misses, which clears the old
         board coordinates first) still differ in ways this helper does not
         cover.
     """

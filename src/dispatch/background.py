@@ -1,10 +1,9 @@
 """Background operation runner (one op at a time, the rest waiting in a FIFO
 run queue, console tee'd to the browser via /api/run/status polling), and the
-web UI's view of the shared operation table in src/ops/registry.py."""
+web UI's view of the shared operation table in src/dispatch/registry.py."""
 
 import functools
 import io
-import json
 import secrets
 import sys
 import threading
@@ -14,7 +13,7 @@ from datetime import datetime
 from src import config
 from src import session_log
 from src.claude import api as claude_api
-from src.ops import registry
+from src.dispatch import registry
 
 TASK = {"name": None, "thread": None, "log": [], "log_offset": 0,
         "started": None, "ended": None, "error": None, "active": False}
@@ -231,24 +230,6 @@ def _running():
 QUEUE = deque()
 
 
-def _params_key(params):
-    """Canonical text for one run's params, so two requests that mean the
-    same thing compare equal.
-
-    Keys are sorted and None values dropped: the browser posts a whole form,
-    so the same button pressed twice can differ only in key order or in a
-    field left blank, and those two must not take two places in the queue.
-
-    >>> a, b = {"pages": 2, "track": "x"}, {"track": "x", "pages": 2}
-    >>> _params_key(a) == _params_key(b)
-    True
-    >>> _params_key({"track": "x", "limit": None})
-    '{"track": "x"}'
-    """
-    return json.dumps({k: v for k, v in params.items() if v is not None},
-                      sort_keys=True, default=str)
-
-
 def _entry_json(entry, position, duplicate=None):
     """One queue entry as the browser sees it — everything but the callable."""
     d = {"id": entry["id"], "name": entry["name"], "position": position,
@@ -274,16 +255,18 @@ def _hand_off():
         return entry
 
 
-def submit(name, params, fn):
+def submit(name, args, fn):
     """Run `fn` now if the slot is free, else put it in the run queue.
 
-    Returns None when the op started, otherwise the queue entry it added —
-    or the identical one already waiting, marked `duplicate`, since asking
-    twice for the same run with the same params is a double click, not a
-    second job. Queueing the op that is CURRENTLY running is allowed on
-    purpose: a crawl re-run after a config change is a real request.
+    `args` is the op's validated params (a registry.OpParams). Returns None
+    when the op started, otherwise the queue entry it added, or the
+    identical one already waiting, marked `duplicate`: asking twice for a
+    run whose params validate to the same values ("5" and 5, a blank field
+    and its default) is a double click, not a second job. Queueing the op
+    that is CURRENTLY running is allowed on purpose: a crawl re-run after a
+    config change is a real request.
     """
-    key = _params_key(params)
+    key = args.model_dump_json()
     with _TASK_LOCK:
         # `or QUEUE` keeps the order honest: while anything is waiting, a new
         # request goes to the back even if the runner is momentarily free.
@@ -306,7 +289,7 @@ def submit(name, params, fn):
                 if e["name"] == name and e["key"] == key:
                     return _entry_json(e, i + 1, duplicate=True)
             entry = {"id": secrets.token_hex(4), "name": name,
-                     "params": dict(params), "key": key,
+                     "params": args.model_dump(mode="json"), "key": key,
                      "enqueued_at": datetime.now().isoformat(), "fn": fn}
             QUEUE.append(entry)
             return _entry_json(entry, len(QUEUE), duplicate=False)
@@ -342,21 +325,16 @@ def queue_clear():
         return n
 
 
-def _int(p, key, default=None):
-    v = str(p.get(key, "") or "").strip()
-    return int(v) if v else default
-
-
-# The operations, from the ONE registry shared with the CLIs. Each entry
-# keeps the {label, engine, fn} shape routes.py and the tests read: `engine`
+# The operations, from the ONE registry shared with the CLIs, in the
+# {label, engine, params, fn} shape routes.py and the tests read: `engine`
 # is the crawl engine the op needs ("local" = the location-scoped crawler,
-# "sweep" = the location-agnostic one — src/crawl/runner.py; None = any
+# "sweep" = the location-agnostic one, src/crawl/runner.py; None = any
 # track), matched against the active track's profile-configured engine and
-# never against a user-chosen track id. `fn(params)` takes the JSON the
-# browser POSTed (api_run injects params["track"]) and runs the op through
-# ops_registry.invoke, which coerces the params and imports the target.
+# never against a user-chosen track id. `params` is the op's model, which
+# api_run validates the POSTed JSON with; `fn(args)` runs the op through
+# registry.invoke with those validated args.
 OPS = {
-    name: {"label": e["label"], "engine": e["engine"],
+    name: {"label": e["label"], "engine": e["engine"], "params": e["params"],
            "fn": functools.partial(registry.invoke, name)}
     for name, e in registry.ui_ops().items()
 }

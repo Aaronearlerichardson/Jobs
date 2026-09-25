@@ -779,3 +779,49 @@ def test_the_environment_is_read_only_through_config_settings():
         or (isinstance(n, ast.Name) and n.id in ("environ", "getenv")))
     assert not found, (f"environment read at {found}: add a field to "
                        "src/config/secrets.Settings and read config.SETTINGS.")
+
+
+# --------------------------------------------------------------------------- #
+#  8. Imports point down the package layers                                   #
+# --------------------------------------------------------------------------- #
+
+#: src/'s top-level units, lowest first. A module may import, at module level
+#: or inside a function, only units before its own. dispatch sits above crawl
+#: (two operations run crawl code) and below web, so the harvester, which
+#: imports crawl and nothing above it, never loads the operation table.
+LAYERS = ("tags", "config", "match", "net", "session_log", "store", "claude",
+          "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web")
+
+
+def _imported_units(rel, tree):
+    """The src units `rel`'s import statements name."""
+    package = rel.removesuffix(".py").split("/")[:-1]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = package[:len(package) - node.level + 1] if node.level else []
+            mod = ".".join(base + ([node.module] if node.module else []))
+            names = ([f"{mod}.{a.name}" for a in node.names]
+                     if mod == "src" else [mod])
+        else:
+            continue
+        for n in names:
+            parts = n.split(".")
+            if parts[0] == "src" and len(parts) > 1:
+                yield parts[1]
+
+
+def test_src_imports_point_down_the_layers():
+    rank = {u: i for i, u in enumerate(LAYERS)}
+    on_disk = {p.stem if p.is_file() else p.name
+               for p in (ROOT / "src").iterdir()
+               if p.name not in ("__init__.py", "__pycache__")
+               and (p.is_dir() or p.suffix == ".py")}
+    assert on_disk == set(LAYERS), f"place {on_disk ^ set(LAYERS)} in LAYERS"
+    up = sorted({(rel, u) for rel, src in source_files()
+                 if rel.startswith("src/") and rel.count("/") >= 1
+                 and rel != "src/__init__.py"
+                 for u in _imported_units(rel, ast.parse(src))
+                 if rank[u] > rank[rel.split("/")[1].removesuffix(".py")]})
+    assert not up, f"imports pointing up the layers: {up}"

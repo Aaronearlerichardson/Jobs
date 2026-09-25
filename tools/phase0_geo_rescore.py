@@ -31,16 +31,16 @@ the locality check runs in Python against the SAME regex the live
 crawl/triage gates use, so no city name is duplicated here.
 
 Why a tools/ script and not an extension of the `rescore` op
-(src.ops.registry / maintenance.rescore_all): the op's `where` shape is a
-flat SQL predicate the CLI/registry Param system passes as a plain string;
+(src.dispatch.registry / scoring.rescore_all): the op's `where` shape is a
+flat SQL predicate the CLI/registry passes as a plain string;
 this selection's locality half is NOT expressible as SQL without either
 (a) inlining city names into a LIKE chain here (exactly what the "no
 hard-coded locality" rule forbids), or (b) accepting a Python callable as
-an op param (the registry's Param types are primitives for a reason -- CLI
-+ webapp both drive it). Doing the structural half in SQL and the locality
+an op param (the registry's OpParams fields are primitives for a reason --
+CLI + webapp both drive it). Doing the structural half in SQL and the locality
 half in Python, in one purpose-built script, was the smaller mismatch. It
 is also explicitly a ONE-TIME migration for this bug, not a recurring
-op -- rescore_all (already fixed to pass location -- see maintenance.py)
+op -- rescore_all (already fixed to pass location -- see scoring.py)
 remains the right tool for a general "rescore everything" pass.
 
 Usage (from the repo root; `python tools/phase0_geo_rescore.py ...` works

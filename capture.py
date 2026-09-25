@@ -40,7 +40,7 @@ except Exception:
 from src import tags
 from src import store
 from src.crawl.page_capture import page_url, parse_page
-from src.ops.maintenance import ingest_external_jobs
+from src.ops.ingest import ingest_external_jobs
 
 PORT_DEFAULT = 8877
 
@@ -296,7 +296,7 @@ def main():
     args = ap.parse_args()
 
     if args.add:
-        from src.ops.maintenance import add_manual_job
+        from src.ops.ingest import add_manual_job
         add_manual_job(url=args.url, title=args.title, company=args.company,
                        location=args.location, description=args.desc,
                        pull_board=not args.no_board)

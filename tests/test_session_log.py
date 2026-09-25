@@ -199,7 +199,7 @@ class TestWebappOps:
     def _run(tmp_path, name, fn):
         """Run `fn` as web-UI op `name` to the end; returns (the op's
         session log text, the browser's copy of its output)."""
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         assert ops._run_op(name, fn) is True
         while ops._running():
             time.sleep(0.02)

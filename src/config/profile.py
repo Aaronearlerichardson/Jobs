@@ -188,7 +188,7 @@ KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in _kw.model_extra.items()}
 EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in _exc.model_extra.items()}
 
 # Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
-# `accept_remote` and src/ops/background.py restores it between operations. Read it
+# `accept_remote` and src/dispatch/background.py restores it between operations. Read it
 # through the package (`config.ACCEPT_REMOTE`), never from-import it.
 ACCEPT_REMOTE    = _loc.accept_remote
 LOCATION_EXCLUDE = list(_loc.exclude)

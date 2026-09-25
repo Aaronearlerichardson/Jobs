@@ -20,7 +20,7 @@ reads:
 Everything is re-exported here, so `import config; config.X` is the whole
 API and callers never name a submodule. Read mutable settings
 (ACCEPT_REMOTE, STORE_DB_PATH, the keyword lists) through the package
-attribute at use time — src/crawl/runner.py and src/ops/background.py reassign them
+attribute at use time — src/crawl/runner.py and src/dispatch/background.py reassign them
 while a track runs, and a from-bound copy goes stale.
 """
 

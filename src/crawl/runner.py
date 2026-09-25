@@ -669,7 +669,7 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     longest in the repo -- and what kept them from being functions was a
     dozen shared locals, now named once in `Collected`.
     """
-    from src.ops import maintenance as ops
+    from src.ops import scoring
 
     engine = t["engine"]
     send = t["email"] if send is None else send
@@ -723,11 +723,12 @@ def run_track(t, *, fit=True, commit=True, send=None, verify=None,
 
         linked = t["sources"]["store"] and t["sources"]["location_scoped"]
         if resume and commit and linked and not guard_tripped:
-            scored += ops.self_heal_unscored(conn, resume, track=t["track"],
-                                             max_workers=max_workers)
+            scored += scoring.self_heal_unscored(
+                conn, resume, track=t["track"], max_workers=max_workers)
         if verify_n and resume and commit and not guard_tripped:
-            ops.verify_top(top_n=verify_n, max_workers=max(2, max_workers // 2),
-                           conn=conn, t=t)
+            scoring.verify_top(top_n=verify_n,
+                               max_workers=max(2, max_workers // 2),
+                               conn=conn, t=t)
 
         _print_funnel(got.funnel, bar)
 

@@ -388,7 +388,7 @@ def have_api_key():
 def reset_breaker():
     """Re-arm the breaker for a NEW run. It is process-lifetime by design
     (one CLI run = one process), but the web UI runs every operation on a
-    thread inside one long-lived server process, so src/ops/background.
+    thread inside one long-lived server process, so src/dispatch/background.
     _run_op re-arms it per operation: a topped-up balance takes effect
     without a server restart, and a still-dead API fails once and explains
     itself.

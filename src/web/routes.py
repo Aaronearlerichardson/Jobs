@@ -1,14 +1,18 @@
 """All HTTP routes: jobs/pipeline/companies/stats/tracks, the background-op
 API, config editing (Settings tab), and the SPA itself."""
 
+from __future__ import annotations
+
 import hashlib
 import io
 import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
-from flask import jsonify, make_response, request, send_file
+from flask import abort, jsonify, make_response, request, send_file
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src import config
 from src import digest
@@ -17,23 +21,45 @@ from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import profile_edit
+from src.config.profile_schema import error_lines
 from src.match import locality
-from src.ops.background import (_LOG_LOCK, OPS, TASK, _int, _running,
-                                queue_clear, queue_remove, queue_snapshot,
-                                submit)
+from src.dispatch.background import (_LOG_LOCK, OPS, TASK, _running,
+                                     queue_clear, queue_remove,
+                                     queue_snapshot, submit)
 from src.ops.maintenance import track_store
 from . import BOOT_ID, STATE, app
 from .server import schedule_restart
 
 
-def _track():
-    """Resolve the request's track config ([tracks.*] in profile.toml).
-    Accepts ?track=<id> (or a "track" key in a JSON body); unknown ids fall
-    back to the default track rather than erroring — a stale localStorage
-    value after a config edit shouldn't brick the UI."""
-    tid = (request.args.get("track")
-           or (request.get_json(silent=True) or {}).get("track")
-           or config.DEFAULT_TRACK)
+class _Body(BaseModel):
+    """A JSON request body. A key the route does not read is an error;
+    `track` (a track id) is accepted everywhere, as in the query string."""
+    model_config = ConfigDict(extra="forbid")
+
+    track: str | None = None
+
+
+def _invalid(lines, what="bad request"):
+    """The 400 for input that failed validation: `error` for the UI's toast,
+    `errors` one 'path: problem' line per bad key."""
+    return jsonify(error=f"{what}: " + "; ".join(lines), errors=lines), 400
+
+
+def _body(model=_Body):
+    """The request's JSON body (none reads as {}) as `model`; aborts with
+    `_invalid` otherwise."""
+    try:
+        return model.model_validate_json(request.get_data() or b"{}")
+    except ValidationError as e:
+        abort(make_response(_invalid(error_lines(e))))
+
+
+def _track(tid=None):
+    """Resolve the request's track config ([tracks.*] in profile.toml) from
+    ?track=<id>, else `tid` (a JSON body's "track"). Unknown ids fall back
+    to the default track rather than erroring: a stale localStorage value
+    after a config edit shouldn't brick the UI."""
+    tid = request.args.get("track") or tid or config.DEFAULT_TRACK
     return config.UI_TRACKS.get(tid) or config.UI_TRACKS[config.DEFAULT_TRACK]
 
 
@@ -54,21 +80,22 @@ def api_run(name):
     neither is something waiting would fix. The restart would drop the queue
     with the process, and the mismatch is wrong no matter when it runs.
     """
-    if name not in OPS:
+    op = OPS.get(name)
+    if op is None:
         return jsonify(error=f"unknown operation {name!r}"), 404
     if STATE["restarting"]:
         return jsonify(error="server is restarting"), 409
-    track_cfg = _track()
-    need = OPS[name].get("engine")
+    args = _body(op["params"])
+    track_cfg = _track(args.track)
+    need = op.get("engine")
     if need is not None and need != track_cfg["engine"]:
         return jsonify(error=f"{name!r} needs the {need!r} engine - the "
                              f"{track_cfg['label']} track runs "
                              f"{track_cfg['engine']!r}"), 409
-    params = request.get_json(silent=True) or {}
-    params["track"] = track_cfg["id"]
+    args = args.model_copy(update={"track": track_cfg["id"]})
     # submit() claims the slot under a lock, so two requests in the same
     # instant can't both start an operation: the loser is queued, not run.
-    entry = submit(name, params, lambda: OPS[name]["fn"](params))
+    entry = submit(name, args, lambda: op["fn"](args))
     if entry is None:
         return jsonify(ok=True, name=name)
     return jsonify(queued=True, id=entry["id"], name=entry["name"],
@@ -90,13 +117,13 @@ def api_run_queue_clear():
 
 @app.get("/api/run/status")
 def api_run_status():
-    # `since` is an ABSOLUTE line count (see _Tee's docstring in ops.py), not
+    # `since` is an ABSOLUTE line count (src.dispatch.background._Tee), not
     # a raw index into TASK["log"] — that list gets its head chopped off once
     # it passes 5000 lines, so a plain-index cursor goes stale on every trim
     # and the browser re-renders lines it already showed. log_offset is how
     # many lines have been trimmed away; subtracting it from the absolute
     # cursor gives the correct index into what remains.
-    since = _int(request.args, "since", 0) or 0
+    since = request.args.get("since", 0, type=int)
     with _LOG_LOCK:
         offset = TASK["log_offset"]
         start = max(0, since - offset)
@@ -119,7 +146,7 @@ _JOB_FIELDS = (
     "fit_reason", "fit_gates", "fit_domain", "fit_function", "fit_stack",
     "fit_seniority", "posted_at", "first_seen", "last_seen", "status",
     "disposition", "disposition_note", "disposition_at",
-    # Application-pipeline tracking (store.PIPELINE_FIELDS + the stamp).
+    # Application-pipeline tracking (store.PipelineFields + the stamp).
     "applied_at", "followup_at", "contact", "referral", "outcome_reason",
     # store.ranked_jobs(collapse=True) (the default /api/jobs uses): how many
     # same-company/same-title postings this row stands in for, and the
@@ -208,31 +235,41 @@ def api_job(job_id):
     return jsonify(d)
 
 
+class _Disposition(_Body):
+    disposition: str = ""
+    note: str | None = None
+
+
 @app.post("/api/job/<job_id>/disposition")
 def api_disposition(job_id):
-    p = request.get_json(silent=True) or {}
-    with track_store(_track()) as conn:
+    p = _body(_Disposition)
+    with track_store(_track(p.track)) as conn:
         row, err = store.set_disposition(
-            conn, job_id, p.get("disposition", ""),
-            note=(p.get("note") or "").strip() or None)
+            conn, job_id, p.disposition,
+            note=(p.note or "").strip() or None)
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job_id=row["job_id"])
 
 
+class _Pipeline(_Body, store.PipelineFields):
+    pass
+
+
 @app.post("/api/job/<job_id>/pipeline")
 def api_pipeline_fields(job_id):
-    """Edit one application's tracking fields (store.PIPELINE_FIELDS).
+    """Edit one application's tracking fields (store.PipelineFields).
 
     Only the keys actually present in the body are written, so the SPA's
     save-on-change editor can send one field at a time without blanking the
-    others. The whitelist lives in the store, not here.
+    others.
     """
-    p = request.get_json(silent=True) or {}
-    fields = {k: p[k] for k in store.PIPELINE_FIELDS if k in p}
-    t = _track()
+    p = _body(_Pipeline)
+    t = _track(p.track)
     with track_store(t) as conn:
-        row, err = store.update_pipeline_fields(conn, job_id, **fields)
+        row, err = store.update_pipeline_fields(
+            conn, job_id, **p.model_dump(exclude_unset=True,
+                                         exclude={"track"}))
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job=_job_json(
@@ -291,16 +328,20 @@ def api_companies():
     return jsonify(out)
 
 
+class _Toggle(_Body):
+    on: bool = False
+
+
 @app.post("/api/company/<int:cid>/watch")
 def api_watch(cid):
-    on = bool((request.get_json(silent=True) or {}).get("on"))
-    with track_store(_track()) as conn:
+    p = _body(_Toggle)
+    with track_store(_track(p.track)) as conn:
         row = conn.execute("SELECT name FROM companies WHERE id=?",
                            (cid,)).fetchone()
         if not row:
             return jsonify(error="not found"), 404
-        store.set_company_tag(conn, row["name"], "watch", add=on)
-    return jsonify(ok=True, watched=on)
+        store.set_company_tag(conn, row["name"], "watch", add=p.on)
+    return jsonify(ok=True, watched=p.on)
 
 
 @app.post("/api/company/<int:cid>/reactivate")
@@ -308,7 +349,7 @@ def api_reactivate(cid):
     """Undormant a company: crawl it every run again. The manual override
     for a board the dormancy rules retired too eagerly (a slug that was
     briefly broken, a team that has only just started hiring)."""
-    with track_store(_track()) as conn:
+    with track_store(_track(_body().track)) as conn:
         row = conn.execute("SELECT id FROM companies WHERE id=?",
                            (cid,)).fetchone()
         if not row:
@@ -319,11 +360,12 @@ def api_reactivate(cid):
 
 @app.post("/api/company/<int:cid>/active")
 def api_active(cid):
-    on = 1 if (request.get_json(silent=True) or {}).get("on") else 0
-    with track_store(_track()) as conn:
-        conn.execute("UPDATE companies SET active=? WHERE id=?", (on, cid))
+    p = _body(_Toggle)
+    with track_store(_track(p.track)) as conn:
+        conn.execute("UPDATE companies SET active=? WHERE id=?",
+                     (int(p.on), cid))
         conn.commit()
-    return jsonify(ok=True, active=bool(on))
+    return jsonify(ok=True, active=p.on)
 
 
 # --------------------------------------------------------------------------- #
@@ -346,7 +388,7 @@ def api_confirm(cid):
     """Accept a review candidate: the pending tag comes off and the shared
     mission rule decides whether it is crawled."""
     from src.claude.api import is_active_mission
-    with track_store(_track()) as conn:
+    with track_store(_track(_body().track)) as conn:
         pending = store.get_company(conn, cid)
         if not pending:
             return jsonify(error="not found"), 404
@@ -357,16 +399,26 @@ def api_confirm(cid):
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
 
+class _Reason(_Body):
+    reason: str = ""
+
+
 @app.post("/api/company/<int:cid>/reject")
 def api_reject(cid):
     """Throw a review candidate away: the row and its jobs go, and the name
     is blocklisted so discovery stops re-finding it."""
-    reason = ((request.get_json(silent=True) or {}).get("reason") or "").strip()
-    with track_store(_track()) as conn:
-        name = store.reject_company(conn, cid, reason or "rejected in review")
+    p = _body(_Reason)
+    with track_store(_track(p.track)) as conn:
+        name = store.reject_company(conn, cid,
+                                    p.reason.strip() or "rejected in review")
     if not name:
         return jsonify(error="not found"), 404
     return jsonify(ok=True, name=name)
+
+
+class _Paste(_Body):
+    text: str = ""
+    use_llm: bool | None = None       # None: the model reads it if keyed
 
 
 @app.post("/api/names/preview")
@@ -379,14 +431,16 @@ def api_names_preview():
     # longer means the next request is lost (/api/run/<name> queues it), so
     # refusing a parse would only stop the person preparing the list.
     from src.discovery.paste_ingest import preview_names
-    p = request.get_json(silent=True) or {}
-    raw = p.get("use_llm")
+    p = _body(_Paste)
     try:
-        names = preview_names(p.get("text") or "",
-                              use_llm=None if raw is None else bool(raw))
+        names = preview_names(p.text, use_llm=p.use_llm)
     except Exception as e:
         return jsonify(error=f"could not parse that text: {e}"), 400
     return jsonify(names)
+
+
+class _Block(_Reason):
+    names: list[str] = []
 
 
 @app.post("/api/names/block")
@@ -403,11 +457,11 @@ def api_names_block():
     # a harvest thread holds the store's process-wide _WRITE_LOCK only for
     # the length of one batch() block (store/schema.py, e814fac), not for
     # the whole run.
-    p = request.get_json(silent=True) or {}
-    reason = (p.get("reason") or "").strip() or "not a company (review)"
-    with track_store(_track()) as conn:
+    p = _body(_Block)
+    reason = p.reason.strip() or "not a company (review)"
+    with track_store(_track(p.track)) as conn:
         keys = {k for k in (store.block_name(conn, n, reason)
-                            for n in (p.get("names") or [])) if k}
+                            for n in p.names) if k}
     return jsonify(ok=True, blocked=len(keys), keys=sorted(keys))
 
 
@@ -425,6 +479,8 @@ def api_import():
     try:
         with track_store(_track()) as conn:
             n = store.import_companies(conn, tmp)
+    except ValidationError as e:
+        return _invalid(error_lines(e), "import failed")
     except Exception as e:
         return jsonify(error=f"import failed: {e}"), 400
     finally:
@@ -485,16 +541,23 @@ def api_config_get():
     return jsonify(raw=raw, source=source, parsed=parsed)
 
 
+class _Toml(_Body):
+    toml: str = ""
+
+
+class _Updates(_Body):
+    updates: dict[str, Any] = {}
+
+
 @app.post("/api/config/validate")
 def api_config_validate():
-    p = request.get_json(silent=True) or {}
-    return jsonify(errors=profile_edit.validate(p.get("toml") or ""))
+    return jsonify(errors=profile_edit.validate(_body(_Toml).toml))
 
 
 def _save_config(text):
     errors = profile_edit.validate(text)
     if errors:
-        return jsonify(error="validation failed", errors=errors), 400
+        return _invalid(errors, "validation failed")
     profile_edit.backup_then_write(text)
     schedule_restart()
     return jsonify(ok=True, restarting=True)
@@ -505,9 +568,8 @@ def api_config_put():
     busy = _config_busy()
     if busy:
         return busy
-    p = request.get_json(silent=True) or {}
-    updates = p.get("updates") or {}
-    if not isinstance(updates, dict) or not updates:
+    updates = _body(_Updates).updates
+    if not updates:
         return jsonify(error="no updates given"), 400
     try:
         text = profile_edit.apply_updates(updates)
@@ -521,7 +583,7 @@ def api_config_put_raw():
     busy = _config_busy()
     if busy:
         return busy
-    return _save_config((request.get_json(silent=True) or {}).get("toml") or "")
+    return _save_config(_body(_Toml).toml)
 
 
 @app.get("/api/stats")

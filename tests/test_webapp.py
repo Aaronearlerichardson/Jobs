@@ -108,6 +108,58 @@ class TestApi:
     def test_unknown_operation_404s(self, client):
         assert client.post("/api/run/no_such_op").status_code == 404
 
+    def test_bad_op_params_400_by_key_and_nothing_runs(self, client,
+                                                       patch_op):
+        ran = []
+        patch_op("check-closed", lambda **kw: ran.append(kw))
+        resp = client.post("/api/run/check-closed",
+                           json={"limit": "many", "stale": 3})
+        assert resp.status_code == 400
+        body = json.loads(resp.data)
+        assert sorted(ln.split(":")[0] for ln in body["errors"]) == [
+            "limit", "stale"]
+        assert "limit" in body["error"]          # what the UI's toast shows
+        status = json.loads(client.get("/api/run/status").data)
+        assert ran == [] and not status["running"] and status["queue"] == []
+
+    def test_a_body_key_the_route_does_not_read_400s(self, client,
+                                                     wired_db_path):
+        resp = client.post("/api/job/p1/disposition",
+                           json={"disposition": 5, "why": "typo"})
+        assert resp.status_code == 400
+        assert sorted(json.loads(resp.data)["errors"]) == [
+            "disposition: Input should be a valid string", "why: unknown key"]
+
+    def test_import_takes_an_export_back_but_not_unknown_columns(
+            self, client, wired_db_path):
+        """An export carries columns an import never writes (id, the crawl
+        schedule), and they are accepted. A column the companies table does
+        not have is a 400 naming it, and nothing is written."""
+        import io
+        from src import store
+        conn = store.connect(wired_db_path)
+        store.upsert_company(conn, {"name": "Acme", "ats": "lever",
+                                    "slug": "acme"})
+        conn.close()
+
+        def post(rows):
+            return client.post("/api/import/companies", data={"file": (
+                io.BytesIO(json.dumps(rows).encode()), "roster.json")})
+
+        rows = json.loads(client.get("/api/export/companies").data)
+        assert post(rows).status_code == 200
+        rows[0]["hq"] = "x"
+        resp = post(rows + [{"name": "Beta", "size": 3}])
+        assert resp.status_code == 400
+        assert json.loads(resp.data)["errors"] == [
+            "[0].hq: unknown key", "[1].size: unknown key"]
+        conn = store.connect(wired_db_path)
+        try:
+            assert [c["name"] for c in store.get_companies(
+                conn, active_only=False)] == ["Acme"]
+        finally:
+            conn.close()
+
 
 class TestCompanyCrawlState:
     """The roster tab has to show WHY a company stopped producing rows --
@@ -239,11 +291,11 @@ class TestPipelineApi:
         stats = json.loads(client.get("/api/stats").data)
         assert stats["applied_7d"] == 1
 
-    def test_a_field_outside_the_whitelist_is_ignored(self, client,
+    def test_a_field_outside_the_whitelist_is_refused(self, client,
                                                       wired_db_path):
         self._pipeline_store(wired_db_path)
         assert client.post("/api/job/p1/pipeline",
-                           json={"resume_fit_score": 0}).status_code == 200
+                           json={"resume_fit_score": 0}).status_code == 400
         assert self._row(client)["resume_fit_score"] == 0.54
 
     def test_an_outcome_outside_the_vocabulary_400s(self, client,
@@ -546,13 +598,13 @@ class TestOpConcurrency:
     def _drain():
         import time
 
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         while ops._running():
             time.sleep(0.02)
         time.sleep(0.15)          # let the worker's finally block land
 
     def test_second_op_is_refused_while_the_first_runs(self):
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         assert ops._run_op("first", self._noisy("a")) is True
         assert ops._run_op("second", self._noisy("b")) is False
         self._drain()
@@ -573,7 +625,7 @@ class TestOpConcurrency:
         startup jitter."""
         import threading
 
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         results, lock = [], threading.Lock()
         barrier = threading.Barrier(12)
 
@@ -593,7 +645,7 @@ class TestOpConcurrency:
         self._drain()
 
     def test_log_records_each_line_once(self):
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         ops._run_op("solo", self._noisy("line"))
         self._drain()
         recorded = [l for l in ops.TASK["log"] if l.startswith("line-")]
@@ -602,7 +654,7 @@ class TestOpConcurrency:
     def test_stdout_is_restored_when_the_op_ends(self):
         import sys
 
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         before = sys.stdout
         ops._run_op("solo", self._noisy("z", lines=1))
         self._drain()
@@ -611,7 +663,7 @@ class TestOpConcurrency:
     def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
         import sys
 
-        from src.ops import background as ops
+        from src.dispatch import background as ops
 
         def boom():
             raise RuntimeError("op exploded")
@@ -626,7 +678,7 @@ class TestOpConcurrency:
         self._drain()
 
     def test_prints_outside_an_operation_do_not_reach_the_log(self):
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         ops._run_op("solo", self._noisy("q", lines=1))
         self._drain()
         n = len(ops.TASK["log"])
@@ -643,7 +695,7 @@ class TestOpRearmsTheClaudeBreaker:
         import time
 
         from src.claude import api
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         seen = {}
 
@@ -701,7 +753,8 @@ class TestRunQueue:
         """
         from types import SimpleNamespace
 
-        from src.ops import background as ops
+        from src.dispatch import background as ops
+        from src.dispatch import registry
 
         gates, ran = {}, []
 
@@ -716,7 +769,8 @@ class TestRunQueue:
                     raise RuntimeError("op exploded")
 
             monkeypatch.setitem(ops.OPS, name,
-                                {"label": name, "engine": None, "fn": fn})
+                                {"label": name, "engine": None,
+                                 "params": registry.Rows, "fn": fn})
 
         yield SimpleNamespace(add=add, ran=ran,
                               release=lambda n: gates[n].set())
@@ -749,14 +803,16 @@ class TestRunQueue:
 
     def test_an_identical_request_does_not_queue_twice(self, client,
                                                        stub_ops):
-        """A double click is one request. Same op, same params after
-        normalisation -- the existing entry comes back instead of a second
-        copy of the same run."""
+        """A double click is one request. Same op, params that validate to
+        the same values ("5" and 5, a blank field and its default) -- the
+        existing entry comes back instead of a second copy of the same run."""
         stub_ops.add("q-first")
         stub_ops.add("q-second")
         client.post("/api/run/q-first")
-        first = json.loads(client.post("/api/run/q-second").data)
-        again = client.post("/api/run/q-second")
+        first = json.loads(client.post("/api/run/q-second",
+                                       json={"limit": "5"}).data)
+        again = client.post("/api/run/q-second",
+                            json={"limit": 5, "workers": ""})
         assert again.status_code == 202
         body = json.loads(again.data)
         assert body["duplicate"] is True
@@ -771,7 +827,7 @@ class TestRunQueue:
         client.post("/api/run/q-first")
         one = json.loads(client.post("/api/run/q-second", json={}).data)
         two = json.loads(client.post("/api/run/q-second",
-                                     json={"pages": 2}).data)
+                                     json={"limit": 2}).data)
         assert two["duplicate"] is False
         assert two["id"] != one["id"]
         assert two["position"] == 2
@@ -886,7 +942,7 @@ class TestRunQueue:
         """An idle runner is not enough. The queue lives in memory and a save
         restarts the process (server.py schedule_restart), so every waiting
         entry would vanish with it."""
-        from src.ops import background as ops
+        from src.dispatch import background as ops
         assert self._status(client)["running"] is False
         ops.QUEUE.append({"id": "test-entry", "name": "q-first", "params": {},
                           "key": "{}", "enqueued_at": "2026-09-11T00:00:00",

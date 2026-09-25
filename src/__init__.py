@@ -17,6 +17,8 @@ lives here, grouped by what it does rather than by when it was written:
     net/        HTTP, robots, the fetch pool, DuckDuckGo, small helpers
     crawl/      the three passes over boards: crawl, harvest, triage
     discovery/  finding companies worth crawling in the first place
-    ops/        every operation a front end can run, in one registry
+    ops/        the operations a front end can run, by family
+    dispatch/   the one operation table every front end runs from, and the
+                web UI's op runner
     web/        the Flask UI
 """

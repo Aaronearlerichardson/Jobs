@@ -21,7 +21,7 @@ Two kinds of record end up here:
 
 Notes:
     run_scraper.main() calls start() right after argument parsing;
-    src/ops/background.py opens one SessionLog per UI operation and streams its
+    src/dispatch/background.py opens one SessionLog per UI operation and streams its
     browser tee into it. The offline test suite never calls start()
     (tests/conftest.py points _log_dir at a tmp directory, autouse);
     tests/test_session_log.py enforces the record format, the level
@@ -146,7 +146,7 @@ def _level_for(line, err):
 class SessionLog:
     """One session's log file: a logging handler feeding it, plus the
     line-buffered console mirror that both tees (_Tee below, and
-    src/ops/background.py's browser tee) stream into through feed().
+    src/dispatch/background.py's browser tee) stream into through feed().
 
     Notes:
         The handler is attached to the ROOT logger, so any module's
@@ -304,7 +304,7 @@ def _prune(log_dir, keep=KEEP):
 def open_log(mode, invocation, now=None):
     """Create a fresh SessionLog (file + attached logging handler). The
     caller owns close() — start() below wires it up for CLI runs,
-    src/ops/background.py streams its browser-tee'd output into one per UI
+    src/dispatch/background.py streams its browser-tee'd output into one per UI
     operation.
 
     Notes:
