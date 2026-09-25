@@ -14,6 +14,7 @@ nothing (2026-09-21: 1 closed, 0 live, 36 unverifiable of 37), too loose
 and it closes live postings off a 403.
 """
 
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -77,6 +78,17 @@ class TestAPresentBoardIsConfirmed:
     def test_greenhouse_counts_its_jobs(self, serve):
         serve(fake_response({"jobs": _ids(3) + [{}]}))
         assert board_for("greenhouse").probe("acme") == (True, 3)
+
+    def test_a_local_count_reads_the_rows_offices(self, serve):
+        """The probe URL's rows name no offices: the probe reads it, the
+        local count the listing's own URL."""
+        row = {"id": 1, "title": "T", "location": {"name": "Boston, MA"}}
+        log = serve({"content=false": fake_response({"jobs": [row]}),
+                     "content=true": fake_response(
+                         {"jobs": [{**row, "offices": [{"name": "Durham, NC"}]}]})})
+        gh = board_for("greenhouse")
+        assert (gh.probe("acme"), gh.local_count("acme", re.compile(r"\bNC\b"))) == ((True, 1), 1)
+        assert ["content=true" in r.url for r in log] == [False, True]
 
     def test_lever_counts_a_bare_list(self, serve):
         serve(fake_response(_ids(2)))

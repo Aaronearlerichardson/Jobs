@@ -81,15 +81,19 @@ def next_url(payload, pager, home):
     return nxt if isinstance(nxt, str) and nxt.lower().startswith(home.lower()) else None
 
 
-def scope_failed(scoped_total, board_total, cap):
+def scope_failed(scoped_total, board_total, cap, rows=(), board_page=()):
     """Whether a locality-scoped listing came back unnarrowed: as many
     postings as the whole board, or at least `cap` (the most the pull
-    will read).
+    will read). With no scoped total: its `rows` open with every posting
+    of the unscoped first page `board_page`, when that lists any.
 
     >>> scope_failed(82, 2000, 1200), scope_failed(2000, 2000, 1200)
     (False, True)
     >>> scope_failed(1300, None, 1200), scope_failed(None, 2000, 1200), scope_failed(0, 0, 1200)
     (True, False, False)
+    >>> a, b, c = ({"id": x} for x in "abc")
+    >>> scope_failed(None, None, 0, [a, b, c], [a, b, a]), scope_failed(None, None, 0, [b, a], [a, b])
+    (True, False)
 
     Notes:
         2026-09-09: one board answered every scoped call with all 2000
@@ -97,7 +101,10 @@ def scope_failed(scoped_total, board_total, cap):
         Locations" rows to rescue them (531s of an 872s crawl), and kept
         all 1,200 as local.
     """
-    if not isinstance(scoped_total, int) or scoped_total <= 0:
+    if not isinstance(scoped_total, int):
+        head = list(dict.fromkeys(r["id"] for r in board_page if r["id"] is not None))
+        return bool(head) and [r["id"] for r in rows if r["id"] is not None][:len(head)] == head
+    if scoped_total <= 0:
         return False
     if isinstance(board_total, int) and 0 < board_total <= scoped_total:
         return True

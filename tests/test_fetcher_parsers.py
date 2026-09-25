@@ -173,19 +173,28 @@ class TestSpecdBoardsReadTheirListings:
             "US-NC-Morrisville", "US-NC-Winston-Salem", "Cary HQ, North Carolina, United States",
             "Remote, US"]
 
-    def test_a_tenant_with_no_area_option_counts_its_listed_places(self, serve, monkeypatch,
-                                                                  tmp_path):
-        """Nothing vouches for a scope that reports no total: the local count
-        samples the listing's own location column, not 0."""
+    @pytest.mark.parametrize("form", [
+        "",
+        '<select name="searchLocation"><option value="1-2-Durham">US-NC-Durham</option></select>',
+    ], ids=["no-area-option", "area-filter-ignored"])
+    def test_an_unvouched_tenant_is_judged_on_its_listed_places(self, serve, monkeypatch,
+                                                               tmp_path, capsys, form):
+        """Nothing vouches for a tenant whose form offers no area option, nor
+        for one whose search, reporting no total, opens with the unscoped
+        page's postings (it ignored the filter): the pull keeps, and the
+        local count samples, the listing's own location column."""
         monkeypatch.setattr(board.time, "sleep", lambda s: None)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
-        page = "<ul>" + "".join(
+        page = form + "<ul>" + "".join(
             f'<li><div class="header"><span class="field-label">Location</span><span>{loc}'
             f'</span></div><a class="iCIMS_Anchor" href="https://acme.icims.com/jobs/{n}/x/job">'
             f'<h3>Chemist</h3></a></li>'
             for n, loc in ((1, "US-NC-Durham"), (2, "US-TX-Austin"))) + "</ul>"
         serve({"/jobs/search": fake_response(text=page)})
-        assert board_for("icims").local_count("acme", re.compile(r"\bNC\b")) == 1
+        icims, nc = board_for("icims"), re.compile(r"\bNC\b")
+        assert [r["location"] for r in icims.jobs("acme", "Acme", loc_re=nc)] == ["US-NC-Durham"]
+        assert ("unnarrowed" in capsys.readouterr().out) == bool(form)
+        assert icims.local_count("acme", nc) == 1
 
     def test_a_located_pull_asks_the_search_forms_area_options(self, serve, monkeypatch,
                                                                tmp_path):

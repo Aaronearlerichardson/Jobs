@@ -342,7 +342,8 @@ class _Request(_Spec):
 
 
 class Listing(_Request):
-    probe_url: Template | None = Field(None, description="The URL a cheap read asks instead")
+    probe_url: Template | None = Field(None, description="The URL a cheap read of ids, titles "
+                                                         "and the total asks instead")
     pager: Pager | None = Field(None, description="How pages step; none reads one page")
     scope: Scope | None = Field(None, description="Narrows the listing to the locality")
     why: Why | None = Field(None, description='Why this fallback alternative exists: '

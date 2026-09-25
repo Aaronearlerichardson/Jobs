@@ -164,25 +164,28 @@ class TestWorkdayScope:
         assert [j["location"] for j in out] == ["US, NC, Durham"]
         assert [c.method for c in calls].count("GET") == 1
 
-    def test_a_row_the_scope_vouched_for_is_kept_wherever_it_reads(self, cxs):
+    def test_a_row_the_scope_vouched_for_is_kept_naming_the_area(self, cxs):
         """The board's own area search listed it: a listed or detail place
-        outside the area drops nothing."""
+        outside the area drops nothing, and the row names the area searched,
+        which a later hydration keeps."""
         cxs(_postings(30, "US, TX, Austin"), detail="US, CA, Santa Clara",
             scoped=[_posting("US, CA, Santa Clara", "/job/US-CA/Eng_A"),
                     _posting("2 Locations", "/job/US-CA/Eng_B")])
         out = board_for("workday").whole_board(WD, NC_RE)
-        assert [j["location"] for j in out] == ["US, CA, Santa Clara"] * 2
+        assert [j["location"] for j in out] == ["US, CA, Santa Clara; North Carolina"] * 2
+        job = board_for("workday").hydrate({**out[1], "description": ""})
+        assert (job["description"], job["location"]) == ("Build things.", out[1]["location"])
 
     def test_the_rescue_has_a_per_pull_budget(self, cxs, capsys):
         """Past `rescue.cap`, a row the facet vouched for stays on its
-        listed text; the budget line says so."""
+        listed text, the area appended; the budget line says so."""
         spec = config.BOARDS["workday"]
         capped = board.Board("workday", {**spec, "rescue": {**spec["rescue"], "cap": 4}})
         local = [_posting("5 Locations", f"/job/US-CA-Santa-Clara/Eng_{i}") for i in range(6)]
         calls = cxs(local + _postings(30, "US, TX, Austin"), scoped=local)
         out = capped.whole_board(WD, NC_RE)
         assert [c.method for c in calls].count("GET") == 4
-        assert [j["location"] for j in out].count("5 Locations") == 2
+        assert [j["location"] for j in out].count("5 Locations; North Carolina") == 2
         assert "detail budget" in capsys.readouterr().out
 
     def test_the_local_count_is_the_scoped_total(self, cxs):
