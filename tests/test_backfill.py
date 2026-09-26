@@ -8,6 +8,10 @@ attempts now stamp jobs.desc_checked_at, and reruns skip rows checked in the
 last `retry_days` days.
 """
 
+import asyncio
+
+from conftest import answer
+
 import src.store as store
 from src.ops import backfill as ops
 from src.ats.board import company as company_fetch
@@ -26,39 +30,37 @@ class TestBackfillRetryThrottle:
             "track": "local-tech"})
         conn.close()
 
-    def test_failed_rows_are_stamped_and_skipped_on_rerun(
+    async def test_failed_rows_are_stamped_and_skipped_on_rerun(
             self, tmp_path, monkeypatch, capsys):
         dbp = tmp_path / "t.db"
         self._seed(dbp)
         # The board no longer lists the job, and its detail page is gone too.
-        monkeypatch.setattr(company_fetch, "fetch_company",
-                            lambda *a, **k: [])
-        monkeypatch.setattr(company_fetch, "hydrate_description",
-                            lambda stub, company=None: None)
+        monkeypatch.setattr(company_fetch, "afetch_company", answer([]))
+        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
         t = {"db_path": dbp}
 
-        assert ops.backfill_board_descriptions(t=t) == 0
+        assert await ops.backfill_board_descriptions(t=t) == 0
         out = capsys.readouterr().out
         assert "backfilling 1 description(s)" in out
 
         # Rerun inside the retry window: the row is skipped, its board is
         # never fetched.
         fetched = []
-        monkeypatch.setattr(company_fetch, "fetch_company",
-                            lambda *a, **k: fetched.append(1) or [])
-        assert ops.backfill_board_descriptions(t=t) == 0
+        monkeypatch.setattr(company_fetch, "afetch_company",
+                            answer(lambda *a, **k: fetched.append(1) or []))
+        assert await ops.backfill_board_descriptions(t=t) == 0
         out = capsys.readouterr().out
         assert "backfilling 0 description(s)" in out
         assert "1 skipped: failed in the last 3d" in out
         assert not fetched, "a recently-failed row must not re-fetch its board"
 
         # retry_days=0 forces the retry.
-        assert ops.backfill_board_descriptions(t=t, retry_days=0) == 0
+        assert await ops.backfill_board_descriptions(t=t, retry_days=0) == 0
         out = capsys.readouterr().out
         assert "backfilling 1 description(s)" in out
         assert fetched, "retry_days=0 must retry the row"
 
-    def test_rows_of_boardless_companies_are_stamped_too(
+    async def test_rows_of_boardless_companies_are_stamped_too(
             self, tmp_path, capsys):
         """A company row with no ats has no board to fetch — that IS a
         failed attempt. Unstamped, these rows were re-selected (and
@@ -75,24 +77,24 @@ class TestBackfillRetryThrottle:
         conn.close()
         t = {"db_path": dbp}
 
-        ops.backfill_board_descriptions(t=t)
+        await ops.backfill_board_descriptions(t=t)
         assert "backfilling 1 description(s)" in capsys.readouterr().out
-        ops.backfill_board_descriptions(t=t)
+        await ops.backfill_board_descriptions(t=t)
         out = capsys.readouterr().out
         assert "backfilling 0 description(s)" in out
         assert "1 skipped: failed in the last 3d" in out
 
-    def test_a_successful_backfill_is_not_throttled(
+    async def test_a_successful_backfill_is_not_throttled(
             self, tmp_path, monkeypatch, capsys):
         dbp = tmp_path / "t.db"
         self._seed(dbp)
         board_row = {"title": "Vanished Engineer", "description": ""}
-        monkeypatch.setattr(company_fetch, "fetch_company",
-                            lambda *a, **k: [board_row])
+        monkeypatch.setattr(company_fetch, "afetch_company", answer([board_row]))
         monkeypatch.setattr(
-            company_fetch, "hydrate_description",
-            lambda stub, company=None: stub.__setitem__("description", "A real JD body."))
-        assert ops.backfill_board_descriptions(t={"db_path": dbp}) == 1
+            company_fetch, "ahydrate_description",
+            answer(lambda stub, company=None: stub.__setitem__("description",
+                                                               "A real JD body.")))
+        assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 1
         conn = store.connect(dbp)
         row = conn.execute("SELECT description, desc_checked_at FROM jobs "
                            "WHERE job_id='gh_acme_gone'").fetchone()
@@ -134,14 +136,13 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         return [{"title": "Data Engineer",
                  "description": f"A real JD body from {company['name']}."}]
 
-    def test_the_companies_go_through_fan_out_with_the_given_workers(
+    async def test_the_companies_go_through_fan_out_with_the_given_workers(
             self, tmp_path, monkeypatch):
         dbp = tmp_path / "t.db"
         names = ["Acme", "Beacon", "Cirrus"]
         self._seed(dbp, names)
-        monkeypatch.setattr(company_fetch, "fetch_company", self._board)
-        monkeypatch.setattr(company_fetch, "hydrate_description",
-                            lambda job, company=None: None)
+        monkeypatch.setattr(company_fetch, "afetch_company", answer(self._board))
+        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
 
         seen = {}
         real_fan_out = ops.fan_out
@@ -152,45 +153,42 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
             return real_fan_out(items, fn, label, max_workers, **kw)
 
         monkeypatch.setattr(ops, "fan_out", _spy)
-        assert ops.backfill_board_descriptions(t={"db_path": dbp},
+        assert await ops.backfill_board_descriptions(t={"db_path": dbp},
                                                max_workers=5) == 3
         assert seen["max_workers"] == 5, "max_workers must reach the pool"
         assert sorted(c["name"] for c, _rows in seen["items"]) == sorted(names), \
             "every company's board fetch must be submitted to the pool"
 
-    def test_three_boards_are_actually_in_flight_at_once(
+    async def test_three_boards_are_actually_in_flight_at_once(
             self, tmp_path, monkeypatch):
         """A barrier that only releases when three fetches are inside it at
         the same moment: serial execution deadlocks it, the timeout fires,
         board_index reports the failure and nothing is backfilled."""
-        import threading
-
         dbp = tmp_path / "t.db"
         self._seed(dbp, ["Acme", "Beacon", "Cirrus"])
-        barrier = threading.Barrier(3, timeout=20)
+        barrier = asyncio.Barrier(3)
 
-        def _fetch(company, loc_re=None):
-            barrier.wait()
+        async def _fetch(company, loc_re=None):
+            async with asyncio.timeout(20):
+                await barrier.wait()
             return self._board(company)
 
-        monkeypatch.setattr(company_fetch, "fetch_company", _fetch)
-        monkeypatch.setattr(company_fetch, "hydrate_description",
-                            lambda job, company=None: None)
-        assert ops.backfill_board_descriptions(t={"db_path": dbp},
+        monkeypatch.setattr(company_fetch, "afetch_company", _fetch)
+        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
+        assert await ops.backfill_board_descriptions(t={"db_path": dbp},
                                                max_workers=3) == 3
 
-    def test_every_row_is_still_written_and_counted(
+    async def test_every_row_is_still_written_and_counted(
             self, tmp_path, monkeypatch, capsys):
         """Concurrency changes when a company line prints (completion order
         now), not what the run does: the same rows are written, the same
         per-company summaries and footer are printed."""
         dbp = tmp_path / "t.db"
         self._seed(dbp, ["Acme", "Beacon"])
-        monkeypatch.setattr(company_fetch, "fetch_company", self._board)
-        monkeypatch.setattr(company_fetch, "hydrate_description",
-                            lambda job, company=None: None)
+        monkeypatch.setattr(company_fetch, "afetch_company", answer(self._board))
+        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
 
-        assert ops.backfill_board_descriptions(t={"db_path": dbp}) == 2
+        assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 2
         out = capsys.readouterr().out
         assert "Acme" in out and "Beacon" in out
         assert "1 stale ->  1 matched" in out

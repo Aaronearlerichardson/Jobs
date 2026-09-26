@@ -22,7 +22,6 @@ import ssl
 import sys
 import threading
 import time
-import weakref
 from datetime import timedelta
 from functools import partial, wraps
 
@@ -92,8 +91,6 @@ _LOOP_THREAD = None
 _START = threading.Lock()
 #: thread -> the task its run_sync waits on. Read and written on the loop.
 _WAITS = {}
-#: Threads whose pool left them running (see abandon).
-_ABANDONED = weakref.WeakSet()
 
 
 def _loop():
@@ -158,10 +155,6 @@ def run_sync(coro):
     ctx, done = contextvars.copy_context(), concurrent.futures.Future()
 
     def start():
-        if me in _ABANDONED:
-            coro.close()
-            done.set_exception(asyncio.CancelledError())
-            return
         task = _WAITS[me] = loop.create_task(coro, context=ctx)
         task.add_done_callback(partial(_settle, me, done))
 
@@ -170,7 +163,7 @@ def run_sync(coro):
         return done.result()
     except BaseException:
         if not done.done():
-            loop.call_soon_threadsafe(_cancel, (me,))
+            loop.call_soon_threadsafe(_cancel, me)
             concurrent.futures.wait([done], timeout=10)
         raise
 
@@ -210,23 +203,11 @@ def _settle(thread, done, task):
         done.set_result(task.result())
 
 
-def _cancel(threads):
-    """Cancel the tasks `threads` wait on in run_sync. On the loop."""
-    for thread in threads:
-        task = _WAITS.get(thread)
-        if task is not None:
-            task.cancel()
-
-
-def abandon(threads):
-    """Cancel the request each of `threads` waits on in run_sync, and
-    fail every one they start later with CancelledError: net.parallel's
-    pool calls it for the work its block leaves running
-    (tests/test_harvest.py::test_ctrl_c_mid_wait_never_starts_the_queued_work)."""
-    threads = tuple(threads)
-    _ABANDONED.update(threads)
-    if threads and _LOOP is not None:
-        _LOOP.call_soon_threadsafe(_cancel, threads)
+def _cancel(thread):
+    """Cancel the task `thread` waits on in run_sync. On the loop."""
+    task = _WAITS.get(thread)
+    if task is not None:
+        task.cancel()
 
 
 def _shutdown():
@@ -460,15 +441,23 @@ async def _exchange(method, url, polite=True, timeout=None,
     """The requests.Response requests would return for one request (its
     keywords: headers, params, data, json), redirects followed by
     requests' rules, MAX_REDIRECTS at most
-    (tests/test_robots.py::TestTransport)."""
+    (tests/test_robots.py::TestTransport). A polite request's hop to an
+    origin it has not been on yet waits that origin's turn first, as a
+    first request to it would (tests/test_robots.py::
+    test_a_redirect_into_a_shared_host_waits_its_turn)."""
     req, hops, limit = _prepare(method, url, polite, **kw), [], _timeout(timeout)
     r = await _hop(req, limit)
+    origins = {origin_of(url)}
     while allow_redirects and r.is_redirect:
         if len(hops) >= MAX_REDIRECTS:
             raise requests.TooManyRedirects(
                 f"Exceeded {MAX_REDIRECTS} redirects.", response=r)
         hops.append(r)
         req = next(_REDIRECTS.resolve_redirects(r, req, yield_requests=True))
+        if polite and origin_of(req.url) not in origins:
+            origins.add(origin_of(req.url))
+            from .robots import CACHE       # robots.py imports this module
+            await CACHE.wait_turn(req.url)
         r = await _hop(req, limit)
     r.history = hops
     return r

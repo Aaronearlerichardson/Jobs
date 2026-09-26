@@ -83,29 +83,29 @@ class TestRemoteAdmissionGates:
         monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
         assert not ops._whole_board(self._co(mission=0.99), 0.85)
 
-    def test_remote_row_survives_the_geo_gate(self, local_track):
-        assert ops._keep_job(self._co(mission=0.9), self._job("Remote - US"),
+    async def test_remote_row_survives_the_geo_gate(self, local_track):
+        assert await ops._keep_job(self._co(mission=0.9), self._job("Remote - US"),
                              self._track(local_track))
 
-    def test_onsite_elsewhere_still_drops(self, local_track, elsewhere):
-        assert not ops._keep_job(self._co(mission=0.9), self._job(elsewhere),
+    async def test_onsite_elsewhere_still_drops(self, local_track, elsewhere):
+        assert not await ops._keep_job(self._co(mission=0.9), self._job(elsewhere),
                                  self._track(local_track))
 
-    def test_local_row_is_kept(self, local_track, local_addr):
-        assert ops._keep_job(self._co(mission=0.9), self._job(local_addr),
+    async def test_local_row_is_kept(self, local_track, local_addr):
+        assert await ops._keep_job(self._co(mission=0.9), self._job(local_addr),
                              self._track(local_track))
 
-    def test_sweep_tag_alone_admits_no_remote(self, local_track):
+    async def test_sweep_tag_alone_admits_no_remote(self, local_track):
         # Machine-set tag: whole-board fetch, local-onsite rows ONLY.
-        assert not ops._keep_job(self._co(tag=tags.SWEEP),
+        assert not await ops._keep_job(self._co(tag=tags.SWEEP),
                                  self._job("Remote - US"),
                                  self._track(local_track))
 
-    def test_watch_tag_admits_remote(self, local_track):
-        assert ops._keep_job(self._co(tag="watch"), self._job("Remote - US"),
+    async def test_watch_tag_admits_remote(self, local_track):
+        assert await ops._keep_job(self._co(tag="watch"), self._job("Remote - US"),
                              self._track(local_track))
 
-    def test_multi_division_watch_tag_widens_the_crawl_paths_division_gate(
+    async def test_multi_division_watch_tag_widens_the_crawl_paths_division_gate(
             self, local_track, division_vocab):
         # _keep_job is the CRAWL path's division gate; src.crawl.triage has
         # its own copy (tested in test_triage.py against the same fixture).
@@ -114,15 +114,15 @@ class TestRemoteAdmissionGates:
         job = self._job("Remote - US",
                         title="Senior Software Engineer, AI Research Clusters")
         job["description"] = _PLAIN_ENG_BODY
-        assert ops._keep_job(self._co(tag="watch", name="Megacorp Watched"),
+        assert await ops._keep_job(self._co(tag="watch", name="Megacorp Watched"),
                              job, self._track(local_track))
 
-    def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(
+    async def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(
             self, local_track, division_vocab):
         job = self._job("Remote - US",
                         title="Senior Software Engineer, AI Research Clusters")
         job["description"] = _PLAIN_ENG_BODY
-        assert not ops._keep_job(self._co(tag="", name="Megacorp Watched"),
+        assert not await ops._keep_job(self._co(tag="", name="Megacorp Watched"),
                                  job, self._track(local_track))
 
 
@@ -208,23 +208,23 @@ class TestWidenAndRestore:
 
 
 class TestSourceAssembly:
-    def test_location_scoped_sources_carry_company_rows(self, cfg, local_track):
+    async def test_location_scoped_sources_carry_company_rows(self, cfg, local_track):
         # Empty store (CI) yields no sources; the SHAPE is what's asserted.
-        specs = runner.build_sources(cfg, local_track)
+        specs = await runner.build_sources(cfg, local_track)
         assert all(s["company"] is not None for s in specs)
 
-    def test_sweep_sources_carry_no_company_row(self, cfg, sweep_track):
-        specs = runner.build_sources(cfg, sweep_track)
+    async def test_sweep_sources_carry_no_company_row(self, cfg, sweep_track):
+        specs = await runner.build_sources(cfg, sweep_track)
         assert all(s["company"] is None for s in specs)
 
-    def test_priority_companies_come_first_and_are_starred(self, cfg, sweep_track):
+    async def test_priority_companies_come_first_and_are_starred(self, cfg, sweep_track):
         prio = getattr(cfg, "DISCOVERY_PRIORITY_COMPANIES", [])
         if not prio:
             return                                  # none configured: nothing to order
-        specs = runner.build_sources(cfg, sweep_track)
+        specs = await runner.build_sources(cfg, sweep_track)
         assert [s for s in specs[:len(prio)] if s["platform"].endswith("*")]
 
-    def test_dormant_companies_drop_out_of_the_source_list(self, cfg,
+    async def test_dormant_companies_drop_out_of_the_source_list(self, cfg,
                                                            local_track,
                                                            tmp_path):
         """The point of dormancy: build_sources must read the crawlable rows,
@@ -242,16 +242,16 @@ class TestSourceAssembly:
         conn.commit()
         conn.close()
         t = {**local_track, "db_path": db_path, "store_tag": None}
-        names = {s["name"] for s in runner.build_sources(cfg, t)}
+        names = {s["name"] for s in await runner.build_sources(cfg, t)}
         assert "Awake" in names and "Asleep" not in names
 
         conn = store.connect(db_path)
         store.reactivate_company(conn, cid)
         conn.close()
-        names = {s["name"] for s in runner.build_sources(cfg, t)}
+        names = {s["name"] for s in await runner.build_sources(cfg, t)}
         assert "Asleep" in names
 
-    def test_websearch_toggle_removes_sources(self, cfg, sweep_track):
-        with_ws = runner.build_sources(cfg, sweep_track)
-        without = runner.build_sources(cfg, sweep_track, include_websearch=False)
+    async def test_websearch_toggle_removes_sources(self, cfg, sweep_track):
+        with_ws = await runner.build_sources(cfg, sweep_track)
+        without = await runner.build_sources(cfg, sweep_track, include_websearch=False)
         assert len(without) <= len(with_ws)

@@ -27,14 +27,14 @@ def dedup(t=None):
     return n, n_jobs
 
 
-def prune(offmission=False, t=None):
+async def prune(offmission=False, t=None):
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
-    from src.ops.maintenance import track_store
+    from src.ops.maintenance import track_writer
     from src.ops.repair import prune_dead_boards
-    with track_store(t) as conn:
-        n_dead, n_off = prune_dead_boards(
-            conn, deactivate_offmission=bool(offmission))
+    async with track_writer(t) as db:
+        n_dead, n_off = await prune_dead_boards(
+            db, deactivate_offmission=bool(offmission))
     print(f"\n  deactivated {n_dead} dead-board compan(ies)"
           + (f" + {n_off} off-mission" if offmission else "") + ".")
     return n_dead, n_off
@@ -48,36 +48,36 @@ def backfill_axes(t=None):
         return store.backfill_axis_columns(conn)
 
 
-def ingest_nlx(companies, t=None):
+async def ingest_nlx(companies, t=None):
     """Pull postings for bot-gated employers from the federal NLx feed and
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""
-    from src.ats.feeds.careeronestop import fetch_nlx_company
+    from src.ats.feeds.careeronestop import afetch_nlx_company
     from src.ops.ingest import ingest_external_jobs
     if not companies:
         print("  [!] give a comma-separated list of employer names")
         return 0
     total = 0
     for name in companies:
-        jobs = fetch_nlx_company(name)
+        jobs = await afetch_nlx_company(name)
         print(f"  {name}: {len(jobs)} NLx posting(s)")
         if jobs:
-            total += ingest_external_jobs(jobs, source="nlx", t=t)
+            total += await ingest_external_jobs(jobs, source="nlx", t=t)
     print(f"\n  {total} new job(s) ingested from the NLx feed.")
     return total
 
 
-def dork_sweep():
+async def dork_sweep():
     """ATS dorking via DuckDuckGo: mine search-indexed board URLs for
     companies in your locality into the store. Returns (added, checked)."""
     from src.discovery.dork import run_ddgs_dorks
-    added, checked = run_ddgs_dorks()
+    added, checked = await run_ddgs_dorks()
     print(f"\n  {added} new local board(s) added to the store "
           f"({checked} extracted from dork results)")
     return added, checked
 
 
-def discover_term(term, no_report=False, dry_run=False):
+async def discover_term(term, no_report=False, dry_run=False):
     """Free-text sector discovery: ask Claude for likely employers matching
     `term`, probe each against the ATS registry, and (apply-by-default)
     queue the confirmed ones unless `dry_run`. Returns the discovery
@@ -87,10 +87,10 @@ def discover_term(term, no_report=False, dry_run=False):
     if not term:
         print("  [!] give a sector/term to search for, e.g. 'medical device companies'")
         return None
-    result = discover(term)
+    result = await discover(term)
     print_summary(result)
     if not no_report:
         write_discovery_report(result)
-    for line in apply_to_store(result, dry_run=bool(dry_run)):
+    for line in await apply_to_store(result, dry_run=bool(dry_run)):
         print(line)
     return result

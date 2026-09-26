@@ -40,6 +40,7 @@ except Exception:
 from src import tags
 from src import store
 from src.crawl.page_capture import page_url, parse_page
+from src.net import http
 from src.ops.ingest import ingest_external_jobs
 
 PORT_DEFAULT = 8877
@@ -168,7 +169,7 @@ def ingest_html(url, html, label=""):
     jobs, source = parse_page(url, html)
     with closing(store.connect()) as conn:
         owner = attribute_company(conn, page_url(html, url), jobs)
-    ingested = ingest_external_jobs(jobs, source=source) if jobs else 0
+    ingested = http.run_sync(ingest_external_jobs(jobs, source=source)) if jobs else 0
     # Company name -> its own website, when the page exposed it (JSON-LD).
     sites = {j["company"]: j["company_url"] for j in jobs
              if j.get("company") and j.get("company_url")}
@@ -297,9 +298,10 @@ def main():
 
     if args.add:
         from src.ops.ingest import add_manual_job
-        add_manual_job(url=args.url, title=args.title, company=args.company,
-                       location=args.location, description=args.desc,
-                       pull_board=not args.no_board)
+        http.run_sync(add_manual_job(url=args.url, title=args.title,
+                                     company=args.company, location=args.location,
+                                     description=args.desc,
+                                     pull_board=not args.no_board))
         return
 
     if args.files:

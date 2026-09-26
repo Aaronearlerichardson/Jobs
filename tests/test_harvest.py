@@ -8,7 +8,8 @@ import threading
 
 import pytest
 
-from conftest import company_row as _company, fake_response, make_board_fn, no_pacing
+from conftest import (answer, company_row as _company, fake_response, make_board_fn,
+                      no_pacing)
 
 from src import config, store
 from src.claude import api as claude_api
@@ -467,16 +468,17 @@ def test_harvest_board_buries_a_second_definitive_404(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("ats, dead", [("greenhouse", True),
                                        ("workday", False)])
-def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
+async def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
     from src.crawl import runner
     c = _company(db, "Acme", ats=ats)
     snap = {"fetch_errors": 1, "incomplete": True, "capped": False,
             "capped_total": None, "last_error": "Acme: HTTP 404"}
-    for _ in range(2):
-        spec = {"company": store.get_company(db, c["id"]), "name": "Acme",
-                "platform": ats}
-        runner._gate_sources(db, local_track, [spec], [([], None, snap)],
-                             commit=True)
+    async with store.Writer(db) as w:
+        for _ in range(2):
+            spec = {"company": store.get_company(db, c["id"]), "name": "Acme",
+                    "platform": ats}
+            await runner._gate_sources(w, local_track, [spec], [([], None, snap)],
+                                       commit=True)
     row = store.get_company(db, c["id"])
     assert (row["miss_reason"], row["active"]) == (
         ("board-dead:greenhouse", 0) if dead else (None, 1))
@@ -675,12 +677,12 @@ def _ctrl_c():
 
 @pytest.mark.skipif(signal.getsignal(signal.SIGINT) is not signal.default_int_handler,
                     reason="SIGINT is not Python's KeyboardInterrupt here")
-@pytest.mark.parametrize("entry", ["harvest.run", "drain", "fan_out", "fetch_all"])
+@pytest.mark.parametrize("entry", ["harvest.run", "fan_out", "fetch_all"])
 def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
     """Two items run, each waiting on a request, and Ctrl+C lands while the
     caller waits on them: both requests are cancelled, and the six items
-    still queued never run. harvest.run and drain_or_abandon used to leave
-    them queued, and the interpreter's exit ran every one (2026-09-17
+    still queued never run. harvest.run and the thread pools' drain used to
+    leave them queued, and the interpreter's exit ran every one (2026-09-17
     reresolve log: requests after the KeyboardInterrupt)."""
     lock, flying, cancelled = threading.Lock(), [], []
     started, ran = [], []
@@ -707,14 +709,13 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
                 urls[name] = f"https://{name.replace(' ', '')}.test/"
         return urls.get(name)
 
-    def work(name):
+    async def work(name):
         if begin(name):
-            http.SESSION.get(urls[name])
+            await http.send("GET", urls[name])
         return []
 
-    async def awork(company):           # harvest.run's board, on the loop
-        if begin(company["name"]):
-            await http.send("GET", urls[company["name"]])
+    async def results(gen):
+        return [x async for x in gen]
 
     names = [f"Board {i}" for i in range(8)]
     db = tmp_path / "s.db"
@@ -724,12 +725,12 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
     conn.close()
     run = {
         "harvest.run": lambda: harvest.run(
-            db_path=db, triage=False, board_fn=make_board_fn(before=awork)),
-        "drain": lambda: parallel.drain(names, work, lambda f, n: None,
-                                        lambda n: None, max_workers=2),
-        "fan_out": lambda: list(parallel.fan_out(names, work, max_workers=2)),
-        "fetch_all": lambda: parallel.fetch_all(
-            [(n, "x", lambda n=n: work(n)) for n in names], max_workers=2),
+            db_path=db, triage=False,
+            board_fn=make_board_fn(before=lambda c: work(c["name"]))),
+        "fan_out": lambda: http.run_sync(results(parallel.fan_out(
+            names, work, max_workers=2))),
+        "fetch_all": lambda: http.run_sync(parallel.fetch_all(
+            [(n, "x", lambda n=n: work(n)) for n in names], max_workers=2)),
     }[entry]
     before = set(threading.enumerate())
     with pytest.raises(KeyboardInterrupt):
@@ -821,16 +822,17 @@ def test_harvest_summary_line_is_bare_when_nothing_is_flagged(
     ({"incomplete": True}, 0),      # a page failed: nothing closes
     ({"capped": True}, 0),          # capped: never closes (see store.jobs)
 ])
-def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
-                                                        snapshot, closed):
+async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
+                                                              snapshot, closed):
     """The crawl reads fetch_all's per-source snapshot and gives
     store.sync_job_statuses the same guard the harvester does."""
     from src.crawl import runner
     c = _company(db, "Acme")
     store.upsert_job(db, {"job_id": "gh_acme_old", "company_id": c["id"],
                           "title": "Still open", "track": local_track["track"]})
-    *_, n_reopened, n_closed = runner._gate_company_board(
-        db, local_track, c, [_job(1)], commit=True, snapshot=snapshot)
+    async with store.Writer(db) as w:
+        *_, n_reopened, n_closed = await runner._gate_company_board(
+            w, local_track, c, [_job(1)], commit=True, snapshot=snapshot)
     assert (n_reopened, n_closed) == (0, closed)
     assert db.execute("SELECT status FROM jobs WHERE job_id='gh_acme_old'"
                       ).fetchone()["status"] == ("closed" if closed else "open")
@@ -838,7 +840,7 @@ def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
 
 # ── the crawl adopts harvested rows ─────────────────────────────────────────
 
-def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
+async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     """The end-to-end contract: a harvested row (no track) is scored by the
     next crawl, and the crawl reuses the stored description instead of
     re-hydrating."""
@@ -862,17 +864,18 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     t = {**t, "db_path": db, "sources": {**t["sources"]},
          "email": False, "verify_top": 0, "require_core_anchor": False,
          "exclude_gate": False, "geo_gate": False, "cost_guard": 0}
-    monkeypatch.setattr(runner, "build_sources", lambda cfg, tt, include_websearch=None: [
-        {"name": "Acme", "platform": "greenhouse", "company": c,
-         "thunk": lambda: board}])
+    monkeypatch.setattr(runner, "build_sources", answer(
+        lambda cfg, tt, include_websearch=None: [
+            {"name": "Acme", "platform": "greenhouse", "company": c,
+             "thunk": answer(board)}]))
     monkeypatch.setattr(runner, "resume_text", lambda: "resume text")
     hydrated = []                # jobs that reached the network path bodiless
 
-    def fake_hydrate(j):
+    async def fake_hydrate(j):
         if not j.get("description"):
             hydrated.append(j)
         return j
-    monkeypatch.setattr(ops.company_fetch, "hydrate_description", fake_hydrate)
+    monkeypatch.setattr(ops.company_fetch, "ahydrate_description", fake_hydrate)
     monkeypatch.setattr(gates, "is_technical_role",
                         lambda title, tt: True)
 
@@ -881,12 +884,10 @@ def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
 
         def as_columns(self):
             return {"resume_fit_score": 0.7, "fit_reason": "ok"}
-    monkeypatch.setattr(ops, "score_resume_fit",
-                        lambda title, description="", *, location="",
-                        max_tokens=300: R())
-    monkeypatch.setattr(scoring, "self_heal_unscored", lambda *a, **k: 0)
-    runner.run_track(t, fit=True, commit=True, send=False, verify=False,
-                     websearch=False)
+    monkeypatch.setattr(ops, "ascore_resume_fit", answer(R()))
+    monkeypatch.setattr(scoring, "self_heal_unscored", answer(0))
+    await runner.run_track(t, fit=True, commit=True, send=False, verify=False,
+                           websearch=False)
     conn = store.connect(db)
     row = conn.execute("SELECT * FROM jobs WHERE job_id='gh_acme_1'").fetchone()
     assert row["resume_fit_score"] == 0.7
@@ -911,15 +912,15 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         _company(conn, "A")
         order = []
         monkeypatch.setattr("src.crawl.triage.run",
-                            lambda **kw: order.append("triage")
-                            or {"pending": 0})
+                            answer(lambda **kw: order.append("triage")
+                                   or {"pending": 0}))
         monkeypatch.setattr(
             "src.crawl.triage.roster_tracks",
             lambda: [{"track": "local-tech", "verify_top": verify_top}])
         monkeypatch.setattr(harvest, "verify_top",
-                            lambda **kw: order.append(("verify", kw)))
+                            answer(lambda **kw: order.append(("verify", kw))))
         monkeypatch.setattr(harvest, "check_closed_jobs",
-                            lambda **kw: order.append(("closed", kw)))
+                            answer(lambda **kw: order.append(("closed", kw))))
         monkeypatch.setattr(harvest, "rewrite_digest",
                             lambda conn, t, **kw: order.append("digest"))
         return db, order

@@ -63,7 +63,7 @@ def _parsed():
 #  1. The company-activation rule
 # --------------------------------------------------------------------------- #
 #
-# `score_company_mission()` returns (None, None, "") when scoring is
+# `ascore_company_mission()` returns (None, None, "") when scoring is
 # UNAVAILABLE — no API key, a failed or rate-limited call. That None is not
 # a verdict, and every add path must treat it as "keep crawling". Six sites
 # implemented that inline; one had drifted to two hard-coded tier names,
@@ -201,17 +201,16 @@ class TestOffmissionInactiveIsNotTheActivationRule:
 #: `is_multi_division`, which it calls). Still re-exported as
 #: `src.claude.api.is_active_mission`, which is what most call sites say.
 #:
-#: `local_sourcing.score_missions` (its per-row consumer, `_scored`) is
-#: the REACTIVATION half and is
+#: `local_sourcing.score_missions` is the REACTIVATION half and is
 #: deliberately NOT the helper: it must not revive a row on `tier is None`.
 #: A None tier with a non-None score means the model answered with a mission
-#: name outside the profile's taxonomy — score_company_mission nulls the tier
+#: name outside the profile's taxonomy -- ascore_company_mission nulls the tier
 #: but keeps the score, so the "scoring unavailable" `return` above does
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
 RULE_SITES_ALLOWED = {
     ("src/config/policy.py", "is_active_mission"),
-    ("src/discovery/local_sourcing.py", "_scored"),
+    ("src/discovery/local_sourcing.py", "score_missions"),
 }
 
 #: Names that, compared against with `in`, mean "this is the activation rule".
@@ -349,27 +348,21 @@ def test_doctests_actually_exist():
 # --------------------------------------------------------------------------- #
 
 #: Modules allowed to run a thread pool of their own, and why. Everything
-#: else calls net.parallel (fan_out for work that can FAIL, drain for work
-#: that can HANG, fetch_all for the crawl's source fan-out).
+#: else runs concurrent work as tasks through net.parallel (fan_out, with
+#: `stall_s` for work that can HANG; fetch_all for the crawl's sources).
 POOL_OWNERS = {
-    "src/net/parallel.py":
-        "owns the shared primitives",
     "src/store/schema.py":
-        "the async store's one thread: a sqlite3 connection lives on the thread "
-        "that opened it",
-    "src/discovery/resolve/fetchpool.py":
-        "per-run candidate-URL memo; the pool is part of the cache",
+        "the async store's one thread: each sqlite3 call blocks",
     "src/net/http.py":
         "the session's DNS lookups, on threads no asyncio.to_thread work can "
-        "queue ahead of (net.parallel imports net.http, so not its pool)",
+        "queue ahead of",
 }
 
-#: A pool is net.parallel.pool, whose exit cancels the queue however its
-#: block ends, or a raw executor, which only RAW_POOLS may build (or name,
-#: so an import alias cannot hide one).
+#: A pool is a raw executor, which only RAW_POOLS may build (or name, so an
+#: import alias cannot hide one).
 _POOL_RE = re.compile(r"\bThreadPoolExecutor\(|\bpool\(")
 _RAW_RE = re.compile(r"\b(Thread|Process)PoolExecutor\b")
-RAW_POOLS = {"src/net/parallel.py", "src/net/http.py", "src/store/schema.py"}
+RAW_POOLS = {"src/net/http.py", "src/store/schema.py"}
 
 
 def test_thread_pools_go_through_net_parallel():
@@ -386,9 +379,9 @@ def test_thread_pools_go_through_net_parallel():
         if hits:
             offenders[rel] = hits
     assert not offenders, (
-        f"{sorted(offenders)} build their own thread pool. Use "
-        "src.net.parallel (fan_out / drain / fetch_all), or add the module "
-        "to POOL_OWNERS with the reason and build it with net.parallel.pool.")
+        f"{sorted(offenders)} build their own thread pool. Run the work as "
+        "tasks (src.net.parallel.fan_out / fetch_all), or add the module to "
+        "POOL_OWNERS with the reason.")
 
 
 def test_pool_owners_still_own_pools():
@@ -940,7 +933,11 @@ def test_the_one_client_session_is_made_in_net_http_with_a_timeout():
 
 #: Modules allowed to catch CancelledError, and why: the boundaries where
 #: async code meets a caller that is not.
-CANCEL_BOUNDARIES = {}
+CANCEL_BOUNDARIES = {
+    "src/dispatch/registry.py":
+        "ainvoke: a started sync target cannot be cancelled, so its outcome, "
+        "not the cancel, is the op's",
+}
 
 
 def _cancel_catches(rel, tree):

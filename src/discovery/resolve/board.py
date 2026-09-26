@@ -1,6 +1,6 @@
 """Name in, crawlable board out -- or the reason there isn't one.
 
-The top of this package: `resolve_or_miss` is the single entry point for
+The top of this package: `aresolve_or_miss` is the single entry point for
 "attempt a company, and record the outcome either way", and everything
 else here is what it is built from.
 
@@ -87,7 +87,7 @@ read_local = http.sync_shim(aread_local)
 
 async def _validate_board(comp):
     """(total, nc) live posting counts of a resolved board from its cheap
-    reads, as `probe_company` counts a guess: `Board.alive` (the listing's
+    reads, as `aprobe_company` counts a guess: `Board.alive` (the listing's
     own total where it reports one) and `Board.local_count`. None when the
     read failed; (0, 0) when it proved the board gone (`Board.gone`) or the
     columns name no board. A board that lists nothing is dead or wrong to
@@ -286,22 +286,18 @@ async def aresolve_or_miss(name, careers_url=""):
     return hit, None
 
 
-resolve_or_miss = http.sync_shim(aresolve_or_miss)
+async def resolved(name, careers_url=""):
+    """`aresolve_or_miss`'s (hit, reason), with a RAISE reported and turned
+    into a miss reason of the same shape.
 
-
-def resolved(fut, name):
-    """`resolve_or_miss`'s (hit, reason) off a completed future, with a
-    RAISE turned into a miss reason of the same shape.
-
-    `resolve_or_miss` already converts the exceptions it can see, but the
-    future itself can still fail -- a worker that dies in the pool, a
-    cancelled task. Its three consumers (resolve_leads, add_names,
-    reresolve_misses) each wrote this out, and the third had already
-    dropped the report line, so a resolution that blew up during a
-    reresolve became a miss with nothing in the log to say why.
+    `aresolve_or_miss` already converts the exceptions it can see, but not
+    one raised past it. Its three bulk consumers (resolve_leads,
+    add_names, reresolve_misses) each wrote this out, and the third had
+    already dropped the report line, so a resolution that blew up during
+    a reresolve became a miss with nothing in the log to say why.
     """
     try:
-        return fut.result()
+        return await aresolve_or_miss(name, careers_url)
     except Exception as e:          # noqa: BLE001 - the reason IS the result
         print(f"    [!] {name}: {type(e).__name__}: {e}")
         return None, f"fetch-error:{type(e).__name__}"

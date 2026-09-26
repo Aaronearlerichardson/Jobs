@@ -128,7 +128,7 @@ ACTIVE_MISSION_TIERS = tuple(t["name"] for t in MISSION_TIERS if t["active"])
 def is_active_mission(tier, name, include_missions=None):
     """The one activation rule: should a newly-sourced company be crawled?
 
-    `tier` is the mission tier from src.claude.score_company_mission, `name`
+    `tier` is the mission tier from src.claude.api.ascore_company_mission, `name`
     the company name, `include_missions` an optional override of the
     profile's active tiers. Returns 1 (crawl it) or 0 (park it) -- an int,
     because it goes straight into the ``companies.active`` column.

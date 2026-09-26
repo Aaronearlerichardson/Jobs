@@ -23,9 +23,9 @@ from src.claude.fit import is_deep_verified
 from src.config import profile_edit
 from src.config.profile_schema import error_lines
 from src.match import locality
-from src.dispatch.background import (_LOG_LOCK, OPS, TASK, _running,
-                                     queue_clear, queue_remove,
-                                     queue_snapshot, submit)
+from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
+                                     stop, submit)
+from src.net import http
 from src.ops.maintenance import track_store
 from . import BOOT_ID, STATE, app
 from .server import schedule_restart
@@ -93,8 +93,9 @@ def api_run(name):
                              f"{track_cfg['label']} track runs "
                              f"{track_cfg['engine']!r}"), 409
     args = args.model_copy(update={"track": track_cfg["id"]})
-    # submit() claims the slot under a lock, so two requests in the same
-    # instant can't both start an operation: the loser is queued, not run.
+    # submit() claims the slot on the network loop, one request at a time,
+    # so two requests in the same instant can't both start an operation:
+    # the loser is queued, not run.
     entry = submit(name, args, lambda: op["fn"](args))
     if entry is None:
         return jsonify(ok=True, name=name)
@@ -115,25 +116,20 @@ def api_run_queue_clear():
     return jsonify(removed=queue_clear())
 
 
+@app.post("/api/run/stop")
+def api_run_stop():
+    """Cancel the running operation (`stopping`: whether one was running);
+    the queue behind it carries on."""
+    return jsonify(stopping=stop())
+
+
 @app.get("/api/run/status")
 def api_run_status():
     # `since` is an ABSOLUTE line count (src.dispatch.background._Tee), not
-    # a raw index into TASK["log"] — that list gets its head chopped off once
-    # it passes 5000 lines, so a plain-index cursor goes stale on every trim
-    # and the browser re-renders lines it already showed. log_offset is how
-    # many lines have been trimmed away; subtracting it from the absolute
-    # cursor gives the correct index into what remains.
-    since = request.args.get("since", 0, type=int)
-    with _LOG_LOCK:
-        offset = TASK["log_offset"]
-        start = max(0, since - offset)
-        lines = TASK["log"][start:]
-        total = offset + len(TASK["log"])
-    queue = queue_snapshot()
-    return jsonify(running=_running(), name=TASK["name"],
-                   started=TASK["started"], ended=TASK["ended"],
-                   error=TASK["error"], lines=lines, total=total,
-                   queue=queue, queued=len(queue))
+    # a raw index into the log, which gets its head chopped off once it
+    # passes 5000 lines (see background.status).
+    s = status(request.args.get("since", 0, type=int))
+    return jsonify(**s, queued=len(s["queue"]))
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +429,7 @@ def api_names_preview():
     from src.discovery.paste_ingest import preview_names
     p = _body(_Paste)
     try:
-        names = preview_names(p.text, use_llm=p.use_llm)
+        names = http.run_sync(preview_names(p.text, use_llm=p.use_llm))
     except Exception as e:
         return jsonify(error=f"could not parse that text: {e}"), 400
     return jsonify(names)
@@ -515,10 +511,10 @@ def _config_busy():
     would vanish with the process that holds it, silently. So the queue has
     to drain or be cleared first, and the message has to say so.
     """
-    waiting = len(queue_snapshot())
-    running = _running()
+    s = status()
+    waiting, running = len(s["queue"]), s["running"]
     if running or waiting:
-        what = (f"'{TASK['name']}' is running" if running
+        what = (f"'{s['name']}' is running" if running
                 else "the run queue is not empty")
         if running and waiting:
             what += f", with {waiting} more in the run queue"

@@ -156,11 +156,11 @@ class TestRegistry:
         # (tests/test_boards_spec.py pins it); Workable seeds LOCAL.
         assert seed_tag_for("workable") == tags.LOCAL
 
-    def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):
+    async def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):
         from src.ats.registry import sweep
         workable_board(load("workable_board.json"),
                        detail=load("workable_job_detail.json"))
-        jobs = sweep("workable", "Eupry", SLUG)()
+        jobs = await sweep("workable", "Eupry", SLUG)()
         assert all(j["company"] == "Eupry" for j in jobs)
 
 

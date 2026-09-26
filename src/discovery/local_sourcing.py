@@ -11,11 +11,11 @@ The stages, and where each lives:
   2. Resolve each name to a board. That whole step is src.discovery.resolve
      now -- sniff the careers page, probe guessed slugs, search the web,
      validate every hit with a live fetch, and say WHY when none of it
-     worked (resolve.board.resolve_or_miss). It used to live here, which
+     worked (resolve.board.aresolve_or_miss). It used to live here, which
      put ~300 lines of store-free resolution in the middle of the module
      that decides what to store.
   3. Verify the board has jobs in your [locality], or the company an office
-     there (resolve.identity.nc_hq_signal); mission-score it; write it to
+     there (resolve.identity.anc_hq_signal); mission-score it; write it to
      the store as a review candidate (score_and_upsert), or record the miss.
 
 This module is the SOURCING half: which names to try, and what to do with
@@ -27,19 +27,20 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 """
 
 import time
-from contextlib import closing
 from datetime import datetime, timedelta
 
 from src import config
+from src import store
 from src import tags as company_tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
+from src.match.locality import NC_RE
 from src.match.names import name_key
-from src.net.parallel import drain, fan_out
-from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
-from .resolve.board import read_local, resolve_or_miss, resolved
-from .resolve.probes import nc_count, probe_company
-from .resolve.websearch_board import websearch_board
+from src.net.parallel import RESOLVE_STALL_S, fan_out
+from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, agather_names
+from .resolve.board import aread_local, resolved
+from .resolve.probes import anc_count, aprobe_company
+from .resolve.websearch_board import awebsearch_board
 
 # --------------------------------------------------------------------------- #
 #  discover_local: the bulk pass over gathered names                          #
@@ -57,7 +58,7 @@ def _boardless(names, hits):
     return [n for n in names if name_key(n) not in have]
 
 
-def _hit_from_detection(name, det):
+async def _hit_from_detection(name, det):
     """A sniff/websearch DETECTION turned into a hit, by asking the board
     how many LOCAL jobs it actually holds.
 
@@ -74,20 +75,22 @@ def _hit_from_detection(name, det):
     """
     ats = det["ats"]
     slug = det.get("triple", det.get("slug"))
-    jobs, total, reason = read_local(coords.columns(ats, slug, det.get("careers_url")))
+    jobs, total, reason = await aread_local(coords.columns(ats, slug, det.get("careers_url")))
     return {"name": name, "ats": ats, "slug": slug, "count": len(jobs) or total,
             "nc": len(jobs), "careers_url": det.get("careers_url"), "reason": reason}
 
 
-def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
+async def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
     """Run one fallback resolver over `todo`, appending to `hits` (nc>0) or
     `misses` (anything else), under the stall watchdog.
 
-    drain, not a plain pool: one wedged resolution used to hold the web
-    UI's single op slot until the app was restarted.
+    The watchdog, not a plain fan-out: one wedged resolution used to hold
+    the web UI's single op slot until the app was restarted.
     """
-    def _done(fut, n):
-        h = fut.result()
+    async for h in fan_out(
+            todo, resolve_one, str, max_workers, stall_s=RESOLVE_STALL_S,
+            on_abandon=lambda n: misses.append({"name": n,
+                                                "reason": "fetch-error:stalled"})):
         if h and h.get("nc"):
             h.pop("reason", None)
             hits.append(h)
@@ -97,12 +100,8 @@ def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
         elif h:
             misses.append(h)
 
-    drain(todo, resolve_one, _done,
-          lambda n: misses.append({"name": n, "reason": "fetch-error:stalled"}),
-          max_workers=max_workers)
 
-
-def _probe_pass(names, max_workers):
+async def _probe_pass(names, max_workers):
     """Name-guessed slug probes over every candidate. The cheap first pass:
     no page fetched, just the platforms' own APIs."""
     n_scan = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
@@ -111,12 +110,12 @@ def _probe_pass(names, max_workers):
     # A probe that raises is now reported and skipped rather than ending
     # the pass -- this was the last pool in src/ with a bare fut.result(),
     # the same shape as the prune_dead_boards bug.
-    return [h for h in fan_out(names,
-                               lambda n: probe_company(n, name_key(n) in _MAJORS_KEYS),
-                               "probe", max_workers) if h]
+    return [h async for h in fan_out(
+        names, lambda n: aprobe_company(n, name_key(n) in _MAJORS_KEYS),
+        "probe", max_workers) if h]
 
 
-def _js_scan_pass(hits, max_workers):
+async def _js_scan_pass(hits, max_workers):
     """Re-probe the MAJORS that got no board, with a headless browser
     (probes.JsScanProbePool).
 
@@ -143,24 +142,24 @@ def _js_scan_pass(hits, max_workers):
     k = min(config.SETTINGS.js_pages, max_workers, len(missed))
     print(f"  JS-probing {len(missed)} major(s) with no static board "
           f"({k} parallel page(s))...")
-    with JsScanProbePool(k) as pool:
+    async with JsScanProbePool(k) as pool:
 
-        def _js_one(name):
+        async def _js_one(name):
             t0 = time.monotonic()
-            meta, outcome = pool.probe(name)
+            meta, outcome = await pool.aprobe(name)
             if outcome == "hit":
                 ats, slug = meta["ats"], meta["slug"]
                 return {"name": name, "ats": ats, "slug": slug,
-                        "count": meta["count"], "nc": nc_count(ats, slug)}
+                        "count": meta["count"], "nc": await anc_count(ats, slug)}
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 
         # Every name prints a line: 2026-09-22 printed 4 [JS-OK] for 38
         # majors, and the other 34 (and a 338s stall) left no trace.
         # on_error keeps this pass's own wording rather than fan_out's.
-        for h in fan_out(missed, _js_one, "JS probe", k,
-                         on_error=lambda n, e: print(
-                             f"    [!] JS probe failed for {n!r}: {e}")):
+        async for h in fan_out(missed, _js_one, "JS probe", k,
+                               on_error=lambda n, e: print(
+                                   f"    [!] JS probe failed for {n!r}: {e}")):
             if "nc" in h:
                 hits.append(h)
                 slug = h["slug"]
@@ -172,24 +171,24 @@ def _js_scan_pass(hits, max_workers):
                       f"{h['elapsed']:.0f}s")
 
 
-def _sniff_pass(names, hits, misses, max_workers):
+async def _sniff_pass(names, hits, misses, max_workers):
     """Fetch each still-boardless name's careers page and read the ATS +
     exact slug off it. The main recall lever over the directory: it covers
     every hosted platform and finds slugs the name-guesser cannot."""
-    from .resolve.sniffer import sniff_ats
+    from .resolve.sniffer import asniff_ats
 
     todo = _boardless(names, hits)
     print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
-    def _sniff_one(n):
-        s = sniff_ats(n)
-        return _hit_from_detection(n, s) if s else {
+    async def _sniff_one(n):
+        s = await asniff_ats(n)
+        return await _hit_from_detection(n, s) if s else {
             "name": n, "reason": "no-board-found"}
 
-    _resolve_pass(todo, _sniff_one, "[SNIFF]", hits, misses, max_workers)
+    await _resolve_pass(todo, _sniff_one, "[SNIFF]", hits, misses, max_workers)
 
 
-def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
+async def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
     """Search the web for a careers page, for names probe+sniff could not
     board. A measured 60-company gap study found 5 of 6 eventual
     resolutions came through here -- names on gov/acronym/product-named
@@ -202,12 +201,8 @@ def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
     cap = config.DISCOVERY_WEBSEARCH_CAP if cap is None else int(cap)
     todo = _boardless(names, hits)
     if todo and cap > 0:
-        from src.store import connect as _connect, recent_miss_names
-        conn = _connect()
-        try:
-            recent = recent_miss_names(conn, days=retry_days)
-        finally:
-            conn.close()
+        async with store.Writer() as db:
+            recent = await db.run(store.recent_miss_names, days=retry_days)
         todo = [n for n in todo if n not in recent][:cap]
     else:
         todo = []
@@ -217,13 +212,13 @@ def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
         return
     t0 = time.time()
 
-    def _websearch_one(n):
-        w = websearch_board(n)
-        return _hit_from_detection(n, w) if w else {
+    async def _websearch_one(n):
+        w = await awebsearch_board(n)
+        return await _hit_from_detection(n, w) if w else {
             "name": n, "reason": "no-board-found"}
 
-    _resolve_pass(todo, _websearch_one, "[WEBSEARCH]", hits, misses,
-                  max_workers)
+    await _resolve_pass(todo, _websearch_one, "[WEBSEARCH]", hits, misses,
+                        max_workers)
     print(f"  websearch pass: {time.time() - t0:.1f}s for "
           f"{len(todo)} name(s)")
 
@@ -290,8 +285,8 @@ def _report_discovery(hits, confirmed, dropped, misses):
               f"0/{h['count']}")
 
 
-def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
-                   websearch=True, websearch_cap=None, websearch_retry_days=14):
+async def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
+                         websearch=True, websearch_cap=None, websearch_retry_days=14):
     """
     Gather names + probe each. Returns (confirmed, checked, misses) where
     confirmed is a list of NC-local hit dicts and misses is one dict per
@@ -318,19 +313,19 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
         A name the careers-page sniff cannot read anything off is reported
         as plain ``no-board-found``, not a refined code: classify_miss()
         would re-fetch every candidate URL for every one of the hundreds of
-        boardless names in a full pass. The on-demand paths (resolve_or_miss,
+        boardless names in a full pass. The on-demand paths (aresolve_or_miss,
         add_names, resolve_leads) work on tens of names and do classify.
     """
-    names = gather_names(extra_names)
+    names = await agather_names(extra_names)
     misses = []
-    hits = _probe_pass(names, max_workers)
+    hits = await _probe_pass(names, max_workers)
     if js_majors:
-        _js_scan_pass(hits, max_workers)
+        await _js_scan_pass(hits, max_workers)
     if sniff:
-        _sniff_pass(names, hits, misses, max_workers)
+        await _sniff_pass(names, hits, misses, max_workers)
     if websearch:
-        _websearch_pass(names, hits, misses, max_workers, websearch_cap,
-                        websearch_retry_days)
+        await _websearch_pass(names, hits, misses, max_workers, websearch_cap,
+                              websearch_retry_days)
 
     hits, confirmed, dropped, misses = _reduce_hits(names, hits, misses)
     _report_discovery(hits, confirmed, dropped, misses)
@@ -340,11 +335,11 @@ def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff=True,
 #  Sampling and store writes (populate / add_board / resolve_leads)           #
 
 
-def _sample_titles(hit, n=6):
+async def _sample_titles(hit, n=6):
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
-    Every family samples through board.company.sample_titles. [] when
+    Every family samples through board.company.asample_titles. [] when
     nothing could be read.
 
     Notes:
@@ -355,11 +350,11 @@ def _sample_titles(hit, n=6):
     """
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
     board = hit if "wd_tenant" in hit else coords.from_hit(hit)
-    return company_fetch.sample_titles(board, n)
+    return await company_fetch.asample_titles(board, n)
 
 
-def mission_context(board):
-    """The free-text context `src.claude.score_company_mission` is given for
+async def mission_context(board):
+    """The free-text context `src.claude.ascore_company_mission` is given for
     a resolved board or roster row (a hit or a store row): a few live posting
     titles, else the board's own address (coords.board_context) -- '' only
     for a board with neither. Every mission-scoring call site builds its
@@ -374,7 +369,7 @@ def mission_context(board):
         the 237 boards on the sixteen families that had no sampler were empty
         on 2026-09-18 (26 of 31 JazzHR boards).
     """
-    titles = " | ".join(t for t in _sample_titles(board) if t)
+    titles = " | ".join(t for t in await _sample_titles(board) if t)
     return titles or coords.board_context(board)
 
 
@@ -409,18 +404,18 @@ def _productive_row(conn, name):
     return None
 
 
-def _score_hit(hit):
+async def _score_hit(hit):
     """(tier, score, reason) for a resolved board: its mission_context as
-    the domain context for src.claude.score_company_mission. Pure network
-    I/O, safe to run off the main thread."""
-    from src.claude.api import score_company_mission
-    return score_company_mission(hit["name"], mission_context(hit))
+    the domain context for src.claude.ascore_company_mission."""
+    from src.claude.api import ascore_company_mission
+    return await ascore_company_mission(hit["name"], await mission_context(hit))
 
 
-def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
-                     scored=None, extra=None):
-    """Mission-score a resolved board and write it to the store as a review
-    candidate -- the one write path behind every automated add surface.
+async def score_and_upsert(db, hit, source, include_missions=None, tags=None,
+                           scored=None, extra=None):
+    """Mission-score a resolved board and write it to the store (`db`, a
+    store.Writer) as a review candidate -- the one write path behind every
+    automated add surface.
 
     `hit` is a resolver result: {name, ats, slug, nc, count} plus an optional
     careers_url, `slug` being the (tenant, pod, site) triple for Workday and
@@ -429,7 +424,7 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     (src.claude.is_active_mission), and whether it went to the review queue
     -- or None when the board is already on the roster under ANOTHER name
     (_board_already_tracked). The dedup runs before the mission call, so a
-    duplicate costs no LLM request; a caller that scored in a worker pool
+    duplicate costs no LLM request; a caller that scored concurrently
     first (populate_companies) passes the result as `scored`.
 
     A name whose roster row is active and has produced jobs
@@ -437,14 +432,18 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     same board only refreshes the counts, and a different one is printed,
     noted on the row, and returns None. Neither pays for a score.
 
-    >>> from src.store import connect, upsert_company
+    >>> from src.net import http
+    >>> from src.store import Writer, connect, upsert_company
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
     ...     "wd_tenant": "fortrea", "wd_pod": 1, "wd_site": "Fortrea",
     ...     "active": 1, "total_job_count": 350})
-    >>> score_and_upsert(conn, {"name": "Fortrea", "ats": "phenom",
-    ...     "slug": "careers.fortrea.com", "nc": 24, "count": 24},
-    ...     "local_sourcing")  # doctest: +ELLIPSIS
+    >>> async def add():
+    ...     async with Writer(conn) as db:
+    ...         return await score_and_upsert(db, {"name": "Fortrea",
+    ...             "ats": "phenom", "slug": "careers.fortrea.com", "nc": 24,
+    ...             "count": 24}, "local_sourcing")
+    >>> http.run_sync(add())  # doctest: +ELLIPSIS
         [keep] Fortrea: existing workday board retained; alternate phenom ...
     >>> conn.execute("SELECT ats, slug, wd_tenant, active, total_job_count, "
     ...              "notes FROM companies").fetchone()[:]
@@ -470,39 +469,60 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
         board coordinates first) still differ in ways this helper does not
         cover.
     """
-    from src.claude.api import is_active_mission
-    from src.store import (board_key, is_confirmed_company, mark_pending,
-                           upsert_company)
+    settled, result = await db.run(_settled_board, hit)
+    if settled:
+        return result
+    return await db.run(_write_candidate, hit,
+                        scored if scored is not None else await _score_hit(hit),
+                        source, include_missions, tags, extra)
+
+
+def _settled_board(conn, hit):
+    """(True, score_and_upsert's answer) when the roster already settles
+    `hit` without a score (a duplicate board, a productive row kept), else
+    (False, None)."""
+    from src.store import board_key, upsert_company
 
     name = hit["name"]
     row = coords.from_hit(hit, name=name)
     dup = _board_already_tracked(conn, row)
     if dup:
         _report_dup_board(name, dup)
-        return None
+        return True, None
     # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
     # name-keyed upsert below re-pointed its Workday row (353 relevant jobs
     # an hour earlier) at it; the next crawl read 27 jobs and counted every
     # one as new. Discovery may not re-point or switch off a board that
     # works -- the alternate goes in `notes` for a person to judge.
     kept = _productive_row(conn, name)
-    if kept:
-        if board_key(kept) == board_key(row):
-            upsert_company(conn, {"name": name,
-                                  "local_job_count": hit.get("nc") or 0,
-                                  "total_job_count": hit.get("count")})
-            return kept, kept["active"], False
-        key = board_key(row)
-        alt = ("/".join(str(p) for p in key[1:]) if key
-               else row.get("careers_url") or "?")
-        print(f"    [keep] {name}: existing {kept['ats']} board retained; "
-              f"alternate {row['ats']} board {alt} noted")
-        note = f"alt board: {row['ats']} {alt}"
-        if note not in (kept["notes"] or ""):
-            upsert_company(conn, {"name": name, "notes": "; ".join(
-                filter(None, (kept["notes"], note)))})
-        return None
-    tier, score, reason = scored if scored is not None else _score_hit(hit)
+    if not kept:
+        return False, None
+    if board_key(kept) == board_key(row):
+        upsert_company(conn, {"name": name,
+                              "local_job_count": hit.get("nc") or 0,
+                              "total_job_count": hit.get("count")})
+        return True, (kept, kept["active"], False)
+    key = board_key(row)
+    alt = ("/".join(str(p) for p in key[1:]) if key
+           else row.get("careers_url") or "?")
+    print(f"    [keep] {name}: existing {kept['ats']} board retained; "
+          f"alternate {row['ats']} board {alt} noted")
+    note = f"alt board: {row['ats']} {alt}"
+    if note not in (kept["notes"] or ""):
+        upsert_company(conn, {"name": name, "notes": "; ".join(
+            filter(None, (kept["notes"], note)))})
+    return True, None
+
+
+def _write_candidate(conn, hit, scored, source, include_missions, tags, extra):
+    """score_and_upsert's write of a scored board (`scored`, its tier,
+    score and reason); returns (row, active, pending)."""
+    from src.claude.api import is_active_mission
+    from src.store import is_confirmed_company, mark_pending, upsert_company
+
+    name = hit["name"]
+    row = coords.from_hit(hit, name=name)
+    tier, score, reason = scored
     # Shared activation rule (src.claude.is_active_mission): active tiers,
     # an UNAVAILABLE (None) score, or a multi-division conglomerate whose
     # subdivisions are filtered at crawl time.
@@ -527,7 +547,7 @@ def score_and_upsert(conn, hit, source, include_missions=None, tags=None,
     return row, active, pending
 
 
-def populate_companies(extra_names=None, include_missions=None, dork=True):
+async def populate_companies(extra_names=None, include_missions=None, dork=True):
     """
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
@@ -549,40 +569,35 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
 
     Returns the list of company dicts written by the name-based pass.
     """
-    from src.store import connect, miss_counts, record_miss
-
-    confirmed, _, misses = discover_local(extra_names)
-    with closing(connect()) as conn:
+    confirmed, _, misses = await discover_local(extra_names)
+    async with store.Writer() as db:
         written = []
 
         # Misses first: they are pure local writes, so the roster's failure
         # record survives even if the mission-scoring pass below is interrupted.
-        n_miss = sum(record_miss(conn, m["name"], m["reason"], **_miss_row(m))
-                     for m in misses)
+        n_miss = await db.run(lambda conn: sum(
+            store.record_miss(conn, m["name"], m["reason"], **_miss_row(m))
+            for m in misses))
         if misses:
+            counts = await db.run(store.miss_counts)
             print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
                   f"confirmed); store now holds: "
-                  + ", ".join(f"{fam}={n}" for fam, n in miss_counts(conn)))
+                  + ", ".join(f"{fam}={n}" for fam, n in counts))
         print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
 
         # The title fetch (1 GET) + mission call (1 LLM request) per company are
-        # pure network I/O — the historical serial tail of the pass. Run them in
-        # a pool; SQLite upserts stay on this thread (connections don't cross
-        # threads). Output is completion-ordered.
-        def _score_one(h):
-            return h, _score_hit(h)
-
-        def _score_done(fut, name):
-            try:
-                h, scored = fut.result()
-            except Exception as e:
-                print(f"    [!] mission scoring failed for {name!r}: {e}")
-                return
-            result = score_and_upsert(conn, h, source="local_sourcing",
-                                      include_missions=include_missions,
-                                      scored=scored)
+        # pure network I/O -- the historical serial tail of the pass. Run them
+        # concurrently, under the stall watchdog; output is completion-ordered.
+        async for h, scored in fan_out(
+                confirmed, _score_hit, lambda h: h["name"], 8, with_item=True,
+                on_error=lambda h, e: print(
+                    f"    [!] mission scoring failed for {h['name']!r}: {e}"),
+                stall_s=RESOLVE_STALL_S):
+            result = await score_and_upsert(db, h, source="local_sourcing",
+                                            include_missions=include_missions,
+                                            scored=scored)
             if not result:
-                return
+                continue
             row, active, pending = result
             written.append(dict(row))
             tier, score, reason = scored
@@ -590,8 +605,6 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
                     else "active" if active else "INACTIVE(other)")
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
-        drain(confirmed, _score_one, _score_done, lambda name: None,
-              label=lambda h: h["name"], max_workers=8)
 
     if dork:
         print("\n  ATS-dork sweep (search-indexed board URLs)...")
@@ -603,7 +616,7 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
             # a package-level one -- what the deferred import used to hide
             # was src/ats depending on src/discovery.
             from .dork import run_ddgs_dorks
-            added, checked = run_ddgs_dorks()
+            added, checked = await run_ddgs_dorks()
             print(f"  dork: {added} new board(s) added "
                   f"({checked} extracted from search results)")
         except Exception as e:
@@ -611,7 +624,7 @@ def populate_companies(extra_names=None, include_missions=None, dork=True):
     return written
 
 
-def add_board(name, url, capture=False):
+async def add_board(name, url, capture=False):
     """Register a board the user already knows — no guessing. `url` may be
     the ATS board itself (myworkdayjobs / greenhouse / lever / ...) or the
     company's careers page; coordinates are detected, the board NC-counted,
@@ -644,32 +657,30 @@ def add_board(name, url, capture=False):
         way, nothing is fetched until the host is listed in the profile's
         [policy] robots_exempt_hosts.
     """
-    from src.claude.api import score_company_mission
-    from src.store import (CAPTURE_ATS, connect, is_confirmed_company,
-                            mark_pending, upsert_company)
+    from src.claude.api import ascore_company_mission
     from src.ats.signatures import detect, pack
-    from .resolve.sniffer import sniff_ats
+    from .resolve.sniffer import asniff_ats
 
     if capture:
-        with closing(connect()) as conn:
-            row = {"name": name, "ats": CAPTURE_ATS, "careers_url": url,
+        async with store.Writer() as db:
+            row = {"name": name, "ats": store.CAPTURE_ATS, "careers_url": url,
                    "source": "manual", "active": 1,
                    "notes": "capture-only board: browse it yourself and save "
                             "pages with capture.py --watch"}
-            dup = _board_already_tracked(conn, row)
+            dup = await db.run(_board_already_tracked, row)
             if dup:
                 _report_dup_board(name, dup)
                 return None
-            upsert_company(conn, row)
+            await db.run(store.upsert_company, row)
         print(f"  [OK] {name}: capture-only, {url}  -- save its pages with "
               f"capture.py --watch")
-        return {"ats": CAPTURE_ATS, "careers_url": url}
+        return {"ats": store.CAPTURE_ATS, "careers_url": url}
 
     hit = detect("", url, leads=False)
     if hit:
         found = pack(hit[1], hit[2], url)
     else:
-        found = sniff_ats(name, careers_url=url)
+        found = await asniff_ats(name, careers_url=url)
     if not found:
         print(f"  [!] No ATS coordinates found at/near {url}")
         return None
@@ -681,14 +692,14 @@ def add_board(name, url, capture=False):
     slug = handle or url
     board = coords.columns(ats, handle, found.get("careers_url") or url, name=name)
     try:
-        nc = len(company_fetch.fetch_company(board, company_fetch.NC_RE))
+        nc = len(await company_fetch.afetch_company(board, NC_RE))
     except Exception:
         nc = 0
 
-    tier, score, reason = score_company_mission(name, mission_context(board))
+    tier, score, reason = await ascore_company_mission(name, await mission_context(board))
 
-    with closing(connect()) as conn:
-        dup = _board_already_tracked(conn, board)
+    async with store.Writer() as db:
+        dup = await db.run(_board_already_tracked, board)
         if dup:
             _report_dup_board(name, dup)
             return None
@@ -701,20 +712,20 @@ def add_board(name, url, capture=False):
         # The URL is the user's, but the ATS coordinates under it were sniffed:
         # a careers page that links a shared/parent tenant resolves to somebody
         # else's board. One confirmation click covers both.
-        pending = not is_confirmed_company(conn, name)
+        pending = not await db.run(store.is_confirmed_company, name)
         if pending:
-            row = mark_pending(row)
-        upsert_company(conn, row)
+            row = store.mark_pending(row)
+        await db.run(store.upsert_company, row)
     ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
     print(f"  [OK] {name}: {ats} {slug!s}  nc={nc}  mission={tier} ({ss})  "
           f"{'PENDING REVIEW' if pending else 'ACTIVE'}")
     return found
 
 
-def score_missions(max_workers=6, rescore_all=False):
+async def score_missions(max_workers=6, rescore_all=False):
     """Backfill company mission scores: every company with a board and no
     mission_tier (or every ACTIVE one, with rescore_all) gets sampled titles
-    + one score_company_mission call. Heals stores populated by
+    + one ascore_company_mission call. Heals stores populated by
     --import-companies / older seed imports (no scoring) or by
     keyless/failed scoring passes.
 
@@ -727,30 +738,26 @@ def score_missions(max_workers=6, rescore_all=False):
     reactivates it below. `rescore_all` stays active-only — it is a
     re-judgement of the live roster, not a recovery pass, and widening it
     would resurrect everything ever deactivated for being off-mission."""
-    from src.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
-    from src.store import connect, get_companies, upsert_company
+    from src.claude.api import ACTIVE_MISSION_TIERS, ascore_company_mission
 
-    with closing(connect()) as conn:
-        cos = [c for c in get_companies(conn, active_only=rescore_all)
+    async with store.Writer() as db:
+        cos = [c for c in await db.run(store.get_companies, active_only=rescore_all)
                if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
         if not cos:
             print("  Nothing to score - every active company has a mission tier.")
             return 0
         print(f"  mission-scoring {len(cos)} compan(ies)...")
 
-        def _one(c):
-            return c, score_company_mission(c["name"], mission_context(c))
+        async def _one(c):
+            return await ascore_company_mission(c["name"], await mission_context(c))
 
         n = 0
-        def _scored(fut, name):
-            nonlocal n
-            try:
-                c, (tier, score, reason) = fut.result()
-            except Exception as e:
-                print(f"    [!] {name}: {e}")
-                return
+        async for c, (tier, score, reason) in fan_out(
+                cos, _one, lambda c: c["name"], max_workers, with_item=True,
+                on_error=lambda c, e: print(f"    [!] {c['name']}: {e}"),
+                stall_s=RESOLVE_STALL_S):
             if tier is None and score is None:
-                return            # scoring unavailable - leave the row alone
+                continue          # scoring unavailable - leave the row alone
             # Off-mission companies are deactivated so the crawl skips them,
             # matching the new-company sourcing path (an `other` tier means
             # "not health/bio/science" — no reason to keep crawling it).
@@ -788,7 +795,7 @@ def score_missions(max_workers=6, rescore_all=False):
                         and not company_tags.has(c.get("tags"), company_tags.PENDING)):
                     update["active"] = 1
                     revived = True
-            upsert_company(conn, update)
+            await db.run(store.upsert_company, update)
             n += 1
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             flag = ("  -> deactivated (off-mission)"
@@ -796,8 +803,6 @@ def score_missions(max_workers=6, rescore_all=False):
                     else "  -> REACTIVATED (was unscored + inactive)" if revived
                     else "")
             print(f"    {c['name']:32} {str(tier):20} {ss}  ({reason}){flag}")
-        drain(cos, _one, _scored, lambda name: None,
-              label=lambda c: c["name"], max_workers=max_workers)
     print(f"\n  {n} compan(ies) scored.")
     return n
 
@@ -831,9 +836,10 @@ def _miss_row(m):
     return row
 
 
-def resolve_leads(max_workers=8,
-                  sources=("page_capture", "linkedin_search", "linkedin_company_search"),
-                  all_leads=False, limit=None, retry_days=14):
+async def resolve_leads(max_workers=8,
+                        sources=("page_capture", "linkedin_search",
+                                 "linkedin_company_search"),
+                        all_leads=False, limit=None, retry_days=14):
     """Resolve boardless company leads (banked by capture.py from browsed
     LinkedIn/Indeed pages, or by manual adds) into crawlable boards and queue
     the hits for review. Careers-page SNIFF first (collision-safe), slug-probe
@@ -845,11 +851,8 @@ def resolve_leads(max_workers=8,
     (default: capture.py's 'page_capture'). all_leads=True ignores the source
     filter and takes every inactive boardless lead. Idempotent — rerunning
     retries only the still-unresolved leads."""
-    from src.store import (connect, get_companies as _store_companies,
-                            record_miss, recent_miss_names)
-
-    with closing(connect()) as conn:
-        leads = [c for c in _store_companies(conn, active_only=False)
+    async with store.Writer() as db:
+        leads = [c for c in await db.run(store.get_companies, active_only=False)
                  if not c.get("ats") and not c.get("active")]
         if not all_leads:
             leads = [c for c in leads if c.get("source") in sources]
@@ -857,7 +860,7 @@ def resolve_leads(max_workers=8,
         # every permanent miss, and the pass gets slower the longer it runs.
         # retry_days=0 (or --all-leads) retries the lot.
         if retry_days and not all_leads:
-            recent = recent_miss_names(conn, days=retry_days)
+            recent = await db.run(store.recent_miss_names, days=retry_days)
             skipped_recent = [c for c in leads if c["name"] in recent]
             leads = [c for c in leads if c["name"] not in recent]
             if skipped_recent:
@@ -872,32 +875,27 @@ def resolve_leads(max_workers=8,
         print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
               f"fallback; every board validated by a live fetch)...")
 
-        # Not `resolved`: that name is board.resolved(), called in _consume below.
-        resolved_rows, probe_only = [], []
-        by_name = {c["name"]: c for c in leads}
+        # Not `resolved`: that name is board.resolved(), which resolves each.
+        resolved_rows, probe_only, stalled = [], [], []
 
-        def _stalled(name):
-            # A lead whose domains blackhole becomes a recorded miss, not a
-            # hung command (src.net.parallel.drain).
-            record_miss(conn, name, "fetch-error:stalled",
-                        source=by_name[name].get("source"))
-
-        def _consume(fut, name):
-            c = by_name[name]
-            hit, reason = resolved(fut, name)
+        async for c, (hit, reason) in fan_out(
+                leads, lambda c: resolved(c["name"], c.get("careers_url") or ""),
+                lambda c: c["name"], max_workers, with_item=True,
+                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
             if not hit:
                 # Was printed and forgotten; now the lead row keeps WHY, so
                 # the next run can skip it and the user can see the tally.
-                record_miss(conn, c["name"], reason, source=c.get("source"))
+                await db.run(store.record_miss, c["name"], reason,
+                             source=c.get("source"))
                 print(f"    [miss] {c['name'][:34]:34} {reason}")
-                return
+                continue
             # A lead is a name somebody's page mentioned, not an employer
             # anyone vouched for: resolving it produces a review candidate,
             # written under the lead's own name.
-            result = score_and_upsert(conn, {**hit, "name": c["name"]},
-                                      source=c.get("source") or "resolve_leads")
+            result = await score_and_upsert(db, {**hit, "name": c["name"]},
+                                            source=c.get("source") or "resolve_leads")
             if not result:
-                return
+                continue
             row, active, pending = result
             resolved_rows.append(row)
             if hit.get("via") == "probe":
@@ -909,10 +907,11 @@ def resolve_leads(max_workers=8,
             print(f"    [{mark}] {c['name'][:30]:30} "
                   f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
                   f"{str(tier):18} {ss}{flag}")
-        drain(leads,
-              lambda c: resolve_or_miss(c["name"], c.get("careers_url") or ""),
-              _consume, _stalled, label=lambda c: c["name"],
-              max_workers=max_workers)
+        for c in stalled:
+            # A lead whose domains blackhole becomes a recorded miss, not a
+            # hung command.
+            await db.run(store.record_miss, c["name"], "fetch-error:stalled",
+                         source=c.get("source"))
     queued = sum(1 for r in resolved_rows
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
     print(f"\n  {len(resolved_rows)} board(s) resolved, "

@@ -914,8 +914,11 @@ async function pollOps() {
     const queue = s.queue || [];
     const pill = $("#oppill");
     const qtail = queue.length ? ` +${queue.length} queued` : "";
+    $("#opstop").hidden = !s.running;
     if (s.running) {
       pill.textContent = `running: ${s.name}${qtail}`; pill.className = "pill running";
+    } else if (s.stopped) {
+      pill.textContent = `stopped: ${s.name}${qtail}`; pill.className = "pill";
     } else if (s.error) {
       pill.textContent = `failed: ${s.name}${qtail}`; pill.className = "pill err";
     } else {
@@ -1297,6 +1300,15 @@ $("#c-import").addEventListener("change", async e => {
   } catch (err) { toast("import failed: " + err.message); }
   e.target.value = "";
 });
+$("#opstop").onclick = async () => {
+  $("#opstop").disabled = true;
+  try {
+    const d = await post("/api/run/stop", {});
+    toast(d.stopping ? "stopping the running operation" : "nothing is running");
+  } catch (e) { toast("stop failed: " + e.message); }
+  $("#opstop").disabled = false;
+  await pollOps();
+};
 
 (async () => {
   try { await loadTracks(); }               // sets state.track + op availability

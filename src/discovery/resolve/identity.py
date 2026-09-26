@@ -355,6 +355,3 @@ async def anc_hq_signal(name, careers_url="", board_jobs=None):
         except Exception:
             continue
     return False
-
-
-nc_hq_signal = http.sync_shim(anc_hq_signal)

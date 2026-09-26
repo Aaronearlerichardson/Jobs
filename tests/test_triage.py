@@ -7,12 +7,13 @@ import logging
 
 import pytest
 
-from conftest import company_row as _company, iso_days_ago, make_board_fn
+from conftest import answer, company_row as _company, iso_days_ago, make_board_fn
 
 from src import tags
 from src import store
 from src.claude.fit import MIN_DESC_CHARS, FitResult
 from src.crawl import harvest, triage
+from src.net import http
 
 LOCAL = "local-tech"
 SWEEP = "remote-neural"
@@ -70,11 +71,11 @@ def stubs(monkeypatch):
     """Stub the three paid/network steps and record what they were asked."""
     calls = {"mission": [], "hydrate": [], "score": []}
 
-    def mission(name, context=""):
+    async def mission(name, context=""):
         calls["mission"].append(name)
         return "other", 0.05, "off-mission"
 
-    def hydrate(company, jobs, **kw):
+    async def hydrate(company, jobs, **kw):
         n = 0
         for j in jobs:
             calls["hydrate"].append(j["id"])
@@ -84,12 +85,12 @@ def stubs(monkeypatch):
                 n += 1
         return {"hydrated": n, "unhydrated": len(jobs) - n}
 
-    def score(title, description="", *, location="", max_tokens=300):
+    async def score(title, description="", *, location="", max_tokens=300):
         calls["score"].append(title)
         return FitResult(score=0.1 if "weak" in title.lower() else 0.7,
                          reason="stub")
 
-    monkeypatch.setattr(triage, "score_resume_fit", score)
+    monkeypatch.setattr(triage, "ascore_resume_fit", score)
     monkeypatch.setattr(triage, "core_anchor",
                         lambda title, desc="": "eeg"
                         if "eeg" in f"{title} {desc}".lower() else None)
@@ -99,9 +100,10 @@ def stubs(monkeypatch):
 
 
 def _run(db, tracks, stubs, **kw):
-    return triage.run(db_path=db, tracks=tracks,
-                      mission_scorer=stubs["mission_fn"],
-                      hydrate_fn=stubs["hydrate_fn"], max_workers=2, **kw)
+    return http.run_sync(triage.run(db_path=db, tracks=tracks,
+                                    mission_scorer=stubs["mission_fn"],
+                                    hydrate_fn=stubs["hydrate_fn"], max_workers=2,
+                                    **kw))
 
 
 # ── mission context ─────────────────────────────────────────────────────────
@@ -110,17 +112,21 @@ def test_mission_is_scored_on_titles_else_on_the_board_address(tmp_path):
     conn = store.connect(tmp_path / "s.db")
     sent = []
 
-    def scorer(name, context=""):
+    async def scorer(name, context=""):
         sent.append(context)
         return "adjacent", 0.5, "stub"
 
+    async def ensure(company, titles):
+        async with store.Writer(conn) as w:
+            await triage.ensure_mission(w, company, titles, scorer)
+
     c = _company(conn, "Studycast", ats="rippling", slug="core-sound-imaging",
                  careers_url="https://ats.rippling.com/core-sound-imaging/jobs")
-    triage.ensure_mission(conn, c, ["PACS Engineer", None, "Sales Lead"], scorer)
+    http.run_sync(ensure(c, ["PACS Engineer", None, "Sales Lead"]))
     assert sent == ["PACS Engineer | Sales Lead"]
 
     d = _company(conn, "Nameless", ats="bamboohr", slug="npi")
-    triage.ensure_mission(conn, d, [], scorer)
+    http.run_sync(ensure(d, []))
     assert 'bamboohr "npi"' in sent[-1]
 
 
@@ -469,15 +475,15 @@ def test_hydration_spends_the_board_budget_on_relevant_titles_first(
                         lambda title, desc="": "data" in (title or "").lower())
     order = []
 
-    def hydrate(company, jobs, **kw):
+    async def hydrate(company, jobs, **kw):
         order.extend(j["id"] for j in jobs)
         for j in jobs:
             j["_tried"] = True
             j["description"] = "python sql pipelines " * 20
         return {"hydrated": len(jobs), "unhydrated": 0}
 
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-               hydrate_fn=hydrate, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+               hydrate_fn=hydrate, max_workers=2))
 
     assert order[0] == "eng", f"hydrated in arrival order: {order}"
 
@@ -606,11 +612,11 @@ def test_skip_score_short_body_counted_in_summary(tmp_path, tracks, stubs,
     _harvested(conn, c, "stub", "Data Engineer", local_addr,
               description="too short")
 
-    def score(title, description="", *, location="", max_tokens=300):
+    async def score(title, description="", *, location="", max_tokens=300):
         if len(description) < MIN_DESC_CHARS:
             return FitResult(score=None, reason="no description; unscored")
         return FitResult(score=0.7, reason="stub")
-    monkeypatch.setattr(triage, "score_resume_fit", score)
+    monkeypatch.setattr(triage, "ascore_resume_fit", score)
 
     s = _run(db, tracks, stubs)
 
@@ -680,8 +686,8 @@ def test_harvest_pass_ends_with_triage_then_digests(tmp_path, monkeypatch):
     conn = store.connect(db)
     _company(conn, "A")
     seen, order = [], []
-    monkeypatch.setattr(triage, "run", lambda **kw: seen.append(kw)
-                        or order.append("triage") or {"pending": 0})
+    monkeypatch.setattr(triage, "run", answer(lambda **kw: seen.append(kw)
+                        or order.append("triage") or {"pending": 0}))
     monkeypatch.setattr(triage, "roster_tracks",
                         lambda: [{"track": LOCAL}, {"track": SWEEP}])
     monkeypatch.setattr(harvest, "rewrite_digest",
@@ -731,15 +737,15 @@ def test_bodiless_workday_n_locations_resolves_before_geo_gate(
     _harvested(conn, c, "far", "Data Engineer", "2 Locations",
                url=_wd_url("far"))
 
-    def hydrate(company, jobs, **kw):
+    async def hydrate(company, jobs, **kw):
         for j in jobs:
             j["_tried"] = True
             j["description"] = "python sql pipelines " * 20
             j["location"] = local_addr if j["id"] == "near" else elsewhere
         return {"hydrated": len(jobs), "unhydrated": 0}
 
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=hydrate, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate, max_workers=2))
 
     near, far = _row(conn, "near"), _row(conn, "far")
     assert near["triage_status"] == "ok" and near["location"] == local_addr
@@ -758,14 +764,14 @@ def test_bodied_workday_n_locations_resolves_via_cached_location_lookup(
     _harvested(conn, c, "j", "Data Engineer", "2 Locations",
                description="python sql pipelines " * 20, url=_wd_url("j"))
 
-    def hydrate(company, jobs, **kw):
+    async def hydrate(company, jobs, **kw):
         for j in jobs:
             j["_tried"] = True
             j["location"] = local_addr        # simulates a resolved lookup
         return {"hydrated": 1, "unhydrated": 0}
 
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=hydrate, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate, max_workers=2))
 
     row = _row(conn, "j")
     assert row["triage_status"] == "ok" and row["location"] == local_addr
@@ -784,22 +790,22 @@ def test_bodied_workday_location_lookup_failure_defers_then_expires(
                description="python sql pipelines " * 20, url=_wd_url("j"))
     calls = []
 
-    def hydrate_fails(company, jobs, **kw):
+    async def hydrate_fails(company, jobs, **kw):
         for j in jobs:
             calls.append(j["id"])
             j["_tried"] = True          # the lookup ran; it resolved nothing
         return {"hydrated": 0, "unhydrated": len(jobs)}
 
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=hydrate_fails, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2))
     assert calls == ["j"]
     row = _row(conn, "j")
     assert row["triage_status"] is None and row["desc_checked_at"]
 
     # Inside the retry window: no second lookup attempt.
     calls.clear()
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=hydrate_fails, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2))
     assert calls == [] and _row(conn, "j")["triage_status"] is None
 
     # The last attempt is now older than RETRY_DAYS: the geo gate stops
@@ -807,8 +813,8 @@ def test_bodied_workday_location_lookup_failure_defers_then_expires(
     old = iso_days_ago(triage.RETRY_DAYS + 1)
     conn.execute("UPDATE jobs SET desc_checked_at=? WHERE job_id='j'", (old,))
     conn.commit()
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=hydrate_fails, max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=hydrate_fails, max_workers=2))
     assert calls == []
     assert _row(conn, "j")["triage_status"] == "geo"
 
@@ -842,7 +848,7 @@ def test_requeue_reports_both_reasons_and_touches_nothing_by_default(
     store.record_triage(conn, "both", "ok", f"{LOCAL}=ok;{SWEEP}=ok",
                         tracks=[LOCAL, SWEEP])
 
-    s = triage.requeue_rows(db_path=db, tracks=tracks)
+    s = http.run_sync(triage.requeue_rows(db_path=db, tracks=tracks))
 
     assert s["counts"] == {"geo:unknown-location": 1, "geo:non-local": 1}
     assert _row(conn, "both")["triage_status"] == "ok"
@@ -867,7 +873,7 @@ def test_requeue_apply_clears_track_score_and_triage_fields_then_rejudges(
     store.record_triage(conn, "far", "ok", f"{LOCAL}=ok", tracks=[LOCAL],
                         scores={"resume_fit_score": 0.7, "fit_reason": "stub"})
 
-    s = triage.requeue_rows(db_path=db, apply=True, tracks=tracks)
+    s = http.run_sync(triage.requeue_rows(db_path=db, apply=True, tracks=tracks))
 
     assert s["requeued"] == 2
     for jid in ("unk", "far"):
@@ -881,8 +887,8 @@ def test_requeue_apply_clears_track_score_and_triage_fields_then_rejudges(
     # A later plain pass is what re-judges it -- requeue_rows never does.
     # The Workday row now waits on its location lookup (the stub resolves
     # none) instead of being dropped by the body rule at once.
-    triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
-              hydrate_fn=stubs["hydrate_fn"], max_workers=2)
+    http.run_sync(triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+              hydrate_fn=stubs["hydrate_fn"], max_workers=2))
     assert stubs["hydrate"] == ["unk"]
     unk = _row(conn, "unk")
     assert unk["triage_status"] is None and unk["desc_checked_at"]

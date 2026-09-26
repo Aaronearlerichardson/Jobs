@@ -8,7 +8,7 @@ hundreds of sites with zero per-vendor code.
 
 Use it two ways:
 
-  fetch_jsonld_page(company, url)
+  await afetch_jsonld_page(company, url)
 """
 
 import asyncio
@@ -173,7 +173,5 @@ async def afetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
                  for obj in extract_jsonld(r.text, page_url) if is_jobposting(obj)])
     return [j for j in jobs if gate is None or gate(j["title"], j["description"])]
 
-
-fetch_jsonld_page = http.sync_shim(afetch_jsonld_page)
 
 

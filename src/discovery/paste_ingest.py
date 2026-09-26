@@ -12,18 +12,18 @@ isn't an employer simply fails to resolve.
 
 Two steps, so requests are spent only on names a person ticked:
 preview_names (parse and classify, no network) then add_names (resolve via
-resolve.board.resolve_or_miss, score, queue for review).
+resolve.board.aresolve_or_miss, score, queue for review).
 """
 
 import re
-from contextlib import closing
 
+from src import store
 from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
-from src.net.parallel import drain
+from src.net.parallel import RESOLVE_STALL_S, fan_out
 from .local_sourcing import score_and_upsert
 from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
-from .resolve.board import resolve_or_miss, resolved
+from .resolve.board import resolved
 
 # Lines that are never a company name in a pasted results page.
 _PASTE_NOISE_RE = re.compile(
@@ -271,14 +271,14 @@ def parse_company_names(blob, limit=300):
     return out
 
 
-def extract_names_llm(blob, limit=60):
+async def extract_names_llm(blob, limit=60):
     """Ask the model which employers a pasted page mentions.
 
     The regex path cannot tell "Fennec Pharmaceuticals" from a job title whose
     words it has never seen. One call fixes that for a messy paste. Returns []
     without an API key, so the caller falls back to the regex.
     """
-    from src.claude.api import call_claude_json
+    from src.claude.api import acall_claude_json
     system = ("You extract EMPLOYER NAMES from text copied off a job-search or "
               "company-directory page. Return only organisations that could "
               "employ someone. Never return job titles, locations, dates, "
@@ -287,7 +287,7 @@ def extract_names_llm(blob, limit=60):
     user = ('Return JSON {"companies": ["name", ...]} with at most '
             f'{limit} entries, in the order they appear.\n\n'
             f"---\n{str(blob or '')[:20000]}\n---")
-    data = call_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
+    data = await acall_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
     return [n for n in (data.companies if data else [])
             if 2 < len(n) <= 60][:limit]
 
@@ -365,7 +365,7 @@ def _name_state(key, tracked, blocked, missed):
     return "new"
 
 
-def preview_names(blob, use_llm=None):
+async def preview_names(blob, use_llm=None):
     """A pasted page -> the list a person ticks through before anything is
     resolved: ``[{"name", "key", "state"}]``, one entry per distinct name, in
     the order they appear, with `state` from `_name_state`.
@@ -381,21 +381,16 @@ def preview_names(blob, use_llm=None):
         key is configured and falls back to parse_company_names when it
         returns nothing; True forces the model, False the regex parser.
     """
-    from src.store import connect, recent_miss_names
     if use_llm is None:
         use_llm = have_api_key()
-    names = extract_names_llm(blob) if use_llm else []
+    names = await extract_names_llm(blob) if use_llm else []
     if not names:
         names = parse_company_names(blob)
-    conn = connect()
-    try:
-        tracked = {name_key(r["name"])
-                   for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
-        blocked = _blocked_keys(conn)
-        missed = {name_key(n)
-                  for n in recent_miss_names(conn)}
-    finally:
-        conn.close()
+    async with store.Writer() as db:
+        tracked, blocked, missed = await db.run(lambda conn: (
+            {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()},
+            _blocked_keys(conn),
+            {name_key(n) for n in store.recent_miss_names(conn)}))
     out, seen = [], set()
     for n in names:
         key = name_key(n)
@@ -415,7 +410,7 @@ def preview_names(blob, use_llm=None):
     return out
 
 
-def add_names(names, use_llm=False, max_workers=6, include_missions=None):
+async def add_names(names, use_llm=False, max_workers=6, include_missions=None):
     """Resolve company names to boards and queue the ones that verify.
 
     `names` is the list of names a person confirmed in the review step. A raw
@@ -431,10 +426,8 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
     Everything written lands in the review queue (src.store.mark_pending),
     never straight onto the roster.
     """
-    from src.store import connect, record_miss
-
     if isinstance(names, (str, bytes)):
-        names = [n["name"] for n in preview_names(names, use_llm=use_llm)
+        names = [n["name"] for n in await preview_names(names, use_llm=use_llm)
                  if n["state"] == "new"]
     else:
         names = [str(n).strip() for n in (names or []) if str(n).strip()]
@@ -442,16 +435,16 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         print("  no company names to resolve.")
         return []
 
-    with closing(connect()) as conn:
-        skip = ({name_key(r["name"])
-                 for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
-                | _blocked_keys(conn))
+    async with store.Writer() as db:
+        skip = await db.run(lambda conn: (
+            {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
+            | _blocked_keys(conn)))
         fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
         skipped = len(names) - len(fresh) - len(junk)
         for n, why in junk:
             # Recorded, not resolved: the miss keeps the paste a worklist, and
             # its 'junk-name' family is one no re-resolution pass retries.
-            record_miss(conn, n, f"junk-name:{why}", source="paste")
+            await db.run(store.record_miss, n, f"junk-name:{why}", source="paste")
             print(f"    [junk]  {n[:30]:30} {why} - not an employer name, skipped")
         print(f"  {len(names)} name(s) given"
               + (f", {skipped} already tracked or blocked" if skipped else "")
@@ -460,25 +453,22 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         if not fresh:
             return []
 
-        written, unresolved = [], []
+        written, unresolved, stalled = [], [], []
 
-        def _stalled(n):
-            record_miss(conn, n, "fetch-error:stalled", source="paste")
-            unresolved.append((n, "fetch-error:stalled"))
-
-        def _consume(fut, name):
-            hit, reason = resolved(fut, name)
+        async for name, (hit, reason) in fan_out(
+                fresh, resolved, str, max_workers, with_item=True,
+                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
             if not hit:
                 # A pasted name that resolves to nothing used to be printed
                 # once and lost; keep it with a reason so the paste is a
                 # worklist, not a one-shot.
-                record_miss(conn, name, reason, source="paste")
+                await db.run(store.record_miss, name, reason, source="paste")
                 unresolved.append((name, reason))
-                return
-            result = score_and_upsert(conn, hit, source="paste",
-                                      include_missions=include_missions)
+                continue
+            result = await score_and_upsert(db, hit, source="paste",
+                                            include_missions=include_missions)
             if not result:
-                return
+                continue
             row, active, pending = result
             written.append(hit)
             tier = row["mission_tier"]
@@ -495,10 +485,9 @@ def add_names(names, use_llm=False, max_workers=6, include_missions=None):
             print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
                   f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
                   f"{state}{flag}")
-
-        drain(fresh, resolve_or_miss, _consume, _stalled,
-              max_workers=max_workers)
-        conn.commit()
+        for n in stalled:
+            await db.run(store.record_miss, n, "fetch-error:stalled", source="paste")
+            unresolved.append((n, "fetch-error:stalled"))
     if unresolved:
         print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "
               f"(kept as misses — see the companies table's miss_reason):")

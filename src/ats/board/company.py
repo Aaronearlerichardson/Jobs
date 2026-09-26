@@ -23,7 +23,6 @@ import re
 from urllib.parse import unquote
 
 from src import config
-from src.match.locality import NC_RE  # profile [locality]
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.net.util import clean_field, first, node_text, parse_markup
@@ -200,12 +199,6 @@ async def afetch_company(company, loc_re=None):
 
 
 fetch_company = http.sync_shim(afetch_company)
-
-
-# fetch_company with the profile's locality regex; used by discovery
-# (ats_dork, local_sourcing) to sample a board's local postings.
-def fetch_company_nc(company):
-    return fetch_company(company, NC_RE)
 
 
 # --- title sampling ------------------------------------------------------------ #

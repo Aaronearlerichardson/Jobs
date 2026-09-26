@@ -2,6 +2,7 @@
 the HN thread parser, posting-date normalisation, age tags, and the
 closed-posting probe guards. No network."""
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
@@ -382,11 +383,11 @@ class TestDiscoveryWiring:
         assert len(DORK_QUERIES) >= 4
         assert any("greenhouse" in q for q in DORK_QUERIES)
 
-    def test_probe_pool_coexists_unlaunched(self):
+    async def test_probe_pool_coexists_unlaunched(self):
         # Lazy launch: a K-browser pool can be built and torn down without
         # ever starting a browser.
         from src.discovery.resolve.probes import JsScanProbePool
-        with JsScanProbePool(3) as pool:
+        async with JsScanProbePool(3) as pool:
             assert pool.size == 3 and not pool.launched
 
 
@@ -490,40 +491,22 @@ Page 1 of 4"""
 
 
 class TestPastedNameExtractionFallback:
-    def test_llm_extraction_falls_back_to_the_parser(self, monkeypatch):
+    async def test_llm_extraction_falls_back_to_the_parser(self, monkeypatch, db):
         """No API key (or a failed call) must not lose the paste — the regex
         parser still runs, so the card works for free."""
-        monkeypatch.setattr(paste_ingest, "extract_names_llm",
-                            lambda *a, **k: [])
+        monkeypatch.setattr(paste_ingest, "extract_names_llm", answer([]))
         captured = {}
 
-        def _resolve(n, *a, **k):
-            # resolve_or_miss, not resolve_board_sniff_first: add_names now
+        async def _resolve(n, *a, **k):
+            # aresolve_or_miss, not resolve_board_sniff_first: add_names
             # goes through the wrapper that also yields a miss reason, and
             # the real one would hit the network on a failed resolve.
             captured[n] = None
             return None, "no-board-found"
 
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss", _resolve)
-
-        class _Conn:
-            def execute(self, *a):
-                return self
-
-            def fetchall(self):
-                return []
-
-            def fetchone(self):
-                return None
-
-            def commit(self):
-                pass
-
-            def close(self):
-                pass
-
-        monkeypatch.setattr("src.store.connect", lambda *a, **k: _Conn())
-        paste_ingest.add_names("Chimerix\n2 days ago", use_llm=True)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", _resolve)
+        keep_store_open(monkeypatch, db)
+        await paste_ingest.add_names("Chimerix\n2 days ago", use_llm=True)
         assert "Chimerix" in captured, "the paste was lost when the LLM returned nothing"
 
 
@@ -538,14 +521,13 @@ class TestPastedNameBoardGuard:
         import src.claude.api as claude
 
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda *a, **k: (hit, None))
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr(claude, "score_company_mission",
-                            lambda *a, **k: ("adjacent", 0.5, "stub"))
-        monkeypatch.setattr(identity, "nc_hq_signal", lambda *a, **k: True)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", answer((hit, None)))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(claude, "ascore_company_mission",
+                            answer(("adjacent", 0.5, "stub")))
+        monkeypatch.setattr(identity, "anc_hq_signal", answer(True))
 
-    def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
+    async def test_same_board_under_another_name_is_not_added(self, monkeypatch, db, capsys):
         import src.store as store
         store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
                                   "slug": "globalcareers-sas"})
@@ -553,12 +535,12 @@ class TestPastedNameBoardGuard:
                                      "slug": "globalcareers-sas",
                                      "careers_url": "https://www.sas.com/careers",
                                      "count": 150, "nc": 30, "via": "sniff"})
-        paste_ingest.add_names("SAS", max_workers=1)
+        await paste_ingest.add_names("SAS", max_workers=1)
         names = [r[0] for r in db.execute("SELECT name FROM companies")]
         assert names == ["SAS Institute"]
         assert "[dup]" in capsys.readouterr().out
 
-    def test_a_new_board_is_still_written(self, monkeypatch, db):
+    async def test_a_new_board_is_still_written(self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
                                   "slug": "globalcareers-sas"})
@@ -566,7 +548,7 @@ class TestPastedNameBoardGuard:
                                      "slug": "veeva",
                                      "careers_url": "https://www.veeva.com/careers",
                                      "count": 40, "nc": 12, "via": "sniff"})
-        paste_ingest.add_names("Veeva", max_workers=1)
+        await paste_ingest.add_names("Veeva", max_workers=1)
         names = sorted(r[0] for r in db.execute("SELECT name FROM companies"))
         assert names == ["SAS Institute", "Veeva"]
 
@@ -575,65 +557,39 @@ class TestResolutionStallWatchdog:
     """One wedged resolution must not hold a resolution pass — and the web
     UI's one-op-at-a-time slot — forever. 2026-08-28: 59 of 60 pasted names
     finished in 8 minutes; the 60th hung for over an hour and wedged the op
-    slot until the app was restarted. The shared helper behind add_names and
-    discover_local's sniff/websearch passes is src.net.parallel.drain."""
+    slot until the app was restarted. The watchdog behind add_names and
+    discover_local's sniff/websearch passes is src.net.parallel.fan_out's
+    `stall_s`."""
 
-    def test_drain_abandons_only_the_stuck_item(self, monkeypatch):
-        import threading
+    async def test_fan_out_abandons_only_the_stuck_item(self):
         from src.net import parallel
 
-        monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
-        release = threading.Event()
-        consumed, stalled = [], []
-        try:
-            parallel.drain(
-                ["fast", "slow"],
-                lambda n: "ok" if n == "fast" else release.wait(10),
-                lambda fut, n: consumed.append((n, fut.result())),
-                stalled.append, max_workers=2)
-        finally:
-            release.set()
-        assert consumed == [("fast", "ok")]
+        async def work(n):
+            if n == "slow":
+                await asyncio.sleep(10)
+            return "ok"
+
+        stalled = []
+        got = [x async for x in parallel.fan_out(
+            ["fast", "slow"], work, max_workers=2, with_item=True,
+            stall_s=0.3, on_abandon=stalled.append)]
+        assert got == [("fast", "ok")]
         assert stalled == ["slow"]
 
-    class _Conn:
-        def execute(self, *a):
-            return self
-
-        def fetchall(self):
-            return []
-
-        def fetchone(self):
-            return None
-
-        def commit(self):
-            pass
-
-        def close(self):
-            pass
-
-    def test_a_hung_resolve_is_abandoned_and_recorded(self, monkeypatch):
-        import threading
-        release = threading.Event()
-
-        def _resolve(n, *a, **k):
+    async def test_a_hung_resolve_is_abandoned_and_recorded(self, monkeypatch, db):
+        async def _resolve(n, *a, **k):
             if n.startswith("Hangs"):
-                release.wait(10)      # far past the patched stall window
+                await asyncio.sleep(10)   # far past the patched stall window
             return None, "no-board-found"
 
-        from src.net import parallel
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(parallel, "RESOLVE_STALL_S", 0.3)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", _resolve)
+        monkeypatch.setattr(paste_ingest, "RESOLVE_STALL_S", 0.3)
         misses = []
         monkeypatch.setattr(
             "src.store.record_miss",
             lambda conn, n, r, **kw: misses.append((n, r)))
-        monkeypatch.setattr("src.store.connect",
-                            lambda *a, **k: self._Conn())
-        try:
-            out = paste_ingest.add_names("Chimerix\nHangs Forever Inc")
-        finally:
-            release.set()             # unblock the abandoned worker thread
+        keep_store_open(monkeypatch, db)
+        out = await paste_ingest.add_names("Chimerix\nHangs Forever Inc")
         assert out == []
         assert ("Hangs Forever Inc", "fetch-error:stalled") in misses, \
             "the wedged name was not abandoned as a recorded miss"
@@ -734,8 +690,8 @@ Durham, NC (Hybrid)
 
 class TestResolveBoardSniffFirstCustomShortCircuit:
     """Offline coverage for the Task 1 fix: a `custom` sniff hit only wins
-    immediately when it already carries local jobs. No network — sniff_ats,
-    probe_company, websearch_board and _validate_board are all faked."""
+    immediately when it already carries local jobs. No network: asniff_ats,
+    aprobe_company, awebsearch_board and _validate_board are all faked."""
 
     @staticmethod
     def _sniff_custom(careers_url="https://x.example/careers"):
@@ -884,11 +840,12 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         board = {"ats": "greenhouse", "slug": "acme"}
 
         serve(requests.exceptions.ReadTimeout("slow"))
-        assert resolve_board.resolve_or_miss("Acme", url) == (
+        assert run_sync(resolve_board.aresolve_or_miss("Acme", url)) == (
             None, "fetch-error:unreadable-greenhouse")
         assert resolve_board.read_local(board)[2] == "fetch-error:unreadable-greenhouse"
         serve(404)
-        assert resolve_board.resolve_or_miss("Acme", url) == (None, "board-dead:greenhouse")
+        assert run_sync(resolve_board.aresolve_or_miss("Acme", url)) \
+            == (None, "board-dead:greenhouse")
         assert resolve_board.read_local(board)[2] == "board-dead:greenhouse"
         serve(fake_response({"jobs": [{"id": 1, "title": "Eng", "absolute_url": url,
                                        "location": {"name": "Paris, France"}}]}))
@@ -898,7 +855,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
 class TestDiscoverLocalWebsearchPass:
     """Offline coverage for the Task 2 fix: discover_local's bulk pass now
     runs a bounded websearch step for names probe+sniff left boardless.
-    gather_names, probe_company, websearch_board, and src.store are all
+    agather_names, aprobe_company, awebsearch_board and the store are all
     faked -- no network, no real DB."""
 
     class _FakeConn:
@@ -907,52 +864,52 @@ class TestDiscoverLocalWebsearchPass:
 
     def _patch_common(self, monkeypatch, names, recent=frozenset()):
         import src.store as store
-        monkeypatch.setattr(local_sourcing, "gather_names", lambda extra=None: list(names))
-        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
-        monkeypatch.setattr(store, "connect", lambda *a, **k: self._FakeConn())
+        monkeypatch.setattr(local_sourcing, "agather_names", answer(list(names)))
+        monkeypatch.setattr(local_sourcing, "aprobe_company", answer(None))
+        monkeypatch.setattr(store.schema, "connect", lambda *a, **k: self._FakeConn())
         monkeypatch.setattr(store, "recent_miss_names",
                             lambda conn, days=14: set(recent))
 
-    def test_websearch_cap_bounds_attempts(self, monkeypatch):
+    async def test_websearch_cap_bounds_attempts(self, monkeypatch):
         names = [f"Company {i}" for i in range(6)]
         self._patch_common(monkeypatch, names)
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "websearch_board",
-            lambda name, max_results=8: calls.append(name))
+            local_sourcing, "awebsearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
 
-        local_sourcing.discover_local(
+        await local_sourcing.discover_local(
             max_workers=2, js_majors=False, sniff=False,
             websearch=True, websearch_cap=2)
 
         assert len(calls) == 2
 
-    def test_websearch_cap_zero_disables_the_pass(self, monkeypatch):
+    async def test_websearch_cap_zero_disables_the_pass(self, monkeypatch):
         names = ["Alpha", "Beta"]
         # Deliberately do NOT patch src.store here: cap=0 must short-circuit
         # before any DB connection is even attempted.
-        monkeypatch.setattr(local_sourcing, "gather_names", lambda extra=None: list(names))
-        monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(local_sourcing, "agather_names", answer(list(names)))
+        monkeypatch.setattr(local_sourcing, "aprobe_company", answer(None))
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "websearch_board",
-            lambda name, max_results=8: calls.append(name))
+            local_sourcing, "awebsearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
 
-        local_sourcing.discover_local(
+        await local_sourcing.discover_local(
             max_workers=2, js_majors=False, sniff=False,
             websearch=True, websearch_cap=0)
 
         assert calls == []
 
-    def test_recently_missed_names_are_skipped(self, monkeypatch):
+    async def test_recently_missed_names_are_skipped(self, monkeypatch):
         names = ["Alpha", "Beta"]
         self._patch_common(monkeypatch, names, recent={"Alpha"})
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "websearch_board",
-            lambda name, max_results=8: calls.append(name))
+            local_sourcing, "awebsearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
 
-        local_sourcing.discover_local(
+        await local_sourcing.discover_local(
             max_workers=2, js_majors=False, sniff=False,
             websearch=True, websearch_cap=10)
 
@@ -969,7 +926,7 @@ class TestPastedNamePreview:
 
         keep_store_open(monkeypatch, db)
 
-    def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
+    async def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "IQVIA", "ats": "workday",
                                   "wd_tenant": "iqvia"})
@@ -980,33 +937,33 @@ class TestPastedNamePreview:
                             lambda *a, **k: ["Alpaca Health", "IQVIA",
                                              "Oncology",
                                              "Fennec Pharmaceuticals"])
-        rows = paste_ingest.preview_names("<pasted page>", use_llm=False)
+        rows = await paste_ingest.preview_names("<pasted page>", use_llm=False)
         assert {r["name"]: r["state"] for r in rows} == {
             "Alpaca Health": "new", "IQVIA": "tracked",
             "Oncology": "blocked", "Fennec Pharmaceuticals": "missed"}
         assert [r["key"] for r in rows][0] == "alpacahealth"
 
-    def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
+    async def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "NAME_BLOCKLIST", {"biotech"})
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Biotech"])
         assert [r["state"] for r in
-                paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
+                await paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
 
-    def test_preview_resolves_nothing(self, monkeypatch, db):
+    async def test_preview_resolves_nothing(self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda *a, **k: tried.append(a) or (None, "x"))
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda *a, **k: tried.append(a) or (None, "x")))
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         assert [r["name"] for r in
-                paste_ingest.preview_names("x", use_llm=False)] \
+                await paste_ingest.preview_names("x", use_llm=False)] \
             == ["Alpaca Health"]
         assert tried == [], "the preview step resolved a name"
 
-    def test_the_model_reads_the_paste_when_a_key_is_configured(
+    async def test_the_model_reads_the_paste_when_a_key_is_configured(
             self, monkeypatch, db):
         # preview_names(use_llm=None) resolves the default through
         # src.claude.api.have_api_key now, not its own inline
@@ -1015,19 +972,19 @@ class TestPastedNamePreview:
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "have_api_key", lambda: True)
         monkeypatch.setattr(paste_ingest, "extract_names_llm",
-                            lambda *a, **k: ["Model Named Co"])
-        assert [r["name"] for r in paste_ingest.preview_names("x")] \
+                            answer(["Model Named Co"]))
+        assert [r["name"] for r in await paste_ingest.preview_names("x")] \
             == ["Model Named Co"]
 
-    def test_no_key_means_the_regex_parser(self, monkeypatch, db):
+    async def test_no_key_means_the_regex_parser(self, monkeypatch, db):
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "have_api_key", lambda: False)
         monkeypatch.setattr(paste_ingest, "extract_names_llm",
-                            lambda *a, **k: (_ for _ in ()).throw(
-                                AssertionError("called with no API key")))
+                            answer(lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("called with no API key"))))
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Parsed Co"])
-        assert [r["name"] for r in paste_ingest.preview_names("x")] \
+        assert [r["name"] for r in await paste_ingest.preview_names("x")] \
             == ["Parsed Co"]
 
 
@@ -1043,65 +1000,65 @@ class TestAddNamesQueue:
         import src.claude.api as claude
 
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda *a, **k: (hit or self._HIT, None))
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr(claude, "score_company_mission",
-                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer((hit or self._HIT, None)))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(claude, "ascore_company_mission",
+                            answer(("adjacent", 0.5, "stub")))
 
-    def test_a_resolved_name_lands_in_the_queue_not_the_roster(
+    async def test_a_resolved_name_lands_in_the_queue_not_the_roster(
             self, monkeypatch, db):
         import src.store as store
         self._wire(monkeypatch, db)
-        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
+        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert store.crawlable_companies(db) == []
 
-    def test_a_blocklisted_name_is_never_resolved(self, monkeypatch, db):
+    async def test_a_blocklisted_name_is_never_resolved(self, monkeypatch, db):
         import src.store as store
         store.block_name(db, "Oncology", "not a company")
         self._wire(monkeypatch, db, {**self._HIT, "name": "Oncology"})
         tried = []
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda n, *a, **k: tried.append(n) or (None, "x"))
-        paste_ingest.add_names(["Oncology"], max_workers=1)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
+        await paste_ingest.add_names(["Oncology"], max_workers=1)
         assert tried == []
         assert store.get_companies(db, active_only=False) == []
 
-    def test_a_name_already_on_the_roster_is_not_re_resolved(
+    async def test_a_name_already_on_the_roster_is_not_re_resolved(
             self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
                                   "slug": "alpaca"})
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda n, *a, **k: tried.append(n) or (None, "x"))
-        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
+        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert tried == []
 
-    def test_a_raw_blob_still_works(self, monkeypatch, db):
+    async def test_a_raw_blob_still_works(self, monkeypatch, db):
         # The thin single-step path the CLI (and an older client) still use.
         import src.store as store
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
-        paste_ingest.add_names("Alpaca Health\n2 days ago", max_workers=1)
+        await paste_ingest.add_names("Alpaca Health\n2 days ago", max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
 
-    def test_a_websearch_only_hit_is_queued_instead_of_corroborated(
+    async def test_a_websearch_only_hit_is_queued_instead_of_corroborated(
             self, monkeypatch, db):
         """add_names used to spend extra fetches proving a websearch hit had
         a local HQ, and wrote it inactive when it could not. The queue is
         that judgement now, and it costs nothing."""
         import src.store as store
         probed = []
-        monkeypatch.setattr(identity, "nc_hq_signal",
-                            lambda *a, **k: probed.append(a) or False)
+        monkeypatch.setattr(identity, "anc_hq_signal",
+                            answer(lambda *a, **k: probed.append(a) or False))
         self._wire(monkeypatch, db, {**self._HIT, "nc": 0, "via": "websearch"})
-        paste_ingest.add_names(["Alpaca Health"], max_workers=1)
+        await paste_ingest.add_names(["Alpaca Health"], max_workers=1)
         assert [c["name"] for c in store.pending_companies(db)] \
             == ["Alpaca Health"]
         assert probed == [], "the corroboration probe still runs"
@@ -1122,17 +1079,23 @@ class TestScoreAndUpsert:
         the scorer was asked about."""
         import src.claude.api as claude
         asked = []
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr(claude, "score_company_mission",
-                            lambda name, *a, **k: asked.append(name) or scored)
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(claude, "ascore_company_mission",
+                            answer(lambda name, *a, **k: asked.append(name) or scored))
         return asked
 
-    def test_an_unconfirmed_name_is_queued_not_activated(
+    @staticmethod
+    async def _upsert(db, hit, **kw):
+        import src.store as store
+        async with store.Writer(db) as w:
+            return await local_sourcing.score_and_upsert(w, hit, **kw)
+
+    async def test_an_unconfirmed_name_is_queued_not_activated(
             self, monkeypatch, db):
         import src.store as store
         from src import tags
         asked = self._wire(monkeypatch)
-        row, active, pending = local_sourcing.score_and_upsert(
+        row, active, pending = await self._upsert(
             db, self._HIT, source="paste", include_missions=("adjacent",))
         assert asked == ["Alpaca Health"]
         # The verdict says a reviewer's confirmation WOULD activate it ...
@@ -1149,7 +1112,7 @@ class TestScoreAndUpsert:
         assert stored["careers_url"] == self._HIT["careers_url"]
         assert (row["mission_tier"], row["mission_score"]) == ("adjacent", 0.5)
 
-    def test_a_confirmed_name_is_refreshed_in_place(self, monkeypatch, db):
+    async def test_a_confirmed_name_is_refreshed_in_place(self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "Alpaca Health", "ats": "lever",
                                   "slug": "alpaca", "active": 1})
@@ -1157,7 +1120,7 @@ class TestScoreAndUpsert:
         # No job count: a row that has produced jobs keeps `active`
         # whatever discovery scores it (_productive_row).
         hit = {**self._HIT, "count": None}
-        _, active, pending = local_sourcing.score_and_upsert(
+        _, active, pending = await self._upsert(
             db, hit, source="paste", include_missions=("adjacent",))
         assert (active, pending) == (1, False)
         assert [c["name"] for c in store.crawlable_companies(db)] \
@@ -1165,53 +1128,53 @@ class TestScoreAndUpsert:
         assert store.pending_companies(db) == []
         # The activation rule is src.claude.is_active_mission, and it is
         # what a confirmed row's `active` follows.
-        _, active, _ = local_sourcing.score_and_upsert(
+        _, active, _ = await self._upsert(
             db, hit, source="paste", include_missions=())
         assert active == 0
         assert store.crawlable_companies(db) == []
 
-    def test_a_board_tracked_under_another_name_costs_no_score(
+    async def test_a_board_tracked_under_another_name_costs_no_score(
             self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "Alpaca", "ats": "lever",
                                   "slug": "alpaca"})
         asked = self._wire(monkeypatch)
-        assert local_sourcing.score_and_upsert(
+        assert await self._upsert(
             db, self._HIT, source="paste") is None
         assert asked == [], "the duplicate check must run before the LLM call"
         assert [c["name"] for c in store.get_companies(db, active_only=False)] \
             == ["Alpaca"]
 
-    def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
+    async def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
         asked = self._wire(monkeypatch)
-        row, _, _ = local_sourcing.score_and_upsert(
+        row, _, _ = await self._upsert(
             db, self._HIT, source="local_sourcing",
             scored=("core", 0.9, "pooled"))
         assert asked == []
         assert (row["mission_tier"], row["mission_score"]) == ("core", 0.9)
 
-    def test_local_tag_follows_the_local_count_unless_given(
+    async def test_local_tag_follows_the_local_count_unless_given(
             self, monkeypatch, db):
         import src.store as store
         from src import tags
         self._wire(monkeypatch)
-        local_sourcing.score_and_upsert(
+        await self._upsert(
             db, {**self._HIT, "nc": 0}, source="paste")
         assert store.get_companies(db, active_only=False)[0]["tags"] \
             == tags.PENDING
         # ats_dork admits an nc == 0 board on its HQ signal and says so
         # by passing the tag explicitly.
-        local_sourcing.score_and_upsert(
+        await self._upsert(
             db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0},
             source="ats_dork", tags=tags.LOCAL)
         beta = next(c for c in store.get_companies(db, active_only=False)
                     if c["name"] == "Beta Bio")
         assert {tags.LOCAL, tags.PENDING} <= set(beta["tags"].split(","))
 
-    def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
+    async def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
         import src.store as store
         self._wire(monkeypatch)
-        local_sourcing.score_and_upsert(
+        await self._upsert(
             db, {**self._HIT, "ats": "workday",
                  "slug": ("acme", 5, "External")}, source="ats_dork")
         stored = store.get_companies(db, active_only=False)[0]
@@ -1232,11 +1195,11 @@ class TestScoreMissionsHonoursTheReviewQueue:
         import src.claude.api as claude
 
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(claude, "score_company_mission",
-                            lambda *a, **k: ("adjacent", 0.5, "stub"))
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
+        monkeypatch.setattr(claude, "ascore_company_mission",
+                            answer(("adjacent", 0.5, "stub")))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
 
-    def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
+    async def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
         import src.store as store
         from src import tags
         self._wire(monkeypatch, db)
@@ -1245,7 +1208,7 @@ class TestScoreMissionsHonoursTheReviewQueue:
                                   "tags": tags.PENDING})
         store.upsert_company(db, {"name": "Failed Call Co", "ats": "lever",
                                   "slug": "failed", "active": 0})
-        local_sourcing.score_missions(max_workers=1)
+        await local_sourcing.score_missions(max_workers=1)
         rows = {r["name"]: dict(r) for r in
                 db.execute("SELECT name, active, tags, mission_tier FROM companies")}
         assert rows["Queued Co"]["active"] == 0
@@ -1257,16 +1220,16 @@ class TestScoreMissionsHonoursTheReviewQueue:
 class TestValidateCandidateResolutionOrder:
     """The order discovery resolves a candidate in, pinned.
 
-    src.discovery.pipeline.validate_candidate used to carry its OWN
+    src.discovery.pipeline.avalidate_candidate used to carry its OWN
     probe-first resolver: slug variants of the name against every ATS
     before anything looked at the company's site. That is the order that
     mapped "Ripple Neuro" onto the payments company's board (2026-08-28)
     and a stranger's board onto two roster rows (2026-09-18, 2026-09-21).
-    It calls resolve.board.resolve_board_sniff_first now, and nothing here
-    may reintroduce a probe that outranks the careers-page sniff.
+    It calls resolve.board.aresolve_board_sniff_first now, and nothing
+    here may reintroduce a probe that outranks the careers-page sniff.
 
-    Offline: sniff_ats, probe_company, websearch_board and _validate_board
-    are all faked.
+    Offline: asniff_ats, aprobe_company, awebsearch_board and
+    _validate_board are all faked.
     """
 
     @staticmethod
@@ -1285,7 +1248,7 @@ class TestValidateCandidateResolutionOrder:
         return pipeline.Candidate(name=name, ats=ats, slug_guess=None,
                                   careers_url="", notes="")
 
-    def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
+    async def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
         """The company's own page names greenhouse/raya-health-inc; the
         name's first word confirms on an unrelated 120-job Lever board.
         The page wins, and the stranger's board is never taken."""
@@ -1299,13 +1262,13 @@ class TestValidateCandidateResolutionOrder:
                     ("lever", "raya"): (120, 9)})
         c = self._candidate("Raya Health")
 
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
 
         assert (c.confirmed, c.ats, c.slug_guess) == (
             True, "greenhouse", "raya-health-inc")
         assert c.via == "sniff"
 
-    def test_a_probe_only_hit_is_confirmed_but_flagged(self, monkeypatch):
+    async def test_a_probe_only_hit_is_confirmed_but_flagged(self, monkeypatch):
         """Nothing readable on the company's site: the name-guessed slug is
         the only evidence, so it confirms -- carrying a [VERIFY] note, which
         is what a human reading the report acts on."""
@@ -1315,12 +1278,12 @@ class TestValidateCandidateResolutionOrder:
                    boards={("greenhouse", "zetalabs"): (12, 4)})
         c = self._candidate("Zeta Labs")
 
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
 
         assert (c.confirmed, c.ats, c.via) == (True, "greenhouse", "probe")
         assert "name-guessed slug" in pipeline.verify_note(c)
 
-    def test_an_empty_board_does_not_confirm(self, monkeypatch):
+    async def test_an_empty_board_does_not_confirm(self, monkeypatch):
         """Every hit is validated by a live fetch, so a slug guess landing
         on a board with no postings is a MISS -- the probe's own 200 used to
         be enough."""
@@ -1330,11 +1293,11 @@ class TestValidateCandidateResolutionOrder:
                    boards={})
         c = self._candidate("Nova Health")
 
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
 
         assert not c.confirmed
 
-    def test_a_workday_triple_is_carried_as_one_string(self, monkeypatch):
+    async def test_a_workday_triple_is_carried_as_one_string(self, monkeypatch):
         """apply_to_store and the report read one handle string off the
         candidate; Workday's triple is '|'-joined for them and parsed back
         by apply._candidate_hit."""
@@ -1345,12 +1308,12 @@ class TestValidateCandidateResolutionOrder:
                    boards={("workday", None): (61, 12)})
         c = self._candidate("Direct Supply")
 
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
 
         assert c.slug_guess == "dsupply|5|External"
         assert _candidate_hit(c)["slug"] == ("dsupply", 5, "External")
 
-    def test_an_unfetchable_ats_is_reported_as_a_lead(self, monkeypatch):
+    async def test_an_unfetchable_ats_is_reported_as_a_lead(self, monkeypatch):
         """Nothing resolves, but the careers page names a platform we can
         RECOGNIZE and not fetch -- reported so the user can add it by hand,
         not filed as a dead miss."""
@@ -1361,7 +1324,7 @@ class TestValidateCandidateResolutionOrder:
                     "source_url": "https://acme.example/careers"}))
         c = self._candidate("Acme Devices")
 
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
 
         assert not c.confirmed
         assert c.ats_lead == "eightfold @ acme"
@@ -1388,9 +1351,9 @@ class TestApplyToStoreFetchability:
     def _wire(monkeypatch, db, tier="core-mission"):
         import src.claude.api as claude
         keep_store_open(monkeypatch, db)
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h, n=6: [])
-        monkeypatch.setattr(claude, "score_company_mission",
-                            lambda name, *a, **k: (tier, 0.9, "stub"))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr(claude, "ascore_company_mission",
+                            answer((tier, 0.9, "stub")))
 
     @staticmethod
     def _candidate(name, ats, slug, careers_url, nc=3, count=8):
@@ -1399,11 +1362,11 @@ class TestApplyToStoreFetchability:
             notes="", confirmed=True, job_count=count, nc=nc, via="sniff")
 
     @staticmethod
-    def _apply(*cands):
+    async def _apply(*cands):
         from src.discovery import apply_to_store
-        return apply_to_store({"term": "neurotech", "companies": list(cands)})
+        return await apply_to_store({"term": "neurotech", "companies": list(cands)})
 
-    def test_a_resolved_custom_board_reaches_the_roster(self, monkeypatch, db):
+    async def test_a_resolved_custom_board_reaches_the_roster(self, monkeypatch, db):
         """The whole path: the resolver sniffs a self-hosted careers page,
         and the candidate it produces lands in the review queue with its URL
         as the board's coordinate -- the same row local_sourcing writes for
@@ -1417,10 +1380,10 @@ class TestApplyToStoreFetchability:
             boards={("custom", None): (5, 2)})
         self._wire(monkeypatch, db)
         c = TestValidateCandidateResolutionOrder._candidate("Beta Custom")
-        pipeline.validate_candidate(c, delay=0)
+        await pipeline.avalidate_candidate(c, delay=0)
         assert (c.confirmed, c.ats, c.slug_guess) == (True, "custom", None)
 
-        lines = self._apply(c)
+        lines = await self._apply(c)
 
         assert not any("[skip]" in ln for ln in lines), lines
         stored = store.get_companies(db, active_only=False)[0]
@@ -1435,14 +1398,14 @@ class TestApplyToStoreFetchability:
         # `sweep`, D14).
         assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))
 
-    def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
+    async def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
                                                          serve):
         """Not just "no longer skipped": once the reviewer confirms it, the
         row is one the harvester picks up and fetch_company dispatches."""
         import src.store as store
         self._wire(monkeypatch, db)
 
-        self._apply(self._candidate("Beta Custom", "custom", None,
+        await self._apply(self._candidate("Beta Custom", "custom", None,
                                     "https://beta.example/careers", nc=2))
 
         store.confirm_company(db, store.company_id_by_name(db, "Beta Custom"))
@@ -1454,10 +1417,10 @@ class TestApplyToStoreFetchability:
         # src.crawl.harvest.fetch_whole_board and the local track
         # (src.crawl.runner) both dispatch a roster row here.
         seen = serve("<html></html>")
-        company_fetch.fetch_company(row, None)
+        await company_fetch.afetch_company(row, None)
         assert seen == ["https://beta.example/careers"]
 
-    def test_a_confirmed_board_follows_is_active_mission(self, monkeypatch, db):
+    async def test_a_confirmed_board_follows_is_active_mission(self, monkeypatch, db):
         """An off-mission tier parks the row rather than dropping it -- the
         custom candidate gets the same verdict every other add gets."""
         import src.store as store
@@ -1466,47 +1429,47 @@ class TestApplyToStoreFetchability:
                                   "active": 1})
         self._wire(monkeypatch, db, tier="other")
 
-        self._apply(self._candidate("Beta Custom", "custom", None,
+        await self._apply(self._candidate("Beta Custom", "custom", None,
                                     "https://beta.example/careers", nc=2))
 
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["mission_tier"], stored["active"]) == ("other", 0)
 
-    def test_a_slug_keyed_board_with_no_slug_is_still_skipped(
+    async def test_a_slug_keyed_board_with_no_slug_is_still_skipped(
             self, monkeypatch, db):
         """`custom` is keyed on its URL; greenhouse is not. A careers URL
         does not stand in for the handle its fetcher needs."""
         import src.store as store
         self._wire(monkeypatch, db)
 
-        lines = self._apply(self._candidate(
+        lines = await self._apply(self._candidate(
             "Delta Labs", "greenhouse", None, "https://delta.example/careers"))
 
         assert any("malformed slug" in ln for ln in lines), lines
         assert store.get_companies(db, active_only=False) == []
 
-    def test_an_ats_with_no_fetcher_is_still_skipped(self, monkeypatch, db):
+    async def test_an_ats_with_no_fetcher_is_still_skipped(self, monkeypatch, db):
         """The gate still exists, it just reads the right table: a platform
         the sniffer can NAME but nothing can fetch stays out of the roster."""
         import src.store as store
         self._wire(monkeypatch, db)
         assert company_fetch.board_for("eightfold") is None
 
-        lines = self._apply(self._candidate(
+        lines = await self._apply(self._candidate(
             "Gamma Devices", "eightfold", "gamma",
             "https://gamma.example/careers"))
 
         assert any("no fetcher for ATS 'eightfold'" in ln for ln in lines)
         assert store.get_companies(db, active_only=False) == []
 
-    def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):
+    async def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):
         """The ordinary case the gate was written for, pinned: a greenhouse
         candidate still stores with its slug and the registry's seed tag."""
         import src.store as store
         from src import tags
         self._wire(monkeypatch, db)
 
-        self._apply(self._candidate("Alpha Bio", "greenhouse", "alphabio",
+        await self._apply(self._candidate("Alpha Bio", "greenhouse", "alphabio",
                                     "https://alpha.example/careers"))
 
         stored = store.get_companies(db, active_only=False)[0]

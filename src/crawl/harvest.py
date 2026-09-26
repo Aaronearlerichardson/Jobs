@@ -471,9 +471,6 @@ async def ahydrate_rows(jobs, company, stats, delay=None, backoff_s=MISS_BACKOFF
         lambda: sum(1 for j in jobs if company_fetch.needs_detail(j)))
 
 
-hydrate_rows = http.sync_shim(ahydrate_rows)
-
-
 # --------------------------------------------------------------------------- #
 #  The run                                                                     #
 # --------------------------------------------------------------------------- #
@@ -481,28 +478,31 @@ hydrate_rows = http.sync_shim(ahydrate_rows)
 def run(db_path=None, only=None, names=None, min_age_hours=None,
         limit=None, max_workers=DEFAULT_WORKERS, hydrate=False,
         max_hours=None, board_fn=aharvest_board, triage=True, score_cap=None):
-    """Harvest every planned board (`apass`, on the network loop), then
-    triage what was stored and rewrite every roster track's digest.
-    Returns the summary dict (also printed); the triage summary rides in
-    it under "triage".
+    """Harvest every planned board (`apass`), then triage what was stored
+    and rewrite every roster track's digest (`_triage`): one coroutine on
+    the network loop, the two halves in that order. Returns the summary
+    dict (also printed); the triage summary rides in it under "triage".
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
     the next one, or for `run_scraper.py --triage`); `score_cap` bounds
     that pass's Claude fit calls (triage.SCORE_CAP when None);
-    `max_workers` sizes its pools. `board_fn` exists for tests (it is
-    aharvest_board's signature). Ctrl+C raises KeyboardInterrupt here once
-    the pull has unwound (net.http.run_sync).
+    `max_workers` bounds its concurrency. `board_fn` exists for tests (it
+    is aharvest_board's signature). Ctrl+C raises KeyboardInterrupt here
+    once the pass has unwound (net.http.run_sync).
     """
     db_path = db_path or config.STORE_DB_PATH
     claude_baseline = cache_stats()     # this pass's own Claude spend footer
-    summary = http.run_sync(apass(db_path, only=only, names=names,
-                                  min_age_hours=min_age_hours, limit=limit,
-                                  hydrate=hydrate, max_hours=max_hours,
-                                  board_fn=board_fn))
-    if triage:
-        summary["triage"] = _triage(db_path, max_workers, score_cap,
-                                    claude_baseline)
-    return summary
+
+    async def whole():
+        summary = await apass(db_path, only=only, names=names,
+                              min_age_hours=min_age_hours, limit=limit,
+                              hydrate=hydrate, max_hours=max_hours,
+                              board_fn=board_fn)
+        if triage:
+            summary["triage"] = await _triage(db_path, max_workers, score_cap,
+                                              claude_baseline)
+        return summary
+    return http.run_sync(whole())
 
 
 async def apass(db_path, only=None, names=None, min_age_hours=None,
@@ -654,7 +654,7 @@ def _report(c, s, summary):
     _log.debug("board %s stats %s", c.get("name"), s)
 
 
-def _triage(db_path, max_workers, score_cap, claude_baseline):
+async def _triage(db_path, max_workers, score_cap, claude_baseline):
     """The pass's second half; returns triage.run's summary.
 
     The gate/hydrate/score pass over everything pending in the store --
@@ -669,7 +669,7 @@ def _triage(db_path, max_workers, score_cap, claude_baseline):
 
     Notes:
         triage is imported here because it imports this module. The steps
-        after it use `db_path`, not maintenance.track_store(t): that opens
+        after it use `db_path`, not maintenance.track_writer(t): that opens
         each track's configured store, a different file whenever `db_path`
         is overridden (tests, `harvest.py --db`), and triage.run reads
         every roster track from the one `db_path` too. The verify guard
@@ -677,9 +677,8 @@ def _triage(db_path, max_workers, score_cap, claude_baseline):
     """
     from src.crawl import triage
     kw = {"score_cap": score_cap} if score_cap is not None else {}
-    result = triage.run(db_path=db_path, max_workers=max_workers, **kw)
-    conn = store.connect(db_path)
-    try:
+    result = await triage.run(db_path=db_path, max_workers=max_workers, **kw)
+    async with store.Writer(db_path) as db:
         tracks = triage.roster_tracks()
         down = api_disabled()
         if not have_api_key() or down:
@@ -688,15 +687,13 @@ def _triage(db_path, max_workers, score_cap, claude_baseline):
         else:
             for t in tracks:
                 if t.get("verify_top"):
-                    verify_top(top_n=t["verify_top"],
-                              max_workers=max(2, max_workers // 2),
-                              conn=conn, t=t)
-        check_closed_jobs(max_workers=max_workers, limit=CLOSED_PROBE_LIMIT,
-                          stale_days=CLOSED_PROBE_STALE_DAYS, conn=conn)
+                    await verify_top(top_n=t["verify_top"],
+                                     max_workers=max(2, max_workers // 2),
+                                     db=db, t=t)
+        await check_closed_jobs(max_workers=max_workers, limit=CLOSED_PROBE_LIMIT,
+                                stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         for t in tracks:
-            rewrite_digest(conn, t, top_n=5,
-                           heading=f"\n  [{t['track']}] digest rewritten:")
-    finally:
-        conn.close()
+            await db.run(rewrite_digest, t, top_n=5,
+                         heading=f"\n  [{t['track']}] digest rewritten:")
     report_cache_stats(claude_baseline)
     return result

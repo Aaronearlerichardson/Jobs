@@ -466,7 +466,7 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
         assert ops.rewrite_digest(db, local_track) == []
         assert "Harvest triage" not in self._text(report_dir, local_track)
 
-    def test_the_crawl_report_goes_through_the_same_writer(
+    async def test_the_crawl_report_goes_through_the_same_writer(
             self, db, company, add_job, local_track, report_dir):
         job_id = add_job("gh_acme_1", fit=0.9, track=local_track["track"])
         add_job("gh_acme_2", fit=0.4, track=local_track["track"])
@@ -477,8 +477,9 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
         got = runner.Collected(to_score=[], matches=[], watch_hits=watch_hits,
                                funnel=[], n_closed=0, n_reopened=0, n_seen=0)
 
-        ranked = runner._report_ranked(db, local_track, got, scored=0,
-                                       send=False, top_n=15, bar="=" * 10)
+        async with store.Writer(db) as w:
+            ranked = await runner._report_ranked(w, local_track, got, scored=0,
+                                                 send=False, top_n=15, bar="=" * 10)
 
         assert ([j["job_id"] for j in ranked]
                 == [j["job_id"] for j in ops._ranked(db, local_track)])

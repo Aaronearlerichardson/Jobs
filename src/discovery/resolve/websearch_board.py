@@ -154,6 +154,3 @@ async def awebsearch_board(name, max_results=8):
         if hit:
             return hit
     return None
-
-
-websearch_board = http.sync_shim(awebsearch_board)

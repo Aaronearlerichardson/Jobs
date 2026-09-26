@@ -15,7 +15,7 @@ Gates, per configured track, in order:
   1. mission   company-level, once per COMPANY: the roster row's cached
                mission tier (src.claude.is_active_mission) and the
                track's min_mission. A company never scored gets ONE
-               score_company_mission call, with the harvested titles as
+               ascore_company_mission call, with the harvested titles as
                context, and the verdict is written back to the roster.
                Multi-division employers (profile [policy]) fall through:
                a conglomerate's corporate score says nothing about the
@@ -61,9 +61,9 @@ triage_detail so a false drop is debuggable; triage_status carries the
 one row verdict the funnel counts.
 
 Keyword focus (runner.apply_keyword_focus) mutates config's shared lists,
-so the gate phases run on the calling thread, one track at a time, with
-the lists restored afterwards. Only hydration and scoring fan out to
-threads, and neither reads those lists.
+so the gate phases run one company and one track at a time (off the loop,
+asyncio.to_thread), with the lists restored afterwards. Only hydration and
+scoring run concurrently, and neither reads those lists.
 
 Those seven steps are seven functions -- _free_gates, _hydrate,
 _body_gates, _score, _write_verdicts, over _by_company and _judged -- and
@@ -72,9 +72,10 @@ _body_gates, _score, _write_verdicts, over _by_company and _judged -- and
 written the asking out twice.
 """
 
+import asyncio
 import logging
 import time
-from contextlib import closing, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from src import config
@@ -83,10 +84,10 @@ from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS
 from src.ats.board.company import needs_detail
-from src.claude.api import is_active_mission, score_company_mission
-from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
+from src.claude.api import ascore_company_mission, is_active_mission
+from src.claude.fit import MIN_DESC_CHARS, ascore_resume_fit
 from src.crawl import harvest
-from src.crawl.harvest import MISS_BACKOFF_S, hydrate_rows
+from src.crawl.harvest import MISS_BACKOFF_S, ahydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
@@ -160,10 +161,11 @@ def _keyword_focus(t):
 #  Gate 1: mission, once per company                                          #
 # --------------------------------------------------------------------------- #
 
-def ensure_mission(conn, company, titles=(), scorer=score_company_mission):
-    """The company's (tier, score), scoring it ONCE via Claude when the
-    roster row has neither, with the harvested titles as context, and
-    caching the verdict on the row. Never touches `active`: activation
+async def ensure_mission(db, company, titles=(), scorer=ascore_company_mission):
+    """The company's (tier, score), scoring it ONCE via Claude (`scorer`, a
+    coroutine function) when the roster row has neither, with the harvested
+    titles as context, and caching the verdict on the row (`db`, a
+    store.Writer). Never touches `active`: activation
     policy belongs to src.discovery.local_sourcing.score_missions. Returns
     (None, None) when scoring is unavailable -- which reads as unknown,
     not off-mission, everywhere downstream."""
@@ -178,14 +180,14 @@ def ensure_mission(conn, company, titles=(), scorer=score_company_mission):
     try:
         context = (" | ".join(t for t in titles if t)
                    or coords.board_context(company))
-        tier, score, reason = scorer(company.get("name") or "", context)
+        tier, score, reason = await scorer(company.get("name") or "", context)
     except Exception as e:                      # noqa: BLE001 - reported
         print(f"    [!] mission score failed for {company.get('name')}: {e}")
         return None, None
     if tier is None and score is None:
         return None, None
-    store.upsert_company(conn, {"name": company["name"], "mission_tier": tier,
-                                "mission_score": score, "mission_reason": reason})
+    await db.run(store.upsert_company, {"name": company["name"], "mission_tier": tier,
+                                        "mission_score": score, "mission_reason": reason})
     company["mission_tier"], company["mission_score"] = tier, score
     _log.debug("mission %s -> %s %.2f", company.get("name"), tier, score or 0)
     return tier, score
@@ -299,28 +301,32 @@ def row_verdict(company, job, t, cutoff):
     return DEFER if deferred else OK
 
 
-def judge(conn, company, jobs, tracks, mission_scorer=score_company_mission,
-          *, cutoff):
+async def judge(db, company, jobs, tracks, mission_scorer=ascore_company_mission,
+                *, cutoff):
     """Gates 1-6 for one company's rows against every applicable track.
     Returns {job_id: {track_label: verdict}} (verdict OK / gate / DEFER).
-    Mission is decided once here; the per-track keyword focus is applied
-    around each track's pass over the rows."""
+    Mission is decided once here (`db`, a store.Writer, keeps it); the
+    per-track keyword focus is applied around each track's pass over the
+    rows, off the loop."""
     applicable = [t for t in tracks if _track_applies(t, company)]
     out = {j["job_id"]: {} for j in jobs}
     if not applicable:
         return out
-    ensure_mission(conn, company, [j.get("title") for j in jobs[:8]],
-                   scorer=mission_scorer)
-    for t in applicable:
-        mv = mission_verdict(company, t)
-        if mv != OK:
-            for j in jobs:
-                out[j["job_id"]][t["track"]] = mv
-            continue
-        with _keyword_focus(t):
-            for j in jobs:
-                out[j["job_id"]][t["track"]] = row_verdict(company, j, t, cutoff)
-    return out
+    await ensure_mission(db, company, [j.get("title") for j in jobs[:8]],
+                         scorer=mission_scorer)
+
+    def gate():
+        for t in applicable:
+            mv = mission_verdict(company, t)
+            if mv != OK:
+                for j in jobs:
+                    out[j["job_id"]][t["track"]] = mv
+                continue
+            with _keyword_focus(t):
+                for j in jobs:
+                    out[j["job_id"]][t["track"]] = row_verdict(company, j, t, cutoff)
+        return out
+    return await asyncio.to_thread(gate)
 
 
 def summarize(verdicts):
@@ -353,8 +359,8 @@ def summarize(verdicts):
 # --------------------------------------------------------------------------- #
 
 def _fetcher_shape(row, company):
-    """A stored row as the job dict board.company.hydrate_description
-    expects (`hydrate_rows` passes it the roster row, which names the
+    """A stored row as the job dict board.company.ahydrate_description
+    expects (`harvest.ahydrate_rows` passes it the roster row, which names the
     board)."""
     return {"id": row["job_id"], "job_id": row["job_id"],
             "title": row.get("title") or "", "url": row.get("url") or "",
@@ -363,18 +369,12 @@ def _fetcher_shape(row, company):
             "ats": company.get("ats"), "_row": row}
 
 
-def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S):
+async def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S):
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats."""
     stats = {"hydrated": 0, "unhydrated": 0}
-    hydrate_rows(jobs, company, stats, delay, backoff_s)
+    await ahydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
-
-
-def _score_one(job):
-    res = score_resume_fit(job.get("title") or "", job.get("description") or "",
-                           location=job.get("location") or "")
-    return job, res
 
 
 # --------------------------------------------------------------------------- #
@@ -393,7 +393,7 @@ def _by_company(conn, rows):
     return groups, {cid: store.get_company(conn, cid) for cid in groups}
 
 
-def _judged(conn, companies, groups, tracks, mission_scorer, cutoff):
+async def _judged(db, companies, groups, tracks, mission_scorer, cutoff):
     """Yield (company, row, status, detail, surfaced) for every grouped row.
 
     The two gate phases differ only in what they DO with a verdict -- the
@@ -401,14 +401,14 @@ def _judged(conn, companies, groups, tracks, mission_scorer, cutoff):
     """
     for cid, rs in groups.items():
         c = companies[cid]
-        verdicts = judge(conn, c, rs, tracks, mission_scorer=mission_scorer,
-                         cutoff=cutoff)
+        verdicts = await judge(db, c, rs, tracks, mission_scorer=mission_scorer,
+                               cutoff=cutoff)
         for r in rs:
             status, detail, surfaced = summarize(verdicts[r["job_id"]])
             yield c, r, status, detail, surfaced
 
 
-def _free_gates(conn, companies, groups, tracks, mission_scorer, cutoff):
+async def _free_gates(db, companies, groups, tracks, mission_scorer, cutoff):
     """Phase 1: the free gates, on the text the rows already have.
 
     Returns (decided, survivors). A survivor is OK on some track, or
@@ -418,8 +418,8 @@ def _free_gates(conn, companies, groups, tracks, mission_scorer, cutoff):
     decide the row right here instead of deferring it into phase 2.
     """
     decided, survivors = {}, {}
-    for c, r, status, detail, _ in _judged(conn, companies, groups, tracks,
-                                           mission_scorer, cutoff):
+    async for c, r, status, detail, _ in _judged(db, companies, groups, tracks,
+                                                 mission_scorer, cutoff):
         if status in (OK, DEFER):
             survivors[r["job_id"]] = (c, r, status)
         else:
@@ -461,8 +461,8 @@ def _hydrate_order(survivors):
     return key
 
 
-def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
-             hydrate_fn, cutoff):
+async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
+                   hydrate_fn, cutoff):
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
     location the listing never named (see needs_detail/hydrate_description).
@@ -512,7 +512,7 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
         for j in todo[cid]:
             waiting[j["id"]] = "hydration abandoned past the pass budget"
 
-    for cid, st in fan_out(
+    async for cid, st in fan_out(
             list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
             lambda cid: f"{companies[cid]['name']}: hydrate",
             max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
@@ -531,12 +531,12 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
                 r["location"] = j.get("location") or r.get("location")
                 if j.get("remote_hint"):
                     r["remote_hint"] = j["remote_hint"]
-                store.store_body(conn, j["id"], r["description"],
-                                 r["location"])
+                await db.run(store.store_body, j["id"], r["description"],
+                             r["location"])
             if not needs_detail(j):
                 continue                 # resolved (body, or just location)
             if j.get("_tried"):
-                store.mark_desc_checked(conn, j["id"], now=stamp)
+                await db.run(store.mark_desc_checked, j["id"], now=stamp)
                 waiting[j["id"]] = "fetch failed this pass"
             else:
                 # Never reached hydrate_description at all: the board's
@@ -547,8 +547,8 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
     return waiting
 
 
-def _body_gates(conn, companies, survivors, tracks, mission_scorer, decided,
-                summary, n_free, waiting, cutoff):
+async def _body_gates(db, companies, survivors, tracks, mission_scorer, decided,
+                      summary, n_free, waiting, cutoff):
     """Phase 3: the same gates again, now with bodies.
 
     Returns the rows to score. A survivor still without a body -- DEFER,
@@ -560,9 +560,9 @@ def _body_gates(conn, companies, survivors, tracks, mission_scorer, decided,
     # The survivor rows carry company_id themselves, so the same grouping
     # helper works here without rebuilding the (company, row) pairs.
     groups = ops.group_by_company([r for _, r, _ in survivors.values()])
-    for c, r, status, detail, surfaced in _judged(conn, companies, groups,
-                                                  tracks, mission_scorer,
-                                                  cutoff):
+    async for c, r, status, detail, surfaced in _judged(db, companies, groups,
+                                                        tracks, mission_scorer,
+                                                        cutoff):
         if status == OK and (r.get("description") or "").strip():
             final[r["job_id"]] = (c, r, surfaced, detail)
         elif status in (OK, DEFER):
@@ -590,7 +590,7 @@ def _print_waiting(rows, reasons):
         print(f"    ... and {extra} more")
 
 
-def _score(final, summary, score_cap, fit, max_workers):
+async def _score(final, summary, score_cap, fit, max_workers):
     """Phase 4: the only paid step, best companies first, under the cap.
 
     Returns (scores, over_cap). Rows over the cap stay pending -- their
@@ -609,10 +609,14 @@ def _score(final, summary, score_cap, fit, max_workers):
                  f"for the next pass)" if over_cap else "") + "...")
         # A row abandoned past the budget waits for the next pass, as a row
         # over the cap does.
-        for r, res in fan_out([x[1] for x in to_score], _score_one,
-                              "scoring", max(2, min(max_workers, 6)),
-                              budget_s=config.PASS_BUDGET_S,
-                              on_abandon=lambda r: over_cap.add(r["job_id"])):
+        async for r, res in fan_out(
+                [x[1] for x in to_score],
+                lambda job: ascore_resume_fit(job.get("title") or "",
+                                              job.get("description") or "",
+                                              location=job.get("location") or ""),
+                "scoring", max(2, min(max_workers, 6)), with_item=True,
+                budget_s=config.PASS_BUDGET_S,
+                on_abandon=lambda r: over_cap.add(r["job_id"])):
             if res.score is not None:
                 scores[r["job_id"]] = res
                 summary["scored"] += 1
@@ -623,7 +627,7 @@ def _score(final, summary, score_cap, fit, max_workers):
 
 def _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
                     stamp):
-    """Phase 5: one batch, every verdict.
+    """Phase 5: every verdict, inside the caller's one batch.
 
     A survivor the scorer could not reach (no key, breaker tripped) is
     still stamped into its tracks unscored: the crawl's self-heal scores
@@ -649,36 +653,35 @@ def _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
         line of its own). The score line used to print "ok" plus a
         redundant "[SURFACED]" tag, two names for one fact.
     """
-    with store.batch(conn):
-        for jid, (status, detail, c, r) in decided.items():
-            store.record_triage(conn, jid, status, detail, now=stamp)
-            summary[status] += 1
-            _log.debug("drop %s | %s | %s | %s | %s", status,
-                      clean_field(c.get("name")), clean_field(r.get("title")),
-                      clean_field(r.get("location")), detail)
-        for jid, (c, r, surfaced, detail) in final.items():
-            if jid in over_cap:
-                summary["left"] += 1
-                continue
-            res = scores.get(jid)
-            floors = [t["digest_min_fit"] for t in tracks
-                      if t["track"] in surfaced]
-            status = OK
-            if res is not None and floors and res.score < min(floors):
-                status = "fit"
-            loc, desc = r.get("location") or "", r.get("description") or ""
-            if res is not None:
-                label = "surfaced" if status == OK else status
-                print(f"  score {res.score:.2f} {label} | {c.get('name')} | "
-                      f"{r.get('title') or ''} | {loc} | {res.summary()}")
-            store.record_triage(
-                conn, jid, status, detail, tracks=surfaced, description=desc,
-                geo_mode=geo_mode(loc, desc),
-                remote_signal=remote_signal_for(
-                    {"location": loc, "description": desc}),
-                scores=res.as_columns() if res is not None else None,
-                now=stamp)
-            summary["surfaced" if status == OK else status] += 1
+    for jid, (status, detail, c, r) in decided.items():
+        store.record_triage(conn, jid, status, detail, now=stamp)
+        summary[status] += 1
+        _log.debug("drop %s | %s | %s | %s | %s", status,
+                   clean_field(c.get("name")), clean_field(r.get("title")),
+                   clean_field(r.get("location")), detail)
+    for jid, (c, r, surfaced, detail) in final.items():
+        if jid in over_cap:
+            summary["left"] += 1
+            continue
+        res = scores.get(jid)
+        floors = [t["digest_min_fit"] for t in tracks
+                  if t["track"] in surfaced]
+        status = OK
+        if res is not None and floors and res.score < min(floors):
+            status = "fit"
+        loc, desc = r.get("location") or "", r.get("description") or ""
+        if res is not None:
+            label = "surfaced" if status == OK else status
+            print(f"  score {res.score:.2f} {label} | {c.get('name')} | "
+                  f"{r.get('title') or ''} | {loc} | {res.summary()}")
+        store.record_triage(
+            conn, jid, status, detail, tracks=surfaced, description=desc,
+            geo_mode=geo_mode(loc, desc),
+            remote_signal=remote_signal_for(
+                {"location": loc, "description": desc}),
+            scores=res.as_columns() if res is not None else None,
+            now=stamp)
+        summary["surfaced" if status == OK else status] += 1
 
 
 def _print_summary(summary, bar):
@@ -704,10 +707,10 @@ def _print_summary(summary, bar):
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
 
 
-def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
-        score_cap=SCORE_CAP, fit=True, hydrate=True,
-        mission_scorer=score_company_mission, hydrate_fn=hydrate_company,
-        now=None, requeue=False, requeue_apply=False):
+async def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
+              score_cap=SCORE_CAP, fit=True, hydrate=True,
+              mission_scorer=ascore_company_mission, hydrate_fn=hydrate_company,
+              now=None, requeue=False, requeue_apply=False):
     """Triage every pending row in the store. Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,
     scored, surfaced, and how many rows are left pending.
@@ -723,7 +726,7 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
     `limit` caps the rows read this pass; `score_cap` the Claude fit calls;
     `fit=False` stamps survivors unscored (the crawl's self-heal scores
     them later); `hydrate=False` leaves undetailed survivors pending.
-    `mission_scorer` / `hydrate_fn` exist for tests.
+    `mission_scorer` / `hydrate_fn` (coroutine functions) exist for tests.
 
     `requeue=True` skips all five phases and instead runs `requeue_rows`
     (report-only unless `requeue_apply=True` too) -- see its docstring for
@@ -733,12 +736,12 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
     silent rewrite.
     """
     if requeue:
-        return requeue_rows(db_path=db_path, apply=requeue_apply,
-                            tracks=tracks)
+        return await requeue_rows(db_path=db_path, apply=requeue_apply,
+                                  tracks=tracks)
     db_path = db_path or config.STORE_DB_PATH
     tracks = roster_tracks(tracks)
-    with closing(store.connect(db_path)) as conn:
-        rows = store.triage_pending(conn, limit=limit)
+    async with store.Writer(db_path) as db:
+        rows = await db.run(store.triage_pending, limit=limit)
         bar = "=" * 70
         print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
               f"- {datetime.now():%Y-%m-%d %H:%M}")
@@ -754,19 +757,19 @@ def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
         stamp = now or datetime.now()
         cutoff = (stamp - timedelta(days=RETRY_DAYS)).isoformat()
 
-        groups, companies = _by_company(conn, rows)
-        decided, survivors = _free_gates(conn, companies, groups, tracks,
-                                         mission_scorer, cutoff)
+        groups, companies = await db.run(_by_company, rows)
+        decided, survivors = await _free_gates(db, companies, groups, tracks,
+                                               mission_scorer, cutoff)
         n_free = len(decided)
         waiting = {}
         if hydrate:
-            waiting = _hydrate(conn, companies, survivors, summary, stamp,
-                               max_workers, hydrate_fn, cutoff)
-        final = _body_gates(conn, companies, survivors, tracks, mission_scorer,
-                            decided, summary, n_free, waiting, cutoff)
-        scores, over_cap = _score(final, summary, score_cap, fit, max_workers)
-        _write_verdicts(conn, decided, final, scores, over_cap, tracks, summary,
-                        stamp)
+            waiting = await _hydrate(db, companies, survivors, summary, stamp,
+                                     max_workers, hydrate_fn, cutoff)
+        final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
+                                  decided, summary, n_free, waiting, cutoff)
+        scores, over_cap = await _score(final, summary, score_cap, fit, max_workers)
+        await db.batch(_write_verdicts, decided, final, scores, over_cap, tracks,
+                       summary, stamp)
 
     summary["secs"] = time.monotonic() - t0
     _print_summary(summary, bar)
@@ -879,7 +882,7 @@ def requeue_reasons(conn, tracks=None):
     return out
 
 
-def requeue_rows(db_path=None, apply=False, sample=10, tracks=None):
+async def requeue_rows(db_path=None, apply=False, sample=10, tracks=None):
     """Report (the default) or apply a re-queue of rows `requeue_reasons`
     flags -- the CLI/registry surface (run_scraper.py --triage --requeue
     [--requeue-apply], the registry `triage` op's same two params).
@@ -908,8 +911,8 @@ def requeue_rows(db_path=None, apply=False, sample=10, tracks=None):
     Returns {"counts": {reason: n}, "requeued": n if applied else 0}.
     """
     db_path = db_path or config.STORE_DB_PATH
-    with closing(store.connect(db_path)) as conn:
-        found = requeue_reasons(conn, tracks)
+    async with store.Writer(db_path) as db:
+        found = await db.run(requeue_reasons, tracks)
         counts = {}
         for v in found.values():
             counts[v["reason"]] = counts.get(v["reason"], 0) + 1
@@ -922,7 +925,5 @@ def requeue_rows(db_path=None, apply=False, sample=10, tracks=None):
         if len(found) > sample:
             print(f"    ... and {len(found) - sample} more")
         if apply:
-            with store.batch(conn):
-                for jid in found:
-                    store.clear_triage(conn, jid)
+            await db.batch(lambda conn: [store.clear_triage(conn, jid) for jid in found])
     return {"counts": counts, "requeued": len(found) if apply else 0}

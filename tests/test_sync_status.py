@@ -12,6 +12,8 @@ a board's jobs on an error or an empty snapshot would close them on the
 strength of a failed fetch — but it has to be visible.
 """
 
+from conftest import answer
+
 import src.store as store
 from src.ops import status as ops
 
@@ -27,15 +29,15 @@ class TestSyncStatusReportsSkippedBoards:
                             lambda conn, tag=None: roster)
         # An answer is (jobs, err) or (jobs, err, snapshot).
         monkeypatch.setattr(ops, "fetch_all",
-                            lambda sources, *a, **k: [(*answers[name], None)[:3]
-                                                      for name, _ats, _fn
-                                                      in sources])
+                            answer(lambda sources, *a, **k: [(*answers[name], None)[:3]
+                                                             for name, _ats, _fn
+                                                             in sources]))
         monkeypatch.setattr(ops, "_ranked", lambda *a, **k: [])
         monkeypatch.setattr(
             ops, "rewrite_digest",
             lambda conn, t, top_n=15, heading="": print(heading) or [])
 
-    def _run(self, tmp_path, monkeypatch, capsys, local_track):
+    async def _run(self, tmp_path, monkeypatch, capsys, local_track):
         dbp = tmp_path / "t.db"
         conn = store.connect(dbp)
         cid = store.upsert_company(
@@ -63,12 +65,12 @@ class TestSyncStatusReportsSkippedBoards:
                    "Silent Co": ([], None),
                    "Idless Co": (listed, None)}
         self._wire(monkeypatch, roster, answers)
-        ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t={**local_track, "db_path": dbp})
         return capsys.readouterr().out
 
-    def test_each_skipped_board_gets_its_own_warning_line(
+    async def test_each_skipped_board_gets_its_own_warning_line(
             self, tmp_path, monkeypatch, capsys, local_track):
-        out = self._run(tmp_path, monkeypatch, capsys, local_track)
+        out = await self._run(tmp_path, monkeypatch, capsys, local_track)
         lines = [ln for ln in out.splitlines() if "[!]" in ln]
         assert len(lines) == 3, f"one warning per skipped board, got: {lines}"
         assert any("Broken Co" in ln and "(fetch error)" in ln
@@ -82,13 +84,13 @@ class TestSyncStatusReportsSkippedBoards:
         for ln in lines:
             assert ln.lstrip().startswith("[!]"), ln
 
-    def test_the_footer_counts_the_skips_beside_the_reconciled_count(
+    async def test_the_footer_counts_the_skips_beside_the_reconciled_count(
             self, tmp_path, monkeypatch, capsys, local_track):
-        out = self._run(tmp_path, monkeypatch, capsys, local_track)
+        out = await self._run(tmp_path, monkeypatch, capsys, local_track)
         assert ("1 board(s) reconciled: 0 closed, 0 reopened, 3 skipped "
                 "(1 fetch error, 1 empty board, 1 no roster id)") in out
 
-    def test_a_failed_fetch_never_closes_that_board_s_jobs(
+    async def test_a_failed_fetch_never_closes_that_board_s_jobs(
             self, tmp_path, monkeypatch, capsys, local_track):
         """The skip itself is the point: an unreadable board must not have
         its stored jobs closed."""
@@ -107,7 +109,7 @@ class TestSyncStatusReportsSkippedBoards:
                    "slug": "broken"}]
         self._wire(monkeypatch, roster,
                    {"Broken Co": ([], RuntimeError("HTTP 500"))})
-        ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t={**local_track, "db_path": dbp})
 
         conn = store.connect(dbp)
         status = conn.execute("SELECT COALESCE(status,'open') FROM jobs "
@@ -117,7 +119,7 @@ class TestSyncStatusReportsSkippedBoards:
         assert "0 board(s) reconciled: 0 closed, 0 reopened, 1 skipped " \
                "(1 fetch error)" in capsys.readouterr().out
 
-    def test_a_partial_fetch_is_skipped_like_a_failed_one(
+    async def test_a_partial_fetch_is_skipped_like_a_failed_one(
             self, tmp_path, monkeypatch, capsys, local_track):
         """A page failed partway and the pager kept what had arrived
         (2026-09-15: Stryker's page 10 came back as HTML, 200 rows listed,
@@ -141,7 +143,7 @@ class TestSyncStatusReportsSkippedBoards:
                    [{"id": cid, "name": "Partial Co", "ats": "greenhouse",
                      "slug": "part"}],
                    {"Partial Co": (listed, None, {"incomplete": True})})
-        ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t={**local_track, "db_path": dbp})
 
         conn = store.connect(dbp)
         statuses = dict(conn.execute(

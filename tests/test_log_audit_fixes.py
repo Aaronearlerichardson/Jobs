@@ -48,32 +48,32 @@ class TestJunkNamesInThePasteFlow:
     def _wire(self, monkeypatch, db):
         keep_store_open(monkeypatch, db)
 
-    def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
+    async def test_preview_marks_junk_unticked_with_a_reason(self, monkeypatch, db):
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health",
                                              "Required Qualifications"])
-        rows = paste_ingest.preview_names("x", use_llm=False)
+        rows = await paste_ingest.preview_names("x", use_llm=False)
         assert [(r["name"], r["state"]) for r in rows] == [
             ("Alpaca Health", "new"), ("Required Qualifications", "junk")]
         assert rows[1]["why"] == "section-heading"
 
-    def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
+    async def test_blocked_beats_junk_in_the_preview(self, monkeypatch, db):
         store.block_name(db, "Oncology", "not a company")
         self._wire(monkeypatch, db)
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Oncology"])
         assert [r["state"] for r in
-                paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
+                await paste_ingest.preview_names("x", use_llm=False)] == ["blocked"]
 
-    def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
+    async def test_add_names_records_junk_as_a_miss_and_never_resolves_it(
             self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(paste_ingest, "resolve_or_miss",
-                            lambda n, *a, **k: tried.append(n) or (None, "x"))
-        paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
-                                 max_workers=1)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
+        await paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
+                                     max_workers=1)
         assert tried == ["Alpaca Health"]
         row = db.execute("SELECT miss_reason, active FROM companies "
                          "WHERE name='Proficiency in SQL.'").fetchone()
@@ -86,14 +86,14 @@ class TestJunkNamesInThePasteFlow:
 class TestJunkNamesInReresolve:
     T = {"db_path": None}
 
-    def test_old_junk_misses_are_retired_not_retried(self, monkeypatch, db):
+    async def test_old_junk_misses_are_retired_not_retried(self, monkeypatch, db):
         store.record_miss(db, "Required Qualifications", "no-board-found:x")
         store.record_miss(db, "Emmes", "no-board-found:wrong-domain")
         tried = []
-        monkeypatch.setattr(resolve_board, "resolve_or_miss",
-                            lambda n, *a, **k: tried.append(n)
-                            or (None, "no-board-found:x"))
-        ops.reresolve_misses(conn=db, max_workers=1, t=self.T)
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda n, *a, **k: tried.append(n)
+                                   or (None, "no-board-found:x")))
+        await ops.reresolve_misses(db=db, max_workers=1, t=self.T)
         assert tried == ["Emmes"]
         assert db.execute("SELECT miss_reason FROM companies WHERE "
                           "name='Required Qualifications'").fetchone()[0] \
@@ -128,7 +128,7 @@ class TestSnifferResolvesHostsOnce:
                                        "https://live.example/"]))
         assert looked_up == []
 
-    def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
+    async def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
         import threading
         gate = threading.Event()
 
@@ -136,16 +136,17 @@ class TestSnifferResolvesHostsOnce:
             gate.wait(2)
             return [("addr",)]
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
-        kept = fetchpool._drop_unresolvable(["https://slow.example/"], timeout=0.05)
+        kept = await fetchpool._drop_unresolvable(["https://slow.example/"],
+                                                  timeout=0.05)
         assert kept == []
         assert not fetchpool._DEAD_HOSTS.dead("https://slow.example/"), \
             "a slow resolver is not a missing name"
         gate.set()
 
-    def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch,
+    async def test_a_refused_connection_still_marks_the_host_dead(self, monkeypatch,
                                                              serve):
         serve(requests.exceptions.ConnectionError("refused"))
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo",
                             lambda *a, **k: [("addr",)])
-        assert run_sync(fetchpool._fetch_page("https://x.example/")) is None
-        assert fetchpool._drop_unresolvable(["https://x.example/careers"]) == []
+        assert await fetchpool._fetch_page("https://x.example/") is None
+        assert await fetchpool._drop_unresolvable(["https://x.example/careers"]) == []

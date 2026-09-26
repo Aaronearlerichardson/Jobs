@@ -8,14 +8,14 @@ local-engine track) and derives the store, jobs.track value, gates and
 ranking knobs from it.
 """
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 
 from src import config
 from src import digest
 from src import store
 from src import tags
 from src.ats.board import company as company_fetch
-from src.claude.fit import score_resume_fit
+from src.claude.fit import ascore_resume_fit
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
@@ -59,6 +59,19 @@ def track_store(t=None, conn=None):
         conn.close()
 
 
+@asynccontextmanager
+async def track_writer(t=None, db=None):
+    """`track_store` for async code: the track's store on a store.Writer
+    for the block -- or `db` itself when the caller already holds a Writer
+    (the crawl, the harvest pass), or a Writer over `db` when it is an open
+    connection, which stays open."""
+    if isinstance(db, store.Writer):
+        yield db
+        return
+    async with store.Writer(_t(t)["db_path"] if db is None else db) as w:
+        yield w
+
+
 def group_by_company(rows, key="company_id"):
     """`rows` bucketed by their company id, in first-seen order.
 
@@ -75,7 +88,7 @@ def group_by_company(rows, key="company_id"):
     return out
 
 
-def board_index(company):
+async def board_index(company):
     """One company's whole board, indexed by normalised title.
 
     Empty when the board cannot be pulled -- which is the same outcome as a
@@ -83,14 +96,14 @@ def board_index(company):
     per-URL path either way.
     """
     try:
-        board = company_fetch.fetch_company(company, loc_re=None)
+        board = await company_fetch.afetch_company(company, loc_re=None)
     except Exception as e:                      # noqa: BLE001 - reported
         fetch_failed(f"{company['name']}: board fetch failed", e)
         return {}
     return {(b.get("title") or "").strip().lower(): b for b in board}
 
 
-def board_match(index, title):
+async def board_match(index, title):
     """The board row for `title`, hydrated, or None when the board does not
     cover it (or covers it with no body).
 
@@ -103,7 +116,7 @@ def board_match(index, title):
     match = index.get((title or "").strip().lower())
     if match is None:
         return None
-    company_fetch.hydrate_description(match)
+    await company_fetch.ahydrate_description(match)
     return match if match.get("description") else None
 
 
@@ -222,7 +235,7 @@ def _whole_board(company, mission_floor=None):
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-def _keep_job(company, job, t):
+async def _keep_job(company, job, t):
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -234,7 +247,7 @@ def _keep_job(company, job, t):
         # detail call — but the relevance gate NEEDS the description (titles
         # like "Research Scientist" say nothing about the division). Hydrate
         # first; only locality-filtered jobs at conglomerates pay the GET.
-        company_fetch.hydrate_description(job)
+        await company_fetch.ahydrate_description(job)
         # Same widening src.crawl.triage's division gate applies: a WATCHED
         # conglomerate's own engineering vocabulary ([policy]
         # watch_division_titles) counts as in-field here too. Without it the
@@ -268,7 +281,7 @@ def _keep_job(company, job, t):
     return True
 
 
-def _scored_row(job, *, company_id, company_name, track, status=None):
+async def _scored_row(job, *, company_id, company_name, track, status=None):
     """Score one fetched posting and shape it into a jobs-table row.
 
     The crawl path and the external-ingest path build the same row and had
@@ -281,8 +294,8 @@ def _scored_row(job, *, company_id, company_name, track, status=None):
     `job` is a fetcher's dict: `id` and `title` are required (nothing can
     be scored without them), the rest is read defensively.
     """
-    res = score_resume_fit(job["title"], job.get("description", ""),
-                           location=job.get("location") or "")
+    res = await ascore_resume_fit(job["title"], job.get("description", ""),
+                                  location=job.get("location") or "")
     row = {
         "job_id": job["id"], "company_id": company_id,
         "company_name": company_name,
@@ -300,42 +313,42 @@ def _scored_row(job, *, company_id, company_name, track, status=None):
     return row
 
 
-def _score_job(resume, company, job, track):
-    company_fetch.hydrate_description(job)
-    return _scored_row(job, company_id=company["id"],
-                       company_name=company["name"], track=track)
+async def _score_job(company, job, track):
+    await company_fetch.ahydrate_description(job)
+    return await _scored_row(job, company_id=company["id"],
+                             company_name=company["name"], track=track)
 
 
-def crawl_company(conn, resume, company, max_workers=6, t=None):
+async def crawl_company(db, company, max_workers=6, t=None):
     """Fetch ONE store company's locality-scoped board (whole board for
     watched/sweep-tagged companies), apply the track's filters, resume-fit-
-    score the new postings, and store them. Returns (n_fetched, n_kept,
-    n_new). Used by the manual-add flow to pull a company's other jobs once
-    it's in the roster."""
+    score the new postings, and store them on `db` (a store.Writer).
+    Returns (n_fetched, n_kept, n_new). Used by the manual-add flow to pull
+    a company's other jobs once it's in the roster."""
     t = _t(t)
     loc_re = None if _whole_board(company,
                                   t.get("remote_mission_floor")) else NC_RE
     try:
-        jobs = company_fetch.fetch_company(company, loc_re)
+        jobs = await company_fetch.afetch_company(company, loc_re)
     except Exception as e:
         fetch_failed(f"fetch error for {company['name']}", e)
         return (0, 0, 0)
     # A successful non-empty snapshot is the authority on what this company
     # currently lists: close stored rows that vanished, revive returners.
     if jobs and company.get("id"):
-        store.sync_job_statuses(conn, company["id"], jobs, track=t["track"])
-    kept = [j for j in jobs if _keep_job(company, j, t)]
-    fresh = [j for j in kept if not store.job_exists(conn, j["id"])]
+        await db.run(store.sync_job_statuses, company["id"], jobs, track=t["track"])
+    kept = [j for j in jobs if await _keep_job(company, j, t)]
+    fresh = await db.run(lambda conn: [j for j in kept
+                                       if not store.job_exists(conn, j["id"])])
     n_new = 0
-    for row in fan_out(fresh, lambda j: _score_job(resume, company, j,
-                                                   t["track"]),
-                       "scoring", max_workers):
+    async for row in fan_out(fresh, lambda j: _score_job(company, j, t["track"]),
+                             "scoring", max_workers):
         # Kept separate from the scoring failure fan_out reports: a store
         # write that fails is not a scoring problem, and lumping the two
         # together is what hid the write-lock starvation in harvest.py for
         # a day (every locked write read as an unreachable board).
         try:
-            store.upsert_job(conn, row)
+            await db.run(store.upsert_job, row)
             n_new += 1
         except Exception as e:
             print(f"    [!] store error: {e}")

@@ -386,9 +386,9 @@ def have_api_key():
 
 def reset_breaker():
     """Re-arm the breaker for a NEW run. It is process-lifetime by design
-    (one CLI run = one process), but the web UI runs every operation on a
-    thread inside one long-lived server process, so src/dispatch/background.
-    _run_op re-arms it per operation: a topped-up balance takes effect
+    (one CLI run = one process), but the web UI runs every operation
+    inside one long-lived server process, so src/dispatch/background._run
+    re-arms it per operation: a topped-up balance takes effect
     without a server restart, and a still-dead API fails once and explains
     itself.
 
@@ -591,9 +591,6 @@ async def ascore_company_mission(name, context=""):
     if r is None:
         return None, None, ""
     return r.tier, r.score, r.reason
-
-
-score_company_mission = http.sync_shim(ascore_company_mission)
 
 
 _BOARD_OWNER_SYSTEM = (

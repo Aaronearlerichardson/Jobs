@@ -10,8 +10,13 @@ the whole top N (the "re-verify all" tick box in the web UI).
 Offline: the verifier and the live-JD fetch are stubbed.
 """
 
+import asyncio
+
+from conftest import answer
+
 from src import store
 from src.claude import fit
+from src.net import http
 from src.ops import scoring as ops
 
 
@@ -86,25 +91,25 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                 description="d" * 400, fit_reason="deep: current",
                 fit_model="m-new")
 
-    def _run(self, db, monkeypatch, t, **kw):
+    async def _run(self, db, monkeypatch, t, **kw):
         _use_model(monkeypatch, "m-new")
         calls = []
 
-        def fake_verify(title, text, *, location=""):
+        async def fake_verify(title, text, *, location=""):
             calls.append(title)
             return fit.FitResult(score=0.75, axes={a: 0.75 for a in fit.AXES},
                                  reason="deep: re-read", model="m-new")
 
-        monkeypatch.setattr(fit, "verify_fit", fake_verify)
-        monkeypatch.setattr(ops, "_live_jd", lambda r: r.get("description") or "")
-        n = ops.verify_top(top_n=10, max_workers=1, conn=db, t=t, **kw)
+        monkeypatch.setattr(fit, "averify_fit", fake_verify)
+        monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))
+        n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t, **kw)
         return n, calls
 
-    def test_default_pass_leaves_current_model_rows_alone(
+    async def test_default_pass_leaves_current_model_rows_alone(
             self, db, add_job, local_track, monkeypatch):
         t = _track(local_track)
         self._seed(add_job, t)
-        n, calls = self._run(db, monkeypatch, t)
+        n, calls = await self._run(db, monkeypatch, t)
         assert n == 3 and len(calls) == 3
         models = {r["job_id"]: r["fit_model"] for r in
                   db.execute("SELECT job_id, fit_model FROM jobs")}
@@ -113,34 +118,30 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                          ).fetchone()["fit_reason"]
         assert cur == "deep: current"            # untouched
 
-    def test_a_call_abandoned_past_the_budget_is_asked_again_only_when_forced(
+    async def test_a_call_abandoned_past_the_budget_is_asked_again_only_when_forced(
             self, db, add_job, local_track, monkeypatch, capsys):
         """A verify call still running when its round's budget runs out is
         abandoned: it is paid for, so it is neither counted nor asked again
         unless forced, and its row keeps its first-pass score. The rows queued behind it
         were never asked, so the next pass asks them."""
-        import threading
         from src import config
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
         monkeypatch.setattr(config, "PASS_BUDGET_S", 0.5)
-        hung, calls = threading.Event(), []
+        calls = []
 
-        def verify(title, text, *, location=""):
+        async def verify(title, text, *, location=""):
             calls.append(title)
             if title.endswith("gh_acme_fresh"):
-                hung.wait(10)
+                await asyncio.sleep(10)
             return fit.FitResult(score=0.75, axes={a: 0.75 for a in fit.AXES},
                                  reason="deep: re-read", model="m-new")
 
-        monkeypatch.setattr(fit, "verify_fit", verify)
-        monkeypatch.setattr(ops, "_live_jd", lambda r: r.get("description") or "")
-        try:
-            runs = [ops.verify_top(top_n=10, max_workers=1, conn=db, t=t)
-                    for _ in "ab"]
-        finally:
-            hung.set()
+        monkeypatch.setattr(fit, "averify_fit", verify)
+        monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))
+        runs = [await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
+                for _ in "ab"]
         out = capsys.readouterr().out
         assert runs == [0, 2]
         assert calls.count("Data Engineer gh_acme_fresh") == 1
@@ -148,20 +149,20 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                 "score; the 1 whose call had started") in out
         assert tuple(db.execute("SELECT resume_fit_score, fit_model FROM jobs "
                                 "WHERE job_id='gh_acme_fresh'").fetchone()) == (0.9, None)
-        ops.verify_top(top_n=10, max_workers=1, conn=db, t=t, force=True)
+        await ops.verify_top(top_n=10, max_workers=1, db=db, t=t, force=True)
         assert calls.count("Data Engineer gh_acme_fresh") == 2
 
-    def test_force_re_verifies_every_finalist(
+    async def test_force_re_verifies_every_finalist(
             self, db, add_job, local_track, monkeypatch):
         t = _track(local_track)
         self._seed(add_job, t)
-        n, calls = self._run(db, monkeypatch, t, force=True)
+        n, calls = await self._run(db, monkeypatch, t, force=True)
         assert n == 4
         # The second round finds nothing stale even under force: every row
         # now carries the current model AND was re-read this run.
         assert len(calls) == 4
 
-    def test_past_the_head_rows_under_the_floor_are_not_verified(
+    async def test_past_the_head_rows_under_the_floor_are_not_verified(
             self, db, add_job, local_track, monkeypatch):
         """2026-09-22: top-200 runs spent ~20 Opus calls on rows stored at
         0.19-0.24. The first VERIFY_HEAD ranks are checked whatever their
@@ -177,22 +178,22 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                 description="d" * 400)
         _use_model(monkeypatch, "m-new")
         seen = []
-        monkeypatch.setattr(fit, "verify_fit", lambda title, text, **k:
+        monkeypatch.setattr(fit, "averify_fit", answer(lambda title, text, **k:
                             seen.append(text) or fit.FitResult(
-                                score=0.3, reason="deep: v", model="m-new"))
-        monkeypatch.setattr(ops, "_live_jd", lambda r: r["job_id"])
-        ops.verify_top(top_n=30, max_workers=1, conn=db, t=t, rounds=1)
+                                score=0.3, reason="deep: v", model="m-new")))
+        monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r["job_id"]))
+        await ops.verify_top(top_n=30, max_workers=1, db=db, t=t, rounds=1)
         assert seen == ["gh_acme_above"]
-        ops.verify_top(top_n=30, max_workers=1, conn=db, t=t, rounds=1,
+        await ops.verify_top(top_n=30, max_workers=1, db=db, t=t, rounds=1,
                        force=True)
         assert "gh_acme_below" in seen
 
-    def test_a_second_default_pass_is_free(
+    async def test_a_second_default_pass_is_free(
             self, db, add_job, local_track, monkeypatch):
         t = _track(local_track)
         self._seed(add_job, t)
-        self._run(db, monkeypatch, t)
-        n, calls = self._run(db, monkeypatch, t)
+        await self._run(db, monkeypatch, t)
+        n, calls = await self._run(db, monkeypatch, t)
         assert (n, calls) == (0, [])
 
 
@@ -201,9 +202,9 @@ class TestWebOpPassesTheTickBox:
         from src.dispatch import background as web_ops
         seen = {}
         patch_op("verify", lambda **kw: seen.update(kw))
-        web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
+        http.run_sync(web_ops.OPS["verify"]["fn"]({"top": "5", "force": True}))
         assert seen["force"] is True and seen["top_n"] == 5
-        web_ops.OPS["verify"]["fn"]({"top": "5"})
+        http.run_sync(web_ops.OPS["verify"]["fn"]({"top": "5"}))
         assert seen["force"] is False
 
 
@@ -217,7 +218,7 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
             add_job(f"gh_acme_{i}", fit=0.9 - i / 100, track=t["track"],
                     description="d" * 400)
 
-    def test_tripped_before_the_pass_skips_it_in_one_line(
+    async def test_tripped_before_the_pass_skips_it_in_one_line(
             self, db, add_job, local_track, monkeypatch, capsys):
         from src.claude import api
         t = _track(local_track)
@@ -226,17 +227,17 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
         monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         fetched, verified = [], []
         monkeypatch.setattr(ops, "_live_jd",
-                            lambda r: fetched.append(r["job_id"]) or "")
-        monkeypatch.setattr(fit, "verify_fit",
-                            lambda *a, **k: verified.append(a)
-                                            or fit.FitResult(score=None))
-        n = ops.verify_top(top_n=10, max_workers=1, conn=db, t=t)
+                            answer(lambda r: fetched.append(r["job_id"]) or ""))
+        monkeypatch.setattr(fit, "averify_fit",
+                            answer(lambda *a, **k: verified.append(a)
+                                            or fit.FitResult(score=None)))
+        n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
         out = capsys.readouterr().out
         assert (n, fetched, verified) == (0, [], [])
         assert out.count("deep verify skipped") == 1
         assert "[?] kept" not in out
 
-    def test_tripping_mid_round_halts_without_fetching_the_rest(
+    async def test_tripping_mid_round_halts_without_fetching_the_rest(
             self, db, add_job, local_track, monkeypatch, capsys):
         from src.claude import api
         t = _track(local_track)
@@ -245,14 +246,14 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
         monkeypatch.setattr(api, "_FATAL_MSG", None)
         fetched = []
         monkeypatch.setattr(ops, "_live_jd",
-                            lambda r: fetched.append(r["job_id"]) or "d" * 400)
+                            answer(lambda r: fetched.append(r["job_id"]) or "d" * 400))
 
-        def dead_api(title, text, *, location=""):
+        async def dead_api(title, text, *, location=""):
             api._trip_fatal("HTTP 400: 'credit balance'")
             return fit.FitResult(score=None, reason="unverified")
 
-        monkeypatch.setattr(fit, "verify_fit", dead_api)
-        n = ops.verify_top(top_n=10, max_workers=1, conn=db, t=t)
+        monkeypatch.setattr(fit, "averify_fit", dead_api)
+        n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
         out = capsys.readouterr().out
         assert n == 0
         assert len(fetched) == 1                 # only the row that tripped it
@@ -284,54 +285,54 @@ class TestVerifyFloorCandidates:
                     description="d" * 400, fit_reason="deep: current",
                     fit_model="m-new")
 
-    def _verify(self, db, monkeypatch, t, score, reason="deep: v", **kw):
+    async def _verify(self, db, monkeypatch, t, score, reason="deep: v", **kw):
         """verify_top with the verifier answering `score`: (n, calls)."""
         _use_model(monkeypatch, "m-new")
         calls = []
-        monkeypatch.setattr(fit, "verify_fit", lambda *a, **k: calls.append(a)
+        monkeypatch.setattr(fit, "averify_fit", answer(lambda *a, **k: calls.append(a)
                             or fit.FitResult(score=score, reason=reason,
-                                             model="m-new"))
-        monkeypatch.setattr(ops, "_live_jd", lambda r: r.get("description") or "")
-        return ops.verify_top(max_workers=1, conn=db, t=t, **kw), calls
+                                             model="m-new")))
+        monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))
+        return await ops.verify_top(max_workers=1, db=db, t=t, **kw), calls
 
     def _row(self, db, job_id):
         return tuple(db.execute(
             "SELECT resume_fit_score, triage_status FROM jobs WHERE job_id=?",
             (job_id,)).fetchone())
 
-    def test_a_candidate_reaching_digest_min_fit_is_relabelled_ok(
+    async def test_a_candidate_reaching_digest_min_fit_is_relabelled_ok(
             self, db, add_job, local_track, monkeypatch, local_addr):
         t = _track(local_track)
         self._fit(db, add_job, t, "gh_acme_fit", 0.16, location=local_addr)
-        n, _ = self._verify(db, monkeypatch, t, 0.5, top_n=10)
+        n, _ = await self._verify(db, monkeypatch, t, 0.5, top_n=10)
         assert n == 1
         # 0.5 clears the track's digest_min_fit (0.4 by default).
         assert self._row(db, "gh_acme_fit") == (0.5, "ok")
 
-    def test_a_candidate_staying_under_digest_min_fit_keeps_fit(
+    async def test_a_candidate_staying_under_digest_min_fit_keeps_fit(
             self, db, add_job, local_track, monkeypatch, local_addr):
         t = _track(local_track)
         self._fit(db, add_job, t, "gh_acme_weak", 0.16, location=local_addr)
-        self._verify(db, monkeypatch, t, 0.2, top_n=10)
+        await self._verify(db, monkeypatch, t, 0.2, top_n=10)
         assert self._row(db, "gh_acme_weak") == (0.2, "fit")
 
-    def test_a_row_under_the_floor_is_not_a_candidate(
+    async def test_a_row_under_the_floor_is_not_a_candidate(
             self, db, add_job, local_track, monkeypatch, local_addr):
         t = _track(local_track)
         self._fill_top_n(add_job, t)
         self._fit(db, add_job, t, "gh_acme_toolow", 0.1, location=local_addr)
-        assert self._verify(db, monkeypatch, t, 0.9, top_n=2) == (0, [])
+        assert await self._verify(db, monkeypatch, t, 0.9, top_n=2) == (0, [])
 
-    def test_a_candidate_the_current_model_verified_is_skipped(
+    async def test_a_candidate_the_current_model_verified_is_skipped(
             self, db, add_job, local_track, monkeypatch, local_addr, capsys):
         t = _track(local_track)
         self._fit(db, add_job, t, "gh_acme_seen", 0.3, location=local_addr,
                   fit_reason="deep: already", fit_model="m-new")
-        assert self._verify(db, monkeypatch, t, 0.9, top_n=10) == (0, [])
+        assert await self._verify(db, monkeypatch, t, 0.9, top_n=10) == (0, [])
         assert (f"deep-verify [{t['track']}]: nothing new in the top 10"
                 in capsys.readouterr().out)
 
-    def test_candidates_fill_only_the_slots_the_top_n_left(
+    async def test_candidates_fill_only_the_slots_the_top_n_left(
             self, db, add_job, local_track, monkeypatch, local_addr):
         """The top-2 slice is all current, so both slots go to the two
         best candidates, and the third waits."""
@@ -340,18 +341,18 @@ class TestVerifyFloorCandidates:
         for job_id, score in (("gh_fit_a", 0.30), ("gh_fit_b", 0.28),
                               ("gh_fit_c", 0.26)):
             self._fit(db, add_job, t, job_id, score, location=local_addr)
-        n, _ = self._verify(db, monkeypatch, t, 0.1, top_n=2, rounds=1)
+        n, _ = await self._verify(db, monkeypatch, t, 0.1, top_n=2, rounds=1)
         verified = {r["job_id"] for r in db.execute(
             "SELECT job_id FROM jobs WHERE fit_reason='deep: v'")}
         assert n == 2
         assert verified == {"gh_fit_a", "gh_fit_b"}
 
-    def test_verified_row_prints_old_new_score_company_title_reason(
+    async def test_verified_row_prints_old_new_score_company_title_reason(
             self, db, add_job, local_track, monkeypatch, capsys):
         t = _track(local_track)
         add_job("gh_acme_1", "Data Engineer", fit=0.6, track=t["track"],
                 description="d" * 400)
-        self._verify(db, monkeypatch, t, 0.7, reason="deep: solid fit",
+        await self._verify(db, monkeypatch, t, 0.7, reason="deep: solid fit",
                      top_n=10)
         out = capsys.readouterr().out
         assert "0.60 -> 0.70, Acme, Data Engineer, solid fit" in out

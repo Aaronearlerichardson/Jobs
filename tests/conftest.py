@@ -421,8 +421,8 @@ def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
 
 
 def keep_store_open(monkeypatch, db):
-    """Point `store.connect()` at the test's OWN connection, with close()
-    disarmed.
+    """Point `store.connect()`, and so every store.Writer, at the test's OWN
+    connection, with close() disarmed.
 
     The paths under test (add_names, preview_names, populate_companies,
     score_missions, reresolve) open their own connection and close it when
@@ -444,7 +444,8 @@ def keep_store_open(monkeypatch, db):
         def close(self):
             pass
 
-    monkeypatch.setattr(store, "connect", lambda *a, **k: _NoClose())
+    for owner in (store, store.schema):
+        monkeypatch.setattr(owner, "connect", lambda *a, **k: _NoClose())
     return db
 
 
@@ -453,6 +454,19 @@ def no_pacing(monkeypatch):
     walks many pages or details."""
     for name in ("PAGE_DELAY_S", "SWEEP_DETAIL_DELAY_S", "WHOLE_BOARD_DETAIL_DELAY_S"):
         monkeypatch.setattr(_config, name, 0)
+
+
+def run_web_op(name, fn, timeout=10):
+    """Run `fn()` (a coroutine) as web-UI op `name` (src.dispatch.background)
+    and wait for the runner to go idle; returns its final status."""
+    from src.dispatch import background
+    from src.dispatch.registry import OpParams
+    assert background.submit(name, OpParams(), fn) is None, "the runner was busy"
+    deadline = time.monotonic() + timeout
+    while (s := background.status())["running"]:
+        assert time.monotonic() < deadline, f"op {name!r} never finished"
+        time.sleep(0.02)
+    return s
 
 
 def fake_response(payload=None, *, text=None, status=200, content=None, url=""):

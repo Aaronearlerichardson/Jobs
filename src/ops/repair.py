@@ -8,16 +8,17 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
-from src.net.parallel import drain, fan_out
-from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_store
+from src.net.parallel import RESOLVE_STALL_S, fan_out
+from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
 
 
-def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
+async def prune_dead_boards(db, max_workers=12, deactivate_offmission=False):
     """Deactivate active companies whose JSON-API ATS board no longer resolves
     (a hard 404/error, the source of the crawl's `HTTP 404` spam), and
     optionally off-mission `other`-tier companies (excluding multi-division).
     Only ATSes whose board endpoint cleanly distinguishes "exists" (200)
-    from "dead" (404) are probed. Returns (n_dead, n_offmission).
+    from "dead" (404) are probed, and the writes go to `db` (a store.Writer,
+    or a connection: track_writer). Returns (n_dead, n_offmission).
 
     Prints how many boards it probes, then one line per company it
     deactivates (name, ATS, reason), so a clean run still leaves a trace.
@@ -29,43 +30,47 @@ def prune_dead_boards(conn, max_workers=12, deactivate_offmission=False):
     """
     # Board.alive, not the slug probe: an empty board is alive; dead means
     # the board REQUEST fails.
-    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.prunable}
+    PROBE = {b.name: b.aalive for b in BOARDS.values() if b.spec.prunable}
 
-    rows = [c for c in store.get_companies(conn, active_only=True)
-            if c.get("ats") in PROBE and c.get("slug")]
-    print(f"  probing {len(rows)} board(s) for a dead ATS endpoint...")
+    async with track_writer(db=db) as db:
+        rows = [c for c in await db.run(store.get_companies, active_only=True)
+                if c.get("ats") in PROBE and c.get("slug")]
+        print(f"  probing {len(rows)} board(s) for a dead ATS endpoint...")
 
-    def _check(c):
-        ok, _ = PROBE[c["ats"]](c["slug"])
-        return c, ok
+        async def _check(c):
+            ok, _ = await PROBE[c["ats"]](c["slug"])
+            return c, ok
 
-    # A probe that raises is now reported and skipped rather than killing
-    # the whole prune -- this was the one pool here with no try at all, so
-    # a single unreachable host aborted the pass over every other board.
-    dead = [c for c, ok in fan_out(rows, _check, "board probe", max_workers)
-            if not ok]
-    with store.batch(conn):
-        for c in dead:
-            store.deactivate_company(
-                conn, c["id"],
-                note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
-            print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} "
-                  f"board '{c['slug']}' no longer resolves")
+        # A probe that raises is now reported and skipped rather than killing
+        # the whole prune -- this was the one pool here with no try at all, so
+        # a single unreachable host aborted the pass over every other board.
+        dead = [c async for c, ok in fan_out(rows, _check, "board probe", max_workers)
+                if not ok]
+        return len(dead), await db.batch(_deactivate, dead, deactivate_offmission)
 
-        n_off = 0
-        if deactivate_offmission:
-            # Watched companies are exempt: a watch tag is the user
-            # deliberately keeping an off-mission employer crawled.
-            off = [c for c in store.get_companies(conn, active_only=True)
-                   if c.get("mission_tier") == "other"
-                   and not config.is_multi_division(c.get("name"))
-                   and not tags.has(c, tags.WATCH)]
-            for c in off:
-                store.deactivate_company(conn, c["id"])
-                print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
-                      f"off-mission (score={c.get('mission_score')})")
-            n_off = len(off)
-    return len(dead), n_off
+
+def _deactivate(conn, dead, offmission):
+    """prune_dead_boards' writes, in its one batch: the `dead` boards, then
+    with `offmission` the off-mission companies; returns how many of those."""
+    for c in dead:
+        store.deactivate_company(
+            conn, c["id"],
+            note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
+        print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} "
+              f"board '{c['slug']}' no longer resolves")
+    if not offmission:
+        return 0
+    # Watched companies are exempt: a watch tag is the user deliberately
+    # keeping an off-mission employer crawled.
+    off = [c for c in store.get_companies(conn, active_only=True)
+           if c.get("mission_tier") == "other"
+           and not config.is_multi_division(c.get("name"))
+           and not tags.has(c, tags.WATCH)]
+    for c in off:
+        store.deactivate_company(conn, c["id"])
+        print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
+              f"off-mission (score={c.get('mission_score')})")
+    return len(off)
 
 
 # --------------------------------------------------------------------------- #
@@ -280,9 +285,9 @@ def _reresolve_candidates(conn, days=None, names=None, limit=50,
     return out[:int(limit)] if limit else out
 
 
-def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
-                     names=None, t=None, families=RERESOLVE_FAMILIES,
-                     commit=True):
+async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
+                           names=None, t=None, families=RERESOLVE_FAMILIES,
+                           commit=True):
     """Retry the roster rows that died at resolution; queue every hit for
     human review. Returns the rows written.
 
@@ -299,7 +304,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     -- see _silent_board_candidates); they are tried after every
     miss-family row, so `families=(SILENT_FAMILY,)` is how a bounded pass
     reaches them. A hit on one is written exactly like any other family's.
-    resolve_or_miss only calls a board a hit when a live fetch lists jobs,
+    aresolve_or_miss only calls a board a hit when a live fetch lists jobs,
     so the silent coordinates themselves never come back as one; a miss on
     an inactive row is recorded as usual (record_miss declines on an
     active row, which then stays a candidate).
@@ -316,16 +321,16 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         in months, and the resolver's own collision guards are not a
         substitute for that look.
 
-        Resolution runs through the same stall watchdog every other bulk
-        resolution path uses (src.net.parallel.drain):
+        Resolution runs under the same stall watchdog every other bulk
+        resolution path uses (src.net.parallel.fan_out's `stall_s`):
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """
-    from src.claude.api import score_company_mission
+    from src.claude.api import ascore_company_mission
     from src.discovery.local_sourcing import (_board_already_tracked,
                                               _report_dup_board,
                                               mission_context)
-    from src.discovery.resolve.board import resolve_or_miss, resolved
+    from src.discovery.resolve.board import resolved
     from src.match.names import junk_name_reason
 
     families = tuple(families or RERESOLVE_FAMILIES)
@@ -333,19 +338,23 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
     if unknown:
         raise ValueError(f"unknown reresolve families: {sorted(unknown)}")
     t = _t(t)
-    with track_store(t, conn) as conn:
-        rows = _reresolve_candidates(conn, days=days, names=names, limit=limit,
-                                     families=families)
+    async with track_writer(t, db) as db:
+
+        async def miss(name, reason):
+            if commit:
+                await db.run(store.record_miss, name, reason)
+
+        rows = await db.run(_reresolve_candidates, days=days, names=names,
+                            limit=limit, families=families)
         # Misses recorded before the paste screen existed include section
         # headings and category nouns ("Required Qualifications",
         # "Proficiency in SQL.", "Oncology"). Re-stamp them into the
         # 'junk-name' family, which no pass retries, instead of paying a
         # sniff, two web searches and a stall slot for each again.
         junk = [(r, junk_name_reason(r["name"])) for r in rows]
-        miss = store.record_miss if commit else (lambda *a, **k: False)
         for r, why in junk:
             if why:
-                miss(conn, r["name"], f"junk-name:{why}")
+                await miss(r["name"], f"junk-name:{why}")
                 print(f"    [junk]    {r['name'][:30]:30} {why} - "
                       f"{'retired' if commit else 'would be retired'} "
                       f"from the retry queue")
@@ -361,44 +370,38 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         # is the point of the family), so `was` falls back to naming the
         # family for the [miss]/[pending] print lines below.
         was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
-        written, still, dups = [], [], []
+        written, still, dups, stalled = [], [], [], []
 
-        def _stalled(name):
-            miss(conn, name, "fetch-error:stalled")
-            still.append((name, "fetch-error:stalled"))
-
-        def _consume(fut, name):
-            hit, reason = resolved(fut, name)
+        async for r, (hit, reason) in fan_out(
+                rows, lambda r: resolved(r["name"], r.get("careers_url") or ""),
+                lambda r: r["name"], max_workers, with_item=True,
+                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
+            name = r["name"]
             if not hit:
-                miss(conn, name, reason)
+                await miss(name, reason)
                 still.append((name, reason))
                 print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
-                return
+                continue
             board = coords.from_hit(hit, name=name)
-            dup = _board_already_tracked(conn, board)
+            dup = await db.run(_board_already_tracked, board)
             if dup:
                 # Someone else already holds this board. Leave the row as
                 # the miss it was, but re-stamp it so a bounded rerun moves
                 # past it instead of paying for the same fetch every night.
                 _report_dup_board(name, dup)
-                miss(conn, name, was[name])
+                await miss(name, was[name])
                 dups.append(name)
-                return
+                continue
             if not commit:
                 written.append(board)
                 print(f"    [preview] {name[:30]:30} {hit['ats']:12} "
                       f"{coords.board_slug(board) or board.get('careers_url') or ''} "
                       f"nc={hit['nc']:<3} "
                       f"tot={hit['count']:<4} (was {was[name]})")
-                return
-            tier, score, reason = score_company_mission(
-                name, mission_context(hit))
-            # upsert_company drops None values so it can never erase a
-            # stored one — which would leave the dead board's slug beside
-            # the new Workday triple. Clear the coordinate columns first.
-            conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, "
-                         "wd_pod=NULL, wd_site=NULL WHERE name=?", (name,))
-            store.upsert_company(conn, {
+                continue
+            tier, score, reason = await ascore_company_mission(
+                name, await mission_context(hit))
+            await db.run(_retarget, name, {
                 **board,
                 "local_job_count": hit["nc"], "total_job_count": hit["count"],
                 "mission_tier": tier, "mission_score": score,
@@ -411,12 +414,9 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
             print(f"    [pending] {name[:30]:30} {hit['ats']:12} "
                   f"nc={hit['nc']:<3} tot={hit['count']:<4} "
                   f"{str(tier):18} {ss}  (was {was[name]})")
-
-        drain(rows,
-              lambda r: resolve_or_miss(r["name"], r.get("careers_url") or ""),
-              _consume, _stalled, label=lambda r: r["name"],
-              max_workers=max_workers)
-        conn.commit()
+        for r in stalled:
+            await miss(r["name"], "fetch-error:stalled")
+            still.append((r["name"], "fetch-error:stalled"))
         print(f"\n  {len(written)} board(s) "
               + ("re-resolved and queued for review "
                  f"(active=0, tagged {tags.PENDING})" if commit
@@ -426,6 +426,16 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
         if written and commit:
             print("  confirm or reject them in the roster review queue.")
         return written
+
+
+def _retarget(conn, name, row):
+    """Point the company `name` at the board `row` names. upsert_company
+    drops None values so it can never erase a stored one -- which would
+    leave the dead board's slug beside a new Workday triple -- so the
+    coordinate columns are cleared first."""
+    conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, "
+                 "wd_pod=NULL, wd_site=NULL WHERE name=?", (name,))
+    store.upsert_company(conn, row)
 
 
 # --------------------------------------------------------------------------- #
@@ -446,7 +456,7 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 #     live: "AbbVie", "Eurofins").
 #
 # config.BOARDS names that field as each spec's `employer`; the engine
-# reads it off one listing request (`Board.employer_name`).
+# reads it off one listing request (`Board.aemployer_name`).
 #
 # Workday, Lever and Ashby were checked the same way and do NOT qualify:
 #   * Workday's CXS job-DETAIL JSON (not the listing) carries a top-level
@@ -466,10 +476,6 @@ def reresolve_misses(conn=None, limit=50, max_workers=6, days=None,
 
 def _employer_atses():
     return sorted(b.name for b in BOARDS.values() if b.spec.employer)
-
-
-def _employer_name(ats, slug):
-    return board_for(ats).employer_name(slug)
 
 
 def _slug_named_boards(conn):
@@ -504,11 +510,11 @@ def _slug_named_boards(conn):
     return rows
 
 
-def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
+async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
     """PREVIEW (default) or APPLY a rename of every active, dork-sourced
     Greenhouse/SmartRecruiters board whose stored name is nothing but its
     own board slug (_slug_named_boards) to the employer name the board's
-    OWN listing payload carries (`Board.employer_name`). One GET per
+    OWN listing payload carries (`Board.aemployer_name`). One GET per
     candidate board, no detail fetch, no whole-board pull.
 
     Same preview/apply shape as reresolve_misses: `commit=False` (the
@@ -518,7 +524,7 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
 
     A fetched name is rejected -- reported, never written, in EITHER mode
     -- when:
-      * the board answered empty or errored (`Board.employer_name` -> "");
+      * the board answered empty or errored (`Board.aemployer_name` -> "");
       * src.match.names.junk_name_reason flags it -- the SAME screen a
         pasted or re-resolved name is run through, so a malformed payload
         naming a section heading rather than an employer can never
@@ -555,8 +561,8 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
     from src.match.names import junk_name_reason, name_key
 
     t = _t(t)
-    with track_store(t, conn) as conn:
-        rows = _slug_named_boards(conn)
+    async with track_writer(t, db) as db:
+        rows = await db.run(_slug_named_boards)
         if limit:
             rows = rows[:int(limit)]
         if not rows:
@@ -565,11 +571,11 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
             return []
         print(f"  checking {len(rows)} slug-named board's own payload for "
               f"its employer name...")
-        existing = {name_key(r["name"]): r["name"]
-                   for r in conn.execute("SELECT name FROM companies")}
+        existing = {name_key(r["name"]): r["name"] for r in await db.run(
+            lambda conn: conn.execute("SELECT name FROM companies").fetchall())}
         out = []
         for c in rows:
-            new_name = _employer_name(c["ats"], c["slug"])
+            new_name = await board_for(c["ats"]).aemployer_name(c["slug"])
             label = f"{c['name'][:30]:30} {c['ats']:15}"
             if not new_name:
                 print(f"    [skip]      {label} board answered no employer name")
@@ -592,11 +598,11 @@ def rename_slug_boards(conn=None, t=None, commit=False, limit=None):
                   f"-> {new_name!r}")
             out.append((c["id"], c["name"], new_name))
             if commit:
-                conn.execute("UPDATE companies SET name=? WHERE id=?",
-                            (new_name, c["id"]))
                 existing[key] = new_name
         if commit and out:
-            conn.commit()
+            await db.batch(lambda conn: conn.executemany(
+                "UPDATE companies SET name=? WHERE id=?",
+                [(new, cid) for cid, _, new in out]))
         print(f"\n  {len(out)} board(s) "
               + ("renamed" if commit
                  else "would be renamed (preview: nothing written)")

@@ -101,7 +101,7 @@ async def launch_chromium(pw, **kwargs):
 # the company name cannot produce (Workday's tenant, pod and site:
 # redhat.wd5.myworkdayjobs.com/Jobs_External), so probe_scan reads it off
 # the company's careers page(s) (`scan_hit`), then counts the board's
-# listing (`Board.alive`). probe_company calls it as its last step.
+# listing (`Board.alive`). aprobe_company calls it as its last step.
 
 #: The platforms whose spec sets `discovery.scan`, in spec order.
 SCANNED = tuple(b.name for b in BOARDS.values() if b.fetchable and b.spec.discovery.scan)
@@ -191,15 +191,15 @@ class JsScanProbePool:
 
     Each scrape takes a free page, which lives in a browser context of its
     own and is kept for later scrapes; a caller waits while all `size`
-    slots are busy. close() shuts the browser down.
+    slots are busy. aclose() shuts the browser down.
 
     Usage:
-        with JsScanProbePool(4) as js:
-            meta, outcome = js.probe("NetApp", careers_url="")
+        async with JsScanProbePool(4) as js:
+            meta, outcome = await js.aprobe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
     failure is reported once per process (_report_js_disabled) and every
-    later probe() returns (None, "no browser").
+    later aprobe() returns (None, "no browser").
 
     Notes:
         Was `size` whole browsers, each pinned to a thread of its own
@@ -361,8 +361,6 @@ class JsScanProbePool:
                    time.monotonic() - t0)
         return meta, outcome
 
-    probe = http.sync_shim(aprobe)
-
     @property
     def launched(self) -> bool:
         """True once the browser has actually started (for logging)."""
@@ -379,13 +377,11 @@ class JsScanProbePool:
             except Exception as e:
                 print(f"    [js] browser close errored: {e}")
 
-    close = http.sync_shim(aclose)
-
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *_a):
-        self.close()
+    async def __aexit__(self, *_a):
+        await self.aclose()
 
 
 # ─── Probing a COMPANY, not a handle ────────────────────────────
@@ -436,6 +432,3 @@ async def aprobe_company(name, scan=True):
             hit = {"name": name, "ats": s["ats"], "slug": s["slug"],
                    "count": s["count"], "nc": await anc_count(s["ats"], s["slug"])}
     return hit
-
-
-probe_company = http.sync_shim(aprobe_company)

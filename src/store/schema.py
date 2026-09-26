@@ -297,9 +297,12 @@ def connect(path=None):
     connection is open -- copy all three when backing up by hand (the
     -wal is not optional: the newest writes live there until SQLite
     folds them back in).
+
+    Any thread may use the connection, one at a time: a Writer adopts one
+    opened elsewhere (sqlite3 is serialized, threadsafety 3).
     """
     conn = sqlite3.connect(path or config.STORE_DB_PATH,
-                           timeout=BUSY_TIMEOUT_S)
+                           timeout=BUSY_TIMEOUT_S, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     try:
         conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
@@ -469,7 +472,8 @@ class batch:
 
 class Writer:
     """`async with Writer(path) as db`: a store connection (`connect(path)`)
-    on a thread of its own for the block.
+    on a thread of its own for the block; given an open connection
+    instead, that one, left open.
 
     `await db.run(fn, ...)` is `fn(conn, ...)` on that thread, and
     `await db.batch(fn, ...)` the same inside one `batch` transaction. The
@@ -487,21 +491,22 @@ class Writer:
     True
 
     Notes:
-        The store for async code: a sqlite3 connection belongs to the
-        thread that opened it, and each call blocks, so a coroutine never
-        holds one. A pass's writes queue here rather than on the busy
-        timeout; other processes keep their own connections.
+        The store for async code: each sqlite3 call blocks, so a coroutine
+        never holds a connection. A pass's writes queue here rather than
+        on the busy timeout; other processes keep their own connections.
     """
 
     def __init__(self, path=None):
         self.path = path
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="store")
-        self._conn = self._queue = self._drainer = None
+        self._conn = path if isinstance(path, sqlite3.Connection) else None
+        self._queue = self._drainer = None
 
     async def __aenter__(self):
         loop = asyncio.get_running_loop()
         try:
-            self._conn = await loop.run_in_executor(self._thread, connect, self.path)
+            if self._conn is None:
+                self._conn = await loop.run_in_executor(self._thread, connect, self.path)
         except BaseException:
             self._thread.shutdown(wait=False)
             raise
@@ -513,7 +518,8 @@ class Writer:
         self._queue.put_nowait(None)
         try:
             await self._drainer
-            await asyncio.get_running_loop().run_in_executor(self._thread, self._conn.close)
+            if self._conn is not self.path:
+                await asyncio.get_running_loop().run_in_executor(self._thread, self._conn.close)
         finally:
             self._thread.shutdown(wait=False)
 

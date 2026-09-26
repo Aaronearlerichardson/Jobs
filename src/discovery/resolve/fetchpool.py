@@ -16,14 +16,12 @@ import logging
 import socket
 import threading
 import time
-from concurrent.futures import wait as fut_wait
 
 from src import config
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
-from src.net.parallel import pool
 from src.net.util import host_of, origin_of
 
 # File-only diagnostics (session log DEBUG channel — never printed).
@@ -235,12 +233,13 @@ def _resolves(host):
     return ok
 
 
-def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
+async def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
     """`urls` minus every one whose host is known dead or fails a bounded
-    DNS lookup. Distinct hosts are resolved concurrently; a host the
-    resolver has not answered within `timeout` is skipped for THIS call
-    (not marked dead: a slow resolver is not a missing name) and its lookup
-    thread is left to finish on its own."""
+    DNS lookup. Distinct hosts are resolved concurrently, 8 at a time, each
+    lookup off the loop; a host the resolver has not answered within
+    `timeout` is skipped for THIS call (not marked dead: a slow resolver is
+    not a missing name), a lookup under way is left to finish on its own,
+    and one not yet begun never begins."""
     hosts = {}
     for u in urls:
         h = host_of(u)
@@ -253,13 +252,18 @@ def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
                         time.time() - _DNS_CACHE[h][0] < _DEAD_HOST_TTL)]
     slow = set()
     if todo:
-        with pool(min(8, len(todo))) as ex:
-            futs = {ex.submit(_resolves, h): h for h in todo}
-            _done, pending = fut_wait(futs, timeout=timeout)
+        slots = asyncio.Semaphore(8)
+
+        async def resolve(h):
+            async with slots:
+                return await asyncio.to_thread(_resolves, h)
+        lookups = {asyncio.ensure_future(resolve(h)): h for h in todo}
+        _done, pending = await asyncio.wait(lookups, timeout=timeout)
         for f in pending:
-            slow.add(futs[f])
+            f.cancel()
+            slow.add(lookups[f])
             _log.debug("skip host %s this pass: resolver silent for %.0fs",
-                       futs[f], timeout)
+                       lookups[f], timeout)
     return [u for u in urls
             if host_of(u) not in slow and not _DEAD_HOSTS.dead(u)]
 
@@ -270,7 +274,7 @@ async def _fetch_all(urls):
     evaluated in priority order regardless of completion order. Every
     requested URL is a key of the result; one on a host that does not
     resolve (see _drop_unresolvable) maps to None without a GET. At most 8
-    GETs at once; the DNS check runs off the loop.
+    GETs at once.
 
     These are GUESSES — `<token>.io`, `<token>.co`, `careers.<token>.com` —
     so their robots.txt failures are expected and say nothing worth logging;
@@ -278,7 +282,7 @@ async def _fetch_all(urls):
     """
     from src.net import robots
     out = dict.fromkeys(urls)
-    live = await asyncio.to_thread(_drop_unresolvable, urls)
+    live = await _drop_unresolvable(urls)
     if not live:
         return out
     slots = asyncio.Semaphore(8)

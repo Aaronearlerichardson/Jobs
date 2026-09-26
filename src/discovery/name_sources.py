@@ -4,7 +4,7 @@ to a board.
 Profile seeds and scan majors, `/company/<slug>/` links on directory and
 listicle pages (RTP.org, Built In, chamber directories), web-search
 harvesting of such pages, and an LLM brainstorm of the profile's region and
-domain, unioned by gather_names. Every name still has to survive the
+domain, unioned by agather_names. Every name still has to survive the
 resolve -> validate -> score chain in local_sourcing, so noise here costs
 requests rather than roster rows -- which is why the shape filters
 (_looks_like_company, _is_nav_noise) run first.
@@ -304,6 +304,3 @@ async def agather_names(extra=None):
     if junk:
         print(f"    {junk} junk-shaped candidate name(s) dropped")
     return names
-
-
-gather_names = http.sync_shim(agather_names)

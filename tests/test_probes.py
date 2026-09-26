@@ -167,7 +167,7 @@ class TestFailureIsReportedNeverRaised:
 
 
 @pytest.mark.parametrize("hang", ["page", "count"])
-def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
+async def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     """discover-local 2026-09-22 sat 338s silent in the JS pass: one name's
     scrape has to give up, and not hand its hung page to the next name. A
     board count it waits on is cancelled, and its slot is free at once."""
@@ -202,10 +202,10 @@ def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     monkeypatch.setattr(config, "JS_PROBE_BUDGET_S", 0.1)
     monkeypatch.setattr(probes, "foreign_board", answer(False))
     monkeypatch.setattr(probes, "_scan_meta", count)
-    with probes.JsScanProbePool(1) as js:
+    async with probes.JsScanProbePool(1) as js:
         js._browser = browser = Hung()
         t0 = time.monotonic()
-        assert js.probe("Acme") == (None, "budget exceeded")
+        assert await js.aprobe("Acme") == (None, "budget exceeded")
         assert time.monotonic() - t0 < 0.5
         assert browser.closed == 1 and not js._idle
         assert not js._slots.locked()
@@ -221,15 +221,15 @@ class TestPruneNamesWhatItDeactivates:
         store.upsert_company(db, {"name": name, "ats": ats, "slug": slug,
                                   **extra})
 
-    def test_the_prune_op_names_each_dead_board_and_sums_up(
+    async def test_the_prune_op_names_each_dead_board_and_sums_up(
             self, db, monkeypatch, capsys):
         keep_store_open(monkeypatch, db)
         self._company(db, "Gone Co", "greenhouse", "gone")
         self._company(db, "Live Co", "greenhouse", "live")
-        monkeypatch.setattr(board_for("greenhouse"), "alive",
-                            lambda slug: (slug == "live", 3))
+        monkeypatch.setattr(board_for("greenhouse"), "aalive",
+                            answer(lambda slug: (slug == "live", 3)))
 
-        roster.prune()
+        await roster.prune()
 
         out = capsys.readouterr().out
         assert "probing 2 board(s) for a dead ATS endpoint" in out
@@ -239,13 +239,13 @@ class TestPruneNamesWhatItDeactivates:
         assert "Live Co" not in out
         assert "deactivated 1 dead-board compan(ies)." in out
 
-    def test_an_off_mission_deactivation_names_its_score(
+    async def test_an_off_mission_deactivation_names_its_score(
             self, db, monkeypatch, capsys):
         self._company(db, "Other Co", "lever", "other",
                       mission_tier="other", mission_score=0.05)
-        monkeypatch.setattr(board_for("lever"), "alive", lambda slug: (True, 5))
+        monkeypatch.setattr(board_for("lever"), "aalive", answer(lambda slug: (True, 5)))
 
-        assert repair.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
+        assert await repair.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
 
         [line] = [ln for ln in capsys.readouterr().out.splitlines()
                   if "[other]" in ln]
@@ -275,7 +275,7 @@ class TestSelfHealRetryMarker:
         monkeypatch.setattr(fit_module, "acall_claude_json", refuse)
         return calls
 
-    def test_an_offline_scorer_marks_nothing(self, db, add_job, monkeypatch):
+    async def test_an_offline_scorer_marks_nothing(self, db, add_job, monkeypatch):
         # The breaker tripping mid-pass (expired key, exhausted balance)
         # would otherwise park every unscored row for UNSCORED_RETRY_DAYS.
         self._stub_refusal(monkeypatch)
@@ -283,18 +283,18 @@ class TestSelfHealRetryMarker:
         monkeypatch.setattr(fit_module, "api_disabled", lambda: "HTTP 401")
         jid = add_job("j1", description="x" * 300, fit=None)
 
-        assert scoring.self_heal_unscored(db, "resume", "local-tech") == 0
+        assert await scoring.self_heal_unscored(db, "resume", "local-tech") == 0
 
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
         assert not (row["fit_reason"] or ""), "an offline scorer judged nothing"
 
-    def test_a_refusal_is_marked_with_cause_and_length(
+    async def test_a_refusal_is_marked_with_cause_and_length(
             self, db, add_job, monkeypatch):
         calls = self._stub_refusal(monkeypatch)
         jid = add_job("j1", description="x" * 300, fit=None)
 
-        n = scoring.self_heal_unscored(db, "resume", "local-tech")
+        n = await scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert n == 0
         assert len(calls) == 1
@@ -303,19 +303,19 @@ class TestSelfHealRetryMarker:
         assert row["resume_fit_score"] is None
         assert row["fit_reason"] == f"unscored:refused:300:{datetime.now().date()}"
 
-    def test_a_fresh_refusal_marker_holds_off_the_next_pass(
+    async def test_a_fresh_refusal_marker_holds_off_the_next_pass(
             self, db, add_job, monkeypatch):
         calls = self._stub_refusal(monkeypatch)
         add_job("j1", description="x" * 300, fit=None)
-        scoring.self_heal_unscored(db, "resume", "local-tech")
+        await scoring.self_heal_unscored(db, "resume", "local-tech")
         assert len(calls) == 1
 
-        n = scoring.self_heal_unscored(db, "resume", "local-tech")   # same day, same body
+        n = await scoring.self_heal_unscored(db, "resume", "local-tech")   # same day, same body
 
         assert n == 0
         assert len(calls) == 1, "a fresh REFUSED marker must not be re-asked"
 
-    def test_a_30_day_old_refusal_marker_is_retried(
+    async def test_a_30_day_old_refusal_marker_is_retried(
             self, db, add_job, monkeypatch):
         calls = self._stub_refusal(monkeypatch)
         jid = add_job("j1", description="x" * 300, fit=None)
@@ -323,11 +323,11 @@ class TestSelfHealRetryMarker:
                   (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
 
-        scoring.self_heal_unscored(db, "resume", "local-tech")
+        await scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert len(calls) == 1, "30+ days on, the same row is due again"
 
-    def test_a_changed_body_is_retried_the_same_day(
+    async def test_a_changed_body_is_retried_the_same_day(
             self, db, add_job, monkeypatch):
         calls = self._stub_refusal(monkeypatch)
         jid = add_job("j1", description="x" * 300, fit=None)
@@ -336,11 +336,11 @@ class TestSelfHealRetryMarker:
             (f"unscored:refused:300:{datetime.now().date()}", "y" * 450, jid))
         db.commit()
 
-        scoring.self_heal_unscored(db, "resume", "local-tech")
+        await scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert len(calls) == 1, "a body that grew is due even on the same day"
 
-    def test_padding_whitespace_does_not_look_like_a_changed_body(
+    async def test_padding_whitespace_does_not_look_like_a_changed_body(
             self, db, add_job, monkeypatch):
         """The marker's length -- and the length _unscored_due compares it
         against -- is the STRIPPED body, the same measure
@@ -358,11 +358,11 @@ class TestSelfHealRetryMarker:
              "   " + body + "   ", jid))          # same content, padded
         db.commit()
 
-        scoring.self_heal_unscored(db, "resume", "local-tech")
+        await scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert calls == [], "padding whitespace alone must not trigger a retry"
 
-    def test_scoring_succeeds_once_due_and_replaces_the_marker(
+    async def test_scoring_succeeds_once_due_and_replaces_the_marker(
             self, db, add_job, monkeypatch):
         import src.claude.fit as fit_module
         jid = add_job("j1", description="x" * 300, fit=None)
@@ -373,7 +373,7 @@ class TestSelfHealRetryMarker:
             fit_module.FitReply(domain=0.5, function=0.5, stack=0.5,
                                 seniority=0.5, gates=[], reason="fits")))
 
-        n = scoring.self_heal_unscored(db, "resume", "local-tech")
+        n = await scoring.self_heal_unscored(db, "resume", "local-tech")
 
         assert n == 1
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
@@ -388,13 +388,13 @@ class TestRescoreAllUsesTheSharedUnscoredMarker:
     the store has one shape for "nothing to score here" everywhere it
     appears."""
 
-    def test_a_bodyless_row_gets_the_shared_marker(
+    async def test_a_bodyless_row_gets_the_shared_marker(
             self, db, add_job, monkeypatch):
         keep_store_open(monkeypatch, db)
         monkeypatch.setattr(scoring, "resume_text", lambda: "resume")
         jid = add_job("j1", description="too short", fit=0.4)
 
-        scoring.rescore_all()
+        await scoring.rescore_all()
 
         row = dict(db.execute("SELECT * FROM jobs WHERE job_id=?",
                               (jid,)).fetchone())
@@ -408,7 +408,7 @@ class TestDeadBoardClosure:
     rows, miss_reason board-dead:greenhouse since 2026-09-11) is the live
     case this was written for."""
 
-    def test_a_dead_boards_stale_open_row_closes_without_a_probe(
+    async def test_a_dead_boards_stale_open_row_closes_without_a_probe(
             self, db, monkeypatch, capsys):
         [jid] = seed_stale(db, "Judi Health", ats="greenhouse",
                            miss_reason="board-dead:greenhouse", days_stale=20)
@@ -417,12 +417,12 @@ class TestDeadBoardClosure:
         def _probe(url, job_id=None):
             probed.append(url)
             return (None, "n/a")
-        monkeypatch.setattr(status.closure, "probe_job_open", _probe)
+        monkeypatch.setattr(status.closure, "aprobe_job_open", answer(_probe))
 
         # stale_days=999 keeps this row OUT of the URL-probe population
         # entirely (last_seen is only 20 days old) -- proving the closure
         # is a SEPARATE step, not a side effect of probing.
-        n = status.check_closed_jobs(conn=db, stale_days=999)
+        n = await status.check_closed_jobs(db=db, stale_days=999)
 
         assert n == 1
         assert probed == [], "closed by inference; no URL should be fetched"
@@ -431,27 +431,27 @@ class TestDeadBoardClosure:
         assert row["status"] == "closed"
         assert "[dead-board]" in capsys.readouterr().out
 
-    def test_a_quiet_board_with_no_miss_is_never_closed_this_way(
+    async def test_a_quiet_board_with_no_miss_is_never_closed_this_way(
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
                            days_stale=400)
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: (None, "n/a"))
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: (None, "n/a")))
 
-        status.check_closed_jobs(conn=db, stale_days=999)
+        await status.check_closed_jobs(db=db, stale_days=999)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
         assert row["status"] != "closed"
 
-    def test_a_miss_in_a_different_family_is_never_closed_this_way(
+    async def test_a_miss_in_a_different_family_is_never_closed_this_way(
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Ats Gap", ats=None,
                            miss_reason="ats-unsupported:ukg", days_stale=400)
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: (None, "n/a"))
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: (None, "n/a")))
 
-        status.check_closed_jobs(conn=db, stale_days=999)
+        await status.check_closed_jobs(db=db, stale_days=999)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -465,29 +465,29 @@ class TestClosedProbeRotation:
     (unlike a closed one) left a row exactly where it was for the next
     pass to pick again."""
 
-    def test_250_stale_rows_are_fully_covered_in_three_passes_of_100(
+    async def test_250_stale_rows_are_fully_covered_in_three_passes_of_100(
             self, db, monkeypatch):
         seed_stale(db, n=250)
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: (None, "gated"))
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: (None, "gated")))
 
         for _ in range(3):
-            status.check_closed_jobs(conn=db, stale_days=1, limit=100)
+            await status.check_closed_jobs(db=db, stale_days=1, limit=100)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
             "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
         assert covered == 250
 
-    def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
+    async def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
         seed_stale(db, n=250)
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: (None, "gated"))
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: (None, "gated")))
 
-        status.check_closed_jobs(conn=db, stale_days=1, limit=100)
+        await status.check_closed_jobs(db=db, stale_days=1, limit=100)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
@@ -511,27 +511,27 @@ class TestClosedProbeGiveUp:
         def _probe(url, job_id=None):
             probed.append(url)
             return verdict
-        monkeypatch.setattr(status.closure, "probe_job_open", _probe)
+        monkeypatch.setattr(status.closure, "aprobe_job_open", answer(_probe))
         return probed
 
-    def _run(self, db, n):
+    async def _run(self, db, n):
         for _ in range(n):
-            status.check_closed_jobs(conn=db, stale_days=1)
+            await status.check_closed_jobs(db=db, stale_days=1)
 
     def _streak(self, db, job_id="Acme-j0"):
         return db.execute("SELECT COALESCE(probe_streak, 0) AS s FROM jobs "
                           "WHERE job_id=?", (job_id,)).fetchone()["s"]
 
-    def test_ten_unverifiable_probes_drop_the_row_from_the_selection(
+    async def test_ten_unverifiable_probes_drop_the_row_from_the_selection(
             self, db, monkeypatch):
         [jid] = seed_stale(db)
         probed = self._answer(monkeypatch, (None, "gated"))
 
-        self._run(db, status.CLOSED_PROBE_GIVE_UP)
+        await self._run(db, status.CLOSED_PROBE_GIVE_UP)
         assert len(probed) == status.CLOSED_PROBE_GIVE_UP
         assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP
 
-        self._run(db, 3)                      # three further passes
+        await self._run(db, 3)                      # three further passes
 
         assert len(probed) == status.CLOSED_PROBE_GIVE_UP, \
             "a given-up row must never be selected again"
@@ -540,39 +540,39 @@ class TestClosedProbeGiveUp:
         assert (row["status"] or "open") == "open", \
             "unverifiable is not closed: the row stays open, just unprobed"
 
-    def test_three_unverifiable_probes_leave_the_row_in_the_queue(
+    async def test_three_unverifiable_probes_leave_the_row_in_the_queue(
             self, db, monkeypatch):
         seed_stale(db)
         probed = self._answer(monkeypatch, (None, "gated"))
 
-        self._run(db, 3)
+        await self._run(db, 3)
         assert self._streak(db) == 3
 
-        self._run(db, 1)
+        await self._run(db, 1)
 
         assert len(probed) == 4, "3 < CLOSED_PROBE_GIVE_UP: still selected"
 
-    def test_a_confirmed_live_probe_resets_the_streak(self, db, monkeypatch):
+    async def test_a_confirmed_live_probe_resets_the_streak(self, db, monkeypatch):
         seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, status.CLOSED_PROBE_GIVE_UP - 1)
+        await self._run(db, status.CLOSED_PROBE_GIVE_UP - 1)
         assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP - 1
 
         probed = self._answer(monkeypatch, (True, "200"))
-        self._run(db, 1)
+        await self._run(db, 1)
 
         assert self._streak(db) == 0
         assert len(probed) == 1
         # ...and the row is still in the queue afterwards.
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, 1)
+        await self._run(db, 1)
         assert self._streak(db) == 1
 
-    def test_a_board_sighting_puts_a_given_up_row_back_in_the_queue(
+    async def test_a_board_sighting_puts_a_given_up_row_back_in_the_queue(
             self, db, monkeypatch):
         [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, status.CLOSED_PROBE_GIVE_UP)
+        await self._run(db, status.CLOSED_PROBE_GIVE_UP)
         assert self._streak(db) == status.CLOSED_PROBE_GIVE_UP
 
         # The board lists it again: store.touch_job is the sighting, and
@@ -581,20 +581,20 @@ class TestClosedProbeGiveUp:
 
         assert self._streak(db) == 0
 
-    def test_a_given_up_row_still_closes_when_its_board_dies(
+    async def test_a_given_up_row_still_closes_when_its_board_dies(
             self, db, monkeypatch):
         """The give-up rule parks the URL PROBE, not the row: every other
         closure path still reaches it."""
         [jid] = seed_stale(db)
         self._answer(monkeypatch, (None, "gated"))
-        self._run(db, status.CLOSED_PROBE_GIVE_UP)
+        await self._run(db, status.CLOSED_PROBE_GIVE_UP)
         db.execute("UPDATE jobs SET last_seen=? WHERE job_id=?",
                    (iso_days_ago(status.DEAD_BOARD_CLOSE_DAYS + 6), jid))
         db.execute("UPDATE companies SET miss_reason='board-dead:greenhouse' "
                    "WHERE name='Acme'")
         db.commit()
 
-        status.check_closed_jobs(conn=db, stale_days=1)
+        await status.check_closed_jobs(db=db, stale_days=1)
 
         row = db.execute("SELECT status FROM jobs WHERE job_id=?",
                          (jid,)).fetchone()
@@ -685,7 +685,7 @@ class TestProbeIsDecisivePerFamily:
                     "jobs.ashbyhq.com": fake_response(url=ASHBY_JOB)})
         assert job_probe.probe_job_open(ASHBY_JOB)[0] is None
 
-    def test_one_ashby_board_fetch_serves_every_row_on_it(self, probe_http):
+    async def test_one_ashby_board_fetch_serves_every_row_on_it(self, probe_http):
         """A company with many stale rows must not re-fetch its board once
         per row, even when the probe pool asks for all of them at once:
         the memo used to fill only after the first read landed."""
@@ -694,8 +694,8 @@ class TestProbeIsDecisivePerFamily:
         listing = {"jobs": [{"id": rows[0].rsplit("/", 1)[1]}]}
         seen = probe_http({FAMILY_API[ASHBY_JOB]: lambda url, **kw:
                            time.sleep(0.2) or fake_response(listing)})
-        verdicts = sorted(o for o, _ in fan_out(rows, job_probe.probe_job_open,
-                                                max_workers=8))
+        verdicts = sorted([o async for o, _ in fan_out(
+            rows, job_probe.aprobe_job_open, max_workers=8)])
         assert (len(seen), verdicts) == (1, [False] * 7 + [True])
 
     def test_smartrecruiters_closes_on_the_active_flag(self, probe_http):
@@ -867,22 +867,22 @@ class TestProbeSelectionFollowsTheHarvestCadence:
     @staticmethod
     def _probed(monkeypatch):
         urls = []
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: urls.append(url) or (None, "gated"))
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: urls.append(url) or (None, "gated")))
         return urls
 
-    def test_a_board_walked_inside_the_window_still_has_its_rows_probed(
+    async def test_a_board_walked_inside_the_window_still_has_its_rows_probed(
             self, db, monkeypatch):
         # Walked two days ago and the row has been unseen for thirty: the
         # walk happened and did not list it.
         [jid] = seed_stale(db, "Walked", harvested=iso_days_ago(2))
         urls = self._probed(monkeypatch)
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
-    def test_a_board_whose_next_walk_is_not_due_yet_contributes_nothing(
+    async def test_a_board_whose_next_walk_is_not_due_yet_contributes_nothing(
             self, db, monkeypatch, capsys):
         # Off-mission and inactive, so it waits 168h; last walked just
         # past the 7-day staleness line, i.e. due but not yet run.
@@ -890,20 +890,20 @@ class TestProbeSelectionFollowsTheHarvestCadence:
                    active=0, mission_tier="other")
         urls = self._probed(monkeypatch)
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         assert urls == []
         assert "1 skipped: board not walked since" in capsys.readouterr().out
 
-    def test_a_company_with_no_board_is_always_probed(self, db, monkeypatch):
+    async def test_a_company_with_no_board_is_always_probed(self, db, monkeypatch):
         [jid] = seed_stale(db, "No Board", ats=None, harvested=None)
         urls = self._probed(monkeypatch)
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
-    def test_a_board_the_harvester_skips_is_always_probed(self, db, monkeypatch):
+    async def test_a_board_the_harvester_skips_is_always_probed(self, db, monkeypatch):
         """'no-board-found' keeps a company out of
         store.harvestable_companies, so its rows can never be answered by
         a board diff however recently the ats column was filled in."""
@@ -911,7 +911,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
                            miss_reason="no-board-found")
         urls = self._probed(monkeypatch)
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         assert urls == [f"https://acme.example/{jid}"]
 
@@ -921,7 +921,7 @@ class TestProbeOutcomesAreReportedPerFamily:
     breaks the pass down by ATS family (by host for what no family claims)
     with the reasons behind each."""
 
-    def test_each_family_gets_a_line_with_its_counts_and_reasons(
+    async def test_each_family_gets_a_line_with_its_counts_and_reasons(
             self, db, monkeypatch, capsys):
         seed_stale(db, harvested=iso_days_ago(1),
                    urls=[LEVER_JOB, LEVER_JOB + "x", ICIMS_JOB,
@@ -931,10 +931,10 @@ class TestProbeOutcomesAreReportedPerFamily:
                     ICIMS_JOB: (None, "HTTP 405"),
                     "https://www.linkedin.com/jobs/view/1":
                         (None, "bot-gated aggregator host")}
-        monkeypatch.setattr(status.closure, "probe_job_open",
-                            lambda url, job_id=None: verdicts[url])
+        monkeypatch.setattr(status.closure, "aprobe_job_open",
+                            answer(lambda url, job_id=None: verdicts[url]))
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         out = capsys.readouterr().out
         assert "1 closed, 1 confirmed live, 2 unverifiable" in out
@@ -942,17 +942,17 @@ class TestProbeOutcomesAreReportedPerFamily:
         assert "icims            1 unverifiable [HTTP 405]" in out
         assert "www.linkedin.com 1 unverifiable [bot-gated aggregator host]" in out
 
-    def test_a_quoted_page_phrase_is_detail_not_a_reason_of_its_own(
+    async def test_a_quoted_page_phrase_is_detail_not_a_reason_of_its_own(
             self, db, monkeypatch, capsys):
         """Two rows closed by the same kind of notice must tally as one
         reason, not as two singletons named after their own wording."""
         seed_stale(db, harvested=iso_days_ago(1),
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
-            status.closure, "probe_job_open",
-            lambda url, job_id=None: (False, f"page says {url[-12:]!r}"))
+            status.closure, "aprobe_job_open",
+            answer(lambda url, job_id=None: (False, f"page says {url[-12:]!r}")))
 
-        status.check_closed_jobs(conn=db, stale_days=7)
+        await status.check_closed_jobs(db=db, stale_days=7)
 
         assert "icims            2 closed [page says ... x2]" in \
             capsys.readouterr().out

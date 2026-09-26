@@ -38,12 +38,12 @@ def seed_tag_for(ats):
 
 
 def sweep(ats, name, handle):
-    """The sweep's fetch for one board: a thunk pulling it through the
-    profile's keyword gate (the engine itself is ungated; the
+    """The sweep's fetch for one board: a thunk whose coroutine pulls it
+    through the profile's keyword gate (the engine itself is ungated; the
     company-vetted path, board/company.py, passes a location regex
     instead). None for a platform no spec fetches."""
     board = board_for(ats)
-    return (lambda: board.jobs(handle, name, gate=is_relevant)) if board else None
+    return (lambda: board.ajobs(handle, name, gate=is_relevant)) if board else None
 
 
 def iter_store_sources(companies):

@@ -113,10 +113,11 @@ class TestWebView:
 
     def test_fn_runs_the_registry_with_the_posted_params(self, patch_op):
         from src import web
+        from src.net import http
         seen = {}
         patch_op("check-closed", lambda **kw: seen.update(kw))
-        web.OPS["check-closed"]["fn"]({"stale_days": "3", "limit": "",
-                                          "track": config.DEFAULT_TRACK})
+        http.run_sync(web.OPS["check-closed"]["fn"]({
+            "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK}))
         assert seen["stale_days"] == 3 and seen["limit"] is None
         assert seen["t"]["id"] == config.DEFAULT_TRACK
         assert "max_workers" not in seen        # the target's own default

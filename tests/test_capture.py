@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 import capture
-from conftest import fake_response
+from conftest import answer, fake_response
 import src.claude.fit as fit
 import src.store as store
 from src import tags
@@ -106,8 +106,8 @@ def roster(wired_db_path, monkeypatch):
     default connect() and the default track's db_path (conftest's
     `wired_db_path`) -- plus a stubbed fit scorer so the ingest never
     reaches the Claude API. Yields a connection."""
-    monkeypatch.setattr(ops, "score_resume_fit",
-                        lambda *a, **k: fit.FitResult(score=0.5, reason="stub"))
+    monkeypatch.setattr(ops, "ascore_resume_fit",
+                        answer(fit.FitResult(score=0.5, reason="stub")))
     conn = store.connect(wired_db_path)
     yield conn
     conn.close()
@@ -188,14 +188,15 @@ class TestAttribution:
         assert summary["company"] == "Acme Neuro"
         assert _row(roster, "Acme Neuro")["ats"] == store.CAPTURE_ATS
 
-    def test_capture_only_registration_by_hand(self, roster):
+    async def test_capture_only_registration_by_hand(self, roster):
         from src.discovery.local_sourcing import add_board
-        assert add_board("Acme Health", "https://jobs.acmehealth.org/", capture=True)
+        assert await add_board("Acme Health", "https://jobs.acmehealth.org/",
+                               capture=True)
         row = _row(roster, "Acme Health")
         assert row["ats"] == store.CAPTURE_ATS and row["active"] == 1
         assert row["careers_url"] == "https://jobs.acmehealth.org/"
         # The same board under another spelling is the same company.
-        assert add_board("Acme Health System", "https://jobs.acmehealth.org/",
+        assert await add_board("Acme Health System", "https://jobs.acmehealth.org/",
                          capture=True) is None
         assert len(store.get_companies(roster, active_only=False)) == 1
         assert store.crawlable_companies(roster) == []

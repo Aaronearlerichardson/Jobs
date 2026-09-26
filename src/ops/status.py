@@ -12,7 +12,7 @@ from src.ats.board import closure
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out, fetch_all
 from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
-                                 group_by_company, rewrite_digest, track_store)
+                                 group_by_company, rewrite_digest, track_writer)
 
 
 # Why a fetched board can't be reconciled, in the order the footer reports
@@ -67,7 +67,7 @@ def _sync_skip_note(skipped):
     return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
 
 
-def sync_status_all(top_n=15, t=None):
+async def sync_status_all(top_n=15, t=None):
     """Status-only reconciliation: re-fetch every active company's board
     (same scoping as the crawl — locality unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
@@ -84,16 +84,16 @@ def sync_status_all(top_n=15, t=None):
     it drops is check_closed_jobs's job, which probes the row's own URL
     instead of trusting one page-capped pull."""
     t = _t(t)
-    with track_store(t) as conn:
-        companies = store.crawlable_companies(conn, tag=t["store_tag"])
+    async with track_writer(t) as db:
+        companies = await db.run(store.crawlable_companies, tag=t["store_tag"])
         print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
         loc = NC_RE if t["sources"]["location_scoped"] else None
         sources = [(c["name"], c["ats"] or "?",
-                    (lambda cc=c: company_fetch.fetch_company(
+                    (lambda cc=c: company_fetch.afetch_company(
                         cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
                                      or loc is None) else loc)))
                    for c in companies]
-        fetched = fetch_all(sources)
+        fetched = await fetch_all(sources)
         n_closed = n_reopened = n_boards = 0
         skipped = {why: 0 for why in _SYNC_SKIP_REASONS}
         for c, (jobs, err, snapshot) in zip(companies, fetched):
@@ -116,8 +116,8 @@ def sync_status_all(top_n=15, t=None):
                 print(f"    [!] {(c.get('name') or '?')[:34]:34} "
                       f"not reconciled ({why}){detail}")
                 continue
-            n_re, n_cl = store.sync_job_statuses(
-                conn, c["id"], jobs, track=t["track"],
+            n_re, n_cl = await db.run(
+                store.sync_job_statuses, c["id"], jobs, track=t["track"],
                 capped=(snapshot or {}).get("capped", False))
             n_boards += 1
             n_closed += n_cl
@@ -125,11 +125,11 @@ def sync_status_all(top_n=15, t=None):
             if n_cl or n_re:
                 print(f"  {c['name'][:34]:34} {len(jobs):3} listed -> "
                       f"{n_cl:2} closed, {n_re:2} reopened")
-        n_open = len(_ranked(conn, t))
-        rewrite_digest(conn, t, top_n,
-                       f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
-                       f"{n_reopened} reopened{_sync_skip_note(skipped)}; "
-                       f"{n_open} open job(s) in ranking.")
+        n_open = len(await db.run(_ranked, t))
+        await db.run(rewrite_digest, t, top_n,
+                     f"\n  {n_boards} board(s) reconciled: {n_closed} closed, "
+                     f"{n_reopened} reopened{_sync_skip_note(skipped)}; "
+                     f"{n_open} open job(s) in ranking.")
         return (n_closed, n_reopened)
 
 
@@ -272,22 +272,22 @@ def _dead_board_open_rows(conn, days):
             if store.miss_family(r["miss_reason"]) == _DEAD_BOARD_FAMILY]
 
 
-def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
-                      conn=None):
+async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
+                            db=None):
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
     accepting" notice, a past JSON-LD validThrough, a spec's closure
     rule, an id absent from a non-empty board listing -- see
-    board.closure.probe_job_open). Indeterminate probes (bot-gated
+    board.closure.aprobe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
     fetch has already failed (store.miss_family == "board-dead") -- no URL
     probe needed there, the board itself is the witness. Returns how many
     rows this call closed IN TOTAL, probed and inferred together.
 
-    `conn=None` opens the track's own store (`t`, default track when `t` is
-    also None); a caller's own `conn` is used as is (track_store). Neither
+    `db=None` opens the track's own store (`t`, default track when `t` is
+    also None); a caller's own `db` is used as is (track_writer). Neither
     query is scoped by track: a stale OPEN row is stale whichever track
     ranks it.
 
@@ -354,20 +354,20 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
         greenhouse board dead since 09-11 (Judi Health), 1 at Hippocratic
         AI.
     """
-    with track_store(t, conn) as conn:
+    async with track_writer(t, db) as db:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
-        rows = [dict(r) for r in conn.execute(
+        rows = await db.run(lambda conn: [dict(r) for r in conn.execute(
             "SELECT job_id, title, company_name, company_id, url FROM jobs "
             "WHERE COALESCE(status,'open') != 'closed' "
             "AND COALESCE(last_seen, first_seen, '') < ? "
             "AND COALESCE(probe_streak, 0) < ? "
             "ORDER BY COALESCE(desc_checked_at, ''), company_name",
-            (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()]
+            (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()])
         # The harvester's OWN view of which boards it walks and when
         # (store.harvestable_companies, companies.last_harvested_at), not a
         # second copy of that rule.
         walked = {c["id"]: (c.get("last_harvested_at") or "")
-                  for c in store.harvestable_companies(conn)}
+                  for c in await db.run(store.harvestable_companies)}
         n_rows = len(rows)
         # "" covers both "no board the harvester walks" and "walked none
         # yet": either way no board snapshot has ever ruled on the row.
@@ -381,13 +381,13 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
               + (f" ({n_deferred} skipped: board not walked since)"
                  if n_deferred else "") + "...")
 
-        def _probe(r):
+        async def _probe(r):
             # A probe that RAISES is not a failure to report and skip, it
             # is an unverifiable row -- the third outcome this op counts.
             # So it is caught here rather than left to fan_out, which would
             # drop the row and quietly shrink the denominator.
             try:
-                return closure.probe_job_open(r["url"], r["job_id"])
+                return await closure.aprobe_job_open(r["url"], r["job_id"])
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {type(e).__name__}"
 
@@ -397,7 +397,7 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
         # An abandoned probe is never yielded, so it closes nothing and
         # records no outcome: the row waits for the next pass as it was.
         abandoned = []
-        for r, (is_open, reason) in fan_out(
+        async for r, (is_open, reason) in fan_out(
                 rows, _probe,
                 lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",
                 max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
@@ -406,17 +406,17 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             bucket = _probe_label(r["url"])
             reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1
             if is_open is False:
-                store.set_job_status(conn, r["job_id"], "closed")
+                await db.run(store.set_job_status, r["job_id"], "closed")
                 n_closed += 1
                 counts[bucket]["closed"] += 1
                 print(f"    [closed] {label} {reason}")
             elif is_open:
-                store.record_probe_outcome(conn, r["job_id"], True, now)
+                await db.run(store.record_probe_outcome, r["job_id"], True, now)
                 n_live += 1
                 counts[bucket]["live"] += 1
             else:
-                streak = store.record_probe_outcome(conn, r["job_id"], False,
-                                                    now)
+                streak = await db.run(store.record_probe_outcome, r["job_id"],
+                                      False, now)
                 n_unknown += 1
                 counts[bucket]["unverifiable"] += 1
                 if streak >= CLOSED_PROBE_GIVE_UP:
@@ -433,12 +433,12 @@ def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             print(f"  {n_parked} row(s) hit {CLOSED_PROBE_GIVE_UP} "
                   f"unverifiable probes and left the probe queue.")
 
-        dead = group_by_company(_dead_board_open_rows(
-            conn, DEAD_BOARD_CLOSE_DAYS))
+        dead = group_by_company(await db.run(_dead_board_open_rows,
+                                             DEAD_BOARD_CLOSE_DAYS))
         n_dead = 0
         for rs in dead.values():
             for r in rs:
-                store.set_job_status(conn, r["job_id"], "closed")
+                await db.run(store.set_job_status, r["job_id"], "closed")
             n_dead += len(rs)
             print(f"    [dead-board] {(rs[0]['company_name'] or '?')[:34]:34} "
                   f"{len(rs):3} row(s) closed ({rs[0]['miss_reason']})")

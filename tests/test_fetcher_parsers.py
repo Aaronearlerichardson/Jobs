@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import fake_response, no_pacing
+from conftest import answer, fake_response, no_pacing
 from src.match.filters import is_relevant
 from src.ats.board import BOARDS, board_for, board_for_url, company, fields
 from src.ats.board import engine as board
@@ -515,10 +515,10 @@ class TestRelevanceGate:
         serve(fake_response(load("greenhouse_board.json")))
         assert board_for("greenhouse").jobs("databricks", "Databricks")
 
-    def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
+    async def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
         from src.ats.registry import sweep
         serve(fake_response(load("greenhouse_board.json")))
-        assert sweep("greenhouse", "Databricks", "databricks")() == []
+        assert await sweep("greenhouse", "Databricks", "databricks")() == []
 
     def test_no_fetcher_module_imports_the_filter_or_config_timeouts(self):
         """The point of the parameter: a fetcher module is reusable with
@@ -580,9 +580,9 @@ class TestAshbyKeyAcrossCallSites:
             pytest.skip("profile configures no NC locality")
         assert nc_count("ashby", "susteon") == 2
 
-    def test_mission_scorer_gets_titles(self, ashby_board):
+    async def test_mission_scorer_gets_titles(self, ashby_board):
         from src.discovery.local_sourcing import _sample_titles
-        titles = _sample_titles({"ats": "ashby", "slug": "susteon"})
+        titles = await _sample_titles({"ats": "ashby", "slug": "susteon"})
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
     def test_company_fetcher_returns_postings(self, ashby_board):
@@ -913,25 +913,25 @@ class TestMissionContext:
     BOARD = {"name": "Studycast", "ats": "rippling", "slug": "core-sound-imaging",
              "careers_url": "https://ats.rippling.com/core-sound-imaging/jobs"}
 
-    def test_live_titles_are_the_context(self, monkeypatch):
+    async def test_live_titles_are_the_context(self, monkeypatch):
         from src.discovery import local_sourcing
         monkeypatch.setattr(local_sourcing, "_sample_titles",
-                            lambda h: ["PACS Engineer", "", "Sales Lead"])
-        assert local_sourcing.mission_context(self.BOARD) == \
+                            answer(["PACS Engineer", "", "Sales Lead"]))
+        assert await local_sourcing.mission_context(self.BOARD) == \
             "PACS Engineer | Sales Lead"
 
-    def test_no_titles_means_the_board_address(self, monkeypatch):
+    async def test_no_titles_means_the_board_address(self, monkeypatch):
         from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        ctx = local_sourcing.mission_context(self.BOARD)
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        ctx = await local_sourcing.mission_context(self.BOARD)
         assert "core-sound-imaging" in ctx and "no open postings" in ctx
 
-    def test_a_board_with_no_address_stays_empty(self, monkeypatch):
+    async def test_a_board_with_no_address_stays_empty(self, monkeypatch):
         from src.discovery import local_sourcing
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        assert local_sourcing.mission_context({"ats": "custom"}) == ""
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        assert await local_sourcing.mission_context({"ats": "custom"}) == ""
 
-    def test_the_scorer_is_sent_the_context_for_an_unsampled_family(
+    async def test_the_scorer_is_sent_the_context_for_an_unsampled_family(
             self, serve, monkeypatch):
         """Through the real sampler: a Rippling board (no branch of its own
         before 2026-09-18) reaches the scorer with its titles, and once its
@@ -939,13 +939,13 @@ class TestMissionContext:
         from src.discovery import local_sourcing
         sent = []
         monkeypatch.setattr(
-            "src.claude.api.score_company_mission",
-            lambda name, context="": sent.append(context) or ("adjacent", .5, ""))
+            "src.claude.api.ascore_company_mission",
+            answer(lambda name, context="": sent.append(context) or ("adjacent", .5, "")))
         serve(fake_response(TestTitleSampling.RIPPLING))
-        local_sourcing._score_hit(self.BOARD)
+        await local_sourcing._score_hit(self.BOARD)
         assert sent[-1] == "PACS Support Engineer | Imaging Software Developer"
         serve(fake_response([]))
-        local_sourcing._score_hit(self.BOARD)
+        await local_sourcing._score_hit(self.BOARD)
         assert "core-sound-imaging" in sent[-1]
 
 

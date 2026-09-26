@@ -19,10 +19,11 @@ different defaults to the same call. Now each operation is declared once:
            {key: value} dict into the target's keyword arguments.
   ui       False hides the op from the web UI (CLI-only shape).
 
-A front end hands `invoke()` the op name and a params dict (the JSON the
-browser POSTed, or values pulled off argparse) and gets the target's
-return value back. Parameter names are the same on both sides, so a
-button and a flag are two spellings of one call.
+A front end hands `ainvoke()` (or its sync shim `invoke()`) the op name
+and a params dict (the JSON the browser POSTed, or values pulled off
+argparse) and gets the target's return value back. Parameter names are
+the same on both sides, so a button and a flag are two spellings of one
+call.
 
 Notes:
     This package sits above src/crawl (two targets live there) and below
@@ -32,6 +33,8 @@ Notes:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import operator
 from typing import Annotated, ClassVar
 
@@ -42,6 +45,7 @@ from src import config
 from src.config.profile_schema import error_lines
 from src.crawl import runner, triage
 from src.discovery import local_sourcing, paste_ingest
+from src.net import http
 from src.ops import (backfill, ingest, rekey, repair, roster, scoring,
                      status)
 
@@ -420,10 +424,15 @@ def ui_ops():
     return {n: e for n, e in REGISTRY.items() if e.get("ui", True)}
 
 
-def invoke(name, params=None, *, track=UNSET):
+async def ainvoke(name, params=None, *, track=UNSET):
     """Run operation `name` with a front end's params (a dict, or the op's
     model already validated); returns what the target returns. Params the
     op does not accept raise ParamError before anything runs.
+
+    A coroutine target is awaited. A sync one (the ops that only touch the
+    store) runs on a worker thread, and once started runs to its end: a
+    cancel waits for it (so the next op never overlaps it) and is then
+    withdrawn, the call returning or raising what the target did.
 
     `track` is the track cfg to run against. Left UNSET, it is resolved
     from params["track"] (a track id; the web UI injects the active one)
@@ -438,4 +447,17 @@ def invoke(name, params=None, *, track=UNSET):
         raise ParamError(name, error_lines(e)) from None
     if track is UNSET:
         track = config.UI_TRACKS.get(args.track or config.DEFAULT_TRACK)
-    return entry["target"](**args.kwargs(track))
+    target, kw = entry["target"], args.kwargs(track)
+    if inspect.iscoroutinefunction(target):
+        return await target(**kw)
+    done = asyncio.ensure_future(asyncio.to_thread(target, **kw))
+    try:
+        return await asyncio.shield(done)
+    except asyncio.CancelledError:
+        await asyncio.wait([done])
+        asyncio.current_task().uncancel()
+        print(f"  {name}: the stop came too late; a started store op runs to its end")
+        return done.result()
+
+
+invoke = http.sync_shim(ainvoke)

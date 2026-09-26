@@ -4,30 +4,28 @@ The SOURCING half of a `discover-term` / `--from-bciwiki` run: ask Claude (or
 a directory) for employer names, hand each one to the shared resolver
 (src.discovery.resolve.board), and turn what comes back into a report and a
 roster write. The resolution itself used to be a second, probe-first
-implementation living here; see validate_candidate for why it isn't any more.
+implementation living here; see avalidate_candidate for why it isn't any more.
 """
 
 import asyncio
 import re
-import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from src.ats import coords
 from src.ats.board import board_for
 from src.claude.api import (DISCOVER_SYSTEM, DiscoveredCompany, DiscoverReply,
-                            call_claude_json)
+                            acall_claude_json)
 from src.config import REPORT_DIR, SETTINGS
 from src.match.names import strip_suffixes
-from src.net import http
-from src.net.parallel import drain
+from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.net.util import worker_count
 from .resolve.board import aresolve_board_sniff_first
 from .resolve.probes import SCANNED, JsScanProbePool
 from .resolve.sniffer import asniff_careers_ats
 from .seeds import seed_candidates_for
 
-# Parallel worker count for validate_candidate. Each worker is almost
+# Parallel worker count for avalidate_candidate. Each worker is almost
 # entirely blocked on network I/O (slug probes + careers-page fetches
 # against different hosts), so this is a network-concurrency knob, not a
 # CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
@@ -197,9 +195,6 @@ async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=
     return c
 
 
-validate_candidate = http.sync_shim(avalidate_candidate)
-
-
 def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     """
     Append seed candidates to Claude's output, deduping by normalized
@@ -213,10 +208,10 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     ]
 
 
-def discover(term):
+async def discover(term):
     print(f"  > Asking Claude for companies in: {term!r}")
-    payload = call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
-                               reply=DiscoverReply)
+    payload = await acall_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
+                                      reply=DiscoverReply)
     raw_companies = ([c.model_dump() for c in payload.companies]
                      if payload else [])
     seeds = seed_candidates_for(term)
@@ -235,7 +230,7 @@ def discover(term):
     else:
         print(f"  > Claude returned {len(raw_companies)} company suggestion(s)")
 
-    validated = _validate_all(merged)
+    validated = await _validate_all(merged)
     return {
         "term":        term,
         "companies":   validated,
@@ -244,8 +239,8 @@ def discover(term):
     }
 
 
-def _validate_all(candidate_dicts, use_js=True, websearch=True):
-    """Validate candidate dicts in parallel; return Candidate objects in
+async def _validate_all(candidate_dicts, use_js=True, websearch=True):
+    """Validate candidate dicts concurrently; return Candidate objects in
     input order. Shared by Claude-driven discover() and name-list-driven
     discover_companies().
 
@@ -257,59 +252,52 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
     fallback is gated: it is the slowest thing a miss can pay for, and a
     bulk sweep pays it once per boardless name.
     """
-    # Each worker drops log lines into its own list and flushes them
-    # as a single atomic block when the candidate finishes — so the
-    # [N/total] progress line + any "[js] headless scrape..." messages
-    # for one candidate always appear contiguously, even with 8
-    # workers logging concurrently.
+    # Each candidate drops its log lines into its own list, printed as one
+    # block when it finishes -- so the [N/total] progress line + any "[js]
+    # headless scrape..." messages for one candidate always appear
+    # contiguously, however many run at once.
     total     = len(candidate_dicts)
     validated = [None] * total
-    out_lock  = threading.Lock()
-    done      = [0]                           # list-as-box for closure mutation
 
-    def _worker(idx, rc, js_probe):
-        cand = candidate_from_dict(rc)
+    async def _worker(irc):
+        cand = candidate_from_dict(irc[1])
         buf: list[str] = []
         # Small inter-step delay: each resolution step hits a different host,
-        # and workers already run concurrently, so politeness sleeps add up to
-        # dead time per candidate. 0.05 keeps a light touch without the tax.
-        validate_candidate(
+        # and candidates already run concurrently, so politeness sleeps add
+        # up to dead time per candidate. 0.05 keeps a light touch without
+        # the tax.
+        await avalidate_candidate(
             cand, delay=0.05, js_probe=js_probe, log=buf.append,
             websearch=websearch,
         )
-        # Flush under lock so concurrent candidates never interleave.
-        with out_lock:
-            done[0] += 1
+        return cand, buf
+
+    # A pool of pages for the JS scrapes, in a browser launched on first
+    # use, so concurrent candidates scrape in parallel (up to _JS_PAGES)
+    # instead of serializing on one. Skipped entirely when use_js is off,
+    # so bulk sweeps never pay the browser cost.
+    js_probe = JsScanProbePool(_JS_PAGES) if use_js else None
+    try:
+        done = 0
+        async for (idx, _rc), (cand, buf) in fan_out(
+                list(enumerate(candidate_dicts)), _worker,
+                lambda irc: (irc[1].get("name") or "").strip(),
+                _DISCOVERY_WORKERS, with_item=True, stall_s=RESOLVE_STALL_S):
+            done += 1
             if cand.confirmed:
                 status, detail = "OK  ", f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
             elif cand.ats_lead:
                 status, detail = "lead", f"  {cand.ats_lead}"
             else:
                 status, detail = "miss", ""
-            print(f"  [{done[0]:>3}/{total}] {status}  {cand.name} "
+            print(f"  [{done:>3}/{total}] {status}  {cand.name} "
                   f"({cand.ats}){detail}")
             for line in buf:
                 print(line)
-        return idx, cand
-
-    # A pool of pages for the JS scrapes, in a browser launched on first
-    # use, so concurrent candidates scrape in parallel (up to _JS_PAGES)
-    # instead of serializing on one. Skipped entirely when use_js is off,
-    # so bulk sweeps never pay the browser cost.
-    def _done(fut, _name):
-        idx, cand = fut.result()
-        validated[idx] = cand
-
-    js_probe = JsScanProbePool(_JS_PAGES) if use_js else None
-    try:
-        drain(list(enumerate(candidate_dicts)),
-              lambda irc: _worker(irc[0], irc[1], js_probe),
-              _done, lambda _name: None,
-              label=lambda irc: (irc[1].get("name") or "").strip(),
-              max_workers=_DISCOVERY_WORKERS)
+            validated[idx] = cand
     finally:
         if js_probe is not None:
-            js_probe.close()
+            await js_probe.aclose()
     # A candidate the watchdog abandoned is reported unconfirmed, not
     # dropped: the report and --apply walk every slot.
     for i, rc in enumerate(candidate_dicts):
@@ -320,7 +308,7 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
     return validated
 
 
-def discover_companies(candidate_dicts, term, use_js=False):
+async def discover_companies(candidate_dicts, term, use_js=False):
     """Resolve an explicit list of candidate dicts (e.g. harvested from the
     BCIWiki directory) to crawlable boards — no Claude call. Returns the
     same result shape as discover().
@@ -335,8 +323,8 @@ def discover_companies(candidate_dicts, term, use_js=False):
           f"(workers={_DISCOVERY_WORKERS}, js={'on' if use_js else 'off'})")
     if not candidate_dicts:
         return {"term": term, "companies": [], "gated_sites": []}
-    validated = _validate_all(candidate_dicts, use_js=use_js,
-                              websearch=use_js)
+    validated = await _validate_all(candidate_dicts, use_js=use_js,
+                                    websearch=use_js)
     return {"term": term, "companies": validated, "gated_sites": []}
 
 

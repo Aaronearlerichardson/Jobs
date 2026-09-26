@@ -14,6 +14,7 @@ fetching paths a host asked us to leave alone.
 """
 
 import asyncio
+import contextlib
 import logging
 import re
 import socket
@@ -24,6 +25,7 @@ import aiohttp
 import pytest
 import requests
 
+from conftest import answer
 from src.net import http, robots
 from src.net.robots import _match_group, _pattern_to_re, parse_groups
 
@@ -226,6 +228,45 @@ async def test_crawl_delay_spaces_one_origin_only():
                          turn("https://b.example/1"))
     assert at["https://b.example/1"] - t0 < 0.1
     assert at["https://a.example/2"] - at["https://a.example/1"] >= 0.19
+
+
+async def test_a_redirect_into_a_shared_host_waits_its_turn(monkeypatch):
+    """A redirect hop into another origin takes that origin's turn, as a
+    first request to it would: two origins redirecting into one host with
+    a Crawl-delay reach it that far apart, and so do an http->https hop on
+    one host and a direct request to its https origin."""
+    from src import config
+    monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
+    monkeypatch.setattr(robots.CACHE, "allowed", answer(True))
+    paced = ("https://shared.test", "https://up.test")
+    monkeypatch.setattr(robots.CACHE, "crawl_delay",
+                        answer(lambda url: 0.2 if url.startswith(paced) else None))
+    at = {}
+
+    @contextlib.asynccontextmanager
+    async def request(method, url, **kw):
+        url = str(url)
+        if url.startswith(paced):
+            at.setdefault(url[8:10], []).append(time.monotonic())
+            status, headers = 200, []
+        elif url.startswith("http://up.test"):
+            status, headers = 302, [(b"Location", b"https://up.test/x")]
+        else:
+            status, headers = 302, [(b"Location", f"https://shared.test/{url[8]}".encode())]
+
+        async def read():
+            return b""
+        yield SimpleNamespace(status=status, raw_headers=headers, read=read, reason="")
+
+    monkeypatch.setattr(http, "_session", lambda: SimpleNamespace(request=request))
+    got = await asyncio.gather(http.send("GET", "https://a.test/x"),
+                               http.send("GET", "https://b.test/x"),
+                               http.send("GET", "https://up.test/y"),
+                               http.send("GET", "http://up.test/x"))
+    assert [r.url for r in got] == ["https://shared.test/a", "https://shared.test/b",
+                                    "https://up.test/y", "https://up.test/x"]
+    for arrivals in at.values():
+        assert arrivals[1] - arrivals[0] >= 0.19
 
 
 class TestUnreachableHostReporting:

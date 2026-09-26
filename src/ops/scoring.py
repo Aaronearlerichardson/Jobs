@@ -2,18 +2,19 @@
 and the deep verify of the ranking's finalists."""
 
 import re
+from contextlib import aclosing
 from datetime import datetime
 
 from src import config
 from src import store
 from src.ats.board import company as company_fetch
 from src.ats.board import board_for_url
-from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
+from src.claude.fit import UNSCORED_CAUSES, ascore_resume_fit
 from src.claude.resume import resume_text
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out
 from src.net.util import text_from_html
-from src.ops.maintenance import _ranked, _t, rewrite_digest, track_store
+from src.ops.maintenance import _ranked, _t, rewrite_digest, track_writer
 
 
 # How long a REFUSED marker holds off a retry (fit.unscored_cause's
@@ -100,12 +101,13 @@ def _unscored_due(fit_reason, desc_len, now=None):
     return age_days >= UNSCORED_RETRY_DAYS
 
 
-def self_heal_unscored(conn, resume, track, max_workers=6):
+async def self_heal_unscored(db, resume, track, max_workers=6):
     """Self-heal: the fresh-only crawl loop never revisits an already-stored
     job, so a row that was ingested bodyless (unscorable -> NULL score) would
     stay out of the ranking forever even once its description is recovered.
     Score any NULL-score row that now carries a real body (hydrated by
-    backfill_board_descriptions, or by an earlier run). Returns #scored.
+    backfill_board_descriptions, or by an earlier run), on `db` (a
+    store.Writer, or a connection: track_writer). Returns #scored.
 
     A row the scorer STILL can't score is no longer left exactly as found:
     it is stamped with an _unscored_marker (cause from fit.unscored_cause)
@@ -144,47 +146,48 @@ def self_heal_unscored(conn, resume, track, max_workers=6):
     conds += ["resume_fit_score IS NULL",
               "length(COALESCE(description,'')) >= ?"]
     args.append(MIN_DESC_CHARS)
-    pending = [dict(r) for r in conn.execute(
-        "SELECT job_id, title, description, location, fit_reason FROM jobs "
-        "WHERE " + " AND ".join(conds), args).fetchall()]
-    if not pending:
-        return 0
-    now = datetime.now()
-    due = [r for r in pending if _unscored_due(
-        r.get("fit_reason"), len((r.get("description") or "").strip()), now)]
-    held = len(pending) - len(due)
-    if not due:
-        print(f"  self-heal: {held} previously-unscorable job(s) not yet "
-              f"due for retry.")
-        return 0
-    print(f"  self-heal: scoring {len(due)} newly-described "
-          f"job(s) that were previously unscorable"
-          + (f" ({held} not yet due for retry)" if held else "") + "...")
-    scored = 0
-    for r, res in fan_out(due,
-                          lambda r: score_resume_fit(
-                              r["title"], r.get("description", ""),
-                              location=r.get("location") or ""),
-                          "self-heal scoring", max_workers, with_item=True):
-        if res.score is not None:
-            store.update_job_scores(conn, r["job_id"], res.as_columns())
-            scored += 1
-            continue
-        cause = unscored_cause(res.reason)
-        if cause is None:
-            continue    # scorer offline, or an unrecognized reason: leave as is
-        desc_len = len((r.get("description") or "").strip())
-        store.update_job_scores(conn, r["job_id"],
-                                {"fit_reason": _unscored_marker(cause, desc_len, now)})
-        store.mark_desc_checked(conn, r["job_id"], now)
-        detail = (f"retry in {UNSCORED_RETRY_DAYS}d or when the body changes"
-                  if cause == "refused"
-                  else f"retry once the body grows past {MIN_DESC_CHARS} chars")
-        print(f"    [{cause}] {(r.get('title') or '')[:50]} - {detail}")
-    return scored
+    async with track_writer(db=db) as db:
+        pending = await db.run(lambda conn: [dict(r) for r in conn.execute(
+            "SELECT job_id, title, description, location, fit_reason FROM jobs "
+            "WHERE " + " AND ".join(conds), args).fetchall()])
+        if not pending:
+            return 0
+        now = datetime.now()
+        due = [r for r in pending if _unscored_due(
+            r.get("fit_reason"), len((r.get("description") or "").strip()), now)]
+        held = len(pending) - len(due)
+        if not due:
+            print(f"  self-heal: {held} previously-unscorable job(s) not yet "
+                  f"due for retry.")
+            return 0
+        print(f"  self-heal: scoring {len(due)} newly-described "
+              f"job(s) that were previously unscorable"
+              + (f" ({held} not yet due for retry)" if held else "") + "...")
+        scored = 0
+        async for r, res in fan_out(due,
+                                    lambda r: ascore_resume_fit(
+                                        r["title"], r.get("description", ""),
+                                        location=r.get("location") or ""),
+                                    "self-heal scoring", max_workers, with_item=True):
+            if res.score is not None:
+                await db.run(store.update_job_scores, r["job_id"], res.as_columns())
+                scored += 1
+                continue
+            cause = unscored_cause(res.reason)
+            if cause is None:
+                continue    # scorer offline, or an unrecognized reason: leave as is
+            desc_len = len((r.get("description") or "").strip())
+            await db.run(store.update_job_scores, r["job_id"],
+                         {"fit_reason": _unscored_marker(cause, desc_len, now)})
+            await db.run(store.mark_desc_checked, r["job_id"], now)
+            detail = (f"retry in {UNSCORED_RETRY_DAYS}d or when the body changes"
+                      if cause == "refused"
+                      else f"retry once the body grows past {MIN_DESC_CHARS} chars")
+            print(f"    [{cause}] {(r.get('title') or '')[:50]} - {detail}")
+        return scored
 
 
-def rescore_all(max_workers=6, track=None, described_only=False, t=None):
+async def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     """Re-run resume-fit scoring over every stored job in the track's DB
     (all jobs.track values unless `track` names one). Use after changing the
     resume or the scoring prompt — the normal crawl only scores jobs it
@@ -207,7 +210,7 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     if not resume:
         print("  [!] No resume text - cannot rescore. Set config.RESUME_PATH.")
         return 0
-    with track_store(t) as conn:
+    async with track_writer(t) as db:
         conds, args = store.open_in_track_clause(track)
         if described_only:
             conds.append("length(COALESCE(description,'')) >= ?")
@@ -215,34 +218,34 @@ def rescore_all(max_workers=6, track=None, described_only=False, t=None):
         q = "SELECT job_id, title, description, location FROM jobs"
         if conds:
             q += " WHERE " + " AND ".join(conds)
-        rows = [dict(r) for r in conn.execute(q, args).fetchall()]
+        rows = await db.run(lambda conn: [dict(r) for r in conn.execute(q, args).fetchall()])
         print(f"  rescoring {len(rows)} job(s) against the current resume...")
         now = datetime.now()
 
-        def _one(r):
-            res = score_resume_fit(r["title"], r.get("description", ""),
-                                   location=r.get("location") or "")
+        async def _one(r):
+            res = await ascore_resume_fit(r["title"], r.get("description", ""),
+                                          location=r.get("location") or "")
             return r["job_id"], res, r.get("description", "")
 
         n = 0
-        for jid, res, desc in fan_out(rows, _one, "rescore", max_workers):
+        async for jid, res, desc in fan_out(rows, _one, "rescore", max_workers):
             if res.score is None:
                 # Unscorable (no real body): clear the stale score so it
                 # drops from ranking. A described row that merely failed to
                 # parse keeps its score.
                 if len((desc or "").strip()) < MIN_DESC_CHARS:
-                    store.update_job_scores(
-                        conn, jid, {"fit_reason": _unscored_marker(
+                    await db.run(store.update_job_scores, jid, {
+                        "fit_reason": _unscored_marker(
                             "short", len((desc or "").strip()), now)})
                     n += 1
                 continue
-            store.update_job_scores(conn, jid, res.as_columns())
+            await db.run(store.update_job_scores, jid, res.as_columns())
             n += 1
     print(f"  {n} job(s) rescored.")
     return n
 
 
-def _live_jd(row):
+async def _live_jd(row):
     """Freshest full JD text for one stored job row, preferring a live
     detail fetch (the platform's own detail endpoint through the board
     engine, then the generic JSON-LD/careers-page extractor)
@@ -263,9 +266,9 @@ def _live_jd(row):
     try:
         board = board_for_url(url)
         if board:
-            text = board.description_for(url)
+            text = await board.adescription_for(url)
         if not text and url:
-            text = company_fetch.job_page_meta(url)[1]
+            text = (await company_fetch.ajob_page_meta(url))[1]
     except Exception:
         text = ""
     stored = row.get("description") or ""
@@ -315,15 +318,14 @@ def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
 # deep read (Tempus 0.19 -> 0.18, several NVIDIA 0.20-0.22).
 VERIFY_HEAD = 25
 
-# Rows whose deep-verify call had started when a pool abandoned it past
-# config.PASS_BUDGET_S. That paid call may still land on its thread, so this
-# process asks for them again only under `force`; they keep their first-pass
-# score.
+# Rows whose deep-verify call had started when the round was cut off past
+# config.PASS_BUDGET_S. That call may already be paid for, so this process
+# asks for them again only under `force`; they keep their first-pass score.
 _GIVEN_UP = set()
 
 
-def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
-               force=False):
+async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
+                     force=False):
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
     each of the current top `top_n` jobs (past rank VERIFY_HEAD, only those
     stored at or above the track's `verify_floor`), PLUS enough
@@ -365,8 +367,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
         fetched for nothing.
     """
     from src.claude.api import api_disabled
-    from src.claude.fit import (DEEP_MARKER, FitResult, is_deep_verified,
-                                verify_fit, verify_model)
+    from src.claude.fit import (DEEP_MARKER, FitResult, averify_fit,
+                                is_deep_verified, verify_model)
     t = _t(t)
     current = verify_model()
     done_ids = set()   # verified THIS run: never stale again, even under force
@@ -378,7 +380,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
             return True
         return (r.get("fit_model") or "") != current
 
-    with track_store(t, conn) as conn:
+    async with track_writer(t, db) as db:
         n_done = 0
         for rnd in range(rounds):
             down = api_disabled()
@@ -390,7 +392,7 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
                 print(f"  [!] deep verify skipped: Claude API disabled for this "
                       f"run ({down})")
                 break
-            ranked = _ranked(conn, t, limit=top_n)
+            ranked = await db.run(_ranked, t, limit=top_n)
             floor = t["verify_floor"]
             stale_all = [(i, r) for i, r in enumerate(ranked) if _stale(r)]
             stale_top = [r for i, r in stale_all
@@ -404,8 +406,8 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
             candidates = []
             if remaining > 0:
                 seen_ids = {r["job_id"] for r in ranked}
-                floor_rows = _verify_floor_candidates(
-                    conn, t, floor, exclude_ids=seen_ids)
+                floor_rows = await db.run(_verify_floor_candidates, t, floor,
+                                          exclude_ids=seen_ids)
                 candidates = [r for r in floor_rows if _stale(r)][:remaining]
             todo = stale_top + candidates
             if not todo:
@@ -421,61 +423,61 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
 
             started = set()
 
-            def _one(r):
+            async def _one(r):
                 # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
                 # verify call hit an exhausted credit balance). A row the API
                 # can no longer score doesn't need its live JD fetched.
                 if api_disabled():
                     return r, None, FitResult(score=None, reason="api disabled")
                 started.add(r["job_id"])
-                text = _live_jd(r)
-                return r, text, verify_fit(r["title"], text,
-                                           location=r.get("location") or "")
+                text = await _live_jd(r)
+                return r, text, await averify_fit(r["title"], text,
+                                                  location=r.get("location") or "")
 
             n_scored = n_crushed = 0
             halted = None
             abandoned = []
-            for r, text, res in fan_out(
+            async with aclosing(fan_out(
                     todo, _one,
                     lambda r: f"verify {r['company_name']}: {(r['title'] or '')[:40]}",
                     max_workers, budget_s=config.PASS_BUDGET_S,
-                    on_abandon=abandoned.append):
-                if res.score is None:
-                    halted = api_disabled()
-                    if halted:
-                        # One line for the round, not one '[?] kept' per
-                        # finalist. Breaking out cancels the rows still
-                        # queued (fan_out does not join on the way out).
-                        break
-                    print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
-                    continue
-                store.update_job_scores(conn, r["job_id"], res.as_columns())
-                done_ids.add(r["job_id"])
-                if text and len(text) > len(r.get("description") or ""):
-                    conn.execute("UPDATE jobs SET description=? WHERE job_id=?",
-                                 (text[:config.MAX_DESC_CHARS], r["job_id"]))
-                    conn.commit()
-                # A floor candidate that reaches the track's digest_min_fit on
-                # the deep score surfaces exactly as triage would have surfaced
-                # it first-pass; one that doesn't keeps triage_status='fit' —
-                # its corrected score is still recorded above either way.
-                if (r.get("triage_status") == "fit"
-                        and res.score >= t["digest_min_fit"]):
-                    store.record_triage(conn, r["job_id"], store.TRIAGE_OK,
-                                        r.get("triage_detail") or "",
-                                        tracks=[t["track"]])
-                old = r.get("resume_fit_score")
-                move = (f"{old:.2f} -> {res.score:.2f}"
-                        if isinstance(old, float) else f"?    -> {res.score:.2f}")
-                flag = "  [DEMOTED]" if isinstance(old, float) and \
-                    res.score < old - 0.15 else ""
-                reason = (res.reason or "").removeprefix(f"{DEEP_MARKER} ")[:90]
-                print(f"    {move}, {r['company_name']}, {r['title'][:44]}, "
-                      f"{reason}{flag}")
-                n_done += 1
-                n_scored += 1
-                if isinstance(old, float) and res.score < old - 0.25:
-                    n_crushed += 1
+                    on_abandon=abandoned.append)) as verified:
+                async for r, text, res in verified:
+                    if res.score is None:
+                        halted = api_disabled()
+                        if halted:
+                            # One line for the round, not one '[?] kept' per
+                            # finalist. Leaving cancels the rows still
+                            # running or queued.
+                            break
+                        print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
+                        continue
+                    await db.run(store.update_job_scores, r["job_id"], res.as_columns())
+                    done_ids.add(r["job_id"])
+                    if text and len(text) > len(r.get("description") or ""):
+                        await db.run(store.store_body, r["job_id"], text)
+                    # A floor candidate that reaches the track's digest_min_fit
+                    # on the deep score surfaces exactly as triage would have
+                    # surfaced it first-pass; one that doesn't keeps
+                    # triage_status='fit' -- its corrected score is still
+                    # recorded above either way.
+                    if (r.get("triage_status") == "fit"
+                            and res.score >= t["digest_min_fit"]):
+                        await db.run(store.record_triage, r["job_id"], store.TRIAGE_OK,
+                                     r.get("triage_detail") or "",
+                                     tracks=[t["track"]])
+                    old = r.get("resume_fit_score")
+                    move = (f"{old:.2f} -> {res.score:.2f}"
+                            if isinstance(old, float) else f"?    -> {res.score:.2f}")
+                    flag = "  [DEMOTED]" if isinstance(old, float) and \
+                        res.score < old - 0.15 else ""
+                    reason = (res.reason or "").removeprefix(f"{DEEP_MARKER} ")[:90]
+                    print(f"    {move}, {r['company_name']}, {r['title'][:44]}, "
+                          f"{reason}{flag}")
+                    n_done += 1
+                    n_scored += 1
+                    if isinstance(old, float) and res.score < old - 0.25:
+                        n_crushed += 1
             if halted:
                 print(f"  [!] deep verify halted: Claude API disabled for this run "
                       f"({halted}); {len(todo) - n_scored} finalist(s) keep their "
@@ -503,15 +505,16 @@ def verify_top(top_n=15, max_workers=4, rounds=2, conn=None, t=None,
         return n_done
 
 
-def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
+async def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
     """Standalone verify: deep-verify the current top N in the store (no
     crawl), then rewrite the digest and print the corrected top. `force`
     re-verifies rows the current verify model already checked."""
     t = _t(t)
-    n = verify_top(top_n=top_n, max_workers=max_workers, t=t, force=force)
-    with track_store(t) as conn:
-        n_open = len(_ranked(conn, t))
-        rewrite_digest(conn, t, top_n,
-                       f"\n  {n} job(s) deep-verified; corrected top "
-                       f"{min(top_n, n_open)}:")
+    async with track_writer(t) as db:
+        n = await verify_top(top_n=top_n, max_workers=max_workers, db=db, t=t,
+                             force=force)
+        n_open = len(await db.run(_ranked, t))
+        await db.run(rewrite_digest, t, top_n,
+                     f"\n  {n} job(s) deep-verified; corrected top "
+                     f"{min(top_n, n_open)}:")
     return n

@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from conftest import fake_response, iso_days_ago
+from conftest import answer, fake_response, iso_days_ago
 
 import src.store as store
 from src import tags
@@ -113,13 +113,12 @@ class TestReresolveWrites:
     T = {"db_path": None}
 
     def _wire(self, monkeypatch, result):
-        monkeypatch.setattr(resolve_board, "resolve_or_miss",
-                            lambda *a, **k: result)
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("src.claude.api.score_company_mission",
-                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", answer(result))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr("src.claude.api.ascore_company_mission",
+                            answer(("adjacent", 0.5, "stub")))
 
-    def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
+    async def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
         store.upsert_company(db, {"name": "Emmes", "active": 0,
                                   "tags": tags.WATCH, "source": "directory"})
         _miss(db, "Emmes", "no-board-found:wrong-domain")
@@ -128,7 +127,7 @@ class TestReresolveWrites:
                                   "https://emmes.com/careers",
                                   "count": 40, "nc": 4, "via": "sniff"}, None))
 
-        assert len(repair.reresolve_misses(conn=db, max_workers=1, t=self.T)) == 1
+        assert len(await repair.reresolve_misses(db=db, max_workers=1, t=self.T)) == 1
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Emmes'").fetchone())
@@ -142,7 +141,7 @@ class TestReresolveWrites:
             "the review queue shows the tier, so it has to be scored here"
         assert row["source"] == "directory", "the row's provenance is not ours"
 
-    def test_a_silent_board_retargets_when_the_sniff_finds_a_new_board(
+    async def test_a_silent_board_retargets_when_the_sniff_finds_a_new_board(
             self, db, monkeypatch):
         """A hit on a SILENT_FAMILY row goes through the exact same write
         as any other family's -- no separate code path."""
@@ -152,7 +151,7 @@ class TestReresolveWrites:
                                   "https://quiet.example/careers",
                                   "count": 12, "nc": 2, "via": "sniff"}, None))
 
-        written = repair.reresolve_misses(conn=db, max_workers=1, t=self.T,
+        written = await repair.reresolve_misses(db=db, max_workers=1, t=self.T,
                                        families=[repair.SILENT_FAMILY])
 
         assert len(written) == 1
@@ -163,7 +162,7 @@ class TestReresolveWrites:
             "retargeted the same way as any other family: reviewed, not crawled"
         assert tags.PENDING in tags.parse(row["tags"])
 
-    def test_preview_writes_nothing_and_scores_nothing(self, db,
+    async def test_preview_writes_nothing_and_scores_nothing(self, db,
                                                         monkeypatch):
         _silent(db, "Quiet", slug="quiet-old", active=1)
         _miss(db, "Gone", "board-dead:lever", ats="lever", slug="gone")
@@ -173,26 +172,26 @@ class TestReresolveWrites:
                        "slug": "quiet-new", "careers_url": None,
                        "count": 12, "nc": 2, "via": "sniff"}, None),
             "Gone": (None, "no-board-found:wrong-domain")}
-        monkeypatch.setattr(resolve_board, "resolve_or_miss",
-                            lambda name, *a, **k: results[name])
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(lambda name, *a, **k: results[name]))
 
-        def no_score(*a, **k):
+        async def no_score(*a, **k):
             raise AssertionError("a preview never pays for a mission score")
-        monkeypatch.setattr("src.claude.api.score_company_mission", no_score)
+        monkeypatch.setattr("src.claude.api.ascore_company_mission", no_score)
 
-        written = repair.reresolve_misses(
-            conn=db, max_workers=1, t=self.T, commit=False,
+        written = await repair.reresolve_misses(
+            db=db, max_workers=1, t=self.T, commit=False,
             families=repair.RERESOLVE_FAMILIES + (repair.SILENT_FAMILY,))
 
         assert [b["slug"] for b in written] == ["quiet-new"]
         assert [dict(r) for r in db.execute(
             "SELECT * FROM companies")] == before
 
-    def test_an_unknown_family_is_refused(self, db):
+    async def test_an_unknown_family_is_refused(self, db):
         with pytest.raises(ValueError):
-            repair.reresolve_misses(conn=db, t=self.T, families=["silent"])
+            await repair.reresolve_misses(db=db, t=self.T, families=["silent"])
 
-    def test_stale_coordinates_do_not_survive_a_new_board(self, db, monkeypatch):
+    async def test_stale_coordinates_do_not_survive_a_new_board(self, db, monkeypatch):
         # upsert_company drops None values so it can never erase a stored
         # one; without an explicit clear, the dead iCIMS slug would sit
         # beside the newly resolved Workday triple.
@@ -202,7 +201,7 @@ class TestReresolveWrites:
                                   "careers_url": None,
                                   "count": 12, "nc": 3, "via": "sniff"}, None))
 
-        repair.reresolve_misses(conn=db, max_workers=1, t=self.T)
+        await repair.reresolve_misses(db=db, max_workers=1, t=self.T)
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Advarra'").fetchone())
@@ -211,14 +210,14 @@ class TestReresolveWrites:
                 row["wd_site"]) == ("workday", "advarra", 5, "External")
         assert store.board_key(row) == ("workday", "advarra", 5, "External")
 
-    def test_a_repeated_miss_updates_the_reason_and_the_stamp(
+    async def test_a_repeated_miss_updates_the_reason_and_the_stamp(
             self, db, monkeypatch):
         _miss(db, "Emmes", "no-board-found")
         db.execute("UPDATE companies SET miss_at='2020-01-01' "
                    "WHERE name='Emmes'")
         self._wire(monkeypatch, (None, "no-board-found:domain-unreachable"))
 
-        assert repair.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
+        assert await repair.reresolve_misses(db=db, max_workers=1, t=self.T) == []
 
         row = dict(db.execute(
             "SELECT * FROM companies WHERE name='Emmes'").fetchone())
@@ -229,7 +228,7 @@ class TestReresolveWrites:
         assert tags.PENDING not in tags.parse(row["tags"]), \
             "a row that still does not resolve has nothing to review"
 
-    def test_a_board_another_row_already_owns_is_not_stolen(
+    async def test_a_board_another_row_already_owns_is_not_stolen(
             self, db, monkeypatch, capsys):
         store.upsert_company(db, {"name": "SAS Institute", "ats": "icims",
                                   "slug": "globalcareers-sas", "active": 1})
@@ -240,7 +239,7 @@ class TestReresolveWrites:
                                   "careers_url": "https://www.sas.com/careers",
                                   "count": 150, "nc": 30, "via": "sniff"}, None))
 
-        assert repair.reresolve_misses(conn=db, max_workers=1, t=self.T) == []
+        assert await repair.reresolve_misses(db=db, max_workers=1, t=self.T) == []
 
         assert "[dup]" in capsys.readouterr().out
         row = dict(db.execute(
@@ -249,8 +248,8 @@ class TestReresolveWrites:
         assert row["miss_at"] > "2020-01-01", \
             "re-stamped, so a bounded rerun moves past it"
 
-    def test_nothing_to_do_is_not_an_error(self, db, capsys):
-        assert repair.reresolve_misses(conn=db, t=self.T) == []
+    async def test_nothing_to_do_is_not_an_error(self, db, capsys):
+        assert await repair.reresolve_misses(db=db, t=self.T) == []
         assert "no re-resolvable misses" in capsys.readouterr().out
 
 
@@ -258,30 +257,29 @@ class TestManualAddUsesTheSharedResolver:
     """add_manual_job resolved through a probe-first resolver of its own —
     a name-guessed slug tried before the company's own careers page, which
     is the collision a hand-typed employer name is most exposed to. It now
-    goes through resolve_or_miss like every other interactive add path."""
+    goes through aresolve_or_miss like every other interactive add path."""
 
     def _wire(self, monkeypatch, result, seen):
-        def _resolve(name, careers_url=""):
+        async def _resolve(name, careers_url=""):
             seen.append(name)
             return result
 
-        monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(local_sourcing, "_sample_titles", lambda h: [])
-        monkeypatch.setattr("src.claude.api.score_company_mission",
-                            lambda *a, **k: ("adjacent", 0.5, "stub"))
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", _resolve)
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        monkeypatch.setattr("src.claude.api.ascore_company_mission",
+                            answer(("adjacent", 0.5, "stub")))
         monkeypatch.setattr("src.claude.api.is_active_mission",
                             lambda *a, **k: True)
-        # No crawl, no ingest, no résumé read — this test is about the
-        # resolver call, and all three would reach the disk or the network.
-        monkeypatch.setattr(ingest, "ingest_external_jobs", lambda *a, **k: 1)
-        monkeypatch.setattr(ingest, "crawl_company", lambda *a, **k: (0, 0, 0))
-        monkeypatch.setattr(ingest, "resume_text", lambda *a, **k: "")
+        # No crawl and no ingest: this test is about the resolver call,
+        # and both would reach the disk or the network.
+        monkeypatch.setattr(ingest, "ingest_external_jobs", answer(1))
+        monkeypatch.setattr(ingest, "crawl_company", answer((0, 0, 0)))
 
     def test_the_probe_first_resolver_is_gone(self):
         assert not hasattr(local_sourcing, "resolve_company_board"), \
             "one resolver for the interactive paths, not three"
 
-    def test_a_resolved_board_is_written_from_the_shared_resolver(
+    async def test_a_resolved_board_is_written_from_the_shared_resolver(
             self, tmp_path, monkeypatch):
         seen = []
         self._wire(monkeypatch, ({"name": "Emmes", "ats": "greenhouse",
@@ -291,7 +289,7 @@ class TestManualAddUsesTheSharedResolver:
                    seen)
         t = {"db_path": tmp_path / "t.db"}
 
-        out = ingest.add_manual_job("https://emmes.com/jobs/1", "Data Engineer",
+        out = await ingest.add_manual_job("https://emmes.com/jobs/1", "Data Engineer",
                                  "Emmes", "Durham, NC", t=t)
 
         assert seen == ["Emmes"]
@@ -303,14 +301,14 @@ class TestManualAddUsesTheSharedResolver:
         assert (row["ats"], row["slug"]) == ("greenhouse", "emmes")
         assert row["active"] == 1
 
-    def test_an_unresolved_company_keeps_the_reason_not_a_prose_note(
+    async def test_an_unresolved_company_keeps_the_reason_not_a_prose_note(
             self, tmp_path, monkeypatch):
         seen = []
         self._wire(monkeypatch, (None, "no-board-found:domain-unreachable"),
                    seen)
         t = {"db_path": tmp_path / "t.db"}
 
-        out = ingest.add_manual_job("https://axoft.com/jobs/1", "Data Engineer",
+        out = await ingest.add_manual_job("https://axoft.com/jobs/1", "Data Engineer",
                                  "Axoft", "Durham, NC", t=t)
 
         assert out["board"] is False
@@ -380,31 +378,27 @@ class TestJobviteSignature:
 
 
 class TestARaisedResolutionIsReported:
-    """`resolve_or_miss` converts the exceptions it can see; the FUTURE can
-    still fail (a worker that dies, a cancelled task). Three consumers
-    unwrapped that by hand and the reresolve copy had dropped the report
-    line, so a resolution that blew up there became a miss with nothing in
-    the log to say why. resolve.board.resolved is the one unwrap now."""
+    """`aresolve_or_miss` converts the exceptions it can see; one raised
+    past it still can. Three consumers unwrapped that by hand and the
+    reresolve copy had dropped the report line, so a resolution that blew
+    up there became a miss with nothing in the log to say why.
+    resolve.board.resolved is the one unwrap now."""
 
-    def test_the_reason_and_the_report_both_survive(self, capsys):
-        from concurrent.futures import Future
-        from src.discovery.resolve.board import resolved
-
-        fut = Future()
-        fut.set_exception(RuntimeError("boom"))
-        hit, reason = resolved(fut, "Acme Bio")
+    async def test_the_reason_and_the_report_both_survive(self, capsys,
+                                                          monkeypatch):
+        async def boom(name, careers_url=""):
+            raise RuntimeError("boom")
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss", boom)
+        hit, reason = await resolve_board.resolved("Acme Bio")
         assert hit is None
         assert reason == "fetch-error:RuntimeError"
         out = capsys.readouterr().out
         assert "Acme Bio" in out and "RuntimeError" in out
 
-    def test_a_normal_result_passes_straight_through(self):
-        from concurrent.futures import Future
-        from src.discovery.resolve.board import resolved
-
-        fut = Future()
-        fut.set_result(({"name": "Acme"}, None))
-        assert resolved(fut, "Acme") == ({"name": "Acme"}, None)
+    async def test_a_normal_result_passes_straight_through(self, monkeypatch):
+        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+                            answer(({"name": "Acme"}, None)))
+        assert await resolve_board.resolved("Acme") == ({"name": "Acme"}, None)
 
 
 class TestRenameSlugBoards:
@@ -445,28 +439,28 @@ class TestRenameSlugBoards:
 
         serve(_get)
 
-    def test_a_dork_sourced_slug_name_is_renamed_from_the_payload(
+    async def test_a_dork_sourced_slug_name_is_renamed_from_the_payload(
             self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        out = repair.rename_slug_boards(conn=db, commit=True)
+        out = await repair.rename_slug_boards(db=db, commit=True)
 
         assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "MedElite Group, LLC."
 
-    def test_preview_writes_nothing(self, db, serve):
+    async def test_preview_writes_nothing(self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc")
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        out = repair.rename_slug_boards(conn=db, commit=False)
+        out = await repair.rename_slug_boards(db=db, commit=False)
 
         assert out == [(1, "Medelitellc", "MedElite Group, LLC.")]
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "Medelitellc", "preview must never write"
 
-    def test_a_legitimately_named_company_is_never_a_candidate(
+    async def test_a_legitimately_named_company_is_never_a_candidate(
             self, db, serve):
         """name_is_own_slug alone also matches a real one-word name that
         happens to equal its slug ("Ceribell" / slug "ceribell") -- the
@@ -479,45 +473,45 @@ class TestRenameSlugBoards:
                       source="local_sourcing")
         self._stub_readers(serve, ceribell="Ceribell, Inc")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "Ceribell"
 
-    def test_a_name_that_is_not_its_own_slug_is_never_a_candidate(
+    async def test_a_name_that_is_not_its_own_slug_is_never_a_candidate(
             self, db, serve):
         self._slug_co(db, "Precision for Medicine", "greenhouse", "pfm")
         self._stub_readers(serve, pfm="Precision for Medicine")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
 
-    def test_an_empty_payload_answer_is_skipped(self, db, serve, capsys):
+    async def test_an_empty_payload_answer_is_skipped(self, db, serve, capsys):
         self._slug_co(db, "Resultspt", "greenhouse", "resultspt")
         self._stub_readers(serve)   # every slug answers ""
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
         assert "no employer name" in capsys.readouterr().out
 
-    def test_a_junk_payload_name_is_rejected_not_written(
+    async def test_a_junk_payload_name_is_rejected_not_written(
             self, db, serve, capsys):
         # A payload can carry garbage too -- the same junk_name_reason
         # screen a pasted or re-resolved name goes through applies here.
         self._slug_co(db, "Science37", "greenhouse", "science37")
         self._stub_readers(serve, science37="Science 37")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
         out = capsys.readouterr().out
         assert "rejected" in out and "numbered-duplicate" in out
         row = db.execute("SELECT name FROM companies WHERE id=1").fetchone()
         assert row["name"] == "Science37"
 
-    def test_a_name_matching_what_is_already_stored_is_not_reapplied(
+    async def test_a_name_matching_what_is_already_stored_is_not_reapplied(
             self, db, serve):
         self._slug_co(db, "Eurofins", "smartrecruiters", "Eurofins")
         self._stub_readers(serve, Eurofins="Eurofins")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
 
-    def test_a_name_that_would_collide_with_another_company_is_rejected(
+    async def test_a_name_that_would_collide_with_another_company_is_rejected(
             self, db, serve, capsys):
         store.upsert_company(db, {"name": "Cortica", "ats": "greenhouse",
                                   "slug": "cortica-hq", "active": 1,
@@ -525,20 +519,20 @@ class TestRenameSlugBoards:
         self._slug_co(db, "Corticaneuro", "greenhouse", "corticaneuro")
         self._stub_readers(serve, corticaneuro="Cortica")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
         assert "collides" in capsys.readouterr().out
         row = db.execute(
             "SELECT name FROM companies WHERE name='Corticaneuro'").fetchone()
         assert row is not None, "the row must be left exactly as it was"
 
-    def test_an_inactive_board_is_not_a_candidate(self, db, serve):
+    async def test_an_inactive_board_is_not_a_candidate(self, db, serve):
         self._slug_co(db, "Medelitellc", "greenhouse", "medelitellc",
                       active=0)
         self._stub_readers(serve, medelitellc="MedElite Group, LLC.")
 
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
 
-    def test_an_unsupported_ats_is_not_a_candidate(self, db, monkeypatch):
+    async def test_an_unsupported_ats_is_not_a_candidate(self, db, monkeypatch):
         # Workday/Lever/Ashby carry no reliable board-level employer field
         # (see the module comment above _employer_atses) -- confirmed
         # live, not merely assumed, so they are not in the reader map at
@@ -546,7 +540,7 @@ class TestRenameSlugBoards:
         store.upsert_company(db, {"name": "Lifestance", "ats": "lever",
                                   "slug": "lifestance", "active": 1,
                                   "source": "ats_dork"})
-        assert repair.rename_slug_boards(conn=db, commit=True) == []
+        assert await repair.rename_slug_boards(db=db, commit=True) == []
 
 
 class TestRekeyJobs:

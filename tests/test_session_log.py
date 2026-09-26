@@ -10,8 +10,9 @@ import io
 import logging
 import re
 import sys
-import time
 from datetime import datetime
+
+from conftest import run_web_op
 
 import src.session_log as session_log
 
@@ -199,16 +200,12 @@ class TestWebappOps:
     def _run(tmp_path, name, fn):
         """Run `fn` as web-UI op `name` to the end; returns (the op's
         session log text, the browser's copy of its output)."""
-        from src.dispatch import background as ops
-        assert ops._run_op(name, fn) is True
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)          # let the worker's finally block land
+        lines = run_web_op(name, fn)["lines"]
         [log] = (tmp_path / "session-logs").glob(f"session-*-webui-{name}.log")
-        return log.read_text(encoding="utf-8"), list(ops.TASK["log"])
+        return log.read_text(encoding="utf-8"), lines
 
     def test_ui_op_output_lands_as_levelled_records(self, tmp_path):
-        def _op():
+        async def _op():
             print("probe-line")
             print("  [!] probe-warning")
             logging.getLogger("discovery").debug("probe debug detail")
@@ -227,7 +224,7 @@ class TestWebappOps:
         log -- a total failure deserves ERROR. Writing it to stderr instead
         gets that for free (session_log._level_for's err path), the same
         way run_scraper.py's own pass-failure line already does."""
-        def _op():
+        async def _op():
             raise RuntimeError("op exploded")
 
         text, browser = self._run(tmp_path, "boom", _op)
@@ -242,7 +239,7 @@ class TestWebappOps:
         the footer prints here, while the op's own log tee is still open."""
         from src.claude import api as claude_api
 
-        def _op():
+        async def _op():
             claude_api._record_usage({"input_tokens": 5, "output_tokens": 3})
 
         text, browser = self._run(tmp_path, "spend", _op)

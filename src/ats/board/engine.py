@@ -868,8 +868,6 @@ class Board:
         entries = [] if err else decode.entries(payload, listing.decoder)
         return str(fields.value(spec, entries[0]) or "").strip() if entries else ""
 
-    employer_name = http.sync_shim(aemployer_name)
-
     # --- one posting -------------------------------------------------------
 
     async def _listing_entries(self, handle):
@@ -941,8 +939,6 @@ class Board:
         """The posting's description, read live; "" on any miss."""
         rec, fs, ctx = await self._posting(url, report)
         return (fs["description"](rec, ctx) or "") if rec else ""
-
-    description_for = http.sync_shim(adescription_for)
 
     @property
     def fills_location(self):

@@ -3,6 +3,7 @@ socket, no API key. Covers the geo bucket the Jobs tab filters on, the API
 surface the SPA depends on, and the asset cache-busting that a stale
 browser copy once defeated."""
 
+import asyncio
 import json
 import re
 import threading
@@ -10,6 +11,7 @@ import time
 
 import pytest
 
+from conftest import answer, run_web_op
 from src import web
 
 
@@ -542,8 +544,8 @@ class TestReviewQueue:
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         tried = []
-        monkeypatch.setattr(ls, "resolve_or_miss",
-                            lambda *a, **k: tried.append(a) or (None, "x"))
+        monkeypatch.setattr(ls, "resolved",
+                            answer(lambda *a, **k: tried.append(a) or (None, "x")))
         rows = json.loads(client.post(
             "/api/names/preview", json={"text": "x", "use_llm": False}).data)
         assert rows == [{"name": "Alpaca Health", "key": "alpacahealth",
@@ -581,57 +583,34 @@ class TestOpConcurrency:
     a tee that appends to TASK["log"], the second tee wrapped the first and
     every printed line was recorded once per layer. The duplicate output in
     the run log was the visible half; the duplicated work was the expensive
-    half.
+    half. The slot is claimed on the network loop now, one request at a
+    time, so the race cannot exist.
     """
 
     @staticmethod
     def _noisy(label, lines=3, pause=0.05):
-        import time
-
-        def fn():
+        async def fn():
             for i in range(lines):
                 print(f"{label}-{i}")
-                time.sleep(pause)
+                await asyncio.sleep(pause)
         return fn
 
-    @staticmethod
-    def _drain():
-        import time
-
-        from src.dispatch import background as ops
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)          # let the worker's finally block land
-
-    def test_second_op_is_refused_while_the_first_runs(self):
-        from src.dispatch import background as ops
-        assert ops._run_op("first", self._noisy("a")) is True
-        assert ops._run_op("second", self._noisy("b")) is False
-        self._drain()
-
     def test_simultaneous_claims_start_exactly_one(self):
-        """Flaked under full-suite load (never in isolation) before this used
-        a Barrier: 12 plain `Thread.start()` calls don't land at the same
-        instant, and under CPU contention that spread can exceed the noisy
-        op's runtime — so by the time a late thread actually calls
-        `_run_op`, an earlier op has already finished and freed the slot,
-        and it legitimately claims a *second* one. That's the test's timing
-        assumption breaking, not the lock: probing `_run_op` behind a
-        Barrier (so all 12 calls truly land together) instead of bare
-        `Thread.start()`, five isolated runs of that probe all returned
-        exactly one True. A Barrier forces all 12 threads to call
-        `_run_op` at (as near as the OS allows) the same instant, so the
-        assertion actually tests concurrent contention instead of thread-
-        startup jitter."""
-        import threading
-
+        """Twelve threads submit at (as near as the OS allows) the same
+        instant, behind a Barrier: one starts, the rest queue as the one
+        waiting entry they all name."""
         from src.dispatch import background as ops
+        from src.dispatch.registry import OpParams
         results, lock = [], threading.Lock()
-        barrier = threading.Barrier(12)
+        barrier, done = threading.Barrier(12), threading.Event()
+
+        async def held():
+            while not done.is_set():
+                await asyncio.sleep(0.01)
 
         def claim():
             barrier.wait()
-            r = ops._run_op("x", self._noisy("x", lines=1))
+            r = ops.submit("x", OpParams(), held)
             with lock:
                 results.append(r)
 
@@ -640,50 +619,41 @@ class TestOpConcurrency:
             t.start()
         for t in threads:
             t.join()
-        assert results.count(True) == 1, "more than one op claimed the slot"
-        assert results.count(False) == 11
-        self._drain()
+        ops.queue_clear()
+        done.set()
+        assert results.count(None) == 1, "more than one op claimed the slot"
+        assert sorted(r["duplicate"] for r in results if r) == [False] + [True] * 10
+        while ops.status()["running"]:
+            time.sleep(0.02)
 
     def test_log_records_each_line_once(self):
-        from src.dispatch import background as ops
-        ops._run_op("solo", self._noisy("line"))
-        self._drain()
-        recorded = [l for l in ops.TASK["log"] if l.startswith("line-")]
-        assert recorded == ["line-0", "line-1", "line-2"]
+        lines = run_web_op("solo", self._noisy("line"))["lines"]
+        assert [l for l in lines if l.startswith("line-")] == [
+            "line-0", "line-1", "line-2"]
 
     def test_stdout_is_restored_when_the_op_ends(self):
         import sys
-
-        from src.dispatch import background as ops
         before = sys.stdout
-        ops._run_op("solo", self._noisy("z", lines=1))
-        self._drain()
+        run_web_op("solo", self._noisy("z", lines=1))
         assert sys.stdout is before, "the tee outlived its operation"
 
     def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
         import sys
 
-        from src.dispatch import background as ops
-
-        def boom():
+        async def boom():
             raise RuntimeError("op exploded")
 
         before = sys.stdout
-        assert ops._run_op("boom", boom) is True
-        self._drain()
+        s = run_web_op("boom", boom)
         assert sys.stdout is before
-        assert ops._running() is False
-        assert "RuntimeError" in (ops.TASK["error"] or "")
-        assert ops._run_op("after", self._noisy("ok", lines=1)) is True
-        self._drain()
+        assert "RuntimeError" in (s["error"] or "")
+        run_web_op("after", self._noisy("ok", lines=1))
 
     def test_prints_outside_an_operation_do_not_reach_the_log(self):
         from src.dispatch import background as ops
-        ops._run_op("solo", self._noisy("q", lines=1))
-        self._drain()
-        n = len(ops.TASK["log"])
+        n = len(run_web_op("solo", self._noisy("q", lines=1))["lines"])
         print("this line belongs to no operation")
-        assert len(ops.TASK["log"]) == n
+        assert len(ops.status()["lines"]) == n
 
 
 class TestOpRearmsTheClaudeBreaker:
@@ -692,20 +662,14 @@ class TestOpRearmsTheClaudeBreaker:
     runs at 18:29 and 19:24 skipped every Claude call without saying why."""
 
     def test_run_op_resets_a_tripped_breaker(self, monkeypatch):
-        import time
-
         from src.claude import api
-        from src.dispatch import background as ops
         monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
         seen = {}
 
-        def probe():
+        async def probe():
             seen["disabled"] = api.api_disabled()
 
-        assert ops._run_op("probe", probe) is True
-        while ops._running():
-            time.sleep(0.02)
-        time.sleep(0.15)          # let the worker's finally block land
+        run_web_op("probe", probe)
         assert seen["disabled"] is None
 
 
@@ -758,13 +722,18 @@ class TestRunQueue:
 
         gates, ran = {}, []
 
-        def add(name, boom=False):
+        def add(name, boom=False, work=None):
             gate = threading.Event()
             gates[name] = gate
 
-            def fn(params):
+            async def fn(params):
                 ran.append(name)
-                assert gate.wait(10), f"{name!r} was never released"
+                if work is not None:
+                    await work()
+                deadline = time.monotonic() + 10
+                while not gate.is_set():
+                    assert time.monotonic() < deadline, f"{name!r} was never released"
+                    await asyncio.sleep(0.01)
                 if boom:
                     raise RuntimeError("op exploded")
 
@@ -909,6 +878,140 @@ class TestRunQueue:
                        "the runner to go idle")
         assert stub_ops.ran == ["q-first", "q-second"]
         assert self._status(client)["queue"] == []
+
+    def test_status_polls_hand_over_only_new_lines(self, client, stub_ops):
+        """app.js polls /api/run/status?since=<total> every 1.5 s: each poll
+        carries the lines past the cursor, and none twice."""
+        async def speak():
+            print("first line")
+        stub_ops.add("q-first", work=speak)
+        client.post("/api/run/q-first")
+        s = self._wait_for(client, lambda s: "first line" in s["lines"],
+                           "the op's line to reach the log")
+        again = json.loads(client.get(f"/api/run/status?since={s['total']}").data)
+        assert (again["lines"], again["total"]) == ([], s["total"])
+
+    def test_stop_cancels_the_op_rolls_its_batch_back_and_the_queue_runs_on(
+            self, client, stub_ops, tmp_path):
+        """A stopped op's open store batch rolls back, and the op queued
+        behind it still gets the slot."""
+        from src import store
+        db = tmp_path / "s.db"
+        store.connect(db).close()
+        writing, release = threading.Event(), threading.Event()
+
+        def write(conn):
+            store.upsert_job(conn, {"job_id": "half", "title": "T"})
+            writing.set()
+            assert release.wait(10)
+
+        async def batch():
+            async with store.Writer(db) as w:
+                await w.batch(write)
+        stub_ops.add("q-writer", work=batch)
+        stub_ops.add("q-second")
+        client.post("/api/run/q-writer")
+        client.post("/api/run/q-second")
+        assert writing.wait(10)
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        release.set()
+        s = self._wait_for(client, lambda s: s["name"] == "q-second",
+                           "the queued op to start after the stopped one")
+        assert s["running"] is True
+        conn = store.connect(db)
+        try:
+            assert not store.job_exists(conn, "half")
+        finally:
+            conn.close()
+        stub_ops.release("q-second")
+        s = self._wait_for(client, lambda s: not s["running"], "the runner to go idle")
+        assert stub_ops.ran == ["q-writer", "q-second"]
+
+    def test_stop_marks_the_op_stopped_within_a_second(self, client, stub_ops):
+        stub_ops.add("q-first")
+        client.post("/api/run/q-first")
+        t0 = time.monotonic()
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        s = self._wait_for(client, lambda s: not s["running"], "the op to stop")
+        assert time.monotonic() - t0 < 1
+        assert (s["name"], s["stopped"], s["error"]) == ("q-first", True, None)
+        assert "  [!] operation stopped" in s["lines"]
+        assert json.loads(client.post("/api/run/stop").data) == {"stopping": False}
+
+    def test_a_stop_before_an_op_first_runs_still_hands_the_slot_on(self, client):
+        """A stop can land between an op's start and its first step (racing
+        the hand-off from the op before it): the op's body never runs, and
+        the slot is handed on all the same."""
+        from src.dispatch import background as ops
+        from src.dispatch.registry import OpParams
+        from src.net import http
+        ran = []
+
+        async def body():
+            ran.append("body")
+
+        async def race():
+            assert await ops.asubmit("q-first", OpParams(), body) is None
+            return await ops.astop()
+        assert http.run_sync(race()) is True
+        s = self._wait_for(client, lambda s: not s["running"], "the slot to be freed")
+        assert (s["name"], s["stopped"], ran) == ("q-first", True, [])
+        assert run_web_op("q-after", body)["stopped"] is False
+        assert ran == ["body"]
+
+    @staticmethod
+    def _gated_dedup(monkeypatch, boom=False):
+        """Point the `dedup` op at a sync target that blocks until released;
+        returns (started, release, ended) events."""
+        from src.dispatch import registry
+        started, release, ended = (threading.Event() for _ in range(3))
+
+        def target(**kw):
+            started.set()
+            assert release.wait(10)
+            ended.set()
+            if boom:
+                raise RuntimeError("store op exploded")
+        monkeypatch.setitem(registry.REGISTRY, "dedup",
+                            {**registry.REGISTRY["dedup"], "target": target})
+        return started, release, ended
+
+    def test_two_stops_never_let_the_next_op_overlap_a_sync_one(
+            self, client, stub_ops, monkeypatch):
+        started, release, ended = self._gated_dedup(monkeypatch)
+        stub_ops.add("q-second")
+        try:
+            client.post("/api/run/dedup")
+            client.post("/api/run/q-second")
+            assert started.wait(10)
+            for _ in range(2):
+                assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+            time.sleep(0.2)
+            assert (self._status(client)["name"], stub_ops.ran) == ("dedup", [])
+        finally:
+            release.set()
+        self._wait_for(client, lambda s: s["name"] == "q-second",
+                       "the queued op to start after the sync one")
+        assert ended.is_set()
+
+    @pytest.mark.parametrize("boom", [False, True])
+    def test_a_sync_op_stopped_too_late_reports_its_own_outcome(
+            self, client, monkeypatch, boom):
+        """A stop cannot interrupt a started sync op: it ends completed or
+        failed, as it did, never "stopped"."""
+        started, release, _ = self._gated_dedup(monkeypatch, boom)
+        try:
+            client.post("/api/run/dedup")
+            assert started.wait(10)
+            assert json.loads(client.post("/api/run/stop").data) == {"stopping": True}
+        finally:
+            release.set()
+        s = self._wait_for(client, lambda s: not s["running"], "the op to end")
+        assert (s["stopped"], s["error"]) == (
+            False, "RuntimeError: store op exploded" if boom else None)
+        assert "  [!] operation stopped" not in s["lines"]
+        assert ("  dedup: the stop came too late; a started store op runs to "
+                "its end") in s["lines"]
 
     def test_a_failed_op_does_not_take_the_queue_down_with_it(self, client,
                                                               stub_ops):

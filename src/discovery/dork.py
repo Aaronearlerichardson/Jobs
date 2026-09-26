@@ -12,7 +12,6 @@ Two entry points:
 
 import asyncio
 import json
-from contextlib import closing
 
 from src import config
 from src import store
@@ -22,10 +21,11 @@ from src.ats.board import BOARDS
 from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
-from src.discovery.resolve.identity import nc_hq_signal
+from src.discovery.resolve.identity import anc_hq_signal
 from src.discovery.resolve.probes import slug_keyed
+from src.match.locality import NC_RE
 from src.match.names import SLUG_NAME_SOURCE
-from src.net import ddg, http
+from src.net import ddg
 
 
 def _or_group(terms, n=8):
@@ -186,7 +186,7 @@ def _existing_boards(conn):
     return {k for k in (store.board_key(dict(r)) for r in rows) if k}
 
 
-def harvest_urls(urls, verbose=True):
+async def harvest_urls(urls, verbose=True):
     """
     Extract boards from `urls`, NC-verify + mission-score the new ones, and
     queue them for review. Returns (added, checked).
@@ -199,15 +199,15 @@ def harvest_urls(urls, verbose=True):
     rather than on the roster.
     """
     boards = extract_boards_from_urls(urls)
-    with closing(store.connect()) as conn:
-        have = _existing_boards(conn)
+    async with store.Writer() as db:
+        have = await db.run(_existing_boards)
         added = 0
         for ats, slug in boards:
             comp = coords.columns(ats, slug)
             if store.board_key(comp) in have:
                 continue
             try:
-                jobs = company_fetch.fetch_company_nc(comp)
+                jobs = await company_fetch.afetch_company(comp, NC_RE)
             except Exception:
                 jobs = []
             nc = len(jobs)
@@ -215,7 +215,7 @@ def harvest_urls(urls, verbose=True):
             # Add even with 0 current NC openings IF we can confirm an NC HQ/office
             # (so a daily run catches their next NC posting) — but not otherwise,
             # else non-NC companies that merely mention NC would pollute the roster.
-            if nc == 0 and not nc_hq_signal(name):
+            if nc == 0 and not await anc_hq_signal(name):
                 continue
             # Scoring, activation and the review queue are the shared write
             # path (local_sourcing.score_and_upsert). The row is tagged local
@@ -223,8 +223,8 @@ def harvest_urls(urls, verbose=True):
             # inactive row is near-unrecoverable here -- harvest_urls skips
             # boards already in the store, so the company is never re-probed --
             # which is why the activation rule must be the shared one.
-            result = score_and_upsert(
-                conn, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
+            result = await score_and_upsert(
+                db, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
                 source=SLUG_NAME_SOURCE, tags=company_tags.LOCAL)
             if not result:
                 continue
@@ -261,7 +261,7 @@ def _next_rotation_index():
     return idx
 
 
-def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
+async def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
     """Automated dorking via ddgs (best-effort; DDG's ATS index is patchy).
     Queries are spaced out — hammering DDG back-to-back is what makes it start
     returning 'No results found' mid-run.
@@ -284,10 +284,11 @@ def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
     loc_slice = _rotate_terms(_LOCALITY_TERMS, 4, idx)
     print(f"  [dork] rotation slice {idx} (locality terms: "
           f"{', '.join(loc_slice) or '(none configured)'})")
-    return harvest_urls(dork_urls(build_dork_queries(idx), max_results, pause, pages))
+    return await harvest_urls(await dork_urls(build_dork_queries(idx), max_results,
+                                              pause, pages))
 
 
-async def adork_urls(queries, max_results, pause, pages):
+async def dork_urls(queries, max_results, pause, pages):
     """The result URLs of each dork query in turn, `pause` seconds apart,
     with up to `pages` pages for a query whose first page came back full
     (see run_ddgs_dorks)."""
@@ -311,6 +312,3 @@ async def adork_urls(queries, max_results, pause, pages):
             urls += found
             page += 1
     return urls
-
-
-dork_urls = http.sync_shim(adork_urls)
