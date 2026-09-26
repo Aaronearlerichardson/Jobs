@@ -103,6 +103,8 @@ BOARD_FIXTURES = [
      {"startrow=0": "successfactors_board.html", "startrow=3": "successfactors_board_p2.html"},
      None),
     ("icims", "uscareers-fujifilm", "icims_board.html", "icims_detail.html"),
+    ("jibe", "https://careers.garmin.com/jobs",
+     {"page=1": "jibe_board.json", "page=2": "jibe_board_p2.json"}, None),
     ("custom", "https://careers.foundationmedicine.com/jobs/search", "custom_board.html", None),
     ("wpjson", "https://www.restor3d.com/company/careers/", "wpjson_board.json", None),
 ]
@@ -130,8 +132,9 @@ class TestSpecdBoardsReadTheirListings:
     rows, which had no sweep, in the sweep's shape; jazzhr: a posting
     whose page has no JSON-LD kept as the index names it, its body the
     page's; successfactors: pages stepped by the rows the tenant serves, a
-    place read off the slug only where it leads the title). No page is
-    parsed on the network loop's thread."""
+    place read off the slug only where it leads the title), and except the
+    platforms that had no fetcher module (jibe: recorded from the engine).
+    No page is parsed on the network loop's thread."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
     def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
@@ -149,6 +152,18 @@ class TestSpecdBoardsReadTheirListings:
                 _fixture_response(detail) if detail else fake_response(status=404)])
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
         assert not any(on_loop)
+
+    def test_a_jibe_board_counts_every_place_it_lists(self, serve, monkeypatch):
+        """No scope: the local count reads every page's listed places, a
+        posting's secondary ones too ("Olathe, Kansas; Cary, North
+        Carolina"); a probe asks one row for the board's total."""
+        no_pacing(monkeypatch)
+        log = serve({"page=1": _fixture_response("jibe_board.json"),
+                     "page=2": _fixture_response("jibe_board_p2.json")})
+        jibe, site = board_for("jibe"), "https://careers.garmin.com/jobs"
+        assert jibe.local_count(site, re.compile("North Carolina")) == 2
+        assert jibe.alive(site) == (True, 5)
+        assert log[-1].params == {"page": 1, "limit": 1}
 
     def test_an_icims_row_reads_its_location_column(self, serve, monkeypatch, tmp_path):
         """A tenant's column is a labelled header, a labelled field, or the

@@ -53,6 +53,9 @@ def detect(text, final_url="", leads=True, only=None):
     ('fetchable', 'icims', 'acme')
     >>> detect('{"widgetApiEndpoint":"https://careers.acme.org/widgets"}')
     ('fetchable', 'phenom', 'careers.acme.org')
+    >>> detect('<script>window._jibe = {"cid":"acme"};</script>'
+    ...        '<a href="https://careers-acme.icims.com/jobs/login">Log in</a>')
+    ('fetchable', 'jibe', 'acme')
     >>> detect("", "https://css-acme-prd.inforcloudsuite.com/hcm/Jobs/page/"
     ...            "JobsHomePage?csk.JobBoard=EXTERNAL&csk.HROrganization=42")
     ('fetchable', 'infor', 'css-acme-prd.inforcloudsuite.com|42')
