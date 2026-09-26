@@ -225,9 +225,10 @@ def main(argv=None):
     ap.add_argument("--max-hours", type=float,
                     help="Abandon whatever is still running after this long")
     ap.add_argument("--workers", type=int, default=None,
-                    help="Workers of the triage, verify and closed-URL steps "
-                         "(default: n_cpus-1, or HARVEST_WORKERS); the pull "
-                         "runs every host at once, one board at a time each")
+                    help="Workers of triage's scoring and verify (default: "
+                         "n_cpus-1, or HARVEST_WORKERS); the pull, triage's "
+                         "hydration and the closed-URL probe run every host "
+                         "at once, one at a time each")
     ap.add_argument("--hydrate", action="store_true",
                     help="Fetch every posting's description during the pull "
                          "(default: triage fetches only the rows that pass "

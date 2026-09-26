@@ -166,10 +166,9 @@ class TestOffmissionInactiveIsNotTheActivationRule:
         None) is active: scoring was unavailable, so the row is not
         punished for it.
       * is_offmission_inactive only ever narrows a CADENCE
-        (harvest.plan's HARVEST_OFFMISSION_HOURS) or a BUDGET
-        (config.board_max_rows). An unscored row reads as off-mission
-        there: nobody has bothered to score it, so it does not earn the
-        frequent, wide read.
+        (harvest.plan's HARVEST_OFFMISSION_HOURS). An unscored row reads
+        as off-mission there: nobody has bothered to score it, so it does
+        not earn the frequent read.
     """
 
     def test_an_unscored_row_is_active_but_still_off_mission(self):

@@ -956,3 +956,24 @@ class TestProbeOutcomesAreReportedPerFamily:
 
         assert "icims            2 closed [page says ... x2]" in \
             capsys.readouterr().out
+
+
+async def test_one_origin_is_probed_one_row_at_a_time(db, monkeypatch):
+    """Each origin a probe asks (closure.probe_origin: both Greenhouse page
+    hosts ask one API) gets one row at a time, and every origin at once."""
+    other_gh = "https://boards.greenhouse.io/other/jobs/1"
+    seed_stale(db, harvested=iso_days_ago(1), urls=[GH_JOB, other_gh, WD_JOB])
+    live, seen = set(), []
+
+    async def probe(url, job_id=None):
+        live.add(url)
+        seen.append(set(live))
+        await asyncio.sleep(0.05)
+        live.discard(url)
+        return None, "gated"
+    monkeypatch.setattr(status.closure, "probe_job_open", probe)
+
+    await status.check_closed_jobs(db=db, stale_days=7)
+
+    assert not any({GH_JOB, other_gh} <= s for s in seen)
+    assert {GH_JOB, WD_JOB} in seen or {other_gh, WD_JOB} in seen

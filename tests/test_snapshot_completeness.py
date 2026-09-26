@@ -32,8 +32,7 @@ def fresh_accounting():
 #  Workday: a scoped, ceilinged offset pager (config.BOARDS["workday"])        #
 # --------------------------------------------------------------------------- #
 
-WD = {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5, "wd_site": "Site",
-      "active": 1, "mission_tier": "adjacent"}
+WD = {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5, "wd_site": "Site"}
 
 
 def _posting(loc, path, title="Data Engineer"):
@@ -120,18 +119,12 @@ class TestWorkdaySnapshot:
         assert [c.method for c in calls] == ["POST"]
         assert "[!]" not in capsys.readouterr().out
 
-    @pytest.mark.parametrize("company,rows", [
-        (WD, 1300),                                             # reads on
-        ({**WD, "active": 0, "mission_tier": "other"}, 1200),   # the spec's 60 pages
-    ])
-    async def test_the_page_budget_widens_for_a_mission_worth_it_board(
-            self, cxs, monkeypatch, company, rows):
-        """config.board_max_rows: BOARD_MAX_ROWS for a board a track can
-        surface, the spec's own page budget for one off-mission and
-        inactive."""
+    async def test_the_page_budget_widens_to_the_row_budget(self, cxs, monkeypatch):
+        """config.BOARD_MAX_ROWS past the spec's 60 pages, for every board:
+        WD (unscored, inactive) is one that kept the 60 until 2026-09-26."""
         cxs(_postings(1300))
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 1400)
-        assert len(await company_fetch.fetch_company(company, None)) == rows
+        assert len(await company_fetch.fetch_company(WD, None)) == 1300
 
 
 class TestWorkdayScope:
@@ -345,13 +338,29 @@ class TestEnginePagers:
         assert len(rows) == read and http.snapshot_info()["capped"] is capped
 
     async def test_a_learned_page_size_widens_to_the_row_budget(self, serve, monkeypatch):
-        """A mission-worth-it board reads BOARD_MAX_ROWS at the step the
-        server serves, not the spec's page count."""
+        """A whole-board pull reads BOARD_MAX_ROWS at the step the server
+        serves, not the spec's page count."""
         no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 40)
         calls = _sized_by_server(serve, 99, total=99)
         b = _engine("offset", pages=2, total="total")
-        assert len(await b.whole_board({"slug": "h", "active": 1, "mission_tier": "adjacent"})) == 40
+        assert len(await b.whole_board({"slug": "h"})) == 40
+        assert len(calls) == 8
+
+    async def test_an_unsized_page_pager_widens_by_its_first_page(self, serve, monkeypatch):
+        """A page pager naming no size counts the row budget in its first
+        page's postings: the iCIMS tenants read 8 pages of 20 until
+        2026-09-26, whatever their size."""
+        no_pacing(monkeypatch)
+        monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 40)
+        calls = serve(lambda url, params=None, **kw: fake_response(
+            {"items": _items(range(params["p"] * 5, params["p"] * 5 + 5))}))
+        b = board.Board("t", {"listing": {
+            "url": "https://x.test/list", "params": {"p": "$page"},
+            "decoder": {"kind": "json", "entries": "items"}, "pager": {"kind": "page", "pages": 2},
+            "fields": {"id": {"format": "t_{id}"}, "title": "title",
+                       "url": {"format": "https://x.test/{id}"}}}})
+        assert len(await b.whole_board({"slug": "h"})) == 40
         assert len(calls) == 8
 
     async def test_a_cursor_is_followed_verbatim(self, serve):

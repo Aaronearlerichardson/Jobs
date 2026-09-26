@@ -185,7 +185,8 @@ class Verify(TopN):
     force: bool = False
 
 
-class CheckClosed(Rows):
+class CheckClosed(Tracked):
+    limit: int | None = None
     stale_days: int = 2
 
 

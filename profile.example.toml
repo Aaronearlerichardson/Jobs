@@ -246,16 +246,11 @@ multi_division_mission_floor = 0.6
 # off-mission or not -- see src/crawl/harvest.py's plan() docstring.
 harvest_offmission_hours = 168
 
-# Rows a mission-worth-it Workday or SmartRecruiters whole-board pull
-# reads before giving up. Default 3000, which carries headroom above the
-# biggest board measured live -- see src/config/policy.py's BOARD_MAX_ROWS
-# for that measurement and board_max_rows for the budget rule. A board
-# that is BOTH off-mission and itself inactive (the SAME rule
-# harvest_offmission_hours above uses) keeps its fetcher's own narrower
-# default instead: one a track's own mission gate discards on every triage
-# pass never earns the wider, slower read. Every board is still read every
-# pass either way; this only changes how MUCH of the biggest ones a
-# mission-worth-it pass sees.
+# Rows a whole-board pull reads before giving up, on every board. Default
+# 3000, which carries headroom above the biggest board measured live --
+# see src/config/policy.py's BOARD_MAX_ROWS for that measurement. This only
+# changes how MUCH of the biggest boards a pass sees; a board read short of
+# its end closes none of its vanished rows.
 # board_max_rows = 3000
 
 # Honor robots.txt (default true). Turning this off skips robots.txt

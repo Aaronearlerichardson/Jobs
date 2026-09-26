@@ -716,8 +716,9 @@ python harvest.py --once --hydrate        # the old whole-board hydration
 Listings alone take a while at polite pacing; every host runs at once, each
 walking its own boards one at a time, largest first, and `--max-hours` caps
 the pass (Ctrl+C or the cap keeps what was stored and starts nothing new); a
-board with no progress for 15 minutes is abandoned. `--workers`
-(`HARVEST_WORKERS`) sizes triage's pools. Bodies already in the store are
+board with no progress for 15 minutes is abandoned. Triage's hydration and
+the closed-URL probe walk the same way; `--workers` (`HARVEST_WORKERS`)
+sizes the pass's Claude calls. Bodies already in the store are
 never fetched twice, so each pass advances the roster. Some hosts
 close the connection after roughly 150 detail requests, so triage fetches at
 most 100 bodiless rows per board per pass, a second apart

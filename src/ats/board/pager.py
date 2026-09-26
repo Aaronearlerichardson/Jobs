@@ -140,7 +140,8 @@ async def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=Fa
     time, PAGE_DELAY_S apart.
     `size` and `pages` override the pager's; a `cheap` read is one page
     unless `pages` says; else a row `budget` widens the pager's page cap
-    at the step the walk takes (`page_cap`).
+    at the step the walk takes (`page_cap`), a page pager with no size
+    stepping by its first page's postings.
 
     An offset pager with no size learns it: a page's postings (distinct
     ids) are its entries and the first page's count is the size. The walk
@@ -184,6 +185,8 @@ async def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=Fa
                 size = n_entries
                 step = size - 1 if size_known is None and size > 1 else size
                 pages = page_cap(pager, budget, step) if widen else pages
+        elif n == 0 and widen and pager and not size:
+            pages = page_cap(pager, budget, len({r["id"] for r in listed if r["id"] is not None}))
         new = await asyncio.to_thread(_fresh, listed, seen)
         rows += new
         if not pager:

@@ -145,7 +145,7 @@ _COMMANDS = [
         "top": a.verify_top, "workers": a.workers, "force": a.verify_all})),
     ("sync_status", _op("sync", lambda a: {"top": a.top})),
     ("check_closed", _op("check-closed", lambda a: {
-        "workers": a.workers, "limit": a.limit, "stale_days": a.stale_days})),
+        "limit": a.limit, "stale_days": a.stale_days})),
     ("backfill_board_descriptions", _op("backfill-descriptions", lambda a: {
         "workers": a.workers, "limit": a.limit})),
     ("backfill_axes", _op("backfill-axes", lambda a: {})),

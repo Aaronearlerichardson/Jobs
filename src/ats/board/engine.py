@@ -352,15 +352,19 @@ class Board:
             parts.update(_VARIANTS().get((self.name, str(handle)), {}))
         return parts
 
-    def origin(self, company):
-        """The origin a store row's listing is read from; "" where the row
+    def origin(self, company=None, url=None):
+        """The origin a store row's listing is read from, or the listing of
+        the board a posting `url` of this platform names; "" where the row
         alone does not name it (an empty column, or a `handle.try` or
         `handle.follow` part not settled yet that the origin holds).
 
         >>> BOARDS["icims"].origin({"slug": "careers-acme"})
         'https://careers-acme.icims.com'
+        >>> BOARDS["greenhouse"].origin(url="https://job-boards.greenhouse.io/acme/jobs/42")
+        'https://boards-api.greenhouse.io'
         """
-        handle = self.handle(company)
+        ref = url and self.job_ref(url)
+        handle = self._handle_of(ref) if ref else self.handle(company or {})
         if not (handle and self.listing_spec):
             return ""
         parts = self._parts(handle)
@@ -777,13 +781,11 @@ class Board:
     async def whole_board(self, company, loc_re=None):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
-        spec is `eager`. The walk reads up to the board's row budget
-        (`config.board_max_rows`)."""
+        spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`."""
         handle = self.handle(company)
         if not handle:
             return []
-        rows = await self._pull(handle, self._label(handle), loc_re,
-                                config.board_max_rows(company))
+        rows = await self._pull(handle, self._label(handle), loc_re, config.BOARD_MAX_ROWS)
         eager = self._detail_rows(True) if self.spec.eager else None
         jobs = await board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,

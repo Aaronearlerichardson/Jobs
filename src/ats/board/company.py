@@ -192,6 +192,20 @@ async def fetch_company(company, loc_re=None):
     return await board.whole_board(company, loc_re) if board else []
 
 
+def board_origin(company):
+    """The host a store row's board is read from, which one walk visits
+    at a time (the harvest pull, triage's hydration): its engine's
+    `origin`, else its ATS name (an origin not settled yet, or no engine).
+
+    >>> board_origin({"ats": "icims", "slug": "careers-acme"})
+    'https://careers-acme.icims.com'
+    >>> board_origin({"ats": "workday"})
+    'workday'
+    """
+    board = board_for(company.get("ats"))
+    return (board and board.origin(company)) or company.get("ats")
+
+
 # --- title sampling ------------------------------------------------------------ #
 
 async def sample_titles(company, n=6):

@@ -69,7 +69,8 @@ from src.ops.status import check_closed_jobs
 
 _log = logging.getLogger(__name__)
 
-# Workers of the pass's second half (triage, verify, the closed-URL probe).
+# Workers of the pass's second half: triage's scoring and verify
+# (triage's hydration and the closed-URL probe walk hosts, as the pull does).
 DEFAULT_WORKERS = worker_count("harvest_workers")
 # Hydration is a detail GET per posting, config.HYDRATE_DELAY_S apart and
 # at most config.HYDRATE_CAP_PER_RUN per board per run: one host cut the
@@ -122,13 +123,10 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     total_job_count): each host walks its boards in this order, and its
     longest walk is what the pass waits for.
 
-    A board that is config.is_offmission_inactive -- the one
-    off-mission/inactive rule, shared with the whole-board page budget
-    (config.board_max_rows, read by src.ats.board.engine) and
-    defined in config.policy because ats sits BELOW crawl in the import
-    DAG -- waits the longer config.HARVEST_OFFMISSION_HOURS instead of
-    `min_age_hours`. Such a board is still fetched every pass, per the
-    "harvest every board" mandate -- just not every `min_age_hours`.
+    A board that is config.is_offmission_inactive waits the longer
+    config.HARVEST_OFFMISSION_HOURS instead of `min_age_hours`. Such a
+    board is still fetched every pass, per the "harvest every board"
+    mandate -- just not every `min_age_hours`.
 
     `min_age_hours=None` -- the default, and what harvest.py passes when
     the flag is absent -- means the pass chooses both intervals itself:
@@ -530,8 +528,7 @@ async def pull(db_path, only=None, names=None, min_age_hours=None,
                               stats=plan_stats)
         hosts = {}
         for c in boards:
-            board = board_for(c.get("ats"))
-            hosts.setdefault((board and board.origin(c)) or c.get("ats"), []).append(c)
+            hosts.setdefault(company_fetch.board_origin(c), []).append(c)
         summary["boards"] = len(boards)
         bar = "=" * 70
         print(f"\n{bar}\n  [HARVEST] whole-board pull - {datetime.now():%Y-%m-%d %H:%M}")
@@ -683,7 +680,7 @@ async def _triage(db_path, max_workers, score_cap):
                     await verify_top(top_n=t["verify_top"],
                                      max_workers=max(2, max_workers // 2),
                                      db=db, t=t)
-        await check_closed_jobs(max_workers=max_workers, limit=CLOSED_PROBE_LIMIT,
+        await check_closed_jobs(limit=CLOSED_PROBE_LIMIT,
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         for t in tracks:
             await db.run(rewrite_digest, t, top_n=5,

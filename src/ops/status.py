@@ -272,8 +272,7 @@ def _dead_board_open_rows(conn, days):
             if store.miss_family(r["miss_reason"]) == _DEAD_BOARD_FAMILY]
 
 
-async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
-                            db=None):
+async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
@@ -303,6 +302,9 @@ async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     CLOSED_PROBE_STALE_DAYS) every one of its rows goes "not
     board-verified in 7+ days" by arithmetic just before each walk, and
     probing them says nothing the imminent walk will not say better.
+
+    Pacing: one probe at a time per origin it asks first
+    (board.closure.probe_origin), every origin at once.
 
     Reporting: outcomes are tallied per ATS family (per host for what no
     family claims) and printed under the summary line, because "36
@@ -343,6 +345,10 @@ async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
         and judged) -- and a row the probe just found gated or slow is
         exactly the one worth leaving alone for the backfill's grace
         period anyway.
+
+        Until 2026-09-26 the probes ran max_workers at a time on any
+        host, so rows ordered by company put up to 11 concurrent GETs on
+        one Workday tenant.
 
         last_seen is NEVER written here, on any of the three verdicts: it
         means "a board vouched for this", a direct URL probe is not a
@@ -400,8 +406,9 @@ async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
         async for r, (is_open, reason) in fan_out(
                 rows, _probe,
                 lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",
-                max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
-                on_abandon=abandoned.append):
+                with_item=True, budget_s=config.PASS_BUDGET_S,
+                on_abandon=abandoned.append,
+                key=lambda r: closure.probe_origin(r["url"])):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
             bucket = _probe_label(r["url"])
             reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1

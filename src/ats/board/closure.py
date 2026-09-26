@@ -23,7 +23,7 @@ import time
 from src import config, runstate
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
-from src.net.util import clean_url
+from src.net.util import clean_url, origin_of
 from .engine import board_for_url
 from .jsonld import extract_jsonld, is_jobposting
 
@@ -73,6 +73,19 @@ def probe_family(url):
         return "gated"
     board = board_for_url(url)
     return board.name if board else ""
+
+
+def probe_origin(url):
+    """The origin probe_job_open asks first about `url`: its platform's
+    endpoint's, else the posting page's own.
+
+    >>> probe_origin("https://boards.greenhouse.io/acme/jobs/42")
+    'https://boards-api.greenhouse.io'
+    >>> probe_origin("https://careers-acme.icims.com/jobs/42/eng/job?in_iframe=1")
+    'https://careers-acme.icims.com'
+    """
+    board = board_for_url(url)
+    return (board and board.spec.via != "page" and board.origin(url=url)) or origin_of(url)
 
 
 # A job-detail host that refuses connections refuses every row on it: the

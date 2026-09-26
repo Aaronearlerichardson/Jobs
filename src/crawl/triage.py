@@ -83,7 +83,7 @@ from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS
-from src.ats.board.company import needs_detail
+from src.ats.board.company import board_origin, needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
 from src.crawl import harvest
@@ -461,18 +461,18 @@ def _hydrate_order(survivors):
     return key
 
 
-async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
-                   hydrate_fn, cutoff):
+async def _hydrate(db, companies, survivors, summary, stamp, hydrate_fn, cutoff):
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
     location the listing never named (see needs_detail/hydrate_description).
 
-    One worker per company (hydration is per host), rows already fully
-    decided on some track first and, within that, rows whose TITLE already
-    reads as relevant (match.filters.is_relevant) -- so a board's per-host
-    cap is spent on the surest material. A row whose detail fetch failed
-    recently is not retried (`cutoff`, the same RETRY_DAYS boundary
-    _geo_verdict uses).
+    One company at a time per host (company_fetch.board_origin, as the
+    harvest pull walks) and every host at once; rows already fully
+    decided on some track first and, within that, rows whose TITLE
+    already reads as relevant (match.filters.is_relevant) -- so a
+    board's per-host cap is spent on the surest material. A row whose
+    detail fetch failed recently is not retried (`cutoff`, the same
+    RETRY_DAYS boundary _geo_verdict uses).
 
     Returns {job_id: reason} for every survivor this pass leaves still
     needing detail (skipped, or tried and failed): _body_gates names them.
@@ -482,6 +482,10 @@ async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
         only such rows are all inside it prints no "hydrating" line
         (2026-09-13 18:42: one nav link scraped from a JS-rendered careers
         page, re-fetched and failing every RETRY_DAYS since 2026-09-10).
+
+        Until 2026-09-26 the companies ran max_workers (n_cpus-1) at a
+        time, which both capped the pass and let two companies on one
+        shared host (a multi-tenant API) hydrate at once.
     """
     todo, waiting = {}, {}
     for jid, (c, r, status) in survivors.items():
@@ -504,8 +508,10 @@ async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
     for js in todo.values():
         js.sort(key=order)
     n_todo = sum(len(js) for js in todo.values())
+    hosts = {cid: board_origin(companies[cid]) for cid in todo}
     print(f"  hydrating {n_todo} row(s) needing detail across "
-          f"{len(todo)} board(s), {max_workers} at a time...")
+          f"{len(todo)} board(s) on {len(set(hosts.values()))} host(s), "
+          f"one board at a time per host...")
 
     def _abandoned(cid):
         # Nothing stored or stamped: the rows wait for the next pass.
@@ -515,8 +521,8 @@ async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
     async for cid, st in fan_out(
             list(todo), lambda cid: hydrate_fn(companies[cid], todo[cid]),
             lambda cid: f"{companies[cid]['name']}: hydrate",
-            max_workers, with_item=True, budget_s=config.PASS_BUDGET_S,
-            on_abandon=_abandoned):
+            with_item=True, budget_s=config.PASS_BUDGET_S,
+            on_abandon=_abandoned, key=hosts.get):
         summary["hydrated"] += st.get("hydrated", 0)
         for j in todo[cid]:
             r = survivors[j["id"]][1]
@@ -764,7 +770,7 @@ async def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS
         waiting = {}
         if hydrate:
             waiting = await _hydrate(db, companies, survivors, summary, stamp,
-                                     max_workers, hydrate_fn, cutoff)
+                                     hydrate_fn, cutoff)
         final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
                                   decided, summary, n_free, waiting, cutoff)
         scores, over_cap = await _score(final, summary, score_cap, fit, max_workers)

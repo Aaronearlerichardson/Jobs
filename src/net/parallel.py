@@ -31,7 +31,7 @@ RESOLVE_STALL_S = 300.0
 
 async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
                   with_item=False, on_error=None, budget_s=None,
-                  on_abandon=None, stall_s=None):
+                  on_abandon=None, stall_s=None, key=None):
     """Run the coroutine function `fn` over every item, at most
     `max_workers` at a time; yield what came back.
 
@@ -68,6 +68,21 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     the item itself is the interesting part of the message; `on_error(item,
     exc)` replaces the reporting entirely.
 
+    `key(item)` names the host an item's work goes to: the items of one
+    key run one at a time, in order, and every key at once, so
+    `max_workers` bounds nothing:
+
+    >>> live, seen = set(), []
+    >>> async def visit(s):
+    ...     live.add(s)
+    ...     seen.append(sorted(live))
+    ...     await asyncio.sleep(0.01 if s[0] == "a" else 0.2)
+    ...     live.discard(s)
+    >>> _ = asyncio.run(results(fan_out(["a1", "a2", "b1"], visit, max_workers=1,
+    ...                                 key=lambda s: s[0])))
+    >>> seen
+    [['a1'], ['a1', 'b1'], ['a2', 'b1']]
+
     `budget_s` bounds the whole pass, and `stall_s` a stretch in which
     nothing completes (the watchdog for work that can WEDGE rather than
     fail: a company resolution chaining page fetches). Past either, each
@@ -97,9 +112,10 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
         return
     what = label if callable(label) else (lambda _item: label)
     slots = asyncio.Semaphore(max(1, max_workers))
+    hosts = {}
 
     async def call(item):
-        async with slots:
+        async with hosts.setdefault(key(item), asyncio.Lock()) if key else slots:
             http.reset_fetch_failures()     # this item's own count
             return await fn(item)
 

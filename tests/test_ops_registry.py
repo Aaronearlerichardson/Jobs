@@ -119,7 +119,6 @@ class TestWebView:
             "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK})
         assert seen["stale_days"] == 3 and seen["limit"] is None
         assert seen["t"]["id"] == config.DEFAULT_TRACK
-        assert "max_workers" not in seen        # the target's own default
 
 
 def _args(**given):
@@ -161,7 +160,7 @@ class TestCliDispatch:
         t = {"id": "x"}
         self._handler("check_closed")(_args(limit=40, stale_days=5), t)
         assert calls == [("check-closed",
-                          {"workers": 6, "limit": 40, "stale_days": 5}, t)]
+                          {"limit": 40, "stale_days": 5}, t)]
 
     def test_triage_forwards_score_cap(self, calls):
         self._handler("triage")(_args(score_cap=50), None)
