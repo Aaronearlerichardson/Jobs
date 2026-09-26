@@ -135,7 +135,8 @@ class TestThreadInterleaving:
         """print() writes text and newline separately; a worker thread's
         half-written line plus another thread's full line used to land in
         the file fused into one record (repeatedly seen in the 2026-08-28
-        session logs). Lines are assembled per writing thread."""
+        session logs). Lines are assembled per writer (a task, or a thread
+        such as the store's)."""
         import threading
         monkeypatch.setattr(sys, "stdout", io.StringIO())
         monkeypatch.setattr(sys, "stderr", io.StringIO())

@@ -6,31 +6,30 @@ import logging
 import time
 from contextlib import AsyncExitStack
 
-from src import config
+from src import config, runstate
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
-from src.net import http
 from .fetchpool import candidate_urls
 from .identity import candidate_pages, foreign_board
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.probes")
 
-# Whether the headless browser is usable is a PROCESS fact, not a per-pool
-# one: a long-lived process (the web UI) runs a JsScanProbePool per pass,
-# and Playwright's launch error embeds a ten-line ASCII banner. Read and
-# written on the network loop only.
-_JS_NOTICES = set()
+# Whether the headless browser is usable is a RUN fact, not a per-pool
+# one: a run can start more than one JsScanProbePool, and Playwright's
+# launch error embeds a ten-line ASCII banner.
+_JS_NOTICES = runstate.per_run(set)
 
 
 def _js_notice_once(key, message):
     """Print a `[js]` notice the first time `key` comes up. True if printed."""
-    if key in _JS_NOTICES:
+    notices = _JS_NOTICES()
+    if key in notices:
         return False
-    _JS_NOTICES.add(key)
+    notices.add(key)
     print(f"    [js] {message}")
     return True
 
@@ -51,7 +50,7 @@ def _js_launch_hint(exc):
 
 
 def _report_js_disabled(detail):
-    """Say the JS fallback is off, once per process. True if we reported."""
+    """Say the JS fallback is off, once per run. True if we reported."""
     return _js_notice_once("disabled", f"{detail}; JS scan probe disabled")
 
 
@@ -101,7 +100,7 @@ async def launch_chromium(pw, **kwargs):
 # the company name cannot produce (Workday's tenant, pod and site:
 # redhat.wd5.myworkdayjobs.com/Jobs_External), so probe_scan reads it off
 # the company's careers page(s) (`scan_hit`), then counts the board's
-# listing (`Board.alive`). aprobe_company calls it as its last step.
+# listing (`Board.alive`). probe_company calls it as its last step.
 
 #: The platforms whose spec sets `discovery.scan`, in spec order.
 SCANNED = tuple(b.name for b in BOARDS.values() if b.fetchable and b.spec.discovery.scan)
@@ -122,7 +121,7 @@ async def confirm(ats, slug, careers_url=None):
     handle = b.handle(coords.columns(ats, slug, careers_url)) if b else None
     if not handle:
         return None
-    ok, count = await b.aprobe(handle)
+    ok, count = await b.probe(handle)
     return count if ok else None
 
 
@@ -146,7 +145,7 @@ async def _scan_meta(ats, handle, source_url):
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
     answered."""
-    ok, n = await board_for(ats).aalive(_handle(ats, handle))
+    ok, n = await board_for(ats).alive(_handle(ats, handle))
     return {"ats": ats, "slug": handle, "count": n if ok else 0,
             "validated": ok, "source_url": source_url}
 
@@ -187,7 +186,7 @@ async def probe_scan(name: str, careers_url: str = ""):
 
 class JsScanProbePool:
     """Up to `size` JS scan scrapes at once, in one lazily launched
-    headless browser on the network loop.
+    headless browser.
 
     Each scrape takes a free page, which lives in a browser context of its
     own and is kept for later scrapes; a caller waits while all `size`
@@ -195,11 +194,11 @@ class JsScanProbePool:
 
     Usage:
         async with JsScanProbePool(4) as js:
-            meta, outcome = await js.aprobe("NetApp", careers_url="")
+            meta, outcome = await js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
-    failure is reported once per process (_report_js_disabled) and every
-    later aprobe() returns (None, "no browser").
+    failure is reported once per run (_report_js_disabled) and every
+    later probe() returns (None, "no browser").
 
     Notes:
         Was `size` whole browsers, each pinned to a thread of its own
@@ -241,8 +240,8 @@ class JsScanProbePool:
             await self._stack.aclose()
             return
         self._browser = browser
-        # Re-armed, so a later failure in the same process is reported.
-        _JS_NOTICES.discard("disabled")
+        # Re-armed, so a later failure in the same run is reported.
+        _JS_NOTICES().discard("disabled")
 
     async def _page(self):
         """A free page, made on first need; None when there is no browser."""
@@ -304,7 +303,7 @@ class JsScanProbePool:
 
     @classmethod
     async def _scrape(cls, page, name, careers_url):
-        """aprobe's answer from `page`, once it has one."""
+        """probe's answer from `page`, once it has one."""
         for url in candidate_urls(name, careers_url):
             hit = await cls._scan(page, url)
             if not hit or await foreign_board(name, *hit):
@@ -317,7 +316,7 @@ class JsScanProbePool:
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 
-    async def aprobe(self, name: str, careers_url: str = ""):
+    async def probe(self, name: str, careers_url: str = ""):
         """
         (meta, outcome): meta is probe_scan()'s shape or None; outcome
         is "hit", "not validated", "no board link", "no browser",
@@ -398,17 +397,14 @@ class JsScanProbePool:
 # was.
 
 
-async def anc_count(ats, slug):
+async def nc_count(ats, slug):
     """Postings on a board that are in your [locality] (`Board.local_count`):
     the count that rejects a slug guess landing on somebody else's board.
     `slug` is a resolver hit's."""
-    return await board_for(ats).alocal_count(_handle(ats, slug), NC_RE)
+    return await board_for(ats).local_count(_handle(ats, slug), NC_RE)
 
 
-nc_count = http.sync_shim(anc_count)
-
-
-async def aprobe_company(name, scan=True):
+async def probe_company(name, scan=True):
     """
     Probe every platform whose spec sets ``guess`` (fast) then, only if
     ``scan``, the SCANNED platforms (probe_scan, the slow careers-page
@@ -419,10 +415,10 @@ async def aprobe_company(name, scan=True):
     hit = None
     for slug in slug_guesses(name):
         for ats in (b.name for b in BOARDS.values() if b.spec.guess):
-            ok, count = await board_for(ats).aprobe(slug)
+            ok, count = await board_for(ats).probe(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
-                       "count": count, "nc": await anc_count(ats, slug)}
+                       "count": count, "nc": await nc_count(ats, slug)}
                 break
         if hit:
             break
@@ -430,5 +426,5 @@ async def aprobe_company(name, scan=True):
         s = await probe_scan(name)
         if s and s["validated"]:
             hit = {"name": name, "ats": s["ats"], "slug": s["slug"],
-                   "count": s["count"], "nc": await anc_count(s["ats"], s["slug"])}
+                   "count": s["count"], "nc": await nc_count(s["ats"], s["slug"])}
     return hit

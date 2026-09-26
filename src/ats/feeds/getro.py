@@ -230,7 +230,7 @@ async def _fetch_sitemap(origin, label):
     return entries
 
 
-async def afetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=None):
+async def fetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=None):
     """Relevant postings from one Getro board, as crawler job dicts.
 
     Sitemap first; then, newest first, one page fetch per posting whose
@@ -276,6 +276,3 @@ async def afetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=No
         if detail_delay:
             await asyncio.sleep(detail_delay)
     return jobs
-
-
-fetch_getro_all = http.sync_shim(afetch_getro_all)

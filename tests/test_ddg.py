@@ -70,7 +70,8 @@ def _fake_ddgs(script):
 
 @pytest.fixture
 def wired(monkeypatch, tmp_path):
-    """Fresh breaker state, a throwaway cache, and the fake HTTP module."""
+    """No DNS override (the breaker is the test's run's), a throwaway
+    cache, and the fake HTTP module."""
     ddg.reset_resolver()
     hc = _FakeHttpClient()
     monkeypatch.setattr(ddg, "CACHE_DIR", tmp_path / "ddg")
@@ -81,17 +82,17 @@ def wired(monkeypatch, tmp_path):
     ddg.reset_resolver()
 
 
-def _search(monkeypatch, script, q="acme careers"):
+async def _search(monkeypatch, script, q="acme careers"):
     Fake, made = _fake_ddgs(script)
     monkeypatch.setattr(ddg, "_ddgs_class", lambda: Fake)
-    return ddg.search(q, budget=5), made
+    return await ddg.search(q, budget=5), made
 
 
 class TestResolverFallback:
-    def test_a_refused_resolver_switches_to_the_fallback_and_retries(
+    async def test_a_refused_resolver_switches_to_the_fallback_and_retries(
             self, monkeypatch, wired, capsys):
         hit = [{"href": "https://acme.example/careers"}]
-        out, made = _search(monkeypatch, [REFUSED, hit])
+        out, made = await _search(monkeypatch, [REFUSED, hit])
         assert out == hit
         assert len(made) == 2                       # one failure, one retry
         # ddgs's client factory now injects the configured servers.
@@ -99,56 +100,56 @@ class TestResolverFallback:
         assert wired.built[-1]["dns_resolver"] == ["1.1.1.1", "8.8.8.8"]
         assert "1.1.1.1" in capsys.readouterr().out
 
-    def test_the_switch_happens_once_per_process(self, monkeypatch, wired):
-        _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])
+    async def test_the_switch_happens_once_per_process(self, monkeypatch, wired):
+        await _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])
         installed = wired.primp.Client
-        _search(monkeypatch, [[{"href": "https://b.example/"}]], q="beta jobs")
+        await _search(monkeypatch, [[{"href": "https://b.example/"}]], q="beta jobs")
         assert wired.primp.Client is installed      # not wrapped twice
 
-    def test_a_fallback_that_is_also_refused_trips_the_breaker(
+    async def test_a_fallback_that_is_also_refused_trips_the_breaker(
             self, monkeypatch, wired, capsys):
-        out, made = _search(monkeypatch, [REFUSED, REFUSED])
+        out, made = await _search(monkeypatch, [REFUSED, REFUSED])
         assert out == [] and len(made) == 2
-        out, made = _search(monkeypatch, [[{"href": "https://never/"}]], q="beta")
+        out, made = await _search(monkeypatch, [[{"href": "https://never/"}]], q="beta")
         assert out == [] and made == []             # no client built at all
         text = capsys.readouterr().out
         assert text.count("unreachable") == 1       # announced once
 
-    def test_no_fallback_configured_trips_immediately(
+    async def test_no_fallback_configured_trips_immediately(
             self, monkeypatch, wired):
         monkeypatch.setattr(ddg.config, "SEARCH_DNS_FALLBACK", ())
-        out, made = _search(monkeypatch, [REFUSED])
+        out, made = await _search(monkeypatch, [REFUSED])
         assert out == [] and len(made) == 1
         assert wired.primp.Client is wired.original # nothing installed
-        out, made = _search(monkeypatch, [[{"href": "https://never/"}]], q="beta")
+        out, made = await _search(monkeypatch, [[{"href": "https://never/"}]], q="beta")
         assert out == [] and made == []
 
-    def test_an_expired_window_lets_one_probe_through(
+    async def test_an_expired_window_lets_one_probe_through(
             self, monkeypatch, wired, capsys):
-        _search(monkeypatch, [REFUSED, REFUSED])
-        monkeypatch.setattr(ddg, "_RESOLVER_DOWN_UNTIL", 0.0)
-        out, made = _search(monkeypatch, [REFUSED], q="beta")
+        await _search(monkeypatch, [REFUSED, REFUSED])
+        ddg._SEARCHES().down_until = 0.0
+        out, made = await _search(monkeypatch, [REFUSED], q="beta")
         assert out == [] and len(made) == 1         # probed, refused again
-        assert ddg._RESOLVER_BACKOFF == 2 * ddg.RESOLVER_WINDOW
+        assert ddg._SEARCHES().backoff == 2 * ddg.RESOLVER_WINDOW
         assert "backing off 180s" in capsys.readouterr().out
-        monkeypatch.setattr(ddg, "_RESOLVER_DOWN_UNTIL", 0.0)
+        ddg._SEARCHES().down_until = 0.0
         hit = [{"href": "https://gamma.example/"}]
-        out, _ = _search(monkeypatch, [hit], q="gamma")
+        out, _ = await _search(monkeypatch, [hit], q="gamma")
         assert out == hit
         assert "recovered" in capsys.readouterr().out
-        out, made = _search(monkeypatch, [hit], q="delta")
+        out, made = await _search(monkeypatch, [hit], q="delta")
         assert out == hit and len(made) == 1        # breaker closed again
 
-    def test_reset_restores_the_original_client(self, monkeypatch, wired):
-        _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])
+    async def test_reset_restores_the_original_client(self, monkeypatch, wired):
+        await _search(monkeypatch, [REFUSED, [{"href": "https://a.example/"}]])
         assert wired.primp.Client is not wired.original
         ddg.reset_resolver()
         assert wired.primp.Client is wired.original
 
-    def test_a_throttle_is_not_a_resolver_failure(self, monkeypatch, wired):
+    async def test_a_throttle_is_not_a_resolver_failure(self, monkeypatch, wired):
         monkeypatch.setattr(ddg, "RETRY_PAUSE", 0)
-        out, made = _search(monkeypatch, [Exception("Ratelimit"),
-                                          [{"href": "https://a.example/"}]])
+        out, made = await _search(monkeypatch, [Exception("Ratelimit"),
+                                                [{"href": "https://a.example/"}]])
         assert out == [{"href": "https://a.example/"}]
         assert wired.primp.Client is wired.original # ordinary retry path
 
@@ -178,10 +179,10 @@ def test_a_query_no_one_waits_for_is_not_retried(monkeypatch, wired, cut):
     monkeypatch.setattr(ddg, "_ddgs_class", lambda: Slow)
     t0 = time.monotonic()
     if cut == "budget":
-        assert ddg.search("acme careers", budget=0.3) == []
+        assert asyncio.run(ddg.search("acme careers", budget=0.3)) == []
     else:
         with pytest.raises(TimeoutError):
-            asyncio.run(asyncio.wait_for(ddg.asearch("acme careers", budget=60), 0.3))
+            asyncio.run(asyncio.wait_for(ddg.search("acme careers", budget=60), 0.3))
     assert time.monotonic() - t0 < 1
     release.set()
     assert exited.wait(5)

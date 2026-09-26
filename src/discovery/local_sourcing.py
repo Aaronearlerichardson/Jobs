@@ -11,11 +11,11 @@ The stages, and where each lives:
   2. Resolve each name to a board. That whole step is src.discovery.resolve
      now -- sniff the careers page, probe guessed slugs, search the web,
      validate every hit with a live fetch, and say WHY when none of it
-     worked (resolve.board.aresolve_or_miss). It used to live here, which
+     worked (resolve.board.resolve_or_miss). It used to live here, which
      put ~300 lines of store-free resolution in the middle of the module
      that decides what to store.
   3. Verify the board has jobs in your [locality], or the company an office
-     there (resolve.identity.anc_hq_signal); mission-score it; write it to
+     there (resolve.identity.nc_hq_signal); mission-score it; write it to
      the store as a review candidate (score_and_upsert), or record the miss.
 
 This module is the SOURCING half: which names to try, and what to do with
@@ -37,10 +37,10 @@ from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, agather_names
-from .resolve.board import aread_local, resolved
-from .resolve.probes import anc_count, aprobe_company
-from .resolve.websearch_board import awebsearch_board
+from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
+from .resolve.board import read_local, resolved
+from .resolve.probes import nc_count, probe_company
+from .resolve.websearch_board import websearch_board
 
 # --------------------------------------------------------------------------- #
 #  discover_local: the bulk pass over gathered names                          #
@@ -75,7 +75,7 @@ async def _hit_from_detection(name, det):
     """
     ats = det["ats"]
     slug = det.get("triple", det.get("slug"))
-    jobs, total, reason = await aread_local(coords.columns(ats, slug, det.get("careers_url")))
+    jobs, total, reason = await read_local(coords.columns(ats, slug, det.get("careers_url")))
     return {"name": name, "ats": ats, "slug": slug, "count": len(jobs) or total,
             "nc": len(jobs), "careers_url": det.get("careers_url"), "reason": reason}
 
@@ -118,7 +118,7 @@ async def _probe_pass(names, max_workers):
     # the pass -- this was the last pool in src/ with a bare fut.result(),
     # the same shape as the prune_dead_boards bug.
     return [h async for h in fan_out(
-        names, lambda n: aprobe_company(n, name_key(n) in _MAJORS_KEYS),
+        names, lambda n: probe_company(n, name_key(n) in _MAJORS_KEYS),
         "probe", max_workers) if h]
 
 
@@ -153,11 +153,11 @@ async def _js_scan_pass(hits, max_workers):
 
         async def _js_one(name):
             t0 = time.monotonic()
-            meta, outcome = await pool.aprobe(name)
+            meta, outcome = await pool.probe(name)
             if outcome == "hit":
                 ats, slug = meta["ats"], meta["slug"]
                 return {"name": name, "ats": ats, "slug": slug,
-                        "count": meta["count"], "nc": await anc_count(ats, slug)}
+                        "count": meta["count"], "nc": await nc_count(ats, slug)}
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 
@@ -182,13 +182,13 @@ async def _sniff_pass(names, hits, misses, max_workers):
     """Fetch each still-boardless name's careers page and read the ATS +
     exact slug off it. The main recall lever over the directory: it covers
     every hosted platform and finds slugs the name-guesser cannot."""
-    from .resolve.sniffer import asniff_ats
+    from .resolve.sniffer import sniff_ats
 
     todo = _boardless(names, hits)
     print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
     async def _sniff_one(n):
-        s = await asniff_ats(n)
+        s = await sniff_ats(n)
         return await _hit_from_detection(n, s) if s else {
             "name": n, "reason": "no-board-found"}
 
@@ -220,7 +220,7 @@ async def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
     t0 = time.time()
 
     async def _websearch_one(n):
-        w = await awebsearch_board(n)
+        w = await websearch_board(n)
         return await _hit_from_detection(n, w) if w else {
             "name": n, "reason": "no-board-found"}
 
@@ -320,10 +320,10 @@ async def discover_local(extra_names=None, max_workers=12, js_majors=True, sniff
         A name the careers-page sniff cannot read anything off is reported
         as plain ``no-board-found``, not a refined code: classify_miss()
         would re-fetch every candidate URL for every one of the hundreds of
-        boardless names in a full pass. The on-demand paths (aresolve_or_miss,
+        boardless names in a full pass. The on-demand paths (resolve_or_miss,
         add_names, resolve_leads) work on tens of names and do classify.
     """
-    names = await agather_names(extra_names)
+    names = await gather_names(extra_names)
     misses = []
     hits = await _probe_pass(names, max_workers)
     if js_majors:
@@ -346,7 +346,7 @@ async def _sample_titles(hit, n=6):
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
-    Every family samples through board.company.asample_titles. [] when
+    Every family samples through board.company.sample_titles. [] when
     nothing could be read.
 
     Notes:
@@ -357,11 +357,11 @@ async def _sample_titles(hit, n=6):
     """
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
     board = hit if "wd_tenant" in hit else coords.from_hit(hit)
-    return await company_fetch.asample_titles(board, n)
+    return await company_fetch.sample_titles(board, n)
 
 
 async def mission_context(board):
-    """The free-text context `src.claude.ascore_company_mission` is given for
+    """The free-text context `src.claude.score_company_mission` is given for
     a resolved board or roster row (a hit or a store row): a few live posting
     titles, else the board's own address (coords.board_context) -- '' only
     for a board with neither. Every mission-scoring call site builds its
@@ -413,9 +413,9 @@ def _productive_row(conn, name):
 
 async def _score_hit(hit):
     """(tier, score, reason) for a resolved board: its mission_context as
-    the domain context for src.claude.ascore_company_mission."""
-    from src.claude.api import ascore_company_mission
-    return await ascore_company_mission(hit["name"], await mission_context(hit))
+    the domain context for src.claude.score_company_mission."""
+    from src.claude.api import score_company_mission
+    return await score_company_mission(hit["name"], await mission_context(hit))
 
 
 async def score_and_upsert(db, hit, source, include_missions=None, tags=None,
@@ -439,7 +439,7 @@ async def score_and_upsert(db, hit, source, include_missions=None, tags=None,
     same board only refreshes the counts, and a different one is printed,
     noted on the row, and returns None. Neither pays for a score.
 
-    >>> from src.net import http
+    >>> import asyncio
     >>> from src.store import Writer, connect, upsert_company
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
@@ -450,7 +450,7 @@ async def score_and_upsert(db, hit, source, include_missions=None, tags=None,
     ...         return await score_and_upsert(db, {"name": "Fortrea",
     ...             "ats": "phenom", "slug": "careers.fortrea.com", "nc": 24,
     ...             "count": 24}, "local_sourcing")
-    >>> http.run_sync(add())  # doctest: +ELLIPSIS
+    >>> asyncio.run(add())  # doctest: +ELLIPSIS
         [keep] Fortrea: existing workday board retained; alternate phenom ...
     >>> conn.execute("SELECT ats, slug, wd_tenant, active, total_job_count, "
     ...              "notes FROM companies").fetchone()[:]
@@ -664,9 +664,9 @@ async def add_board(name, url, capture=False):
         way, nothing is fetched until the host is listed in the profile's
         [policy] robots_exempt_hosts.
     """
-    from src.claude.api import ascore_company_mission
+    from src.claude.api import score_company_mission
     from src.ats.signatures import detect, pack
-    from .resolve.sniffer import asniff_ats
+    from .resolve.sniffer import sniff_ats
 
     if capture:
         async with store.Writer() as db:
@@ -687,7 +687,7 @@ async def add_board(name, url, capture=False):
     if hit:
         found = pack(hit[1], hit[2], url)
     else:
-        found = await asniff_ats(name, careers_url=url)
+        found = await sniff_ats(name, careers_url=url)
     if not found:
         print(f"  [!] No ATS coordinates found at/near {url}")
         return None
@@ -699,11 +699,11 @@ async def add_board(name, url, capture=False):
     slug = handle or url
     board = coords.columns(ats, handle, found.get("careers_url") or url, name=name)
     try:
-        nc = len(await company_fetch.afetch_company(board, NC_RE))
+        nc = len(await company_fetch.fetch_company(board, NC_RE))
     except Exception:
         nc = 0
 
-    tier, score, reason = await ascore_company_mission(name, await mission_context(board))
+    tier, score, reason = await score_company_mission(name, await mission_context(board))
 
     async with store.Writer() as db:
         dup = await db.run(_board_already_tracked, board)
@@ -732,7 +732,7 @@ async def add_board(name, url, capture=False):
 async def score_missions(max_workers=6, rescore_all=False):
     """Backfill company mission scores: every company with a board and no
     mission_tier (or every ACTIVE one, with rescore_all) gets sampled titles
-    + one ascore_company_mission call. Heals stores populated by
+    + one score_company_mission call. Heals stores populated by
     --import-companies / older seed imports (no scoring) or by
     keyless/failed scoring passes.
 
@@ -745,7 +745,7 @@ async def score_missions(max_workers=6, rescore_all=False):
     reactivates it below. `rescore_all` stays active-only — it is a
     re-judgement of the live roster, not a recovery pass, and widening it
     would resurrect everything ever deactivated for being off-mission."""
-    from src.claude.api import ACTIVE_MISSION_TIERS, ascore_company_mission
+    from src.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
 
     async with store.Writer() as db:
         cos = [c for c in await db.run(store.get_companies, active_only=rescore_all)
@@ -756,7 +756,7 @@ async def score_missions(max_workers=6, rescore_all=False):
         print(f"  mission-scoring {len(cos)} compan(ies)...")
 
         async def _one(c):
-            return await ascore_company_mission(c["name"], await mission_context(c))
+            return await score_company_mission(c["name"], await mission_context(c))
 
         n = 0
         async for c, (tier, score, reason) in fan_out(

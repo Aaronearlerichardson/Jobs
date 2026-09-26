@@ -279,8 +279,8 @@ def _credentials():
         USAJOBS_EMAIL=getattr(config, "USAJOBS_EMAIL", ""))
 
 
-async def afetch_usajobs(keyword=None, location=None, radius=None, series=None,
-                         results_per_page=250, max_pages=20, gate=None):
+async def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
+                        results_per_page=250, max_pages=20, gate=None):
     """Search USAJOBS and return the announcements passing `gate` as job
     dicts (all of them when `gate` is None), each page read off the loop.
 
@@ -336,6 +336,3 @@ async def afetch_usajobs(keyword=None, location=None, radius=None, series=None,
         if not total or fetched >= total:
             break
     return jobs
-
-
-fetch_usajobs = http.sync_shim(afetch_usajobs)

@@ -1,9 +1,8 @@
 """The one way out to the network.
 
-Every request, from a thread or a coroutine, goes through `send`: one
-aiohttp session on one event loop, the network loop. Until every caller
-is async the loop runs on a daemon thread, a thread reaches it through
-`run_sync`, and `SESSION` is requests.Session's get and post over it.
+Every request goes through `send`, a coroutine on the entry point's event
+loop: one aiohttp session per run (src/runstate.py), opened at the run's
+first request and closed as it ends.
 
 requests stays as the model layer only: it prepares each request (URL,
 params, body, headers), rules on each redirect, and reads each reply (a
@@ -13,17 +12,12 @@ requests sent and read. Its own I/O is never used
 """
 
 import asyncio
-import atexit
-import concurrent.futures
 import contextvars
 import logging
-import socket
 import ssl
 import sys
-import threading
 import time
 from datetime import timedelta
-from functools import partial, wraps
 
 import aiohttp
 import requests
@@ -35,6 +29,7 @@ from requests.utils import default_headers, get_encoding_from_headers
 from urllib3.util.ssl_ import create_urllib3_context
 from yarl import URL
 
+from src import runstate
 from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
 from src.net.util import host_of, origin_of
 
@@ -83,179 +78,11 @@ Unreachable = requests.ConnectionError
 
 
 # --------------------------------------------------------------------------- #
-#  The network loop                                                           #
-# --------------------------------------------------------------------------- #
-
-_LOOP = None                    # the network loop, once started
-_LOOP_THREAD = None
-_START = threading.Lock()
-#: thread -> the task its run_sync waits on. Read and written on the loop.
-_WAITS = {}
-
-
-def _loop():
-    """The network loop, started on its daemon thread at first use and
-    stopped at interpreter exit."""
-    global _LOOP, _LOOP_THREAD
-    with _START:
-        if _LOOP is None:
-            _LOOP = asyncio.new_event_loop()
-            _LOOP_THREAD = threading.Thread(target=_LOOP.run_forever,
-                                            name="net-loop", daemon=True)
-            _LOOP_THREAD.start()
-            atexit.register(_shutdown)
-        return _LOOP
-
-
-def run_sync(coro):
-    """`coro`'s result, run on the network loop while this thread waits.
-
-    For code that is not async yet; tests/test_invariants.py keeps it out
-    of async code. The task runs in a copy of this thread's context, and
-    a fetch failure it reports counts here:
-
-    >>> async def dead():
-    ...     return fetch_failed("board", "timeout", indent=0)
-    >>> reset_fetch_failures(); run_sync(dead()); fetch_failures()
-    [!] board: timeout
-    []
-    1
-
-    On the loop itself it could only deadlock, so it refuses:
-
-    >>> async def nested():
-    ...     return run_sync(dead())
-    >>> run_sync(nested())
-    Traceback (most recent call last):
-    RuntimeError: run_sync on the network loop: await the coroutine instead
-
-    The task's exception is raised here, and anything else that ends the
-    wait (Ctrl+C) cancels the task and raises once it has unwound (10 s at
-    most; a second Ctrl+C stops the wait): its finally blocks, a store
-    batch rolling back, run before this thread moves on.
-
-    Notes:
-        A ContextVar set inside the task changes the copy, never this
-        thread's context; the fetch accounting is a holder object for
-        that reason (see _account).
-
-        Not asyncio.run_coroutine_threadsafe: its cancelled future raises
-        concurrent.futures.CancelledError, an Exception, which the
-        fetchers' `except Exception` would swallow, so an abandoned board
-        could store a short snapshot as a whole one.
-    """
-    try:
-        loop, me = _loop(), threading.current_thread()
-        if me is _LOOP_THREAD:
-            raise RuntimeError("run_sync on the network loop: await the coroutine instead")
-    except BaseException:
-        coro.close()
-        raise
-    _account()
-    ctx, done = contextvars.copy_context(), concurrent.futures.Future()
-
-    def start():
-        task = _WAITS[me] = loop.create_task(coro, context=ctx)
-        task.add_done_callback(partial(_settle, me, done))
-
-    loop.call_soon_threadsafe(start)
-    try:
-        return done.result()
-    except BaseException:
-        if not done.done():
-            loop.call_soon_threadsafe(_cancel, me)
-            concurrent.futures.wait([done], timeout=10)
-        raise
-
-
-def sync_shim(afn):
-    """`afn`, a coroutine function `a<name>`, as the function `<name>` for
-    a thread: its coroutine run through run_sync. The shims phase 8
-    deletes.
-
-    >>> async def atwice(n):
-    ...     return 2 * n
-    >>> twice = sync_shim(atwice)
-    >>> twice(4), twice.__name__
-    (8, 'twice')
-
-    Notes:
-        The shim keeps this module as its own, so doctest collects
-        `afn`'s docstring once, from `afn`.
-    """
-    @wraps(afn, assigned=("__doc__",))
-    def shim(*args, **kw):
-        return run_sync(afn(*args, **kw))
-    shim.__name__ = afn.__name__.removeprefix("a")
-    shim.__qualname__ = afn.__qualname__.removesuffix(afn.__name__) + shim.__name__
-    return shim
-
-
-def _settle(thread, done, task):
-    """Hand `task`'s outcome to `thread`, waiting in run_sync."""
-    if _WAITS.get(thread) is task:
-        del _WAITS[thread]
-    if task.cancelled():
-        done.set_exception(asyncio.CancelledError())
-    elif task.exception() is not None:
-        done.set_exception(task.exception())
-    else:
-        done.set_result(task.result())
-
-
-def _cancel(thread):
-    """Cancel the task `thread` waits on in run_sync. On the loop."""
-    task = _WAITS.get(thread)
-    if task is not None:
-        task.cancel()
-
-
-def _shutdown():
-    """Close the session and stop the loop: at interpreter exit, so no
-    "Unclosed client session" warning is printed."""
-    global _LOOP, _SESSION
-    if _LOOP is None:
-        return
-    session, _SESSION = _SESSION, None
-    try:
-        if session is not None:
-            run_sync(session.close())
-    finally:
-        _LOOP.call_soon_threadsafe(_LOOP.stop)
-        _LOOP_THREAD.join(5)
-        if not _LOOP_THREAD.is_alive():
-            _LOOP.close()
-        _LOOP = None
-
-
-# --------------------------------------------------------------------------- #
 #  One request                                                                #
 # --------------------------------------------------------------------------- #
 
-_SESSION = None
-
-
-class _Resolver(aiohttp.ThreadedResolver):
-    """aiohttp's ThreadedResolver, its answers and errors unchanged, with
-    its lookups on DNS threads of its own rather than the loop's default
-    executor: there a lookup could queue behind asyncio.to_thread workers
-    that wait on this loop (run_sync), and never run."""
-
-    def __init__(self):
-        self._loop = self                # resolve() calls the two below
-        self._pool = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="dns")
-
-    def getaddrinfo(self, *args, **kwargs):
-        return asyncio.get_running_loop().run_in_executor(
-            self._pool, partial(socket.getaddrinfo, *args, **kwargs))
-
-    def getnameinfo(self, *args):
-        return asyncio.get_running_loop().run_in_executor(
-            self._pool, socket.getnameinfo, *args)
-
-
-def _session():
-    """The one aiohttp session, made on the network loop at first use.
+def _open_session():
+    """A run's aiohttp session, closed as the run ends.
 
     Notes:
         What requests did, where it matters: its CA bundle and TLS
@@ -263,21 +90,24 @@ def _session():
         that takes IP-address hosts and sends values unquoted, header
         lines up to http.client's 64 KiB. trust_env stays False: no proxy
         or CA-bundle environment variables, where requests read them.
+        Names resolve through aiohttp's ThreadedResolver, on the loop's
+        default executor, where no work waits on the loop.
     """
-    global _SESSION
-    if _SESSION is None:
-        tls = create_urllib3_context()
-        tls.load_verify_locations(certs.where())
-        tls.sslobject_class = _Handshake
-        _SESSION = aiohttp.ClientSession(
-            connector=aiohttp.TCPConnector(limit=100, ssl=tls,
-                                           keepalive_timeout=30,
-                                           ttl_dns_cache=300,
-                                           resolver=_Resolver()),
-            timeout=_timeout(DEFAULT_TIMEOUT),
-            cookie_jar=aiohttp.CookieJar(unsafe=True, quote_cookie=False),
-            max_line_size=65536, max_field_size=65536)
-    return _SESSION
+    tls = create_urllib3_context()
+    tls.load_verify_locations(certs.where())
+    tls.sslobject_class = _Handshake
+    session = aiohttp.ClientSession(
+        connector=aiohttp.TCPConnector(limit=100, ssl=tls, keepalive_timeout=30,
+                                       ttl_dns_cache=300),
+        timeout=_timeout(DEFAULT_TIMEOUT),
+        cookie_jar=aiohttp.CookieJar(unsafe=True, quote_cookie=False),
+        max_line_size=65536, max_field_size=65536)
+    runstate.at_exit(session.close, last=True)
+    return session
+
+
+#: This run's aiohttp session, opened at its first request.
+_session = runstate.per_run(_open_session)
 
 
 def _timeout(t):
@@ -457,7 +287,7 @@ async def _exchange(method, url, polite=True, timeout=None,
         if polite and origin_of(req.url) not in origins:
             origins.add(origin_of(req.url))
             from .robots import CACHE       # robots.py imports this module
-            await CACHE.wait_turn(req.url)
+            await CACHE().wait_turn(req.url)
         r = await _hop(req, limit)
     r.history = hops
     return r
@@ -484,10 +314,11 @@ async def send(method, url, *, polite=True, **kw):
         return await _exchange(method, url, polite=False, **kw)
     # Imported here: robots.py imports this module.
     from .robots import CACHE, RobotsDisallowed
-    if not await CACHE.allowed(url):
+    robots = CACHE()
+    if not await robots.allowed(url):
         _log.debug("%s %s -> robots.txt disallow", method, url)
         raise RobotsDisallowed(f"robots.txt disallows {url}")
-    await CACHE.wait_turn(url)
+    await robots.wait_turn(url)
     try:
         r = await _exchange(method, url, **kw)
     except Exception as e:
@@ -515,30 +346,14 @@ class HostLimiter:
             slot[1] = time.monotonic() + gap
 
 
-#: The process's one limiter: robots.txt's Crawl-delay feeds it.
+#: The process's one limiter: robots.txt's Crawl-delay feeds it. Not run
+#: state (src/runstate.py): a host's Crawl-delay spans runs, which follow
+#: one another (the web UI's ops, the timed harvester's passes) and can
+#: overlap (a web UI request beside an op).
 LIMITER = HostLimiter()
 
 
-class SyncSession:
-    """requests.Session's get and post over `send`, for the threads that
-    are not async yet: each call blocks its thread in run_sync and returns
-    the requests.Response. `polite` is send's."""
-
-    def __init__(self, polite=True):
-        self.polite = polite
-
-    def get(self, url, **kw):
-        return run_sync(send("GET", url, polite=self.polite, **kw))
-
-    def post(self, url, **kw):
-        return run_sync(send("POST", url, polite=self.polite, **kw))
-
-
-#: The crawler's session: every fetcher's requests are polite.
-SESSION = SyncSession()
-
-
-async def arequest(method, url, label=None, **kw):
+async def request(method, url, label=None, **kw):
     """(status, response, error) for one polite request, HEADERS under the
     call's own.
 
@@ -558,7 +373,7 @@ async def arequest(method, url, label=None, **kw):
 
 
 def _json_of(status, r, err, label):
-    """arequest_json's answer from arequest's: "empty response" and
+    """request_json's answer from request's: "empty response" and
     "non-JSON response" are errors too."""
     if err:
         return status, None, err
@@ -570,16 +385,16 @@ def _json_of(status, r, err, label):
         return status, None, failed(label, "non-JSON response")
 
 
-async def arequest_json(method, url, label=None, **kw):
-    """(status, payload, error) for one JSON request: `arequest`'s, plus
+async def request_json(method, url, label=None, **kw):
+    """(status, payload, error) for one JSON request: `request`'s, plus
     "empty response" and "non-JSON response" as errors. The JSON is
     decoded off the loop, its failure counted here (`_account`)."""
     _account()
-    return await asyncio.to_thread(_json_of, *await arequest(method, url, label, **kw), label)
+    return await asyncio.to_thread(_json_of, *await request(method, url, label, **kw), label)
 
 
-async def aget_json(url, label, default=None, **kw):
-    """The endpoint's JSON, or `default` -- reported (`arequest_json`'s
+async def get_json(url, label, default=None, **kw):
+    """The endpoint's JSON, or `default` -- reported (`request_json`'s
     reasons), never raised.
 
     A board that 500s, comes back empty, answers with something that will
@@ -601,7 +416,7 @@ async def aget_json(url, label, default=None, **kw):
         Nine fetchers wrote this out, three of them having already named
         it (`api._get_board`, `hnhiring._get_json`, `company._get_json`).
     """
-    _status, data, err = await arequest_json("GET", url, label, **kw)
+    _status, data, err = await request_json("GET", url, label, **kw)
     return default if err else data
 
 
@@ -627,16 +442,14 @@ class _Account:
         self.n, self.last, self.capped, self.total = 0, None, False, None
 
 
-#: The current fetch attempt's accounting. A thread starts with an empty
-#: context of its own and keeps it across a pool's work items, so this is
-#: per thread under the pools, as threading.local was, and per task under
-#: asyncio.
+#: The current fetch attempt's accounting: per task.
 _ACCOUNT = contextvars.ContextVar("fetch_account")
 
 
 def _account():
     """This context's accounting, made on first use. A holder, not values:
-    run_sync's task runs in a copy of the context, and still counts here."""
+    an asyncio.to_thread worker runs in a copy of its task's context, and
+    still counts here."""
     acct = _ACCOUNT.get(None)
     if acct is None:
         acct = _Account()
@@ -681,7 +494,7 @@ def fetch_failures():
 def reset_fetch_failures():
     """Start this context's fetch accounting from zero: the failure count,
     the last-failure message, and the capped marker. One call per fetch
-    attempt, where it runs (crawl.harvest.aharvest_board,
+    attempt, where it runs (crawl.harvest.harvest_board,
     net.parallel.fetch_all)."""
     _ACCOUNT.set(_Account())
 
@@ -759,20 +572,17 @@ class HostBreaker:
     def __init__(self, ttl, trips=1):
         self.ttl, self.trips = ttl, trips
         self._hits = {}     # host -> (last refusal, refusals in a row)
-        self._lock = threading.Lock()
 
     def trip(self, url):
         host, now = host_of(url), time.time()
         if host:
-            with self._lock:
-                last, n = self._hits.get(host, (0.0, 0))
-                self._hits[host] = (now, n + 1 if now - last < self.ttl else 1)
+            last, n = self._hits.get(host, (0.0, 0))
+            self._hits[host] = (now, n + 1 if now - last < self.ttl else 1)
 
     def dead(self, url):
         host = host_of(url)
-        with self._lock:
-            hit = self._hits.get(host)
-            if hit and time.time() - hit[0] >= self.ttl:
-                del self._hits[host]
-                return False
-            return bool(hit) and hit[1] >= self.trips
+        hit = self._hits.get(host)
+        if hit and time.time() - hit[0] >= self.ttl:
+            del self._hits[host]
+            return False
+        return bool(hit) and hit[1] >= self.trips

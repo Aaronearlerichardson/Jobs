@@ -4,10 +4,10 @@ from src.net import http
 from src.net.http import JSON_HEADERS
 
 
-async def afetch_discourse(display_name, base_url, category_id, gate=None):
+async def fetch_discourse(display_name, base_url, category_id, gate=None):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
-    data = await http.aget_json(url, f"Discourse {display_name}", default={},
-                                headers=JSON_HEADERS)
+    data = await http.get_json(url, f"Discourse {display_name}", default={},
+                               headers=JSON_HEADERS)
     topics = (data.get("topic_list") or {}).get("topics", []) if data else []
     jobs = []
     for t in topics:
@@ -28,6 +28,3 @@ async def afetch_discourse(display_name, base_url, category_id, gate=None):
                 "description": "",
             })
     return jobs
-
-
-fetch_discourse = http.sync_shim(afetch_discourse)

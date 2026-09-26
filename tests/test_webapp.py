@@ -13,6 +13,7 @@ import pytest
 
 from conftest import answer, run_web_op
 from src import web
+from src.web.server import call
 
 
 class TestGeoBucket:
@@ -583,7 +584,7 @@ class TestOpConcurrency:
     a tee that appends to TASK["log"], the second tee wrapped the first and
     every printed line was recorded once per layer. The duplicate output in
     the run log was the visible half; the duplicated work was the expensive
-    half. The slot is claimed on the network loop now, one request at a
+    half. The slot is claimed on the web UI's loop now, one request at a
     time, so the race cannot exist.
     """
 
@@ -596,9 +597,9 @@ class TestOpConcurrency:
         return fn
 
     def test_simultaneous_claims_start_exactly_one(self):
-        """Twelve threads submit at (as near as the OS allows) the same
-        instant, behind a Barrier: one starts, the rest queue as the one
-        waiting entry they all name."""
+        """Twelve request threads submit through the web UI's loop at (as
+        near as the OS allows) the same instant, behind a Barrier: one
+        starts, the rest queue as the one waiting entry they all name."""
         from src.dispatch import background as ops
         from src.dispatch.registry import OpParams
         results, lock = [], threading.Lock()
@@ -610,7 +611,7 @@ class TestOpConcurrency:
 
         def claim():
             barrier.wait()
-            r = ops.submit("x", OpParams(), held)
+            r = call(ops.submit("x", OpParams(), held))
             with lock:
                 results.append(r)
 
@@ -619,11 +620,11 @@ class TestOpConcurrency:
             t.start()
         for t in threads:
             t.join()
-        ops.queue_clear()
+        call(ops.queue_clear())
         done.set()
         assert results.count(None) == 1, "more than one op claimed the slot"
         assert sorted(r["duplicate"] for r in results if r) == [False] + [True] * 10
-        while ops.status()["running"]:
+        while call(ops.status())["running"]:
             time.sleep(0.02)
 
     def test_log_records_each_line_once(self):
@@ -633,9 +634,11 @@ class TestOpConcurrency:
 
     def test_stdout_is_restored_when_the_op_ends(self):
         import sys
+        from src.dispatch import background as ops
         before = sys.stdout
         run_web_op("solo", self._noisy("z", lines=1))
         assert sys.stdout is before, "the tee outlived its operation"
+        assert ops.TASK["task"] is None, "the ended op's task is still held"
 
     def test_a_failing_op_still_restores_stdout_and_frees_the_slot(self):
         import sys
@@ -653,24 +656,29 @@ class TestOpConcurrency:
         from src.dispatch import background as ops
         n = len(run_web_op("solo", self._noisy("q", lines=1))["lines"])
         print("this line belongs to no operation")
-        assert len(ops.status()["lines"]) == n
+        assert len(call(ops.status())["lines"]) == n
 
 
 class TestOpRearmsTheClaudeBreaker:
-    """src.claude's breaker is process-lifetime; the server process outlives
-    many operations. 2026-09-09: a crawl tripped it at 18:22, and the verify
-    runs at 18:29 and 19:24 skipped every Claude call without saying why."""
+    """src.claude's breaker is per run, and the server process outlives
+    many operations, each a run of its own. 2026-09-09: a crawl tripped it
+    at 18:22, and the verify runs at 18:29 and 19:24 skipped every Claude
+    call without saying why."""
 
-    def test_run_op_resets_a_tripped_breaker(self, monkeypatch):
+    def test_the_next_op_has_an_armed_breaker(self):
         from src.claude import api
-        monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
-        seen = {}
+        seen = []
+
+        async def trip():
+            api._trip_fatal("HTTP 400: 'credit balance'")
+            seen.append(api.api_disabled())
 
         async def probe():
-            seen["disabled"] = api.api_disabled()
+            seen.append(api.api_disabled())
 
+        run_web_op("trip", trip)
         run_web_op("probe", probe)
-        assert seen["disabled"] is None
+        assert seen == ["HTTP 400: 'credit balance'", None]
 
 
 class TestRunQueue:
@@ -747,12 +755,12 @@ class TestRunQueue:
         # half way through a queue: drop what is waiting FIRST, so releasing
         # the gates cannot chain another op into life, then let whatever is
         # running finish.
-        ops.queue_clear()
+        call(ops.queue_clear())
         for gate in gates.values():
             gate.set()
         self._wait_for(client, lambda s: not s["running"],
                        "the runner to go idle")
-        ops.queue_clear()
+        call(ops.queue_clear())
 
     def test_a_second_run_is_queued_rather_than_refused(self, client,
                                                         stub_ops):
@@ -944,16 +952,15 @@ class TestRunQueue:
         the slot is handed on all the same."""
         from src.dispatch import background as ops
         from src.dispatch.registry import OpParams
-        from src.net import http
         ran = []
 
         async def body():
             ran.append("body")
 
         async def race():
-            assert await ops.asubmit("q-first", OpParams(), body) is None
-            return await ops.astop()
-        assert http.run_sync(race()) is True
+            assert await ops.submit("q-first", OpParams(), body) is None
+            return await ops.stop()
+        assert call(race()) is True
         s = self._wait_for(client, lambda s: not s["running"], "the slot to be freed")
         assert (s["name"], s["stopped"], ran) == ("q-first", True, [])
         assert run_web_op("q-after", body)["stopped"] is False
@@ -1055,7 +1062,7 @@ class TestRunQueue:
             assert resp.status_code == 409
             assert "run queue" in json.loads(resp.data)["error"]
         finally:
-            ops.queue_clear()
+            call(ops.queue_clear())
 
     # ----------------------------------------------------------------- #
     #  The paste flow is not an operation and must not wait for one       #

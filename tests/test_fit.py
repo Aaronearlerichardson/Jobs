@@ -141,37 +141,37 @@ class TestGateOverrides:
         return fit.combine(res.axes, [], fit.config.FIT_WEIGHTS,
                            fit.config.FIT_GATE_PENALTY)
 
-    def test_score_resume_fit_applies_it(self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.FitReply(
+    async def test_score_resume_fit_applies_it(self, monkeypatch, local_addr):
+        monkeypatch.setattr(fit, "call_claude_json", answer(fit.FitReply(
             domain=.8, function=.8, stack=.7, seniority=1.0,
             gates=["geo", "clearance"], reason="good lane")))
         body = ("Build neural data pipelines. " * 20
                 + "Applicants must be eligible to obtain a U.S. security "
                   "clearance.")
-        res = fit.score_resume_fit("ML Engineer", body, location=local_addr)
+        res = await fit.score_resume_fit("ML Engineer", body, location=local_addr)
         assert res.gates == []
         assert res.score == self._ungated(res)
         assert "gate:" not in res.summary()
 
-    def test_verify_fit_applies_it_without_disarming_its_own_backstops(
+    async def test_verify_fit_applies_it_without_disarming_its_own_backstops(
             self, monkeypatch, local_addr):
-        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.VerifyReply(
+        monkeypatch.setattr(fit, "call_claude_json", answer(fit.VerifyReply(
             years_required=None, seat_type="management", must_haves=[],
             candidate_gaps=[], domain=.8, function=.8, stack=.7,
             seniority=1.0, gates=["geo"], reason="deep")))
-        res = fit.verify_fit("Program Lead", "x " * 200, location=local_addr)
+        res = await fit.verify_fit("Program Lead", "x " * 200, location=local_addr)
         assert res.gates == ["management"]      # geo stripped, seat gate kept
 
-    def test_the_add_side_backstop_still_wins(self, monkeypatch, local_addr):
+    async def test_the_add_side_backstop_still_wins(self, monkeypatch, local_addr):
         # A local posting that really does demand an active clearance keeps
         # it: the strip must not undo the regex that just added it.
-        monkeypatch.setattr(fit, "acall_claude_json", answer(fit.FitReply(
+        monkeypatch.setattr(fit, "call_claude_json", answer(fit.FitReply(
             domain=.8, function=.8, stack=.7, seniority=1.0,
             gates=[], reason="cleared shop")))
         body = ("Signal processing work. " * 20
                 + "Must hold an active TS/SCI clearance; eligibility to "
                   "upgrade is a plus.")
-        res = fit.score_resume_fit("DSP Engineer", body, location=local_addr)
+        res = await fit.score_resume_fit("DSP Engineer", body, location=local_addr)
         assert res.gates == ["clearance"]
 
 
@@ -187,7 +187,7 @@ class TestUnscoredCause:
     def test_an_unrecognized_reason_is_not_a_verdict_either(self):
         assert fit.unscored_cause("some future reason") is None
 
-    def test_a_body_long_enough_to_reach_the_api_never_takes_the_short_path(
+    async def test_a_body_long_enough_to_reach_the_api_never_takes_the_short_path(
             self, monkeypatch):
         # self_heal_unscored only calls in here once its OWN query has
         # already guaranteed length >= MIN_DESC_CHARS; this pins that the
@@ -196,26 +196,26 @@ class TestUnscoredCause:
         # REFUSED class (rather than needing the exact HTTP-level cause
         # from src.claude.api) sound.
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-        monkeypatch.setattr(fit, "acall_claude_json", answer(None))
-        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        monkeypatch.setattr(fit, "call_claude_json", answer(None))
+        res = await fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
         assert res.score is None
         assert fit.unscored_cause(res.reason) == "refused"
 
-    def test_a_scorer_that_never_asked_is_not_a_refusal(self, monkeypatch):
+    async def test_a_scorer_that_never_asked_is_not_a_refusal(self, monkeypatch):
         # No key, and a tripped breaker, both make call_claude_json return
         # None WITHOUT asking the model. Reporting those as "unscored" would
         # let ops.scoring's retry marker hold a perfectly scorable row
         # for UNSCORED_RETRY_DAYS over one billing hiccup.
-        monkeypatch.setattr(fit, "acall_claude_json", answer(None))
+        monkeypatch.setattr(fit, "call_claude_json", answer(None))
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY",
                             "YOUR_ANTHROPIC_API_KEY_HERE")
-        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        res = await fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
         assert (res.score, res.reason) == (None, "scorer unavailable")
         assert fit.unscored_cause(res.reason) is None
 
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
         monkeypatch.setattr(fit, "api_disabled", lambda: "credit balance")
-        res = fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
+        res = await fit.score_resume_fit("T", "x" * fit.MIN_DESC_CHARS)
         assert fit.unscored_cause(res.reason) is None
 
 
@@ -229,12 +229,12 @@ class TestPrompts:
             "years_required", "seat_type", "must_haves", "candidate_gaps",
             "domain"]
 
-    def test_verify_refuses_stub_descriptions(self):
-        assert fit.verify_fit("T", "too short").score is None
+    async def test_verify_refuses_stub_descriptions(self):
+        assert (await fit.verify_fit("T", "too short")).score is None
 
     @pytest.mark.parametrize("scorer", [fit.score_resume_fit, fit.verify_fit])
-    def test_the_stored_location_reaches_the_user_turn_only(self, monkeypatch,
-                                                             scorer):
+    async def test_the_stored_location_reaches_the_user_turn_only(self, monkeypatch,
+                                                                  scorer):
         # Both scorers build the turn with fit._user_turn, whose doctest pins
         # the rendering. This pins that each one hands the location over,
         # and that it never reaches the cached system prompt.
@@ -244,14 +244,14 @@ class TestPrompts:
             seen.update(system=system, user=user)
             return None                     # -> unscored, score None
 
-        monkeypatch.setattr(fit, "acall_claude_json", fake)
+        monkeypatch.setattr(fit, "call_claude_json", fake)
         body = "x" * (fit.MIN_DESC_CHARS + 10)
-        scorer("ML Engineer", body, location="Nowhereville, TX")
+        await scorer("ML Engineer", body, location="Nowhereville, TX")
         assert "JOB LOCATION (stored): Nowhereville, TX\n" in seen["user"]
         assert "Nowhereville" not in seen["system"]
         # ...while the rule for reading that line is in both prompts.
         assert '"JOB LOCATION (stored)" line' in seen["system"]
-        scorer("ML Engineer", body)          # no location -> no line
+        await scorer("ML Engineer", body)    # no location -> no line
         assert "JOB LOCATION" not in seen["user"]
 
 

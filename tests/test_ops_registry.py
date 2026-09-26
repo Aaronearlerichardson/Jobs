@@ -72,33 +72,33 @@ class TestTable:
 
 
 class TestInvoke:
-    def test_resolves_the_track_from_params_or_the_default(self, patch_op):
+    async def test_resolves_the_track_from_params_or_the_default(self, patch_op):
         seen = {}
         patch_op("sync", lambda **kw: seen.update(kw))
-        registry.invoke("sync", {"top": "7"})
+        await registry.invoke("sync", {"top": "7"})
         assert seen == {"top_n": 7, "t": config.UI_TRACKS[config.DEFAULT_TRACK]}
-        registry.invoke("sync", {}, track=None)
+        await registry.invoke("sync", {}, track=None)
         assert seen == {"top_n": 15, "t": None}
 
-    def test_unknown_op_raises(self):
+    async def test_unknown_op_raises(self):
         with pytest.raises(KeyError):
-            registry.invoke("no-such-op", {})
+            await registry.invoke("no-such-op", {})
 
-    def test_blank_is_absent_but_false_is_a_value(self, patch_op):
+    async def test_blank_is_absent_but_false_is_a_value(self, patch_op):
         """A blank web field takes the default (a blank `workers` leaves
         max_workers to the target); argparse's False for an unset
         store_true flag is a real value (rescore's described_only)."""
         seen = {}
         patch_op("rescore", lambda **kw: seen.update(kw))
-        registry.invoke("rescore", {"described_only": False, "workers": ""},
-                        track=None)
+        await registry.invoke("rescore", {"described_only": False, "workers": ""},
+                              track=None)
         assert seen == {"described_only": False, "t": None}
 
-    def test_bad_params_fail_by_key_before_the_target_runs(self, patch_op):
+    async def test_bad_params_fail_by_key_before_the_target_runs(self, patch_op):
         seen = []
         patch_op("check-closed", lambda **kw: seen.append(kw))
         with pytest.raises(registry.ParamError) as err:
-            registry.invoke("check-closed", {"limit": "many", "stale": 3})
+            await registry.invoke("check-closed", {"limit": "many", "stale": 3})
         assert [ln.split(":")[0] for ln in err.value.lines] == ["limit", "stale"]
         assert seen == []
 
@@ -111,13 +111,12 @@ class TestWebView:
             assert set(o) == {"label", "engine", "params", "fn"}, name
             assert o["label"] == registry.REGISTRY[name]["label"]
 
-    def test_fn_runs_the_registry_with_the_posted_params(self, patch_op):
+    async def test_fn_runs_the_registry_with_the_posted_params(self, patch_op):
         from src import web
-        from src.net import http
         seen = {}
         patch_op("check-closed", lambda **kw: seen.update(kw))
-        http.run_sync(web.OPS["check-closed"]["fn"]({
-            "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK}))
+        await web.OPS["check-closed"]["fn"]({
+            "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK})
         assert seen["stale_days"] == 3 and seen["limit"] is None
         assert seen["t"]["id"] == config.DEFAULT_TRACK
         assert "max_workers" not in seen        # the target's own default
@@ -145,8 +144,10 @@ class TestCliDispatch:
     @pytest.fixture
     def calls(self, monkeypatch):
         seen = []
-        monkeypatch.setattr(registry, "invoke",
-                            lambda name, params, track=None: seen.append((name, params, track)))
+
+        async def invoke(name, params, track=None):
+            seen.append((name, params, track))
+        monkeypatch.setattr(registry, "invoke", invoke)
         return seen
 
     def _handler(self, dest):
@@ -192,8 +193,10 @@ class TestCliDispatch:
 class TestDiscoverDispatch:
     def test_flags_map_onto_registry_ops(self, monkeypatch):
         seen = []
-        monkeypatch.setattr(registry, "invoke",
-                            lambda name, params, track=None: seen.append((name, params)))
+
+        async def invoke(name, params, track=None):
+            seen.append((name, params))
+        monkeypatch.setattr(registry, "invoke", invoke)
         cmds = dict(discover.__dict__["_COMMANDS"])
         cmds["add_board"](SimpleNamespace(add_board=["Acme", "https://x"], capture=True))
         cmds["rescore_missions"](SimpleNamespace(rescore_missions=True))

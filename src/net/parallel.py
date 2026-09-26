@@ -1,4 +1,4 @@
-"""Concurrent work on the network loop.
+"""Concurrent work as tasks on the event loop.
 
 Fetchers are network-bound and independent per source, so running them
 together takes a ~30-source crawl from minutes (serial + sleeps) to
@@ -13,7 +13,6 @@ keep dedupe deterministic regardless of completion order.
 """
 
 import asyncio
-import threading
 import time
 
 from src import config
@@ -44,14 +43,14 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     ...     return n * 10
     >>> async def results(gen):
     ...     return [x async for x in gen]
-    >>> sorted(http.run_sync(results(fan_out([1, 2, 3], tenfold))))
+    >>> sorted(asyncio.run(results(fan_out([1, 2, 3], tenfold))))
     [10, 20, 30]
 
     `with_item=True` yields (item, result):
 
     >>> async def size(s):
     ...     return len(s)
-    >>> sorted(http.run_sync(results(fan_out(["a", "bb"], size, with_item=True))))
+    >>> sorted(asyncio.run(results(fan_out(["a", "bb"], size, with_item=True))))
     [('a', 1), ('bb', 2)]
 
     Each call counts its own fetch failures (net.http.fetch_failures):
@@ -61,7 +60,7 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     ...         return http.fetch_failed("item 1", "timeout", indent=0)
     ...     await asyncio.sleep(0.05)
     ...     return http.fetch_failures()
-    >>> http.run_sync(results(fan_out([0, 1], count)))
+    >>> asyncio.run(results(fan_out([0, 1], count)))
     [!] item 1: timeout
     [[], 0]
 
@@ -79,7 +78,7 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     >>> async def slow(n):
     ...     await asyncio.sleep(n)
     ...     return n
-    >>> http.run_sync(results(fan_out([0, 5], slow, str, budget_s=0.2)))
+    >>> asyncio.run(results(fan_out([0, 5], slow, str, budget_s=0.2)))
         [!] 5: past its 0.2s budget - abandoned
     [0]
 
@@ -155,7 +154,7 @@ async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
     >>> async def ok():
     ...     return [1]
     >>> [(jobs, snap["incomplete"]) for jobs, _, snap in
-    ...  http.run_sync(fetch_all([("bad", "x", bad), ("ok", "x", ok)]))]
+    ...  asyncio.run(fetch_all([("bad", "x", bad), ("ok", "x", ok)]))]
     [!] bad: timeout
     [([], True), ([1], False)]
 
@@ -163,7 +162,7 @@ async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
 
     >>> async def boom():
     ...     raise OSError("refused")
-    >>> http.run_sync(fetch_all([("dead", "x", boom)]))
+    >>> asyncio.run(fetch_all([("dead", "x", boom)]))
     [([], OSError('refused'), None)]
 
     So is a source still unfinished when `budget_s` (default
@@ -172,7 +171,7 @@ async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
 
     >>> async def hung():
     ...     await asyncio.sleep(5)
-    >>> http.run_sync(fetch_all([("slow", "x", hung)], budget_s=0.2))
+    >>> asyncio.run(fetch_all([("slow", "x", hung)], budget_s=0.2))
         [!] slow: past its 0.2s budget - abandoned
     [([], TimeoutError('past its 0.2s budget'), None)]
 
@@ -205,26 +204,24 @@ async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
 class SingleFlight:
     """A per-key memo that concurrent callers of one key fill ONCE.
 
-    `do(key, make, ttl)` returns the value kept for `key`, else make()'s:
-    a caller arriving while another runs make() for the same key waits
-    for it and reads the value it kept. A value is kept for `ttl` seconds
-    (for good when None), and only when `keep(value)` holds; with nothing
-    kept, each caller runs make() itself, one at a time.
+    `await do(key, make, ttl)` returns the value kept for `key`, else
+    `await make()`'s: a caller arriving while another awaits make() for the
+    same key waits for it and reads the value it kept. A value is kept for
+    `ttl` seconds (for good when None), and only when `keep(value)` holds;
+    with nothing kept, each caller runs make() itself, one at a time.
 
     >>> calls = []
+    >>> async def made():
+    ...     return calls.append(1) or "v"
+    >>> async def nothing():
+    ...     calls.append(1)
     >>> memo = SingleFlight(keep=lambda v: v is not None)
-    >>> [memo.do("k", lambda: calls.append(1) or "v") for _ in "ab"], len(calls)
+    >>> async def twice(key, make):
+    ...     return [await memo.do(key, make) for _ in "ab"]
+    >>> asyncio.run(twice("k", made)), len(calls)
     (['v', 'v'], 1)
-    >>> [memo.do("n", lambda: calls.append(1)) for _ in "ab"], len(calls)
+    >>> asyncio.run(twice("n", nothing)), len(calls)
     ([None, None], 3)
-
-    `ado` is `do` for a coroutine function `make`, its callers tasks on
-    one event loop:
-
-    >>> async def make():
-    ...     return calls.append(1) or "w"
-    >>> [http.run_sync(memo.ado("a", make)) for _ in "ab"], len(calls)
-    (['w', 'w'], 4)
 
     `hold(key)` is the lock a maker of `key` holds, for a value kept
     somewhere else (the board engine's settled handle parts).
@@ -234,35 +231,20 @@ class SingleFlight:
         self._keep = keep
         self._memo = {}                 # key -> (expires or None, value)
         self._locks = {}
-        self._guard = threading.Lock()
 
-    def clear(self):
-        """Forget every kept value."""
-        self._memo.clear()
-
-    def hold(self, key, aio=False):
-        """The lock one maker of `key` holds at a time: a thread's, or with
-        `aio` a task's (an asyncio.Lock)."""
-        with self._guard:
-            return self._locks.setdefault((key, aio), asyncio.Lock() if aio else threading.Lock())
+    def hold(self, key):
+        """The asyncio.Lock one maker of `key` holds at a time."""
+        return self._locks.setdefault(key, asyncio.Lock())
 
     def _kept(self, key):
         got = self._memo.get(key)
         return got if got and (got[0] is None or time.monotonic() < got[0]) else None
 
-    def do(self, key, make, ttl=None):
+    async def do(self, key, make, ttl=None):
         """The value kept for `key`, else make()'s (see the class)."""
         got = self._kept(key)
         if got is None:
-            with self.hold(key):
-                got = self._kept(key) or self._made(key, make(), ttl)
-        return got[1]
-
-    async def ado(self, key, make, ttl=None):
-        """`do` for a coroutine function `make` (see the class)."""
-        got = self._kept(key)
-        if got is None:
-            async with self.hold(key, aio=True):
+            async with self.hold(key):
                 got = self._kept(key) or self._made(key, await make(), ttl)
         return got[1]
 

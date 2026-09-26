@@ -33,12 +33,12 @@ host, paced. Nothing is written to the store.
 """
 
 import argparse
+import asyncio
 import contextlib
 import io
 import json
 import re
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,8 +51,9 @@ from tools._harness import BLOCKED_RE, blame, console_utf8   # noqa: E402
 
 console_utf8()
 
-from src import config                                       # noqa: E402
-from src.net.http import SESSION, HEADERS, SyncSession, run_sync  # noqa: E402
+from src import config, runstate                             # noqa: E402
+from src.net import http                                     # noqa: E402
+from src.net.http import HEADERS                             # noqa: E402
 from src.net.robots import CACHE as ROBOTS         # noqa: E402
 from src.net.util import origin_of                # noqa: E402
 
@@ -141,18 +142,18 @@ ROBOTS_TARGETS = [
 ]
 
 
-def probe_robots(label, url):
+async def probe_robots(label, url):
     """What does this host's robots.txt say about the path we'd fetch?"""
     origin = origin_of(url)
     started = time.monotonic()
     code, note = None, ""
     try:
-        # A plain session, NOT the crawler's SESSION: the session is
+        # A plain request, NOT the crawler's polite one: that is
         # robots-aware, so on a host with `Disallow: /` it refuses to fetch
         # the very robots.txt we are trying to read, and the probe reports a
         # transport failure for what is actually a policy decision.
-        r = SyncSession(polite=False).get(f"{origin}/robots.txt", timeout=12,
-                                          headers=HEADERS, allow_redirects=True)
+        r = await http.send("GET", f"{origin}/robots.txt", polite=False, timeout=12,
+                            headers=HEADERS, allow_redirects=True)
         code = r.status_code
         body = r.text if r.status_code < 400 else ""
     except Exception as e:
@@ -160,8 +161,8 @@ def probe_robots(label, url):
 
     # The crawler's own decision, through the same cache the crawl uses.
     try:
-        allowed = run_sync(ROBOTS.allowed(url))
-        delay = run_sync(ROBOTS.crawl_delay(url))
+        allowed = await ROBOTS().allowed(url)
+        delay = await ROBOTS().crawl_delay(url)
     except Exception as e:
         allowed, delay, note = True, None, note or f"{type(e).__name__}: {e}"
 
@@ -190,31 +191,33 @@ def probe_robots(label, url):
 #  2. aggregator feeds                                                         #
 # --------------------------------------------------------------------------- #
 
-class _ThreadCapture:
-    """A stdout stand-in that routes each thread's writes to its own buffer.
+class _TaskCapture:
+    """A stdout stand-in that routes each task's writes to its own buffer.
 
     `contextlib.redirect_stdout` swaps the GLOBAL `sys.stdout` and restores it
-    on exit, which is fine sequentially and silently destructive in a thread
-    pool: one worker restores the real stdout while another still holds the
-    redirect, and every later print lands in a StringIO nobody reads — the
-    roster probe ran to completion and printed nothing at all. Installed once
-    for a whole threaded section instead, with per-thread buffers.
+    on exit, which is fine sequentially and silently destructive across
+    concurrent tasks: one restores the real stdout while another still holds
+    the redirect, and every later print lands in a StringIO nobody reads —
+    the roster probe ran to completion and printed nothing at all. Installed
+    once for a whole concurrent section instead, with per-task buffers.
     """
 
     def __init__(self, passthrough):
-        self._buffers = threading.local()
+        self._buffers = {}
         self._passthrough = passthrough
 
     def start(self):
-        self._buffers.buf = io.StringIO()
+        self._buffers[asyncio.current_task()] = io.StringIO()
 
     def take(self):
-        buf = getattr(self._buffers, "buf", None)
-        self._buffers.buf = None
+        buf = self._buffers.pop(asyncio.current_task(), None)
         return " ".join(buf.getvalue().split()) if buf else ""
 
     def write(self, s):
-        buf = getattr(self._buffers, "buf", None)
+        try:
+            buf = self._buffers.get(asyncio.current_task())
+        except RuntimeError:                # a thread's print: no task
+            buf = None
         (buf or self._passthrough).write(s)
         return len(s)
 
@@ -222,30 +225,30 @@ class _ThreadCapture:
         self._passthrough.flush()
 
 
-def _run_fetcher(fn, *a, **kw):
-    """Call a fetcher, capturing the diagnostics it prints. Returns
+async def _run_fetcher(fn, *a, **kw):
+    """Await a fetcher, capturing the diagnostics it prints. Returns
     (rows, note, exception_text).
 
-    Thread-safe when `sys.stdout` is a _ThreadCapture (the roster path);
-    falls back to a plain redirect for the sequential sections."""
-    cap = sys.stdout if isinstance(sys.stdout, _ThreadCapture) else None
+    Safe across tasks when `sys.stdout` is a _TaskCapture (the roster
+    path); falls back to a plain redirect for the sequential sections."""
+    cap = sys.stdout if isinstance(sys.stdout, _TaskCapture) else None
     if cap is not None:
         cap.start()
         try:
-            rows = fn(*a, **kw)
+            rows = await fn(*a, **kw)
             return rows or [], cap.take(), ""
         except Exception as e:
             return [], cap.take(), f"{type(e).__name__}: {e}"
     buf = io.StringIO()
     try:
         with contextlib.redirect_stdout(buf):
-            rows = fn(*a, **kw)
+            rows = await fn(*a, **kw)
         return rows or [], " ".join(buf.getvalue().split()), ""
     except Exception as e:
         return [], " ".join(buf.getvalue().split()), f"{type(e).__name__}: {e}"
 
 
-def probe_feeds():
+async def probe_feeds():
     from src.ats.feeds import (fetch_hnhiring, fetch_remoteok,
                                fetch_remotive, fetch_rss)
 
@@ -259,14 +262,14 @@ def probe_feeds():
 
     for label, call in checks:
         started = time.monotonic()
-        rows, note, exc = _run_fetcher(call)
+        rows, note, exc = await _run_fetcher(call)
         status = verdict(f"{note} {exc}", bool(rows))
         detail = (f"{len(rows)} postings" if rows
                   else (exc or note or "0 postings, no diagnostic")[:110])
         out.append({"section": "feeds", "name": label, "status": status,
                     "detail": detail, "rows": len(rows),
                     "seconds": round(time.monotonic() - started, 1)})
-        time.sleep(1.0)
+        await asyncio.sleep(1.0)
     return out
 
 
@@ -286,7 +289,7 @@ SEARCH_QUERIES = [
 ]
 
 
-def probe_search(deep=False):
+async def probe_search(deep=False):
     from src.net.ddg import search as ddg_text
 
     out = []
@@ -296,7 +299,7 @@ def probe_search(deep=False):
                        ("ddg lite endpoint", "https://lite.duckduckgo.com/lite/?q=test")):
         started = time.monotonic()
         try:
-            r = SESSION.get(url, timeout=20, headers=HEADERS)
+            r = await http.send("GET", url, timeout=20, headers=HEADERS)
             body = r.text[:4000].lower()
             challenged = any(s in body for s in
                              ("captcha", "unusual traffic", "are you a robot",
@@ -310,14 +313,14 @@ def probe_search(deep=False):
         out.append({"section": "search", "name": label, "status": status,
                     "detail": detail,
                     "seconds": round(time.monotonic() - started, 1)})
-        time.sleep(1.5)
+        await asyncio.sleep(1.5)
 
     # -- layer 2: the wrapper the crawl actually calls ---------------------
     # NB: ddg_text caches hits for 7 days, so a pass here can mean "served
     # from cache". Reported so the result isn't over-read.
     for label, q in SEARCH_QUERIES:
         started = time.monotonic()
-        rows, note, exc = _run_fetcher(ddg_text, q, max_results=8)
+        rows, note, exc = await _run_fetcher(ddg_text, q, max_results=8)
         elapsed = round(time.monotonic() - started, 1)
         cached = elapsed < 0.5 and rows
         if rows:
@@ -334,14 +337,14 @@ def probe_search(deep=False):
         out.append({"section": "search", "name": f"ddg_text: {label}",
                     "status": status, "detail": detail, "rows": len(rows),
                     "seconds": elapsed})
-        time.sleep(2.0)
+        await asyncio.sleep(2.0)
 
     # -- layer 3: the whole pipeline --------------------------------------
     if deep:
         from src.ats.feeds.websearch import fetch_websearch
         for label, q in SEARCH_QUERIES[1:]:
             started = time.monotonic()
-            rows, note, exc = _run_fetcher(
+            rows, note, exc = await _run_fetcher(
                 fetch_websearch, f"probe: {label}", q, max_results=5)
             blob = f"{note} {exc}"
             if rows:
@@ -355,7 +358,7 @@ def probe_search(deep=False):
             out.append({"section": "search", "name": f"fetch_websearch: {label}",
                         "status": status, "detail": detail, "rows": len(rows),
                         "seconds": round(time.monotonic() - started, 1)})
-            time.sleep(2.0)
+            await asyncio.sleep(2.0)
     return out
 
 
@@ -363,7 +366,7 @@ def probe_search(deep=False):
 #  4. forums                                                                   #
 # --------------------------------------------------------------------------- #
 
-def probe_forums():
+async def probe_forums():
     from src.ats.feeds.discourse import fetch_discourse
     out = []
     if not config.DISCOURSE_BOARDS:
@@ -372,14 +375,14 @@ def probe_forums():
                  "seconds": 0.0}]
     for label, url, cat in config.DISCOURSE_BOARDS:
         started = time.monotonic()
-        rows, note, exc = _run_fetcher(fetch_discourse, label, url, cat)
+        rows, note, exc = await _run_fetcher(fetch_discourse, label, url, cat)
         status = verdict(f"{note} {exc}", bool(rows))
         detail = (f"{len(rows)} postings" if rows
                   else (exc or note or "0 topics in that category")[:110])
         out.append({"section": "forums", "name": f"{label} (cat {cat})",
                     "status": status, "detail": detail, "rows": len(rows),
                     "seconds": round(time.monotonic() - started, 1)})
-        time.sleep(1.0)
+        await asyncio.sleep(1.0)
     return out
 
 
@@ -387,7 +390,7 @@ def probe_forums():
 #  5. keyed APIs                                                               #
 # --------------------------------------------------------------------------- #
 
-def probe_api():
+async def probe_api():
     out = []
     has_key = bool(config.CAREERONESTOP_USER_ID and config.CAREERONESTOP_TOKEN)
     started = time.monotonic()
@@ -399,7 +402,7 @@ def probe_api():
                     "seconds": 0.0})
         return out
     from src.ats.feeds.careeronestop import fetch_nlx_company
-    rows, note, exc = _run_fetcher(fetch_nlx_company, "Google", max_pages=1)
+    rows, note, exc = await _run_fetcher(fetch_nlx_company, "Google", max_pages=1)
     status = verdict(f"{note} {exc}", bool(rows))
     detail = (f"{len(rows)} postings" if rows
               else (exc or note or "0 postings returned")[:110])
@@ -413,7 +416,7 @@ def probe_api():
 #  6. deliberately gated hosts                                                 #
 # --------------------------------------------------------------------------- #
 
-def probe_gated():
+async def probe_gated():
     """Hosts the crawler refuses to fetch by policy, not by capability.
 
     Nothing is requested here — that is the point. This section exists so the
@@ -433,7 +436,7 @@ def probe_gated():
 #  7. your own roster                                                          #
 # --------------------------------------------------------------------------- #
 
-def probe_roster(limit=None, workers=8):
+async def probe_roster(limit=None, workers=8):
     """Probe every ACTIVE board in the store. This is the practical 404 pass:
     discovery imports leave stale slugs behind, companies get acquired, and
     boards move — all of which show up here as broken."""
@@ -456,13 +459,13 @@ def probe_roster(limit=None, workers=8):
     skipped = len(rows) - len(todo)
     paged = "/".join(sorted({r["ats"] for r in rows} - cheap))
 
-    def one(row):
+    async def one(row):
         board = board_for(row["ats"])
         if not board:
             return {"section": "roster", "name": row["name"], "ats": row["ats"],
                     "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
         started = time.monotonic()
-        jobs, note, exc = _run_fetcher(
+        jobs, note, exc = await _run_fetcher(
             sweep(board.name, row["name"], board.handle(row) or ""))
         if jobs:
             status, detail = OK, f"{len(jobs)} postings"
@@ -477,13 +480,13 @@ def probe_roster(limit=None, workers=8):
 
     out = []
     real_stdout = sys.stdout
-    sys.stdout = _ThreadCapture(real_stdout)
+    sys.stdout = _TaskCapture(real_stdout)
     try:
-        for i, res in enumerate(fan_out(todo, one, "roster probe", workers), 1):
+        async for res in fan_out(todo, one, "roster probe", workers):
             out.append(res)
-            if i % 25 == 0:
-                # This thread has no buffer, so it passes through.
-                print(f"    ...{i}/{len(todo)} boards probed")
+            if len(out) % 25 == 0:
+                # This task has no buffer, so it passes through.
+                print(f"    ...{len(out)}/{len(todo)} boards probed")
     finally:
         sys.stdout = real_stdout
     if skipped:
@@ -498,9 +501,13 @@ def probe_roster(limit=None, workers=8):
 #  Reporting                                                                   #
 # --------------------------------------------------------------------------- #
 
+async def _probe_robots_all():
+    return [await probe_robots(label, url) for label, url in ROBOTS_TARGETS]
+
+
+#: key -> (title, the section's coroutine function, given the parsed args).
 SECTIONS = {
-    "robots": ("robots.txt policy",
-               lambda a: [probe_robots(l, u) for l, u in ROBOTS_TARGETS]),
+    "robots": ("robots.txt policy", lambda a: _probe_robots_all()),
     "feeds":  ("Aggregator feeds", lambda a: probe_feeds()),
     "search": ("Web search", lambda a: probe_search(deep=a.deep)),
     "forums": ("Forums", lambda a: probe_forums()),
@@ -525,6 +532,35 @@ def summarize(results):
     return counts
 
 
+async def _probe_all(wanted, args):
+    """Every wanted section's results, each printed as it lands, then the
+    roster's when asked for."""
+    all_results = []
+    for key in wanted:
+        title, fn = SECTIONS[key]
+        try:
+            res = await fn(args)
+        except Exception as e:
+            res = [{"section": key, "name": "(section failed)", "status": BROKEN,
+                    "detail": f"{type(e).__name__}: {e}"[:110], "seconds": 0.0}]
+        print_section(title, res)
+        all_results += res
+
+    if args.roster:
+        print("\n  Your roster (active boards)")
+        print("  " + "-" * 27)
+        res = await probe_roster(limit=args.limit)
+        bad = [r for r in res if r["status"] in (BROKEN, BLOCKED)]
+        for r in sorted(bad, key=lambda r: (r["status"], r["name"])):
+            print(f"    {EMOJI.get(r['status'], '?')} {r['name'][:26]:26} "
+                  f"{r.get('ats', ''):14} {r['detail'][:64]}")
+        alive = sum(r["status"] == OK for r in res)
+        print(f"    {alive} alive, {len(bad)} failing "
+              f"({sum(r['status'] == SKIPPED for r in res)} skipped)")
+        all_results += res
+    return all_results
+
+
 def main():
     ap = argparse.ArgumentParser(description="Comprehensive source health probe")
     ap.add_argument("--only", action="append", choices=sorted(SECTIONS),
@@ -544,29 +580,7 @@ def main():
     # nothing", never "nothing matched your keywords".
     config.widen_keywords()
     started = time.monotonic()
-    all_results = []
-    for key in wanted:
-        title, fn = SECTIONS[key]
-        try:
-            res = fn(args)
-        except Exception as e:
-            res = [{"section": key, "name": "(section failed)", "status": BROKEN,
-                    "detail": f"{type(e).__name__}: {e}"[:110], "seconds": 0.0}]
-        print_section(title, res)
-        all_results += res
-
-    if args.roster:
-        print("\n  Your roster (active boards)")
-        print("  " + "-" * 27)
-        res = probe_roster(limit=args.limit)
-        bad = [r for r in res if r["status"] in (BROKEN, BLOCKED)]
-        for r in sorted(bad, key=lambda r: (r["status"], r["name"])):
-            print(f"    {EMOJI.get(r['status'], '?')} {r['name'][:26]:26} "
-                  f"{r.get('ats', ''):14} {r['detail'][:64]}")
-        alive = sum(r["status"] == OK for r in res)
-        print(f"    {alive} alive, {len(bad)} failing "
-              f"({sum(r['status'] == SKIPPED for r in res)} skipped)")
-        all_results += res
+    all_results = runstate.run(_probe_all(wanted, args))
 
     counts = summarize(all_results)
     print(f"\n  {'=' * 72}")

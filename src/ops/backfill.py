@@ -73,7 +73,7 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
 
     Companies are fetched CONCURRENTLY (`max_workers`). A row the board
     pull does not cover is hydrated through its company's engine
-    (`company_fetch.ahydrate_description`).
+    (`company_fetch.hydrate_description`).
 
     Notes:
         This function once advertised max_workers=8 and walked one company
@@ -131,7 +131,7 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                     # detail page (JSON-LD / career-site markup).
                     stub = {"title": r["title"], "url": r["url"],
                             "ats": company.get("ats"), "description": ""}
-                    await company_fetch.ahydrate_description(stub, company)
+                    await company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")
                 out.append((r["job_id"], desc))
             return out

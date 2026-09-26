@@ -945,7 +945,8 @@ identically to a dead one.
 | `src/match/filters.py` / `locality.py` | keyword tiers; locality, remote eligibility and US eligibility — all profile-driven |
 | `src/web/` | Flask package: `routes.py`, `server.py`, `templates/` + `static/` |
 | `src/dispatch/` | how a front end runs an operation by name: `registry.py` (the one table the UI buttons and CLI flags share), `background.py` (the web UI's runner) |
-| `src/net/parallel.py` | thread-pool source fetching and `fan_out`, the one pool every op/crawl/discovery fan-out runs under (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
+| `src/net/parallel.py` | source fetching and `fan_out`, the tasks every op/crawl/discovery fan-out runs as (`CRAWLER_WORKERS`/`DISCOVERY_WORKERS` env) |
+| `src/runstate.py` | what one run (a CLI command, a harvest pass, a web UI op) remembers: its memos, caches, breakers and counters, fresh for the next run |
 | `src/net/robots.py` | robots.txt fetch + cache + RFC 9309 path matching (stdlib's matcher is not compliant — see the module docstring) |
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |
 | `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |

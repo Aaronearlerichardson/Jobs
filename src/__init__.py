@@ -6,6 +6,7 @@ lives here, grouped by what it does rather than by when it was written:
 
     config/     profile.toml, tracks, paths, secrets, policy  (leaf)
     src/tags.py     the company scope-tag vocabulary              (leaf)
+    src/runstate.py what one run remembers: memos, caches, breakers (leaf)
     store/      the SQLite store: schema, roster, jobs, ranking
     claude/     the Claude API, resume-fit scoring, mission scoring
     match/      the free gates: titles, keywords, geography, remote, names

@@ -7,6 +7,7 @@ everything below so callers keep saying ``store.connect``.
 """
 
 import asyncio
+import contextvars
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -475,19 +476,20 @@ class Writer:
     on a thread of its own for the block; given an open connection
     instead, that one, left open.
 
-    `await db.run(fn, ...)` is `fn(conn, ...)` on that thread, and
-    `await db.batch(fn, ...)` the same inside one `batch` transaction. The
-    calls run one at a time, in the order asked. A caller cancelled while
-    its call waits never starts it; one cancelled while its batch runs
-    has the batch rolled back.
+    `await db.run(fn, ...)` is `fn(conn, ...)` on that thread, in a copy
+    of the caller's context (its run, src/runstate.py), and `await
+    db.batch(fn, ...)` the same inside one `batch` transaction. The calls
+    run one at a time, in the order asked. A caller cancelled while its
+    call waits never starts it; one cancelled while its batch runs has the
+    batch rolled back.
 
-    >>> from src.net import http
+    >>> import asyncio
     >>> from src.store import job_exists, upsert_job
     >>> async def demo():
     ...     async with Writer(":memory:") as db:
     ...         await db.batch(upsert_job, {"job_id": "w1", "title": "T"})
     ...         return await db.run(job_exists, "w1")
-    >>> http.run_sync(demo())
+    >>> asyncio.run(demo())
     True
 
     Notes:
@@ -544,7 +546,7 @@ class Writer:
                 if asked.cancelled():
                     raise RuntimeError("its caller was cancelled: rolled back")
             return got
-        self._queue.put_nowait((asked, call))
+        self._queue.put_nowait((asked, contextvars.copy_context().run, call))
         return await asked
 
     async def _drain(self):
@@ -552,11 +554,11 @@ class Writer:
         the None that ends the block."""
         loop = asyncio.get_running_loop()
         while (item := await self._queue.get()) is not None:
-            asked, call = item
+            asked, within, call = item
             if asked.cancelled():
                 continue
             try:
-                got = await loop.run_in_executor(self._thread, call)
+                got = await loop.run_in_executor(self._thread, within, call)
             except Exception as e:
                 if not asked.done():
                     asked.set_exception(e)

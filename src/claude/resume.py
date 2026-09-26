@@ -3,9 +3,7 @@
 import re
 import zipfile
 
-from src import config
-
-_cache = None
+from src import config, runstate
 
 
 def _extract_docx(path):
@@ -24,24 +22,21 @@ def _extract_docx(path):
     return text
 
 
-def resume_text():
-    """
-    Return the résumé as plain text (cached). Supports .docx and plain
-    .txt/.md. Returns "" if the configured RESUME_PATH is missing.
-    """
-    global _cache
-    if _cache is not None:
-        return _cache
+def _read_resume():
+    """The résumé as plain text: .docx, or plain .txt/.md; "" (said) when
+    the configured RESUME_PATH is missing or unreadable."""
     path = config.RESUME_PATH
     try:
         if str(path).lower().endswith(".docx"):
-            _cache = _extract_docx(path)
-        else:
-            _cache = open(path, encoding="utf-8").read()
+            return _extract_docx(path)
+        with open(path, encoding="utf-8") as f:
+            return f.read()
     except FileNotFoundError:
         print(f"  [!] Résumé not found at {path} — fit scoring disabled.")
-        _cache = ""
     except Exception as e:
         print(f"  [!] Résumé read failed ({e}) — fit scoring disabled.")
-        _cache = ""
-    return _cache
+    return ""
+
+
+#: The résumé as plain text, read once per run.
+resume_text = runstate.per_run(_read_resume)

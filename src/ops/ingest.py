@@ -129,16 +129,16 @@ async def add_manual_job(url, title, company, location, description="",
     later. Returns a summary dict.
 
     Notes:
-        Resolution goes through src.discovery.resolve.board.aresolve_or_miss --
+        Resolution goes through src.discovery.resolve.board.resolve_or_miss --
         the same careers-page-sniff-first resolver every other interactive
         add path uses. It replaced a probe-first resolver that guessed a
         slug from the name before looking at the company's own site, which
         is exactly the collision this path is most exposed to: a hand-typed
         employer name lands on a same-named stranger's board.
     """
-    from src.claude.api import ascore_company_mission, is_active_mission
+    from src.claude.api import is_active_mission, score_company_mission
     from src.discovery.local_sourcing import mission_context
-    from src.discovery.resolve.board import aresolve_or_miss
+    from src.discovery.resolve.board import resolve_or_miss
 
     t = _t(t)
     name = (company or "").strip()
@@ -151,7 +151,7 @@ async def add_manual_job(url, title, company, location, description="",
         # the posting page itself, then fall back to the URL's slug. An
         # empty title is not a job — it can't be scored (SKIP-SCORE) or
         # ranked, and nine such rows sat in the 2026-09-01 store.
-        page_title, page_desc = await company_fetch.ajob_page_meta(url)
+        page_title, page_desc = await company_fetch.job_page_meta(url)
         title = page_title or company_fetch.title_from_url_slug(url)
         if not title:
             print(f"  [!] no title given and none readable from {url}; "
@@ -177,9 +177,9 @@ async def add_manual_job(url, title, company, location, description="",
             # A hit carrying a reason ("no-local-jobs") is a live, readable
             # board with nothing open here today — worth registering, exactly
             # as the probe-first resolver's nc=0 hit was.
-            board, miss = await aresolve_or_miss(name)
+            board, miss = await resolve_or_miss(name)
         if board:
-            tier, score, reason = await ascore_company_mission(
+            tier, score, reason = await score_company_mission(
                 name, await mission_context(board))
             active = is_active_mission(tier, name)
             await db.run(store.upsert_company, coords.from_hit(

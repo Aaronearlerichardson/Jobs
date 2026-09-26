@@ -38,11 +38,9 @@ spec schema (spec.py, the models a spec parses into), the field grammar
 (fields.py), the decoders (decode.py) and the listing walk (pager.py), all
 in src/ats/board/.
 
-The engine is coroutines on the network loop: a page is decoded and its
-rows mapped off the loop (asyncio.to_thread), and a board's pages and
-detail reads go one at a time, their delays awaited. Each coroutine a
-thread calls, `a<name>`, has a sync shim `<name>` (`http.sync_shim`);
-`detail`, `probe_job` and `board_jobs` are awaited only.
+The engine is coroutines: a page is decoded and its rows mapped off the
+loop (asyncio.to_thread), and a board's pages and detail reads go one at a
+time, their delays awaited.
 
 Notes:
     2026-09-18 audit: 124 open rows carried an embedded newline or tab
@@ -56,7 +54,7 @@ Notes:
 import asyncio
 import re
 
-from src import config
+from src import config, runstate
 from src.match.locality import location_unknown
 from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS
@@ -101,9 +99,9 @@ async def board_jobs(rows, company_name, gate=None, loc_re=None,
     >>> calls = []
     >>> async def body(row):
     ...     return calls.append(row["id"]) or "body"
-    >>> jobs = http.run_sync(board_jobs(rows, "Acme", gate=lambda t, d="": "data" in t.lower(),
-    ...                                 loc_re=re.compile("NC"), fetch_description=body,
-    ...                                 detail_delay=0))
+    >>> jobs = asyncio.run(board_jobs(rows, "Acme", gate=lambda t, d="": "data" in t.lower(),
+    ...                               loc_re=re.compile("NC"), fetch_description=body,
+    ...                               detail_delay=0))
     >>> [(j["id"], j["company"], j["description"]) for j in jobs]
     [('1', 'Acme', 'body')]
 
@@ -123,7 +121,7 @@ async def board_jobs(rows, company_name, gate=None, loc_re=None,
     ...           "location": "Durham,\\tNC", "description": ""},
     ...          {"id": "5", "title": "   ", "url": "u5", "location": "",
     ...           "description": ""}]
-    >>> jobs = http.run_sync(board_jobs(messy, "Acme"))
+    >>> jobs = asyncio.run(board_jobs(messy, "Acme"))
     >>> [(j["id"], j["title"], j["location"]) for j in jobs]
     [('4', 'Data Engineer', 'Durham, NC')]
     """
@@ -223,13 +221,13 @@ _NAMED = {"$facets": {}, "$search_text": "", "$area": None,
 #: The report net.http files for a 404 answer (`Board.gone`).
 _HTTP_404 = re.compile(r"\bHTTP 404\b")
 
-#: Listings read for closure and deep verify, (ats, handle) -> entries,
-#: each read once while concurrent readers of that board wait for it.
-_MEMO = SingleFlight()
-#: The handle parts `handle.try` and `handle.follow` settled on:
+#: The run's listings read for closure and deep verify, (ats, handle) ->
+#: entries, each read once while concurrent readers of that board wait.
+_MEMO = runstate.per_run(SingleFlight)
+#: The handle parts `handle.try` and `handle.follow` settled on this run:
 #: (ats, handle) -> {part: value}; `_SETTLING` holds a handle's `try`.
-_VARIANTS = {}
-_SETTLING = SingleFlight()
+_VARIANTS = runstate.per_run(dict)
+_SETTLING = runstate.per_run(SingleFlight)
 
 
 def _fill(tpl, lookup, vals):
@@ -350,7 +348,8 @@ class Board:
 
     def _parts(self, handle):
         parts = dict(zip(self._part_names, str(handle).split(self._sep)))
-        parts.update(_VARIANTS.get((self.name, str(handle)), {}))
+        if self._hspec.try_ or self._hspec.follow:
+            parts.update(_VARIANTS().get((self.name, str(handle)), {}))
         return parts
 
     def origin(self, company):
@@ -358,8 +357,8 @@ class Board:
         alone does not name it (an empty column, or a `handle.try` or
         `handle.follow` part not settled yet that the origin holds).
 
-        >>> BOARDS["workday"].origin({"wd_tenant": "acme", "wd_pod": 5, "wd_site": "Ext"})
-        'https://acme.wd5.myworkdayjobs.com'
+        >>> BOARDS["icims"].origin({"slug": "careers-acme"})
+        'https://careers-acme.icims.com'
         """
         handle = self.handle(company)
         if not (handle and self.listing_spec):
@@ -447,9 +446,9 @@ class Board:
             kw["timeout"] = timeout
         url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else vals.get(f"${k}"))
         if dec.kind == "json":
-            status, payload, err = await http.arequest_json(req.method, url, label, **kw)
+            status, payload, err = await http.request_json(req.method, url, label, **kw)
         else:
-            status, r, err = await http.arequest(req.method, url, label, **kw)
+            status, r, err = await http.request(req.method, url, label, **kw)
             if err:
                 return status, None, err
             try:
@@ -473,12 +472,12 @@ class Board:
                 continue
             url = fields.fmt(tpl, parts.get)
             url = url if re.match(r"(?i)^https?://", url) else f"https://{url}"
-            status, r, err = await http.arequest("GET", url,
-                                                 **({"timeout": timeout} if timeout else {}))
+            status, r, err = await http.request("GET", url,
+                                                **({"timeout": timeout} if timeout else {}))
             if err or status != 200:
                 return http.failed(label, f"could not resolve the board's {name}")
             parts[name] = re.sub(r"[?#].*$", "", r.url or url).rstrip("/")
-            _VARIANTS.setdefault((self.name, str(handle)), {})[name] = parts[name]
+            _VARIANTS().setdefault((self.name, str(handle)), {})[name] = parts[name]
         return None
 
     async def _page(self, req, handle, vals, label=None, timeout=None, url=None):
@@ -502,15 +501,15 @@ class Board:
         at a time; one that waited asks once with the value it settled."""
         key = (self.name, str(handle))
         if self._unsettled(key):
-            async with _SETTLING.hold(key, aio=True):
+            async with _SETTLING().hold(key):
                 tries = self._unsettled(key)
                 if tries:
                     return await self._settle(key, tries, req, parts, vals, label, timeout, url)
-            parts = {**parts, **_VARIANTS[key]}
+            parts = {**parts, **_VARIANTS()[key]}
         return (parts, *await self._fetch(req, parts, vals, label, timeout, url))
 
     def _unsettled(self, key):
-        return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS.get(key, {})}
+        return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS().get(key, {})}
 
     async def _settle(self, key, tries, req, parts, vals, label, timeout, url):
         (name, values), = tries.items()
@@ -520,7 +519,7 @@ class Board:
                                                      url)
             if not self._wrong(req, status, payload):
                 if not err:
-                    _VARIANTS.setdefault(key, {})[name] = v
+                    _VARIANTS().setdefault(key, {})[name] = v
                 break
             if refused is None and (status is None or status >= 500
                                     or status in (403, 405, 429)):
@@ -585,7 +584,7 @@ class Board:
             return len(entries), [row(parts, e) for e in entries]
         return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
 
-    async def alisting(self, handle, label=None, cheap=False, rescue_cap=None):
+    async def listing(self, handle, label=None, cheap=False, rescue_cap=None):
         """Every row on the board, mapped by the spec's fields and, where
         the rescue runs on every pull, filled from at most `rescue_cap`
         details (default the rescue's cap); [] when the listing failed
@@ -595,8 +594,6 @@ class Board:
         if cheap:
             return rows
         return await self._rescue_all(rows, label, rescue_cap)
-
-    listing = http.sync_shim(alisting)
 
     async def _rescue_all(self, rows, label, cap=None):
         """`rows` through an "always" rescue, unscoped; else unchanged."""
@@ -759,7 +756,7 @@ class Board:
         if not self.detail_spec:
             return None
         if not fill:
-            return lambda row: self.adescription_for(row.get("url"), report=True)
+            return lambda row: self.description_for(row.get("url"), report=True)
 
         async def read(row):
             rec, fs, ctx = await self._posting(row.get("url"), True)
@@ -768,7 +765,7 @@ class Board:
             return row.get("description") or ""
         return read
 
-    async def ajobs(self, handle, company_name="", gate=None, loc_re=None):
+    async def jobs(self, handle, company_name="", gate=None, loc_re=None):
         """The sweep: `board_jobs` over the listing (`_pull`), screened by
         `gate`; an `eager` platform's detail reads fill the row as the
         whole-board pull's do."""
@@ -777,9 +774,7 @@ class Board:
                                 fetch_description=self._detail_rows(self.spec.eager),
                                 detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
-    jobs = http.sync_shim(ajobs)
-
-    async def awhole_board(self, company, loc_re=None):
+    async def whole_board(self, company, loc_re=None):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
         spec is `eager`. The walk reads up to the board's row budget
@@ -795,26 +790,20 @@ class Board:
                                 detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S)
         return await asyncio.to_thread(adapt, jobs, self.name)
 
-    whole_board = http.sync_shim(awhole_board)
-
-    async def aprobe(self, handle):
+    async def probe(self, handle):
         """(ok, n) for a guessed handle: one cheap read, n postings on it (the
         listing's own total where it reports one), ok when there is at least
         one. Quiet: a miss is the expected answer."""
-        n = (await self.aalive(handle))[1]
+        n = (await self.alive(handle))[1]
         return n > 0, n
 
-    probe = http.sync_shim(aprobe)
-
-    async def aalive(self, handle, label=None):
+    async def alive(self, handle, label=None):
         """(ok, n) where ok means the board request itself succeeded, empty
         or not (the dead-board check), and n counts its postings; a failed
         request is reported under `label` when given."""
         rows, total = await self._walk(handle, label, cheap=True, size=1)
         n = sum(1 for r in rows or [] if r["id"] is not None)
         return rows is not None, total if total is not None else n
-
-    alive = http.sync_shim(aalive)
 
     def gone(self, error):
         """Whether `error`, a failed listing read's report, proves the board
@@ -829,7 +818,7 @@ class Board:
         """
         return self.spec.prunable and bool(_HTTP_404.search(error or ""))
 
-    async def alocal_count(self, handle, loc_re):
+    async def local_count(self, handle, loc_re):
         """Postings on the board in `loc_re`'s area. Where the spec scopes,
         the scoped total (where the facets vouch but the board reports none,
         the postings on the first scoped page), unless the board ignored the
@@ -855,9 +844,7 @@ class Board:
         return sum(1 for r in rows
                    if loc_ok(loc_re, r["location"]) or loc_ok(loc_re, r.get("_free") or ""))
 
-    local_count = http.sync_shim(alocal_count)
-
-    async def aemployer_name(self, handle):
+    async def employer_name(self, handle):
         """The employer the listing names on its first posting, or ""."""
         spec, listing = self.spec.employer, self.listing_spec
         if not spec:
@@ -879,7 +866,7 @@ class Board:
             _parts, _s, payload, err = await self._page(
                 self.listing_spec, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, self.listing_spec.decoder) or None
-        return await _MEMO.ado((self.name, handle), read, ttl=config.BOARD_MEMO_S)
+        return await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
 
     async def _member(self, ref, job_id=None):
         """The listing entry for the posting `ref` names: by the posting id
@@ -914,7 +901,7 @@ class Board:
         label = " ".join(str(x) for x in (self.name, handle, "job",
                                           *(v for k, v in ref.items() if k not in own))
                          if x) if report else None
-        parts = {**_VARIANTS.get((self.name, handle), {}), **ref}
+        parts = {**_VARIANTS().get((self.name, handle), {}), **ref}
         req = self.detail_spec.model_copy(update={"url": url}) if url else self.detail_spec
         _parts, status, payload, err = await self._ask(req, handle, parts, label=label)
         return status, decode.record(payload, self.detail_spec), err
@@ -935,7 +922,7 @@ class Board:
             return (await self.detail(ref, report))[1], self._detail_fields, ref
         return await self._member(ref), self._listing_fields, ref
 
-    async def adescription_for(self, url, report=False):
+    async def description_for(self, url, report=False):
         """The posting's description, read live; "" on any miss."""
         rec, fs, ctx = await self._posting(url, report)
         return (fs["description"](rec, ctx) or "") if rec else ""
@@ -954,7 +941,7 @@ class Board:
         return (self.fills_location and location_unknown(job.get("location"))
                 and self.owns_url(job.get("url")))
 
-    async def ahydrate(self, job, company=None):
+    async def hydrate(self, job, company=None):
         """Fill, in place, what `needs_detail` says `job` lacks (`_apply`),
         a new body capped at MAX_DESC_CHARS. A bodied row's location alone
         is read through `_locate` where the spec caches locations.
@@ -972,8 +959,6 @@ class Board:
             if not had and job.get("description"):
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
-
-    hydrate = http.sync_shim(ahydrate)
 
     def _apply(self, job, rec, fs, ctx):
         """Fill `job` in place from its posting's record: the body when it

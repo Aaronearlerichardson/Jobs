@@ -9,7 +9,7 @@ site's navigation are refused and a specific slug is required
 "current openings" page, one hop away, on the same host (`read_page`).
 
 The `custom` spec reads a board through `read_page` (the html decoder's
-`"$job_links"`); discovery asks `acustom_board_listing_url` whether a page
+`"$job_links"`); discovery asks `custom_board_listing_url` whether a page
 is a board at all. The reader's constants live in config
 (CAREERS_PAGE_*, BOARD_DETECT_CACHE_S).
 """
@@ -195,7 +195,7 @@ def is_board_page(html):
         return False
 
 
-async def acustom_board_listing_url(page_url, html=None):
+async def custom_board_listing_url(page_url, html=None):
     """The URL holding a custom board's listings: `page_url` when it is one
     (CAREERS_PAGE_MIN_LINKS genuine job links), else its openings page one
     hop away when that is; None otherwise, and always for an aggregator or
@@ -205,8 +205,8 @@ async def acustom_board_listing_url(page_url, html=None):
     so a board going live or dead is re-checked soon); a failed fetch is
     not cached. Pages are parsed and judged off the loop.
 
-    >>> http.run_sync(acustom_board_listing_url("https://www.indeed.com/jobs?q=x",
-    ...                                         "<html></html>")) is None
+    >>> asyncio.run(custom_board_listing_url("https://www.indeed.com/jobs?q=x",
+    ...                                      "<html></html>")) is None
     True
     """
     if _OFFSITE_RE.search(page_url):

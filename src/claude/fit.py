@@ -41,20 +41,17 @@ from typing import Annotated, Literal
 
 from pydantic import BeforeValidator
 
+from src import runstate
 from src.claude.reply import Reply, Unit, choice
 
 try:
     from src import config
-    from src.claude.api import acall_claude_json, api_disabled, have_api_key
-    from src.net.http import sync_shim
+    from src.claude.api import api_disabled, call_claude_json, have_api_key
 except Exception:                      # importable standalone for calibration
     config = None
-    acall_claude_json = None
+    call_claude_json = None
     api_disabled = lambda: None        # noqa: E731
     have_api_key = lambda: False       # noqa: E731
-
-    def sync_shim(afn):                # no network loop to wait on
-        return lambda *a, **kw: asyncio.run(afn(*a, **kw))
 
 try:
     # The one place that knows where a posting IS (profile [locality] /
@@ -309,27 +306,24 @@ def disposition_examples_block(conn, limit=3):
     return "\n".join(lines)
 
 
-_DISPO_BLOCK_CACHE = None
+def _read_disposition_block() -> str:
+    """disposition_examples_block over the default store. profile.toml
+    [fit] disposition_examples sets the count (0 disables); silently empty
+    when the store is unavailable."""
+    n = config.FIT_DISPOSITION_EXAMPLES if config else 0
+    if n <= 0:
+        return ""
+    try:
+        from src import store
+        with closing(store.connect()) as conn:
+            return disposition_examples_block(conn, n)
+    except Exception:
+        return ""
 
 
-def _disposition_block() -> str:
-    """disposition_examples_block over the default store, computed once per
-    process (a crawl scores hundreds of jobs; dispositions don't change
-    mid-run). profile.toml [fit] disposition_examples sets the count
-    (0 disables); silently empty when the store is unavailable."""
-    global _DISPO_BLOCK_CACHE
-    if _DISPO_BLOCK_CACHE is None:
-        n = config.FIT_DISPOSITION_EXAMPLES if config else 0
-        block = ""
-        if n > 0:
-            try:
-                from src import store
-                with closing(store.connect()) as conn:
-                    block = disposition_examples_block(conn, n)
-            except Exception:
-                block = ""
-        _DISPO_BLOCK_CACHE = block
-    return _DISPO_BLOCK_CACHE
+#: The run's disposition_examples_block, read once (a crawl scores hundreds
+#: of jobs; dispositions don't change mid-run).
+_disposition_block = runstate.per_run(_read_disposition_block)
 
 
 def _axes_and_gates_block() -> str:
@@ -724,14 +718,14 @@ def _gated(r, gates, reason, model, description, location):
                      model=model)
 
 
-async def ascore_resume_fit(title: str, description: str = "", *,
-                            location: str = "", max_tokens=300) -> FitResult:
+async def score_resume_fit(title: str, description: str = "", *,
+                           location: str = "", max_tokens=300) -> FitResult:
     """Score one posting. Returns a None-scored result when the API is
     unavailable OR when there is no real description to assess (callers treat a
     None score as 'don't rank this'), so unscorable rows drop out instead of
     floating at a fabricated cap. `location` rides in the user turn (see
     _user_turn)."""
-    if acall_claude_json is None:
+    if call_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
@@ -744,8 +738,8 @@ async def ascore_resume_fit(title: str, description: str = "", *,
         return FitResult(score=None, reason="no description; unscored")
     user = _user_turn(title, location, "JOB DESCRIPTION", clip_desc(desc))
     # Built off the loop: the first build reads the store (_disposition_block).
-    r = await acall_claude_json(await asyncio.to_thread(build_system_prompt),
-                                user, max_tokens=max_tokens, reply=FitReply)
+    r = await call_claude_json(await asyncio.to_thread(build_system_prompt),
+                               user, max_tokens=max_tokens, reply=FitReply)
     if r is None:
         # A call that never left the process -- no key, or the breaker
         # tripped on an expired one / an exhausted balance -- is the
@@ -760,9 +754,6 @@ async def ascore_resume_fit(title: str, description: str = "", *,
         return FitResult(score=None, reason="unscored")
     return _gated(r, list(r.gates), r.reason, _cfg("CLAUDE_MODEL", ""),
                   description, location)
-
-
-score_resume_fit = sync_shim(ascore_resume_fit)
 
 
 # The two "gave up without a score" reasons score_resume_fit's own None-score
@@ -826,8 +817,8 @@ def unscored_cause(reason):
 DEEP_MARKER = "deep:"
 
 
-async def averify_fit(title: str, description: str = "", *, location: str = "",
-                      max_tokens=8000) -> FitResult:
+async def verify_fit(title: str, description: str = "", *, location: str = "",
+                     max_tokens=8000) -> FitResult:
     """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
     but run on the (near-)full posting text with an explicit requirements
     extraction step first — years required, seat type, must-haves, and the
@@ -843,7 +834,7 @@ async def averify_fit(title: str, description: str = "", *, location: str = "",
     rows the CURRENT verify model has already checked — with years/seat/
     gaps folded into the reason for the digest. A None score means unverifiable
     (no API, no text): callers must keep the first-pass score."""
-    if acall_claude_json is None:
+    if call_claude_json is None:
         return FitResult(score=None, reason="scorer unavailable")
     desc = (description or "").strip()
     if len(desc) < MIN_DESC_CHARS:
@@ -856,9 +847,9 @@ async def averify_fit(title: str, description: str = "", *, location: str = "",
     # (config.CLAUDE_VERIFY_MODEL, ~15-30 bounded calls/run) — max_tokens must
     # cover thinking + the JSON on 5-family models, hence the 8000 default.
     vmodel = verify_model()
-    r = await acall_claude_json(await asyncio.to_thread(build_verify_prompt),
-                                user, max_tokens=max_tokens, model=vmodel,
-                                thinking=True, reply=VerifyReply)
+    r = await call_claude_json(await asyncio.to_thread(build_verify_prompt),
+                               user, max_tokens=max_tokens, model=vmodel,
+                               thinking=True, reply=VerifyReply)
     if r is None:
         return FitResult(score=None, reason="unverified")
     gates = list(r.gates)
@@ -877,9 +868,6 @@ async def averify_fit(title: str, description: str = "", *, location: str = "",
     if bits:
         reason += f" [{' | '.join(bits)}]"
     return _gated(r, gates, reason, vmodel, description, location)
-
-
-verify_fit = sync_shim(averify_fit)
 
 
 def is_deep_verified(fit_reason) -> bool:

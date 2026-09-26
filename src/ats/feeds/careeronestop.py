@@ -66,8 +66,8 @@ def _default_location():
             or re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip())
 
 
-async def afetch_nlx_company(name, location=None, days=60,
-                             page_size=50, max_pages=6):
+async def fetch_nlx_company(name, location=None, days=60,
+                            page_size=50, max_pages=6):
     """All NLx postings for one employer in `location`. Returns normalized
     job dicts ({id, title, company, url, location, description}) ready for
     ingest_external_jobs; company is canonicalized to `name` so the store's
@@ -152,6 +152,3 @@ async def afetch_nlx_company(name, location=None, days=60,
     if dropped:
         print(f"    ({dropped} result(s) mentioned {name!r} but were other employers — skipped)")
     return out
-
-
-fetch_nlx_company = http.sync_shim(afetch_nlx_company)

@@ -134,26 +134,26 @@ class TestSpecdBoardsReadTheirListings:
     page's; successfactors: pages stepped by the rows the tenant serves, a
     place read off the slug only where it leads the title), and except the
     platforms that had no fetcher module (jibe: recorded from the engine).
-    No page is parsed on the network loop's thread."""
+    No page is parsed on the event loop's thread."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
-    def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
-                                      handle, listing, detail):
+    async def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
+                                            handle, listing, detail):
         no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
         parse, on_loop = util.etree.fromstring, []
         monkeypatch.setattr(util.etree, "fromstring", lambda *a, **kw: on_loop.append(
-            threading.current_thread() is http._LOOP_THREAD) or parse(*a, **kw))
+            threading.current_thread() is threading.main_thread()) or parse(*a, **kw))
         if isinstance(listing, dict):
             serve({fragment: _fixture_response(name) for fragment, name in listing.items()})
         else:
             serve(([fake_response(url=REDIRECTS[ats])] if ats in REDIRECTS else []) + [
                 _fixture_response(listing),
                 _fixture_response(detail) if detail else fake_response(status=404)])
-        assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
+        assert await board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
         assert not any(on_loop)
 
-    def test_a_jibe_board_counts_every_place_it_lists(self, serve, monkeypatch):
+    async def test_a_jibe_board_counts_every_place_it_lists(self, serve, monkeypatch):
         """No scope: the local count reads every page's listed places, a
         posting's secondary ones too ("Olathe, Kansas; Cary, North
         Carolina"); a probe asks one row for the board's total."""
@@ -161,11 +161,11 @@ class TestSpecdBoardsReadTheirListings:
         log = serve({"page=1": _fixture_response("jibe_board.json"),
                      "page=2": _fixture_response("jibe_board_p2.json")})
         jibe, site = board_for("jibe"), "https://careers.garmin.com/jobs"
-        assert jibe.local_count(site, re.compile("North Carolina")) == 2
-        assert jibe.alive(site) == (True, 5)
+        assert await jibe.local_count(site, re.compile("North Carolina")) == 2
+        assert await jibe.alive(site) == (True, 5)
         assert log[-1].params == {"page": 1, "limit": 1}
 
-    def test_an_icims_row_reads_its_location_column(self, serve, monkeypatch, tmp_path):
+    async def test_an_icims_row_reads_its_location_column(self, serve, monkeypatch, tmp_path):
         """A tenant's column is a labelled header, a labelled field, or the
         map-marked city, state and country; a row with none takes the
         posting page's, never a place-shaped title."""
@@ -190,7 +190,7 @@ class TestSpecdBoardsReadTheirListings:
             card(4, "Manager, Risk, Fraud")]) + "</ul>"
         serve({"/jobs/search": fake_response(text=page),
                "/jobs/4/": _fixture_response("icims_detail.html")})
-        assert [r["location"] for r in board_for("icims").listing("acme")] == [
+        assert [r["location"] for r in await board_for("icims").listing("acme")] == [
             "US-NC-Morrisville", "US-NC-Winston-Salem", "Cary HQ, North Carolina, United States",
             "Remote, US"]
 
@@ -198,8 +198,8 @@ class TestSpecdBoardsReadTheirListings:
         "",
         '<select name="searchLocation"><option value="1-2-Durham">US-NC-Durham</option></select>',
     ], ids=["no-area-option", "area-filter-ignored"])
-    def test_an_unvouched_tenant_is_judged_on_its_listed_places(self, serve, monkeypatch,
-                                                               tmp_path, capsys, form):
+    async def test_an_unvouched_tenant_is_judged_on_its_listed_places(self, serve, monkeypatch,
+                                                                      tmp_path, capsys, form):
         """Nothing vouches for a tenant whose form offers no area option, nor
         for one whose search, reporting no total, opens with the unscoped
         page's postings (it ignored the filter): the pull keeps, and the
@@ -213,12 +213,12 @@ class TestSpecdBoardsReadTheirListings:
             for n, loc in ((1, "US-NC-Durham"), (2, "US-TX-Austin"))) + "</ul>"
         serve({"/jobs/search": fake_response(text=page)})
         icims, nc = board_for("icims"), re.compile(r"\bNC\b")
-        assert [r["location"] for r in icims.jobs("acme", "Acme", loc_re=nc)] == ["US-NC-Durham"]
+        assert [r["location"] for r in await icims.jobs("acme", "Acme", loc_re=nc)] == ["US-NC-Durham"]
         assert ("unnarrowed" in capsys.readouterr().out) == bool(form)
-        assert icims.local_count("acme", nc) == 1
+        assert await icims.local_count("acme", nc) == 1
 
-    def test_a_located_pull_asks_the_search_forms_area_options(self, serve, monkeypatch,
-                                                               tmp_path):
+    async def test_a_located_pull_asks_the_search_forms_area_options(self, serve, monkeypatch,
+                                                                     tmp_path):
         """A search reading no free-text place (iCIMS lists nothing for
         searchLocation=NC) is scoped by its form's own location options:
         every one whose label the area matches, asked together."""
@@ -227,7 +227,7 @@ class TestSpecdBoardsReadTheirListings:
         log = serve({"searchLocation": _fixture_response("icims_board_located.html"),
                      "/jobs/search": _fixture_response("icims_board.html"),
                      "/jobs/388": _fixture_response("icims_detail_located.html")})
-        rows = board_for("icims").jobs("uscareers-fujifilm", "Acme", loc_re=re.compile(r"\bNC\b"))
+        rows = await board_for("icims").jobs("uscareers-fujifilm", "Acme", loc_re=re.compile(r"\bNC\b"))
         assert next(r.params["searchLocation"] for r in log if "searchLocation" in r.params) == [
             "12781--Holly Springs, NC", "12781-12817-Durham", "12781-12817-Holly Springs"]
         assert [(r["id"], r["location"]) for r in rows] == [
@@ -256,22 +256,22 @@ class TestSpecdBoardsReadTheirListings:
     ]
 
     @pytest.mark.parametrize("url,listed,detail,location", HYDRATE)
-    def test_a_stored_row_hydrates_from_its_url(self, serve, url, listed, detail,
-                                                location):
+    async def test_a_stored_row_hydrates_from_its_url(self, serve, url, listed, detail,
+                                                      location):
         """Only the URL survives the store: the engine reads the posting's
         coordinates back out of it (`job_ref`) for its detail."""
         serve(_fixture_response(detail))
-        job = company.hydrate_description({"ats": board_for_url(url).name, "url": url,
-                                           "description": "", "location": listed})
+        job = await company.hydrate_description({"ats": board_for_url(url).name, "url": url,
+                                                 "description": "", "location": listed})
         assert job["location"] == location
         assert job["description"] and "<p>" not in job["description"]
 
     @pytest.mark.parametrize("ats", sorted(b.name for b in BOARDS.values()
                                            if b.fetchable))
-    def test_an_unexpected_shape_is_an_empty_board(self, serve, ats):
+    async def test_an_unexpected_shape_is_an_empty_board(self, serve, ats):
         serve(fake_response(["not", "a", "board"] if ats != "lever"
                             else {"not": "a list"}))
-        assert board_for(ats).jobs("x", "X") == []
+        assert await board_for(ats).jobs("x", "X") == []
 
 
 class TestPeopleAdmin:
@@ -298,16 +298,16 @@ class TestPeopleAdmin:
         profile's places."""
         monkeypatch.setitem(fields.TRANSFORMS, "place", lambda v: where)
 
-    def test_reads_both_tenants_feeds(self, serve, monkeypatch):
+    async def test_reads_both_tenants_feeds(self, serve, monkeypatch):
         """NC State serves PeopleAdmin from its own hostname and is keyed on
         its feed URL; ids carry the whole host, so the tenants cannot
         collide. `<author><name>` (the hiring department) leads the body,
         which arrives as escaped HTML and must not stay that way."""
         self.place(monkeypatch, "")
         serve({"all_jobs.atom": load_text(self.UNC)})
-        unc = board_for("peopleadmin").jobs("unc.peopleadmin.com", "UNC")
+        unc = await board_for("peopleadmin").jobs("unc.peopleadmin.com", "UNC")
         serve({"all_jobs.atom": load_text(self.NCSU)})
-        ncsu = board_for("peopleadmin").jobs(
+        ncsu = await board_for("peopleadmin").jobs(
             "https://jobs.ncsu.edu/postings/all_jobs.atom", "NC State")
         assert (len(unc), len(ncsu)) == (7, 8)
         j = unc[0]
@@ -320,30 +320,30 @@ class TestPeopleAdmin:
         assert ncsu[0]["id"] == "pa_jobs_ncsu_edu_230936"
         assert all(j["url"].startswith("https://jobs.ncsu.edu/postings/") for j in ncsu)
 
-    def test_search_atom_answers_only_when_all_jobs_cannot(self, serve):
+    async def test_search_atom_answers_only_when_all_jobs_cannot(self, serve):
         """An erroring or empty `all_jobs.atom` is a miss, not an answer: a
         tenant still has a saved search."""
         calls = serve({"all_jobs.atom": load_text(self.UNC),
                        "search.atom": load_text(self.NCSU)})
-        assert len(board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
+        assert len(await board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
         assert calls == ["https://unc.peopleadmin.com/postings/all_jobs.atom"]
         for miss in (404, self.EMPTY):
             calls = serve({"all_jobs.atom": miss, "search.atom": load_text(self.UNC)})
-            assert len(board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
+            assert len(await board_for("peopleadmin").jobs("unc.peopleadmin.com")) == 7
             assert calls[-1].endswith("/postings/search.atom")
 
-    def test_a_location_filter_passes_postings_naming_no_place(self, serve,
-                                                               monkeypatch):
+    async def test_a_location_filter_passes_postings_naming_no_place(self, serve,
+                                                                     monkeypatch):
         """Unlocated postings are the campus's (`unlocated: keep`); one that
         names a place is still filtered on it."""
         serve({"all_jobs.atom": load_text(self.UNC)})
         row = {"ats": "peopleadmin", "careers_url": "unc.peopleadmin.com"}
         self.place(monkeypatch, "")
-        jobs = company.fetch_company(row, re.compile("nowhere-at-all"))
+        jobs = await company.fetch_company(row, re.compile("nowhere-at-all"))
         assert len(jobs) == 7 and jobs[0]["ats"] == "peopleadmin"
         self.place(monkeypatch, "Chapel Hill, NC")
-        assert company.fetch_company(row, re.compile("Raleigh")) == []
-        assert len(company.fetch_company(row, re.compile("Chapel Hill"))) == 7
+        assert await company.fetch_company(row, re.compile("Raleigh")) == []
+        assert len(await company.fetch_company(row, re.compile("Chapel Hill"))) == 7
 
 
 class TestUsajobs:
@@ -351,69 +351,69 @@ class TestUsajobs:
     fetcher here — allowed to be switched off by a missing env var, so the
     no-credentials path is as much a contract as the parsing is."""
 
-    def test_parses_postings(self, usajobs_creds, usajobs_pages,
-                             match_everything):
+    async def test_parses_postings(self, usajobs_creds, usajobs_pages,
+                                   match_everything):
         usajobs_pages([load("usajobs_search.json")])
-        jobs = usajobs.fetch_usajobs(location="Research Triangle Park, "
-                                              "North Carolina", radius=25)
+        jobs = await usajobs.fetch_usajobs(location="Research Triangle Park, "
+                                           "North Carolina", radius=25)
         assert len(jobs) == 2
         j = jobs[0]
         assert j["id"] == "usajobs_830216800"
         assert j["title"] == "IT Specialist (Data Management)"
         assert j["url"] == "https://www.usajobs.gov/job/830216800"
 
-    def test_company_is_the_organization_not_the_department(
+    async def test_company_is_the_organization_not_the_department(
             self, usajobs_creds, usajobs_pages, match_everything):
         """`OrganizationName` is the lab a reader recognizes; the cabinet
         department it reports to is not. The department stays in the body
         so it remains searchable."""
         usajobs_pages([load("usajobs_search.json")])
-        j = usajobs.fetch_usajobs()[1]
+        j = (await usajobs.fetch_usajobs())[1]
         assert j["company"] == ("National Institute of Environmental "
                                 "Health Sciences")
         assert j["description"].startswith(
             "Department of Health and Human Services.")
 
-    def test_every_duty_station_is_kept(self, usajobs_creds, usajobs_pages,
-                                        match_everything):
+    async def test_every_duty_station_is_kept(self, usajobs_creds, usajobs_pages,
+                                              match_everything):
         """One vacancy open at two campuses must not lose the local one."""
         usajobs_pages([load("usajobs_search.json")])
-        assert usajobs.fetch_usajobs()[1]["location"] == (
+        assert (await usajobs.fetch_usajobs())[1]["location"] == (
             "Research Triangle Park, North Carolina; Bethesda, Maryland")
 
-    def test_description_carries_summary_duties_quals_and_pay(
+    async def test_description_carries_summary_duties_quals_and_pay(
             self, usajobs_creds, usajobs_pages, match_everything):
         usajobs_pages([load("usajobs_search.json")])
-        desc = usajobs.fetch_usajobs()[0]["description"]
+        desc = (await usajobs.fetch_usajobs())[0]["description"]
         assert "Job summary redacted" in desc
         assert "First major duty redacted" in desc
         assert "Second major duty redacted" in desc
         assert "Qualification summary redacted" in desc
         assert "Salary: $99,908 - $129,878 Per Year" in desc
 
-    def test_posted_at_is_normalized(self, usajobs_creds, usajobs_pages,
-                                     match_everything):
+    async def test_posted_at_is_normalized(self, usajobs_creds, usajobs_pages,
+                                           match_everything):
         usajobs_pages([load("usajobs_search.json")])
-        assert [j["posted_at"] for j in usajobs.fetch_usajobs()] == [
+        assert [j["posted_at"] for j in await usajobs.fetch_usajobs()] == [
             "2026-08-03", "2026-08-10"]
 
-    def test_url_falls_back_to_apply_uri(self, usajobs_creds, usajobs_pages,
-                                         match_everything):
+    async def test_url_falls_back_to_apply_uri(self, usajobs_creds, usajobs_pages,
+                                               match_everything):
         usajobs_pages([load("usajobs_search.json")])
-        assert usajobs.fetch_usajobs()[1]["url"] == (
+        assert (await usajobs.fetch_usajobs())[1]["url"] == (
             "https://www.usajobs.gov/job/830216801/apply")
 
-    def test_remote_hint_only_on_remote_announcements(
+    async def test_remote_hint_only_on_remote_announcements(
             self, usajobs_creds, usajobs_pages, match_everything):
         """`remote_signal_for` treats ANY hint as decisive, so stamping a
         non-remote posting would advertise it as remote-eligible."""
         usajobs_pages([load("usajobs_search.json")])
-        jobs = usajobs.fetch_usajobs()
+        jobs = await usajobs.fetch_usajobs()
         assert "remote_hint" not in jobs[0]
         assert jobs[1]["remote_hint"] == "usajobs:RemoteIndicator"
 
-    def test_pages_until_the_reported_total(self, usajobs_creds,
-                                            usajobs_pages, match_everything):
+    async def test_pages_until_the_reported_total(self, usajobs_creds,
+                                                  usajobs_pages, match_everything):
         """SearchResultCountAll is 3 with 2 per page, so a single-page read
         would silently drop the last announcement."""
         page2 = load("usajobs_search.json")
@@ -423,71 +423,71 @@ class TestUsajobs:
         page2["SearchResult"]["SearchResultCount"] = 1
         calls = usajobs_pages([load("usajobs_search.json"), page2])
 
-        jobs = usajobs.fetch_usajobs()
+        jobs = await usajobs.fetch_usajobs()
         assert [j["id"] for j in jobs] == [
             "usajobs_830216800", "usajobs_830216801", "usajobs_830216802"]
         assert [c.params["Page"] for c in calls] == [1, 2]
 
-    def test_stops_on_an_empty_page(self, usajobs_creds, usajobs_pages,
-                                    match_everything):
+    async def test_stops_on_an_empty_page(self, usajobs_creds, usajobs_pages,
+                                          match_everything):
         """A total that overstates what the API returns must not spin."""
         empty = {"SearchResult": {"SearchResultCountAll": 99,
                                   "SearchResultItems": []}}
         calls = usajobs_pages([load("usajobs_search.json"), empty])
-        assert len(usajobs.fetch_usajobs()) == 2
+        assert len(await usajobs.fetch_usajobs()) == 2
         assert len(calls) == 2
 
-    def test_series_and_location_become_query_params(
+    async def test_series_and_location_become_query_params(
             self, usajobs_creds, usajobs_pages, match_everything):
         calls = usajobs_pages([load("usajobs_search.json")])
-        usajobs.fetch_usajobs(keyword="data", location="Durham, NC",
-                              radius=25, series=["2210", "1550"])
+        await usajobs.fetch_usajobs(keyword="data", location="Durham, NC",
+                                    radius=25, series=["2210", "1550"])
         params = calls[0].params
         assert params["JobCategoryCode"] == "2210;1550"
         assert params["LocationName"] == "Durham, NC"
         assert params["Radius"] == 25
         assert params["Keyword"] == "data"
 
-    def test_credentials_travel_in_the_documented_headers(
+    async def test_credentials_travel_in_the_documented_headers(
             self, usajobs_creds, usajobs_pages, match_everything):
         """The API keys off `Authorization-Key` plus the REGISTERED address
         as User-Agent; the shared session's browser UA would be rejected."""
         calls = usajobs_pages([load("usajobs_search.json")])
-        usajobs.fetch_usajobs()
+        await usajobs.fetch_usajobs()
         headers = calls[0].headers
         assert headers["Authorization-Key"] == "test-key"
         assert headers["User-Agent"] == "someone@example.org"
         assert headers["Host"] == "data.usajobs.gov"
 
-    def test_no_credentials_returns_empty_without_fetching(
+    async def test_no_credentials_returns_empty_without_fetching(
             self, monkeypatch, usajobs_pages, match_everything):
         monkeypatch.setattr(usajobs.config, "USAJOBS_API_KEY", "")
         monkeypatch.setattr(usajobs.config, "USAJOBS_EMAIL", "")
         calls = usajobs_pages([load("usajobs_search.json")])
-        assert usajobs.fetch_usajobs() == []
+        assert await usajobs.fetch_usajobs() == []
         assert calls == []
 
-    def test_email_alone_is_not_enough(self, monkeypatch, usajobs_pages,
-                                       match_everything):
+    async def test_email_alone_is_not_enough(self, monkeypatch, usajobs_pages,
+                                             match_everything):
         monkeypatch.setattr(usajobs.config, "USAJOBS_API_KEY", "")
         monkeypatch.setattr(usajobs.config, "USAJOBS_EMAIL", "a@b.org")
         usajobs_pages([load("usajobs_search.json")])
-        assert usajobs.fetch_usajobs() == []
+        assert await usajobs.fetch_usajobs() == []
 
-    def test_http_error_returns_empty(self, usajobs_creds, usajobs_pages,
-                                      match_everything):
+    async def test_http_error_returns_empty(self, usajobs_creds, usajobs_pages,
+                                            match_everything):
         usajobs_pages([load("usajobs_search.json")], status=401)
-        assert usajobs.fetch_usajobs() == []
+        assert await usajobs.fetch_usajobs() == []
 
-    def test_request_exception_returns_empty(self, usajobs_creds,
-                                             serve, match_everything):
+    async def test_request_exception_returns_empty(self, usajobs_creds,
+                                                   serve, match_everything):
         serve(RuntimeError("connection reset"))
-        assert usajobs.fetch_usajobs() == []
+        assert await usajobs.fetch_usajobs() == []
 
-    def test_unexpected_shape_returns_empty(self, usajobs_creds,
-                                            usajobs_pages, match_everything):
+    async def test_unexpected_shape_returns_empty(self, usajobs_creds,
+                                                  usajobs_pages, match_everything):
         usajobs_pages([["not", "a", "dict"]])
-        assert usajobs.fetch_usajobs() == []
+        assert await usajobs.fetch_usajobs() == []
 
 
 class TestRelevanceGate:
@@ -505,15 +505,15 @@ class TestRelevanceGate:
         cfg.SKILL_KEYWORDS[:] = []
         cfg.INCLUDE_KEYWORDS[:] = ["quantum basket weaving"]
 
-    def test_irrelevant_postings_are_dropped_by_the_gate(
+    async def test_irrelevant_postings_are_dropped_by_the_gate(
             self, serve, nothing_matches):
         serve(fake_response(load("greenhouse_board.json")))
-        assert board_for("greenhouse").jobs("databricks", "Databricks",
-                                            gate=is_relevant) == []
+        assert await board_for("greenhouse").jobs("databricks", "Databricks",
+                                                  gate=is_relevant) == []
 
-    def test_no_gate_keeps_everything(self, serve, nothing_matches):
+    async def test_no_gate_keeps_everything(self, serve, nothing_matches):
         serve(fake_response(load("greenhouse_board.json")))
-        assert board_for("greenhouse").jobs("databricks", "Databricks")
+        assert await board_for("greenhouse").jobs("databricks", "Databricks")
 
     async def test_the_registry_thunk_is_gated(self, serve, nothing_matches):
         from src.ats.registry import sweep
@@ -567,10 +567,10 @@ class TestAshbyKeyAcrossCallSites:
         """Serve BOARD to every module that reads the Ashby posting API."""
         serve(fake_response(TestAshbyKeyAcrossCallSites.BOARD))
 
-    def test_probe_reports_the_real_total(self, ashby_board):
-        assert board_for("ashby").probe("susteon") == (True, 2)
+    async def test_probe_reports_the_real_total(self, ashby_board):
+        assert await board_for("ashby").probe("susteon") == (True, 2)
 
-    def test_nc_counter_sees_local_jobs(self, ashby_board):
+    async def test_nc_counter_sees_local_jobs(self, ashby_board):
         from src.match.locality import is_nc
         from src.discovery.resolve.probes import nc_count
         # The fixture board has two jobs in NC. Skip the test if the active
@@ -578,16 +578,16 @@ class TestAshbyKeyAcrossCallSites:
         # return 0, so there's nothing to test.
         if not is_nc("Morrisville, North Carolina"):
             pytest.skip("profile configures no NC locality")
-        assert nc_count("ashby", "susteon") == 2
+        assert await nc_count("ashby", "susteon") == 2
 
     async def test_mission_scorer_gets_titles(self, ashby_board):
         from src.discovery.local_sourcing import _sample_titles
         titles = await _sample_titles({"ats": "ashby", "slug": "susteon"})
         assert titles == ["Catalysis Scientist", "Lab Technician"]
 
-    def test_company_fetcher_returns_postings(self, ashby_board):
+    async def test_company_fetcher_returns_postings(self, ashby_board):
         from src.ats.board.company import fetch_company
-        jobs = fetch_company({"ats": "ashby", "slug": "susteon"})
+        jobs = await fetch_company({"ats": "ashby", "slug": "susteon"})
         assert [j["title"] for j in jobs] == ["Catalysis Scientist", "Lab Technician"]
         assert jobs[0]["location"] == "Morrisville, North Carolina"
         assert jobs[0]["ats"] == "ashby" and jobs[0]["posted_at"] == "2026-05-28"
@@ -611,13 +611,13 @@ class TestGetro:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
         return serve(routes)
 
-    def test_parses_the_board_newest_first(self, board, match_everything):
-        jobs = getro.fetch_getro_all(self.BOARD, detail_delay=0)
+    async def test_parses_the_board_newest_first(self, board, match_everything):
+        jobs = await getro.fetch_getro_all(self.BOARD, detail_delay=0)
         assert [j["id"] for j in jobs] == [
             "getro_91000002", "getro_91000001", "getro_91000004"]
 
-    def test_the_record_becomes_a_job_dict(self, board, match_everything):
-        j = {x["id"]: x for x in getro.fetch_getro_all(
+    async def test_the_record_becomes_a_job_dict(self, board, match_everything):
+        j = {x["id"]: x for x in await getro.fetch_getro_all(
             self.BOARD, detail_delay=0)}["getro_91000001"]
         assert j["company"] == "Acme Analytics"
         assert j["title"] == "Senior Data Engineer"
@@ -631,19 +631,19 @@ class TestGetro:
         assert j["_employer"]["domain"] == "acme-analytics.example"
         assert j["_employer"]["slug"] == "acme-analytics"
 
-    def test_posted_at_falls_back_to_the_sitemap_lastmod(
+    async def test_posted_at_falls_back_to_the_sitemap_lastmod(
             self, board, match_everything):
-        j = {x["id"]: x for x in getro.fetch_getro_all(
+        j = {x["id"]: x for x in await getro.fetch_getro_all(
             self.BOARD, detail_delay=0)}["getro_91000002"]
         assert j["posted_at"] == "2026-08-30"
 
-    def test_a_closed_posting_the_sitemap_still_lists_is_dropped(
+    async def test_a_closed_posting_the_sitemap_still_lists_is_dropped(
             self, board, match_everything):
-        ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
+        ids = [j["id"] for j in await getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert "getro_91000003" not in ids
 
-    def test_titles_are_screened_before_any_page_fetch(self, board):
-        jobs = getro.fetch_getro_all(
+    async def test_titles_are_screened_before_any_page_fetch(self, board):
+        jobs = await getro.fetch_getro_all(
             self.BOARD, detail_delay=0,
             gate=lambda title, desc="": "data" in title.lower())
         assert [j["id"] for j in jobs] == ["getro_91000001", "getro_91000004"]
@@ -651,18 +651,18 @@ class TestGetro:
         assert all("91000001" in u or "91000004" in u for u in pages)
         assert not any("api.getro.com" in u for u in board)
 
-    def test_the_detail_cap_trims_the_oldest(self, board, match_everything):
-        jobs = getro.fetch_getro_all(self.BOARD, max_details=2, detail_delay=0)
+    async def test_the_detail_cap_trims_the_oldest(self, board, match_everything):
+        jobs = await getro.fetch_getro_all(self.BOARD, max_details=2, detail_delay=0)
         assert [j["id"] for j in jobs] == ["getro_91000002"]
         assert not any("91000001" in u or "91000004" in u for u in board)
 
-    def test_a_challenged_board_returns_empty(self, serve,
-                                              match_everything):
+    async def test_a_challenged_board_returns_empty(self, serve,
+                                                    match_everything):
         # Cloudflare's "Just a moment..." answers the sitemap with a 403.
         serve({"sitemap.xml": 403})
-        assert getro.fetch_getro_all(self.BOARD, detail_delay=0) == []
+        assert await getro.fetch_getro_all(self.BOARD, detail_delay=0) == []
 
-    def test_a_sitemap_index_is_followed(self, serve, match_everything):
+    async def test_a_sitemap_index_is_followed(self, serve, match_everything):
         index = ('<sitemapindex><sitemap><loc>'
                  'https://jobs.example-network.org/sitemaps/jobs-1.xml'
                  '</loc></sitemap></sitemapindex>')
@@ -671,16 +671,16 @@ class TestGetro:
         for jid in self.IDS:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
         serve(routes)
-        assert len(getro.fetch_getro_all(self.BOARD, detail_delay=0)) == 3
+        assert len(await getro.fetch_getro_all(self.BOARD, detail_delay=0)) == 3
 
-    def test_a_page_without_the_record_is_skipped(self, serve,
-                                                   match_everything):
+    async def test_a_page_without_the_record_is_skipped(self, serve,
+                                                        match_everything):
         routes = {"sitemap.xml": load_text("getro_sitemap.xml"),
                   "/jobs/91000001-": "<html><body>moved</body></html>"}
         for jid in self.IDS[1:]:
             routes[f"/jobs/{jid}-"] = load_text(f"getro_job_{jid}.html")
         serve(routes)
-        ids = [j["id"] for j in getro.fetch_getro_all(self.BOARD, detail_delay=0)]
+        ids = [j["id"] for j in await getro.fetch_getro_all(self.BOARD, detail_delay=0)]
         assert ids == ["getro_91000002", "getro_91000004"]
 
 
@@ -798,20 +798,20 @@ class TestJobvite:
     """What the fixture contract above does not reach: the listing's
     fallback page and the whole-board pull's in-area detail reads."""
 
-    def test_a_dead_search_falls_back_to_the_jobs_page(self, serve):
+    async def test_a_dead_search_falls_back_to_the_jobs_page(self, serve):
         """Listing alternatives: some tenants replace the search page with a
         landing page, so the second listing answers."""
         calls = serve({"search": 500, "/neogenomics/jobs": load_text("jobvite_board.html"),
                        "/job/": load_text("jobvite_detail.html")})
-        jobs = company.fetch_company({"ats": "jobvite", "slug": "neogenomics"})
+        jobs = await company.fetch_company({"ats": "jobvite", "slug": "neogenomics"})
         assert len(jobs) == 3 and [c.url.rsplit("/", 1)[-1] for c in calls[:2]] == [
             "search", "jobs"]
 
-    def test_company_fetch_pays_only_for_in_region_pages(self, serve):
+    async def test_company_fetch_pays_only_for_in_region_pages(self, serve):
         calls = serve({"search": load_text("jobvite_board.html"),
                        "/job/": load_text("jobvite_detail.html")})
-        jobs = company.fetch_company({"ats": "jobvite", "slug": "neogenomics"},
-                                     re.compile("Florida"))
+        jobs = await company.fetch_company({"ats": "jobvite", "slug": "neogenomics"},
+                                           re.compile("Florida"))
         assert [j["id"] for j in jobs] == ["jv_neogenomics_oiiRyfwJ"]
         assert jobs[0]["posted_at"] == "2025-11-06" and jobs[0]["ats"] == "jobvite"
         assert [c.url for c in calls if "/job/" in c.url] == [
@@ -826,22 +826,22 @@ class TestOneFetcherPerAts:
     TestAshbyKeyAcrossCallSites); one implementation cannot.
     """
 
-    def test_the_dispatch_table_adapts_the_module_fetcher(self, serve,
-                                                          match_everything):
+    async def test_the_dispatch_table_adapts_the_module_fetcher(self, serve,
+                                                                match_everything):
         from src.ats.board import company
         serve(fake_response(load("greenhouse_board.json")))
-        module = board_for("greenhouse").jobs("databricks", "Databricks")
-        vetted = company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
+        module = await board_for("greenhouse").jobs("databricks", "Databricks")
+        vetted = await company.fetch_company({"ats": "greenhouse", "slug": "databricks"})
         assert [j["id"] for j in vetted] == [j["id"] for j in module]
         assert all(j["ats"] == "greenhouse" and "company" not in j for j in vetted)
 
-    def test_the_location_regex_filters_the_listing(self, serve,
-                                                    match_everything):
+    async def test_the_location_regex_filters_the_listing(self, serve,
+                                                          match_everything):
         from src.ats.board import company
         serve(fake_response(load("greenhouse_board.json")))
-        everything = company.fetch_company({"ats": "greenhouse", "slug": "x"})
-        nowhere = company.fetch_company({"ats": "greenhouse", "slug": "x"},
-                                        re.compile("nowhere-at-all"))
+        everything = await company.fetch_company({"ats": "greenhouse", "slug": "x"})
+        nowhere = await company.fetch_company({"ats": "greenhouse", "slug": "x"},
+                                              re.compile("nowhere-at-all"))
         assert everything and nowhere == []
 
 
@@ -862,35 +862,35 @@ class TestTitleSampling:
                                           "Imaging Software Developer",
                                           "PACS Support Engineer"])]
 
-    def test_a_rippling_board_is_sampled_at_listing_cost(self, serve):
+    async def test_a_rippling_board_is_sampled_at_listing_cost(self, serve):
         urls = serve(fake_response(self.RIPPLING))
-        titles = company.sample_titles(
+        titles = await company.sample_titles(
             {"ats": "rippling", "slug": "core-sound-imaging"})
         assert titles == ["PACS Support Engineer", "Imaging Software Developer"]
         assert len(urls) == 1 and "core-sound-imaging" in urls[0]
 
-    def test_a_bamboohr_board_is_sampled_at_listing_cost(self, serve):
+    async def test_a_bamboohr_board_is_sampled_at_listing_cost(self, serve):
         urls = serve(fake_response({"result": [
             {"id": 7, "jobOpeningName": "Field Service Engineer",
              "location": {"city": "Cary", "state": "NC"}}]}))
-        assert company.sample_titles({"ats": "bamboohr", "slug": "acme"}) == \
+        assert await company.sample_titles({"ats": "bamboohr", "slug": "acme"}) == \
             ["Field Service Engineer"]
         assert [u.rsplit("/", 1)[-1] for u in urls] == ["list"]
 
-    def test_a_one_request_family_samples_through_its_company_fetcher(
+    async def test_a_one_request_family_samples_through_its_company_fetcher(
             self, serve):
         serve(fake_response(load("hibob_board.json")))
         row = {"ats": "hibob", "slug": "acme"}
-        whole = [j["title"] for j in company.fetch_company(row)]
-        assert whole and company.sample_titles(row, n=50) == whole
-        assert company.sample_titles(row, n=1) == whole[:1]
+        whole = [j["title"] for j in await company.fetch_company(row)]
+        assert whole and await company.sample_titles(row, n=50) == whole
+        assert await company.sample_titles(row, n=1) == whole[:1]
 
-    def test_titles_are_distinct_and_capped(self, serve):
+    async def test_titles_are_distinct_and_capped(self, serve):
         serve(fake_response(self.RIPPLING))
         row = {"ats": "rippling", "slug": "core-sound-imaging"}
-        assert company.sample_titles(row, n=2) == [
+        assert await company.sample_titles(row, n=2) == [
             "PACS Support Engineer", "Imaging Software Developer"]
-        assert company.sample_titles(row, n=1) == ["PACS Support Engineer"]
+        assert await company.sample_titles(row, n=1) == ["PACS Support Engineer"]
 
     @pytest.mark.parametrize("row", [
         {"ats": "rippling", "slug": "gone"},
@@ -898,11 +898,11 @@ class TestTitleSampling:
         {"ats": "custom", "careers_url": None},   # nothing to fetch
         {"ats": "no-such-ats"},                   # nothing that could
     ])
-    def test_an_unreadable_board_samples_empty_and_never_raises(
+    async def test_an_unreadable_board_samples_empty_and_never_raises(
             self, row, serve, capsys):
         serve(OSError("connection refused"))
         http.reset_fetch_failures()
-        assert company.sample_titles(row) == []
+        assert await company.sample_titles(row) == []
 
 
 class TestMissionContext:
@@ -939,7 +939,7 @@ class TestMissionContext:
         from src.discovery import local_sourcing
         sent = []
         monkeypatch.setattr(
-            "src.claude.api.ascore_company_mission",
+            "src.claude.api.score_company_mission",
             answer(lambda name, context="": sent.append(context) or ("adjacent", .5, "")))
         serve(fake_response(TestTitleSampling.RIPPLING))
         await local_sourcing._score_hit(self.BOARD)
@@ -950,11 +950,11 @@ class TestMissionContext:
 
 
 class TestADeadEndpointIsNeverAnException:
-    """Every JSON-pulling fetcher goes through net.http.aget_json, and the
+    """Every JSON-pulling fetcher goes through net.http.get_json, and the
     scraped ones report through net.http.fetch_failed, so the "a dead
     source reports and returns empty" contract is ONE contract, checked
     for both failure shapes (a refused socket and an HTTP error reach
-    aget_json's handler by different routes).
+    get_json's handler by different routes).
 
     Parametrised over the fetchable specs themselves, so a board platform
     is covered the day it is specced; FEEDS are the sources outside them.
@@ -985,14 +985,14 @@ class TestADeadEndpointIsNeverAnException:
               else fake_response(status=500))
 
     @pytest.mark.parametrize("name", sorted(n for n in BOARDS if board_for(n)) + sorted(FEEDS))
-    def test_reports_and_returns_empty(self, name, dead_source, capsys,
-                                       match_everything):
+    async def test_reports_and_returns_empty(self, name, dead_source, capsys,
+                                             match_everything):
         http.reset_fetch_failures()
         if name in self.FEEDS:
-            got = self.FEEDS[name]()
+            got = await self.FEEDS[name]()
         else:
-            got = company.fetch_company({**self.ROW, "ats": name,
-                                         "slug": self.SLUGS.get(name, "acme")})
+            got = await company.fetch_company({**self.ROW, "ats": name,
+                                               "slug": self.SLUGS.get(name, "acme")})
         assert got == []
         # A dead source must be COUNTED, not just logged: an uncounted
         # failure and a genuinely empty board are the same [] to a caller

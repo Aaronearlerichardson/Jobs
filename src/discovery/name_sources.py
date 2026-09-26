@@ -4,7 +4,7 @@ to a board.
 Profile seeds and scan majors, `/company/<slug>/` links on directory and
 listicle pages (RTP.org, Built In, chamber directories), web-search
 harvesting of such pages, and an LLM brainstorm of the profile's region and
-domain, unioned by agather_names. Every name still has to survive the
+domain, unioned by gather_names. Every name still has to survive the
 resolve -> validate -> score chain in local_sourcing, so noise here costs
 requests rather than roster rows -- which is why the shape filters
 (_looks_like_company, _is_nav_noise) run first.
@@ -212,7 +212,7 @@ async def harvest_search_names(queries, per_query=12, fetch_dirs=10):
                   "getlatka", "tracxn", "f6s.com")
     dir_urls = []
     for q in queries:
-        for r in await ddg.asearch(q, max_results=per_query):
+        for r in await ddg.search(q, max_results=per_query):
             u = r.get("href") or r.get("url") or ""
             if u and any(h in u.lower() for h in _DIR_HOSTS):
                 dir_urls.append(u)
@@ -254,7 +254,7 @@ async def brainstorm_company_names(n=None):
     cached = await asyncio.to_thread(ddg.cache_get, key)
     if cached is not None:
         return cached
-    from src.claude.api import acall_claude_json
+    from src.claude.api import call_claude_json
     system = "You help maintain a job-search company roster."
     user = (
         f"List up to {n} REAL employers likely to have offices, labs, or "
@@ -264,14 +264,14 @@ async def brainstorm_company_names(n=None):
         "CROs, diagnostics and device makers, health-system technology arms, "
         "university spinouts. Use official company names only — no "
         "descriptions, no locations, no commentary.")
-    r = await acall_claude_json(system, user, max_tokens=1600, reply=CompanyNames)
+    r = await call_claude_json(system, user, max_tokens=1600, reply=CompanyNames)
     names = [x for x in (r.companies if r else []) if 2 < len(x) < 60][:n]
     if names:
         await asyncio.to_thread(ddg.cache_put, key, names)
     return names
 
 
-async def agather_names(extra=None):
+async def gather_names(extra=None):
     """Union of all name sources, de-duplicated case-insensitively:
     profile seeds + majors + configured directory scrapes + web-search
     harvesting + an LLM region/domain brainstorm + any explicit `extra`."""

@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import contextlib
 import json
 import logging
 import re
-import threading
 import time
 
 from pydantic import StrictBool, ValidationError
 
-from src import config
+from src import config, runstate
 from src.claude.reply import Reply, Unit, choice
 from src.net import http
 
@@ -197,19 +195,44 @@ _LEGACY_MODELS = ("claude-3", "claude-opus-4-0", "claude-opus-4-1",
 #  (2x writes) for runs whose calls are spread more than 5 minutes apart.       #
 # --------------------------------------------------------------------------- #
 
-# Scoring fans out (every call a coroutine on the network loop), and a cache
+# Scoring fans out (every call a coroutine on the event loop), and a cache
 # entry is only readable once the first response has started — N calls firing
 # at once would each pay a full-price write of the same prefix. The first
 # caller for a given (model, system) claims the prefix and the rest wait for
 # it to land, so the fan-out pays one write and N-1 reads. Bounded: if the
 # leader hangs or errors the followers go ahead anyway and just miss the cache.
-_PREFIX_GATES = {}
+#
+# Token accounting keeps cache behaviour observable rather than assumed (a
+# silent invalidator shows up as cache_read stuck at 0).
 
-# Cumulative token accounting, so cache behaviour is observable rather than
-# assumed (a silent invalidator shows up here as cache_read stuck at 0).
-_USAGE_LOCK = threading.Lock()
-_USAGE = {"calls": 0, "uncached_input": 0, "cache_write": 0,
-          "cache_read": 0, "output": 0}
+
+class _Calls:
+    """What a run's Claude calls share: the prompt-cache gates (model,
+    hash(system)) -> asyncio.Event (see _claim_prefix); the token counters,
+    and those the last footer covered (see report_cache_stats), printed
+    as the run ends when the claude_usage_summary setting is on; the
+    breaker's message once tripped (see _trip_fatal); and the board-owner
+    checks it started that are still in flight, which the run's end waits
+    for, config.CLAUDE_OWNER_WAIT_S at most, before its session closes and
+    its footer prints (see board_is_own)."""
+
+    def __init__(self):
+        self.gates = {}
+        self.usage = dict.fromkeys(("calls", "uncached_input", "cache_write",
+                                    "cache_read", "output"), 0)
+        self.reported = dict(self.usage)
+        self.fatal = None
+        self.asking = set()
+        if config.SETTINGS.claude_usage_summary:
+            runstate.at_exit(report_cache_stats)
+        runstate.at_exit(self._land_asks)
+
+    async def _land_asks(self):
+        if self.asking:
+            await asyncio.wait(self.asking, timeout=config.CLAUDE_OWNER_WAIT_S)
+
+
+_CALLS = runstate.per_run(_Calls)
 
 
 def _system_field(system_prompt, cache=True):
@@ -275,10 +298,10 @@ async def _claim_prefix(model, system_prompt):
     """The first caller for this prefix leads: it gets the Event to set when
     its request finishes. Everyone else waits for the leader,
     config.CLAUDE_GATE_WAIT_S at most, and gets None."""
-    key = (model, hash(system_prompt))
-    event = _PREFIX_GATES.get(key)
+    key, gates = (model, hash(system_prompt)), _CALLS().gates
+    event = gates.get(key)
     if event is None:
-        event = _PREFIX_GATES[key] = asyncio.Event()
+        event = gates[key] = asyncio.Event()
         return event
     with contextlib.suppress(TimeoutError):
         async with asyncio.timeout(config.CLAUDE_GATE_WAIT_S):
@@ -287,43 +310,30 @@ async def _claim_prefix(model, system_prompt):
 
 
 def _record_usage(usage):
-    with _USAGE_LOCK:
-        _USAGE["calls"] += 1
-        _USAGE["uncached_input"] += int(usage.get("input_tokens") or 0)
-        _USAGE["cache_write"] += int(usage.get("cache_creation_input_tokens") or 0)
-        _USAGE["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
-        _USAGE["output"] += int(usage.get("output_tokens") or 0)
+    u = _CALLS().usage
+    u["calls"] += 1
+    u["uncached_input"] += int(usage.get("input_tokens") or 0)
+    u["cache_write"] += int(usage.get("cache_creation_input_tokens") or 0)
+    u["cache_read"] += int(usage.get("cache_read_input_tokens") or 0)
+    u["output"] += int(usage.get("output_tokens") or 0)
 
 
-def cache_stats():
-    """Cumulative token counters for this process (a plain dict copy)."""
-    with _USAGE_LOCK:
-        return dict(_USAGE)
+def report_cache_stats():
+    """Print the one-line usage footer for the calls this run made since
+    its last footer, if there were any.
 
-
-# The usage as of the last footer report_cache_stats printed.
-_LAST_REPORTED = dict(_USAGE)
-
-
-def report_cache_stats(baseline=None):
-    """Print the one-line usage footer for the calls made since `baseline`
-    (a prior cache_stats() snapshot), if there were any.
-
-    A harvest pass or a web-UI op passes the snapshot it took at its
-    start. Omitted (the atexit footer), `baseline` is the last report
-    printed, so a CLI one-shot prints its total once and a process whose
-    passes already reported prints nothing more.
+    A harvest pass and a web-UI op print theirs as they end; every run
+    prints what is left as it ends (the claude_usage_summary setting), so
+    a CLI one-shot prints its total once.
 
     `hit` is the share of the CACHEABLE prefix served from cache — 0% across
     a whole run with a large system prompt means something is invalidating
     the prefix (a timestamp in it, a changed model, a changed profile
     mid-run).
     """
-    global _LAST_REPORTED
-    with _USAGE_LOCK:
-        base = _LAST_REPORTED if baseline is None else baseline
-        s = {k: v - base.get(k, 0) for k, v in _USAGE.items()}
-        _LAST_REPORTED = dict(_USAGE)
+    calls = _CALLS()
+    s = {k: v - calls.reported[k] for k, v in calls.usage.items()}
+    calls.reported = dict(calls.usage)
     if s["calls"] <= 0:
         return
     cached = s["cache_read"] + s["cache_write"]
@@ -335,32 +345,27 @@ def report_cache_stats(baseline=None):
           f"| output {s['output']:,} tok")
 
 
-@atexit.register
-def _print_cache_stats_at_exit():
-    if config.SETTINGS.claude_usage_summary:
-        report_cache_stats()
-
-
 # Unrecoverable-API-error circuit breaker. Some failures can never succeed on
 # retry within the same run — an exhausted credit balance (400), a bad or
 # revoked API key (401/403). Without a breaker each job's call fails
 # independently: the 2026-08-31 rescore burned 973 consecutive "credit balance
 # is too low" 400s over five minutes before finishing. Once tripped, every
-# later call in the process returns None immediately without touching the API.
-_FATAL_LOCK = threading.Lock()
-_FATAL_MSG = None
+# later call in the run returns None immediately without touching the API;
+# the next run (a web UI op, a harvest pass) asks again, so a topped-up
+# balance takes effect without a restart, and a still-dead API fails once
+# and explains itself (2026-09-09: a crawl tripped it at 18:22, and the
+# verify runs at 18:29 and 19:24 skipped every call without saying why).
 
 # Transient statuses worth one short retry ladder (529 = overloaded_error).
 _RETRY_STATUSES = (429, 500, 502, 503, 529)
 
 
 def _trip_fatal(msg):
-    global _FATAL_MSG
-    with _FATAL_LOCK:
-        if _FATAL_MSG is None:
-            _FATAL_MSG = msg
-            print(f"  [!] Claude API disabled for the rest of this run "
-                  f"(unrecoverable): {msg}")
+    calls = _CALLS()
+    if calls.fatal is None:
+        calls.fatal = msg
+        print(f"  [!] Claude API disabled for the rest of this run "
+              f"(unrecoverable): {msg}")
 
 
 def api_disabled():
@@ -368,8 +373,7 @@ def api_disabled():
     Claude calls for this run, else None. Long loops (the deep-verify pass)
     check it to stop with one line instead of a per-row 'unverified' for
     work the API can no longer do."""
-    with _FATAL_LOCK:
-        return _FATAL_MSG
+    return _CALLS().fatal
 
 
 def have_api_key():
@@ -384,27 +388,8 @@ def have_api_key():
     return config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"
 
 
-def reset_breaker():
-    """Re-arm the breaker for a NEW run. It is process-lifetime by design
-    (one CLI run = one process), but the web UI runs every operation
-    inside one long-lived server process, so src/dispatch/background._run
-    re-arms it per operation: a topped-up balance takes effect
-    without a server restart, and a still-dead API fails once and explains
-    itself.
-
-    Notes:
-        On 2026-09-09 a crawl tripped it on an exhausted credit balance at
-        18:22, and the verify runs at 18:29 and 19:24 skipped every call
-        without trying — and without saying why, since the banner prints
-        once per trip.
-    """
-    global _FATAL_MSG
-    with _FATAL_LOCK:
-        _FATAL_MSG = None
-
-
-async def acall_claude_json(system_prompt, user_content, max_tokens=1000,
-                            model=None, thinking=False, cache=True, *, reply):
+async def call_claude_json(system_prompt, user_content, max_tokens=1000,
+                           model=None, thinking=False, cache=True, *, reply):
     """POST to /v1/messages and return Claude's answer as a `reply` (a Reply
     subclass) instance, held to its schema (see build_payload).
 
@@ -433,8 +418,8 @@ async def acall_claude_json(system_prompt, user_content, max_tokens=1000,
     if not have_api_key():
         print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return None
-    if _FATAL_MSG is not None:
-        _log.debug("claude call skipped (breaker tripped): %s", _FATAL_MSG)
+    if (fatal := api_disabled()) is not None:
+        _log.debug("claude call skipped (breaker tripped): %s", fatal)
         return None
     use_model = model or config.CLAUDE_MODEL
     payload = build_payload(system_prompt, user_content, max_tokens,
@@ -535,15 +520,12 @@ async def acall_claude_json(system_prompt, user_content, max_tokens=1000,
             lead.set()
 
 
-call_claude_json = http.sync_shim(acall_claude_json)
+async def expand_search(term):
+    return await call_claude_json(_EXPAND_SYSTEM, term, reply=ExpandReply)
 
 
-def expand_search(term):
-    return call_claude_json(_EXPAND_SYSTEM, term, reply=ExpandReply)
-
-
-def expand_location(term):
-    return call_claude_json(_LOCATION_EXPAND_SYSTEM, term, reply=LocationReply)
+async def expand_location(term):
+    return await call_claude_json(_LOCATION_EXPAND_SYSTEM, term, reply=LocationReply)
 
 
 _COMPANY_MISSION_SYSTEM = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
@@ -574,7 +556,7 @@ class MissionReply(Reply):
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
-async def ascore_company_mission(name, context=""):
+async def score_company_mission(name, context=""):
     """Return (mission_tier|None, score|None, reason) for an employer."""
     # Deterministic bullseye anchor (profile [mission].bullseye_regex), checked
     # BEFORE the LLM: a company whose NAME is the candidate's exact target is
@@ -586,8 +568,8 @@ async def ascore_company_mission(name, context=""):
     if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
         return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
     user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
-    r = await acall_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
-                                reply=MissionReply)
+    r = await call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
+                               reply=MissionReply)
     if r is None:
         return None, None, ""
     return r.tier, r.score, r.reason
@@ -614,12 +596,13 @@ class BoardOwnerReply(Reply):
     reason: str
 
 
-#: (company, board) -> the task of its paid call, while it runs and then
-#: for the process once it answered True/False (see aboard_is_own).
+#: (company, board) -> the task of its paid call while it runs, then for
+#: the process a done future of its True/False (see board_is_own). Not run
+#: state (src/runstate.py): the next web UI op or harvest pass reuses it.
 _BOARD_OWNER_CACHE = {}
 
 
-async def aboard_is_own(company, board, site="", titles=()):
+async def board_is_own(company, board, site="", titles=()):
     """True/False: is `board` (a Workday tenant, or "<ats>:<slug>")
     `company`'s own hiring board? None when the API is unavailable or the
     reply is malformed — callers keep the hit on None (offline behavior
@@ -629,7 +612,8 @@ async def aboard_is_own(company, board, site="", titles=()):
 
     The call is a task of its own that every asker awaits shielded: an
     asker cancelled mid-call (a JS scrape's budget) leaves it to finish,
-    and its verdict is kept for the next one.
+    and its verdict is kept for the next one, the run's end waiting for it
+    (see _Calls).
 
     Notes:
         Consulted only for collision-prone resolutions, a board on a
@@ -648,21 +632,25 @@ async def aboard_is_own(company, board, site="", titles=()):
         if titles:
             user += "\nSAMPLE JOB TITLES: " + " | ".join(
                 t for t in list(titles)[:8] if t)
-        r = await acall_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
-                                    reply=BoardOwnerReply)
+        r = await call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
+                                   reply=BoardOwnerReply)
         return None if r is None else r.same_employer
     key = (str(company).lower(), str(board).lower())
     task = _BOARD_OWNER_CACHE.get(key)
     if task is None:
         task = _BOARD_OWNER_CACHE[key] = asyncio.create_task(ask())
+        asking = _CALLS().asking
+        asking.add(task)
+        task.add_done_callback(asking.discard)
 
         def settled(t):
             # Runs before any asker resumes; exception() marks an error seen.
-            if ((t.cancelled() or t.exception() is not None or t.result() is None)
-                    and _BOARD_OWNER_CACHE.get(key) is t):
+            if _BOARD_OWNER_CACHE.get(key) is not t:
+                return
+            if t.cancelled() or t.exception() is not None or t.result() is None:
                 del _BOARD_OWNER_CACHE[key]
+            else:       # the verdict alone: a kept task pins its run's state
+                _BOARD_OWNER_CACHE[key] = kept = t.get_loop().create_future()
+                kept.set_result(t.result())
         task.add_done_callback(settled)
     return await asyncio.shield(task)
-
-
-board_is_own = http.sync_shim(aboard_is_own)

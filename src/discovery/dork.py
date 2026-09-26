@@ -21,7 +21,7 @@ from src.ats.board import BOARDS
 from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
-from src.discovery.resolve.identity import anc_hq_signal
+from src.discovery.resolve.identity import nc_hq_signal
 from src.discovery.resolve.probes import slug_keyed
 from src.match.locality import NC_RE
 from src.match.names import SLUG_NAME_SOURCE
@@ -207,7 +207,7 @@ async def harvest_urls(urls, verbose=True):
             if store.board_key(comp) in have:
                 continue
             try:
-                jobs = await company_fetch.afetch_company(comp, NC_RE)
+                jobs = await company_fetch.fetch_company(comp, NC_RE)
             except Exception:
                 jobs = []
             nc = len(jobs)
@@ -215,7 +215,7 @@ async def harvest_urls(urls, verbose=True):
             # Add even with 0 current NC openings IF we can confirm an NC HQ/office
             # (so a daily run catches their next NC posting) — but not otherwise,
             # else non-NC companies that merely mention NC would pollute the roster.
-            if nc == 0 and not await anc_hq_signal(name):
+            if nc == 0 and not await nc_hq_signal(name):
                 continue
             # Scoring, activation and the review queue are the shared write
             # path (local_sourcing.score_and_upsert). The row is tagged local

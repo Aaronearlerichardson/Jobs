@@ -12,18 +12,18 @@ Pipeline per query:
 
 import asyncio
 
-from src.net import ddg, http
-from src.ats.board.jsonld import afetch_jsonld_page
+from src.net import ddg
+from src.ats.board.jsonld import fetch_jsonld_page
 
 
-async def afetch_websearch(label, query, max_results=15, per_result_delay=0.5,
-                           gate=None):
+async def fetch_websearch(label, query, max_results=15, per_result_delay=0.5,
+                          gate=None):
     """
     Run one DDG query; for each result URL, scan for JSON-LD JobPosting.
     `label` is used as the company name when we can't infer one.
     """
     print(f"    -> Query: {query!r}")
-    results = await ddg.asearch(query, max_results=max_results)
+    results = await ddg.search(query, max_results=max_results)
     if not results:
         return []
 
@@ -33,9 +33,6 @@ async def afetch_websearch(label, query, max_results=15, per_result_delay=0.5,
         if not url or url in seen_urls:
             continue
         seen_urls.add(url)
-        jobs.extend(await afetch_jsonld_page(label, url, gate=gate))
+        jobs.extend(await fetch_jsonld_page(label, url, gate=gate))
         await asyncio.sleep(per_result_delay)
     return jobs
-
-
-fetch_websearch = http.sync_shim(afetch_websearch)

@@ -35,8 +35,8 @@ class TestBackfillRetryThrottle:
         dbp = tmp_path / "t.db"
         self._seed(dbp)
         # The board no longer lists the job, and its detail page is gone too.
-        monkeypatch.setattr(company_fetch, "afetch_company", answer([]))
-        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
+        monkeypatch.setattr(company_fetch, "fetch_company", answer([]))
+        monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
         t = {"db_path": dbp}
 
         assert await ops.backfill_board_descriptions(t=t) == 0
@@ -46,7 +46,7 @@ class TestBackfillRetryThrottle:
         # Rerun inside the retry window: the row is skipped, its board is
         # never fetched.
         fetched = []
-        monkeypatch.setattr(company_fetch, "afetch_company",
+        monkeypatch.setattr(company_fetch, "fetch_company",
                             answer(lambda *a, **k: fetched.append(1) or []))
         assert await ops.backfill_board_descriptions(t=t) == 0
         out = capsys.readouterr().out
@@ -89,9 +89,9 @@ class TestBackfillRetryThrottle:
         dbp = tmp_path / "t.db"
         self._seed(dbp)
         board_row = {"title": "Vanished Engineer", "description": ""}
-        monkeypatch.setattr(company_fetch, "afetch_company", answer([board_row]))
+        monkeypatch.setattr(company_fetch, "fetch_company", answer([board_row]))
         monkeypatch.setattr(
-            company_fetch, "ahydrate_description",
+            company_fetch, "hydrate_description",
             answer(lambda stub, company=None: stub.__setitem__("description",
                                                                "A real JD body.")))
         assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 1
@@ -141,8 +141,8 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         dbp = tmp_path / "t.db"
         names = ["Acme", "Beacon", "Cirrus"]
         self._seed(dbp, names)
-        monkeypatch.setattr(company_fetch, "afetch_company", answer(self._board))
-        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
+        monkeypatch.setattr(company_fetch, "fetch_company", answer(self._board))
+        monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
 
         seen = {}
         real_fan_out = ops.fan_out
@@ -173,8 +173,8 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
                 await barrier.wait()
             return self._board(company)
 
-        monkeypatch.setattr(company_fetch, "afetch_company", _fetch)
-        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
+        monkeypatch.setattr(company_fetch, "fetch_company", _fetch)
+        monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
         assert await ops.backfill_board_descriptions(t={"db_path": dbp},
                                                max_workers=3) == 3
 
@@ -185,8 +185,8 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         per-company summaries and footer are printed."""
         dbp = tmp_path / "t.db"
         self._seed(dbp, ["Acme", "Beacon"])
-        monkeypatch.setattr(company_fetch, "afetch_company", answer(self._board))
-        monkeypatch.setattr(company_fetch, "ahydrate_description", answer(None))
+        monkeypatch.setattr(company_fetch, "fetch_company", answer(self._board))
+        monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
 
         assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 2
         out = capsys.readouterr().out

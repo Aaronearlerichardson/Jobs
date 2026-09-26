@@ -154,7 +154,7 @@ async def build_sources(cfg, t, include_websearch=None):
             floor = t.get("remote_mission_floor")
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
-                    (lambda cc=c: company_fetch.afetch_company(
+                    (lambda cc=c: company_fetch.fetch_company(
                         cc, None if ops._whole_board(cc, floor) else NC_RE)),
                     company=c, key=("store", (c["name"] or "").lower()))
         else:
@@ -167,30 +167,30 @@ async def build_sources(cfg, t, include_websearch=None):
     # registry, the crawl injects the keyword gate here; the fetchers are
     # ungated on their own.
     if src["aggregators"]:
-        from src.ats.feeds.discourse import afetch_discourse
-        from src.ats.feeds.hnhiring import afetch_hnhiring
-        from src.ats.feeds.remoteok import afetch_remoteok
-        from src.ats.feeds.remotive import afetch_remotive
-        from src.ats.feeds.rssfeed import afetch_rss
+        from src.ats.feeds.discourse import fetch_discourse
+        from src.ats.feeds.hnhiring import fetch_hnhiring
+        from src.ats.feeds.remoteok import fetch_remoteok
+        from src.ats.feeds.remotive import fetch_remotive
+        from src.ats.feeds.rssfeed import fetch_rss
         for name, base, cat in cfg.DISCOURSE_BOARDS:
             add(name, "discourse",
-                lambda n=name, b=base, c=cat: afetch_discourse(n, b, c, gate=is_relevant))
+                lambda n=name, b=base, c=cat: fetch_discourse(n, b, c, gate=is_relevant))
         if getattr(cfg, "REMOTEOK_ENABLED", True):
-            add("RemoteOK", "remoteok", lambda: afetch_remoteok(gate=is_relevant))
+            add("RemoteOK", "remoteok", lambda: fetch_remoteok(gate=is_relevant))
         if getattr(cfg, "REMOTIVE_ENABLED", True):
             add("Remotive", "remotive",
-                lambda: afetch_remotive(category=cfg.REMOTIVE_CATEGORY,
-                                        gate=is_relevant))
+                lambda: fetch_remotive(category=cfg.REMOTIVE_CATEGORY,
+                                       gate=is_relevant))
         if getattr(cfg, "HNHIRING_ENABLED", True):
             add("HN Who-is-hiring", "hn",
-                lambda: afetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS,
-                                        gate=is_relevant))
+                lambda: fetch_hnhiring(max_threads=cfg.HNHIRING_MAX_THREADS,
+                                       gate=is_relevant))
         for label, url, default_loc in cfg.RSS_FEEDS:
             is_remote_board = default_loc.strip().lower() == "remote"
             add(label, "rss",
                 lambda l=label, u=url, d=default_loc, rb=is_remote_board:
-                    afetch_rss(l, u, default_location=d, remote_board=rb,
-                               gate=is_relevant))
+                    fetch_rss(l, u, default_location=d, remote_board=rb,
+                              gate=is_relevant))
 
     # 4) USAJOBS (federal openings). Deliberately NOT under `aggregators`:
     # that family is remote-native boards and is off for location-scoped
@@ -199,9 +199,9 @@ async def build_sources(cfg, t, include_websearch=None):
     # track wants — a federal campus has no ATS to put in the roster. Safe
     # to leave outside the gate because it ships OFF and needs credentials.
     if getattr(cfg, "USAJOBS_ENABLED", False):
-        from src.ats.feeds.usajobs import afetch_usajobs
+        from src.ats.feeds.usajobs import fetch_usajobs
         add("USAJOBS", "usajobs",
-            lambda: afetch_usajobs(
+            lambda: fetch_usajobs(
                 keyword=cfg.USAJOBS_KEYWORD, location=cfg.USAJOBS_LOCATION,
                 radius=cfg.USAJOBS_RADIUS, series=cfg.USAJOBS_SERIES,
                 results_per_page=cfg.USAJOBS_RESULTS_PER_PAGE,
@@ -212,22 +212,22 @@ async def build_sources(cfg, t, include_websearch=None):
     # and the local track's geo gate decides which of its postings apply.
     # Ships OFF. Their employers are attributed after gating (run_track).
     if getattr(cfg, "GETRO_ENABLED", False):
-        from src.ats.feeds.getro import afetch_getro_all, board_host
+        from src.ats.feeds.getro import board_host, fetch_getro_all
         for board in getattr(cfg, "GETRO_BOARDS", []):
             host = board_host(board)
             if not host:
                 continue
             add(f"Getro {host}", "getro",
-                lambda b=board: afetch_getro_all(
+                lambda b=board: fetch_getro_all(
                     b, max_details=getattr(cfg, "GETRO_MAX_DETAILS", 150),
                     gate=is_relevant))
 
     # 5) Web searches (DDG -> JSON-LD).
     if use_ws:
-        from src.ats.feeds.websearch import afetch_websearch
+        from src.ats.feeds.websearch import fetch_websearch
         for label, query, n in getattr(cfg, "WEBSEARCH_QUERIES", []):
             add(label, "websearch",
-                lambda l=label, q=query, m=n: afetch_websearch(
+                lambda l=label, q=query, m=n: fetch_websearch(
                     l, q, max_results=m, gate=is_relevant))
 
     return specs
@@ -529,12 +529,12 @@ async def _score_and_persist(db, t, got, resume, *, fit, commit, guard_tripped,
                                [:config.MAX_DESC_CHARS]})
 
     if fit and got.matches and resume and not guard_tripped:
-        from src.claude.fit import ascore_resume_fit
+        from src.claude.fit import score_resume_fit
         print(f"  scoring {len(got.matches)} match(es) against resume...")
 
         async def _one(j):
-            res = await ascore_resume_fit(j["title"], j.get("description", ""),
-                                          location=j.get("location") or "")
+            res = await score_resume_fit(j["title"], j.get("description", ""),
+                                         location=j.get("location") or "")
             j.update(res.as_columns())
 
         # `ex.map` re-raised the first failure, so one unscorable posting

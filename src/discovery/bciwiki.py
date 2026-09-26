@@ -7,7 +7,7 @@ on-topic list of exactly the employers this crawler targets — far broader
 and more relevant than Claude's 15-per-query discovery guesses.
 
 So we use it the way the rest of discovery works: harvest names here, then
-run them through avalidate_candidate, which hands each name to the shared
+run them through validate_candidate, which hands each name to the shared
 resolver (careers-page sniff, then slug probe, every hit live-validated).
 """
 
@@ -89,9 +89,9 @@ async def bciwiki_company_names(categories=("companies",), max_items=2000):
     return out
 
 
-async def abciwiki_seed_candidates(categories=("companies",), max_items=2000):
+async def bciwiki_seed_candidates(categories=("companies",), max_items=2000):
     """Candidate dicts (same shape as Claude's discovery payload) so the
-    names flow through candidate_from_dict / avalidate_candidate unchanged."""
+    names flow through candidate_from_dict / validate_candidate unchanged."""
     return [
         {
             "name":        name,

@@ -113,9 +113,9 @@ class TestReresolveWrites:
     T = {"db_path": None}
 
     def _wire(self, monkeypatch, result):
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss", answer(result))
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(result))
         monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
-        monkeypatch.setattr("src.claude.api.ascore_company_mission",
+        monkeypatch.setattr("src.claude.api.score_company_mission",
                             answer(("adjacent", 0.5, "stub")))
 
     async def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
@@ -172,12 +172,12 @@ class TestReresolveWrites:
                        "slug": "quiet-new", "careers_url": None,
                        "count": 12, "nc": 2, "via": "sniff"}, None),
             "Gone": (None, "no-board-found:wrong-domain")}
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             answer(lambda name, *a, **k: results[name]))
 
         async def no_score(*a, **k):
             raise AssertionError("a preview never pays for a mission score")
-        monkeypatch.setattr("src.claude.api.ascore_company_mission", no_score)
+        monkeypatch.setattr("src.claude.api.score_company_mission", no_score)
 
         written = await repair.reresolve_misses(
             db=db, max_workers=1, t=self.T, commit=False,
@@ -257,16 +257,16 @@ class TestManualAddUsesTheSharedResolver:
     """add_manual_job resolved through a probe-first resolver of its own —
     a name-guessed slug tried before the company's own careers page, which
     is the collision a hand-typed employer name is most exposed to. It now
-    goes through aresolve_or_miss like every other interactive add path."""
+    goes through resolve_or_miss like every other interactive add path."""
 
     def _wire(self, monkeypatch, result, seen):
         async def _resolve(name, careers_url=""):
             seen.append(name)
             return result
 
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss", _resolve)
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
         monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
-        monkeypatch.setattr("src.claude.api.ascore_company_mission",
+        monkeypatch.setattr("src.claude.api.score_company_mission",
                             answer(("adjacent", 0.5, "stub")))
         monkeypatch.setattr("src.claude.api.is_active_mission",
                             lambda *a, **k: True)
@@ -347,10 +347,10 @@ class TestPeopleAdminSignature:
                           "https://unc.peopleadmin.com")}
         assert keys == {("peopleadmin", "https://unc.peopleadmin.com")}
 
-    def test_the_packed_host_is_what_the_fetcher_reads(self, serve):
+    async def test_the_packed_host_is_what_the_fetcher_reads(self, serve):
         from src.ats.board.company import fetch_company
         calls = serve(fake_response(text=""))
-        fetch_company(ats_signatures.pack("peopleadmin", "unc", self.URL))
+        await fetch_company(ats_signatures.pack("peopleadmin", "unc", self.URL))
         assert calls[0] == "https://unc.peopleadmin.com/postings/all_jobs.atom"
 
 
@@ -378,7 +378,7 @@ class TestJobviteSignature:
 
 
 class TestARaisedResolutionIsReported:
-    """`aresolve_or_miss` converts the exceptions it can see; one raised
+    """`resolve_or_miss` converts the exceptions it can see; one raised
     past it still can. Three consumers unwrapped that by hand and the
     reresolve copy had dropped the report line, so a resolution that blew
     up there became a miss with nothing in the log to say why.
@@ -388,7 +388,7 @@ class TestARaisedResolutionIsReported:
                                                           monkeypatch):
         async def boom(name, careers_url=""):
             raise RuntimeError("boom")
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss", boom)
+        monkeypatch.setattr(resolve_board, "resolve_or_miss", boom)
         hit, reason = await resolve_board.resolved("Acme Bio")
         assert hit is None
         assert reason == "fetch-error:RuntimeError"
@@ -396,7 +396,7 @@ class TestARaisedResolutionIsReported:
         assert "Acme Bio" in out and "RuntimeError" in out
 
     async def test_a_normal_result_passes_straight_through(self, monkeypatch):
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             answer(({"name": "Acme"}, None)))
         assert await resolve_board.resolved("Acme") == ({"name": "Acme"}, None)
 

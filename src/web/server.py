@@ -1,14 +1,73 @@
 """Server lifecycle: port selection, idempotent launch, the graceful
-self-restart used by the Settings tab, and main()."""
+self-restart used by the Settings tab, main(), and the event loop the
+request threads reach async code through (`call`)."""
 
+import asyncio
+import atexit
 import os
 import subprocess
 import sys
 import threading
 
-from src import config
+from src import config, runstate
 from src.claude.api import have_api_key
 from . import STATE, app
+
+#: The web UI's event loop, on a daemon thread of its own, once started.
+_LOOP = None
+_LOOP_START = threading.Lock()
+
+
+def call(coro):
+    """`coro`'s result, run on the web UI's event loop while this request
+    thread waits, as a run of its own (src/runstate.py): the one way a
+    thread reaches async code. The loop starts at first use; at exit, what
+    still runs on it is cancelled and unwinds (`_unwind`).
+
+    On the loop itself it could only deadlock, so it refuses:
+
+    >>> async def nested():
+    ...     return call(asyncio.sleep(0))
+    >>> call(nested())
+    Traceback (most recent call last):
+    RuntimeError: call on the web UI's loop: await the coroutine instead
+    """
+    global _LOOP
+    try:
+        on_loop = _LOOP is not None and asyncio.get_running_loop() is _LOOP
+    except RuntimeError:                 # no loop runs in this thread
+        on_loop = False
+    if on_loop:
+        coro.close()
+        raise RuntimeError("call on the web UI's loop: await the coroutine instead")
+    with _LOOP_START:
+        if _LOOP is None:
+            _LOOP = asyncio.new_event_loop()
+            threading.Thread(target=_LOOP.run_forever, name="web-loop",
+                             daemon=True).start()
+            atexit.register(_unwind)
+
+    async def in_run():
+        async with runstate.Run():
+            return await coro
+    return asyncio.run_coroutine_threadsafe(in_run(), _LOOP).result()
+
+
+def _unwind():
+    """At exit: cancel the loop's tasks (a running op) and give them 10 s to
+    unwind, so an open store batch rolls back and a run closes its
+    session, then stop the loop."""
+    async def cancel_all():
+        tasks = asyncio.all_tasks() - {asyncio.current_task()}
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.wait(tasks, timeout=10)
+    try:
+        asyncio.run_coroutine_threadsafe(cancel_all(), _LOOP).result(timeout=12)
+    except Exception:
+        pass
+    _LOOP.call_soon_threadsafe(_LOOP.stop)
 
 
 def _ours_on(port):

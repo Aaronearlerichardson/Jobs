@@ -31,10 +31,10 @@ Notes:
 """
 
 import atexit
+import contextvars
 import logging
 import os
 import sys
-import threading
 import time
 from datetime import datetime
 
@@ -83,8 +83,33 @@ _MODIFIERS = {
     "described-only", "why", "db",
 }
 
-# Finishers for session logs opened by start(); finish() drains it.
+# Finishers for session logs opened by start(); finish() drains it. Not
+# run state (src/runstate.py): what they undo, the swap of sys.stdout and
+# sys.stderr, is the process's, and the atexit finish() must find them.
 _active = []
+
+#: The line this writer has begun and not ended, per sink: {sink: text}.
+#: A ContextVar, so each task, and each thread, assembles its own lines.
+_PARTIAL = contextvars.ContextVar("partial_lines", default={})
+
+
+def whole_lines(sink, text):
+    """The lines this task or thread completes by writing `text` to `sink`;
+    the rest waits for its next write there.
+
+    print() writes a line's text and its newline separately, so lines
+    assembled across writers fuse: a worker's line spliced into a
+    progress line (the 2026-08-28 session logs).
+
+    >>> whole_lines("out", "a\\nb"), whole_lines("out", "c\\n")
+    (['a'], ['bc'])
+    """
+    partial = _PARTIAL.get()
+    *lines, rest = (partial.get(sink, "") + text).split("\n")
+    if rest or sink in partial:
+        _PARTIAL.set({**partial, sink: rest} if rest else
+                     {k: v for k, v in partial.items() if k != sink})
+    return lines
 
 
 def _log_dir():
@@ -186,13 +211,6 @@ class SessionLog:
                        f"# started : {now:%Y-%m-%d %H:%M:%S}\n"
                        f"# run     : {invocation}\n\n")
         self._t0 = time.monotonic()
-        # Partial console lines, keyed by (writing thread, err). Per THREAD,
-        # not per stream: print() issues separate text/newline writes, and a
-        # shared buffer let a fetch worker's line fuse into the middle of a
-        # progress line (seen repeatedly in the 2026-08-28 session logs) —
-        # with per-thread assembly every record is one thread's whole line.
-        self._buf = {}
-        self._lock = threading.Lock()
         self._closed = False
 
         self._handler = logging.StreamHandler(self._fh)
@@ -209,20 +227,12 @@ class SessionLog:
 
     # ── console mirror ──────────────────────────────────────────────────
     def feed(self, text, err=False):
-        """Buffer tee'd console output per writing thread; emit one record
-        per complete line."""
+        """One record per line tee'd console output completes, lines
+        assembled per writer (`whole_lines`)."""
         if self._closed:
             return
-        key = (threading.get_ident(), err)
-        with self._lock:
-            buf = self._buf.get(key, "") + text
-            while "\n" in buf:
-                line, buf = buf.split("\n", 1)
-                self._route(line, err)
-            if buf:
-                self._buf[key] = buf
-            else:
-                self._buf.pop(key, None)
+        for line in whole_lines((self, err), text):
+            self._route(line, err)
 
     def _route(self, line, err):
         if not line.strip():
@@ -233,11 +243,10 @@ class SessionLog:
     def close(self):
         if self._closed:
             return
-        with self._lock:
-            for (_tid, err), rest in self._buf.items():
-                if rest.strip():
-                    self._route(rest, err)
-            self._buf.clear()
+        for err in (False, True):
+            rest = _PARTIAL.get().get((self, err), "")
+            if rest.strip():
+                self._route(rest, err)
         self._closed = True
         root = logging.getLogger()
         root.removeHandler(self._handler)

@@ -9,7 +9,7 @@ from src import config
 from src import store
 from src.ats.board import company as company_fetch
 from src.ats.board import board_for_url
-from src.claude.fit import UNSCORED_CAUSES, ascore_resume_fit
+from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
 from src.claude.resume import resume_text
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out
@@ -165,7 +165,7 @@ async def self_heal_unscored(db, resume, track, max_workers=6):
               + (f" ({held} not yet due for retry)" if held else "") + "...")
         scored = 0
         async for r, res in fan_out(due,
-                                    lambda r: ascore_resume_fit(
+                                    lambda r: score_resume_fit(
                                         r["title"], r.get("description", ""),
                                         location=r.get("location") or ""),
                                     "self-heal scoring", max_workers, with_item=True):
@@ -223,8 +223,8 @@ async def rescore_all(max_workers=6, track=None, described_only=False, t=None):
         now = datetime.now()
 
         async def _one(r):
-            res = await ascore_resume_fit(r["title"], r.get("description", ""),
-                                          location=r.get("location") or "")
+            res = await score_resume_fit(r["title"], r.get("description", ""),
+                                         location=r.get("location") or "")
             return r["job_id"], res, r.get("description", "")
 
         n = 0
@@ -266,9 +266,9 @@ async def _live_jd(row):
     try:
         board = board_for_url(url)
         if board:
-            text = await board.adescription_for(url)
+            text = await board.description_for(url)
         if not text and url:
-            text = (await company_fetch.ajob_page_meta(url))[1]
+            text = (await company_fetch.job_page_meta(url))[1]
     except Exception:
         text = ""
     stored = row.get("description") or ""
@@ -321,6 +321,8 @@ VERIFY_HEAD = 25
 # Rows whose deep-verify call had started when the round was cut off past
 # config.PASS_BUDGET_S. That call may already be paid for, so this process
 # asks for them again only under `force`; they keep their first-pass score.
+# Not run state (src/runstate.py): the next web UI op or harvest pass skips
+# them too.
 _GIVEN_UP = set()
 
 
@@ -367,7 +369,7 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
         fetched for nothing.
     """
     from src.claude.api import api_disabled
-    from src.claude.fit import (DEEP_MARKER, FitResult, averify_fit,
+    from src.claude.fit import (DEEP_MARKER, FitResult, verify_fit,
                                 is_deep_verified, verify_model)
     t = _t(t)
     current = verify_model()
@@ -431,8 +433,8 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
                     return r, None, FitResult(score=None, reason="api disabled")
                 started.add(r["job_id"])
                 text = await _live_jd(r)
-                return r, text, await averify_fit(r["title"], text,
-                                                  location=r.get("location") or "")
+                return r, text, await verify_fit(r["title"], text,
+                                                 location=r.get("location") or "")
 
             n_scored = n_crushed = 0
             halted = None

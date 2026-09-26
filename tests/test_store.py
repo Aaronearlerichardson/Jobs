@@ -805,7 +805,7 @@ class TestMisses:
 class TestMarkHarvested:
     """The dead-board promotion cycle mark_harvested runs on the row's
     miss_reason. Its doctest has the soft-fail and ordinary-empty passes;
-    tests/test_harvest.py has the wiring through aharvest_board."""
+    tests/test_harvest.py has the wiring through harvest_board."""
 
     def test_a_nonempty_pass_stamps_last_nonempty_at(self, db, company):
         store.mark_harvested(db, company, 5)

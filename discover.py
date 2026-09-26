@@ -20,37 +20,39 @@ src/dispatch/registry.py, the same table the web UI's roster buttons run from.
 import argparse
 import sys
 
-from src import config
+from src import config, runstate
 from src.dispatch import registry
 
 
 def _op(name, params):
-    """A handler that runs registry op `name` with `params(args)`."""
+    """A handler that runs registry op `name` with `params(args)`: the
+    process's one run (src/runstate.py)."""
     def run(args):
-        registry.invoke(name, params(args), track=None)
+        runstate.run(registry.invoke(name, params(args), track=None))
     return run
 
 
 def _cmd_from_keywords(args):
-    for kw in config.INCLUDE_KEYWORDS:
-        registry.invoke("discover-term", {
-            "term": kw, "no_report": args.no_report, "dry_run": args.dry_run},
-            track=None)
+    async def each():
+        for kw in config.INCLUDE_KEYWORDS:
+            await registry.invoke("discover-term", {
+                "term": kw, "no_report": args.no_report, "dry_run": args.dry_run},
+                track=None)
+    runstate.run(each())
 
 
 def _cmd_from_bciwiki(args):
     """A worked example of bulk-importing a public industry directory: the
     BCIWiki company list, resolved to crawlable boards. Not a registry op —
     it is directory-specific and only useful if that is your field."""
-    from src.discovery import (abciwiki_seed_candidates, apply_to_store,
+    from src.discovery import (bciwiki_seed_candidates, apply_to_store,
                                discover_companies, print_summary,
                                write_discovery_report)
-    from src.net import http
     cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
     print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
 
     async def resolve():
-        seeds = await abciwiki_seed_candidates(categories=cats)
+        seeds = await bciwiki_seed_candidates(categories=cats)
         if args.limit:
             seeds = seeds[: args.limit]
         print(f"  > {len(seeds)} candidate(s) to resolve")
@@ -61,7 +63,7 @@ def _cmd_from_bciwiki(args):
             write_discovery_report(result)
         for line in await apply_to_store(result, dry_run=args.dry_run):
             print(line)
-    http.run_sync(resolve())
+    runstate.run(resolve())
 
 
 # In precedence order: the first whose flag is set runs and the process
@@ -162,9 +164,9 @@ def main():
             ap.print_help()
             sys.exit(1)
 
-        registry.invoke("discover-term", {
+        runstate.run(registry.invoke("discover-term", {
             "term": args.term, "no_report": args.no_report,
-            "dry_run": args.dry_run}, track=None)
+            "dry_run": args.dry_run}, track=None))
     except registry.ParamError as e:
         ap.error(str(e))
 

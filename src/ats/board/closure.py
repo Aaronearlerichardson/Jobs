@@ -15,11 +15,12 @@ closing the posting.
 """
 
 import asyncio
+import functools
 import logging
 import re
 import time
 
-from src import config
+from src import config, runstate
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
 from src.net.util import clean_url
@@ -77,11 +78,13 @@ def probe_family(url):
 # A job-detail host that refuses connections refuses every row on it: the
 # 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on one host. After
 # three in a row, within the board memo's window, its remaining rows are
-# skipped unasked. Three, not discovery's one: these hosts answered before.
-_DEAD_HOSTS = HostBreaker(ttl=config.BOARD_MEMO_S, trips=3)
+# skipped unasked for the run. Three, not discovery's one: these hosts
+# answered before.
+_DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=config.BOARD_MEMO_S,
+                                                 trips=3))
 
 
-async def aprobe_job_open(url, job_id=None):
+async def probe_job_open(url, job_id=None):
     """Best-effort liveness check of one job's own detail URL.
 
     Returns (is_open, reason): True = positively live, False = positively
@@ -131,23 +134,20 @@ async def aprobe_job_open(url, job_id=None):
         if is_open is not None:
             return is_open, fallback
 
-    if _DEAD_HOSTS.dead(url):
+    if _DEAD_HOSTS().dead(url):
         return None, "host unreachable this pass: skipped"
     try:
         r = await http.send("GET", url, headers=board.page_headers(url) if board else HEADERS,
                             allow_redirects=True)
     except Exception as e:
         if isinstance(e, Unreachable):
-            _DEAD_HOSTS.trip(url)
+            _DEAD_HOSTS().trip(url)
         return None, fallback or f"fetch error: {type(e).__name__}"
     if r.status_code in (404, 410):
         return False, f"HTTP {r.status_code}"
     if r.status_code != 200:
         return None, fallback or f"HTTP {r.status_code}"
     return await asyncio.to_thread(_page_verdict, r, url, fallback)
-
-
-probe_job_open = http.sync_shim(aprobe_job_open)
 
 
 def _page_verdict(r, url, fallback):

@@ -12,7 +12,7 @@ isn't an employer simply fails to resolve.
 
 Two steps, so requests are spent only on names a person ticked:
 preview_names (parse and classify, no network) then add_names (resolve via
-resolve.board.aresolve_or_miss, score, queue for review).
+resolve.board.resolve_or_miss, score, queue for review).
 """
 
 import re
@@ -278,7 +278,7 @@ async def extract_names_llm(blob, limit=60):
     words it has never seen. One call fixes that for a messy paste. Returns []
     without an API key, so the caller falls back to the regex.
     """
-    from src.claude.api import acall_claude_json
+    from src.claude.api import call_claude_json
     system = ("You extract EMPLOYER NAMES from text copied off a job-search or "
               "company-directory page. Return only organisations that could "
               "employ someone. Never return job titles, locations, dates, "
@@ -287,7 +287,7 @@ async def extract_names_llm(blob, limit=60):
     user = ('Return JSON {"companies": ["name", ...]} with at most '
             f'{limit} entries, in the order they appear.\n\n'
             f"---\n{str(blob or '')[:20000]}\n---")
-    data = await acall_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
+    data = await call_claude_json(system, user, max_tokens=2000, reply=CompanyNames)
     return [n for n in (data.companies if data else [])
             if 2 < len(n) <= 60][:limit]
 

@@ -18,7 +18,6 @@ import src.store as store
 from src.discovery import paste_ingest
 from src.discovery.resolve import board as resolve_board, fetchpool
 from src.match.names import junk_name_reason
-from src.net.http import run_sync
 from src.ops import repair as ops
 
 
@@ -70,7 +69,7 @@ class TestJunkNamesInThePasteFlow:
             self, monkeypatch, db):
         self._wire(monkeypatch, db)
         tried = []
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             answer(lambda n, *a, **k: tried.append(n) or (None, "x")))
         await paste_ingest.add_names(["Proficiency in SQL.", "Alpaca Health"],
                                      max_workers=1)
@@ -90,7 +89,7 @@ class TestJunkNamesInReresolve:
         store.record_miss(db, "Required Qualifications", "no-board-found:x")
         store.record_miss(db, "Emmes", "no-board-found:wrong-domain")
         tried = []
-        monkeypatch.setattr(resolve_board, "aresolve_or_miss",
+        monkeypatch.setattr(resolve_board, "resolve_or_miss",
                             answer(lambda n, *a, **k: tried.append(n)
                                    or (None, "no-board-found:x")))
         await ops.reresolve_misses(db=db, max_workers=1, t=self.T)
@@ -104,7 +103,7 @@ class TestJunkNamesInReresolve:
 # ─── sniffer DNS pre-check ───────────────────────────────────────────────
 
 class TestSnifferResolvesHostsOnce:
-    def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
+    async def test_unresolvable_hosts_are_never_fetched(self, monkeypatch):
         looked_up, fetched = [], []
 
         def _gai(host, *a, **k):
@@ -117,15 +116,15 @@ class TestSnifferResolvesHostsOnce:
                             answer(lambda u, **k: fetched.append(u) or None))
         urls = ["https://dead.example/careers", "https://dead.example/",
                 "https://dead.example/jobs", "https://live.example/careers"]
-        out = run_sync(fetchpool._fetch_all(urls))
+        out = await fetchpool._fetch_all(urls)
         assert sorted(looked_up) == ["dead.example", "live.example"], \
             "each host resolved once, not once per path"
         assert fetched == ["https://live.example/careers"]
         assert set(out) == set(urls) and out["https://dead.example/"] is None
         # a later stage rebuilding the list asks the resolver nothing
         looked_up.clear()
-        run_sync(fetchpool._fetch_all(["https://dead.example/en/jobs",
-                                       "https://live.example/"]))
+        await fetchpool._fetch_all(["https://dead.example/en/jobs",
+                                    "https://live.example/"])
         assert looked_up == []
 
     async def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
@@ -139,7 +138,7 @@ class TestSnifferResolvesHostsOnce:
         kept = await fetchpool._drop_unresolvable(["https://slow.example/"],
                                                   timeout=0.05)
         assert kept == []
-        assert not fetchpool._DEAD_HOSTS.dead("https://slow.example/"), \
+        assert not fetchpool._DEAD_HOSTS().dead("https://slow.example/"), \
             "a slow resolver is not a missing name"
         gate.set()
 

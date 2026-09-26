@@ -15,7 +15,7 @@ Gates, per configured track, in order:
   1. mission   company-level, once per COMPANY: the roster row's cached
                mission tier (src.claude.is_active_mission) and the
                track's min_mission. A company never scored gets ONE
-               ascore_company_mission call, with the harvested titles as
+               score_company_mission call, with the harvested titles as
                context, and the verdict is written back to the roster.
                Multi-division employers (profile [policy]) fall through:
                a conglomerate's corporate score says nothing about the
@@ -84,10 +84,10 @@ from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS
 from src.ats.board.company import needs_detail
-from src.claude.api import ascore_company_mission, is_active_mission
-from src.claude.fit import MIN_DESC_CHARS, ascore_resume_fit
+from src.claude.api import is_active_mission, score_company_mission
+from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
 from src.crawl import harvest
-from src.crawl.harvest import MISS_BACKOFF_S, ahydrate_rows
+from src.crawl.harvest import MISS_BACKOFF_S, hydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
@@ -161,7 +161,7 @@ def _keyword_focus(t):
 #  Gate 1: mission, once per company                                          #
 # --------------------------------------------------------------------------- #
 
-async def ensure_mission(db, company, titles=(), scorer=ascore_company_mission):
+async def ensure_mission(db, company, titles=(), scorer=score_company_mission):
     """The company's (tier, score), scoring it ONCE via Claude (`scorer`, a
     coroutine function) when the roster row has neither, with the harvested
     titles as context, and caching the verdict on the row (`db`, a
@@ -301,7 +301,7 @@ def row_verdict(company, job, t, cutoff):
     return DEFER if deferred else OK
 
 
-async def judge(db, company, jobs, tracks, mission_scorer=ascore_company_mission,
+async def judge(db, company, jobs, tracks, mission_scorer=score_company_mission,
                 *, cutoff):
     """Gates 1-6 for one company's rows against every applicable track.
     Returns {job_id: {track_label: verdict}} (verdict OK / gate / DEFER).
@@ -359,8 +359,8 @@ def summarize(verdicts):
 # --------------------------------------------------------------------------- #
 
 def _fetcher_shape(row, company):
-    """A stored row as the job dict board.company.ahydrate_description
-    expects (`harvest.ahydrate_rows` passes it the roster row, which names the
+    """A stored row as the job dict board.company.hydrate_description
+    expects (`harvest.hydrate_rows` passes it the roster row, which names the
     board)."""
     return {"id": row["job_id"], "job_id": row["job_id"],
             "title": row.get("title") or "", "url": row.get("url") or "",
@@ -373,7 +373,7 @@ async def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S):
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats."""
     stats = {"hydrated": 0, "unhydrated": 0}
-    await ahydrate_rows(jobs, company, stats, delay, backoff_s)
+    await hydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
 
 
@@ -446,7 +446,7 @@ def _hydrate_order(survivors):
     test_hydration_spends_the_board_budget_on_relevant_titles_first.
 
     Notes:
-        The per-host detail budget (harvest.ahydrate_rows' cap and
+        The per-host detail budget (harvest.hydrate_rows' cap and
         miss-streak breaker) used to be spent in arrival order within the
         decided/undecided split. At a multi-division employer only the
         division gate can refuse a chip-design seat, and that gate needs a
@@ -540,7 +540,7 @@ async def _hydrate(db, companies, survivors, summary, stamp, max_workers,
                 waiting[j["id"]] = "fetch failed this pass"
             else:
                 # Never reached hydrate_description at all: the board's
-                # per-host cap or miss-streak breaker (harvest.ahydrate_rows)
+                # per-host cap or miss-streak breaker (harvest.hydrate_rows)
                 # cut it from this pass's batch.
                 waiting[j["id"]] = "not reached this pass (board hydrate cap/pause)"
     print(f"  hydrated {summary['hydrated']} of {n_todo}")
@@ -611,9 +611,9 @@ async def _score(final, summary, score_cap, fit, max_workers):
         # over the cap does.
         async for r, res in fan_out(
                 [x[1] for x in to_score],
-                lambda job: ascore_resume_fit(job.get("title") or "",
-                                              job.get("description") or "",
-                                              location=job.get("location") or ""),
+                lambda job: score_resume_fit(job.get("title") or "",
+                                             job.get("description") or "",
+                                             location=job.get("location") or ""),
                 "scoring", max(2, min(max_workers, 6)), with_item=True,
                 budget_s=config.PASS_BUDGET_S,
                 on_abandon=lambda r: over_cap.add(r["job_id"])):
@@ -709,7 +709,7 @@ def _print_summary(summary, bar):
 
 async def run(db_path=None, tracks=None, limit=None, max_workers=DEFAULT_WORKERS,
               score_cap=SCORE_CAP, fit=True, hydrate=True,
-              mission_scorer=ascore_company_mission, hydrate_fn=hydrate_company,
+              mission_scorer=score_company_mission, hydrate_fn=hydrate_company,
               now=None, requeue=False, requeue_apply=False):
     """Triage every pending row in the store. Returns the summary dict
     (also printed): harvested/pending N, then a count per gate, hydrated,

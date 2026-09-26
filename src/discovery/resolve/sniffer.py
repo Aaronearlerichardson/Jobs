@@ -20,7 +20,6 @@ from src import config
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.signatures import detect, pack
-from src.net import http
 from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
                        foreign_board)
@@ -55,7 +54,7 @@ async def _scan_root(name, careers_url=""):
 
 # ─── Public API ──────────────────────────────────────────────────────────
 
-async def asniff_ats(name, careers_url=""):
+async def sniff_ats(name, careers_url=""):
     """Raw detection: first fetchable ATS found, else a custom self-hosted
     board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}. Each page is read off the
@@ -76,8 +75,8 @@ async def asniff_ats(name, careers_url=""):
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
-            from src.ats.board.custom import acustom_board_listing_url
-            listing = await acustom_board_listing_url(r.url, text)
+            from src.ats.board.custom import custom_board_listing_url
+            listing = await custom_board_listing_url(r.url, text)
             if listing:
                 custom = {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
     # Counted after the walk rather than before it: "3 answered" was the
@@ -91,9 +90,6 @@ async def asniff_ats(name, careers_url=""):
     if root_hit:
         return root_hit
     return custom
-
-
-sniff_ats = http.sync_shim(asniff_ats)
 
 
 async def _confirmed(ats, slug, page_url, tried):
@@ -114,7 +110,7 @@ async def _confirmed(ats, slug, page_url, tried):
     return tried[key]
 
 
-async def asniff_careers_ats(name, careers_url=""):
+async def sniff_careers_ats(name, careers_url=""):
     """Pipeline style: prefer coordinates we can CONFIRM with a live count
     (`_confirmed`); otherwise surface the highest-priority detection as a
     lead."""
@@ -151,9 +147,6 @@ async def asniff_careers_ats(name, careers_url=""):
     return None
 
 
-sniff_careers_ats = http.sync_shim(asniff_careers_ats)
-
-
 # ─── "no-board-found" subcategories ───────────────────────────────────────
 #
 # A bare "no-board-found" means "we don't know why" -- which of the very
@@ -162,7 +155,7 @@ sniff_careers_ats = http.sync_shim(asniff_careers_ats)
 # four qualifiers (board.classify_miss appends it to the
 # "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
 
-async def adiagnose_no_board(name, careers_url=""):
+async def diagnose_no_board(name, careers_url=""):
     """Why sniff_careers_ats found nothing for `name`, one of:
 
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
@@ -188,7 +181,7 @@ async def adiagnose_no_board(name, careers_url=""):
     A name with no domain tokens to guess and no careers_url hint has no
     candidate URL to even attempt:
 
-    >>> diagnose_no_board("")
+    >>> asyncio.run(diagnose_no_board(""))
     'domain-unreachable'
 
     The other three qualifiers all need a live fetch to demonstrate (a real
@@ -220,6 +213,3 @@ async def adiagnose_no_board(name, careers_url=""):
     if await asyncio.to_thread(lambda: any(is_board_page(r.text) for r in safe_hits)):
         return "careers-page-no-ats"
     return "site-only-no-careers"
-
-
-diagnose_no_board = http.sync_shim(adiagnose_no_board)

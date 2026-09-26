@@ -16,7 +16,7 @@ from src.net import http
 from src.net.util import strip_html
 
 
-async def afetch_remotive(category=None, max_jobs=None, gate=None):
+async def fetch_remotive(category=None, max_jobs=None, gate=None):
     """
     Pull Remotive's job feed; return relevant listings, read off the loop.
 
@@ -27,11 +27,8 @@ async def afetch_remotive(category=None, max_jobs=None, gate=None):
     if category:
         url = f"{url}?category={category}"
 
-    data = await http.aget_json(url, "Remotive", default={})
+    data = await http.get_json(url, "Remotive", default={})
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
-
-
-fetch_remotive = http.sync_shim(afetch_remotive)
 
 
 def _jobs(data, max_jobs, gate):

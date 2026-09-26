@@ -63,7 +63,7 @@ def _parsed():
 #  1. The company-activation rule
 # --------------------------------------------------------------------------- #
 #
-# `ascore_company_mission()` returns (None, None, "") when scoring is
+# `score_company_mission()` returns (None, None, "") when scoring is
 # UNAVAILABLE — no API key, a failed or rate-limited call. That None is not
 # a verdict, and every add path must treat it as "keep crawling". Six sites
 # implemented that inline; one had drifted to two hard-coded tier names,
@@ -204,7 +204,7 @@ class TestOffmissionInactiveIsNotTheActivationRule:
 #: `local_sourcing.score_missions` is the REACTIVATION half and is
 #: deliberately NOT the helper: it must not revive a row on `tier is None`.
 #: A None tier with a non-None score means the model answered with a mission
-#: name outside the profile's taxonomy -- ascore_company_mission nulls the tier
+#: name outside the profile's taxonomy -- score_company_mission nulls the tier
 #: but keeps the score, so the "scoring unavailable" `return` above does
 #: not fire. The helper would read that as "unavailable" and revive an
 #: already-inactive company off an unrecognised answer.
@@ -344,52 +344,69 @@ def test_doctests_actually_exist():
 
 
 # --------------------------------------------------------------------------- #
-#  4. Parallelism goes through src/net/parallel.py                             #
+#  4. Threads live in the four sync wrappers                                   #
 # --------------------------------------------------------------------------- #
 
-#: Modules allowed to run a thread pool of their own, and why. Everything
-#: else runs concurrent work as tasks through net.parallel (fan_out, with
-#: `stall_s` for work that can HANG; fetch_all for the crawl's sources).
-POOL_OWNERS = {
+#: The only modules that make, name or reach a thread, and why: the four
+#: wrappers around what cannot be awaited. Everything else is coroutines on
+#: the entry point's one event loop, CPU work through asyncio.to_thread, and
+#: concurrency as tasks (src.net.parallel.fan_out / fetch_all).
+THREAD_WRAPPERS = {
     "src/store/schema.py":
-        "the async store's one thread: each sqlite3 call blocks",
-    "src/net/http.py":
-        "the session's DNS lookups, on threads no asyncio.to_thread work can "
-        "queue ahead of",
+        "SQLite: each store.Writer's one DB thread (sqlite3 blocks)",
+    "src/net/util.py":
+        "CPU parsing: an lxml parser per asyncio.to_thread worker",
+    "src/net/ddg.py":
+        "ddgs, a sync library: each search on a daemon thread of its own",
+    "src/web/server.py":
+        "the Flask web UI: its loop thread, and `call`, the one way a request "
+        "thread waits on the loop",
 }
 
-#: A pool is a raw executor, which only RAW_POOLS may build (or name, so an
-#: import alias cannot hide one).
-_POOL_RE = re.compile(r"\bThreadPoolExecutor\(|\bpool\(")
-_RAW_RE = re.compile(r"\b(Thread|Process)PoolExecutor\b")
-RAW_POOLS = {"src/net/http.py", "src/store/schema.py"}
+#: What makes, names or waits on a thread (or a process pool).
+THREAD_NAMES = {"threading", "_thread", "concurrent", "ThreadPoolExecutor",
+                "ProcessPoolExecutor", "run_coroutine_threadsafe",
+                "run_in_executor"}
 
 
-def test_thread_pools_go_through_net_parallel():
-    """A hand-rolled pool is how the submit/as_completed/try/print block
-    came back eight times, and how one wedged resolution held the web UI's
-    single op slot for over an hour. The exceptions are real and named;
-    a new one has to be argued for here."""
-    offenders = {}
-    for rel, src in source_files():
-        hits = [l.strip() for l in src.splitlines()
-                if not l.strip().startswith("#")
-                and (rel not in POOL_OWNERS and _POOL_RE.search(l)
-                     or rel not in RAW_POOLS and _RAW_RE.search(l))]
-        if hits:
-            offenders[rel] = hits
-    assert not offenders, (
-        f"{sorted(offenders)} build their own thread pool. Run the work as "
-        "tasks (src.net.parallel.fan_out / fetch_all), or add the module to "
-        "POOL_OWNERS with the reason.")
+def _thread_uses(tree):
+    """[(line, name)] for each THREAD_NAMES import, name or attribute."""
+    out = []
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            names = [a.name.split(".")[0] for a in n.names]
+        elif isinstance(n, ast.ImportFrom) and not n.level:
+            names = [(n.module or "").split(".")[0], *(a.name for a in n.names)]
+        elif isinstance(n, ast.Name):
+            names = [n.id]
+        elif isinstance(n, ast.Attribute):
+            names = [n.attr]
+        else:
+            continue
+        out += [(n.lineno, x) for x in names if x in THREAD_NAMES]
+    return out
 
 
-def test_pool_owners_still_own_pools():
+def test_threads_live_in_the_four_sync_wrappers():
+    """A thread outside the wrappers is how a wedged resolution held the web
+    UI's single op slot for over an hour (a running thread cannot be
+    cancelled), and how a worker waiting on the loop starved it (32 JS
+    pages hung discovery). Scans src/, tools/ and the root scripts."""
+    snippet = ("import threading\nfrom concurrent.futures import Future\n"
+               "async def f(loop):\n    await loop.run_in_executor(None, g)\n")
+    assert _thread_uses(ast.parse(snippet)) == [
+        (1, "threading"), (2, "concurrent"), (4, "run_in_executor")]
+    found = sorted((rel, *u) for rel, tree in _parsed()
+                   if rel not in THREAD_WRAPPERS for u in _thread_uses(tree))
+    assert not found, (f"{found}: a thread outside the four sync wrappers. Await "
+                       "the work, or asyncio.to_thread a CPU-bound call.")
+
+
+def test_the_thread_wrappers_still_wrap_threads():
     """The allowlist must not rot into a list of modules that moved on."""
-    stale = [rel for rel in POOL_OWNERS
-             if not any(r == rel and _POOL_RE.search(s)
-                        for r, s in source_files())]
-    assert not stale, f"POOL_OWNERS lists {stale}, which no longer build one."
+    stale = [rel for rel, tree in _parsed()
+             if rel in THREAD_WRAPPERS and not _thread_uses(tree)]
+    assert not stale and set(THREAD_WRAPPERS) <= {rel for rel, _ in _parsed()}, stale
 
 
 # --------------------------------------------------------------------------- #
@@ -797,8 +814,8 @@ def test_the_environment_is_read_only_through_config_settings():
 #: or inside a function, only units before its own. dispatch sits above crawl
 #: (two operations run crawl code) and below web, so the harvester, which
 #: imports crawl and nothing above it, never loads the operation table.
-LAYERS = ("tags", "config", "match", "net", "session_log", "store", "claude",
-          "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web")
+LAYERS = ("tags", "config", "runstate", "match", "net", "session_log", "store",
+          "claude", "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web")
 
 
 def _imported_units(rel, tree):
@@ -860,11 +877,11 @@ def _async_bodies(tree):
 
 
 #: What an `async def` may not touch: a thread's sleep, sqlite3, threads
-#: and executors block the loop, and run_sync and the sync session wait on
-#: the very loop they would be running on.
+#: and executors block the loop, and run_coroutine_threadsafe waits on the
+#: very loop it would be running on.
 BLOCKING = ("time.sleep", "sqlite3", "threading", "concurrent.futures",
-            "ThreadPoolExecutor", "ProcessPoolExecutor", "run_sync",
-            "SESSION", "SyncSession")
+            "ThreadPoolExecutor", "ProcessPoolExecutor",
+            "run_coroutine_threadsafe")
 
 #: requests' and urllib3's own I/O: nothing calls it, because every request
 #: goes through net.http.send.
@@ -906,9 +923,11 @@ def test_async_code_never_blocks():
     """Invariant 1: no BLOCKING name in an async body; requests and urllib3
     imported only by net/http, which uses them as models (preparing a
     request, reading a reply) and never for I/O."""
-    snippet = ("import time\nasync def f():\n    time.sleep(1)\n    run_sync(g())\n"
+    snippet = ("import time\nasync def f():\n    time.sleep(1)\n"
+               "    asyncio.run_coroutine_threadsafe(g(), loop)\n"
                "def g():\n    time.sleep(1)\n")
-    assert _blocking(ast.parse(snippet)) == {("f", "time.sleep"), ("f", "run_sync")}
+    assert _blocking(ast.parse(snippet)) == {
+        ("f", "time.sleep"), ("f", "asyncio.run_coroutine_threadsafe")}
     assert _requests_uses("x.py", ast.parse("import requests\nrequests.get('u')\n")) == [
         (1, "requests"), (2, "requests.get")]
     blocked = sorted((rel, *hit) for rel, tree in _parsed() for hit in _blocking(tree))
@@ -916,7 +935,7 @@ def test_async_code_never_blocks():
                          "the async version, or asyncio.to_thread a call with none.")
     uses = sorted((rel, *u) for rel, tree in _parsed() for u in _requests_uses(rel, tree))
     assert not uses, (f"{uses}: requests is net.http's model layer only. Send through "
-                      "net.http (SESSION, request, send) and catch http.HTTPError / "
+                      "net.http (send, request, get_json) and catch http.HTTPError / "
                       "http.Unreachable.")
 
 
@@ -935,7 +954,7 @@ def test_the_one_client_session_is_made_in_net_http_with_a_timeout():
 #: async code meets a caller that is not.
 CANCEL_BOUNDARIES = {
     "src/dispatch/registry.py":
-        "ainvoke: a started sync target cannot be cancelled, so its outcome, "
+        "invoke: a started sync target cannot be cancelled, so its outcome, "
         "not the cancel, is the op's",
 }
 
@@ -960,9 +979,8 @@ def _cancel_catches(rel, tree):
 
 def test_nothing_swallows_cancellation():
     """Invariant 3: cancellation (Ctrl+C, a pass budget) reaches the code
-    that started the work, on a thread too: run_sync raises it there for
-    an abandoned pool's request, and a handler that kept it would let a
-    cut-off board store a short snapshot."""
+    that started the work, and a handler that kept it would let a cut-off
+    board store a short snapshot."""
     snippet = ("def f():\n    try:\n        pass\n    except BaseException:\n"
                "        pass\n    try:\n        pass\n    except (OSError, CancelledError):\n"
                "        raise\n")
@@ -995,43 +1013,6 @@ def test_every_task_is_kept():
     assert _dropped_tasks(ast.parse(snippet)) == [2]
     dropped = sorted((rel, line) for rel, tree in _parsed() for line in _dropped_tasks(tree))
     assert not dropped, f"{dropped}: a task started and not kept. Keep it or use a TaskGroup."
-
-
-def _thread_waits(trees):
-    """[(rel, line)] for each to_thread whose target (a lambda, or a def of
-    its module) is or calls run_sync, SESSION or a module-level sync shim."""
-    shims = {(Path(rel).stem, t.id) for rel, tree in trees for n in tree.body if isinstance(n, ast.Assign)
-             and (_dotted(getattr(n.value, "func", None)) or "").endswith("sync_shim") for t in n.targets}
-    out = []
-    for rel, tree in trees:
-        real = {a.asname or a.name: a.name.rpartition(".")[2] for n in ast.walk(tree)
-                if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
-        defs = {f.name: f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)}
-
-        def waits(node):
-            *qual, name = (_dotted(node) or "?").split(".")
-            return bool({"run_sync", "SESSION", "SyncSession"} & {*qual, name}) or (
-                (real.get(qual[-1], qual[-1]), name) in shims if qual
-                else name not in defs and real.get(name, name) in {s for _, s in shims})
-        for n in ast.walk(tree):
-            if isinstance(n, ast.Call) and (_dotted(n.func) or "").endswith("to_thread") and n.args:
-                fn = n.args[0]
-                body = fn if isinstance(fn, ast.Lambda) else defs.get(getattr(fn, "id", None))
-                calls = [c.func for c in ast.walk(body) if isinstance(c, ast.Call)] if body else []
-                out += [(rel, n.lineno)] * any(map(waits, [fn, *calls]))
-    return out
-
-
-def test_no_to_thread_worker_waits_on_the_loop():
-    """Default-executor threads waiting on the loop starve it: the loop's
-    to_thread work queues behind them (32 JS pages hung discovery)."""
-    snippet = ("from src.net import ddg\nasync def f():\n    await asyncio.to_thread(ddg.search)\n"
-               "    await asyncio.to_thread(lambda: http.run_sync(f()))\n"
-               "    await asyncio.to_thread(g)\ndef g():\n    return re.search('a', 'b')\n")
-    assert _thread_waits([("src/net/ddg.py", ast.parse("search = http.sync_shim(asearch)\n")),
-                          ("x.py", ast.parse(snippet))]) == [("x.py", 3), ("x.py", 4)]
-    found = _thread_waits(_parsed())
-    assert not found, f"{found}: a to_thread target waits on the loop; await it there instead."
 
 
 async def test_a_blocked_loop_fails_the_test(loop_blocks):

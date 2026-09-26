@@ -237,9 +237,9 @@ async def test_a_redirect_into_a_shared_host_waits_its_turn(monkeypatch):
     one host and a direct request to its https origin."""
     from src import config
     monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
-    monkeypatch.setattr(robots.CACHE, "allowed", answer(True))
+    monkeypatch.setattr(robots.CACHE(), "allowed", answer(True))
     paced = ("https://shared.test", "https://up.test")
-    monkeypatch.setattr(robots.CACHE, "crawl_delay",
+    monkeypatch.setattr(robots.CACHE(), "crawl_delay",
                         answer(lambda url: 0.2 if url.startswith(paced) else None))
     at = {}
 
@@ -402,13 +402,6 @@ class TestJsProbeDisabledReporting:
         "\n+------------------------------------------+"
     )
 
-    @pytest.fixture(autouse=True)
-    def _rearm(self):
-        from src.discovery.resolve import probes
-        probes._JS_NOTICES.clear()
-        yield
-        probes._JS_NOTICES.clear()
-
     def test_only_the_first_caller_reports(self, capsys):
         from src.discovery.resolve import probes
         assert probes._report_js_disabled("first") is True
@@ -459,13 +452,6 @@ class TestChromiumChannelFallback:
                     "Executable doesn't exist at ...chromium_headless_shell-1234"
                     if channel is None else f"channel {channel} not found")
             return f"browser:{channel}"
-
-    @pytest.fixture(autouse=True)
-    def _quiet(self):
-        from src.discovery.resolve import probes
-        probes._JS_NOTICES.clear()
-        yield
-        probes._JS_NOTICES.clear()
 
     async def test_bundled_build_is_preferred(self, capsys):
         from src.discovery.resolve.probes import launch_chromium
@@ -540,7 +526,7 @@ class TestQuietSpeculativeProbes:
     async def test_speculative_failures_are_silent(self, serve, capsys):
         serve(requests.exceptions.SSLError("handshake"))
         with robots.quiet():
-            await robots.RobotsCache()._fetch("https://red.io")
+            await robots.CACHE()._fetch("https://red.io")
         assert capsys.readouterr().out == ""
 
     async def test_real_targets_still_report(self, serve, capsys):
@@ -549,29 +535,26 @@ class TestQuietSpeculativeProbes:
         assert "proceeding without restrictions" in capsys.readouterr().out
 
     def test_quiet_does_not_leak_past_its_block(self):
-        from src.net import robots
         with robots.quiet():
             pass
-        assert robots._quiet_depth == 0
+        assert robots.CACHE().quiet == 0
 
     def test_quiet_restores_on_exception(self):
-        from src.net import robots
         with pytest.raises(ValueError):
             with robots.quiet():
                 raise ValueError("boom")
-        assert robots._quiet_depth == 0, "a raising probe must not mute the crawl"
+        assert robots.CACHE().quiet == 0, "a raising probe must not mute the crawl"
 
     def test_quiet_nests(self):
-        from src.net import robots
         with robots.quiet():
             with robots.quiet():
-                assert robots._quiet_depth == 2
-            assert robots._quiet_depth == 1, "the inner exit silenced the outer block"
-        assert robots._quiet_depth == 0
+                assert robots.CACHE().quiet == 2
+            assert robots.CACHE().quiet == 1, "the inner exit silenced the outer block"
+        assert robots.CACHE().quiet == 0
 
     async def test_quiet_never_changes_what_is_allowed(self, serve):
         """Silence is a logging decision, not a politeness one."""
         serve(requests.exceptions.SSLError("handshake"))
         with robots.quiet():
-            rules = await robots.RobotsCache()._fetch("https://red.io")
+            rules = await robots.CACHE()._fetch("https://red.io")
         assert rules.group is None and not rules.disallow_all   # still fails open

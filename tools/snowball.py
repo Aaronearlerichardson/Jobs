@@ -737,6 +737,7 @@ def _llm_refine(candidates):
         error or empty response returns `candidates` unchanged rather than
         `[]`.
     """
+    from src import runstate
     from src.claude.api import call_claude_json
     system = (
         "You are cleaning a list of candidate organization names auto-extracted "
@@ -750,7 +751,7 @@ def _llm_refine(candidates):
     )
     names = [c["name"] for c in candidates]
     user = "Candidate names:\n" + "\n".join(f"- {n}" for n in names)
-    data = call_claude_json(system, user, max_tokens=2000, reply=KeepList)
+    data = runstate.run(call_claude_json(system, user, max_tokens=2000, reply=KeepList))
     if data is None or not data.keep:
         return candidates
     keep_keys = {_norm_key(n) for n in data.keep}

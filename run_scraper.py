@@ -22,7 +22,7 @@ queries and edits with their own positional arguments.
 import argparse
 import sys
 
-from src import config
+from src import config, runstate
 from src.dispatch import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
@@ -46,9 +46,10 @@ def _resolve_track(name):
 def _op(name, params):
     """A command handler that runs registry op `name` with the params
     `params(args)` draws off the parsed arguments, against the --track
-    selection (None = the op's own default-track rule)."""
+    selection (None = the op's own default-track rule): the process's one
+    run (src/runstate.py)."""
     def run(args, t):
-        registry.invoke(name, params(args), track=t)
+        runstate.run(registry.invoke(name, params(args), track=t))
     return run
 
 
@@ -308,8 +309,11 @@ def main(argv=None):
                   "no_websearch": args.no_websearch,
                   "confirm_cost": args.confirm_cost, "workers": args.workers,
                   "top": args.top, "samples": args.samples}
-        for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
-            registry.invoke("crawl", params, track=tcfg)
+
+        async def crawl():
+            for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
+                await registry.invoke("crawl", params, track=tcfg)
+        runstate.run(crawl())
     except registry.ParamError as e:
         ap.error(str(e))
 

@@ -75,8 +75,8 @@ def _is_location(s):
 
 
 async def _get_json(url):
-    """One Firebase item, or None (reported). net.http.aget_json."""
-    return await http.aget_json(url, f"HN {url}")
+    """One Firebase item, or None (reported). net.http.get_json."""
+    return await http.get_json(url, f"HN {url}")
 
 
 def _parse_post(text):
@@ -153,7 +153,7 @@ async def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
     return found
 
 
-async def afetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
+async def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
     job comments (those passing `gate(role, text)` when a gate is given).
@@ -198,6 +198,3 @@ async def afetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None)
                 "description": text,
             })
     return jobs
-
-
-fetch_hnhiring = http.sync_shim(afetch_hnhiring)

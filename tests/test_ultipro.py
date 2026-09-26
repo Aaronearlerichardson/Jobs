@@ -63,16 +63,16 @@ def tenant(monkeypatch, serve):
 
 
 class TestHostFallback:
-    def test_a_recruiting2_board_is_fetched_in_one_request(self, tenant):
+    async def test_a_recruiting2_board_is_fetched_in_one_request(self, tenant):
         t = tenant("recruiting2")
-        jobs = UKG.jobs(SLUG, "Acme")
+        jobs = await UKG.jobs(SLUG, "Acme")
         assert [j["title"] for j in jobs] == ["Data Engineer 1", "Data Engineer 2"]
         assert t.hosts_asked() == ["recruiting2"]
         assert http.fetch_failures() == 0
 
-    def test_a_recruiting_only_board_falls_back_on_a_404(self, tenant):
+    async def test_a_recruiting_only_board_falls_back_on_a_404(self, tenant):
         t = tenant("recruiting")
-        job = UKG.jobs(SLUG, "Acme")[0]
+        job = (await UKG.jobs(SLUG, "Acme"))[0]
         assert t.hosts_asked() == ["recruiting2", "recruiting"]
         assert http.fetch_failures() == 0
         # URLs follow the host that answered; the id never carried the host,
@@ -83,37 +83,37 @@ class TestHostFallback:
             "?opportunityId=0001aaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
         assert job["id"] == "ultipro_ACME1000_0001aaaa-bbb"
 
-    def test_the_working_host_is_remembered_and_paging_stays_on_it(self, tenant):
+    async def test_the_working_host_is_remembered_and_paging_stays_on_it(self, tenant):
         t = tenant("recruiting", [_opp(n) for n in range(101)])
-        assert len(UKG.jobs(SLUG, "Acme")) == 101
+        assert len(await UKG.jobs(SLUG, "Acme")) == 101
         assert t.hosts_asked() == ["recruiting2", "recruiting", "recruiting"]
         t.urls.clear()
-        UKG.jobs(SLUG, "Acme")
+        await UKG.jobs(SLUG, "Acme")
         assert t.hosts_asked() == ["recruiting", "recruiting"], "no 404 round trip"
 
-    def test_a_later_page_404_is_an_error_not_a_host_switch(self, tenant):
+    async def test_a_later_page_404_is_an_error_not_a_host_switch(self, tenant):
         t = tenant("recruiting2", [_opp(n) for n in range(101)], fail_from_page=1)
-        assert len(UKG.jobs(SLUG, "Acme")) == 100
+        assert len(await UKG.jobs(SLUG, "Acme")) == 100
         assert t.hosts_asked() == ["recruiting2", "recruiting2"]
         assert http.snapshot_info()["incomplete"]
 
-    def test_a_non_404_error_does_not_try_the_other_host(self, tenant):
+    async def test_a_non_404_error_does_not_try_the_other_host(self, tenant):
         t = tenant("recruiting2", status=500)
-        assert UKG.jobs(SLUG, "Acme") == []
+        assert await UKG.jobs(SLUG, "Acme") == []
         assert t.hosts_asked() == ["recruiting2"]
         assert http.fetch_failures() == 1
         # An error settles no host: the board is found once it answers.
         t.host, t.status = "recruiting", 200
-        assert len(UKG.jobs(SLUG, "Acme")) == 2
+        assert len(await UKG.jobs(SLUG, "Acme")) == 2
 
-    def test_a_board_on_neither_host_is_dead_and_not_remembered(self, tenant):
+    async def test_a_board_on_neither_host_is_dead_and_not_remembered(self, tenant):
         t = tenant("elsewhere")
-        assert UKG.jobs(SLUG, "Acme") == []
+        assert await UKG.jobs(SLUG, "Acme") == []
         assert http.fetch_failures() == 1
-        assert UKG.alive(SLUG) == (False, 0)
+        assert await UKG.alive(SLUG) == (False, 0)
         assert t.hosts_asked() == ["recruiting2", "recruiting"] * 2
 
-    def test_an_empty_listing_is_a_live_board(self, tenant):
+    async def test_an_empty_listing_is_a_live_board(self, tenant):
         tenant("recruiting", [])
-        assert UKG.alive(SLUG) == (True, 0)
+        assert await UKG.alive(SLUG) == (True, 0)
         assert http.fetch_failures() == 0

@@ -49,22 +49,19 @@ if sys.platform == "win32":
     socket.socketpair = _loopback_pair
 
 from src import config as _config                           # noqa: E402
+from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
 import src.crawl.runner as _runner                  # noqa: E402
-import src.ats.board.engine as _board             # noqa: E402
-import src.ats.board.closure as _job_probe         # noqa: E402
-import src.discovery.resolve.fetchpool as _fetchpool  # noqa: E402
 import src.claude.api as _claude                    # noqa: E402
 import src.ops.scoring as _scoring                  # noqa: E402
 from src.net import http as _http                   # noqa: E402
-from src.net import robots as _robots               # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch):
     """A request no test answered fails instead of leaving the machine.
-    Needed beside `-p nonet`: the network loop's sockets connect without
+    Needed beside `-p nonet`: an event loop's sockets connect without
     socket.connect, which nonet patches."""
     def _refuse():
         raise AssertionError("test reached the network")
@@ -72,12 +69,14 @@ def _no_network(monkeypatch):
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _network_loop_debug():
-    """The network loop runs in asyncio debug mode, as pytest.ini's
-    asyncio_debug runs pytest-asyncio's loops."""
+def _web_loop_debug():
+    """The web UI's event loop (src/web/server.py) runs in asyncio debug
+    mode, as pytest.ini's asyncio_debug runs pytest-asyncio's loops."""
+    from src.web import server
+
     async def _debug():
         asyncio.get_running_loop().set_debug(True)
-    _http.run_sync(_debug())
+    server.call(_debug())
 
 
 @pytest.fixture(autouse=True)
@@ -122,25 +121,19 @@ def _outputs_to_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _fresh_run_state(monkeypatch):
-    """Per-run memos start empty in every test: both dead-host breakers,
-    the robots.txt cache and the per-host limiter (whose tasks and locks
-    belong to one event loop), discovery's page memo and DNS cache, the
-    board engine's listing memo and settled handle variants, the
-    board-owner verdicts, the prompt-cache gates (asyncio Events, bound to
-    one loop), and the rows a deep verify gave up on."""
-    for mod in (_fetchpool, _job_probe):
-        old = mod._DEAD_HOSTS
-        monkeypatch.setattr(mod, "_DEAD_HOSTS", _http.HostBreaker(old.ttl, old.trips))
-    monkeypatch.setattr(_robots, "CACHE", _robots.RobotsCache())
+def _fresh_run(monkeypatch):
+    """Every test is a run of its own (src/runstate.py): its memos,
+    caches, breakers and flags start empty. A test's run is never ended,
+    so nothing it registered with runstate.at_exit runs. The process's
+    state starts fresh too: the per-host limiter (its asyncio locks belong
+    to one event loop, and each test has its own), the board-owner
+    verdicts, and the rows a deep verify gave up on."""
+    token = _runstate.RUN.set(_runstate.Run())
     monkeypatch.setattr(_http, "LIMITER", _http.HostLimiter())
-    monkeypatch.setattr(_fetchpool, "_PAGE_MEMO", {})
-    monkeypatch.setattr(_fetchpool, "_DNS_CACHE", {})
-    monkeypatch.setattr(_board, "_VARIANTS", {})
+    monkeypatch.setattr(_claude, "_BOARD_OWNER_CACHE", {})
     monkeypatch.setattr(_scoring, "_GIVEN_UP", set())
-    monkeypatch.setattr(_claude, "_PREFIX_GATES", {})
-    _board._MEMO.clear()
-    _claude._BOARD_OWNER_CACHE.clear()
+    yield
+    _runstate.RUN.reset(token)
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +392,7 @@ def company_row(conn, name, ats="greenhouse", **extra):
 
 def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
                   closed=0, reopened=0, secs=0.0, **extra):
-    """A stand-in for `harvest.aharvest_board`, for tests of `harvest.run`.
+    """A stand-in for `harvest.harvest_board`, for tests of `harvest.run`.
 
     `run()` reads a fixed set of keys off whatever board_fn hands back, and
     eight tests across two files had each spelled that dict out by hand — so
@@ -458,12 +451,14 @@ def no_pacing(monkeypatch):
 
 def run_web_op(name, fn, timeout=10):
     """Run `fn()` (a coroutine) as web-UI op `name` (src.dispatch.background)
-    and wait for the runner to go idle; returns its final status."""
+    on the web UI's loop, and wait for the runner to go idle; returns its
+    final status."""
     from src.dispatch import background
     from src.dispatch.registry import OpParams
-    assert background.submit(name, OpParams(), fn) is None, "the runner was busy"
+    from src.web.server import call
+    assert call(background.submit(name, OpParams(), fn)) is None, "the runner was busy"
     deadline = time.monotonic() + timeout
-    while (s := background.status())["running"]:
+    while (s := call(background.status()))["running"]:
         assert time.monotonic() < deadline, f"op {name!r} never finished"
         time.sleep(0.02)
     return s
@@ -545,8 +540,8 @@ def serve(monkeypatch):
     `strict=True`); or a list served front first, its last item repeating
     -- the caller's own list, so a test may append after installing.
 
-    Replaces net.http.send, which every request reaches: SESSION's,
-    claude.api's, robots.txt's, sync or async.
+    Replaces net.http.send, which every request reaches: the fetchers',
+    claude.api's, robots.txt's.
     """
     def _resolve(reply, url, full, kw, strict):
         if isinstance(reply, list):

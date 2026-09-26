@@ -56,6 +56,9 @@ CLAUDE_THINKING_HEADROOM = 4000
 CLAUDE_TIMEOUT = 120
 # Seconds a call waits for its prompt's first call: one cache write per fan-out.
 CLAUDE_GATE_WAIT_S = 90
+# Seconds a run's end waits for its board-owner checks still in flight, so
+# a paid verdict lands before the run's session closes (claude.board_is_own).
+CLAUDE_OWNER_WAIT_S = 30
 # Seconds before each retry of a transient 429/5xx: such blips clear fast.
 CLAUDE_RETRY_DELAYS_S = (2.0, 8.0)
 
@@ -128,7 +131,7 @@ ACTIVE_MISSION_TIERS = tuple(t["name"] for t in MISSION_TIERS if t["active"])
 def is_active_mission(tier, name, include_missions=None):
     """The one activation rule: should a newly-sourced company be crawled?
 
-    `tier` is the mission tier from src.claude.api.ascore_company_mission, `name`
+    `tier` is the mission tier from src.claude.api.score_company_mission, `name`
     the company name, `include_missions` an optional override of the
     profile's active tiers. Returns 1 (crawl it) or 0 (park it) -- an int,
     because it goes straight into the ``companies.active`` column.

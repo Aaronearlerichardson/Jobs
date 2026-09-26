@@ -72,8 +72,8 @@ def _find(item, name):
     return (el, node_text(el, "", strip=False)) if el is not None else (None, "")
 
 
-async def afetch_rss(source_label, url, default_location="Remote", max_items=200,
-                     remote_board=False, gate=None):
+async def fetch_rss(source_label, url, default_location="Remote", max_items=200,
+                    remote_board=False, gate=None):
     """
     Pull an RSS/Atom feed, yield relevant jobs, the feed read off the loop.
 
@@ -90,9 +90,6 @@ async def afetch_rss(source_label, url, default_location="Remote", max_items=200
         return fetch_failed(f"RSS {source_label}", e)
     return await asyncio.to_thread(_jobs, r.content, source_label, url, default_location,
                                    max_items, remote_board, gate)
-
-
-fetch_rss = http.sync_shim(afetch_rss)
 
 
 def _jobs(feed, source_label, url, default_location, max_items, remote_board, gate):

@@ -33,6 +33,7 @@ blocked (rate-limited/challenged — not our bug) | broken (4xx/5xx/exception)
 """
 
 import argparse
+import asyncio
 import contextlib
 import io
 import json
@@ -52,12 +53,13 @@ console_utf8()
 
 from pydantic import BaseModel                       # noqa: E402
 
+from src import runstate                            # noqa: E402
 from src.ats.board import BOARDS, spec              # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
 
-def check_board(board):
+async def check_board(board):
     """Probe one platform's canary board and classify the outcome."""
     canary = board.spec.canary
     ats, name, floor = board.name, canary.name, canary.min_jobs
@@ -65,7 +67,7 @@ def check_board(board):
     try:
         # The engine prints its diagnostics; capture them to classify.
         with contextlib.redirect_stdout(buf):
-            ok, n = board.alive(canary.handle)
+            ok, n = await board.alive(canary.handle)
         note = " ".join(buf.getvalue().split())
         if not ok and not note:
             note = "the board request failed"
@@ -169,14 +171,17 @@ def main():
             print(f"  {len(names):2}  {path} = {value}  ({', '.join(names)})")
         return 0
 
-    results = []
-    for board in (b for b in BOARDS.values() if b.fetchable and b.spec.canary):
-        r = check_board(board)
-        results.append(r)
-        print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "
-              f"{r['name'][:24]:24} {r['jobs']:5} postings  {r['seconds']:5.1f}s"
-              f"  {r['detail']}")
-        time.sleep(1.0)                            # politeness between hosts
+    async def every_board():
+        results = []
+        for board in (b for b in BOARDS.values() if b.fetchable and b.spec.canary):
+            r = await check_board(board)
+            results.append(r)
+            print(f"  {STATUS_EMOJI.get(r['status'], '?')} {r['ats']:12} "
+                  f"{r['name'][:24]:24} {r['jobs']:5} postings  {r['seconds']:5.1f}s"
+                  f"  {r['detail']}")
+            await asyncio.sleep(1.0)               # politeness between hosts
+        return results
+    results = runstate.run(every_board())
 
     checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     ok = sum(r["status"] == "ok" for r in results)

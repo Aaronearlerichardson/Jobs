@@ -72,7 +72,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools._harness import console_utf8                    # noqa: E402
-from src import config, store                              # noqa: E402
+from src import config, runstate, store                    # noqa: E402
 from src.claude.fit import score_resume_fit                # noqa: E402
 from src.match.locality import NC_RE                       # noqa: E402
 
@@ -150,11 +150,11 @@ def confirm_no_harvest_running():
     print("  no harvest pass appears to be mid-run")
 
 
-def rescore_row(row):
+async def rescore_row(row):
     """Score one candidate with the FIXED scorer (location threaded
     through)."""
-    return score_resume_fit(row["title"] or "", row.get("description") or "",
-                            location=row.get("location") or "")
+    return await score_resume_fit(row["title"] or "", row.get("description") or "",
+                                  location=row.get("location") or "")
 
 
 def apply_result(conn, row, res, dry_run):
@@ -200,7 +200,7 @@ def print_table(rows_and_results):
               f"{row['fit_gates'] or '-'} -> {','.join(res.gates) or '-'}")
 
 
-def run_pilot(n=25, dry_run=False, seed=0):
+async def run_pilot(n=25, dry_run=False, seed=0):
     confirm_backup()
     confirm_api_key()
     confirm_no_harvest_running()
@@ -214,7 +214,7 @@ def run_pilot(n=25, dry_run=False, seed=0):
         results = []
         n_crossed = n_ok = 0
         for row in sample:
-            res = rescore_row(row)
+            res = await rescore_row(row)
             crossed, now_ok = apply_result(conn, row, res, dry_run)
             n_crossed += int(crossed)
             n_ok += int(now_ok)
@@ -227,7 +227,7 @@ def run_pilot(n=25, dry_run=False, seed=0):
         conn.close()
 
 
-def run_full(exclude_ids=(), dry_run=False):
+async def run_full(exclude_ids=(), dry_run=False):
     confirm_backup()
     confirm_api_key()
     confirm_no_harvest_running()
@@ -240,7 +240,7 @@ def run_full(exclude_ids=(), dry_run=False):
         n_crossed = 0
         crossed_list = []
         for row in candidates:
-            res = rescore_row(row)
+            res = await rescore_row(row)
             crossed, now_ok = apply_result(conn, row, res, dry_run)
             n_crossed += int(crossed)
             old = row.get("resume_fit_score")
@@ -296,7 +296,7 @@ def main():
     console_utf8()   # titles are arbitrary text; a cp1252 console dies mid-run
 
     if args.pilot:
-        run_pilot(n=args.pilot, dry_run=args.dry_run, seed=args.seed)
+        runstate.run(run_pilot(n=args.pilot, dry_run=args.dry_run, seed=args.seed))
     elif args.full:
         if not args.go and not args.dry_run:
             raise SystemExit("[!] --full requires --go (confirms the pilot "
@@ -304,7 +304,7 @@ def main():
         exclude = set()
         if args.skip:
             exclude = {ln.strip() for ln in Path(args.skip).read_text().splitlines() if ln.strip()}
-        run_full(exclude_ids=exclude, dry_run=args.dry_run)
+        runstate.run(run_full(exclude_ids=exclude, dry_run=args.dry_run))
     else:
         p.error("pass --pilot N or --full")
 

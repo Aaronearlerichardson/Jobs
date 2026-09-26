@@ -24,23 +24,22 @@ drive the browser; this just keeps what you saw.
 """
 
 import argparse
+import asyncio
 import json
 import re
 import sys
-import time
-from contextlib import closing
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+from aiohttp import web
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 except Exception:
     pass
 
-from src import tags
+from src import runstate, tags
 from src import store
 from src.crawl.page_capture import page_url, parse_page
-from src.net import http
 from src.ops.ingest import ingest_external_jobs
 
 PORT_DEFAULT = 8877
@@ -112,25 +111,24 @@ INDEX_HTML = """<!doctype html><meta charset="utf-8">
 </body>"""
 
 
-def _record_companies(names, source_site, sites=None):
+def _record_companies(conn, names, source_site, sites=None):
     """Record captured company names as inactive store leads. `sites` maps a
     company name -> its own website (from JSON-LD hiringOrganization); stored as
     careers_url so `discover.py --resolve-leads` can probe {domain}/careers
     instead of guessing the domain from the name."""
     sites = sites or {}
     fresh = []
-    with closing(store.connect()) as conn:
-        have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
-        for n in sorted({n.strip() for n in names if n and n.strip()}):
-            if n.lower() in have:
-                continue
-            row = {"name": n, "active": 0, "source": "page_capture",
-                   "notes": f"seen on {source_site}; resolve board via "
-                            f"discover.py --resolve-leads"}
-            if sites.get(n):
-                row["careers_url"] = sites[n]
-            store.upsert_company(conn, row)
-            fresh.append(n)
+    have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
+    for n in sorted({n.strip() for n in names if n and n.strip()}):
+        if n.lower() in have:
+            continue
+        row = {"name": n, "active": 0, "source": "page_capture",
+               "notes": f"seen on {source_site}; resolve board via "
+                        f"discover.py --resolve-leads"}
+        if sites.get(n):
+            row["careers_url"] = sites[n]
+        store.upsert_company(conn, row)
+        fresh.append(n)
     return fresh
 
 
@@ -163,17 +161,19 @@ def attribute_company(conn, url, jobs):
     return row
 
 
-def ingest_html(url, html, label=""):
-    """Parse one page and feed the standard ingest pipeline. Returns a
-    summary dict."""
-    jobs, source = parse_page(url, html)
-    with closing(store.connect()) as conn:
-        owner = attribute_company(conn, page_url(html, url), jobs)
-    ingested = http.run_sync(ingest_external_jobs(jobs, source=source)) if jobs else 0
-    # Company name -> its own website, when the page exposed it (JSON-LD).
-    sites = {j["company"]: j["company_url"] for j in jobs
-             if j.get("company") and j.get("company_url")}
-    new_cos = _record_companies((j.get("company") for j in jobs), source, sites)
+async def ingest_html(url, html, label=""):
+    """Parse one page (off the loop) and feed the standard ingest pipeline.
+    Returns a summary dict."""
+    jobs, source, where = await asyncio.to_thread(
+        lambda: (*parse_page(url, html), page_url(html, url)))
+    async with store.Writer() as db:
+        owner = await db.run(attribute_company, where, jobs)
+        ingested = await ingest_external_jobs(jobs, source=source) if jobs else 0
+        # Company name -> its own website, when the page exposed it (JSON-LD).
+        sites = {j["company"]: j["company_url"] for j in jobs
+                 if j.get("company") and j.get("company_url")}
+        new_cos = await db.run(_record_companies, [j.get("company") for j in jobs],
+                               source, sites)
     tag = label or url or source
     print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
           + (f" under {owner['name']} ({owner.get('ats') or '?'})" if owner else "")
@@ -183,53 +183,46 @@ def ingest_html(url, html, label=""):
             "company": owner["name"] if owner else None}
 
 
-class _Handler(BaseHTTPRequestHandler):
-    def _send(self, code, body, ctype="application/json"):
-        data = body.encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
-        self.end_headers()
-        self.wfile.write(data)
+async def serve(port):
+    """The capture server on 127.0.0.1:`port`, until Ctrl+C: the
+    userscript, its install page, and POST /page (a page's DOM, ingested),
+    CORS-open for the userscript's cross-origin POST. No request size
+    limit: a page's DOM runs to megabytes."""
+    async def answer(request):
+        status, body, ctype = 200, INDEX_HTML, "text/html"
+        if request.method == "OPTIONS":
+            status, body, ctype = 204, "", "application/json"
+        elif request.method == "POST" and not request.path.startswith("/page"):
+            status, body, ctype = 404, '{"error": "unknown endpoint"}', "application/json"
+        elif request.method == "POST":
+            ctype = "application/json"
+            try:
+                payload = json.loads((await request.read()).decode("utf-8", "replace"))
+                body = json.dumps(await ingest_html(payload.get("url", ""),
+                                                    payload.get("html", "")))
+            except Exception as e:
+                print(f"  [!] capture failed: {e}")
+                status, body = 500, json.dumps({"error": str(e)})
+        elif request.method != "GET":
+            status, body, ctype = 501, "Unsupported method", "text/plain"
+        elif request.path.startswith("/jobs-capture.user.js"):
+            body, ctype = USERSCRIPT.replace("__PORT__", str(port)), "text/javascript"
+        return web.Response(status=status, text=body, content_type=ctype, charset="utf-8",
+                            headers={"Access-Control-Allow-Origin": "*",
+                                     "Access-Control-Allow-Headers": "Content-Type"})
 
-    def do_OPTIONS(self):
-        self._send(204, "")
-
-    def do_GET(self):
-        if self.path.startswith("/jobs-capture.user.js"):
-            self._send(200, USERSCRIPT.replace("__PORT__", str(self.server.server_port)),
-                       ctype="text/javascript")
-        else:
-            self._send(200, INDEX_HTML, ctype="text/html")
-
-    def do_POST(self):
-        if not self.path.startswith("/page"):
-            self._send(404, '{"error": "unknown endpoint"}')
-            return
-        try:
-            length = int(self.headers.get("Content-Length", 0))
-            payload = json.loads(self.rfile.read(length).decode("utf-8", "replace"))
-            summary = ingest_html(payload.get("url", ""), payload.get("html", ""))
-            self._send(200, json.dumps(summary))
-        except Exception as e:
-            print(f"  [!] capture failed: {e}")
-            self._send(500, json.dumps({"error": str(e)}))
-
-    def log_message(self, *a):        # quiet the default per-request noise
-        pass
-
-
-def serve(port):
-    srv = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-    print(f"\n  Jobs capture server on http://127.0.0.1:{port}/")
-    print(f"  Userscript install: http://127.0.0.1:{port}/jobs-capture.user.js")
-    print("  Ctrl+C to stop.\n")
+    app = web.Application(client_max_size=0)
+    app.router.add_route("*", "/{tail:.*}", answer)
+    runner = web.AppRunner(app, access_log=None)
+    await runner.setup()
     try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        print("\n  stopped.")
+        await web.TCPSite(runner, "127.0.0.1", port).start()
+        print(f"\n  Jobs capture server on http://127.0.0.1:{port}/")
+        print(f"  Userscript install: http://127.0.0.1:{port}/jobs-capture.user.js")
+        print("  Ctrl+C to stop.\n")
+        await asyncio.Event().wait()
+    finally:
+        await runner.cleanup()
 
 
 def _url_from_saved(html):
@@ -240,7 +233,7 @@ def _url_from_saved(html):
     return m.group(1) if m else ""      # parse_page falls back to canonical
 
 
-def watch(folder, interval=2.0):
+async def watch(folder, interval=2.0):
     folder = Path(folder).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     print(f"\n  Watching {folder.resolve()}")
@@ -254,21 +247,17 @@ def watch(folder, interval=2.0):
                 continue
             if seen.get(p.name) == mtime:
                 continue
-            time.sleep(0.6)             # let the browser finish writing
+            await asyncio.sleep(0.6)    # let the browser finish writing
             try:
                 html = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             seen[p.name] = mtime
             try:
-                ingest_html(_url_from_saved(html), html, label=p.name)
+                await ingest_html(_url_from_saved(html), html, label=p.name)
             except Exception as e:
                 print(f"  [!] {p.name}: {e}")
-        try:
-            time.sleep(interval)
-        except KeyboardInterrupt:
-            print("\n  stopped.")
-            return
+        await asyncio.sleep(interval)
 
 
 def main():
@@ -298,23 +287,28 @@ def main():
 
     if args.add:
         from src.ops.ingest import add_manual_job
-        http.run_sync(add_manual_job(url=args.url, title=args.title,
-                                     company=args.company, location=args.location,
-                                     description=args.desc,
-                                     pull_board=not args.no_board))
+        runstate.run(add_manual_job(url=args.url, title=args.title,
+                                    company=args.company, location=args.location,
+                                    description=args.desc,
+                                    pull_board=not args.no_board))
         return
 
     if args.files:
-        for f in args.files:
-            p = Path(f)
-            html = p.read_text(encoding="utf-8", errors="replace")
-            ingest_html(args.url or _url_from_saved(html), html, label=p.name)
+        async def each():
+            for f in args.files:
+                p = Path(f)
+                html = p.read_text(encoding="utf-8", errors="replace")
+                await ingest_html(args.url or _url_from_saved(html), html, label=p.name)
+        runstate.run(each())
         return
-    if args.watch is not None:
-        from src import config
-        watch(args.watch or str(config.DATA_DIR / "captures"))
-        return
-    serve(args.port)
+    try:
+        if args.watch is not None:
+            from src import config
+            runstate.run(watch(args.watch or str(config.DATA_DIR / "captures")))
+        else:
+            runstate.run(serve(args.port))
+    except KeyboardInterrupt:
+        print("\n  stopped.")
 
 
 if __name__ == "__main__":

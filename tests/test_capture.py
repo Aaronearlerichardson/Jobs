@@ -106,7 +106,7 @@ def roster(wired_db_path, monkeypatch):
     default connect() and the default track's db_path (conftest's
     `wired_db_path`) -- plus a stubbed fit scorer so the ingest never
     reaches the Claude API. Yields a connection."""
-    monkeypatch.setattr(ops, "ascore_resume_fit",
+    monkeypatch.setattr(ops, "score_resume_fit",
                         answer(fit.FitResult(score=0.5, reason="stub")))
     conn = store.connect(wired_db_path)
     yield conn
@@ -129,10 +129,10 @@ class TestAttribution:
     company's existing row, and the row becomes capture-only rather than a
     board the crawl keeps failing to fetch."""
 
-    def test_page_from_a_known_host_lands_under_that_row(self, roster, local_addr):
+    async def test_page_from_a_known_host_lands_under_that_row(self, roster, local_addr):
         store.record_miss(roster, "Acme Health", "no-board-found:site-only-no-careers",
                           careers_url="https://www.acmehealth.org/careers/")
-        summary = capture.ingest_html("", _results_page("jobs.acmehealth.org", local_addr))
+        summary = await capture.ingest_html("", _results_page("jobs.acmehealth.org", local_addr))
         assert summary["company"] == "Acme Health"
         assert summary["ingested"] == 1 and summary["companies"] == []
         row = _row(roster, "Acme Health")
@@ -145,7 +145,7 @@ class TestAttribution:
         # And the crawl loop never picks it up.
         assert store.crawlable_companies(roster) == []
 
-    def test_unknown_host_still_records_a_lead(self, roster, local_addr):
+    async def test_unknown_host_still_records_a_lead(self, roster, local_addr):
         html = """<html><head><link rel="canonical" href="https://jobs.stranger.org/p/1">
         <script type="application/ld+json">{"@type": "JobPosting", "title": "Data Engineer",
         "url": "https://jobs.stranger.org/p/1",
@@ -154,37 +154,37 @@ class TestAttribution:
         "jobLocation": {"address": {"addressLocality": "%s", "addressRegion": "%s"}}}
         </script></head><body></body></html>""" % tuple(
             p.strip() for p in local_addr.split(",", 1))
-        summary = capture.ingest_html("", html)
+        summary = await capture.ingest_html("", html)
         assert summary["company"] is None
         assert summary["companies"] == ["Stranger Labs"]
         lead = _row(roster, "Stranger Labs")
         assert lead["ats"] is None and lead["active"] == 0
         assert lead["source"] == "page_capture"
 
-    def test_a_row_with_a_real_board_keeps_it(self, roster, local_addr, serve):
+    async def test_a_row_with_a_real_board_keeps_it(self, roster, local_addr, serve):
         cid = store.upsert_company(roster, {
             "name": "Acme Dx", "ats": "greenhouse", "slug": "acmedx",
             "careers_url": "https://www.acmedx.com/careers/"})
         serve(fake_response({"jobs": []}))   # ingest hydrates from the board
-        capture.ingest_html("", _results_page("www.acmedx.com", local_addr))
+        await capture.ingest_html("", _results_page("www.acmedx.com", local_addr))
         row = store.get_company(roster, cid)
         assert row["ats"] == "greenhouse"
         assert roster.execute("SELECT company_id FROM jobs").fetchone()[0] == cid
 
-    def test_a_row_in_the_review_queue_is_not_activated(self, roster, local_addr):
+    async def test_a_row_in_the_review_queue_is_not_activated(self, roster, local_addr):
         store.upsert_company(roster, store.mark_pending({
             "name": "Acme Guess", "careers_url": "https://www.acmeguess.com/"}))
-        capture.ingest_html("", _results_page("jobs.acmeguess.com", local_addr))
+        await capture.ingest_html("", _results_page("jobs.acmeguess.com", local_addr))
         row = _row(roster, "Acme Guess")
         assert row["active"] == 0 and row["ats"] is None
         assert tags.has(row["tags"], tags.PENDING)
 
-    def test_jsonld_employer_site_attributes_a_hosted_board_page(self, roster):
+    async def test_jsonld_employer_site_attributes_a_hosted_board_page(self, roster):
         # The page host is the board vendor's; the posting's own JSON-LD says
         # whose site the employer is, and THAT matches the roster.
         store.record_miss(roster, "Acme Neuro", "no-board-found",
                           careers_url="https://acmeneuro.com/")
-        summary = capture.ingest_html("", load("capture_polymer_job.html"))
+        summary = await capture.ingest_html("", load("capture_polymer_job.html"))
         assert summary["company"] == "Acme Neuro"
         assert _row(roster, "Acme Neuro")["ats"] == store.CAPTURE_ATS
 

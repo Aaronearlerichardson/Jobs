@@ -18,6 +18,7 @@ import pytest
 
 from conftest import fake_response
 import src.claude.api as claude
+from src import runstate
 from src.claude.reply import Reply
 
 
@@ -43,69 +44,68 @@ def api(monkeypatch, serve):
     responses = []
     calls = serve(responses)
     monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setattr(claude, "_FATAL_MSG", None)
     monkeypatch.setattr("src.config.CLAUDE_RETRY_DELAYS_S", (0.0, 0.0))
     return responses, calls
 
 
-def test_billing_400_trips_breaker(api):
+async def test_billing_400_trips_breaker(api):
     responses, calls = api
     responses.append(fake_response(status=400, text=_BILLING))
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
     assert len(calls) == 1
     # Breaker is tripped: later calls fail fast without touching the API.
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
     assert len(calls) == 1
 
 
-def test_auth_401_trips_breaker(api):
+async def test_auth_401_trips_breaker(api):
     responses, calls = api
     responses.append(
         fake_response(status=401, text='{"message":"invalid x-api-key"}'))
-    claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-    claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+    await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+    await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
     assert len(calls) == 1
 
 
-def test_ordinary_400_does_not_trip_breaker(api):
+async def test_ordinary_400_does_not_trip_breaker(api):
     responses, calls = api
     responses.append(fake_response(status=400, text=_TOO_LARGE))
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
     assert len(calls) == 2
 
 
-def test_transient_500_retries_then_succeeds(api):
+async def test_transient_500_retries_then_succeeds(api):
     responses, calls = api
     responses.extend([fake_response(status=500, text="overloaded"), _OK])
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) == _Ok(ok=True)
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) == _Ok(ok=True)
     assert len(calls) == 2
 
 
-def test_persistent_500_gives_up_without_tripping(api):
+async def test_persistent_500_gives_up_without_tripping(api):
     responses, calls = api
     responses.append(fake_response(status=500, text="overloaded"))
-    assert claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
+    assert await claude.call_claude_json("sys", "user", cache=False, reply=_Ok) is None
     assert len(calls) == 1 + len(claude.config.CLAUDE_RETRY_DELAYS_S)
     # 5xx is transient — the next call must still reach the API.
-    claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+    await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
     assert len(calls) == 2 * (1 + len(claude.config.CLAUDE_RETRY_DELAYS_S))
 
 
-def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
-    """The web UI runs many operations in one process (src/dispatch/background._run).
-    On 2026-09-09 a crawl tripped the breaker on an exhausted balance and the
-    next two verify runs skipped every call silently — the banner prints once
-    per trip. Re-arming per operation makes a topped-up balance take effect
-    without a server restart, and a still-dead API fails once and explains
-    itself again."""
+async def test_the_next_run_rearms_the_breaker_and_reprints_the_banner(api, capsys):
+    """The web UI runs many operations in one process, each a run of its
+    own (src/dispatch/background._run). On 2026-09-09 a crawl tripped the
+    breaker on an exhausted balance and the next two verify runs skipped
+    every call silently: the banner prints once per trip. A fresh breaker
+    per run makes a topped-up balance take effect without a server
+    restart, and a still-dead API fails once and explains itself again."""
     responses, calls = api
     responses.append(fake_response(status=400, text=_BILLING))
-    claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+    await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
     assert claude.api_disabled() and len(calls) == 1
-    claude.reset_breaker()
-    assert claude.api_disabled() is None
-    claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+    async with runstate.Run():
+        assert claude.api_disabled() is None
+        await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
     assert len(calls) == 2                       # reached the API again
     assert capsys.readouterr().out.count("Claude API disabled") == 2
 
@@ -117,7 +117,7 @@ def test_reset_breaker_rearms_and_reprints_the_banner(api, capsys):
     (RuntimeError("connection reset"),
      r"^claude call failed: RuntimeError in \d+\.\d\ds$"),
 ], ids=["ok", "http-400", "exception"])
-def test_every_call_logs_its_outcome_and_elapsed(api, caplog, reply, logged):
+async def test_every_call_logs_its_outcome_and_elapsed(api, caplog, reply, logged):
     """API latency used to be invisible: call_claude_json posts plain
     (polite=False), never through net.http's per-request DEBUG trace (robots
     / Crawl-delay do not apply to the API), so a slow or failing call left no
@@ -125,17 +125,17 @@ def test_every_call_logs_its_outcome_and_elapsed(api, caplog, reply, logged):
     responses, _ = api
     responses.append(reply)
     with caplog.at_level(logging.DEBUG, logger="claude"):
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+        await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
     assert any(re.search(logged, r.getMessage())
                for r in caplog.records if r.name == "claude")
 
 
-def test_a_legacy_model_answers_through_a_forced_tool_call(api):
+async def test_a_legacy_model_answers_through_a_forced_tool_call(api):
     responses, calls = api
     responses.append(fake_response({"content": [{
         "type": "tool_use", "name": "_Ok", "input": {"ok": True}}], "usage": {}}))
-    assert claude.call_claude_json("sys", "user", model="claude-sonnet-4-0",
-                                   cache=False, reply=_Ok) == _Ok(ok=True)
+    assert await claude.call_claude_json("sys", "user", model="claude-sonnet-4-0",
+                                         cache=False, reply=_Ok) == _Ok(ok=True)
     assert calls[0].kw["json"]["tool_choice"] == {"type": "tool", "name": "_Ok"}
 
 
@@ -165,15 +165,16 @@ def test_each_model_family_gets_the_request_it_accepts():
 
 async def test_a_cut_off_owner_check_still_keeps_its_verdict(monkeypatch):
     """An asker cancelled mid-call (a JS scrape's budget) leaves the paid
-    call to finish; its verdict is kept, and the next asker makes none."""
+    call to finish; its verdict is kept, and the next asker makes none,
+    in the next run (a web UI op, a harvest pass) too."""
     calls, release = [], asyncio.Event()
 
     async def call(*_a, **_kw):
         calls.append(1)
         await release.wait()
         return claude.BoardOwnerReply(same_employer=False, reason="x")
-    monkeypatch.setattr(claude, "acall_claude_json", call)
-    first = asyncio.create_task(claude.aboard_is_own("Acme", "greenhouse:acme"))
+    monkeypatch.setattr(claude, "call_claude_json", call)
+    first = asyncio.create_task(claude.board_is_own("Acme", "greenhouse:acme"))
     while not calls:
         await asyncio.sleep(0)
     first.cancel()
@@ -181,11 +182,43 @@ async def test_a_cut_off_owner_check_still_keeps_its_verdict(monkeypatch):
         await first
     release.set()
     assert await claude._BOARD_OWNER_CACHE["acme", "greenhouse:acme"] is False
-    assert await claude.aboard_is_own("Acme", "greenhouse:acme") is False
+    # The verdict alone is kept: a kept task would pin its run's state.
+    assert not isinstance(claude._BOARD_OWNER_CACHE["acme", "greenhouse:acme"], asyncio.Task)
+    assert await claude.board_is_own("Acme", "greenhouse:acme") is False
+    async with runstate.Run():
+        assert await claude.board_is_own("Acme", "greenhouse:acme") is False
     assert calls == [1]
 
 
-def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):
+async def test_a_run_ending_mid_owner_check_waits_for_its_verdict(monkeypatch):
+    """A run that ends while an owner check it started is still running
+    (its asker cut off) waits for it, config.CLAUDE_OWNER_WAIT_S at most,
+    before closing the session the call opened: the paid verdict is kept,
+    and the next run makes no call."""
+    calls, release, closed = [], asyncio.Event(), asyncio.Event()
+
+    async def call(*_a, **_kw):
+        runstate.at_exit(closed.set, last=True)     # as the session it opens
+        calls.append(1)
+        await release.wait()
+        assert not closed.is_set()
+        return claude.BoardOwnerReply(same_employer=False, reason="x")
+    monkeypatch.setattr(claude, "call_claude_json", call)
+    async with runstate.Run():
+        asker = asyncio.create_task(claude.board_is_own("Acme", "greenhouse:acme"))
+        while not calls:
+            await asyncio.sleep(0)
+        asker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asker
+        asyncio.get_running_loop().call_later(0.05, release.set)
+    assert await claude._BOARD_OWNER_CACHE["acme", "greenhouse:acme"] is False
+    async with runstate.Run():
+        assert await claude.board_is_own("Acme", "greenhouse:acme") is False
+    assert calls == [1]
+
+
+async def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):
     """board_is_own read {"same_employer": "false"} as True -- bool() of a
     non-empty string -- and cached it. A string is not a boolean: the
     verdict is None (keep the hit, cache nothing), and one line names the
@@ -193,8 +226,8 @@ def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):
     responses, calls = api
     responses.append(fake_response({"content": [{
         "type": "text", "text": '{"same_employer": "false", "reason": "x"}'}]}))
-    assert claude.board_is_own("Ripple Neuro", "greenhouse:ripple") is None
-    assert claude.board_is_own("Ripple Neuro", "greenhouse:ripple") is None
+    assert await claude.board_is_own("Ripple Neuro", "greenhouse:ripple") is None
+    assert await claude.board_is_own("Ripple Neuro", "greenhouse:ripple") is None
     assert len(calls) == 2                       # nothing was cached
     out = capsys.readouterr().out.splitlines()
     assert [ln for ln in out if "same_employer" in ln] == [
@@ -204,48 +237,34 @@ def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):
 
 class TestUsageReporting:
     """report_cache_stats: the spend footer a harvest pass or a web-UI op
-    prints for its own Claude calls, reusing the one cumulative counter
-    (cache_stats()) instead of a second one -- and the atexit trailer must
-    not repeat what one of those already printed."""
+    prints for its own Claude calls -- and the footer every run prints as
+    it ends must not repeat what one of those already printed."""
 
-    def test_a_baseline_report_prints_only_the_calls_since_it(
+    async def test_a_report_prints_only_the_calls_since_the_last_one(
             self, api, capsys):
         responses, calls = api
         responses.append(_OK)
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-        baseline = claude.cache_stats()
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-        claude.report_cache_stats(baseline)
-        printed = capsys.readouterr().out
-        assert "[claude] 2 call(s) | input 2 tok " in printed
-
-    def test_atexit_style_report_does_not_repeat_an_already_reported_pass(
-            self, api, capsys):
-        """A harvest pass (or web op) calls report_cache_stats(baseline)
-        itself; the atexit trailer (report_cache_stats(), no baseline) must
-        then find nothing new to say for a CLI one-shot that already
-        reported everything mid-run."""
-        responses, calls = api
-        responses.append(_OK)
-        baseline = claude.cache_stats()
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-        claude.report_cache_stats(baseline)          # the pass's own footer
-        capsys.readouterr()                          # discard it
-        claude.report_cache_stats()                  # what atexit calls
-        assert capsys.readouterr().out == ""
-
-    def test_atexit_style_report_covers_a_one_shot_that_never_reported(
-            self, api, capsys):
-        """A bare script that calls call_claude_json directly, with no
-        harvest pass or web op ever calling report_cache_stats, still gets
-        its whole spend from the atexit trailer -- exactly once."""
-        responses, calls = api
-        responses.append(_OK)
-        claude.report_cache_stats()                  # flush: nothing owed
+        await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+        claude.report_cache_stats()
         capsys.readouterr()
-        claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
-        claude.report_cache_stats()                  # what atexit calls
+        await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+        await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+        claude.report_cache_stats()
+        assert "[claude] 2 call(s) | input 2 tok " in capsys.readouterr().out
+
+    async def test_a_run_prints_what_no_footer_covered_as_it_ends(
+            self, api, capsys, monkeypatch):
+        """A CLI one-shot prints its whole spend once, as its run ends; a
+        pass that printed its own footer prints nothing more."""
+        monkeypatch.setattr(claude.config.SETTINGS, "claude_usage_summary", True)
+        responses, calls = api
+        responses.append(_OK)
+        async with runstate.Run():
+            await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
         printed = capsys.readouterr().out
-        assert printed.count("[claude]") == 1
-        assert "1 call(s)" in printed
+        assert printed.count("[claude]") == 1 and "1 call(s)" in printed
+        async with runstate.Run():
+            await claude.call_claude_json("sys", "user", cache=False, reply=_Ok)
+            claude.report_cache_stats()              # the pass's own footer
+            capsys.readouterr()
+        assert capsys.readouterr().out == ""

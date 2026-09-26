@@ -30,7 +30,7 @@ async def prune_dead_boards(db, max_workers=12, deactivate_offmission=False):
     """
     # Board.alive, not the slug probe: an empty board is alive; dead means
     # the board REQUEST fails.
-    PROBE = {b.name: b.aalive for b in BOARDS.values() if b.spec.prunable}
+    PROBE = {b.name: b.alive for b in BOARDS.values() if b.spec.prunable}
 
     async with track_writer(db=db) as db:
         rows = [c for c in await db.run(store.get_companies, active_only=True)
@@ -304,7 +304,7 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
     -- see _silent_board_candidates); they are tried after every
     miss-family row, so `families=(SILENT_FAMILY,)` is how a bounded pass
     reaches them. A hit on one is written exactly like any other family's.
-    aresolve_or_miss only calls a board a hit when a live fetch lists jobs,
+    resolve_or_miss only calls a board a hit when a live fetch lists jobs,
     so the silent coordinates themselves never come back as one; a miss on
     an inactive row is recorded as usual (record_miss declines on an
     active row, which then stays a candidate).
@@ -326,7 +326,7 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
         one wedged careers-page fetch must not hold the web UI's
         one-op-at-a-time slot.
     """
-    from src.claude.api import ascore_company_mission
+    from src.claude.api import score_company_mission
     from src.discovery.local_sourcing import (_board_already_tracked,
                                               _report_dup_board,
                                               mission_context)
@@ -399,7 +399,7 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
                       f"nc={hit['nc']:<3} "
                       f"tot={hit['count']:<4} (was {was[name]})")
                 continue
-            tier, score, reason = await ascore_company_mission(
+            tier, score, reason = await score_company_mission(
                 name, await mission_context(hit))
             await db.run(_retarget, name, {
                 **board,
@@ -456,7 +456,7 @@ def _retarget(conn, name, row):
 #     live: "AbbVie", "Eurofins").
 #
 # config.BOARDS names that field as each spec's `employer`; the engine
-# reads it off one listing request (`Board.aemployer_name`).
+# reads it off one listing request (`Board.employer_name`).
 #
 # Workday, Lever and Ashby were checked the same way and do NOT qualify:
 #   * Workday's CXS job-DETAIL JSON (not the listing) carries a top-level
@@ -514,7 +514,7 @@ async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
     """PREVIEW (default) or APPLY a rename of every active, dork-sourced
     Greenhouse/SmartRecruiters board whose stored name is nothing but its
     own board slug (_slug_named_boards) to the employer name the board's
-    OWN listing payload carries (`Board.aemployer_name`). One GET per
+    OWN listing payload carries (`Board.employer_name`). One GET per
     candidate board, no detail fetch, no whole-board pull.
 
     Same preview/apply shape as reresolve_misses: `commit=False` (the
@@ -524,7 +524,7 @@ async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
 
     A fetched name is rejected -- reported, never written, in EITHER mode
     -- when:
-      * the board answered empty or errored (`Board.aemployer_name` -> "");
+      * the board answered empty or errored (`Board.employer_name` -> "");
       * src.match.names.junk_name_reason flags it -- the SAME screen a
         pasted or re-resolved name is run through, so a malformed payload
         naming a section heading rather than an employer can never
@@ -575,7 +575,7 @@ async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
             lambda conn: conn.execute("SELECT name FROM companies").fetchall())}
         out = []
         for c in rows:
-            new_name = await board_for(c["ats"]).aemployer_name(c["slug"])
+            new_name = await board_for(c["ats"]).employer_name(c["slug"])
             label = f"{c['name'][:30]:30} {c['ats']:15}"
             if not new_name:
                 print(f"    [skip]      {label} board answered no employer name")

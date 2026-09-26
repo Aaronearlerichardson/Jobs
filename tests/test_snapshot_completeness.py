@@ -24,7 +24,7 @@ NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)
 
 @pytest.fixture(autouse=True)
 def fresh_accounting():
-    """One fetch attempt per test, as fetch_all / aharvest_board run it."""
+    """One fetch attempt per test, as fetch_all / harvest_board run it."""
     http.reset_fetch_failures()
 
 
@@ -87,7 +87,7 @@ class TestWorkdaySnapshot:
         (2000, None, True),     # no total: the rows alone reach the ceiling
         (1995, 1995, False),    # a board under the ceiling is complete
     ])
-    def test_the_ceiling_caps_a_window_of_the_board(self, cxs, n, total, capped):
+    async def test_the_ceiling_caps_a_window_of_the_board(self, cxs, n, total, capped):
         """The API reports a bigger board as 2000 and serves 2000 rows, so
         at the ceiling rows and total AGREE and would read as complete.
 
@@ -97,16 +97,16 @@ class TestWorkdaySnapshot:
             were closed.
         """
         cxs(_postings(n), totals=(total, 0))
-        assert len(board_for("workday").whole_board(WD)) == n
+        assert len(await board_for("workday").whole_board(WD)) == n
         assert http.snapshot_info()["capped"] is capped
 
-    def test_a_scoped_pull_is_never_compared_against_its_total(self, cxs):
+    async def test_a_scoped_pull_is_never_compared_against_its_total(self, cxs):
         """A scope's total counts rows the pull then drops for locality."""
         cxs(_postings(40, "US, TX, Austin"), scoped=_postings(5), totals=(40, 12))
-        assert len(board_for("workday").whole_board(WD, NC_RE)) == 5
+        assert len(await board_for("workday").whole_board(WD, NC_RE)) == 5
         assert not http.snapshot_info()["capped"]
 
-    def test_a_whole_board_pull_never_spends_the_location_rescue(self, cxs, capsys):
+    async def test_a_whole_board_pull_never_spends_the_location_rescue(self, cxs, capsys):
         """loc_re=None keeps every row wherever it sits, so a multi-site
         "N Locations" row costs no detail GET and keeps its listed text.
 
@@ -115,7 +115,7 @@ class TestWorkdaySnapshot:
             budget on multi-site rows a whole-board pull never needed.
         """
         calls = cxs(_postings(5, "3 Locations"))
-        rows = board_for("workday").whole_board(WD)
+        rows = await board_for("workday").whole_board(WD)
         assert [r["location"] for r in rows] == ["3 Locations"] * 5
         assert [c.method for c in calls] == ["POST"]
         assert "[!]" not in capsys.readouterr().out
@@ -124,14 +124,14 @@ class TestWorkdaySnapshot:
         (WD, 1300),                                             # reads on
         ({**WD, "active": 0, "mission_tier": "other"}, 1200),   # the spec's 60 pages
     ])
-    def test_the_page_budget_widens_for_a_mission_worth_it_board(
+    async def test_the_page_budget_widens_for_a_mission_worth_it_board(
             self, cxs, monkeypatch, company, rows):
         """config.board_max_rows: BOARD_MAX_ROWS for a board a track can
         surface, the spec's own page budget for one off-mission and
         inactive."""
         cxs(_postings(1300))
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 1400)
-        assert len(company_fetch.fetch_company(company, None)) == rows
+        assert len(await company_fetch.fetch_company(company, None)) == rows
 
 
 class TestWorkdayScope:
@@ -144,72 +144,72 @@ class TestWorkdayScope:
         rows (531s of an 872s crawl) and kept all 1,200 as local.
     """
 
-    def test_a_scope_the_board_ignored_keeps_listed_matches_only(self, cxs, capsys):
+    async def test_a_scope_the_board_ignored_keeps_listed_matches_only(self, cxs, capsys):
         rows = ([_posting("5 Locations", f"/job/US-CA-Santa-Clara/Eng_{i}")
                  for i in range(40)]
                 + [_posting("US, NC, Durham", "/job/US-NC-Durham/Eng_NC1"),
                    _posting("3 Locations", "/job/US-NC-Durham/Eng_NC2")])
         calls = cxs(rows, scoped=rows[:2], ignores_scope=True)
-        out = board_for("workday").whole_board(WD, NC_RE)
+        out = await board_for("workday").whole_board(WD, NC_RE)
         assert [(j["id"], j["location"]) for j in out] == [
             ("wd_acme_Eng_NC1", "US, NC, Durham"),
             ("wd_acme_Eng_NC2", "US NC Durham (3 Locations)")]
         assert "GET" not in [c.method for c in calls], "no detail rescue"
         assert "unnarrowed" in capsys.readouterr().out
 
-    def test_a_narrowed_scope_expands_multi_location_rows(self, cxs):
+    async def test_a_narrowed_scope_expands_multi_location_rows(self, cxs):
         calls = cxs(_postings(30, "5 Locations"),
                     scoped=[_posting("5 Locations", "/job/US-CA-Santa-Clara/Eng_NC")])
-        out = board_for("workday").whole_board(WD, NC_RE)
+        out = await board_for("workday").whole_board(WD, NC_RE)
         assert [j["location"] for j in out] == ["US, NC, Durham"]
         assert [c.method for c in calls].count("GET") == 1
 
-    def test_a_row_the_scope_vouched_for_is_kept_naming_the_area(self, cxs):
+    async def test_a_row_the_scope_vouched_for_is_kept_naming_the_area(self, cxs):
         """The board's own area search listed it: a listed or detail place
         outside the area drops nothing, and the row names the area searched,
         which a later hydration keeps."""
         cxs(_postings(30, "US, TX, Austin"), detail="US, CA, Santa Clara",
             scoped=[_posting("US, CA, Santa Clara", "/job/US-CA/Eng_A"),
                     _posting("2 Locations", "/job/US-CA/Eng_B")])
-        out = board_for("workday").whole_board(WD, NC_RE)
+        out = await board_for("workday").whole_board(WD, NC_RE)
         assert [j["location"] for j in out] == ["US, CA, Santa Clara; North Carolina"] * 2
-        job = board_for("workday").hydrate({**out[1], "description": ""})
+        job = await board_for("workday").hydrate({**out[1], "description": ""})
         assert (job["description"], job["location"]) == ("Build things.", out[1]["location"])
 
-    def test_the_rescue_has_a_per_pull_budget(self, cxs, capsys):
+    async def test_the_rescue_has_a_per_pull_budget(self, cxs, capsys):
         """Past `rescue.cap`, a row the facet vouched for stays on its
         listed text, the area appended; the budget line says so."""
         spec = config.BOARDS["workday"]
         capped = board.Board("workday", {**spec, "rescue": {**spec["rescue"], "cap": 4}})
         local = [_posting("5 Locations", f"/job/US-CA-Santa-Clara/Eng_{i}") for i in range(6)]
         calls = cxs(local + _postings(30, "US, TX, Austin"), scoped=local)
-        out = capped.whole_board(WD, NC_RE)
+        out = await capped.whole_board(WD, NC_RE)
         assert [c.method for c in calls].count("GET") == 4
         assert [j["location"] for j in out].count("5 Locations; North Carolina") == 2
         assert "detail budget" in capsys.readouterr().out
 
-    def test_the_local_count_is_the_scoped_total(self, cxs):
+    async def test_the_local_count_is_the_scoped_total(self, cxs):
         cxs(_postings(50, "x"), scoped=_postings(3))
-        assert board_for("workday").local_count("acme|5|Site", NC_RE) == 3
+        assert await board_for("workday").local_count("acme|5|Site", NC_RE) == 3
 
-    def test_an_ignored_scope_counts_listed_locations_on_a_sample(
+    async def test_an_ignored_scope_counts_listed_locations_on_a_sample(
             self, cxs, monkeypatch):
         """Never the whole board reported as local."""
         rows = (_postings(150, "US, CA, Santa Clara")
                 + [_posting("US, NC, Durham", "/job/US-NC-Durham/Eng_NC")])
         cxs(rows, scoped=[], ignores_scope=True)
         monkeypatch.setattr(board.config, "LOCAL_COUNT_SAMPLE_PAGES", 2)
-        assert board_for("workday").local_count("acme|5|Site", NC_RE) == 0
+        assert await board_for("workday").local_count("acme|5|Site", NC_RE) == 0
 
-    def test_a_hyphenated_tenant_is_read_through_its_underscore_id(self, cxs):
+    async def test_a_hyphenated_tenant_is_read_through_its_underscore_id(self, cxs):
         """The CXS path takes the tenant's internal id, the underscore form
         of a hyphenated host (the hyphen form 422s): tried once, then
         settled for the pull and a stored row's detail, whose remote type
         rides along as a hint."""
         calls = cxs(_postings(3))
         company = {**WD, "wd_tenant": "vhr-unither"}
-        rows = board_for("workday").whole_board(company)
-        job = company_fetch.hydrate_description(
+        rows = await board_for("workday").whole_board(company)
+        job = await company_fetch.hydrate_description(
             {"ats": "workday", "url": rows[0]["url"], "description": "", "location": ""},
             company)
         assert len(rows) == 3 and job["location"] == "US, NC, Durham"
@@ -281,50 +281,50 @@ class TestEnginePagers:
         ({0: [0, 1], 2: [2, 3], 4: [4]}, 5, None),         # the total, reached
         ({0: [0, 1], 2: [2]}, 3400, 3400),                 # far short of it
     ])
-    def test_the_total_decides_whether_the_walk_was_whole(
+    async def test_the_total_decides_whether_the_walk_was_whole(
             self, offset_board, pages, total, capped_total):
         offset_board(pages, total)
-        rows = _engine("offset", size=2, pages=9, total="total").listing("h", "t h")
+        rows = await _engine("offset", size=2, pages=9, total="total").listing("h", "t h")
         assert [r["id"] for r in rows] == [f"t_{i}" for o in pages for i in pages[o]]
         assert http.snapshot_info()["capped_total"] == capped_total
 
-    def test_every_page_full_with_no_total_is_capped(self, offset_board):
+    async def test_every_page_full_with_no_total_is_capped(self, offset_board):
         offset_board({0: [0, 1], 2: [2, 3]})
-        assert len(_engine("offset", size=2, pages=2).listing("h", "t h")) == 4
+        assert len(await _engine("offset", size=2, pages=2).listing("h", "t h")) == 4
         info = http.snapshot_info()
         assert info["capped"] and info["capped_total"] is None
 
-    def test_a_short_page_short_of_the_total_reads_on(self, offset_board):
+    async def test_a_short_page_short_of_the_total_reads_on(self, offset_board):
         """A server may serve fewer rows than asked (two Phenom tenants
         serve 10 whatever the size): the total, not the page, says when the
         board ends."""
         calls = offset_board({0: [0, 1], 5: [5, 6]}, total=7)
-        rows = _engine("offset", size=5, pages=9, total="total").listing("h", "t h")
+        rows = await _engine("offset", size=5, pages=9, total="total").listing("h", "t h")
         assert [r["id"] for r in rows] == ["t_0", "t_1", "t_5", "t_6"]
         assert [c.params["o"] for c in calls] == [0, 5, 10]
         assert http.snapshot_info()["capped_total"] == 7
 
-    def test_a_failed_later_page_is_counted_not_capped(self, offset_board):
+    async def test_a_failed_later_page_is_counted_not_capped(self, offset_board):
         offset_board({0: [0, 1], 2: [2, 3]}, total=4, fail_from=2)
-        assert len(_engine("offset", size=2, pages=9, total="total").listing("h", "t h")) == 2
+        assert len(await _engine("offset", size=2, pages=9, total="total").listing("h", "t h")) == 2
         info = http.snapshot_info()
         assert info["incomplete"] and not info["capped"]
 
-    def test_overlapping_pages_survive_a_reshuffled_order(self, offset_board):
+    async def test_overlapping_pages_survive_a_reshuffled_order(self, offset_board):
         """The listing order is unstable between requests: a row can shift
         across a page boundary. Half-page overlap plus dedupe by id still
         collects every row once."""
         offset_board({0: [0, 1, 2, 3, 4, 5], 3: [5, 4, 8, 7, 6, 3], 6: [6, 7, 8, 9]},
                      total=10)
-        rows = _engine("overlap", size=6, step=3, pages=9, total="total",
-                       why=_SHIFTS).listing("h", "t h")
+        rows = await _engine("overlap", size=6, step=3, pages=9, total="total",
+                             why=_SHIFTS).listing("h", "t h")
         assert sorted(r["id"] for r in rows) == sorted(f"t_{i}" for i in range(10))
         assert len(rows) == 10 and not http.snapshot_info()["capped"]
 
-    def test_a_page_adding_nothing_new_ends_the_walk_capped(self, offset_board):
+    async def test_a_page_adding_nothing_new_ends_the_walk_capped(self, offset_board):
         calls = offset_board({0: [0, 1, 2, 3], 2: [0, 1, 2, 3]}, total=999)
-        rows = _engine("overlap", size=4, step=2, pages=9, total="total",
-                       why=_SHIFTS).listing("h", "t h")
+        rows = await _engine("overlap", size=4, step=2, pages=9, total="total",
+                             why=_SHIFTS).listing("h", "t h")
         assert len(rows) == 4 and len(calls) == 2
         assert http.snapshot_info()["capped_total"] == 999
 
@@ -335,26 +335,26 @@ class TestEnginePagers:
         (99, None, "empty", 3, 13, True),   # the page bound ends it
         (3, None, "wrap", 9, 3, False),     # a small board wrapping past its end
     ])
-    def test_a_learned_page_size_ends_every_walk(self, serve, monkeypatch, n, total, past,
-                                                  pages, read, capped):
+    async def test_a_learned_page_size_ends_every_walk(self, serve, monkeypatch, n, total, past,
+                                                       pages, read, capped):
         """An offset pager with no size steps by the first page's count, one
         row less with no total: the overlap row makes the last page short."""
         no_pacing(monkeypatch)
         _sized_by_server(serve, n, past=past, total=total)
-        rows = _engine("offset", pages=pages, total="total").listing("h", "t h")
+        rows = await _engine("offset", pages=pages, total="total").listing("h", "t h")
         assert len(rows) == read and http.snapshot_info()["capped"] is capped
 
-    def test_a_learned_page_size_widens_to_the_row_budget(self, serve, monkeypatch):
+    async def test_a_learned_page_size_widens_to_the_row_budget(self, serve, monkeypatch):
         """A mission-worth-it board reads BOARD_MAX_ROWS at the step the
         server serves, not the spec's page count."""
         no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 40)
         calls = _sized_by_server(serve, 99, total=99)
         b = _engine("offset", pages=2, total="total")
-        assert len(b.whole_board({"slug": "h", "active": 1, "mission_tier": "adjacent"})) == 40
+        assert len(await b.whole_board({"slug": "h", "active": 1, "mission_tier": "adjacent"})) == 40
         assert len(calls) == 8
 
-    def test_a_cursor_is_followed_verbatim(self, serve):
+    async def test_a_cursor_is_followed_verbatim(self, serve):
         """The next-page URL carries opaque keys (rebuilt by hand, it
         re-serves page 1): it is followed as served, and `has_next` ends
         the walk."""
@@ -362,37 +362,37 @@ class TestEnginePagers:
         calls = serve({nxt: fake_response({"items": _items([2]), "more": False}),
                        "x.test/list": fake_response({"items": _items([0, 1]), "more": True,
                                                      "next": nxt})})
-        rows = _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
+        rows = await _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
         assert [r["id"] for r in rows] == ["t_0", "t_1", "t_2"]
         assert [c.params for c in calls] == [{"o": 0, "n": 2}, {}]
         assert not http.snapshot_info()["capped"]
 
     @pytest.mark.parametrize("nxt", ["https://x.test/list?again",
                                      "https://elsewhere.test/list?p=2"])
-    def test_a_looping_or_foreign_cursor_ends_the_walk_capped(self, serve, nxt):
+    async def test_a_looping_or_foreign_cursor_ends_the_walk_capped(self, serve, nxt):
         """A cursor served back to the same rows, or pointing outside the
         listing's own directory (served data, not a promise), ends the
         walk; the rows are real, a missing one proves nothing."""
         calls = serve(fake_response({"items": _items([0, 1]), "more": True, "next": nxt}))
-        rows = _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
+        rows = await _engine("cursor", size=2, pages=9, next="next", has_next="more").listing("h", "t h")
         assert len(rows) == 2 and len(calls) == (2 if "x.test" in nxt else 1)
         assert http.snapshot_info()["capped"]
 
-    def test_a_followed_part_is_resolved_once_per_handle(self, serve):
+    async def test_a_followed_part_is_resolved_once_per_handle(self, serve):
         """`handle.follow`: the base a board's root redirects to, asked on
         the handle's first listing and remembered."""
         calls = serve(lambda url, **kw: fake_response(
             {"items": _items([0])} if "/list" in url else None, url="https://x.test/us/en"))
         b = _engine("offset", handle={"follow": {"base": "{slug}"}}, url="{base}/list",
                     size=9, pages=1)
-        assert len(b.listing("x.test")) == len(b.listing("x.test")) == 1
+        assert len(await b.listing("x.test")) == len(await b.listing("x.test")) == 1
         assert [c.url for c in calls] == ["https://x.test", "https://x.test/us/en/list",
                                           "https://x.test/us/en/list"]
 
-    def test_a_handle_missing_a_part_names_no_board(self, serve):
+    async def test_a_handle_missing_a_part_names_no_board(self, serve):
         calls = serve(fake_response({"items": _items([0])}))
         b = _engine("offset", handle={"parts": ["host", "org"]}, size=9, pages=1)
-        assert b.listing("x.test", "t x.test") == [] and calls == []
+        assert await b.listing("x.test", "t x.test") == [] and calls == []
         assert http.snapshot_info()["incomplete"]
 
 
@@ -424,19 +424,19 @@ class TestSuccessFactorsSnapshot:
     """The page label's total is what proves a SuccessFactors walk whole."""
 
     @staticmethod
-    def walk(serve, monkeypatch, pages, total):
+    async def walk(serve, monkeypatch, pages, total):
         no_pacing(monkeypatch)
         calls = serve(_sf_pages(pages, total))
-        return board_for("successfactors").listing("https://careers.example.edu", "t"), calls
+        return await board_for("successfactors").listing("https://careers.example.edu", "t"), calls
 
-    def test_reaching_the_labelled_total_is_not_capped(self, serve, monkeypatch):
-        rows, calls = self.walk(serve, monkeypatch, [list(range(25)), list(range(25, 50))], 50)
+    async def test_reaching_the_labelled_total_is_not_capped(self, serve, monkeypatch):
+        rows, calls = await self.walk(serve, monkeypatch, [list(range(25)), list(range(25, 50))], 50)
         assert len(rows) == len(calls) * 25 == 50
         assert not http.snapshot_info()["capped"]
 
-    def test_a_repeated_page_short_of_the_total_is_capped(self, serve, monkeypatch):
+    async def test_a_repeated_page_short_of_the_total_is_capped(self, serve, monkeypatch):
         """Bayer's shape: a page adding nothing new, 25 of 621."""
-        rows, _ = self.walk(serve, monkeypatch, [list(range(25))] * 10, 621)
+        rows, _ = await self.walk(serve, monkeypatch, [list(range(25))] * 10, 621)
         assert len(rows) == 25
         assert http.snapshot_info()["capped_total"] == 621
 
@@ -469,14 +469,14 @@ class TestSuccessFactorsLocation:
             '<td class="colDate"><span class="jobDate">Sep 17, 2026</span></td>'
             '</tr></table></body></html>')
 
-    def test_the_jobLocation_cell_wins_over_the_flattened_row_text(
+    async def test_the_jobLocation_cell_wins_over_the_flattened_row_text(
             self, serve):
         serve(self._row_html("Springfield, IL, US, 62701"))
-        rows = board_for("successfactors").listing("https://careers.example.edu")
+        rows = await board_for("successfactors").listing("https://careers.example.edu")
         assert len(rows) == 1
         assert rows[0]["location"] == "Springfield, IL, US, 62701"
 
-    def test_a_skin_with_no_jobLocation_cell_still_gets_a_clean_place(
+    async def test_a_skin_with_no_jobLocation_cell_still_gets_a_clean_place(
             self, serve, local_addr):
         """No `.jobLocation` markup at all: falls back to location_snippet
         on the row text, run through the same date/repeat cleanup."""
@@ -485,7 +485,7 @@ class TestSuccessFactorsLocation:
                 f'<span>{local_addr} Sep 17, 2026 {local_addr}</span></td>'
                 '</tr></table></body></html>')
         serve(html)
-        rows = board_for("successfactors").listing("https://careers.example.com")
+        rows = await board_for("successfactors").listing("https://careers.example.com")
         assert len(rows) == 1
         assert rows[0]["location"] == local_addr
 
@@ -498,8 +498,8 @@ class TestPostingPagesAsTheListing:
     """A board whose index names each posting and links its page (jazzhr):
     the page's JSON-LD fills the rest, within the rescue's per-pull budget."""
 
-    def test_past_the_budget_a_row_keeps_what_the_index_names(self, serve, monkeypatch,
-                                                              capsys):
+    async def test_past_the_budget_a_row_keeps_what_the_index_names(self, serve, monkeypatch,
+                                                                    capsys):
         """A posting left unread is still a row, so the snapshot is whole."""
         no_pacing(monkeypatch)
         spec = config.BOARDS["jazzhr"]
@@ -510,7 +510,7 @@ class TestPostingPagesAsTheListing:
                    '"addressRegion": "NC"}}}</script>')
         serve({"/apply/": posting, "applytojob.com/": "".join(
             f"<li><a href='/apply/Id{i}/Posting-{i}'>Posting {i}</a></li>" for i in range(3))})
-        rows = b.whole_board({"ats": "jazzhr", "slug": "acme"})
+        rows = await b.whole_board({"ats": "jazzhr", "slug": "acme"})
         assert [(r["title"], r["location"], r["description"]) for r in rows] == [
             ("Posting 0", "Durham, NC", "Build pipelines."), ("Posting 1", "", ""),
             ("Posting 2", "", "")]

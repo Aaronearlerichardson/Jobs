@@ -4,7 +4,7 @@ The SOURCING half of a `discover-term` / `--from-bciwiki` run: ask Claude (or
 a directory) for employer names, hand each one to the shared resolver
 (src.discovery.resolve.board), and turn what comes back into a report and a
 roster write. The resolution itself used to be a second, probe-first
-implementation living here; see avalidate_candidate for why it isn't any more.
+implementation living here; see validate_candidate for why it isn't any more.
 """
 
 import asyncio
@@ -15,17 +15,17 @@ from datetime import datetime
 from src.ats import coords
 from src.ats.board import board_for
 from src.claude.api import (DISCOVER_SYSTEM, DiscoveredCompany, DiscoverReply,
-                            acall_claude_json)
+                            call_claude_json)
 from src.config import REPORT_DIR, SETTINGS
 from src.match.names import strip_suffixes
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.net.util import worker_count
-from .resolve.board import aresolve_board_sniff_first
+from .resolve.board import resolve_board_sniff_first
 from .resolve.probes import SCANNED, JsScanProbePool
-from .resolve.sniffer import asniff_careers_ats
+from .resolve.sniffer import sniff_careers_ats
 from .seeds import seed_candidates_for
 
-# Parallel worker count for avalidate_candidate. Each worker is almost
+# Parallel worker count for validate_candidate. Each worker is almost
 # entirely blocked on network I/O (slug probes + careers-page fetches
 # against different hosts), so this is a network-concurrency knob, not a
 # CPU one — defaults to n_cpus-1, raise DISCOVERY_WORKERS (e.g. 32) to push
@@ -105,7 +105,7 @@ def verify_note(c) -> str:
     return m.group(1) if m else ""
 
 
-async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
+async def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
     """
     Resolve one candidate to a crawlable board and record what happened.
 
@@ -140,7 +140,7 @@ async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=
         (see resolve_board_sniff_first).
     """
     claimed_ats = c.ats
-    hit = await aresolve_board_sniff_first(c.name, c.careers_url, websearch=websearch)
+    hit = await resolve_board_sniff_first(c.name, c.careers_url, websearch=websearch)
     await asyncio.sleep(delay)
     if hit:
         c.confirmed   = True
@@ -163,7 +163,7 @@ async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=
     # points the user straight at the board to add by hand, rather than
     # reading as a dead miss. Cheap here -- the careers pages this re-reads
     # are already in the resolver's per-run memo (resolve.fetchpool).
-    sniff = await asniff_careers_ats(c.name, c.careers_url)
+    sniff = await sniff_careers_ats(c.name, c.careers_url)
     await asyncio.sleep(delay)
     if sniff:
         c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
@@ -176,7 +176,7 @@ async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=
         # Noisy hint to the user — browser launches are slow, and they'll
         # otherwise wonder why discover() is suddenly pausing.
         marker = "[js]" if js_probe.launched else "[js init]"
-        meta, _ = await js_probe.aprobe(c.name, c.careers_url)
+        meta, _ = await js_probe.probe(c.name, c.careers_url)
         log(f"    {marker} {c.name}: headless scrape... "
             f"{'hit' if meta else 'miss'}")
         await asyncio.sleep(delay)
@@ -210,8 +210,8 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
 
 async def discover(term):
     print(f"  > Asking Claude for companies in: {term!r}")
-    payload = await acall_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
-                                      reply=DiscoverReply)
+    payload = await call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
+                                     reply=DiscoverReply)
     raw_companies = ([c.model_dump() for c in payload.companies]
                      if payload else [])
     seeds = seed_candidates_for(term)
@@ -266,7 +266,7 @@ async def _validate_all(candidate_dicts, use_js=True, websearch=True):
         # and candidates already run concurrently, so politeness sleeps add
         # up to dead time per candidate. 0.05 keeps a light touch without
         # the tax.
-        await avalidate_candidate(
+        await validate_candidate(
             cand, delay=0.05, js_probe=js_probe, log=buf.append,
             websearch=websearch,
         )

@@ -63,7 +63,7 @@ class Settings(BaseSettings):
     xdg_data_home: Path | None = None
     # Web UI port (src/web/server.py; --port=N overrides).
     webui_port: int = Field(5533, ge=1, le=65535)
-    # Thread-pool sizes; unset -> n_cpus - 1 (src/net/util.worker_count).
+    # Concurrency limits; unset -> n_cpus - 1 (src/net/util.worker_count).
     crawler_workers: PositiveInt | None = None
     discovery_workers: PositiveInt | None = None
     harvest_workers: PositiveInt | None = None

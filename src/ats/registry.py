@@ -43,7 +43,7 @@ def sweep(ats, name, handle):
     company-vetted path, board/company.py, passes a location regex
     instead). None for a platform no spec fetches."""
     board = board_for(ats)
-    return (lambda: board.ajobs(handle, name, gate=is_relevant)) if board else None
+    return (lambda: board.jobs(handle, name, gate=is_relevant)) if board else None
 
 
 def iter_store_sources(companies):

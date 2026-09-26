@@ -86,7 +86,7 @@ def _slug_matches_name(slug, name):
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
 
 
-async def awebsearch_board(name, max_results=8):
+async def websearch_board(name, max_results=8):
     """Find a company's board via web search when domain-guessing fails
     (gov/org domains, acronyms, or product-named domains — e.g. 'Core Sound
     Imaging' -> corestudycast.com). Returns the sniff_ats result shape, or
@@ -99,7 +99,7 @@ async def awebsearch_board(name, max_results=8):
       2. aggregators are skipped and self-hosted *custom* boards accepted,
          not just JSON-API ATSes.
     """
-    from src.ats.board.custom import acustom_board_listing_url
+    from src.ats.board.custom import custom_board_listing_url
 
     async def _resolve(urls):
         # Pass 1: ATS coordinates already visible in a result URL
@@ -137,7 +137,7 @@ async def awebsearch_board(name, max_results=8):
             # otherwise a third-party jobs site with ≥3 listings
             # (healthecareers, dotmed, expertini, …) resolves as the board.
             if own:
-                listing = await acustom_board_listing_url(r.url, text)
+                listing = await custom_board_listing_url(r.url, text)
                 if listing:
                     return {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
         return None
@@ -146,7 +146,7 @@ async def awebsearch_board(name, max_results=8):
     # when it lands); fall back to a general careers search only if it misses.
     seen = set()
     for query in (f'"{name}" jobs ({_HINT})', f'"{name}" careers'):
-        fresh = [u for r in await ddg.asearch(query, max_results=max_results)
+        fresh = [u for r in await ddg.search(query, max_results=max_results)
                  if (u := r.get("href") or r.get("url")) and u not in seen
                  and not any(h in u.lower() for h in _AGGREGATOR_HOSTS)]
         seen.update(fresh)

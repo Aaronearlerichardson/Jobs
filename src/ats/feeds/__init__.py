@@ -9,8 +9,7 @@ A fetcher's `gate=None` is a relevance predicate
 `gate(title[, description])`; None keeps every posting. It may run off
 the loop (asyncio.to_thread), so it is pure CPU.
 
-Each fetcher is a coroutine `afetch_<name>` with its sync shim
-`fetch_<name>`.
+Each fetcher is a coroutine, `fetch_<name>`.
 
 Board-shaped platforms are `config.BOARDS` specs run by the engine in
 src/ats/board/.

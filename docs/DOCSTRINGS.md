@@ -135,8 +135,9 @@ Work down this list and stop at the first match.
 
 Two sharper cuts:
 
-- **"Pure" means** no `requests`/`SESSION`, no `sqlite3`, no thread pool, no
-  `open()`, no `src.claude` API call, and no dependence on wall-clock time or
+- **"Pure" means** no `requests`/`net.http`, no `sqlite3`, no thread pool, no
+  run state (`src/runstate.py`: a doctest runs outside any run), no `open()`,
+  no `src.claude` API call, and no dependence on wall-clock time or
   randomness. Roughly 207 of the 534 functions here qualify. If you need a
   fixture, it is not a doctest.
 - **If a doctest would need a mock, it is the wrong tool.** Move it to

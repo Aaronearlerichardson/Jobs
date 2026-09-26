@@ -17,7 +17,7 @@ that ordering is load-bearing.
 """
 
 from .apply import apply_to_store
-from .bciwiki import abciwiki_seed_candidates
+from .bciwiki import bciwiki_seed_candidates
 from .pipeline import (
     discover,
     discover_companies,
@@ -27,7 +27,7 @@ from .pipeline import (
 
 __all__ = [
     "apply_to_store",
-    "abciwiki_seed_candidates",
+    "bciwiki_seed_candidates",
     "discover",
     "discover_companies",
     "print_summary",

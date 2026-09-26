@@ -5,19 +5,18 @@ The careers-page sniffer (sniffer.py) and the Workday probes (probes.py)
 both walk the same candidate list for a name, and the stages of one name's
 resolution -- careers sniff, root scan, lead sniff, diagnosis, Workday probe
 -- each rebuild that list and fetch it again. Everything they share sits
-here so neither imports the other: the URL generator, the dead-host memo,
-the DNS verdict cache and the bounded page memo (the last two behind one
-lock), and
-`_fetch_all`, the concurrent fetch that consults them.
+here so neither imports the other: the URL generator, the run's dead-host
+memo, DNS verdict cache and bounded page memo, and `_fetch_all`, the
+concurrent fetch that consults them.
 """
 
 import asyncio
+import functools
 import logging
 import socket
-import threading
 import time
 
-from src import config
+from src import config, runstate
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net import http
@@ -134,41 +133,39 @@ def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
 # while. HTTP errors and READ timeouts are not cached — a slow or 404ing
 # host may still answer another path.
 _DEAD_HOST_TTL = 15 * 60
-_DEAD_HOSTS = HostBreaker(ttl=_DEAD_HOST_TTL)
-_CACHE_LOCK = threading.Lock()      # _PAGE_MEMO and _DNS_CACHE
+_DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=_DEAD_HOST_TTL))
 
 
-# Per-URL outcome memo, url -> (time recorded, Response or None). The
-# stages of one name's resolution (careers sniff, root scan, lead sniff,
-# diagnosis) each rebuild the candidate list and fetch it again, so a LIVE
-# host answered the same GET up to seven times per name (sgs.com, intertek.
-# com, and a 403ing infosys.com in the 2026-09-01 add-names runs). Same
-# URL, same run, same answer: hand back the first one. Bounded so a long
-# discovery run can't hoard page bodies.
-_PAGE_MEMO = {}
-_PAGE_MEMO_CAP = 512
-_PAGE_MEMO_MAX_BYTES = 2 * 1024 * 1024
+# The run's per-URL outcome memo, url -> (time recorded, Response or None).
+# The stages of one name's resolution (careers sniff, root scan, lead
+# sniff, diagnosis) each rebuild the candidate list and fetch it again, so
+# a LIVE host answered the same GET up to seven times per name (sgs.com,
+# intertek.com, and a 403ing infosys.com in the 2026-09-01 add-names runs).
+# Same URL, same run, same answer: hand back the first one. Bounded (see
+# _memo_put) so a long discovery run can't hoard page bodies.
+_PAGE_MEMO = runstate.per_run(dict)
 
 
 def _memo_get(url):
-    with _CACHE_LOCK:
-        hit = _PAGE_MEMO.get(url)
-        if hit is None:
-            return False, None
-        if time.time() - hit[0] >= _DEAD_HOST_TTL:
-            del _PAGE_MEMO[url]
-            return False, None
-        return True, hit[1]
+    memo = _PAGE_MEMO()
+    hit = memo.get(url)
+    if hit is None:
+        return False, None
+    if time.time() - hit[0] >= _DEAD_HOST_TTL:
+        del memo[url]
+        return False, None
+    return True, hit[1]
 
 
 def _memo_put(url, resp):
-    if resp is not None and len(resp.content or b"") > _PAGE_MEMO_MAX_BYTES:
+    """Remember `url`'s outcome: 512 URLs at most, the oldest dropped
+    first, and no body over 2 MB."""
+    if resp is not None and len(resp.content or b"") > 2 * 1024 * 1024:
         return
-    with _CACHE_LOCK:
-        if len(_PAGE_MEMO) >= _PAGE_MEMO_CAP:
-            oldest = min(_PAGE_MEMO, key=lambda u: _PAGE_MEMO[u][0])
-            del _PAGE_MEMO[oldest]
-        _PAGE_MEMO[url] = (time.time(), resp)
+    memo = _PAGE_MEMO()
+    if len(memo) >= 512:
+        del memo[min(memo, key=lambda u: memo[u][0])]
+    memo[url] = (time.time(), resp)
 
 
 async def _fetch_page(url, timeout=PROBE_TIMEOUT):
@@ -181,7 +178,7 @@ async def _fetch_page(url, timeout=PROBE_TIMEOUT):
     known, resp = _memo_get(url)
     if known:
         return resp
-    if _DEAD_HOSTS.dead(url):
+    if _DEAD_HOSTS().dead(url):
         _log.debug("skip %s: host refused a connection earlier this run", url)
         return None
     try:
@@ -192,7 +189,7 @@ async def _fetch_page(url, timeout=PROBE_TIMEOUT):
     except Unreachable:
         # Unreachable (requests' ConnectionError) covers DNS failure,
         # SSLError and ConnectTimeout; ReadTimeout is a Timeout, not one.
-        _DEAD_HOSTS.trip(url)
+        _DEAD_HOSTS().trip(url)
         return None
     except Exception:
         return None
@@ -200,63 +197,65 @@ async def _fetch_page(url, timeout=PROBE_TIMEOUT):
     return resp
 
 
-# Per-host DNS verdicts for the run, host -> (time recorded, resolved?).
-# Most candidate hosts are name-guesses that do not exist; each path on one
-# used to pay the OS resolver's full failure latency, and the candidates for
-# a name are fetched CONCURRENTLY, so a dead host's five paths all paid it
+# The run's per-host DNS verdicts, host -> (time recorded, resolved?). Most
+# candidate hosts are name-guesses that do not exist; each path on one used
+# to pay the OS resolver's full failure latency, and the candidates for a
+# name are fetched CONCURRENTLY, so a dead host's five paths all paid it
 # before _DEAD_HOSTS could learn anything. On a machine whose resolver is
 # refusing or timing out (VPN plus a second adapter, 2026-09-02 reresolve:
 # 32 names abandoned by the stall watchdog at once, 2 of 50 resolved), that
 # was minutes per name. Resolve each host ONCE, bounded, before any GET.
-_DNS_CACHE = {}
-_DNS_TIMEOUT = 4.0
+_DNS_CACHE = runstate.per_run(dict)
 
 
-def _resolves(host):
-    """Whether `host` has an address, cached per run. A failure marks the
-    host dead for _fetch_page (see _DEAD_HOSTS); a success is remembered so
-    the next stage's rebuilt candidate list does not ask again."""
-    with _CACHE_LOCK:
-        hit = _DNS_CACHE.get(host)
-        if hit is not None and time.time() - hit[0] < _DEAD_HOST_TTL:
-            return hit[1]
-    try:
-        socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
-        ok = True
-    except OSError:
-        ok = False
-    with _CACHE_LOCK:
-        _DNS_CACHE[host] = (time.time(), ok)
-    if not ok:
-        _DEAD_HOSTS.trip(f"https://{host}/")
-        _log.debug("skip host %s: does not resolve", host)
-    return ok
-
-
-async def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
+async def _drop_unresolvable(urls, timeout=4.0):
     """`urls` minus every one whose host is known dead or fails a bounded
     DNS lookup. Distinct hosts are resolved concurrently, 8 at a time, each
-    lookup off the loop; a host the resolver has not answered within
-    `timeout` is skipped for THIS call (not marked dead: a slow resolver is
-    not a missing name), a lookup under way is left to finish on its own,
-    and one not yet begun never begins."""
+    lookup off the loop and each once per run: a failure marks the host
+    dead for _fetch_page (see _DEAD_HOSTS). A host the resolver has not
+    answered within `timeout` is skipped for THIS call (not marked dead: a
+    slow resolver is not a missing name), a lookup under way still records
+    its verdict when it lands, and one not yet begun never begins.
+
+    Notes:
+        The lookup thread posts its verdict before it returns, and
+        resolve() awaits that thread directly, so a lookup that landed
+        during a loop stall counts as done when the timeout is read. A
+        task hop between them (loop.getaddrinfo in its own task) lost
+        that race: 4-16 hosts per syn150 run were wrongly "silent"."""
     hosts = {}
     for u in urls:
         h = host_of(u)
         if h:
             hosts.setdefault(h, []).append(u)
-    todo = [h for h in hosts if not _DEAD_HOSTS.dead(f"https://{h}/")]
-    with _CACHE_LOCK:
-        todo = [h for h in todo
-                if not (_DNS_CACHE.get(h) and
-                        time.time() - _DNS_CACHE[h][0] < _DEAD_HOST_TTL)]
+    dead, verdicts = _DEAD_HOSTS(), _DNS_CACHE()
+
+    def known(h):
+        return verdicts.get(h) and time.time() - verdicts[h][0] < _DEAD_HOST_TTL
+
+    todo = [h for h in hosts if not dead.dead(f"https://{h}/") and not known(h)]
     slow = set()
     if todo:
-        slots = asyncio.Semaphore(8)
+        loop, slots = asyncio.get_running_loop(), asyncio.Semaphore(8)
+
+        def record(h, ok):
+            verdicts[h] = (time.time(), ok)
+            if not ok:
+                dead.trip(f"https://{h}/")
+                _log.debug("skip host %s: does not resolve", h)
+
+        def lookup(h):
+            try:
+                socket.getaddrinfo(h, 443, proto=socket.IPPROTO_TCP)
+                ok = True
+            except OSError:
+                ok = False
+            loop.call_soon_threadsafe(record, h, ok)
 
         async def resolve(h):
             async with slots:
-                return await asyncio.to_thread(_resolves, h)
+                if not known(h):
+                    await asyncio.to_thread(lookup, h)
         lookups = {asyncio.ensure_future(resolve(h)): h for h in todo}
         _done, pending = await asyncio.wait(lookups, timeout=timeout)
         for f in pending:
@@ -265,7 +264,7 @@ async def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
             _log.debug("skip host %s this pass: resolver silent for %.0fs",
                        lookups[f], timeout)
     return [u for u in urls
-            if host_of(u) not in slow and not _DEAD_HOSTS.dead(u)]
+            if host_of(u) not in slow and not dead.dead(u)]
 
 
 async def _fetch_all(urls):

@@ -76,11 +76,11 @@ def _ids(n):
 
 
 class TestAPresentBoardIsConfirmed:
-    def test_greenhouse_counts_its_jobs(self, serve):
+    async def test_greenhouse_counts_its_jobs(self, serve):
         serve(fake_response({"jobs": _ids(3) + [{}]}))
-        assert board_for("greenhouse").probe("acme") == (True, 3)
+        assert await board_for("greenhouse").probe("acme") == (True, 3)
 
-    def test_a_local_count_reads_the_rows_offices(self, serve):
+    async def test_a_local_count_reads_the_rows_offices(self, serve):
         """The probe URL's rows name no offices: the probe reads it, the
         local count the listing's own URL."""
         row = {"id": 1, "title": "T", "location": {"name": "Boston, MA"}}
@@ -88,34 +88,34 @@ class TestAPresentBoardIsConfirmed:
                      "content=true": fake_response(
                          {"jobs": [{**row, "offices": [{"name": "Durham, NC"}]}]})})
         gh = board_for("greenhouse")
-        assert (gh.probe("acme"), gh.local_count("acme", re.compile(r"\bNC\b"))) == ((True, 1), 1)
+        assert (await gh.probe("acme"), await gh.local_count("acme", re.compile(r"\bNC\b"))) == ((True, 1), 1)
         assert ["content=true" in r.url for r in log] == [False, True]
 
-    def test_lever_counts_a_bare_list(self, serve):
+    async def test_lever_counts_a_bare_list(self, serve):
         serve(fake_response(_ids(2)))
-        assert board_for("lever").probe("acme") == (True, 2)
+        assert await board_for("lever").probe("acme") == (True, 2)
 
-    def test_lever_tolerates_a_non_list_payload(self, serve):
+    async def test_lever_tolerates_a_non_list_payload(self, serve):
         serve(fake_response({"unexpected": True}))
-        assert board_for("lever").probe("acme") == (False, 0)
+        assert await board_for("lever").probe("acme") == (False, 0)
 
-    def test_ashby_reads_the_posting_api_key(self, serve):
+    async def test_ashby_reads_the_posting_api_key(self, serve):
         serve(fake_response({"jobs": _ids(2), "jobPostings": []}))
-        assert board_for("ashby").probe("acme") == (True, 2)
+        assert await board_for("ashby").probe("acme") == (True, 2)
 
-    def test_ashby_falls_back_to_the_embed_key(self, serve):
+    async def test_ashby_falls_back_to_the_embed_key(self, serve):
         serve(fake_response({"jobPostings": _ids(1)}))
-        assert board_for("ashby").probe("acme") == (True, 1)
+        assert await board_for("ashby").probe("acme") == (True, 1)
 
-    def test_bamboohr_asks_for_json(self, serve):
+    async def test_bamboohr_asks_for_json(self, serve):
         seen = serve(fake_response({"result": _ids(4)}))
-        assert board_for("bamboohr").probe("acme") == (True, 4)
+        assert await board_for("bamboohr").probe("acme") == (True, 4)
         assert seen[-1].headers["Accept"] == "application/json"
 
-    def test_jazzhr_counts_apply_links_in_the_page(self, serve):
+    async def test_jazzhr_counts_apply_links_in_the_page(self, serve):
         serve(fake_response(text="<a href='/apply/AbC123/Engineer'>x</a>"
                           "<a href='/apply/dEf456/Scientist'>y</a>"))
-        assert board_for("jazzhr").probe("acme") == (True, 2)
+        assert await board_for("jazzhr").probe("acme") == (True, 2)
 
 
 class TestAnEmptyBoardIsAMiss:
@@ -124,22 +124,22 @@ class TestAnEmptyBoardIsAMiss:
     "is the board still there" check is `Board.alive`, which an empty
     board passes.)"""
 
-    def test_greenhouse_empty_is_not_a_board(self, serve):
+    async def test_greenhouse_empty_is_not_a_board(self, serve):
         serve(fake_response({"jobs": []}))
-        assert board_for("greenhouse").probe("acme") == (False, 0)
+        assert await board_for("greenhouse").probe("acme") == (False, 0)
 
-    def test_smartrecruiters_empty_is_not_a_board(self, serve):
+    async def test_smartrecruiters_empty_is_not_a_board(self, serve):
         serve(fake_response({"totalFound": 0}))
-        assert board_for("smartrecruiters").probe("acme") == (False, 0)
+        assert await board_for("smartrecruiters").probe("acme") == (False, 0)
 
-    def test_smartrecruiters_with_postings_is(self, serve):
+    async def test_smartrecruiters_with_postings_is(self, serve):
         serve(fake_response({"totalFound": 7}))
-        assert board_for("smartrecruiters").probe("acme") == (True, 7)
+        assert await board_for("smartrecruiters").probe("acme") == (True, 7)
 
-    def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
+    async def test_jazzhr_with_no_posting_links_is_not_a_board(self, serve):
         # Every JazzHR page links /apply/confirm/, postings or not.
         serve(fake_response(text="<a href='/apply/confirm/'>x</a>" * 2))
-        assert board_for("jazzhr").probe("acme") == (False, 0)
+        assert await board_for("jazzhr").probe("acme") == (False, 0)
 
 
 class TestFailureIsReportedNeverRaised:
@@ -148,21 +148,21 @@ class TestFailureIsReportedNeverRaised:
     payload that will not parse -- so one broken host cannot end the pass.
     """
 
-    def test_a_non_200_is_a_miss(self, serve):
+    async def test_a_non_200_is_a_miss(self, serve):
         serve(fake_response({"jobs": [{}]}, status=404))
-        assert board_for("greenhouse").probe("acme") == (False, 0)
+        assert await board_for("greenhouse").probe("acme") == (False, 0)
 
-    def test_unparseable_json_is_a_miss(self, serve):
+    async def test_unparseable_json_is_a_miss(self, serve):
         serve(fake_response(None))
-        assert board_for("greenhouse").probe("acme") == (False, 0)
+        assert await board_for("greenhouse").probe("acme") == (False, 0)
 
-    def test_a_raising_session_is_a_miss(self, serve):
+    async def test_a_raising_session_is_a_miss(self, serve):
         serve(OSError("connection reset"))
-        assert board_for("greenhouse").probe("acme") == (False, 0)
+        assert await board_for("greenhouse").probe("acme") == (False, 0)
 
-    def test_a_probe_does_not_retry(self, serve):
+    async def test_a_probe_does_not_retry(self, serve):
         calls = serve(OSError("throttled"))
-        assert board_for("kula").probe("acme") == (False, 0)
+        assert await board_for("kula").probe("acme") == (False, 0)
         assert len(calls) == 1
 
 
@@ -205,7 +205,7 @@ async def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     async with probes.JsScanProbePool(1) as js:
         js._browser = browser = Hung()
         t0 = time.monotonic()
-        assert await js.aprobe("Acme") == (None, "budget exceeded")
+        assert await js.probe("Acme") == (None, "budget exceeded")
         assert time.monotonic() - t0 < 0.5
         assert browser.closed == 1 and not js._idle
         assert not js._slots.locked()
@@ -226,7 +226,7 @@ class TestPruneNamesWhatItDeactivates:
         keep_store_open(monkeypatch, db)
         self._company(db, "Gone Co", "greenhouse", "gone")
         self._company(db, "Live Co", "greenhouse", "live")
-        monkeypatch.setattr(board_for("greenhouse"), "aalive",
+        monkeypatch.setattr(board_for("greenhouse"), "alive",
                             answer(lambda slug: (slug == "live", 3)))
 
         await roster.prune()
@@ -243,7 +243,7 @@ class TestPruneNamesWhatItDeactivates:
             self, db, monkeypatch, capsys):
         self._company(db, "Other Co", "lever", "other",
                       mission_tier="other", mission_score=0.05)
-        monkeypatch.setattr(board_for("lever"), "aalive", answer(lambda slug: (True, 5)))
+        monkeypatch.setattr(board_for("lever"), "alive", answer(lambda slug: (True, 5)))
 
         assert await repair.prune_dead_boards(db, deactivate_offmission=True) == (0, 1)
 
@@ -261,7 +261,7 @@ class TestSelfHealRetryMarker:
 
     @staticmethod
     def _stub_refusal(monkeypatch):
-        """Every acall_claude_json call behaves like a refusal: no answer,
+        """Every call_claude_json call behaves like a refusal: no answer,
         which is what score_resume_fit turns into reason="unscored"."""
         import src.claude.fit as fit_module
         calls = []
@@ -272,7 +272,7 @@ class TestSelfHealRetryMarker:
         # nothing rather than as the scorer being offline (which is not a
         # verdict on the posting and must never mark a row).
         monkeypatch.setattr("src.config.ANTHROPIC_API_KEY", "test-key")
-        monkeypatch.setattr(fit_module, "acall_claude_json", refuse)
+        monkeypatch.setattr(fit_module, "call_claude_json", refuse)
         return calls
 
     async def test_an_offline_scorer_marks_nothing(self, db, add_job, monkeypatch):
@@ -369,7 +369,7 @@ class TestSelfHealRetryMarker:
         db.execute("UPDATE jobs SET fit_reason=? WHERE job_id=?",
                   (f"unscored:refused:300:{iso_days_ago(31)[:10]}", jid))
         db.commit()
-        monkeypatch.setattr(fit_module, "acall_claude_json", answer(
+        monkeypatch.setattr(fit_module, "call_claude_json", answer(
             fit_module.FitReply(domain=0.5, function=0.5, stack=0.5,
                                 seniority=0.5, gates=[], reason="fits")))
 
@@ -417,7 +417,7 @@ class TestDeadBoardClosure:
         def _probe(url, job_id=None):
             probed.append(url)
             return (None, "n/a")
-        monkeypatch.setattr(status.closure, "aprobe_job_open", answer(_probe))
+        monkeypatch.setattr(status.closure, "probe_job_open", answer(_probe))
 
         # stale_days=999 keeps this row OUT of the URL-probe population
         # entirely (last_seen is only 20 days old) -- proving the closure
@@ -435,7 +435,7 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Quiet Co", ats="lever", miss_reason=None,
                            days_stale=400)
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: (None, "n/a")))
 
         await status.check_closed_jobs(db=db, stale_days=999)
@@ -448,7 +448,7 @@ class TestDeadBoardClosure:
             self, db, monkeypatch):
         [jid] = seed_stale(db, "Ats Gap", ats=None,
                            miss_reason="ats-unsupported:ukg", days_stale=400)
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: (None, "n/a")))
 
         await status.check_closed_jobs(db=db, stale_days=999)
@@ -471,7 +471,7 @@ class TestClosedProbeRotation:
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: (None, "gated")))
 
         for _ in range(3):
@@ -484,7 +484,7 @@ class TestClosedProbeRotation:
 
     async def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
         seed_stale(db, n=250)
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: (None, "gated")))
 
         await status.check_closed_jobs(db=db, stale_days=1, limit=100)
@@ -511,7 +511,7 @@ class TestClosedProbeGiveUp:
         def _probe(url, job_id=None):
             probed.append(url)
             return verdict
-        monkeypatch.setattr(status.closure, "aprobe_job_open", answer(_probe))
+        monkeypatch.setattr(status.closure, "probe_job_open", answer(_probe))
         return probed
 
     async def _run(self, db, n):
@@ -646,44 +646,44 @@ class TestProbeIsDecisivePerFamily:
     is asked its own public endpoint instead, and what these pin is which
     answer there counts as proof."""
 
-    def test_a_404_from_the_lever_api_closes(self, probe_http):
+    async def test_a_404_from_the_lever_api_closes(self, probe_http):
         seen = probe_http({FAMILY_API[LEVER_JOB]: fake_response(status=404)})
-        assert job_probe.probe_job_open(LEVER_JOB)[0] is False
+        assert (await job_probe.probe_job_open(LEVER_JOB))[0] is False
         assert len(seen) == 1, "the page must not be fetched as well"
 
-    def test_a_200_from_the_lever_api_confirms_live(self, probe_http):
+    async def test_a_200_from_the_lever_api_confirms_live(self, probe_http):
         probe_http({FAMILY_API[LEVER_JOB]: fake_response({"text": "Eng"})})
-        assert job_probe.probe_job_open(LEVER_JOB)[0] is True
+        assert (await job_probe.probe_job_open(LEVER_JOB))[0] is True
 
-    def test_a_404_from_the_greenhouse_api_closes(self, probe_http):
+    async def test_a_404_from_the_greenhouse_api_closes(self, probe_http):
         probe_http({FAMILY_API[GH_JOB]: fake_response(status=404)})
-        assert job_probe.probe_job_open(GH_JOB)[0] is False
+        assert (await job_probe.probe_job_open(GH_JOB))[0] is False
 
-    def test_a_404_from_the_bamboohr_detail_endpoint_closes(self, probe_http):
+    async def test_a_404_from_the_bamboohr_detail_endpoint_closes(self, probe_http):
         probe_http({FAMILY_API[BAMBOO_JOB]: fake_response(status=404)})
-        assert job_probe.probe_job_open(BAMBOO_JOB)[0] is False
+        assert (await job_probe.probe_job_open(BAMBOO_JOB))[0] is False
 
-    def test_a_410_from_the_jazzhr_apply_url_closes(self, probe_http):
+    async def test_a_410_from_the_jazzhr_apply_url_closes(self, probe_http):
         probe_http({FAMILY_API[JAZZ_JOB]: fake_response(status=410)})
-        assert job_probe.probe_job_open(JAZZ_JOB)[0] is False
+        assert (await job_probe.probe_job_open(JAZZ_JOB))[0] is False
 
-    def test_an_id_missing_from_a_non_empty_ashby_board_closes(self, probe_http):
+    async def test_an_id_missing_from_a_non_empty_ashby_board_closes(self, probe_http):
         probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
             {"jobs": [{"id": "aaaaaaaa-0000-0000-0000-000000000000"}]})})
-        assert job_probe.probe_job_open(ASHBY_JOB)[0] is False
+        assert (await job_probe.probe_job_open(ASHBY_JOB))[0] is False
 
-    def test_an_id_the_ashby_board_still_lists_is_live(self, probe_http):
+    async def test_an_id_the_ashby_board_still_lists_is_live(self, probe_http):
         probe_http({FAMILY_API[ASHBY_JOB]: fake_response(
             {"jobs": [{"id": "f21013b3-0152-49d9-accb-3a46d33c8a82"}]})})
-        assert job_probe.probe_job_open(ASHBY_JOB)[0] is True
+        assert (await job_probe.probe_job_open(ASHBY_JOB))[0] is True
 
-    def test_an_empty_ashby_board_proves_nothing(self, probe_http):
+    async def test_an_empty_ashby_board_proves_nothing(self, probe_http):
         """A fetcher soft-fails to [], so an empty listing is
         indistinguishable from a board that did not answer -- the same
         reason store.sync_job_statuses refuses to close on one."""
         probe_http({FAMILY_API[ASHBY_JOB]: fake_response({"jobs": []}),
                     "jobs.ashbyhq.com": fake_response(url=ASHBY_JOB)})
-        assert job_probe.probe_job_open(ASHBY_JOB)[0] is None
+        assert (await job_probe.probe_job_open(ASHBY_JOB))[0] is None
 
     async def test_one_ashby_board_fetch_serves_every_row_on_it(self, probe_http):
         """A company with many stale rows must not re-fetch its board once
@@ -695,24 +695,24 @@ class TestProbeIsDecisivePerFamily:
         seen = probe_http({FAMILY_API[ASHBY_JOB]: lambda url, **kw:
                            time.sleep(0.2) or fake_response(listing)})
         verdicts = sorted([o async for o, _ in fan_out(
-            rows, job_probe.aprobe_job_open, max_workers=8)])
+            rows, job_probe.probe_job_open, max_workers=8)])
         assert (len(seen), verdicts) == (1, [False] * 7 + [True])
 
-    def test_smartrecruiters_closes_on_the_active_flag(self, probe_http):
+    async def test_smartrecruiters_closes_on_the_active_flag(self, probe_http):
         """SmartRecruiters keeps serving a pulled posting at HTTP 200, so
         the status code says nothing and `active` says everything."""
         probe_http({FAMILY_API[SR_JOB]: fake_response(
             {"id": "3743990014860306", "active": False})})
-        assert job_probe.probe_job_open(SR_JOB)[0] is False
+        assert (await job_probe.probe_job_open(SR_JOB))[0] is False
 
-    def test_an_active_smartrecruiters_posting_is_live(self, probe_http):
+    async def test_an_active_smartrecruiters_posting_is_live(self, probe_http):
         probe_http({FAMILY_API[SR_JOB]: fake_response(
             {"id": "3743990014860306", "active": True,
              "postingUrl": "https://jobs.smartrecruiters.com/Acme/"
                            "3743990014860306-data-engineer"})})
-        assert job_probe.probe_job_open(SR_JOB)[0] is True
+        assert (await job_probe.probe_job_open(SR_JOB))[0] is True
 
-    def test_a_smartrecruiters_repost_is_not_a_verdict_on_this_row(
+    async def test_a_smartrecruiters_repost_is_not_a_verdict_on_this_row(
             self, probe_http):
         """A reposted requisition answers active=true under its
         SUCCESSOR's id (carried in postingUrl); that says the successor is
@@ -723,7 +723,7 @@ class TestProbeIsDecisivePerFamily:
                            "3743990015521846-data-engineer"}),
             "jobs.smartrecruiters.com/Acme/3743990014860306":
                 fake_response(url=SR_JOB)})
-        assert job_probe.probe_job_open(SR_JOB)[0] is None
+        assert (await job_probe.probe_job_open(SR_JOB))[0] is None
 
     @staticmethod
     def _infor(end=None, **extra):
@@ -735,76 +735,76 @@ class TestProbeIsDecisivePerFamily:
         return fake_response({"fields": {"PostingDateRange_prd_End":
                                          {"value": end}}, **extra})
 
-    def test_a_deleted_infor_record_closes(self, probe_http):
+    async def test_a_deleted_infor_record_closes(self, probe_http):
         """A pulled posting usually loses its record: the body says so
         while the status line still says 200."""
         seen = probe_http({FAMILY_API[INFOR_JOB]: self._infor(
             status="DOES_NOT_EXIST", statusCode=404)})
-        is_open, reason = job_probe.probe_job_open(INFOR_JOB)
+        is_open, reason = await job_probe.probe_job_open(INFOR_JOB)
         assert is_open is False
         assert reason == "infor api: posting record gone"
         assert len(seen) == 1, "the page must not be fetched as well"
 
-    def test_a_past_infor_posting_end_date_closes(self, probe_http):
+    async def test_a_past_infor_posting_end_date_closes(self, probe_http):
         """The other half: the record survives the pull, with its posting
         window now closed (verified live -- every unlisted requisition that
         still had a record carried a years-stale end date)."""
         probe_http({FAMILY_API[INFOR_JOB]: self._infor(end="20220630")})
-        is_open, reason = job_probe.probe_job_open(INFOR_JOB)
+        is_open, reason = await job_probe.probe_job_open(INFOR_JOB)
         assert is_open is False
         assert reason == "infor api: posting ended 2022-06-30"
 
-    def test_an_open_ended_infor_posting_is_live(self, probe_http):
+    async def test_an_open_ended_infor_posting_is_live(self, probe_http):
         probe_http({FAMILY_API[INFOR_JOB]: self._infor(end="00000000")})
-        assert job_probe.probe_job_open(INFOR_JOB)[0] is True
+        assert (await job_probe.probe_job_open(INFOR_JOB))[0] is True
 
-    def test_an_infor_end_date_still_ahead_is_live(self, probe_http):
+    async def test_an_infor_end_date_still_ahead_is_live(self, probe_http):
         """A posting that names a closing date is open until that date --
         closing it on the date's mere presence would close live rows."""
         ahead = (datetime.now() + timedelta(days=30)).strftime("%Y%m%d")
         probe_http({FAMILY_API[INFOR_JOB]: self._infor(end=ahead)})
-        assert job_probe.probe_job_open(INFOR_JOB)[0] is True
+        assert (await job_probe.probe_job_open(INFOR_JOB))[0] is True
 
-    def test_an_infor_body_with_no_record_proves_nothing(self, probe_http):
+    async def test_an_infor_body_with_no_record_proves_nothing(self, probe_http):
         """Neither a record nor a DOES_NOT_EXIST verdict: unverifiable. The
         page fall-through cannot help either -- an Infor job URL serves the
         same JS shell whether the posting is live or long gone."""
         probe_http({FAMILY_API[INFOR_JOB]: self._infor(),
                     INFOR_JOB.split("?")[0]: fake_response(url=INFOR_JOB)})
-        assert job_probe.probe_job_open(INFOR_JOB)[0] is None
+        assert (await job_probe.probe_job_open(INFOR_JOB))[0] is None
 
     @pytest.mark.parametrize("info,is_open", [
         ({"title": "Engineer", "jobDescription": "<p>Build.</p>"}, True),
         ({}, False),                 # the record answers without a posting
         (None, False),               # no record at all
     ])
-    def test_workday_is_open_while_its_record_names_the_posting(
+    async def test_workday_is_open_while_its_record_names_the_posting(
             self, probe_http, info, is_open):
         """A pulled Workday posting's detail still answers 200."""
         probe_http({FAMILY_API[WD_JOB]: fake_response(
             {} if info is None else {"jobPostingInfo": info})})
-        assert job_probe.probe_job_open(WD_JOB)[0] is is_open
+        assert (await job_probe.probe_job_open(WD_JOB))[0] is is_open
 
-    def test_icims_sends_the_headers_its_waf_accepts(self, probe_http):
+    async def test_icims_sends_the_headers_its_waf_accepts(self, probe_http):
         """iCIMS's WAF 405s the crawler's default Chrome-like UA; its spec's
         detail headers name one it accepts. 17 of the 36 unverifiable probes
         on 2026-09-21 were that 405, not a dead posting."""
         seen = probe_http({"careers-acme.icims.com": fake_response(url=ICIMS_JOB)})
-        job_probe.probe_job_open(ICIMS_JOB)
+        await job_probe.probe_job_open(ICIMS_JOB)
         [sent] = [r.headers for r in seen]
         assert sent["User-Agent"] == PLAIN_HEADERS["User-Agent"]
         assert sent["User-Agent"] != HEADERS["User-Agent"]
 
-    def test_a_pulled_icims_posting_answers_410(self, probe_http):
+    async def test_a_pulled_icims_posting_answers_410(self, probe_http):
         probe_http({"careers-acme.icims.com": fake_response(status=410, url=ICIMS_JOB)})
-        assert job_probe.probe_job_open(ICIMS_JOB)[0] is False
+        assert (await job_probe.probe_job_open(ICIMS_JOB))[0] is False
 
-    def test_every_family_reports_the_endpoint_it_asked(self, probe_http):
+    async def test_every_family_reports_the_endpoint_it_asked(self, probe_http):
         """The reason string is what the pass summary tallies, so it names
         the family that answered rather than a bare status."""
         for url, api in FAMILY_API.items():
             probe_http({api: fake_response(status=404)})
-            reason = job_probe.probe_job_open(url)[1]
+            reason = (await job_probe.probe_job_open(url))[1]
             assert job_probe.probe_family(url) in reason, url
 
 
@@ -814,27 +814,27 @@ class TestOnlyPositiveEvidenceCloses:
 
     @pytest.mark.parametrize("status", [403, 405, 429, 500, 503])
     @pytest.mark.parametrize("url", sorted(FAMILY_API))
-    def test_a_refusal_never_closes(self, probe_http, url, status):
+    async def test_a_refusal_never_closes(self, probe_http, url, status):
         # The page fall-through gets the same refusal: neither layer may
         # turn one into a closure.
         probe_http({FAMILY_API[url]: fake_response(status=status),
                     url.split("?")[0]: fake_response(status=status, url=url)})
-        assert job_probe.probe_job_open(url)[0] is None
+        assert (await job_probe.probe_job_open(url))[0] is None
 
     @pytest.mark.parametrize("url", sorted(FAMILY_API))
-    def test_a_timeout_never_closes(self, probe_http, url):
+    async def test_a_timeout_never_closes(self, probe_http, url):
         probe_http({FAMILY_API[url]: OSError("read timed out"),
                     url.split("?")[0]: OSError("read timed out")})
-        assert job_probe.probe_job_open(url)[0] is None
+        assert (await job_probe.probe_job_open(url))[0] is None
 
-    def test_an_icims_405_is_unverifiable_not_closed(self, probe_http):
+    async def test_an_icims_405_is_unverifiable_not_closed(self, probe_http):
         probe_http({"careers-acme.icims.com": fake_response(status=405, url=ICIMS_JOB)})
-        assert job_probe.probe_job_open(ICIMS_JOB)[0] is None
+        assert (await job_probe.probe_job_open(ICIMS_JOB))[0] is None
 
-    def test_a_bot_gated_host_is_never_fetched_at_all(self, probe_http):
+    async def test_a_bot_gated_host_is_never_fetched_at_all(self, probe_http):
         seen = probe_http({})
-        assert job_probe.probe_job_open(
-            "https://www.linkedin.com/jobs/view/123")[0] is None
+        assert (await job_probe.probe_job_open(
+            "https://www.linkedin.com/jobs/view/123"))[0] is None
         assert seen == []
 
 
@@ -842,15 +842,15 @@ class TestAnUnreachableUrlCostsLittle:
     """The 2026-09-22 13:21 pass spent 20 instant ConnectionErrors on
     BioSpace rows whose stored URLs carried CR/LF/tab runs."""
 
-    def test_embedded_whitespace_is_stripped_before_the_get(self, probe_http):
+    async def test_embedded_whitespace_is_stripped_before_the_get(self, probe_http):
         seen = probe_http({"jobs.biospace.com/job/1/": fake_response(status=404)})
-        assert job_probe.probe_job_open(
-            "https://jobs.biospace.com \r\n\t/job/1/\r\n\r\n")[0] is False
+        assert (await job_probe.probe_job_open(
+            "https://jobs.biospace.com \r\n\t/job/1/\r\n\r\n"))[0] is False
         assert seen[0] == "https://jobs.biospace.com/job/1/"
 
-    def test_a_refusing_host_is_asked_three_times_per_pass(self, probe_http):
+    async def test_a_refusing_host_is_asked_three_times_per_pass(self, probe_http):
         seen = probe_http({"dead.example": requests.ConnectionError()})
-        reasons = [job_probe.probe_job_open(f"https://dead.example/job/{i}")[1]
+        reasons = [(await job_probe.probe_job_open(f"https://dead.example/job/{i}"))[1]
                    for i in range(20)]
         assert len(seen) == 3
         assert reasons[-1] == "host unreachable this pass: skipped"
@@ -867,7 +867,7 @@ class TestProbeSelectionFollowsTheHarvestCadence:
     @staticmethod
     def _probed(monkeypatch):
         urls = []
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: urls.append(url) or (None, "gated")))
         return urls
 
@@ -931,7 +931,7 @@ class TestProbeOutcomesAreReportedPerFamily:
                     ICIMS_JOB: (None, "HTTP 405"),
                     "https://www.linkedin.com/jobs/view/1":
                         (None, "bot-gated aggregator host")}
-        monkeypatch.setattr(status.closure, "aprobe_job_open",
+        monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: verdicts[url]))
 
         await status.check_closed_jobs(db=db, stale_days=7)
@@ -949,7 +949,7 @@ class TestProbeOutcomesAreReportedPerFamily:
         seed_stale(db, harvested=iso_days_ago(1),
                    urls=[ICIMS_JOB, ICIMS_JOB + "&x=1"])
         monkeypatch.setattr(
-            status.closure, "aprobe_job_open",
+            status.closure, "probe_job_open",
             answer(lambda url, job_id=None: (False, f"page says {url[-12:]!r}")))
 
         await status.check_closed_jobs(db=db, stale_days=7)

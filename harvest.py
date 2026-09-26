@@ -18,8 +18,8 @@ one. It keeps a console window of its own, like the crawler UI -- that
 window is how you see what it is doing and how you stop it (close it, or
 Ctrl+C). Minimise it if it is in the way; it was built windowless for a
 while and the only thing that achieved was making Task Manager the off
-switch. Parked, it costs no CPU at all -- the thread is not scheduled until
-its deadline -- and the deadline is wall-clock, so a laptop that slept
+switch. Parked, it costs no CPU at all -- the event loop sleeps until its
+deadline -- and the deadline is wall-clock, so a laptop that slept
 through it runs the pass as soon as it wakes. That "as soon as it wakes"
 is doing the real work, and it is a limit worth knowing: this is an
 in-process timer, and no process runs while Windows itself is asleep, so
@@ -40,9 +40,9 @@ file in the data directory). Each pass gets its own session log
 """
 
 import argparse
+import asyncio
 import os
 import sys
-import threading
 import time
 import traceback
 from contextlib import closing
@@ -134,35 +134,37 @@ def acquire_lock(path=None):
     return fh
 
 
-def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
-                chunk_s=WAIT_CHUNK_S):
+async def run_forever(pass_fn, every_hours, wait=asyncio.sleep, clock=time.time,
+                      chunk_s=WAIT_CHUNK_S):
     """Run `pass_fn` now and then once every `every_hours`, measured via
     `next_pass_at` from the START of the previous pass (a pass that takes
     three hours does not push the schedule back). Never returns unless
     `wait` asks it to.
 
-    `pass_fn(scheduled)` gets the epoch time its pass was due (None for the
-    first, immediate one), so it can say how late it is (overdue_warning).
+    `await pass_fn(scheduled)` gets the epoch time its pass was due (None
+    for the first, immediate one), so it can say how late it is
+    (overdue_warning).
 
-    `wait(seconds)` parks the thread; it returns True to stop the loop
-    (threading.Event.wait semantics -- the default Event is never set, so
-    the default wait only ever times out). `clock` and `chunk_s` exist for
+    `await wait(seconds)` parks; it returns True to stop the loop (the
+    default, asyncio.sleep, never does). `clock` and `chunk_s` exist for
     tests.
 
+    >>> class Stop(Exception):
+    ...     pass
     >>> ticks, log = [0.0], []
     >>> def clock():
     ...     return ticks[0]
-    >>> def wait(s):
+    >>> async def wait(s):
     ...     ticks[0] += s
     ...     return False
-    >>> def one_pass(scheduled):
+    >>> async def one_pass(scheduled):
     ...     log.append((clock(), scheduled))
     ...     ticks[0] += 3600          # the pass itself takes an hour
     ...     if len(log) == 3:
-    ...         raise KeyboardInterrupt
+    ...         raise Stop
     >>> try:
-    ...     run_forever(one_pass, 12, wait=wait, clock=clock)
-    ... except KeyboardInterrupt:
+    ...     asyncio.run(run_forever(one_pass, 12, wait=wait, clock=clock))
+    ... except Stop:
     ...     pass
     >>> [(started / 3600, sched and sched / 3600) for started, sched in log]
     [(0.0, None), (12.0, 12.0), (24.0, 24.0)]
@@ -171,29 +173,28 @@ def run_forever(pass_fn, every_hours, wait=None, clock=time.time,
     one after it is due `every_hours` after that late start:
 
     >>> ticks[0], log[:] = 0.0, []
-    >>> def overrun(scheduled):
+    >>> async def overrun(scheduled):
     ...     log.append((clock(), scheduled))
     ...     ticks[0] += 3600 * (20 if len(log) == 1 else 1)
     ...     if len(log) == 3:
-    ...         raise KeyboardInterrupt
+    ...         raise Stop
     >>> try:
-    ...     run_forever(overrun, 12, wait=wait, clock=clock)
-    ... except KeyboardInterrupt:
+    ...     asyncio.run(run_forever(overrun, 12, wait=wait, clock=clock))
+    ... except Stop:
     ...     pass
     >>> [(started / 3600, sched and sched / 3600) for started, sched in log]
     [(0.0, None), (20.0, 12.0), (32.0, 32.0)]
     """
-    wait = wait or threading.Event().wait
     scheduled = None
     while True:
         started = clock()
-        pass_fn(scheduled)
+        await pass_fn(scheduled)
         scheduled = next_pass_at(started, every_hours)
         while True:
             remaining = scheduled - clock()
             if remaining <= 0:
                 break
-            if wait(min(remaining, chunk_s)):
+            if await wait(min(remaining, chunk_s)):
                 return
 
 
@@ -240,7 +241,7 @@ def main(argv=None):
     ap.add_argument("--db", help="Store path (default: the data dir's jobs.db)")
     args = ap.parse_args(argv)
 
-    from src import session_log
+    from src import runstate, session_log
     from src.crawl import harvest
 
     only = ({s.strip() for s in args.only.split(",") if s.strip()}
@@ -268,7 +269,7 @@ def main(argv=None):
         print("  [!] another harvester holds the lock; exiting")
         return 0
 
-    def one_pass(scheduled=None):
+    async def one_pass(scheduled=None):
         # Captured before session_log.start() so a slow log-file open (or
         # the [!] print it enables below) is never counted as lateness.
         started = time.time()
@@ -280,12 +281,14 @@ def main(argv=None):
             if warning:
                 print(f"  {warning}")
             try:
-                harvest.run(
-                    db_path=args.db, only=only, names=args.names,
-                    min_age_hours=min_age, limit=args.limit,
-                    max_workers=args.workers or harvest.DEFAULT_WORKERS,
-                    hydrate=args.hydrate, max_hours=args.max_hours,
-                    triage=not args.no_triage, score_cap=args.score_cap)
+                # Each pass is a run of its own (src/runstate.py).
+                async with runstate.Run():
+                    await harvest.run(
+                        db_path=args.db, only=only, names=args.names,
+                        min_age_hours=min_age, limit=args.limit,
+                        max_workers=args.workers or harvest.DEFAULT_WORKERS,
+                        hydrate=args.hydrate, max_hours=args.max_hours,
+                        triage=not args.no_triage, score_cap=args.score_cap)
             except Exception:
                 # Put the traceback in the session log while it is still
                 # open: the console shows it too, but the window scrolls and
@@ -306,10 +309,7 @@ def main(argv=None):
             session_log.finish()
 
     try:
-        if args.once:
-            one_pass()
-        else:
-            run_forever(one_pass, args.every)
+        asyncio.run(one_pass() if args.once else run_forever(one_pass, args.every))
     except KeyboardInterrupt:
         # The pass has already unwound (harvest.run): its committed boards
         # stay, the one being written rolled back, none queued started.

@@ -43,7 +43,7 @@ def needs_detail(job):
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
     that the posting's engine can fill (`Board.needs_detail`). Shared by
-    harvest.ahydrate_rows and triage._hydrate, which both select rows to
+    harvest.hydrate_rows and triage._hydrate, which both select rows to
     fetch by this predicate rather than "no description" alone.
 
     >>> needs_detail({"description": "", "ats": "greenhouse"})
@@ -62,7 +62,7 @@ def needs_detail(job):
     return board.needs_detail(job) if board else not job.get("description")
 
 
-async def ahydrate_description(job, company=None):
+async def hydrate_description(job, company=None):
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
     store row, names its board), else from the posting's own page.
@@ -71,20 +71,17 @@ async def ahydrate_description(job, company=None):
         return job
     board = _board_of(job)
     if board:
-        await board.ahydrate(job, company)
+        await board.hydrate(job, company)
     # A posting no engine gave a body: its own page (a custom board's, a
     # SuccessFactors site's).
     if not job.get("description") and job.get("url"):
-        d = (await ajob_page_meta(job["url"]))[1]
+        d = (await job_page_meta(job["url"]))[1]
         if d:
             job["description"] = d
     return job
 
 
-hydrate_description = http.sync_shim(ahydrate_description)
-
-
-async def ajob_page_meta(url):
+async def job_page_meta(url):
     """(title, description) read off a job's own detail page, vendor-
     agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
     then page metadata for the title (og:title, then <title> minus a
@@ -103,9 +100,6 @@ async def ajob_page_meta(url):
     except Exception:
         return "", ""
     return await asyncio.to_thread(_page_meta, r, url)
-
-
-job_page_meta = http.sync_shim(ajob_page_meta)
 
 
 def _page_meta(r, url):
@@ -187,7 +181,7 @@ def title_from_url_slug(url):
 
 # --- dispatch ------------------------------------------------------------------ #
 
-async def afetch_company(company, loc_re=None):
+async def fetch_company(company, loc_re=None):
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`); [] for a platform no spec fetches.
 
@@ -195,15 +189,12 @@ async def afetch_company(company, loc_re=None):
     the profile's locality (the local track's default).
     """
     board = board_for(company.get("ats"))
-    return await board.awhole_board(company, loc_re) if board else []
-
-
-fetch_company = http.sync_shim(afetch_company)
+    return await board.whole_board(company, loc_re) if board else []
 
 
 # --- title sampling ------------------------------------------------------------ #
 
-async def asample_titles(company, n=6):
+async def sample_titles(company, n=6):
     """Up to `n` distinct posting titles from a store row's board, in board
     order: what the mission scorer is shown of an employer it has only a
     name for. [] when the board is unreadable, empty, or of an ATS with no
@@ -225,7 +216,7 @@ async def asample_titles(company, n=6):
     board = board_for(company.get("ats"))
     try:
         handle = board.handle(company) if board else None
-        jobs = await board.alisting(handle, cheap=True, rescue_cap=n) if handle else []
+        jobs = await board.listing(handle, cheap=True, rescue_cap=n) if handle else []
     except Exception:
         return []
     titles, seen = [], set()
@@ -237,6 +228,3 @@ async def asample_titles(company, n=6):
             if len(titles) >= n:
                 break
     return titles
-
-
-sample_titles = http.sync_shim(asample_titles)

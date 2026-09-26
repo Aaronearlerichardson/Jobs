@@ -15,8 +15,8 @@ mutates config or the store.
 """
 
 import argparse
+import asyncio
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 
@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config  # noqa: E402
+from src import config, runstate  # noqa: E402
 
 from src.claude.api import expand_location, expand_search  # noqa: E402
 
@@ -91,7 +91,7 @@ def print_location_expansion(term, expanded):
 
 # ─── Bulk keyword report ──────────────────────────────────────────────────
 
-def generate_keyword_report(delay=0.5):
+async def generate_keyword_report(delay=0.5):
     """
     Expand every INCLUDE_KEYWORDS entry via Claude, aggregate unique
     new titles/keywords/sectors, write a markdown report.
@@ -110,7 +110,7 @@ def generate_keyword_report(delay=0.5):
 
     for i, kw in enumerate(INCLUDE_KEYWORDS, 1):
         print(f"  [{i}/{len(INCLUDE_KEYWORDS)}] '{kw}'")
-        expanded = expand_search(kw)
+        expanded = await expand_search(kw)
         if not expanded:
             continue
         for t in expanded.titles:
@@ -119,7 +119,7 @@ def generate_keyword_report(delay=0.5):
             all_keywords.setdefault(k, []).append(kw)
         for s in expanded.sectors:
             all_sectors.setdefault(s, []).append(kw)
-        time.sleep(delay)
+        await asyncio.sleep(delay)
 
     def sort_by_freq(d):
         return sorted(d.items(), key=lambda kv: (-len(kv[1]), kv[0].lower()))
@@ -175,17 +175,17 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.location:
-        expanded = expand_location(args.location)
+        expanded = runstate.run(expand_location(args.location))
         if expanded:
             print_location_expansion(args.location, expanded)
         return
     if args.keyword_report:
-        generate_keyword_report()
+        runstate.run(generate_keyword_report())
         return
     if not args.term:
         ap.print_help()
         sys.exit(1)
-    expanded = expand_search(args.term)
+    expanded = runstate.run(expand_search(args.term))
     if expanded:
         print_expansion(args.term, expanded)
 

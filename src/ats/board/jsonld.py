@@ -8,7 +8,7 @@ hundreds of sites with zero per-vendor code.
 
 Use it two ways:
 
-  await afetch_jsonld_page(company, url)
+  await fetch_jsonld_page(company, url)
 """
 
 import asyncio
@@ -160,7 +160,7 @@ def _job_from_posting(jp, company_name, source_url):
     return job
 
 
-async def afetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
+async def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
     """Fetch ONE URL; extract JobPosting records from its JSON-LD, read off
     the loop."""
     try:

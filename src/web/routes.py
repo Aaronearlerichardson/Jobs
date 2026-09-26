@@ -25,10 +25,9 @@ from src.config.profile_schema import error_lines
 from src.match import locality
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
-from src.net import http
 from src.ops.maintenance import track_store
 from . import BOOT_ID, STATE, app
-from .server import schedule_restart
+from .server import call, schedule_restart
 
 
 class _Body(BaseModel):
@@ -93,10 +92,10 @@ def api_run(name):
                              f"{track_cfg['label']} track runs "
                              f"{track_cfg['engine']!r}"), 409
     args = args.model_copy(update={"track": track_cfg["id"]})
-    # submit() claims the slot on the network loop, one request at a time,
+    # submit() claims the slot on the web UI's loop, one request at a time,
     # so two requests in the same instant can't both start an operation:
     # the loser is queued, not run.
-    entry = submit(name, args, lambda: op["fn"](args))
+    entry = call(submit(name, args, lambda: op["fn"](args)))
     if entry is None:
         return jsonify(ok=True, name=name)
     return jsonify(queued=True, id=entry["id"], name=entry["name"],
@@ -106,21 +105,21 @@ def api_run(name):
 
 @app.delete("/api/run/queue/<entry_id>")
 def api_run_queue_remove(entry_id):
-    if not queue_remove(entry_id):
+    if not call(queue_remove(entry_id)):
         return jsonify(error="not waiting in the run queue"), 404
     return jsonify(removed=True)
 
 
 @app.delete("/api/run/queue")
 def api_run_queue_clear():
-    return jsonify(removed=queue_clear())
+    return jsonify(removed=call(queue_clear()))
 
 
 @app.post("/api/run/stop")
 def api_run_stop():
     """Cancel the running operation (`stopping`: whether one was running);
     the queue behind it carries on."""
-    return jsonify(stopping=stop())
+    return jsonify(stopping=call(stop()))
 
 
 @app.get("/api/run/status")
@@ -128,7 +127,7 @@ def api_run_status():
     # `since` is an ABSOLUTE line count (src.dispatch.background._Tee), not
     # a raw index into the log, which gets its head chopped off once it
     # passes 5000 lines (see background.status).
-    s = status(request.args.get("since", 0, type=int))
+    s = call(status(request.args.get("since", 0, type=int)))
     return jsonify(**s, queued=len(s["queue"]))
 
 
@@ -429,7 +428,7 @@ def api_names_preview():
     from src.discovery.paste_ingest import preview_names
     p = _body(_Paste)
     try:
-        names = http.run_sync(preview_names(p.text, use_llm=p.use_llm))
+        names = call(preview_names(p.text, use_llm=p.use_llm))
     except Exception as e:
         return jsonify(error=f"could not parse that text: {e}"), 400
     return jsonify(names)
@@ -450,9 +449,9 @@ def api_names_block():
     # confirm/reject routes above have always done unguarded while an op
     # runs -- one INSERT ... ON CONFLICT on its own connection, in WAL mode
     # (readers never block the writer) with busy_timeout=BUSY_TIMEOUT_S, and
-    # a harvest thread holds the store's process-wide _WRITE_LOCK only for
-    # the length of one batch() block (store/schema.py, e814fac), not for
-    # the whole run.
+    # a store.Writer's thread holds the store's process-wide _WRITE_LOCK only
+    # for the length of one batch() block (store/schema.py, e814fac), not
+    # for the whole run.
     p = _body(_Block)
     reason = p.reason.strip() or "not a company (review)"
     with track_store(_track(p.track)) as conn:
@@ -511,7 +510,7 @@ def _config_busy():
     would vanish with the process that holds it, silently. So the queue has
     to drain or be cleared first, and the message has to say so.
     """
-    s = status()
+    s = call(status())
     waiting, running = len(s["queue"]), s["running"]
     if running or waiting:
         what = (f"'{s['name']}' is running" if running

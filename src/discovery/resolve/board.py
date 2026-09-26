@@ -1,6 +1,6 @@
 """Name in, crawlable board out -- or the reason there isn't one.
 
-The top of this package: `aresolve_or_miss` is the single entry point for
+The top of this package: `resolve_or_miss` is the single entry point for
 "attempt a company, and record the outcome either way", and everything
 else here is what it is built from.
 
@@ -33,8 +33,8 @@ from src.match.locality import NC_RE
 from src.net import http
 
 from .identity import foreign_board
-from .probes import aprobe_company
-from .websearch_board import awebsearch_board
+from .probes import probe_company
+from .websearch_board import websearch_board
 
 
 async def read_board(comp, loc_re=None):
@@ -49,7 +49,7 @@ async def read_board(comp, loc_re=None):
     from src.ats.board import company as company_fetch
     before = http.fetch_failures()
     try:
-        rows = await company_fetch.afetch_company(comp, loc_re)
+        rows = await company_fetch.fetch_company(comp, loc_re)
     except Exception:
         return None
     if rows or http.fetch_failures() == before:
@@ -58,7 +58,7 @@ async def read_board(comp, loc_re=None):
     return rows if board and board.gone(http.snapshot_info()["last_error"]) else None
 
 
-async def aread_local(comp):
+async def read_local(comp):
     """(local postings, board total, miss reason) for a detected board:
     its postings in your [locality] (`read_board` with NC_RE); when there
     are none, why, in src.store.MISS_REASONS words. The read failed:
@@ -76,18 +76,15 @@ async def aread_local(comp):
         return [], 0, f"fetch-error:unreadable-{ats}"
     board = board_for(ats)
     handle = board.handle(comp) if board and http.fetch_failures() == before else None
-    ok, n = await board.aalive(handle) if handle else (True, 0)
+    ok, n = await board.alive(handle) if handle else (True, 0)
     if n > 0:
         return [], n, "no-local-jobs"
     return [], 0, f"board-dead:{ats}" if ok else f"fetch-error:unreadable-{ats}"
 
 
-read_local = http.sync_shim(aread_local)
-
-
 async def _validate_board(comp):
     """(total, nc) live posting counts of a resolved board from its cheap
-    reads, as `aprobe_company` counts a guess: `Board.alive` (the listing's
+    reads, as `probe_company` counts a guess: `Board.alive` (the listing's
     own total where it reports one) and `Board.local_count`. None when the
     read failed; (0, 0) when it proved the board gone (`Board.gone`) or the
     columns name no board. A board that lists nothing is dead or wrong to
@@ -97,10 +94,10 @@ async def _validate_board(comp):
     handle = board.handle(comp) if board else None
     if not handle:
         return 0, 0
-    ok, total = await board.aalive(handle, f"{board.name} {handle}")
+    ok, total = await board.alive(handle, f"{board.name} {handle}")
     if not ok:
         return (0, 0) if board.gone(http.snapshot_info()["last_error"]) else None
-    return total, await board.alocal_count(handle, NC_RE) if total else 0
+    return total, await board.local_count(handle, NC_RE) if total else 0
 
 
 async def _url_board(name, careers_url):
@@ -114,7 +111,7 @@ async def _url_board(name, careers_url):
     return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
 
 
-async def aresolve_board_sniff_first(name, careers_url="", websearch=True):
+async def resolve_board_sniff_first(name, careers_url="", websearch=True):
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
 
@@ -140,13 +137,10 @@ async def aresolve_board_sniff_first(name, careers_url="", websearch=True):
     return (await _resolve(name, careers_url, websearch))[0]
 
 
-resolve_board_sniff_first = http.sync_shim(aresolve_board_sniff_first)
-
-
 async def _resolve(name, careers_url="", websearch=True):
     """resolve_board_sniff_first's hit, and the ats of the first board it
     detected but could not read (`read_board`), else None."""
-    from .sniffer import asniff_ats
+    from .sniffer import sniff_ats
     unread = []
 
     async def _mk(ats, slug, curl, via):
@@ -181,7 +175,7 @@ async def _resolve(name, careers_url="", websearch=True):
     # immediately; an nc == 0 custom hit is kept as a last-resort fallback so
     # steps 2/3 get a chance to find the real ATS first.
     fallback = None
-    s = await asniff_ats(name, careers_url or "")
+    s = await sniff_ats(name, careers_url or "")
     if s:
         hit = await _mk(s["ats"], s.get("triple", s.get("slug")), s.get("careers_url"), "sniff")
         if hit:
@@ -191,7 +185,7 @@ async def _resolve(name, careers_url="", websearch=True):
 
     # 2) Fallback: name-guessed slugs, then the scanned platforms' probe
     #    (collision risk -> validated).
-    p = await aprobe_company(name, scan=True)
+    p = await probe_company(name, scan=True)
     if p:
         hit = await _mk(p["ats"], p["slug"], p.get("careers_url"), "probe")
         if hit:
@@ -203,7 +197,7 @@ async def _resolve(name, careers_url="", websearch=True):
     #    'Core Sound Imaging' -> studycast). _websearch_board already validates
     #    slug/own-domain against the name, so it's not collision-flagged.
     #    Best-effort: degrades to a miss when the search backend is rate-limited.
-    w = await awebsearch_board(name) if websearch else None
+    w = await websearch_board(name) if websearch else None
     if w:
         hit = await _mk(w["ats"], w.get("triple", w.get("slug")), w.get("careers_url"), "websearch")
         if hit:
@@ -213,7 +207,7 @@ async def _resolve(name, careers_url="", websearch=True):
     return _out(fallback)
 
 
-async def aclassify_miss(name, careers_url=""):
+async def classify_miss(name, careers_url=""):
     """Second look at a name that would not resolve: which src.store
     MISS_REASONS code explains it.
 
@@ -235,17 +229,17 @@ async def aclassify_miss(name, careers_url=""):
         path and only by the on-demand resolvers — never per candidate in
         a full discover_local pass.
     """
-    from .sniffer import adiagnose_no_board, asniff_careers_ats
+    from .sniffer import diagnose_no_board, sniff_careers_ats
     u = await _url_board(name, careers_url)
     if u:
         return f"board-dead:{u[0]}"
     try:
-        lead = await asniff_careers_ats(name, careers_url or "")
+        lead = await sniff_careers_ats(name, careers_url or "")
     except Exception as e:
         return f"fetch-error:{type(e).__name__}"
     if not lead:
         try:
-            sub = await adiagnose_no_board(name, careers_url or "")
+            sub = await diagnose_no_board(name, careers_url or "")
         except Exception:
             sub = ""
         return f"no-board-found:{sub}" if sub else "no-board-found"
@@ -255,10 +249,7 @@ async def aclassify_miss(name, careers_url=""):
     return f"board-dead:{ats}"
 
 
-classify_miss = http.sync_shim(aclassify_miss)
-
-
-async def aresolve_or_miss(name, careers_url=""):
+async def resolve_or_miss(name, careers_url=""):
     """Resolve a company NAME to a crawlable board, or say why it failed.
 
     Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
@@ -280,24 +271,24 @@ async def aresolve_or_miss(name, careers_url=""):
     if unread:
         return None, f"fetch-error:unreadable-{unread}"
     if not hit:
-        return None, await aclassify_miss(name, careers_url)
+        return None, await classify_miss(name, careers_url)
     if not hit.get("nc"):
         return hit, "no-local-jobs"
     return hit, None
 
 
 async def resolved(name, careers_url=""):
-    """`aresolve_or_miss`'s (hit, reason), with a RAISE reported and turned
+    """`resolve_or_miss`'s (hit, reason), with a RAISE reported and turned
     into a miss reason of the same shape.
 
-    `aresolve_or_miss` already converts the exceptions it can see, but not
+    `resolve_or_miss` already converts the exceptions it can see, but not
     one raised past it. Its three bulk consumers (resolve_leads,
     add_names, reresolve_misses) each wrote this out, and the third had
     already dropped the report line, so a resolution that blew up during
     a reresolve became a miss with nothing in the log to say why.
     """
     try:
-        return await aresolve_or_miss(name, careers_url)
+        return await resolve_or_miss(name, careers_url)
     except Exception as e:          # noqa: BLE001 - the reason IS the result
         print(f"    [!] {name}: {type(e).__name__}: {e}")
         return None, f"fetch-error:{type(e).__name__}"

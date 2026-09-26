@@ -14,9 +14,8 @@ import asyncio
 
 from conftest import answer
 
-from src import store
+from src import runstate, store
 from src.claude import fit
-from src.net import http
 from src.ops import scoring as ops
 
 
@@ -38,7 +37,7 @@ class TestFitResultCarriesTheModel:
         assert "fit_model" in store._SCORE_COLS
         assert fit.FitResult(score=None).as_columns()["fit_model"] is None
 
-    def test_verify_fit_stamps_the_verify_model(self, monkeypatch):
+    async def test_verify_fit_stamps_the_verify_model(self, monkeypatch):
         _use_model(monkeypatch, "m-verify")
         seen = {}
 
@@ -49,8 +48,8 @@ class TestFitResultCarriesTheModel:
                 must_haves=[], candidate_gaps=[], function=0.8, domain=0.8,
                 stack=0.8, seniority=0.8, gates=[], reason="fine")
 
-        monkeypatch.setattr(fit, "acall_claude_json", fake)
-        res = fit.verify_fit("Data Engineer", "x" * (fit.MIN_DESC_CHARS + 10))
+        monkeypatch.setattr(fit, "call_claude_json", fake)
+        res = await fit.verify_fit("Data Engineer", "x" * (fit.MIN_DESC_CHARS + 10))
         assert seen["model"] == "m-verify"
         assert res.model == "m-verify"
         assert res.reason.startswith("deep:")
@@ -100,7 +99,7 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
             return fit.FitResult(score=0.75, axes={a: 0.75 for a in fit.AXES},
                                  reason="deep: re-read", model="m-new")
 
-        monkeypatch.setattr(fit, "averify_fit", fake_verify)
+        monkeypatch.setattr(fit, "verify_fit", fake_verify)
         monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))
         n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t, **kw)
         return n, calls
@@ -122,8 +121,9 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
             self, db, add_job, local_track, monkeypatch, capsys):
         """A verify call still running when its round's budget runs out is
         abandoned: it is paid for, so it is neither counted nor asked again
-        unless forced, and its row keeps its first-pass score. The rows queued behind it
-        were never asked, so the next pass asks them."""
+        unless forced (the next pass is a run of its own), and its row keeps
+        its first-pass score. The rows queued behind it were never asked, so
+        the next pass asks them."""
         from src import config
         t = _track(local_track)
         self._seed(add_job, t)
@@ -138,10 +138,11 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
             return fit.FitResult(score=0.75, axes={a: 0.75 for a in fit.AXES},
                                  reason="deep: re-read", model="m-new")
 
-        monkeypatch.setattr(fit, "averify_fit", verify)
+        monkeypatch.setattr(fit, "verify_fit", verify)
         monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))
-        runs = [await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
-                for _ in "ab"]
+        runs = [await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)]
+        async with runstate.Run():
+            runs.append(await ops.verify_top(top_n=10, max_workers=1, db=db, t=t))
         out = capsys.readouterr().out
         assert runs == [0, 2]
         assert calls.count("Data Engineer gh_acme_fresh") == 1
@@ -178,7 +179,7 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
                 description="d" * 400)
         _use_model(monkeypatch, "m-new")
         seen = []
-        monkeypatch.setattr(fit, "averify_fit", answer(lambda title, text, **k:
+        monkeypatch.setattr(fit, "verify_fit", answer(lambda title, text, **k:
                             seen.append(text) or fit.FitResult(
                                 score=0.3, reason="deep: v", model="m-new")))
         monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r["job_id"]))
@@ -198,13 +199,13 @@ class TestVerifyTopSkipsOnlyCurrentModelRows:
 
 
 class TestWebOpPassesTheTickBox:
-    def test_verify_op_forwards_force(self, patch_op):
+    async def test_verify_op_forwards_force(self, patch_op):
         from src.dispatch import background as web_ops
         seen = {}
         patch_op("verify", lambda **kw: seen.update(kw))
-        http.run_sync(web_ops.OPS["verify"]["fn"]({"top": "5", "force": True}))
+        await web_ops.OPS["verify"]["fn"]({"top": "5", "force": True})
         assert seen["force"] is True and seen["top_n"] == 5
-        http.run_sync(web_ops.OPS["verify"]["fn"]({"top": "5"}))
+        await web_ops.OPS["verify"]["fn"]({"top": "5"})
         assert seen["force"] is False
 
 
@@ -224,11 +225,11 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
-        monkeypatch.setattr(api, "_FATAL_MSG", "HTTP 400: 'credit balance'")
+        api._CALLS().fatal = "HTTP 400: 'credit balance'"
         fetched, verified = [], []
         monkeypatch.setattr(ops, "_live_jd",
                             answer(lambda r: fetched.append(r["job_id"]) or ""))
-        monkeypatch.setattr(fit, "averify_fit",
+        monkeypatch.setattr(fit, "verify_fit",
                             answer(lambda *a, **k: verified.append(a)
                                             or fit.FitResult(score=None)))
         n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
@@ -243,7 +244,6 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
         t = _track(local_track)
         self._seed(add_job, t)
         _use_model(monkeypatch, "m-new")
-        monkeypatch.setattr(api, "_FATAL_MSG", None)
         fetched = []
         monkeypatch.setattr(ops, "_live_jd",
                             answer(lambda r: fetched.append(r["job_id"]) or "d" * 400))
@@ -252,7 +252,7 @@ class TestVerifyTopStopsWhenTheApiIsDisabled:
             api._trip_fatal("HTTP 400: 'credit balance'")
             return fit.FitResult(score=None, reason="unverified")
 
-        monkeypatch.setattr(fit, "averify_fit", dead_api)
+        monkeypatch.setattr(fit, "verify_fit", dead_api)
         n = await ops.verify_top(top_n=10, max_workers=1, db=db, t=t)
         out = capsys.readouterr().out
         assert n == 0
@@ -289,7 +289,7 @@ class TestVerifyFloorCandidates:
         """verify_top with the verifier answering `score`: (n, calls)."""
         _use_model(monkeypatch, "m-new")
         calls = []
-        monkeypatch.setattr(fit, "averify_fit", answer(lambda *a, **k: calls.append(a)
+        monkeypatch.setattr(fit, "verify_fit", answer(lambda *a, **k: calls.append(a)
                             or fit.FitResult(score=score, reason=reason,
                                              model="m-new")))
         monkeypatch.setattr(ops, "_live_jd", answer(lambda r: r.get("description") or ""))

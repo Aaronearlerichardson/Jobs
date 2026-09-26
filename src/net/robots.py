@@ -7,7 +7,7 @@ it is what separates a well-behaved crawler from an abusive one, and "we
 parse and honor robots.txt" answers most of the responsible-crawling
 question in one line.
 
-Fetched once per host and cached, on the network loop (net.http): the
+Fetched once per host and cached for the run (src/runstate.py): the
 requests that want one host's rules at once share one fetch, and the
 per-host crawl delay (net.http.LIMITER) spaces requests to the SAME host
 without holding up the others.
@@ -50,12 +50,11 @@ import asyncio
 import contextlib
 import re
 import socket
-import threading
 import time
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-from src import config
+from src import config, runstate
 from . import http
 from .util import host_of, origin_of
 
@@ -144,10 +143,6 @@ def _match_group(groups, user_agent):
     return best or wildcard
 
 
-_quiet_lock = threading.Lock()
-_quiet_depth = 0
-
-
 @contextlib.contextmanager
 def quiet():
     """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
@@ -160,20 +155,16 @@ def quiet():
     anyway, it buries the case the notice exists for — a host we believe is
     a real board, whose robots.txt we could not read before crawling it.
 
-    Deliberately process-wide rather than per task: the speculative
-    fetches run as tasks of their own (resolve.fetchpool._fetch_all), and
-    the point is to cover every one of them.
-    Operations are serialized (one at a time), so no real crawl is running
-    concurrently to be silenced by accident.
+    Deliberately run-wide rather than per task: the speculative fetches
+    run as tasks of their own (resolve.fetchpool._fetch_all), and the point
+    is to cover every one of them. Another run's notices are its own.
     """
-    global _quiet_depth
-    with _quiet_lock:
-        _quiet_depth += 1
+    rules = CACHE()
+    rules.quiet += 1
     try:
         yield
     finally:
-        with _quiet_lock:
-            _quiet_depth -= 1
+        rules.quiet -= 1
 
 
 def _is_dns_failure(exc, _depth=6):
@@ -222,6 +213,7 @@ class RobotsCache:
         self.user_agent = user_agent or config.USER_AGENT
         self.ttl = ttl
         self._fetches = {}      # origin -> (started, the fetch's Task)
+        self.quiet = 0          # open quiet() blocks
 
     # -- internals --------------------------------------------------------
 
@@ -238,7 +230,7 @@ class RobotsCache:
             # no server to be impolite to and will never be crawled — most
             # candidates here are speculative `careers.<name>.com` guesses —
             # so saying it there is noise that buries the real cases.
-            if not _is_dns_failure(e) and not _quiet_depth:
+            if not _is_dns_failure(e) and not self.quiet:
                 print(f"    [robots] {origin}: unreachable ({type(e).__name__}); "
                       f"proceeding without restrictions")
             return _HostRules()
@@ -362,6 +354,6 @@ class RobotsDisallowed(Exception):
     so this surfaces in the crawl log the same way a 404 would."""
 
 
-# Process-wide cache: one robots.txt per host per hour, however many
-# fetchers are running.
-CACHE = RobotsCache()
+#: This run's cache: one robots.txt per host per hour, however many
+#: fetchers are running.
+CACHE = runstate.per_run(RobotsCache)

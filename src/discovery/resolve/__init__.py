@@ -15,8 +15,7 @@
     board.py             the top: name -> validated board, or the miss
                          reason that explains why not
 
-Its network work is coroutines on the network loop, pages read off the
-loop; each one a thread still calls, `a<name>`, has a sync shim `<name>`.
+Its network work is coroutines, pages read off the loop.
 
 The half of discovery that answers one question and returns. Nothing here
 knows what a track is, touches the store, or decides whether a company is
@@ -30,10 +29,10 @@ uses them. It is a directory now so the next reader can see it without
 building the graph.
 """
 
-from .board import aresolve_or_miss, classify_miss, resolve_board_sniff_first
+from .board import classify_miss, resolve_board_sniff_first, resolve_or_miss
 from .fetchpool import ROOT_PATTERNS, candidate_urls
-from .identity import anc_hq_signal, candidate_pages, corroborated
-from .probes import aprobe_company, probe_scan
+from .identity import candidate_pages, corroborated, nc_hq_signal
+from .probes import probe_company, probe_scan
 from .sniffer import diagnose_no_board, sniff_ats, sniff_careers_ats
 
 __all__ = [
@@ -41,13 +40,13 @@ __all__ = [
     "candidate_urls",
     "candidate_pages",
     "corroborated",
-    "anc_hq_signal",
-    "aprobe_company",
+    "nc_hq_signal",
+    "probe_company",
     "probe_scan",
     "diagnose_no_board",
     "sniff_ats",
     "sniff_careers_ats",
     "classify_miss",
     "resolve_board_sniff_first",
-    "aresolve_or_miss",
+    "resolve_or_miss",
 ]

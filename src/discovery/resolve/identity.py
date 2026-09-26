@@ -14,7 +14,7 @@ import asyncio
 import re
 import sys
 
-from src import config
+from src import config, runstate
 from src.ats.board import BOARDS
 from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
@@ -101,8 +101,8 @@ _NAME_GENERIC = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
                  "the", "and", "of", "gmbh", "ag", "sa"}
 
 # (name, ats, board) whose foreign-board verdict was already printed this
-# process — the verdicts themselves are cached in src.claude.
-_FOREIGN_ANNOUNCED = set()
+# run; the verdicts themselves are the process's, in src.claude.
+_FOREIGN_ANNOUNCED = runstate.per_run(set)
 
 
 def _words(parts):
@@ -176,24 +176,24 @@ async def foreign_board(name, ats, handle):
                    else str(handle).split(board.spec.handle.sep))
     if not words or _affinity(name, words):
         return False
-    from src.claude.api import aboard_is_own
-    own = await aboard_is_own(name, words[0], " ".join(words[1:]))
+    from src.claude.api import board_is_own
+    own = await board_is_own(name, words[0], " ".join(words[1:]))
     # Announce each (name, board) verdict ONCE — the sniff scans many
     # candidate URLs that embed the same board link, and the 2026-08-28
     # discover log repeated the same skip line 3x per company. Single write,
     # not print(): print()'s separate text/newline writes let another
     # thread splice its line into this one.
-    key = (name, ats, words[0])
+    key, announced = (name, ats, words[0]), _FOREIGN_ANNOUNCED()
     if own is False:
-        if key not in _FOREIGN_ANNOUNCED:
-            _FOREIGN_ANNOUNCED.add(key)
+        if key not in announced:
+            announced.add(key)
             sys.stdout.write(
                 f"    [!] {name}: sniffed {ats} board {'/'.join(words)} "
                 f"belongs to another employer (parent/shared board) - "
                 f"skipped\n")
         return True
-    if own is None and key not in _FOREIGN_ANNOUNCED:
-        _FOREIGN_ANNOUNCED.add(key)
+    if own is None and key not in announced:
+        announced.add(key)
         sys.stdout.write(
             f"    [?] {name}: {ats} board {words[0]!r} shares no token "
             f"with the name and can't be verified offline - keeping; worth "
@@ -321,7 +321,7 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     return False
 
 
-async def anc_hq_signal(name, careers_url="", board_jobs=None):
+async def nc_hq_signal(name, careers_url="", board_jobs=None):
     """
     True if the company has a verifiable NC presence — used to TRACK local
     companies that currently have no NC openings. Checks the board's job

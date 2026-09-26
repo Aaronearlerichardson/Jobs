@@ -4,7 +4,7 @@ DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
 wall-clock bound, so when DDG rate-limits (frequent), the library's internal
 retry/backoff blocks for many minutes yielding nothing -- profiled at ~1271s
 of a 1726s --local run. Every caller (the local-sourcing resolvers, the ATS
-dork sweep, the websearch fetcher) goes through `asearch`, which has:
+dork sweep, the websearch fetcher) goes through `search`, which has:
 
   * one disk cache (7-day TTL) so repeat runs -- and repeat queries within a
     run -- return instantly instead of re-hitting DDG; only genuine non-empty
@@ -26,12 +26,12 @@ Notes:
 """
 
 import asyncio
+import contextvars
 import logging
 import threading
 import time
 
-from src import config
-from src.net import http
+from src import config, runstate
 from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
 
 # File-only diagnostics (session log DEBUG channel -- never printed).
@@ -54,16 +54,27 @@ RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 # reresolve lost 24 of its 45 misses to a host DNS hiccup that had long
 # cleared, because the breaker stayed shut for the rest of the run. After
 # each window one query goes through as a probe; a refused probe doubles
-# the window (capped). `reset_resolver()` re-arms the breaker and the DNS
-# override.
+# the window (capped). The breaker is the run's; the override patches the
+# library, so it is the process's, until `reset_resolver()` drops it.
 RESOLVER_WINDOW = 90.0          # seconds of skipping after the first trip
 RESOLVER_WINDOW_CAP = 600.0
-_RESOLVER_DOWN_UNTIL = 0.0      # time.monotonic() deadline of the window
-_RESOLVER_BACKOFF = 0.0         # current window; 0 = breaker closed
-_RESOLVER_PROBING = False       # a probe is in flight; others keep skipping
-_RESOLVER_LOCK = threading.Lock()
 _RESOLVER_OVERRIDE = None       # (module, original Client) while installed
-_RESOLVER_MARKERS = ("dns error", "query refused")
+
+
+class _Searches:
+    """What a run's searches share: the resolver breaker, and whether the
+    missing package was announced. Their threads share it too, hence the
+    lock."""
+
+    def __init__(self):
+        self.down_until = 0.0       # time.monotonic() deadline of the window
+        self.backoff = 0.0          # current window; 0 = breaker closed
+        self.probing = False        # a probe is in flight; others keep skipping
+        self.missing_announced = False
+        self.lock = threading.Lock()
+
+
+_SEARCHES = runstate.per_run(_Searches)
 
 
 # ─── Disk cache ──────────────────────────────────────────────────────────
@@ -86,13 +97,9 @@ def cache_put(key, value):
 
 # ─── The ddgs package ────────────────────────────────────────────────────
 
-_MISSING_ANNOUNCED = False
-
-
 def _ddgs_class():
     """The DDGS class from whichever package name is installed, or None
-    (announced once per process)."""
-    global _MISSING_ANNOUNCED
+    (announced once per run)."""
     try:
         from ddgs import DDGS                 # current name (2024+)
         return DDGS
@@ -102,8 +109,9 @@ def _ddgs_class():
         from duckduckgo_search import DDGS    # legacy name
         return DDGS
     except ImportError:
-        if not _MISSING_ANNOUNCED:
-            _MISSING_ANNOUNCED = True
+        searches = _SEARCHES()
+        if not searches.missing_announced:
+            searches.missing_announced = True
             print("    [!] ddgs not installed. Run: pip install ddgs")
         return None
 
@@ -163,7 +171,7 @@ def _resolver_failure(exc):
     False
     """
     msg = str(exc).lower()
-    return any(m in msg for m in _RESOLVER_MARKERS)
+    return any(m in msg for m in ("dns error", "query refused"))
 
 
 def _http_client_module():
@@ -202,18 +210,17 @@ def _install_resolver(query):
 
 
 def _trip_resolver(query, exc):
-    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
-    with _RESOLVER_LOCK:
-        prev = _RESOLVER_BACKOFF
-        if prev and not _RESOLVER_PROBING:
+    s = _SEARCHES()
+    with s.lock:
+        prev = s.backoff
+        if prev and not s.probing:
             return      # a query already in flight when the breaker tripped
-        _RESOLVER_BACKOFF = (min(prev * 2, RESOLVER_WINDOW_CAP) if prev
-                             else RESOLVER_WINDOW)
-        _RESOLVER_DOWN_UNTIL = time.monotonic() + _RESOLVER_BACKOFF
-        _RESOLVER_PROBING = False
+        s.backoff = min(prev * 2, RESOLVER_WINDOW_CAP) if prev else RESOLVER_WINDOW
+        s.down_until = time.monotonic() + s.backoff
+        s.probing = False
     if prev:
         print(f"  [!] web search still unreachable after {prev:.0f}s, "
-              f"backing off {_RESOLVER_BACKOFF:.0f}s")
+              f"backing off {s.backoff:.0f}s")
         return
     # Which path failed matters: on 2026-09-22 the fallback servers were
     # installed and refused too, which points at the host, not ddgs.
@@ -222,43 +229,39 @@ def _trip_resolver(query, exc):
            if _RESOLVER_OVERRIDE is not None else "its own default resolver")
     print(f"  [!] web search unreachable: the search library's resolver "
           f"was refused via {via} ({type(exc).__name__} on {query[:40]!r}). "
-          f"Skipping web search for {_RESOLVER_BACKOFF:.0f}s, then probing.")
+          f"Skipping web search for {s.backoff:.0f}s, then probing.")
 
 
 def _resolver_gate():
     """None (skip) while the breaker window is open, True for the one caller
     that becomes the probe after it expires, else False. The probe holds
     the rest off until it reports."""
-    global _RESOLVER_PROBING
-    with _RESOLVER_LOCK:
-        if not _RESOLVER_BACKOFF:
+    s = _SEARCHES()
+    with s.lock:
+        if not s.backoff:
             return False
-        if _RESOLVER_PROBING or time.monotonic() < _RESOLVER_DOWN_UNTIL:
+        if s.probing or time.monotonic() < s.down_until:
             return None
-        _RESOLVER_PROBING = True
+        s.probing = True
         return True
 
 
 def _probe_passed():
     """The probe got past name resolution (a hit, an empty or a throttle all
     count): close the breaker."""
-    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
-    with _RESOLVER_LOCK:
-        if not _RESOLVER_PROBING:
+    s = _SEARCHES()
+    with s.lock:
+        if not s.probing:
             return      # the probe was refused and re-tripped
-        _RESOLVER_DOWN_UNTIL = _RESOLVER_BACKOFF = 0.0
-        _RESOLVER_PROBING = False
+        s.down_until = s.backoff = 0.0
+        s.probing = False
     print("  web search resolver recovered")
 
 
 def reset_resolver():
-    """Re-arm the resolver breaker and drop the DNS override (tests, or a
-    long-lived process after the network changed)."""
-    global _RESOLVER_DOWN_UNTIL, _RESOLVER_BACKOFF, _RESOLVER_PROBING
+    """Drop the DNS override (tests, or a long-lived process after the
+    network changed); each run's breaker starts closed."""
     global _RESOLVER_OVERRIDE
-    with _RESOLVER_LOCK:
-        _RESOLVER_DOWN_UNTIL = _RESOLVER_BACKOFF = 0.0
-        _RESOLVER_PROBING = False
     if _RESOLVER_OVERRIDE is not None:
         hc, orig = _RESOLVER_OVERRIDE
         hc.primp.Client = orig
@@ -305,9 +308,10 @@ def _query(DDGS, query, max_results, page, deadline, retries, stop):
 
 
 def _on_own_thread(loop, fn):
-    """(future, stop): fn(stop) run on a daemon thread of its own, its
-    result or exception set on `future` (of `loop`); the caller sets
-    `stop`, a threading.Event, once it no longer waits.
+    """(future, stop): fn(stop) run on a daemon thread of its own, in a
+    copy of the caller's context (its run), its result or exception set on
+    `future` (of `loop`); the caller sets `stop`, a threading.Event, once
+    it no longer waits.
 
     Notes:
         Was asyncio.to_thread, whose default executor queued a search
@@ -330,12 +334,13 @@ def _on_own_thread(loop, fn):
         except RuntimeError:             # the loop has closed (exit)
             pass
 
-    threading.Thread(target=body, daemon=True).start()
+    threading.Thread(target=body, daemon=True,
+                     context=contextvars.copy_context()).start()
     return future, stop
 
 
-async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
-                  retries=RETRIES):
+async def search(query, max_results=10, page=1, budget=WALL_BUDGET,
+                 retries=RETRIES):
     """Bounded, cached, retried DDG text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
     package -- every caller already tolerates an empty list. The disk
@@ -381,10 +386,7 @@ async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
     return out
 
 
-search = http.sync_shim(asearch)
-
-
 async def search_urls(query, max_results=10, page=1):
-    """The result URLs of `asearch`, in order, skipping results without one."""
-    return [u for r in await asearch(query, max_results, page=page)
+    """The result URLs of `search`, in order, skipping results without one."""
+    return [u for r in await search(query, max_results, page=page)
             if (u := (r.get("href") or r.get("url")))]

@@ -89,7 +89,7 @@ async def sync_status_all(top_n=15, t=None):
         print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
         loc = NC_RE if t["sources"]["location_scoped"] else None
         sources = [(c["name"], c["ats"] or "?",
-                    (lambda cc=c: company_fetch.afetch_company(
+                    (lambda cc=c: company_fetch.fetch_company(
                         cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
                                      or loc is None) else loc)))
                    for c in companies]
@@ -279,7 +279,7 @@ async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
     accepting" notice, a past JSON-LD validThrough, a spec's closure
     rule, an id absent from a non-empty board listing -- see
-    board.closure.aprobe_job_open). Indeterminate probes (bot-gated
+    board.closure.probe_job_open). Indeterminate probes (bot-gated
     hosts, JS-only pages) leave the row untouched. THEN, separately, close
     every OPEN row at a DEAD_BOARD_CLOSE_DAYS+-stale company whose own board
     fetch has already failed (store.miss_family == "board-dead") -- no URL
@@ -387,7 +387,7 @@ async def check_closed_jobs(max_workers=8, limit=None, stale_days=2, t=None,
             # So it is caught here rather than left to fan_out, which would
             # drop the row and quietly shrink the denominator.
             try:
-                return await closure.aprobe_job_open(r["url"], r["job_id"])
+                return await closure.probe_job_open(r["url"], r["job_id"])
             except Exception as e:          # noqa: BLE001 - an outcome
                 return None, f"probe error: {type(e).__name__}"
 

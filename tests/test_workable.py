@@ -67,10 +67,10 @@ def workable_board(serve):
                            else fake_response(board, status=status)))
 
 
-def _location(serve, **entry):
+async def _location(serve, **entry):
     """The location the spec builds for one listing entry."""
     serve(fake_response(_board([_job(**entry)])))
-    return WORKABLE.listing(SLUG)[0]["location"]
+    return (await WORKABLE.listing(SLUG))[0]["location"]
 
 
 class TestLocation:
@@ -89,30 +89,30 @@ class TestLocation:
         (dict(city="", state="", country=""), "Unknown"),
         (dict(city="", state="", country="", telecommuting=True), "Remote"),
     ])
-    def test_normalizes_every_shape_a_tenant_fills_in(self, serve, entry, want):
-        assert _location(serve, locations=[], **entry) == want
+    async def test_normalizes_every_shape_a_tenant_fills_in(self, serve, entry, want):
+        assert await _location(serve, locations=[], **entry) == want
 
-    def test_a_multi_site_posting_names_every_office(self, serve, local_addr,
-                                                     elsewhere):
+    async def test_a_multi_site_posting_names_every_office(self, serve, local_addr,
+                                                           elsewhere):
         """`locations[]` is the full list while the flat fields show only
         the primary site, joined with ";", the separator `locality.is_nc`
         reads one office at a time."""
         from src.match.locality import is_nc
         far_city, far_rest = elsewhere.split(", ", 1)
         loc_city, loc_state = local_addr.split(", ", 1)
-        loc = _location(serve, city=far_city, state="", country=far_rest,
-                        locations=[{"city": far_city, "region": "", "country": far_rest,
-                                    "hidden": False},
-                                   {"city": loc_city, "region": loc_state,
-                                    "country": "United States", "hidden": False}])
+        loc = await _location(serve, city=far_city, state="", country=far_rest,
+                              locations=[{"city": far_city, "region": "", "country": far_rest,
+                                          "hidden": False},
+                                         {"city": loc_city, "region": loc_state,
+                                          "country": "United States", "hidden": False}])
         assert loc == f"{far_city}, {far_rest}; {loc_city}, {loc_state}, United States"
         assert is_nc(loc)
 
-    def test_a_hidden_office_is_not_a_location(self, serve):
+    async def test_a_hidden_office_is_not_a_location(self, serve):
         """`hidden` is the employer's own "do not show this" flag."""
-        assert _location(serve, city="", state="", country="", telecommuting=True,
-                         locations=[{"city": "Austin", "region": "Texas",
-                                     "hidden": True}]) == "Remote"
+        assert await _location(serve, city="", state="", country="", telecommuting=True,
+                               locations=[{"city": "Austin", "region": "Texas",
+                                           "hidden": True}]) == "Remote"
 
 
 class TestDetection:
@@ -132,18 +132,18 @@ class TestDetection:
         page = '<a href="https://apply.workable.com/eupry-aps/">Open roles</a>'
         assert detect(page) == ("fetchable", "workable", SLUG)
 
-    def test_the_probe_confirms_a_board_with_a_live_count(self, serve):
+    async def test_the_probe_confirms_a_board_with_a_live_count(self, serve):
         """A fetchable platform is one a slug can be CONFIRMED on
         (signatures.py's own definition)."""
         serve(fake_response(load("workable_board.json")))
-        assert board_for("workable").probe(SLUG) == (True, 4)
+        assert await board_for("workable").probe(SLUG) == (True, 4)
         # An account with nothing published is not a board worth a row: an
         # account slug is not the company name ("eupry" is a different,
         # empty account), so a guessed slug confirms only with postings.
         serve(fake_response(_board([])))
-        assert board_for("workable").probe("eupry") == (False, 0)
+        assert await board_for("workable").probe("eupry") == (False, 0)
         serve(fake_response(status=404))
-        assert board_for("workable").probe("no-such-account") == (False, 0)
+        assert await board_for("workable").probe("no-such-account") == (False, 0)
 
 
 class TestRegistry:
@@ -169,40 +169,40 @@ class TestCompanyDispatch:
     and hydrate_description fills a stored row from its URL alone (no ATS
     coordinate survives `adapt`)."""
 
-    def test_fetch_company_adapts_this_modules_rows(self, workable_board):
+    async def test_fetch_company_adapts_this_modules_rows(self, workable_board):
         from src.ats.board import company
         workable_board(load("workable_board.json"),
                        detail=load("workable_job_detail.json"))
-        out = company.fetch_company({"ats": "workable", "slug": SLUG})
+        out = await company.fetch_company({"ats": "workable", "slug": SLUG})
         assert [j["id"] for j in out][0] == "workable_eupry-aps_D68529D654"
         assert out[0]["ats"] == "workable"
         assert "company" not in out[0]
 
-    def test_the_location_regex_filters_the_listing(self, workable_board):
+    async def test_the_location_regex_filters_the_listing(self, workable_board):
         from src.ats.board import company
         workable_board(_board([_job("AAAA111111", city="Raleigh",
                                     state="North Carolina"),
                                _job("BBBB222222", city="Austin",
                                     state="Texas")]))
         row = {"ats": "workable", "slug": SLUG}
-        assert len(company.fetch_company(row)) == 2
-        assert len(company.fetch_company(row, re.compile("North Carolina"))) == 1
+        assert len(await company.fetch_company(row)) == 2
+        assert len(await company.fetch_company(row, re.compile("North Carolina"))) == 1
 
-    def test_hydrate_description_reads_the_posting_from_its_url(
+    async def test_hydrate_description_reads_the_posting_from_its_url(
             self, workable_board):
         from src.ats.board import company
         workable_board(detail=load("workable_job_detail.json"))
         job = {"ats": "workable", "url": JOB_URL,
                "description": "", "location": "Raleigh, North Carolina"}
-        out = company.hydrate_description(job)
+        out = await company.hydrate_description(job)
         assert "wireless monitoring" in out["description"]
         assert out["location"] == "Raleigh, North Carolina"
 
-    def test_the_title_sampler_reads_the_listing_only(self, workable_board):
+    async def test_the_title_sampler_reads_the_listing_only(self, workable_board):
         from src.ats.board import company
         calls = workable_board(load("workable_board.json"),
                                detail=load("workable_job_detail.json"))
-        titles = company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)
+        titles = await company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)
         assert titles == ["Field Engineer", "Junior Customer Support"]
         assert [c.url for c in calls] == [WIDGET_URL]   # no detail spend
 

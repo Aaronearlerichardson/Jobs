@@ -5,7 +5,7 @@ The LLM that suggests employers for a discovery term has blind spots — it
 reliably misses the mid-size employers that anchor a specific region or
 niche, however obvious they are to someone who lives there. Seeds are your
 override: names you KNOW belong in the roster, resolved exactly like
-suggested ones (avalidate_candidate hands the NAME to the shared resolver,
+suggested ones (validate_candidate hands the NAME to the shared resolver,
 which finds the ATS itself), so you never need to know a company's ATS to
 seed it.
 
@@ -61,7 +61,7 @@ def seed_candidates_for(term: str) -> list[dict]:
     [] if `term` doesn't match a configured trigger.
 
     Dicts have the same shape as the LLM payload entries, so they flow
-    through candidate_from_dict / avalidate_candidate unchanged.
+    through candidate_from_dict / validate_candidate unchanged.
     """
     if not SEED_COMPANIES or not _matches_term(term):
         return []

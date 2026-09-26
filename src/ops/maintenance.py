@@ -15,7 +15,7 @@ from src import digest
 from src import store
 from src import tags
 from src.ats.board import company as company_fetch
-from src.claude.fit import ascore_resume_fit
+from src.claude.fit import score_resume_fit
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
@@ -96,7 +96,7 @@ async def board_index(company):
     per-URL path either way.
     """
     try:
-        board = await company_fetch.afetch_company(company, loc_re=None)
+        board = await company_fetch.fetch_company(company, loc_re=None)
     except Exception as e:                      # noqa: BLE001 - reported
         fetch_failed(f"{company['name']}: board fetch failed", e)
         return {}
@@ -116,7 +116,7 @@ async def board_match(index, title):
     match = index.get((title or "").strip().lower())
     if match is None:
         return None
-    await company_fetch.ahydrate_description(match)
+    await company_fetch.hydrate_description(match)
     return match if match.get("description") else None
 
 
@@ -247,7 +247,7 @@ async def _keep_job(company, job, t):
         # detail call — but the relevance gate NEEDS the description (titles
         # like "Research Scientist" say nothing about the division). Hydrate
         # first; only locality-filtered jobs at conglomerates pay the GET.
-        await company_fetch.ahydrate_description(job)
+        await company_fetch.hydrate_description(job)
         # Same widening src.crawl.triage's division gate applies: a WATCHED
         # conglomerate's own engineering vocabulary ([policy]
         # watch_division_titles) counts as in-field here too. Without it the
@@ -294,8 +294,8 @@ async def _scored_row(job, *, company_id, company_name, track, status=None):
     `job` is a fetcher's dict: `id` and `title` are required (nothing can
     be scored without them), the rest is read defensively.
     """
-    res = await ascore_resume_fit(job["title"], job.get("description", ""),
-                                  location=job.get("location") or "")
+    res = await score_resume_fit(job["title"], job.get("description", ""),
+                                 location=job.get("location") or "")
     row = {
         "job_id": job["id"], "company_id": company_id,
         "company_name": company_name,
@@ -314,7 +314,7 @@ async def _scored_row(job, *, company_id, company_name, track, status=None):
 
 
 async def _score_job(company, job, track):
-    await company_fetch.ahydrate_description(job)
+    await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)
 
@@ -329,7 +329,7 @@ async def crawl_company(db, company, max_workers=6, t=None):
     loc_re = None if _whole_board(company,
                                   t.get("remote_mission_floor")) else NC_RE
     try:
-        jobs = await company_fetch.afetch_company(company, loc_re)
+        jobs = await company_fetch.fetch_company(company, loc_re)
     except Exception as e:
         fetch_failed(f"fetch error for {company['name']}", e)
         return (0, 0, 0)

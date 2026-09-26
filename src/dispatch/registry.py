@@ -19,9 +19,9 @@ different defaults to the same call. Now each operation is declared once:
            {key: value} dict into the target's keyword arguments.
   ui       False hides the op from the web UI (CLI-only shape).
 
-A front end hands `ainvoke()` (or its sync shim `invoke()`) the op name
-and a params dict (the JSON the browser POSTed, or values pulled off
-argparse) and gets the target's return value back. Parameter names are
+A front end awaits `invoke()` with the op name and a params dict (the
+JSON the browser POSTed, or values pulled off argparse) and gets the
+target's return value back. Parameter names are
 the same on both sides, so a button and a flag are two spellings of one
 call.
 
@@ -45,7 +45,6 @@ from src import config
 from src.config.profile_schema import error_lines
 from src.crawl import runner, triage
 from src.discovery import local_sourcing, paste_ingest
-from src.net import http
 from src.ops import (backfill, ingest, rekey, repair, roster, scoring,
                      status)
 
@@ -424,7 +423,7 @@ def ui_ops():
     return {n: e for n, e in REGISTRY.items() if e.get("ui", True)}
 
 
-async def ainvoke(name, params=None, *, track=UNSET):
+async def invoke(name, params=None, *, track=UNSET):
     """Run operation `name` with a front end's params (a dict, or the op's
     model already validated); returns what the target returns. Params the
     op does not accept raise ParamError before anything runs.
@@ -458,6 +457,3 @@ async def ainvoke(name, params=None, *, track=UNSET):
         asyncio.current_task().uncancel()
         print(f"  {name}: the stop came too late; a started store op runs to its end")
         return done.result()
-
-
-invoke = http.sync_shim(ainvoke)
