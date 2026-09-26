@@ -82,13 +82,20 @@ async def _hit_from_detection(name, det):
 
 async def _resolve_pass(todo, resolve_one, tag, hits, misses, max_workers):
     """Run one fallback resolver over `todo`, appending to `hits` (nc>0) or
-    `misses` (anything else), under the stall watchdog.
+    `misses` (anything else), under the stall watchdog. A name whose
+    resolution raises is reported and becomes a `fetch-error:<Exception>`
+    miss, as a stalled one does, so the retry schedule still applies.
 
     The watchdog, not a plain fan-out: one wedged resolution used to hold
     the web UI's single op slot until the app was restarted.
     """
+    def raised(n, e):
+        print(f"    [!] {n} error: {e}")
+        misses.append({"name": n, "reason": f"fetch-error:{type(e).__name__}"})
+
     async for h in fan_out(
-            todo, resolve_one, str, max_workers, stall_s=RESOLVE_STALL_S,
+            todo, resolve_one, str, max_workers, on_error=raised,
+            stall_s=RESOLVE_STALL_S,
             on_abandon=lambda n: misses.append({"name": n,
                                                 "reason": "fetch-error:stalled"})):
         if h and h.get("nc"):

@@ -277,12 +277,25 @@ async def _validate_all(candidate_dicts, use_js=True, websearch=True):
     # instead of serializing on one. Skipped entirely when use_js is off,
     # so bulk sweeps never pay the browser cost.
     js_probe = JsScanProbePool(_JS_PAGES) if use_js else None
+    done = 0
+
+    # A candidate whose validation raises is counted and kept, marked
+    # with its error, rather than silently skipped.
+    def raised(irc, e):
+        nonlocal done
+        done += 1
+        cand = candidate_from_dict(irc[1])
+        cand.tried_slugs.append(f"[error: {type(e).__name__}]")
+        validated[irc[0]] = cand
+        print(f"  [{done:>3}/{total}] err   {cand.name} ({cand.ats})  "
+              f"{type(e).__name__}: {e}")
+
     try:
-        done = 0
         async for (idx, _rc), (cand, buf) in fan_out(
                 list(enumerate(candidate_dicts)), _worker,
                 lambda irc: (irc[1].get("name") or "").strip(),
-                _DISCOVERY_WORKERS, with_item=True, stall_s=RESOLVE_STALL_S):
+                _DISCOVERY_WORKERS, with_item=True, on_error=raised,
+                stall_s=RESOLVE_STALL_S):
             done += 1
             if cand.confirmed:
                 status, detail = "OK  ", f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"

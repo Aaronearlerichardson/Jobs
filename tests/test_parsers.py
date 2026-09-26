@@ -1475,3 +1475,27 @@ class TestApplyToStoreFetchability:
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["ats"], stored["slug"]) == ("greenhouse", "alphabio")
         assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))
+
+class TestADiscoveryPassKeepsARaisingItem:
+    """A pass skips an item whose resolution raises, but never silently:
+    local sourcing records a fetch-error miss, so the retry schedule still
+    applies, and the candidate pipeline counts and marks the candidate."""
+
+    async def test_a_resolve_pass_records_a_fetch_error_miss(self, capsys):
+        async def boom(name):
+            raise ValueError("bad page")
+        hits, misses = [], []
+        await local_sourcing._resolve_pass(["Acme"], boom, "[T]", hits, misses, 1)
+        assert (hits, misses) == (
+            [], [{"name": "Acme", "reason": "fetch-error:ValueError"}])
+        assert "Acme error: bad page" in capsys.readouterr().out
+
+    async def test_a_raising_candidate_is_counted_and_marked(self, monkeypatch, capsys):
+        async def boom(cand, **kw):
+            raise ValueError("bad page")
+        monkeypatch.setattr(pipeline, "avalidate_candidate", boom)
+        acme = {"name": "Acme", "ats": "unknown", "slug_guess": None,
+                "careers_url": "", "notes": ""}
+        [c] = await pipeline._validate_all([acme], use_js=False, websearch=False)
+        assert c.tried_slugs == ["[error: ValueError]"]
+        assert "[  1/1] err   Acme" in capsys.readouterr().out
