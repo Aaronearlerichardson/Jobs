@@ -1,17 +1,17 @@
 # Board health
 
-_6/6 platforms healthy · checked 2026-09-25 11:57 UTC · [how this works](tools/check_boards.py)_
+_5/6 platforms healthy · checked 2026-09-26 11:31 UTC · [how this works](tools/check_boards.py)_
 
 One request per platform against a public sample board, with the keyword filter widened so the number reflects the BOARD rather than any particular search profile.
 
 | | Platform | Sample board | Postings | Detail |
 |---|---|---|---:|---|
 | ✅ | `ashby` | Vanta | 88 | ok |
-| ✅ | `bamboohr` | EMS Biomedical | 99 | ok |
-| ✅ | `greenhouse` | Databricks | 885 | ok |
-| ✅ | `kula` | Precision Neuroscience | 11 | ok |
+| ✅ | `bamboohr` | EMS Biomedical | 100 | ok |
+| ✅ | `greenhouse` | Databricks | 888 | ok |
 | ✅ | `lever` | Veeva | 916 | ok |
 | ✅ | `rippling` | Blackrock Neurotech | 6 | ok |
+| ⚠️ | `kula` | Precision Neuroscience | 0 | reachable but returned 0 (floor 1) |
 
 **✅ ok** — endpoint alive, response parsed, postings returned.  
 **⚠️ degraded** — reachable and parsed, but fewer postings than expected: an empty board, or a silent shape change worth checking.  
