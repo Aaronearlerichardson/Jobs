@@ -840,7 +840,7 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
 
     `soft_fail` is the caller's own verdict (from the fetch's failure
     count -- see net.http.snapshot_info/fetch_failed, read by
-    src.crawl.harvest.harvest_board) that this pass's EMPTY result is a
+    src.crawl.harvest.aharvest_board) that this pass's EMPTY result is a
     board that answered with an error, not a board that genuinely listed
     nothing. `n_jobs` is always 0 when `soft_fail` is set.
 

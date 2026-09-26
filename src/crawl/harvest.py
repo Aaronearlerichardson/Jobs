@@ -34,23 +34,24 @@ a posting seen for the first time, only without the network round-trips
 Concurrency: several processes write the one SQLite file (the web UI, the
 scheduled crawl, this). store.connect runs WAL with a busy timeout, and
 each board is written in ONE transaction (store.batch), so a 1,000-row
-board takes the write lock once rather than a thousand times.
+board takes the write lock once rather than a thousand times. Within the
+pass, one thread owns the store connection (store.Writer) and the boards'
+writes queue for it.
 
 Wall clock is the only thing this trades away: the whole roster is on the
 order of 20,000 postings, and even the listings alone take a while at
 polite pacing (with --hydrate, every posting's detail GET on top of that
-is hours). Boards run concurrently (one worker per board; a board's own
-requests stay serial, which is the per-host politeness), cheapest ATSes
-first so the store fills early, and a board that makes no progress for
-STALL_S is abandoned rather than allowed to wedge the run.
+is hours). The pull (`apass`) is one coroutine on the network loop: one
+task per host walks that host's boards one at a time, largest first, and
+every host runs at once, so a board's host never sees two of the pass's
+boards at a time. Ctrl+C or the pass budget cancels it: committed boards
+stay, a board still being written rolls back, and no queued board starts.
+A board that makes no progress for apass's `stall_s` is cut off alone.
 """
 
+import asyncio
 import logging
-import threading
 import time
-from concurrent.futures import FIRST_COMPLETED
-from concurrent.futures import wait as fut_wait
-from contextlib import closing
 from datetime import datetime, timedelta
 
 from src import config
@@ -62,7 +63,6 @@ from src.claude.api import (api_disabled, cache_stats, have_api_key,
                             report_cache_stats)
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
-from src.net.parallel import pool
 from src.net.util import worker_count
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
@@ -70,25 +70,16 @@ from src.ops.status import check_closed_jobs
 
 _log = logging.getLogger(__name__)
 
-# Boards in flight at once. Each board is one host, and a board's own
-# requests are serial, so this is also the per-host politeness bound.
+# Workers of the pass's second half (triage, verify, the closed-URL probe).
 DEFAULT_WORKERS = worker_count("harvest_workers")
 # Hydration is a detail GET per posting, config.HYDRATE_DELAY_S apart and
 # at most config.HYDRATE_CAP_PER_RUN per board per run: one host cut the
 # crawler off after 151 detail GETs at two per second (2026-09-10), and
 # again after 42 on a retry ten minutes later. The rows left bodiless are
 # picked up by later runs (stored bodies are never re-fetched, so each run
-# advances).
-# Consecutive hydration misses that mean the host has stopped answering
-# (some drop the connection outright once they decide you are a bot).
-# The first streak earns one pause-and-retry; a second ends hydration for
-# this board, and the next run picks the bodiless rows up again.
-MISS_STREAK = 5
+# advances). A host that stops answering (ahydrate_rows' miss streak) gets
+# one pause this long, then the next run.
 MISS_BACKOFF_S = 90.0
-# A board that has made NO progress (no fetch return, no hydrated row) for
-# this long is abandoned. Generous: one detail GET is bounded by
-# config.FETCH_TIMEOUT, so only a wedged fetcher gets here.
-STALL_S = 900.0
 # A board harvested more recently than this is skipped, which is what makes
 # a restarted (or Task-Scheduler-repeated) run resume where it left off.
 # A board that is BOTH off-mission and inactive waits the longer
@@ -122,21 +113,15 @@ def deferred_note(stats):
             f"{config.HARVEST_OFFMISSION_HOURS:g}h") if n else ""
 
 
-def _ats_rank(ats):
-    """Cheap boards (a spec the sweep pulls whole) first, then the
-    heavyweights."""
-    return 0 if (config.BOARDS.get(ats) or {}).get("sweep") else 1
-
-
 def plan(conn, only=None, names=None, min_age_hours=None,
          limit=None, now=None, stats=None):
     """The boards this run will pull, in run order.
 
     `only` restricts to a set of ATS names, `names` to company names
     (case-insensitive); boards harvested within `min_age_hours` are skipped
-    unless named explicitly. Cheapest ATSes first, then smaller boards
-    before bigger ones, so an interrupted run has still banked the most
-    boards per minute.
+    unless named explicitly. Largest boards first (their last known
+    total_job_count): each host walks its boards in this order, and its
+    longest walk is what the pass waits for.
 
     A board that is config.is_offmission_inactive -- the one
     off-mission/inactive rule, shared with the whole-board page budget
@@ -159,10 +144,10 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     boards this call left out ONLY because of the long interval -- i.e.
     boards that would already be due under plain `min_age_hours` freshness
     -- and `"min_age_hours"` set to the ordinary cutoff this call resolved
-    the sentinel to. Both are what a caller's header line says (run()
+    the sentinel to. Both are what a caller's header line says (apass
     below, harvest.py --list); neither re-derives the default itself, so
     the sentinel rule has exactly one writer. The out-parameter shape is
-    this module's own (see _hydrate_rows' `stats`): the return value is
+    this module's own (see ahydrate_rows' `stats`): the return value is
     the plan, and a second return value would be read by no one who does
     not already hold the list.
 
@@ -182,7 +167,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     1
     >>> now = datetime(2026, 9, 10, 9, 0)
     >>> [c["name"] for c in plan(conn, now=now)]
-    ['Old', 'Small', 'Big']
+    ['Big', 'Small', 'Old']
     >>> [c["name"] for c in plan(conn, names=["fresh"], now=now)]
     ['Fresh']
     >>> [c["name"] for c in plan(conn, only={"workday"}, now=now)]
@@ -218,6 +203,10 @@ def plan(conn, only=None, names=None, min_age_hours=None,
         holding 47,737 -- so roughly half of every whole-board pass was
         spent re-fetching rows triage's own mission gate discards on every
         single run.
+
+        Until 2026-09-25 the cheap sweep platforms went first, then the
+        smaller boards, for a thread pool that banked the most boards per
+        minute; per-host walks finish soonest largest first.
     """
     now = now or datetime.now()
     # The sentinel, per the docstring: only an unset min_age_hours lets the
@@ -248,8 +237,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
             if last > board_cutoff:
                 continue
         rows.append(c)
-    rows.sort(key=lambda c: (_ats_rank(c.get("ats")),
-                             c.get("total_job_count") or 0,
+    rows.sort(key=lambda c: (-(c.get("total_job_count") or 0),
                              (c.get("name") or "").lower()))
     if stats is not None:
         stats["offmission_skipped"] = offmission_skipped
@@ -273,11 +261,6 @@ def _row(job, company, stamp):
         "posted_at": job.get("posted_at"), "description": desc,
         "harvested_at": stamp,
     }
-
-
-def fetch_whole_board(company):
-    """The company's full listing, unfiltered."""
-    return company_fetch.fetch_company(company, None)
 
 
 def _soft_failed(stats):
@@ -311,17 +294,15 @@ def bury_404_board(conn, company, error):
     return reason
 
 
-def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
-                  delay=None, now=None, backoff_s=MISS_BACKOFF_S):
-    """Fetch, hydrate and store ONE board. Runs on a worker thread and opens
-    its own connection (sqlite connections are per-thread). Returns a stats
-    dict; a fetch failure is reported, not raised, and leaves the store
-    untouched (nothing is closed on a failed or empty snapshot; see
-    _store_board for an incomplete or capped one).
-
-    `progress()` is called after the listing returns and after every
-    hydrated row, which is how the run's watchdog tells a slow board from a
-    wedged one. `delay` defaults to config.HYDRATE_DELAY_S.
+async def aharvest_board(company, db, hydrate=False, delay=None, now=None,
+                         backoff_s=MISS_BACKOFF_S, progress=lambda: None):
+    """Fetch, hydrate and store ONE board, its store work on `db` (the
+    pass's store.Writer). Returns a stats dict; a fetch failure is
+    reported, not raised, and leaves the store untouched (nothing is
+    closed on a failed or empty snapshot; see _write_board for an
+    incomplete or capped one). `delay` defaults to config.HYDRATE_DELAY_S.
+    `progress()` is called when the listing is back and after every
+    hydration GET (apass's stall bound).
 
     `hydrate` is OFF by default: the listing is stored bodiless and the
     triage pass (src/crawl/triage.py) fetches bodies for the rows that
@@ -342,11 +323,11 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     # A fetcher does not RAISE on a dead board -- it reports and returns [],
     # which is also what a board with nothing on it returns, so `fetched: 0`
     # alone cannot tell "404" from "no openings". net.http counts the
-    # reported failures per thread, and one board owns one thread here, so
-    # resetting around the fetch attributes them to exactly this board.
+    # reported failures per task, and a host's task runs one board at a
+    # time, so resetting around the fetch attributes them to this board.
     http.reset_fetch_failures()
     try:
-        jobs = fetch_whole_board(company) or []
+        jobs = await company_fetch.afetch_company(company) or []
     except Exception as e:                      # noqa: BLE001 - reported
         stats["fetch_errors"] = http.fetch_failures()
         stats["incomplete"] = True
@@ -358,8 +339,27 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     stats.update(http.snapshot_info())
 
     try:
-        _store_board(db_path, jobs, company, stats, progress,
-                     hydrate, delay, backoff_s, now)
+        # Bodies already in the store (an earlier harvest, or a crawl) are
+        # reused, never re-fetched: many listings come back bodiless every
+        # time, and re-hydrating 100 known rows is what tripped one host's
+        # limit on a second run (2026-09-10).
+        if jobs and company.get("id"):
+            stored = await db.run(store.descriptions_for_company, company["id"])
+            for j in jobs:
+                if not j.get("description") and j["id"] in stored:
+                    j["description"] = stored[j["id"]]
+        if hydrate:
+            await ahydrate_rows(jobs, company, stats, delay, backoff_s, progress)
+        stamp_dt = now or datetime.now()
+        stamp = stamp_dt.isoformat()
+        rows = await asyncio.to_thread(
+            lambda: [(_row(j, company, stamp), location_unknown(j.get("location")))
+                     for j in jobs])
+        promoted = await db.batch(_write_board, jobs, rows, company, stats, stamp_dt)
+        if promoted:
+            print(f"    [!] {company.get('name')}: no jobs for >= "
+                  f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "
+                  f"error - promoted to '{promoted}'")
     except Exception as e:                      # noqa: BLE001 - reported
         # A store failure is NOT a fetch error, and calling it one hid this
         # bug for a day: every "database is locked" reads as an unreachable
@@ -370,11 +370,11 @@ def harvest_board(company, db_path, progress=lambda: None, hydrate=False,
     return stats
 
 
-def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
-                 backoff_s, now):
-    """Hydrate (optionally) and write one board's snapshot. The write itself
-    is ONE transaction (store.batch), which is the whole point: a board is
-    one lock acquisition, not one per posting.
+def _write_board(conn, jobs, rows, company, stats, stamp_dt):
+    """One board's snapshot written, inside the caller's store.batch (ONE
+    transaction, which is the whole point: a board is one lock
+    acquisition, not one per posting); `rows` are its (store row,
+    keep_location) pairs. Returns mark_harvested's promotion.
 
     The rows that arrived are always stored. Closing against the snapshot
     is what a partial pull cannot be trusted for: an INCOMPLETE one (a
@@ -385,62 +385,38 @@ def _store_board(db_path, jobs, company, stats, progress, hydrate, delay,
     A soft-failed snapshot (_soft_failed) is recorded as one:
     store.mark_harvested keeps the last good total_job_count and runs its
     dead-board cycle."""
-    conn = store.connect(db_path)
-    try:
-        # Bodies already in the store (an earlier harvest, or a crawl) are
-        # reused, never re-fetched: many listings come back bodiless every
-        # time, and re-hydrating 100 known rows is what tripped one host's
-        # limit on a second run (2026-09-10).
-        if jobs and company.get("id"):
-            stored = store.descriptions_for_company(conn, company["id"])
-            for j in jobs:
-                if not j.get("description") and j["id"] in stored:
-                    j["description"] = stored[j["id"]]
-        if hydrate:
-            _hydrate_rows(jobs, company, stats, progress, delay, backoff_s)
-        stamp_dt = now or datetime.now()
-        stamp = stamp_dt.isoformat()
-        with store.batch(conn):
-            if jobs and company.get("id") and not stats.get("incomplete"):
-                # A full, successful snapshot is the best evidence there is
-                # for what the board lists: close what vanished, revive
-                # returners -- across every track (track=None), on this
-                # pass's own stamp.
-                re_, cl = store.sync_job_statuses(
-                    conn, company["id"], jobs, track=None,
-                    capped=stats.get("capped", False), now=stamp_dt)
-                stats["reopened"], stats["closed"] = re_, cl
-            for j in jobs:
-                # A whole-board listing can say "N Locations" every pass;
-                # the real list triage resolved stays.
-                if store.upsert_job(
-                        conn, _row(j, company, stamp),
-                        keep_location=location_unknown(j.get("location"))):
-                    stats["new"] += 1
-            promoted = None
-            if company.get("id"):
-                promoted = store.mark_harvested(
-                    conn, company["id"], len(jobs),
-                    soft_fail=_soft_failed(stats), now=stamp_dt)
-                # `company` is the pre-pass row: a fetch-error miss already
-                # on it means this is the second failing pass in a row.
-                if (not promoted and _soft_failed(stats)
-                        and company.get("miss_reason") == "fetch-error:harvest"):
-                    bury_404_board(conn, company, stats.get("last_error"))
-        if promoted:
-            print(f"    [!] {company.get('name')}: no jobs for >= "
-                  f"{store.HARVEST_DEAD_AFTER_DAYS}d since its first fetch "
-                  f"error - promoted to '{promoted}'")
-    finally:
-        conn.close()
+    if jobs and company.get("id") and not stats.get("incomplete"):
+        # A full, successful snapshot is the best evidence there is for
+        # what the board lists: close what vanished, revive returners --
+        # across every track (track=None), on this pass's own stamp.
+        stats["reopened"], stats["closed"] = store.sync_job_statuses(
+            conn, company["id"], jobs, track=None,
+            capped=stats.get("capped", False), now=stamp_dt)
+    for row, keep_location in rows:
+        # A whole-board listing can say "N Locations" every pass; the real
+        # list triage resolved stays.
+        if store.upsert_job(conn, row, keep_location=keep_location):
+            stats["new"] += 1
+    if not company.get("id"):
+        return None
+    promoted = store.mark_harvested(conn, company["id"], len(jobs),
+                                    soft_fail=_soft_failed(stats), now=stamp_dt)
+    # `company` is the pre-pass row: a fetch-error miss already on it means
+    # this is the second failing pass in a row.
+    if (not promoted and _soft_failed(stats)
+            and company.get("miss_reason") == "fetch-error:harvest"):
+        bury_404_board(conn, company, stats.get("last_error"))
+    return promoted
 
 
-def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
+async def ahydrate_rows(jobs, company, stats, delay=None, backoff_s=MISS_BACKOFF_S,
+                        progress=lambda: None):
     """Resolve every row in `jobs` that still needs a detail call
     (company_fetch.needs_detail: no body yet, or a body already but a
     location the listing never resolved), in place, within the host's
     tolerances: config.HYDRATE_CAP_PER_RUN rows, `delay` between GETs
-    (config.HYDRATE_DELAY_S when None), and the miss-streak breaker.
+    (config.HYDRATE_DELAY_S when None), and the miss-streak breaker;
+    `progress()` after each GET and after the pause.
 
     Fills stats['hydrated'] (rows whose detail need was resolved this
     pass -- a body arrived, or a location-only row's location did) and
@@ -450,7 +426,13 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
     failed body fetch -- needs_detail decides "resolved or not" either
     way, so the two cases share one counter.
     """
-    todo = [j for j in jobs if company_fetch.needs_detail(j)]
+    # Consecutive misses that mean the host has stopped answering (some
+    # drop the connection outright once they decide you are a bot). The
+    # first streak earns one pause-and-retry; a second ends hydration for
+    # this board, and the next run picks the bodiless rows up again.
+    miss_streak = 5
+    todo = await asyncio.to_thread(
+        lambda: [j for j in jobs if company_fetch.needs_detail(j)])
     cap = config.HYDRATE_CAP_PER_RUN
     delay = config.HYDRATE_DELAY_S if delay is None else delay
     if len(todo) > cap:
@@ -458,37 +440,38 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
               f"cap is {cap}/run - the rest next run")
         todo = todo[:cap]
     streak = paused = 0
-    try:
-        for i, j in enumerate(todo):
-            _log.debug("hydrate %s", j.get("url"))
-            j["_tried"] = True          # attempted (vs. left over the cap)
-            try:
-                company_fetch.hydrate_description(j, company)
-            except Exception as e:              # noqa: BLE001 - per row
-                _log.debug("hydrate %s failed: %s", j.get("url"), e)
+    for i, j in enumerate(todo):
+        _log.debug("hydrate %s", j.get("url"))
+        j["_tried"] = True          # attempted (vs. left over the cap)
+        try:
+            await company_fetch.ahydrate_description(j, company)
+        except Exception as e:                  # noqa: BLE001 - per row
+            _log.debug("hydrate %s failed: %s", j.get("url"), e)
+        progress()
+        if not company_fetch.needs_detail(j):
+            stats["hydrated"] += 1
+            streak = 0
+        else:
+            streak += 1
+        if streak >= miss_streak:
+            if paused:
+                print(f"    [!] {company.get('name')}: {streak} more "
+                      f"misses after a pause - {len(todo) - i - 1} row(s) left "
+                      f"unresolved for the next run")
+                break
+            paused += 1
+            print(f"    [!] {company.get('name')}: {streak} hydration "
+                  f"misses in a row - pausing {backoff_s:.0f}s")
+            streak = 0
+            await asyncio.sleep(backoff_s)
             progress()
-            if not company_fetch.needs_detail(j):
-                stats["hydrated"] += 1
-                streak = 0
-            else:
-                streak += 1
-            if streak >= MISS_STREAK:
-                if paused:
-                    left = len(todo) - i - 1
-                    print(f"    [!] {company.get('name')}: {streak} more "
-                          f"misses after a pause - {left} row(s) left "
-                          f"unresolved for the next run")
-                    break
-                paused += 1
-                print(f"    [!] {company.get('name')}: {streak} hydration "
-                      f"misses in a row - pausing {backoff_s:.0f}s")
-                streak = 0
-                time.sleep(backoff_s)
-                progress()
-            elif delay:
-                time.sleep(delay)
-    finally:
-        stats["unhydrated"] = sum(1 for j in jobs if company_fetch.needs_detail(j))
+        elif delay:
+            await asyncio.sleep(delay)
+    stats["unhydrated"] = await asyncio.to_thread(
+        lambda: sum(1 for j in jobs if company_fetch.needs_detail(j)))
+
+
+hydrate_rows = http.sync_shim(ahydrate_rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -497,153 +480,115 @@ def _hydrate_rows(jobs, company, stats, progress, delay, backoff_s):
 
 def run(db_path=None, only=None, names=None, min_age_hours=None,
         limit=None, max_workers=DEFAULT_WORKERS, hydrate=False,
-        max_hours=None, stall_s=STALL_S, poll_s=30.0,
-        board_fn=harvest_board, triage=True, score_cap=None):
-    """Harvest every planned board, then triage what was stored and
-    rewrite every roster track's digest. Returns the summary dict (also
-    printed); the triage summary rides in it under "triage".
+        max_hours=None, board_fn=aharvest_board, triage=True, score_cap=None):
+    """Harvest every planned board (`apass`, on the network loop), then
+    triage what was stored and rewrite every roster track's digest.
+    Returns the summary dict (also printed); the triage summary rides in
+    it under "triage".
 
     `triage=False` skips the gate/hydrate/score pass (the rows wait for
     the next one, or for `run_scraper.py --triage`); `score_cap` bounds
-    that pass's Claude fit calls (triage.SCORE_CAP when None). `poll_s` is
-    how often the watchdog looks at the in-flight boards; `board_fn`
-    exists for tests (it is harvest_board's signature).
+    that pass's Claude fit calls (triage.SCORE_CAP when None);
+    `max_workers` sizes its pools. `board_fn` exists for tests (it is
+    aharvest_board's signature). Ctrl+C raises KeyboardInterrupt here once
+    the pull has unwound (net.http.run_sync).
+    """
+    db_path = db_path or config.STORE_DB_PATH
+    claude_baseline = cache_stats()     # this pass's own Claude spend footer
+    summary = http.run_sync(apass(db_path, only=only, names=names,
+                                  min_age_hours=min_age_hours, limit=limit,
+                                  hydrate=hydrate, max_hours=max_hours,
+                                  board_fn=board_fn))
+    if triage:
+        summary["triage"] = _triage(db_path, max_workers, score_cap,
+                                    claude_baseline)
+    return summary
+
+
+async def apass(db_path, only=None, names=None, min_age_hours=None,
+                limit=None, hydrate=False, max_hours=None,
+                board_fn=aharvest_board, stall_s=900.0):
+    """The pull: plan (`plan`), then every board fetched and stored, one
+    task per host (Board.origin; per platform while a row's origin is
+    unsettled) walking its boards in plan order and every host at once;
+    the store work on one store.Writer. Returns the summary dict (also
+    printed).
+
+    `max_hours` is the pass budget. Past it, or on Ctrl+C, the walks are
+    cancelled: the boards committed stay, a board being written rolls
+    back, and a board not yet started never starts; the budget names each
+    board it cut off (the summary's "abandoned"). A board with no progress
+    (aharvest_board's) for `stall_s` is cut off the same way and its walk
+    moves on: a request bounds each read (config.FETCH_TIMEOUT), not its
+    total, so a server trickling bytes could hold one forever.
 
     The header line names how many off-mission, inactive boards `plan`
     deferred to its longer interval this pass (plan's `stats` output;
     silent when there are none), so a run that looks small is never a
     silent drop -- it says which boards it left for later and why.
     """
-    db_path = db_path or config.STORE_DB_PATH
-    claude_baseline = cache_stats()     # this pass's own Claude spend footer
-    with closing(store.connect(db_path)) as conn:
-        plan_stats = {}
-        boards = plan(conn, only=only, names=names, min_age_hours=min_age_hours,
-                      limit=limit, stats=plan_stats)
-    age = plan_stats["min_age_hours"]
-
-    bar = "=" * 70
-    print(f"\n{bar}\n  [HARVEST] whole-board pull - {datetime.now():%Y-%m-%d %H:%M}")
-    print(f"  {len(boards)} board(s), {max_workers} at a time, "
-          f"hydrate={'on' if hydrate else 'off'}, "
-          f"skip if harvested < {age:g}h ago" + deferred_note(plan_stats)
-          + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
-
-    summary = {"boards": len(boards), "ok": 0, "err": 0, "stalled": 0,
-               "dead": 0, "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
+    summary = {"boards": 0, "ok": 0, "err": 0, "abandoned": 0, "dead": 0,
+               "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
                "reopened": 0, "secs": 0.0}
-    if not boards:
-        print("  nothing to do")
-        if triage:
-            summary["triage"] = _triage(db_path, max_workers, score_cap,
-                                        claude_baseline)
-        return summary
-
-    t_start = time.monotonic()
-    deadline = t_start + max_hours * 3600 if max_hours else None
-    last_progress = {}                  # company id -> monotonic seconds
-    lock = threading.Lock()
-
-    def _tick(cid):
-        def progress():
-            with lock:
-                last_progress[cid] = time.monotonic()
-        return progress
-
-    done_n = [0]
-
-    def _report(c, s):
-        done_n[0] += 1
-        prefix = ""
-        if s["err"]:
-            status = s["err"]
-        elif _soft_failed(s):
-            # The distinction the log could not previously draw: this board
-            # answered with an error, it is not merely empty. A soft
-            # failure: it names the last error and leaves s["err"] alone.
-            prefix = "[!] "     # session_log records the line at WARNING
-            last = f": {s['last_error']}" if s.get("last_error") else ""
-            status = (f"no jobs - {s['fetch_errors']} fetch error(s){last}, "
-                      f"{s['secs']:.0f}s")
-        else:
-            status = (f"{s['fetched']} job(s), {s['new']} new, "
-                      f"{s['hydrated']} hydrated"
-                      + (f" ({s['unhydrated']} unresolved)"
-                         if s.get("unhydrated") else "")
-                      + f", {s['closed']} closed, {s['secs']:.0f}s")
-            if s.get("incomplete"):
-                status += " [incomplete: 0 closed]"
-            elif s.get("capped"):
-                # 2026-09-18: a capped snapshot no longer closes anything
-                # here (store.sync_job_statuses) -- ops.check_closed_jobs's
-                # URL probe is the only thing that can, later.
-                status += (f" [capped of {s['capped_total']}: 0 closed]"
-                           if s.get("capped_total") else " [capped: 0 closed]")
-        print(f"  {prefix}[{done_n[0]:>3}/{len(boards)}] {c['name']} "
-              f"({c['ats']}): {status}")
-        # Churn a board's own board-diff should have damped, still showing
-        # up: worth a human's attention, not just a debug line.
-        fetched = s.get("fetched") or 0
-        reopened = s.get("reopened") or 0
-        if reopened > max(10, 0.05 * fetched):
-            print(f"    [!] {c['name']} ({c['ats']}): {reopened} reopened "
-                  f"of {fetched} fetched - board churning")
-        _log.debug("board %s stats %s", c.get("name"), s)
-
-    # Abandoned boards keep their thread until the pool's exit cancels the
-    # request each waits on: the pool never joins them, and cancels the
-    # boards not yet started however this block ends (Ctrl+C included).
-    with pool(max_workers, "harvest") as ex:
-        futs = {}
+    async with store.Writer(db_path) as db:
+        plan_stats = {}
+        boards = await db.run(plan, only=only, names=names,
+                              min_age_hours=min_age_hours, limit=limit,
+                              stats=plan_stats)
+        hosts = {}
         for c in boards:
-            cid = c.get("id") or c.get("name")
-            futs[ex.submit(board_fn, c, db_path, progress=_tick(cid),
-                           hydrate=hydrate)] = c
-        pending = set(futs)
-        while pending:
-            done, pending = fut_wait(pending, timeout=poll_s,
-                                     return_when=FIRST_COMPLETED)
-            for fut in done:
-                c = futs[fut]
+            board = board_for(c.get("ats"))
+            hosts.setdefault((board and board.origin(c)) or c.get("ats"), []).append(c)
+        summary["boards"] = len(boards)
+        bar = "=" * 70
+        print(f"\n{bar}\n  [HARVEST] whole-board pull - {datetime.now():%Y-%m-%d %H:%M}")
+        print(f"  {len(boards)} board(s) on {len(hosts)} host(s), one board at a "
+              f"time per host, hydrate={'on' if hydrate else 'off'}, "
+              f"skip if harvested < {plan_stats['min_age_hours']:g}h ago"
+              + deferred_note(plan_stats)
+              + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
+        if not boards:
+            print("  nothing to do")
+            return summary
+
+        t_start = time.monotonic()
+        running = {}                    # id(company) -> company, mid-walk
+
+        async def walk(group):
+            loop = asyncio.get_running_loop()
+            for c in group:
+                running[id(c)] = c
                 try:
-                    s = fut.result()
-                except Exception as e:              # noqa: BLE001 - reported
+                    async with asyncio.timeout(stall_s) as stall:
+                        s = await board_fn(
+                            c, db, hydrate=hydrate,
+                            progress=lambda: stall.reschedule(loop.time() + stall_s))
+                except Exception as e:          # noqa: BLE001 - reported
                     s = {"err": f"{type(e).__name__}: {e}", "fetched": 0,
                          "new": 0, "hydrated": 0, "closed": 0, "reopened": 0,
                          "secs": 0.0}
-                _report(c, s)
-                if s["err"]:
-                    summary["err"] += 1
+                del running[id(c)]
+                if stall.expired():
+                    print(f"  [!] {c['name']} ({c['ats']}): no progress in "
+                          f"{stall_s:g}s - abandoned")
+                    summary["abandoned"] += 1
                 else:
-                    summary["ok"] += 1
-                    if _soft_failed(s):
-                        summary["dead"] += 1
-                for k in ("fetched", "new", "hydrated", "closed", "reopened"):
-                    summary[k] += s[k]
-            now = time.monotonic()
-            out_of_time = deadline is not None and now >= deadline
-            for fut in list(pending):
-                c = futs[fut]
-                cid = c.get("id") or c.get("name")
-                if not fut.running():
-                    if out_of_time and fut.cancel():
-                        pending.discard(fut)
-                    continue
-                with lock:
-                    started = last_progress.setdefault(cid, now)
-                if out_of_time or now - started > stall_s:
-                    why = ("run out of time" if out_of_time
-                           else f"no progress in {stall_s:.0f}s")
-                    print(f"  [!] {c['name']} ({c['ats']}): {why} - abandoned")
-                    summary["stalled"] += 1
-                    pending.discard(fut)
+                    _report(c, s, summary)
 
+        try:
+            async with asyncio.timeout(max_hours * 3600 if max_hours else None):
+                async with asyncio.TaskGroup() as tg:
+                    for group in hosts.values():
+                        tg.create_task(walk(group))
+        except TimeoutError:
+            for c in running.values():
+                print(f"  [!] {c['name']} ({c['ats']}): run out of time - abandoned")
+            summary["abandoned"] += len(running)
     summary["secs"] = time.monotonic() - t_start
-    skipped = summary["boards"] - summary["ok"] - summary["err"] \
-        - summary["stalled"]
+    skipped = summary["boards"] - summary["ok"] - summary["err"] - summary["abandoned"]
     print(f"\n{bar}\n  HARVEST SUMMARY")
     print(f"  boards: {summary['ok']} ok, {summary['err']} failed, "
-          f"{summary['stalled']} abandoned"
+          f"{summary['abandoned']} abandoned"
           + (f", {summary['dead']} answered with an error and no jobs"
              if summary["dead"] else "")
           + (f", {skipped} not started" if skipped > 0 else ""))
@@ -659,10 +604,54 @@ def run(db_path=None, only=None, names=None, min_age_hours=None,
           + (f", largest first: {', '.join(c['name'] for c in unnamed[:10])}"
              + (", ..." if len(unnamed) > 10 else "") if unnamed else ""))
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
-    if triage:
-        summary["triage"] = _triage(db_path, max_workers, score_cap,
-                                    claude_baseline)
     return summary
+
+
+def _report(c, s, summary):
+    """One finished board's status line, its stats added to `summary`."""
+    done = summary["ok"] + summary["err"] + 1
+    if s["err"]:
+        summary["err"] += 1
+    else:
+        summary["ok"] += 1
+        summary["dead"] += _soft_failed(s)
+    for k in ("fetched", "new", "hydrated", "closed", "reopened"):
+        summary[k] += s[k]
+    prefix = ""
+    if s["err"]:
+        status = s["err"]
+    elif _soft_failed(s):
+        # The distinction the log could not previously draw: this board
+        # answered with an error, it is not merely empty. A soft
+        # failure: it names the last error and leaves s["err"] alone.
+        prefix = "[!] "     # session_log records the line at WARNING
+        last = f": {s['last_error']}" if s.get("last_error") else ""
+        status = (f"no jobs - {s['fetch_errors']} fetch error(s){last}, "
+                  f"{s['secs']:.0f}s")
+    else:
+        status = (f"{s['fetched']} job(s), {s['new']} new, "
+                  f"{s['hydrated']} hydrated"
+                  + (f" ({s['unhydrated']} unresolved)"
+                     if s.get("unhydrated") else "")
+                  + f", {s['closed']} closed, {s['secs']:.0f}s")
+        if s.get("incomplete"):
+            status += " [incomplete: 0 closed]"
+        elif s.get("capped"):
+            # 2026-09-18: a capped snapshot no longer closes anything
+            # here (store.sync_job_statuses) -- ops.check_closed_jobs's
+            # URL probe is the only thing that can, later.
+            status += (f" [capped of {s['capped_total']}: 0 closed]"
+                       if s.get("capped_total") else " [capped: 0 closed]")
+    print(f"  {prefix}[{done:>3}/{summary['boards']}] {c['name']} "
+          f"({c['ats']}): {status}")
+    # Churn a board's own board-diff should have damped, still showing
+    # up: worth a human's attention, not just a debug line.
+    fetched = s.get("fetched") or 0
+    reopened = s.get("reopened") or 0
+    if reopened > max(10, 0.05 * fetched):
+        print(f"    [!] {c['name']} ({c['ats']}): {reopened} reopened "
+              f"of {fetched} fetched - board churning")
+    _log.debug("board %s stats %s", c.get("name"), s)
 
 
 def _triage(db_path, max_workers, score_cap, claude_baseline):

@@ -23,6 +23,29 @@ def _job(i, desc=""):
             "description": desc, "ats": "greenhouse"}
 
 
+def _harvest_board(company, db, **kw):
+    """harvest.aharvest_board over a store.Writer of its own, from this
+    thread."""
+    async def one():
+        async with store.Writer(db) as w:
+            return await harvest.aharvest_board(company, w, **kw)
+    return http.run_sync(one())
+
+
+def _fetches(monkeypatch, fetch):
+    """The board fetch answering `fetch(company)`: its list, or its raise."""
+    async def afetch(company, loc_re=None):
+        return fetch(company)
+    monkeypatch.setattr(harvest.company_fetch, "afetch_company", afetch)
+
+
+def _hydrates(monkeypatch, hydrate):
+    """The posting hydration answering `hydrate(job, company)`."""
+    async def ahydrate(job, company=None):
+        return hydrate(job, company)
+    monkeypatch.setattr(harvest.company_fetch, "ahydrate_description", ahydrate)
+
+
 # ── store: concurrency ──────────────────────────────────────────────────────
 
 def test_connect_uses_wal_and_busy_timeout(tmp_path):
@@ -205,21 +228,17 @@ def test_harvest_board_stores_hydrates_and_closes(tmp_path, monkeypatch):
                             "title": "Gone", "track": "local",
                             "resume_fit_score": 0.4})
     board = [_job(1, "already has a body"), _job(2)]
-    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
+    _fetches(monkeypatch, lambda comp: board)
 
     def fake_hydrate(job, company=None):
         job["description"] = "fetched body"
         return job
-    monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
-                        fake_hydrate)
-    ticks = []
-    stats = harvest.harvest_board(c, db, progress=lambda: ticks.append(1),
-                                  delay=0, hydrate=True)
+    _hydrates(monkeypatch, fake_hydrate)
+    stats = _harvest_board(c, db, delay=0, hydrate=True)
 
     assert stats["err"] is None
     assert (stats["fetched"], stats["new"], stats["hydrated"],
             stats["closed"]) == (2, 2, 1, 1)
-    assert len(ticks) == 2                   # listing + one hydrated row
     rows = {r["job_id"]: dict(r) for r in
             conn.execute("SELECT * FROM jobs")}
     assert rows["gh_acme_old"]["status"] == "closed"
@@ -242,8 +261,8 @@ def test_harvest_board_fetch_error_leaves_store_alone(tmp_path, monkeypatch):
 
     def boom(comp):
         raise RuntimeError("503")
-    monkeypatch.setattr(harvest, "fetch_whole_board", boom)
-    stats = harvest.harvest_board(c, db, delay=0)
+    _fetches(monkeypatch, boom)
+    stats = _harvest_board(c, db, delay=0)
     assert stats["err"] == "fetch: RuntimeError: 503" and stats["fetched"] == 0
     assert conn.execute("SELECT status FROM jobs").fetchone()[0] == "open"
     assert store.get_company(conn, c["id"])["last_harvested_at"] is None
@@ -259,14 +278,13 @@ def test_harvest_board_store_error_is_not_reported_as_a_fetch_error(
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme")
-    monkeypatch.setattr(harvest, "fetch_whole_board",
-                        lambda comp: [{"id": "gh_acme_1", "title": "T",
-                                       "url": "u", "location": "Durham, NC"}])
+    _fetches(monkeypatch, lambda comp: [{"id": "gh_acme_1", "title": "T",
+                                         "url": "u", "location": "Durham, NC"}])
 
-    def locked(_path):
+    def locked(*a, **kw):
         raise sqlite3.OperationalError("database is locked")
-    monkeypatch.setattr(harvest.store, "connect", locked)
-    stats = harvest.harvest_board(c, db, delay=0)
+    monkeypatch.setattr(harvest.store, "upsert_job", locked)
+    stats = _harvest_board(c, db, delay=0)
     assert stats["err"] == "store: OperationalError: database is locked"
     assert stats["fetched"] == 1, "the board WAS fetched; only the write failed"
 
@@ -280,15 +298,17 @@ def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(
     c = _company(conn, "Acme", ats="workday", wd_tenant="acme", wd_pod=5,
                  wd_site="Ext")
     board = [_job(i) for i in range(40)]
-    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
+    _fetches(monkeypatch, lambda comp: board)
     calls = []
-    monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
-                        lambda j, company=None: calls.append(j) or j)  # never a body
+    _hydrates(monkeypatch, lambda j, company: calls.append(j) or j)  # never a body
     naps = []
-    monkeypatch.setattr(harvest.time, "sleep", lambda s: naps.append(s))
-    stats = harvest.harvest_board(c, db, delay=0, backoff_s=7, hydrate=True)
-    # One streak -> pause -> second streak -> stop. 2 * MISS_STREAK calls.
-    assert len(calls) == 2 * harvest.MISS_STREAK
+
+    async def nap(s):
+        naps.append(s)
+    monkeypatch.setattr(harvest.asyncio, "sleep", nap)
+    stats = _harvest_board(c, db, delay=0, backoff_s=7, hydrate=True)
+    # One streak of 5 -> pause -> a second streak -> stop.
+    assert len(calls) == 2 * 5
     assert naps == [7]
     assert stats["hydrated"] == 0 and stats["unhydrated"] == 40
     assert stats["fetched"] == 40 and stats["new"] == 40   # still stored
@@ -306,7 +326,7 @@ def test_harvest_board_reuses_stored_bodies_and_caps_hydration(
                                 "title": "T", "description": "stored body",
                                 "harvested_at": "x"})
     board = [_job(i) for i in range(3 + 150)]       # all bodiless listings
-    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
+    _fetches(monkeypatch, lambda comp: board)
     monkeypatch.setattr(config, "HYDRATE_CAP_PER_RUN", 100)
     calls = []
 
@@ -314,9 +334,8 @@ def test_harvest_board_reuses_stored_bodies_and_caps_hydration(
         calls.append(j["id"])
         j["description"] = "fresh body"
         return j
-    monkeypatch.setattr(harvest.company_fetch, "hydrate_description",
-                        fake_hydrate)
-    stats = harvest.harvest_board(c, db, delay=0, hydrate=True)
+    _hydrates(monkeypatch, fake_hydrate)
+    stats = _harvest_board(c, db, delay=0, hydrate=True)
     assert not any(cid in calls for cid in ("gh_acme_0", "gh_acme_1", "gh_acme_2"))
     assert len(calls) == 100                         # the cap, not 150
     assert stats["hydrated"] == 100 and stats["unhydrated"] == 50
@@ -335,8 +354,8 @@ def test_harvest_board_keeps_a_resolved_location_over_a_placeholder(
     store.upsert_job(conn, {"job_id": "gh_acme_1", "company_id": c["id"],
                             "title": "Engineer 1", "location": "2 Locations"})
     store.store_body(conn, "gh_acme_1", "body", "Springfield, IL")
-    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: board)
-    harvest.harvest_board(c, db, delay=0)
+    _fetches(monkeypatch, lambda comp: board)
+    _harvest_board(c, db, delay=0)
     locs = dict(conn.execute("SELECT job_id, location FROM jobs"))
     assert locs == {"gh_acme_1": "Springfield, IL", "gh_acme_2": "Peoria, IL"}
 
@@ -347,8 +366,8 @@ def test_harvest_board_empty_snapshot_closes_nothing(tmp_path, monkeypatch):
     c = _company(conn, "Acme")
     store.upsert_job(conn, {"job_id": "gh_acme_old", "company_id": c["id"],
                             "title": "Still open", "track": "local"})
-    monkeypatch.setattr(harvest, "fetch_whole_board", lambda comp: [])
-    stats = harvest.harvest_board(c, db, delay=0)
+    _fetches(monkeypatch, lambda comp: [])
+    stats = _harvest_board(c, db, delay=0)
     assert stats["err"] is None and stats["closed"] == 0
     assert conn.execute("SELECT status FROM jobs").fetchone()[0] == "open"
 
@@ -372,11 +391,11 @@ def test_a_dead_board_is_told_apart_from_an_empty_one(tmp_path, monkeypatch):
     def dead(comp):
         return http.fetch_failed("Lever netherlands", "404 Client Error")
 
-    monkeypatch.setattr(harvest, "fetch_whole_board", empty)
-    quiet = harvest.harvest_board(c, db, delay=0)
+    _fetches(monkeypatch, empty)
+    quiet = _harvest_board(c, db, delay=0)
 
-    monkeypatch.setattr(harvest, "fetch_whole_board", dead)
-    gone = harvest.harvest_board(c, db, delay=0)
+    _fetches(monkeypatch, dead)
+    gone = _harvest_board(c, db, delay=0)
 
     assert quiet["fetched"] == gone["fetched"] == 0
     assert quiet["fetch_errors"] == 0
@@ -400,9 +419,8 @@ def test_harvest_board_soft_failure_keeps_the_count_and_records_a_miss(
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", ats="lever", total_job_count=9)
-    monkeypatch.setattr(harvest, "fetch_whole_board",
-                        lambda comp: http.fetch_failed("Acme board", "500"))
-    harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    _fetches(monkeypatch, lambda comp: http.fetch_failed("Acme board", "500"))
+    _harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
     row = store.get_company(conn, c["id"])
     assert row["total_job_count"] == 9, "the last known-good count survives"
     assert row["last_harvested_at"]
@@ -416,11 +434,10 @@ def test_harvest_board_promotes_to_board_dead_after_three_days(
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", ats="lever")
-    monkeypatch.setattr(harvest, "fetch_whole_board",
-                        lambda comp: http.fetch_failed("x", "500"))
-    harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    _fetches(monkeypatch, lambda comp: http.fetch_failed("x", "500"))
+    _harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
     c2 = store.get_company(conn, c["id"])
-    harvest.harvest_board(
+    _harvest_board(
         c2, db, delay=0,
         now=harvest.datetime(2026, 1, 1) + harvest.timedelta(
             days=HARVEST_DEAD_AFTER_DAYS))
@@ -440,10 +457,9 @@ def test_harvest_board_buries_a_second_definitive_404(tmp_path, monkeypatch,
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme", ats=ats)
-    monkeypatch.setattr(harvest, "fetch_whole_board",
-                        lambda comp: http.fetch_failed("Acme", "HTTP 404"))
-    harvest.harvest_board(c, db, delay=0)
-    harvest.harvest_board(store.get_company(conn, c["id"]), db, delay=0)
+    _fetches(monkeypatch, lambda comp: http.fetch_failed("Acme", "HTTP 404"))
+    _harvest_board(c, db, delay=0)
+    _harvest_board(store.get_company(conn, c["id"]), db, delay=0)
     row = store.get_company(conn, c["id"])
     assert (row["miss_reason"], row["active"]) == (
         ("board-dead:greenhouse", 0) if dead else ("fetch-error:harvest", 1))
@@ -468,14 +484,13 @@ def test_crawl_buries_a_second_definitive_404(db, local_track, ats, dead):
 
 def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
                                                              monkeypatch):
-    """The count is per-thread, and a worker thread runs one board."""
+    """The count is per task, and a host's task runs one board at a time."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Acme")
-    monkeypatch.setattr(harvest, "fetch_whole_board",
-                        lambda comp: http.fetch_failed("x", "boom"))
-    assert harvest.harvest_board(c, db, delay=0)["fetch_errors"] == 1
-    assert harvest.harvest_board(c, db, delay=0)["fetch_errors"] == 1
+    _fetches(monkeypatch, lambda comp: http.fetch_failed("x", "boom"))
+    assert _harvest_board(c, db, delay=0)["fetch_errors"] == 1
+    assert _harvest_board(c, db, delay=0)["fetch_errors"] == 1
 
 
 # ── snapshot completeness ───────────────────────────────────────────────────
@@ -502,7 +517,7 @@ def test_harvest_board_partial_fetch_stores_rows_but_closes_nothing(
              "externalPath": f"/job/x/{i}"} for i in (1, 2)]})
 
     serve(reply)
-    stats = harvest.harvest_board(c, db, delay=0)
+    stats = _harvest_board(c, db, delay=0)
     assert stats["err"] is None
     assert stats["fetch_errors"] == 1 and stats["incomplete"] is True
     assert "non-JSON response" in stats["last_error"]
@@ -544,12 +559,12 @@ def test_harvest_board_capped_snapshot_never_closes(tmp_path, monkeypatch):
         pass_n["i"] += 1
         return [_job("flaky")] if pass_n["i"] == 1 else [_job("new")]
 
-    monkeypatch.setattr(harvest, "fetch_whole_board", capped_fetch)
+    _fetches(monkeypatch, capped_fetch)
 
     # Pass 1: the board hands back "flaky" only. "keep" -- absent -- stays
     # open: a capped snapshot's window proves nothing about a row it
     # didn't include.
-    s1 = harvest.harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
+    s1 = _harvest_board(c, db, delay=0, now=harvest.datetime(2026, 1, 1))
     assert s1["capped"] is True and s1["capped_total"] == 50
     assert s1["closed"] == 0
     assert conn.execute(
@@ -560,7 +575,7 @@ def test_harvest_board_capped_snapshot_never_closes(tmp_path, monkeypatch):
     # third row, "new", keeps the snapshot non-empty) -- STILL capped, so
     # neither one closes even though "keep" has now missed twice running.
     c2 = store.get_company(conn, c["id"])
-    s2 = harvest.harvest_board(c2, db, delay=0, now=harvest.datetime(2026, 1, 2))
+    s2 = _harvest_board(c2, db, delay=0, now=harvest.datetime(2026, 1, 2))
     assert s2["capped"] is True
     rows = {r["job_id"]: r["status"] for r in conn.execute(
         "SELECT job_id, status FROM jobs WHERE company_id=?", (c["id"],))}
@@ -591,21 +606,62 @@ def test_run_reports_and_skips_fresh_boards(tmp_path, monkeypatch):
                     board_fn=make_board_fn(before=pull, fetched=3, new=2,
                                            hydrated=1, secs=0.1))
     assert sorted(pulled) == ["A", "B"]
-    assert (s["boards"], s["ok"], s["err"], s["stalled"]) == (3 - 1, 1, 1, 0)
+    assert (s["boards"], s["ok"], s["err"], s["abandoned"]) == (3 - 1, 1, 1, 0)
     assert s["fetched"] == 3 and s["new"] == 2
 
 
-def test_run_abandons_a_stalled_board(tmp_path):
+def test_run_budget_cancels_the_pass(tmp_path, capsys):
+    """Past the budget the walks are cancelled: the board mid-fetch is named
+    and abandoned, the one queued behind it on its host never starts, and
+    another host's finished board is kept."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    _company(conn, "Wedged")
-    release = threading.Event()
-    # Blocks, and never calls progress() at all.
-    board_fn = make_board_fn(before=lambda company: release.wait(5))
-    s = harvest.run(db_path=db, max_workers=1, board_fn=board_fn,
-                    stall_s=0.0, poll_s=0.1)
-    release.set()
-    assert s["stalled"] == 1 and s["ok"] == 0
+    _company(conn, "Wedged", total_job_count=9)
+    _company(conn, "Queued", total_job_count=1)
+    _company(conn, "Quick", ats="lever")
+    pulled = []
+
+    async def pull(company):
+        pulled.append(company["name"])
+        if company["name"] == "Wedged":
+            await asyncio.sleep(5)
+    s = harvest.run(db_path=db, board_fn=make_board_fn(before=pull),
+                    max_hours=0.3 / 3600, triage=False)
+    assert sorted(pulled) == ["Quick", "Wedged"]
+    assert (s["ok"], s["abandoned"]) == (1, 1)
+    assert "Wedged (greenhouse): run out of time - abandoned" in capsys.readouterr().out
+
+
+def test_a_silent_board_is_cut_off_and_closes_nothing(tmp_path, serve, monkeypatch,
+                                                      capsys):
+    """A listing that trickles (slower than the stall bound, never an error)
+    cuts its board off as the budget would: nothing stored or closed, and
+    the next board on its host runs. Progress restarts the bound: that
+    board's four detail GETs together outlast it."""
+    monkeypatch.setattr(config, "HYDRATE_DELAY_S", 0)
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    stuck = _company(conn, "Stuck", total_job_count=9)
+    _company(conn, "Steady", total_job_count=1)
+    store.upsert_job(conn, {"job_id": "gh_stuck_1", "company_id": stuck["id"],
+                            "title": "Old"})
+    listing = {"jobs": [{"id": i, "title": f"Engineer {i}", "location": {"name": "Durham, NC"},
+                         "absolute_url": f"https://boards.greenhouse.io/steady/jobs/{i}"}
+                        for i in range(4)]}
+
+    async def trickle(url, **kw):
+        await asyncio.sleep(30)
+
+    async def detail(url, **kw):
+        await asyncio.sleep(0.25)
+        return fake_response({"content": "A body"})
+    serve({"/stuck/": trickle, "/steady/jobs/": detail, "/steady/": fake_response(listing)})
+    s = http.run_sync(harvest.apass(db, hydrate=True, stall_s=0.6))
+    assert (s["ok"], s["abandoned"], s["hydrated"]) == (1, 1, 4)
+    assert "Stuck (greenhouse): no progress in 0.6s - abandoned" in capsys.readouterr().out
+    assert dict(conn.execute("SELECT job_id, status FROM jobs WHERE company_id=?",
+                             (stuck["id"],))) == {"gh_stuck_1": "open"}
+    assert store.get_company(conn, stuck["id"])["last_harvested_at"] is None
 
 
 def _ctrl_c():
@@ -628,6 +684,7 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
     reresolve log: requests after the KeyboardInterrupt)."""
     lock, flying, cancelled = threading.Lock(), [], []
     started, ran = [], []
+    urls = {}
 
     async def hang(url, **kw):
         flying.append(url)
@@ -641,26 +698,33 @@ def test_ctrl_c_mid_wait_never_starts_the_queued_work(tmp_path, entry, serve):
 
     serve(hang)
 
-    def work(name):
+    def begin(name):
         with lock:
             started.append(name)
-            queued = len(started) > 2
-        if queued:
-            ran.append(name)
-        else:
-            http.SESSION.get(f"https://{name.replace(' ', '')}.test/")
+            if len(started) > 2:
+                ran.append(name)
+            else:
+                urls[name] = f"https://{name.replace(' ', '')}.test/"
+        return urls.get(name)
+
+    def work(name):
+        if begin(name):
+            http.SESSION.get(urls[name])
         return []
+
+    async def awork(company):           # harvest.run's board, on the loop
+        if begin(company["name"]):
+            await http.send("GET", urls[company["name"]])
 
     names = [f"Board {i}" for i in range(8)]
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    for n in names:
-        _company(conn, n)
+    for i, n in enumerate(names):       # two hosts: two walks at a time
+        _company(conn, n, ats="lever" if i % 2 else "greenhouse")
     conn.close()
     run = {
         "harvest.run": lambda: harvest.run(
-            db_path=db, max_workers=2, poll_s=5.0, triage=False,
-            board_fn=make_board_fn(before=lambda c: work(c["name"]))),
+            db_path=db, triage=False, board_fn=make_board_fn(before=awork)),
         "drain": lambda: parallel.drain(names, work, lambda f, n: None,
                                         lambda n: None, max_workers=2),
         "fan_out": lambda: list(parallel.fan_out(names, work, max_workers=2)),

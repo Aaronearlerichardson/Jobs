@@ -133,7 +133,9 @@ def run_sync(coro):
     RuntimeError: run_sync on the network loop: await the coroutine instead
 
     The task's exception is raised here, and anything else that ends the
-    wait (Ctrl+C) cancels the task.
+    wait (Ctrl+C) cancels the task and raises once it has unwound (10 s at
+    most; a second Ctrl+C stops the wait): its finally blocks, a store
+    batch rolling back, run before this thread moves on.
 
     Notes:
         A ContextVar set inside the task changes the copy, never this
@@ -169,6 +171,7 @@ def run_sync(coro):
     except BaseException:
         if not done.done():
             loop.call_soon_threadsafe(_cancel, (me,))
+            concurrent.futures.wait([done], timeout=10)
         raise
 
 
@@ -689,7 +692,7 @@ def fetch_failures():
 def reset_fetch_failures():
     """Start this context's fetch accounting from zero: the failure count,
     the last-failure message, and the capped marker. One call per fetch
-    attempt, where it runs (crawl.harvest.harvest_board,
+    attempt, where it runs (crawl.harvest.aharvest_board,
     net.parallel.fetch_all)."""
     _ACCOUNT.set(_Account())
 

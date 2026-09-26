@@ -224,8 +224,9 @@ def main(argv=None):
     ap.add_argument("--max-hours", type=float,
                     help="Abandon whatever is still running after this long")
     ap.add_argument("--workers", type=int, default=None,
-                    help="Boards in flight at once (default: n_cpus-1, "
-                         "or HARVEST_WORKERS)")
+                    help="Workers of the triage, verify and closed-URL steps "
+                         "(default: n_cpus-1, or HARVEST_WORKERS); the pull "
+                         "runs every host at once, one board at a time each")
     ap.add_argument("--hydrate", action="store_true",
                     help="Fetch every posting's description during the pull "
                          "(default: triage fetches only the rows that pass "
@@ -267,8 +268,6 @@ def main(argv=None):
         print("  [!] another harvester holds the lock; exiting")
         return 0
 
-    stalled = [0]
-
     def one_pass(scheduled=None):
         # Captured before session_log.start() so a slow log-file open (or
         # the [!] print it enables below) is never counted as lateness.
@@ -281,13 +280,12 @@ def main(argv=None):
             if warning:
                 print(f"  {warning}")
             try:
-                summary = harvest.run(
+                harvest.run(
                     db_path=args.db, only=only, names=args.names,
                     min_age_hours=min_age, limit=args.limit,
                     max_workers=args.workers or harvest.DEFAULT_WORKERS,
                     hydrate=args.hydrate, max_hours=args.max_hours,
                     triage=not args.no_triage, score_cap=args.score_cap)
-                stalled[0] += summary["stalled"]
             except Exception:
                 # Put the traceback in the session log while it is still
                 # open: the console shows it too, but the window scrolls and
@@ -307,21 +305,15 @@ def main(argv=None):
         finally:
             session_log.finish()
 
-    stopped = False
     try:
         if args.once:
             one_pass()
         else:
             run_forever(one_pass, args.every)
     except KeyboardInterrupt:
+        # The pass has already unwound (harvest.run): its committed boards
+        # stay, the one being written rolled back, none queued started.
         print("\n  stopped")
-        stopped = True
-    if stalled[0] or stopped:
-        # Abandoned boards, and the ones Ctrl+C left running, still own a
-        # thread that a normal exit would wait on. The logs are closed and
-        # what a board has not committed rolls back (SQLite), so leave.
-        sys.stdout.flush()
-        os._exit(0)
     return 0
 
 

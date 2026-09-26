@@ -1,13 +1,15 @@
 """
 The store's physical layer: the SQLite schema, the additive migrations that
 bring an older file up to date, and the connection/transaction helpers
-(connect, batch). No roster or job semantics live here; the
+(connect, batch, Writer). No roster or job semantics live here; the
 functions that read and write rows are in src.store, which re-exports
 everything below so callers keep saying ``store.connect``.
 """
 
+import asyncio
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from src import config
 from src import tags
@@ -463,6 +465,98 @@ class batch:
         finally:
             _WRITE_LOCK.release()
         return False
+
+
+class Writer:
+    """`async with Writer(path) as db`: a store connection (`connect(path)`)
+    on a thread of its own for the block.
+
+    `await db.run(fn, ...)` is `fn(conn, ...)` on that thread, and
+    `await db.batch(fn, ...)` the same inside one `batch` transaction. The
+    calls run one at a time, in the order asked. A caller cancelled while
+    its call waits never starts it; one cancelled while its batch runs
+    has the batch rolled back.
+
+    >>> from src.net import http
+    >>> from src.store import job_exists, upsert_job
+    >>> async def demo():
+    ...     async with Writer(":memory:") as db:
+    ...         await db.batch(upsert_job, {"job_id": "w1", "title": "T"})
+    ...         return await db.run(job_exists, "w1")
+    >>> http.run_sync(demo())
+    True
+
+    Notes:
+        The store for async code: a sqlite3 connection belongs to the
+        thread that opened it, and each call blocks, so a coroutine never
+        holds one. A pass's writes queue here rather than on the busy
+        timeout; other processes keep their own connections.
+    """
+
+    def __init__(self, path=None):
+        self.path = path
+        self._thread = ThreadPoolExecutor(1, thread_name_prefix="store")
+        self._conn = self._queue = self._drainer = None
+
+    async def __aenter__(self):
+        loop = asyncio.get_running_loop()
+        try:
+            self._conn = await loop.run_in_executor(self._thread, connect, self.path)
+        except BaseException:
+            self._thread.shutdown(wait=False)
+            raise
+        self._queue = asyncio.Queue()
+        self._drainer = asyncio.create_task(self._drain())
+        return self
+
+    async def __aexit__(self, *exc):
+        self._queue.put_nowait(None)
+        try:
+            await self._drainer
+            await asyncio.get_running_loop().run_in_executor(self._thread, self._conn.close)
+        finally:
+            self._thread.shutdown(wait=False)
+
+    def run(self, fn, *args, **kw):
+        """`fn(conn, *args, **kw)` on the store's thread (a coroutine)."""
+        return self._ask(False, fn, args, kw)
+
+    def batch(self, fn, *args, **kw):
+        """`run`, inside one `batch` transaction."""
+        return self._ask(True, fn, args, kw)
+
+    async def _ask(self, whole, fn, args, kw):
+        asked = asyncio.get_running_loop().create_future()
+
+        def call():
+            if not whole:
+                return fn(self._conn, *args, **kw)
+            with batch(self._conn):
+                got = fn(self._conn, *args, **kw)
+                # A read of the asker's state, no more: its cancel lands
+                # before the commit (rolled back) or after it (kept).
+                if asked.cancelled():
+                    raise RuntimeError("its caller was cancelled: rolled back")
+            return got
+        self._queue.put_nowait((asked, call))
+        return await asked
+
+    async def _drain(self):
+        """Run the queued calls on the store's thread, one at a time, until
+        the None that ends the block."""
+        loop = asyncio.get_running_loop()
+        while (item := await self._queue.get()) is not None:
+            asked, call = item
+            if asked.cancelled():
+                continue
+            try:
+                got = await loop.run_in_executor(self._thread, call)
+            except Exception as e:
+                if not asked.done():
+                    asked.set_exception(e)
+            else:
+                if not asked.done():
+                    asked.set_result(got)
 
 
 def dedup_groups(conn, table, id_col, groups, rank, describe, merge=None):

@@ -46,12 +46,12 @@ def pool(max_workers, name=""):
     Notes:
         A running item cannot be interrupted between requests: it runs on
         its thread until its next request raises CancelledError, and the
-        interpreter's exit waits for it (harvest.py leaves through os._exit
-        instead). `with ThreadPoolExecutor()` joins on the way out, and the
-        stdlib worker runs every QUEUED item before it looks at the
-        shutdown flag; harvest.run and drain_or_abandon cancelled their
-        queue only after a loop that ended normally, so Ctrl+C left the
-        whole queue running (2026-09-17 reresolve log).
+        interpreter's exit waits for it. `with ThreadPoolExecutor()`
+        joins on the way out, and the stdlib worker runs every QUEUED
+        item before it looks at the shutdown flag; harvest.run and
+        drain_or_abandon cancelled their queue only after a loop that
+        ended normally, so Ctrl+C left the whole queue running
+        (2026-09-17 reresolve log).
     """
     workers = []        # a list: a worker may start while abandon reads it
     ex = ThreadPoolExecutor(max_workers=max(1, max_workers),

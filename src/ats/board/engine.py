@@ -62,7 +62,7 @@ from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
-                          hashed_cache_path, json_cache_get, json_cache_put)
+                          hashed_cache_path, json_cache_get, json_cache_put, origin_of)
 
 from . import decode, fields, pager
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
@@ -352,6 +352,23 @@ class Board:
         parts = dict(zip(self._part_names, str(handle).split(self._sep)))
         parts.update(_VARIANTS.get((self.name, str(handle)), {}))
         return parts
+
+    def origin(self, company):
+        """The origin a store row's listing is read from; "" where the row
+        alone does not name it (an empty column, or a `handle.try` or
+        `handle.follow` part not settled yet that the origin holds).
+
+        >>> BOARDS["workday"].origin({"wd_tenant": "acme", "wd_pod": 5, "wd_site": "Ext"})
+        'https://acme.wd5.myworkdayjobs.com'
+        """
+        handle = self.handle(company)
+        if not (handle and self.listing_spec):
+            return ""
+        parts = self._parts(handle)
+        # The unsettled parts filled two ways: an origin they move is unknown.
+        a, b = (origin_of(fields.fmt(self.listing_spec.url, lambda k: parts.get(k) or fill))
+                for fill in "ab")
+        return a if a == b else ""
 
     def job_ref(self, url, company=None):
         """The named parts a stored posting URL carries, or None when the

@@ -15,7 +15,7 @@ store``; ``store.X``) and holds no code of its own. Five seams live in
 sibling modules and are re-exported below, so no caller has to know which
 file a name is in:
 
-  * schema      the SQLite schema, migrations, connect/batch
+  * schema      the SQLite schema, migrations, connect/batch/Writer
   * companies   the roster: company rows, misses, board identity and
                 dedup, roster CRUD, crawl scheduling (dormancy)
   * jobs        postings: track membership, upsert/dedup, the harvest
@@ -63,5 +63,5 @@ from .review import (  # noqa: F401
     blocked_name_keys,
 )
 from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
-    BUSY_TIMEOUT_S, connect, batch, _ensure_columns,
+    BUSY_TIMEOUT_S, Writer, connect, batch, _ensure_columns,
 )

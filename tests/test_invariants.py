@@ -354,8 +354,9 @@ def test_doctests_actually_exist():
 POOL_OWNERS = {
     "src/net/parallel.py":
         "owns the shared primitives",
-    "src/crawl/harvest.py":
-        "its own FIRST_COMPLETED watchdog, with a per-pass wall-clock budget",
+    "src/store/schema.py":
+        "the async store's one thread: a sqlite3 connection lives on the thread "
+        "that opened it",
     "src/discovery/resolve/fetchpool.py":
         "per-run candidate-URL memo; the pool is part of the cache",
     "src/net/http.py":
@@ -368,7 +369,7 @@ POOL_OWNERS = {
 #: so an import alias cannot hide one).
 _POOL_RE = re.compile(r"\bThreadPoolExecutor\(|\bpool\(")
 _RAW_RE = re.compile(r"\b(Thread|Process)PoolExecutor\b")
-RAW_POOLS = {"src/net/parallel.py", "src/net/http.py"}
+RAW_POOLS = {"src/net/parallel.py", "src/net/http.py", "src/store/schema.py"}
 
 
 def test_thread_pools_go_through_net_parallel():

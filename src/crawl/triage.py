@@ -86,7 +86,7 @@ from src.ats.board.company import needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, score_resume_fit
 from src.crawl import harvest
-from src.crawl.harvest import MISS_BACKOFF_S, _hydrate_rows
+from src.crawl.harvest import MISS_BACKOFF_S, hydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
@@ -354,7 +354,7 @@ def summarize(verdicts):
 
 def _fetcher_shape(row, company):
     """A stored row as the job dict board.company.hydrate_description
-    expects (`_hydrate_rows` passes it the roster row, which names the
+    expects (`hydrate_rows` passes it the roster row, which names the
     board)."""
     return {"id": row["job_id"], "job_id": row["job_id"],
             "title": row.get("title") or "", "url": row.get("url") or "",
@@ -363,12 +363,11 @@ def _fetcher_shape(row, company):
             "ats": company.get("ats"), "_row": row}
 
 
-def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S,
-                    progress=lambda: None):
+def hydrate_company(company, jobs, delay=None, backoff_s=MISS_BACKOFF_S):
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats."""
     stats = {"hydrated": 0, "unhydrated": 0}
-    _hydrate_rows(jobs, company, stats, progress, delay, backoff_s)
+    hydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
 
 
@@ -447,7 +446,7 @@ def _hydrate_order(survivors):
     test_hydration_spends_the_board_budget_on_relevant_titles_first.
 
     Notes:
-        The per-host detail budget (harvest._hydrate_rows' cap and
+        The per-host detail budget (harvest.ahydrate_rows' cap and
         miss-streak breaker) used to be spent in arrival order within the
         decided/undecided split. At a multi-division employer only the
         division gate can refuse a chip-design seat, and that gate needs a
@@ -541,7 +540,7 @@ def _hydrate(conn, companies, survivors, summary, stamp, max_workers,
                 waiting[j["id"]] = "fetch failed this pass"
             else:
                 # Never reached hydrate_description at all: the board's
-                # per-host cap or miss-streak breaker (harvest._hydrate_rows)
+                # per-host cap or miss-streak breaker (harvest.ahydrate_rows)
                 # cut it from this pass's batch.
                 waiting[j["id"]] = "not reached this pass (board hydrate cap/pause)"
     print(f"  hydrated {summary['hydrated']} of {n_todo}")

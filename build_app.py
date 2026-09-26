@@ -339,13 +339,10 @@ def build_command(name=None):
     if name == "harvest":
         cmd += [f"--noinclude-custom-mode={p}:error" for p in HARVEST_FORBID]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_LAZY]
-        # Ctrl+C in the harvester's console reaches the compiled child as a
-        # KeyboardInterrupt: harvest.py cancels the boards not yet started,
-        # closes its session log and leaves through os._exit, never waiting
-        # on a running board. The onefile launcher's default grace time
-        # (5000 ms) hard-killed the child mid-commit back when that exit
-        # still waited on in-flight fetches (config.FETCH_TIMEOUT, up to
-        # 30 s each); 35 s keeps the margin.
+        # Ctrl+C in the harvester's console cancels the pass, which unwinds
+        # in about a second. The grace stays 35 s, not the launcher's 5 s
+        # default: an unwind waiting on another process's write lock (the
+        # store's 30 s busy timeout) must not be killed mid-rollback.
         cmd += ["--onefile-child-grace-time=35000"]
         cmd += [f"--include-data-files={src}={dst}" for src, dst in DATA_FILES
                 if not src.startswith("src/web/")]

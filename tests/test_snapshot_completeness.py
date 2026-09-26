@@ -24,7 +24,7 @@ NC_RE = re.compile(r"\bNC\b|North Carolina", re.I)
 
 @pytest.fixture(autouse=True)
 def fresh_accounting():
-    """One fetch attempt per test, as fetch_all / harvest_board run it."""
+    """One fetch attempt per test, as fetch_all / aharvest_board run it."""
     http.reset_fetch_failures()
 
 

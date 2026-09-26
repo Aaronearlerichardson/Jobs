@@ -44,7 +44,7 @@ def needs_detail(job):
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
     that the posting's engine can fill (`Board.needs_detail`). Shared by
-    harvest._hydrate_rows and triage._hydrate, which both select rows to
+    harvest.ahydrate_rows and triage._hydrate, which both select rows to
     fetch by this predicate rather than "no description" alone.
 
     >>> needs_detail({"description": "", "ats": "greenhouse"})

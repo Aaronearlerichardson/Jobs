@@ -399,7 +399,7 @@ def company_row(conn, name, ats="greenhouse", **extra):
 
 def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
                   closed=0, reopened=0, secs=0.0, **extra):
-    """A stand-in for `harvest.harvest_board`, for tests of `harvest.run`.
+    """A stand-in for `harvest.aharvest_board`, for tests of `harvest.run`.
 
     `run()` reads a fixed set of keys off whatever board_fn hands back, and
     eight tests across two files had each spelled that dict out by hand — so
@@ -408,11 +408,12 @@ def make_board_fn(*, before=None, err=None, fetched=0, new=0, hydrated=0,
 
     `extra` carries the optional keys only some callers set (fetch_errors,
     last_error). `before(company)` runs before the dict is returned, for the
-    tests that need the call recorded, blocked, or raised from.
+    tests that need the call recorded, blocked, or raised from; what it
+    returns is awaited when it is awaitable.
     """
-    def board_fn(company, db_path, progress=lambda: None, hydrate=True):
-        if before is not None:
-            before(company)
+    async def board_fn(company, db, hydrate=True, progress=None):
+        if before is not None and inspect.isawaitable(got := before(company)):
+            await got
         return {"err": err, "fetched": fetched, "new": new,
                 "hydrated": hydrated, "closed": closed, "reopened": reopened,
                 "secs": secs, **extra}

@@ -713,14 +713,16 @@ python run_scraper.py --triage --limit 500 --score-cap 50
 python harvest.py --once --hydrate        # the old whole-board hydration
 ```
 
-Listings alone take a while at polite pacing; boards run concurrently
-(`--workers`, `HARVEST_WORKERS`), cheapest ATSes first, and a board with no
-progress for 15 minutes is abandoned. Bodies already in the store are never
-fetched twice, so each pass advances the roster. Some hosts close the
-connection after roughly 150 detail requests, so triage fetches at most 100
-bodiless rows per board per pass, a second apart (`HYDRATE_CAP_PER_RUN` and
-`HYDRATE_DELAY_S` in `src/config/policy.py`), and leaves the rest for the
-next one.
+Listings alone take a while at polite pacing; every host runs at once, each
+walking its own boards one at a time, largest first, and `--max-hours` caps
+the pass (Ctrl+C or the cap keeps what was stored and starts nothing new); a
+board with no progress for 15 minutes is abandoned. `--workers`
+(`HARVEST_WORKERS`) sizes triage's pools. Bodies already in the store are
+never fetched twice, so each pass advances the roster. Some hosts
+close the connection after roughly 150 detail requests, so triage fetches at
+most 100 bodiless rows per board per pass, a second apart
+(`HYDRATE_CAP_PER_RUN` and `HYDRATE_DELAY_S` in `src/config/policy.py`), and
+leaves the rest for the next one.
 
 By default the process stays up and runs a pass every 12 hours (`--every`;
 `--once` for a single pass). Between passes it parks on a timed wait, which
