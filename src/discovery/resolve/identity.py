@@ -10,6 +10,7 @@ scanning probes and the web-search resolver, so it depends on nothing in
 this package.
 """
 
+import asyncio
 import re
 import sys
 
@@ -17,7 +18,8 @@ from src import config
 from src.ats.board import BOARDS
 from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
-from src.net.http import HEADERS, SESSION
+from src.net import http
+from src.net.http import HEADERS
 
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
@@ -150,7 +152,7 @@ def _affinity(name, parts):
     return False
 
 
-def foreign_board(name, ats, handle):
+async def foreign_board(name, ats, handle):
     """True when `handle`, a board of `ats` detected for `name`, should NOT
     be attributed to it: `ats`'s spec says a board can be a parent
     company's (`discovery.shared`), the handle's parts share no identity
@@ -174,13 +176,13 @@ def foreign_board(name, ats, handle):
                    else str(handle).split(board.spec.handle.sep))
     if not words or _affinity(name, words):
         return False
-    from src.claude.api import board_is_own
-    own = board_is_own(name, words[0], " ".join(words[1:]))
+    from src.claude.api import aboard_is_own
+    own = await aboard_is_own(name, words[0], " ".join(words[1:]))
     # Announce each (name, board) verdict ONCE — the sniff scans many
     # candidate URLs that embed the same board link, and the 2026-08-28
     # discover log repeated the same skip line 3x per company. Single write,
-    # not print(): this runs on sniff worker threads, and print()'s separate
-    # text/newline writes let another thread splice its line into this one.
+    # not print(): print()'s separate text/newline writes let another
+    # thread splice its line into this one.
     key = (name, ats, words[0])
     if own is False:
         if key not in _FOREIGN_ANNOUNCED:
@@ -213,8 +215,8 @@ def foreign_board(name, ats, handle):
 # They had already come apart. The Workday probe built and scanned its own
 # list with neither the corroboration check nor the foreign-board check,
 # so a hit the sniffer rejected was accepted there; the docstring saying
-# "Same guards on both paths now" is the repair, made by hand, that this
-# generator makes structural.
+# "Same guards on both paths now" is the repair, made by hand, that
+# candidate_pages makes structural.
 
 
 def corroborated(url, name, text):
@@ -231,7 +233,7 @@ def corroborated(url, name, text):
     return not risky or _corroborates(text, name, risky)
 
 
-def candidate_responses(name, careers_url="", **kw):
+async def candidate_responses(name, careers_url="", **kw):
     """`name`'s candidate URLs paired with what each one answered, in
     candidate-priority order. `None` where a URL did not answer at all.
     `kw` goes to `candidate_urls` (patterns, cap).
@@ -251,22 +253,24 @@ def candidate_responses(name, careers_url="", **kw):
     urls = candidate_urls(name, careers_url, **kw)
     if not urls:
         return []
-    responses = _fetch_all(urls)
+    responses = await _fetch_all(urls)
     return [(u, responses.get(u)) for u in urls]
 
 
-def candidate_pages(name, careers_url="", **kw):
-    """Yield the responses from `name`'s candidate URLs, best first, with
-    the ones that did not answer and the ones that do not corroborate
-    already dropped. `kw` goes to `candidate_urls` (patterns, cap).
+async def candidate_pages(name, careers_url="", **kw):
+    """The responses from `name`'s candidate URLs, best first, with the
+    ones that did not answer and the ones that do not corroborate (judged
+    off the loop) already dropped. `kw` goes to `candidate_urls`
+    (patterns, cap).
 
     Priority order is the candidate list's, not completion order: the
     fetch runs in parallel but the walk does not, because the first hit
     wins and the precise domain must beat the generic guess.
     """
-    for url, r in candidate_responses(name, careers_url, **kw):
-        if r is not None and corroborated(url, name, r.text):
-            yield r
+    pairs = await candidate_responses(name, careers_url, **kw)
+    return await asyncio.to_thread(
+        lambda: [r for url, r in pairs
+                 if r is not None and corroborated(url, name, r.text)])
 
 
 # --------------------------------------------------------------------------- #
@@ -317,7 +321,7 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     return False
 
 
-def nc_hq_signal(name, careers_url="", board_jobs=None):
+async def anc_hq_signal(name, careers_url="", board_jobs=None):
     """
     True if the company has a verifiable NC presence — used to TRACK local
     companies that currently have no NC openings. Checks the board's job
@@ -343,10 +347,14 @@ def nc_hq_signal(name, careers_url="", board_jobs=None):
             continue
         seen.add(u)
         try:
-            r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
-                            allow_redirects=True)
-            if r.status_code == 200 and _hq_match_beyond_brand(r.text, name):
+            r = await http.send("GET", u, timeout=config.PROBE_TIMEOUT,
+                                headers=HEADERS, allow_redirects=True)
+            if r.status_code == 200 and await asyncio.to_thread(
+                    lambda: _hq_match_beyond_brand(r.text, name)):
                 return True
         except Exception:
             continue
     return False
+
+
+nc_hq_signal = http.sync_shim(anc_hq_signal)

@@ -16,7 +16,6 @@ and it closes live postings off a 403.
 
 import asyncio
 import re
-import threading
 import time
 from datetime import datetime, timedelta
 
@@ -29,7 +28,6 @@ from src.ats.board import closure as job_probe
 from src.ats.board import board_for
 from src import config
 from src.discovery.resolve import probes
-from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.ops import repair, roster, scoring, status
 import src.store as store
@@ -168,13 +166,11 @@ class TestFailureIsReportedNeverRaised:
         assert len(calls) == 1
 
 
-@pytest.mark.parametrize("hang", ["page", "thread"])
+@pytest.mark.parametrize("hang", ["page", "count"])
 def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     """discover-local 2026-09-22 sat 338s silent in the JS pass: one name's
     scrape has to give up, and not hand its hung page to the next name. A
-    scrape cut off while its thread waits on the loop (a board count)
-    keeps its slot until that thread returns, or such threads would pile
-    up in the loop's default executor."""
+    board count it waits on is cancelled, and its slot is free at once."""
     class Hung:
         """A browser whose one context's one page names a board."""
         url = "https://acme.wd5.myworkdayjobs.com/External"
@@ -195,19 +191,25 @@ def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
         async def close(self):
             self.closed += 1
 
-    counted = threading.Event()
+    ended = []
+
+    async def count(*_a):
+        try:
+            await asyncio.sleep(5)
+        finally:
+            ended.append(True)
+
     monkeypatch.setattr(config, "JS_PROBE_BUDGET_S", 0.1)
-    monkeypatch.setattr(probes, "foreign_board", lambda *_a: False)
-    monkeypatch.setattr(probes, "_scan_meta", lambda *_a: counted.wait(5))
+    monkeypatch.setattr(probes, "foreign_board", answer(False))
+    monkeypatch.setattr(probes, "_scan_meta", count)
     with probes.JsScanProbePool(1) as js:
         js._browser = browser = Hung()
         t0 = time.monotonic()
         assert js.probe("Acme") == (None, "budget exceeded")
         assert time.monotonic() - t0 < 0.5
         assert browser.closed == 1 and not js._idle
-        assert js._slots.locked() == (hang == "thread")
-        counted.set()
-        assert http.run_sync(asyncio.wait_for(js._slots.acquire(), 5))
+        assert not js._slots.locked()
+        assert ended == [True] * (hang == "count")
 
 
 class TestPruneNamesWhatItDeactivates:

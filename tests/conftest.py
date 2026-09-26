@@ -504,10 +504,10 @@ def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
 
 
 def answer(value):
-    """A coroutine function returning `value` whatever it is called with:
-    the stand-in for an awaited callee (src.claude.fit.acall_claude_json)."""
-    async def reply(*_a, **_kw):
-        return value
+    """A coroutine function standing in for an awaited callee: it returns
+    `value`, or, when `value` is callable, `value(*args, **kwargs)`."""
+    async def reply(*a, **kw):
+        return value(*a, **kw) if callable(value) else value
     return reply
 
 

@@ -10,6 +10,7 @@ the API with 973 identical requests over five minutes instead of stopping
 after the first.
 """
 
+import asyncio
 import logging
 import re
 
@@ -160,6 +161,28 @@ def test_each_model_family_gets_the_request_it_accepts():
         p = claude.build_payload("S", "U", 300, model=model, thinking=True, reply=_Ok)
         assert "thinking" not in p and "effort" not in p.get("output_config", {}), model
         assert p["max_tokens"] == 300, model
+
+
+async def test_a_cut_off_owner_check_still_keeps_its_verdict(monkeypatch):
+    """An asker cancelled mid-call (a JS scrape's budget) leaves the paid
+    call to finish; its verdict is kept, and the next asker makes none."""
+    calls, release = [], asyncio.Event()
+
+    async def call(*_a, **_kw):
+        calls.append(1)
+        await release.wait()
+        return claude.BoardOwnerReply(same_employer=False, reason="x")
+    monkeypatch.setattr(claude, "acall_claude_json", call)
+    first = asyncio.create_task(claude.aboard_is_own("Acme", "greenhouse:acme"))
+    while not calls:
+        await asyncio.sleep(0)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    assert await claude._BOARD_OWNER_CACHE["acme", "greenhouse:acme"] is False
+    assert await claude.aboard_is_own("Acme", "greenhouse:acme") is False
+    assert calls == [1]
 
 
 def test_an_invalid_reply_is_no_answer_named_once(api, capsys, monkeypatch):

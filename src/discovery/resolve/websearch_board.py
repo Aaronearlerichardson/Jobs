@@ -4,20 +4,21 @@ product-named domains -- 'Core Sound Imaging' -> corestudycast.com).
 
 Third and last step of board.resolve_board_sniff_first. Two guards
 keep a search result from becoming the wrong employer's board: job
-aggregators are skipped outright (_is_aggregator), and a hit is taken only
+aggregators are skipped outright (_AGGREGATOR_HOSTS), and a hit is taken only
 when its slug or host plausibly belongs to the name (_slug_matches_name /
 _host_matches_name), with the shared parent-board check
 (identity.foreign_board).
 """
 
+import asyncio
 import re
 
 from src import config
 from src.ats.board import BOARDS
 from src.ats.signatures import detect, pack
 from src.match.names import name_key
-from src.net import ddg
-from src.net.http import HEADERS, SESSION
+from src.net import ddg, http
+from src.net.http import HEADERS
 from .identity import foreign_board
 
 # Job aggregators / company-directory sites: they rank highly for
@@ -42,10 +43,6 @@ _AGGREGATOR_HOSTS = tuple(
 #: The vendor terms the first board query ORs together: every spec's
 #: `discovery.hint`, in position order.
 _HINT = " OR ".join(t for _, t in sorted(p for b in BOARDS.values() for p in b.spec.discovery.hint))
-
-
-def _is_aggregator(url):
-    return any(h in url.lower() for h in _AGGREGATOR_HOSTS)
 
 
 # Generic words that don't distinguish a company's domain — excluded when
@@ -89,11 +86,11 @@ def _slug_matches_name(slug, name):
     return any(len(t) >= 3 and (s in t or t in s) for t in tokens)
 
 
-def _websearch_board(name, max_results=8):
+async def awebsearch_board(name, max_results=8):
     """Find a company's board via web search when domain-guessing fails
     (gov/org domains, acronyms, or product-named domains — e.g. 'Core Sound
     Imaging' -> corestudycast.com). Returns the sniff_ats result shape, or
-    None.
+    None. Each fetched result page is read off the loop.
 
     Two improvements over a plain '"<name>" careers' search, which is
     dominated by LinkedIn/Indeed and rarely surfaces the real board:
@@ -102,17 +99,9 @@ def _websearch_board(name, max_results=8):
       2. aggregators are skipped and self-hosted *custom* boards accepted,
          not just JSON-API ATSes.
     """
-    from src.ats.board.custom import custom_board_listing_url
+    from src.ats.board.custom import acustom_board_listing_url
 
-    def _search(query):
-        out = []
-        for r in ddg.search(query, max_results=max_results):
-            u = r.get("href") or r.get("url")
-            if u and not _is_aggregator(u):
-                out.append(u)
-        return out
-
-    def _resolve(urls):
+    async def _resolve(urls):
         # Pass 1: ATS coordinates already visible in a result URL
         # (myworkdayjobs.com / boards.greenhouse.io / *.icims.com links).
         # The slug must match the name — a bare board link from search has no
@@ -126,14 +115,15 @@ def _websearch_board(name, max_results=8):
         # an embedded ATS or a self-hosted board with genuine job links.
         for u in urls[:5]:
             try:
-                r = SESSION.get(u, timeout=config.PROBE_TIMEOUT, headers=HEADERS,
-                                allow_redirects=True)
-                if r.status_code != 200 or len(r.text) < 300:
+                r = await http.send("GET", u, timeout=config.PROBE_TIMEOUT,
+                                    headers=HEADERS, allow_redirects=True)
+                text = await asyncio.to_thread(lambda: r.text) if r.status_code == 200 else ""
+                if len(text) < 300:
                     continue
             except Exception:
                 continue
             own = _host_matches_name(r.url, name)
-            hit = detect(r.text, r.url, leads=False)
+            hit = await asyncio.to_thread(detect, text, r.url, leads=False)
             # Trust an embedded ATS when its slug matches the name OR it was
             # embedded on the company's own careers page (own-domain link).
             # An own-page embed can still be a parent conglomerate's shared
@@ -141,13 +131,13 @@ def _websearch_board(name, max_results=8):
             # would attribute every sibling company's jobs to this one —
             # same guard as the sniffer.
             if hit and (own or _slug_matches_name(hit[2], name)):
-                if not foreign_board(name, hit[1], hit[2]):
+                if not await foreign_board(name, hit[1], hit[2]):
                     return pack(hit[1], hit[2], r.url)
             # Custom self-hosted board: only on the company's OWN domain —
             # otherwise a third-party jobs site with ≥3 listings
             # (healthecareers, dotmed, expertini, …) resolves as the board.
             if own:
-                listing = custom_board_listing_url(r.url, r.text)
+                listing = await acustom_board_listing_url(r.url, text)
                 if listing:
                     return {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
         return None
@@ -156,9 +146,14 @@ def _websearch_board(name, max_results=8):
     # when it lands); fall back to a general careers search only if it misses.
     seen = set()
     for query in (f'"{name}" jobs ({_HINT})', f'"{name}" careers'):
-        fresh = [u for u in _search(query) if u not in seen]
+        fresh = [u for r in await ddg.asearch(query, max_results=max_results)
+                 if (u := r.get("href") or r.get("url")) and u not in seen
+                 and not any(h in u.lower() for h in _AGGREGATOR_HOSTS)]
         seen.update(fresh)
-        hit = _resolve(fresh)
+        hit = await _resolve(fresh)
         if hit:
             return hit
     return None
+
+
+websearch_board = http.sync_shim(awebsearch_board)

@@ -38,8 +38,8 @@ from src.match.names import name_key
 from src.net.parallel import drain, fan_out
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolve_or_miss, resolved
-from .resolve.probes import _nc_count, probe_company
-from .resolve.websearch_board import _websearch_board
+from .resolve.probes import nc_count, probe_company
+from .resolve.websearch_board import websearch_board
 
 # --------------------------------------------------------------------------- #
 #  discover_local: the bulk pass over gathered names                          #
@@ -135,13 +135,12 @@ def _js_scan_pass(hits, max_workers):
     from .resolve.probes import JsScanProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
     # exactly one page load. K is memory-bound (a page in the one headless
-    # browser each), so it is capped low and separate from the HTTP worker
-    # count.
+    # browser each), so JS_PAGES caps it, as `max_workers` does.
     #
     # A pool rather than a fixed `i % k` page per name: the fixed split
     # queued two names on one page while another sat idle, and the
     # per-probe budget would then have counted that queue wait.
-    k = min(config.SETTINGS.js_pages, len(missed))
+    k = min(config.SETTINGS.js_pages, max_workers, len(missed))
     print(f"  JS-probing {len(missed)} major(s) with no static board "
           f"({k} parallel page(s))...")
     with JsScanProbePool(k) as pool:
@@ -152,7 +151,7 @@ def _js_scan_pass(hits, max_workers):
             if outcome == "hit":
                 ats, slug = meta["ats"], meta["slug"]
                 return {"name": name, "ats": ats, "slug": slug,
-                        "count": meta["count"], "nc": _nc_count(ats, slug)}
+                        "count": meta["count"], "nc": nc_count(ats, slug)}
             return {"name": name, "reason": outcome,
                     "elapsed": time.monotonic() - t0}
 
@@ -219,7 +218,7 @@ def _websearch_pass(names, hits, misses, max_workers, cap, retry_days):
     t0 = time.time()
 
     def _websearch_one(n):
-        w = _websearch_board(n)
+        w = websearch_board(n)
         return _hit_from_detection(n, w) if w else {
             "name": n, "reason": "no-board-found"}
 

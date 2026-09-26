@@ -7,9 +7,9 @@ roster write. The resolution itself used to be a second, probe-first
 implementation living here; see validate_candidate for why it isn't any more.
 """
 
+import asyncio
 import re
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -19,11 +19,12 @@ from src.claude.api import (DISCOVER_SYSTEM, DiscoveredCompany, DiscoverReply,
                             call_claude_json)
 from src.config import REPORT_DIR, SETTINGS
 from src.match.names import strip_suffixes
+from src.net import http
 from src.net.parallel import drain
 from src.net.util import worker_count
-from .resolve.board import resolve_board_sniff_first
+from .resolve.board import aresolve_board_sniff_first
 from .resolve.probes import SCANNED, JsScanProbePool
-from .resolve.sniffer import sniff_careers_ats
+from .resolve.sniffer import asniff_careers_ats
 from .seeds import seed_candidates_for
 
 # Parallel worker count for validate_candidate. Each worker is almost
@@ -33,9 +34,9 @@ from .seeds import seed_candidates_for
 # more concurrent requests. Tune down if you see 429s from a probe provider.
 _DISCOVERY_WORKERS = worker_count("discovery_workers")
 
-# Pages at once in the JS scan fallback's one headless browser, each about
-# 150MB of RAM: JS_PAGES (1-4, see config.secrets), capped at the worker
-# count (no point having idle pages).
+# Pages at once in the JS scan fallback's one headless browser: JS_PAGES
+# (see config.secrets), capped at the worker count (no point having idle
+# pages).
 _JS_PAGES = min(SETTINGS.js_pages, _DISCOVERY_WORKERS)
 
 
@@ -106,7 +107,7 @@ def verify_note(c) -> str:
     return m.group(1) if m else ""
 
 
-def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
+async def avalidate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
     """
     Resolve one candidate to a crawlable board and record what happened.
 
@@ -141,8 +142,8 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         (see resolve_board_sniff_first).
     """
     claimed_ats = c.ats
-    hit = resolve_board_sniff_first(c.name, c.careers_url, websearch=websearch)
-    time.sleep(delay)
+    hit = await aresolve_board_sniff_first(c.name, c.careers_url, websearch=websearch)
+    await asyncio.sleep(delay)
     if hit:
         c.confirmed   = True
         c.ats         = hit["ats"]
@@ -164,8 +165,8 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
     # points the user straight at the board to add by hand, rather than
     # reading as a dead miss. Cheap here -- the careers pages this re-reads
     # are already in the resolver's per-run memo (resolve.fetchpool).
-    sniff = sniff_careers_ats(c.name, c.careers_url)
-    time.sleep(delay)
+    sniff = await asniff_careers_ats(c.name, c.careers_url)
+    await asyncio.sleep(delay)
     if sniff:
         c.ats_lead = f"{sniff['ats']} @ {sniff['slug']}"
         c.tried_slugs.append(f"[lead:{sniff['ats']} <- {sniff['source_url']}]")
@@ -177,10 +178,10 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         # Noisy hint to the user — browser launches are slow, and they'll
         # otherwise wonder why discover() is suddenly pausing.
         marker = "[js]" if js_probe.launched else "[js init]"
-        meta, _ = js_probe.probe(c.name, c.careers_url)
+        meta, _ = await js_probe.aprobe(c.name, c.careers_url)
         log(f"    {marker} {c.name}: headless scrape... "
             f"{'hit' if meta else 'miss'}")
-        time.sleep(delay)
+        await asyncio.sleep(delay)
         if meta:
             c.confirmed  = True
             c.ats        = meta["ats"]
@@ -194,6 +195,9 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
             )
             _flag_for_verification(c, claimed_ats)
     return c
+
+
+validate_candidate = http.sync_shim(avalidate_candidate)
 
 
 def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:

@@ -15,6 +15,9 @@
     board.py             the top: name -> validated board, or the miss
                          reason that explains why not
 
+Its network work is coroutines on the network loop, pages read off the
+loop; each one a thread calls, `a<name>`, has a sync shim `<name>`.
+
 The half of discovery that answers one question and returns. Nothing here
 knows what a track is, touches the store, or decides whether a company is
 worth keeping -- the modules one level up (local_sourcing, pipeline,

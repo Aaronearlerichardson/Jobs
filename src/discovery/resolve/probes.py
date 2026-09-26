@@ -114,7 +114,7 @@ def slug_keyed(board):
     return "careers_url" not in board.spec.handle.columns
 
 
-def confirm(ats, slug, careers_url=None):
+async def confirm(ats, slug, careers_url=None):
     """A live posting count for detected coordinates, or None: the board's
     probe on the handle they name as store columns (`coords.columns`), so
     a careers_url-keyed board is probed at its careers URL."""
@@ -122,7 +122,7 @@ def confirm(ats, slug, careers_url=None):
     handle = b.handle(coords.columns(ats, slug, careers_url)) if b else None
     if not handle:
         return None
-    ok, count = b.probe(handle)
+    ok, count = await b.aprobe(handle)
     return count if ok else None
 
 
@@ -142,20 +142,20 @@ def _handle(ats, slug):
     return board_for(ats).handle(coords.columns(ats, slug))
 
 
-def _scan_meta(ats, handle, source_url):
+async def _scan_meta(ats, handle, source_url):
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
     answered."""
-    ok, n = board_for(ats).alive(_handle(ats, handle))
+    ok, n = await board_for(ats).aalive(_handle(ats, handle))
     return {"ats": ats, "slug": handle, "count": n if ok else 0,
             "validated": ok, "source_url": source_url}
 
 
-def probe_scan(name: str, careers_url: str = ""):
+async def probe_scan(name: str, careers_url: str = ""):
     """
     The board of a SCANNED platform that `name`'s careers pages name
-    (identity.candidate_pages, fetched through the per-run memo), counted
-    through its listing.
+    (identity.candidate_pages, fetched through the per-run memo, each read
+    off the loop), counted through its listing.
 
     Returns dict {ats, slug, count, validated, source_url} or None when no
     page names one. `validated=False` means a page named the board but its
@@ -168,12 +168,12 @@ def probe_scan(name: str, careers_url: str = ""):
         rejected it. Both paths walk identity.candidate_pages now, so the
         guards cannot come apart again by editing one of them.
     """
-    for r in candidate_pages(name, careers_url):
+    for r in await candidate_pages(name, careers_url):
         # A login redirect usually lands on the vendor's host -- check the
         # final URL first, then fall through to HTML body.
-        hit = scan_hit(r.url) or scan_hit(r.text)
-        if hit and not foreign_board(name, *hit):
-            return _scan_meta(*hit, r.url)
+        hit = scan_hit(r.url) or await asyncio.to_thread(lambda: scan_hit(r.text))
+        if hit and not await foreign_board(name, *hit):
+            return await _scan_meta(*hit, r.url)
     return None
 
 
@@ -191,8 +191,7 @@ class JsScanProbePool:
 
     Each scrape takes a free page, which lives in a browser context of its
     own and is kept for later scrapes; a caller waits while all `size`
-    slots are busy, a cut-off scrape's slot until its thread returns.
-    close() shuts the browser down.
+    slots are busy. close() shuts the browser down.
 
     Usage:
         with JsScanProbePool(4) as js:
@@ -304,25 +303,17 @@ class JsScanProbePool:
         return scan_hit(cur) or await asyncio.to_thread(scan_hit, html)
 
     @classmethod
-    async def _scrape(cls, page, name, careers_url, held):
-        """aprobe's answer from `page`, once it has one. Its calls that wait
-        on the loop (run_sync) go in `held` as tasks, which a cut-off scrape
-        leaves running."""
-
-        async def in_thread(fn, *args):
-            held.append(task := asyncio.create_task(asyncio.to_thread(fn, *args)))
-            await asyncio.wait((task,))
-            return task.result()
-
+    async def _scrape(cls, page, name, careers_url):
+        """aprobe's answer from `page`, once it has one."""
         for url in candidate_urls(name, careers_url):
             hit = await cls._scan(page, url)
-            if not hit or await in_thread(foreign_board, name, *hit):
+            if not hit or await foreign_board(name, *hit):
                 continue
             try:
                 source = page.url
             except Exception:
                 source = url
-            meta = await in_thread(_scan_meta, *hit, source)
+            meta = await _scan_meta(*hit, source)
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 
@@ -342,11 +333,11 @@ class JsScanProbePool:
         await self._slots.acquire()
         t0 = time.monotonic()
         budget = asyncio.timeout(config.JS_PROBE_BUDGET_S)
-        page, keep, held = None, False, []
+        page, keep = None, False
         try:
             async with budget:
                 page = await self._page()
-                meta, outcome = (await self._scrape(page, name, careers_url, held)
+                meta, outcome = (await self._scrape(page, name, careers_url)
                                  if page else (None, "no browser"))
             keep = True
         except Exception as e:
@@ -358,13 +349,7 @@ class JsScanProbePool:
                 print(f"    [js] probe for {name!r} errored: {e}")
                 outcome, keep = f"errored: {e}", True
         finally:
-            # A thread cut off in foreign_board or _scan_meta still waits on
-            # the loop (run_sync), so it keeps the slot until it returns: at
-            # most `size` such threads hold default-executor workers.
-            if held and not held[-1].done():
-                held[-1].add_done_callback(self._release)
-            else:
-                self._slots.release()
+            self._slots.release()
             if page is not None and keep:
                 self._idle.append(page)
             elif page is not None:
@@ -375,13 +360,6 @@ class JsScanProbePool:
         _log.debug("js probe %s: %s in %.1fs", name, outcome,
                    time.monotonic() - t0)
         return meta, outcome
-
-    def _release(self, task):
-        """Done callback of a thread that outlived its scrape: frees the
-        slot it kept, and drops its outcome, which no one awaits."""
-        if not task.cancelled():
-            task.exception()
-        self._slots.release()
 
     probe = http.sync_shim(aprobe)
 
@@ -424,14 +402,17 @@ class JsScanProbePool:
 # was.
 
 
-def _nc_count(ats, slug):
+async def anc_count(ats, slug):
     """Postings on a board that are in your [locality] (`Board.local_count`):
     the count that rejects a slug guess landing on somebody else's board.
     `slug` is a resolver hit's."""
-    return board_for(ats).local_count(_handle(ats, slug), NC_RE)
+    return await board_for(ats).alocal_count(_handle(ats, slug), NC_RE)
 
 
-def probe_company(name, scan=True):
+nc_count = http.sync_shim(anc_count)
+
+
+async def aprobe_company(name, scan=True):
     """
     Probe every platform whose spec sets ``guess`` (fast) then, only if
     ``scan``, the SCANNED platforms (probe_scan, the slow careers-page
@@ -442,16 +423,19 @@ def probe_company(name, scan=True):
     hit = None
     for slug in slug_guesses(name):
         for ats in (b.name for b in BOARDS.values() if b.spec.guess):
-            ok, count = board_for(ats).probe(slug)
+            ok, count = await board_for(ats).aprobe(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
-                       "count": count, "nc": _nc_count(ats, slug)}
+                       "count": count, "nc": await anc_count(ats, slug)}
                 break
         if hit:
             break
     if not hit and scan:
-        s = probe_scan(name)
+        s = await probe_scan(name)
         if s and s["validated"]:
             hit = {"name": name, "ats": s["ats"], "slug": s["slug"],
-                   "count": s["count"], "nc": _nc_count(s["ats"], s["slug"])}
+                   "count": s["count"], "nc": await anc_count(s["ats"], s["slug"])}
     return hit
+
+
+probe_company = http.sync_shim(aprobe_company)

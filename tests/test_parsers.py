@@ -13,7 +13,7 @@ import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
 import src.discovery.resolve.fetchpool as fetchpool
-from conftest import fake_response, keep_store_open
+from conftest import answer, fake_response, keep_store_open
 import src.discovery.pipeline as pipeline
 import src.discovery.resolve.board as resolve_board
 import src.discovery.resolve.identity as identity
@@ -21,6 +21,7 @@ import src.discovery.resolve.sniffer as sniffer
 from src.ats import signatures as ats_signatures
 import src.ats.board.company as company_fetch
 import src.ats.board.closure as job_probe
+from src.net.http import run_sync
 from src.net.util import norm_posted_date
 
 
@@ -54,8 +55,7 @@ class TestSniffer:
         page = fake_response(text='<html><script>var ddo = {"widgetApiEndpoint":'
                                   '"https://careers.example-health.org/widgets"};'
                                   '</script></html>', url=root)
-        monkeypatch.setattr(sniffer, "candidate_pages",
-                            lambda name, careers_url, **kw: iter([page]))
+        monkeypatch.setattr(sniffer, "candidate_pages", answer([page]))
         assert sniffer.sniff_ats("Example Health") == {
             "ats": "phenom", "slug": "careers.example-health.org", "careers_url": root}
 
@@ -66,10 +66,9 @@ class TestSniffer:
         root = "https://careers.example-health.org/go/jobs/1/"
         page = fake_response(text='<script src="https://rmkcdn.successfactors.com/j.js">'
                                   '</script>', url=root)
-        monkeypatch.setattr(sniffer, "candidate_pages",
-                            lambda name, careers_url, **kw: iter([page]))
+        monkeypatch.setattr(sniffer, "candidate_pages", answer([page]))
         asked = []
-        monkeypatch.setattr(sniffer, "confirm", lambda *a: asked.append(a) or 4)
+        monkeypatch.setattr(sniffer, "confirm", answer(lambda *a: asked.append(a) or 4))
         assert sniffer.sniff_careers_ats("Example Health")["confirmed"]
         assert asked == [("successfactors", "rmkcdn", "https://careers.example-health.org")]
 
@@ -82,7 +81,7 @@ def _stub_fetch_all(monkeypatch, mapping):
     used to import the name and so needed their own copies replaced, and
     both go through identity.candidate_pages, which looks it up on
     fetchpool at call time."""
-    def _fake(urls):
+    async def _fake(urls):
         return {u: (fake_response(text=mapping[u], url=u) if u in mapping else None)
                 for u in urls}
     monkeypatch.setattr(fetchpool, "_fetch_all", _fake)
@@ -96,9 +95,9 @@ class TestDeadHostCache:
 
     def test_refused_host_is_not_retried_on_other_paths(self, serve):
         calls = serve(requests.exceptions.ConnectionError("dns"))
-        assert fetchpool._fetch_page("https://www.dead.example/") is None
-        assert fetchpool._fetch_page("https://www.dead.example/careers") is None
-        assert fetchpool._fetch_page("https://www.other.example/careers") is None
+        assert run_sync(fetchpool._fetch_page("https://www.dead.example/")) is None
+        assert run_sync(fetchpool._fetch_page("https://www.dead.example/careers")) is None
+        assert run_sync(fetchpool._fetch_page("https://www.other.example/careers")) is None
         assert calls == ["https://www.dead.example/",
                          "https://www.other.example/careers"]
 
@@ -106,8 +105,8 @@ class TestDeadHostCache:
         # A slow host may still answer another path; only refused
         # connections (DNS, TLS, connect timeout) are remembered.
         calls = serve(requests.exceptions.ReadTimeout("slow"))
-        fetchpool._fetch_page("https://www.slow.example/")
-        fetchpool._fetch_page("https://www.slow.example/careers")
+        run_sync(fetchpool._fetch_page("https://www.slow.example/"))
+        run_sync(fetchpool._fetch_page("https://www.slow.example/careers"))
         assert len(calls) == 2
 
 
@@ -122,34 +121,34 @@ class TestPageMemo:
 
     def test_live_page_is_fetched_once_per_run(self, serve):
         calls = self._session(serve)
-        a = fetchpool._fetch_page("https://www.sgs.com/")
-        b = fetchpool._fetch_page("https://www.sgs.com/")
+        a = run_sync(fetchpool._fetch_page("https://www.sgs.com/"))
+        b = run_sync(fetchpool._fetch_page("https://www.sgs.com/"))
         assert a is b and a is not None
         assert calls == ["https://www.sgs.com/"]
 
     def test_misses_are_memoized_too(self, serve):
         calls = self._session(serve, status=403)
-        assert fetchpool._fetch_page("https://www.infosys.com/") is None
-        assert fetchpool._fetch_page("https://www.infosys.com/") is None
+        assert run_sync(fetchpool._fetch_page("https://www.infosys.com/")) is None
+        assert run_sync(fetchpool._fetch_page("https://www.infosys.com/")) is None
         assert len(calls) == 1
 
     def test_distinct_urls_still_fetch(self, serve):
         calls = self._session(serve)
-        fetchpool._fetch_page("https://www.sgs.com/")
-        fetchpool._fetch_page("https://www.sgs.com/careers")
+        run_sync(fetchpool._fetch_page("https://www.sgs.com/"))
+        run_sync(fetchpool._fetch_page("https://www.sgs.com/careers"))
         assert len(calls) == 2
 
     def test_oversized_bodies_are_not_hoarded(self, serve):
         calls = self._session(serve, body="x" * (fetchpool._PAGE_MEMO_MAX_BYTES + 1))
-        fetchpool._fetch_page("https://big.example/")
-        fetchpool._fetch_page("https://big.example/")
+        run_sync(fetchpool._fetch_page("https://big.example/"))
+        run_sync(fetchpool._fetch_page("https://big.example/"))
         assert len(calls) == 2 and fetchpool._PAGE_MEMO == {}
 
     def test_cap_evicts_the_oldest_entry(self, serve, monkeypatch):
         self._session(serve)
         monkeypatch.setattr(fetchpool, "_PAGE_MEMO_CAP", 2)
         for u in ("https://a.example/", "https://b.example/", "https://c.example/"):
-            fetchpool._fetch_page(u)
+            run_sync(fetchpool._fetch_page(u))
         assert "https://a.example/" not in fetchpool._PAGE_MEMO
         assert len(fetchpool._PAGE_MEMO) == 2
 
@@ -372,7 +371,7 @@ class TestClosedProbeGuards:
 
 class TestDiscoveryWiring:
     def test_brainstorm_disabled_touches_no_api(self):
-        assert name_sources.brainstorm_company_names(n=0) == []
+        assert run_sync(name_sources.brainstorm_company_names(n=0)) == []
 
     def test_populate_companies_has_dork_switch(self):
         import src.discovery.local_sourcing as ls
@@ -736,32 +735,31 @@ Durham, NC (Hybrid)
 class TestResolveBoardSniffFirstCustomShortCircuit:
     """Offline coverage for the Task 1 fix: a `custom` sniff hit only wins
     immediately when it already carries local jobs. No network — sniff_ats,
-    probe_company, _websearch_board and _validate_board are all faked."""
+    probe_company, websearch_board and _validate_board are all faked."""
 
     @staticmethod
     def _sniff_custom(careers_url="https://x.example/careers"):
-        return lambda name, careers_url=careers_url: {
-            "ats": "custom", "careers_url": careers_url}
+        return answer({"ats": "custom", "careers_url": careers_url})
 
     def test_weak_custom_hit_falls_through_to_probe_and_websearch(self, monkeypatch):
         """nc == 0 on the custom hit must not short-circuit: both probe and
         websearch get a chance before anything is returned."""
-        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(sniffer, "asniff_ats", self._sniff_custom())
         calls = {"probe": 0, "websearch": 0}
 
-        def _probe(name, scan=True):
+        async def _probe(name, scan=True):
             calls["probe"] += 1
             return None
 
-        def _websearch(name, max_results=8):
+        async def _websearch(name, max_results=8):
             calls["websearch"] += 1
             return None
 
-        monkeypatch.setattr(resolve_board, "probe_company", _probe)
-        monkeypatch.setattr(resolve_board, "_websearch_board", _websearch)
+        monkeypatch.setattr(resolve_board, "aprobe_company", _probe)
+        monkeypatch.setattr(resolve_board, "awebsearch_board", _websearch)
         # The marketing page "validates" (a handful of scraped fragments)
         # but has zero LOCAL jobs.
-        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (9, 0))
+        monkeypatch.setattr(resolve_board, "_validate_board", answer((9, 0)))
 
         hit = resolve_board.resolve_board_sniff_first("Pfizer")
 
@@ -771,15 +769,15 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_strong_custom_hit_short_circuits(self, monkeypatch):
         """nc > 0 on the custom hit DOES win immediately: neither probe nor
         websearch is ever called."""
-        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(sniffer, "asniff_ats", self._sniff_custom())
         calls = {"probe": 0, "websearch": 0}
         monkeypatch.setattr(
-            resolve_board, "probe_company",
-            lambda *a, **k: calls.update(probe=calls["probe"] + 1))
+            resolve_board, "aprobe_company",
+            answer(lambda *a, **k: calls.update(probe=calls["probe"] + 1)))
         monkeypatch.setattr(
-            resolve_board, "_websearch_board",
-            lambda *a, **k: calls.update(websearch=calls["websearch"] + 1))
-        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (5, 2))
+            resolve_board, "awebsearch_board",
+            answer(lambda *a, **k: calls.update(websearch=calls["websearch"] + 1)))
+        monkeypatch.setattr(resolve_board, "_validate_board", answer((5, 2)))
 
         hit = resolve_board.resolve_board_sniff_first("Science.xyz")
 
@@ -789,10 +787,10 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_held_custom_fallback_returned_when_nothing_better(self, monkeypatch):
         """probe and websearch both miss entirely -> the weak custom hit,
         not None, is the answer: it still beats no answer at all."""
-        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
-        monkeypatch.setattr(resolve_board, "probe_company", lambda *a, **k: None)
-        monkeypatch.setattr(resolve_board, "_websearch_board", lambda *a, **k: None)
-        monkeypatch.setattr(resolve_board, "_validate_board", lambda comp: (9, 0))
+        monkeypatch.setattr(sniffer, "asniff_ats", self._sniff_custom())
+        monkeypatch.setattr(resolve_board, "aprobe_company", answer(None))
+        monkeypatch.setattr(resolve_board, "awebsearch_board", answer(None))
+        monkeypatch.setattr(resolve_board, "_validate_board", answer((9, 0)))
 
         hit = resolve_board.resolve_board_sniff_first("Novozymes")
 
@@ -802,17 +800,17 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_better_probe_hit_wins_over_held_fallback(self, monkeypatch):
         """A real ATS found at step 2 (probe) beats the held custom
         fallback, even though the custom hit was found first."""
-        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
+        monkeypatch.setattr(sniffer, "asniff_ats", self._sniff_custom())
         monkeypatch.setattr(
-            resolve_board, "probe_company",
-            lambda name, scan=True: {
+            resolve_board, "aprobe_company",
+            answer(lambda name, scan=True: {
                 "name": name, "ats": "greenhouse", "slug": "acme",
-                "count": 10, "nc": 4})
+                "count": 10, "nc": 4}))
         monkeypatch.setattr(
-            resolve_board, "_websearch_board",
-            lambda *a, **k: pytest.fail("websearch must not run: probe already won"))
+            resolve_board, "awebsearch_board",
+            answer(lambda *a, **k: pytest.fail("websearch must not run: probe already won")))
 
-        def _validate(comp):
+        async def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (10, 4)
 
         monkeypatch.setattr(resolve_board, "_validate_board", _validate)
@@ -824,14 +822,13 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_better_websearch_hit_wins_over_held_fallback(self, monkeypatch):
         """A real ATS found only at step 3 (websearch) beats the held
         custom fallback when probe also misses."""
-        monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
-        monkeypatch.setattr(resolve_board, "probe_company", lambda *a, **k: None)
+        monkeypatch.setattr(sniffer, "asniff_ats", self._sniff_custom())
+        monkeypatch.setattr(resolve_board, "aprobe_company", answer(None))
         monkeypatch.setattr(
-            resolve_board, "_websearch_board",
-            lambda name, max_results=8: {
-                "ats": "workday", "triple": ("acme", 1, "Acme")})
+            resolve_board, "awebsearch_board",
+            answer({"ats": "workday", "triple": ("acme", 1, "Acme")}))
 
-        def _validate(comp):
+        async def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (20, 6)
 
         monkeypatch.setattr(resolve_board, "_validate_board", _validate)
@@ -843,14 +840,14 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
     def test_vendor_careers_url_names_its_board(self, monkeypatch):
         """A careers_url on a fetchable vendor's host is read off the URL
         itself (the sniff never fetches one); dead, it is that board's miss."""
-        for step in ("probe_company", "_websearch_board"):
-            monkeypatch.setattr(resolve_board, step,
-                                lambda *a, **k: pytest.fail("the URL names the board"))
-        monkeypatch.setattr(sniffer, "sniff_ats",
-                            lambda *a, **k: pytest.fail("the URL names the board"))
+        for step in ("aprobe_company", "awebsearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(
+                lambda *a, **k: pytest.fail("the URL names the board")))
+        monkeypatch.setattr(sniffer, "asniff_ats", answer(
+            lambda *a, **k: pytest.fail("the URL names the board")))
         seen = []
         monkeypatch.setattr(resolve_board, "_validate_board",
-                            lambda comp: seen.append(comp) or (12, 3))
+                            answer(lambda comp: seen.append(comp) or (12, 3)))
         url = "https://careers-acme.icims.com/jobs/search"
 
         hit = resolve_board.resolve_board_sniff_first("Acme", url)
@@ -864,25 +861,25 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         Workday careers_url on another employer's tenant is never fetched
         as this company's board. A platform whose spec does not set
         `discovery.shared` is never asked."""
-        monkeypatch.setattr("src.claude.api.board_is_own", lambda *a, **k: False)
-        monkeypatch.setattr(sniffer, "sniff_ats", lambda *a, **k: None)
-        for step in ("probe_company", "_websearch_board"):
-            monkeypatch.setattr(resolve_board, step, lambda *a, **k: None)
-        monkeypatch.setattr(resolve_board, "_validate_board",
-                            lambda comp: pytest.fail("a foreign board was fetched"))
+        monkeypatch.setattr("src.claude.api.aboard_is_own", answer(False))
+        monkeypatch.setattr(sniffer, "asniff_ats", answer(None))
+        for step in ("aprobe_company", "awebsearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(None))
+        monkeypatch.setattr(resolve_board, "_validate_board", answer(
+            lambda comp: pytest.fail("a foreign board was fetched")))
         url = "https://danaher.wd1.myworkdayjobs.com/DanaherJobs"
 
         assert resolve_board.resolve_board_sniff_first("Genedata", url) is None
-        assert not identity.foreign_board("Genedata", "greenhouse", "danaher")
+        assert not run_sync(identity.foreign_board("Genedata", "greenhouse", "danaher"))
 
     def test_an_unreadable_board_is_no_dead_board(self, monkeypatch, serve):
         """A board whose fetch fails while it is validated is a transient
         miss, never board-dead (which closes a roster row's postings); a
         prunable platform's listing 404 is dead, and a live board with
         nothing local is no-local-jobs."""
-        monkeypatch.setattr(sniffer, "sniff_ats", lambda *a, **k: None)
-        for step in ("probe_company", "_websearch_board"):
-            monkeypatch.setattr(resolve_board, step, lambda *a, **k: None)
+        monkeypatch.setattr(sniffer, "asniff_ats", answer(None))
+        for step in ("aprobe_company", "awebsearch_board"):
+            monkeypatch.setattr(resolve_board, step, answer(None))
         url = "https://boards.greenhouse.io/acme"
         board = {"ats": "greenhouse", "slug": "acme"}
 
@@ -901,7 +898,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
 class TestDiscoverLocalWebsearchPass:
     """Offline coverage for the Task 2 fix: discover_local's bulk pass now
     runs a bounded websearch step for names probe+sniff left boardless.
-    gather_names, probe_company, _websearch_board, and src.store are all
+    gather_names, probe_company, websearch_board, and src.store are all
     faked -- no network, no real DB."""
 
     class _FakeConn:
@@ -921,7 +918,7 @@ class TestDiscoverLocalWebsearchPass:
         self._patch_common(monkeypatch, names)
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            local_sourcing, "websearch_board",
             lambda name, max_results=8: calls.append(name))
 
         local_sourcing.discover_local(
@@ -938,7 +935,7 @@ class TestDiscoverLocalWebsearchPass:
         monkeypatch.setattr(local_sourcing, "probe_company", lambda *a, **k: None)
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            local_sourcing, "websearch_board",
             lambda name, max_results=8: calls.append(name))
 
         local_sourcing.discover_local(
@@ -952,7 +949,7 @@ class TestDiscoverLocalWebsearchPass:
         self._patch_common(monkeypatch, names, recent={"Alpha"})
         calls = []
         monkeypatch.setattr(
-            local_sourcing, "_websearch_board",
+            local_sourcing, "websearch_board",
             lambda name, max_results=8: calls.append(name))
 
         local_sourcing.discover_local(
@@ -1268,24 +1265,20 @@ class TestValidateCandidateResolutionOrder:
     It calls resolve.board.resolve_board_sniff_first now, and nothing here
     may reintroduce a probe that outranks the careers-page sniff.
 
-    Offline: sniff_ats, probe_company, _websearch_board and _validate_board
+    Offline: sniff_ats, probe_company, websearch_board and _validate_board
     are all faked.
     """
 
     @staticmethod
     def _wire(monkeypatch, *, sniff=None, probe=None, boards=None):
-        monkeypatch.setattr(sniffer, "sniff_ats",
-                            lambda name, careers_url="": sniff)
-        monkeypatch.setattr(resolve_board, "probe_company",
-                            lambda name, scan=True: probe)
-        monkeypatch.setattr(resolve_board, "_websearch_board",
-                            lambda name, max_results=8: None)
+        monkeypatch.setattr(sniffer, "asniff_ats", answer(sniff))
+        monkeypatch.setattr(resolve_board, "aprobe_company", answer(probe))
+        monkeypatch.setattr(resolve_board, "awebsearch_board", answer(None))
         monkeypatch.setattr(
             resolve_board, "_validate_board",
-            lambda comp: (boards or {}).get(
-                (comp["ats"], comp.get("slug")), (0, 0)))
-        monkeypatch.setattr(pipeline, "sniff_careers_ats",
-                            lambda name, careers_url="": None)
+            answer(lambda comp: (boards or {}).get(
+                (comp["ats"], comp.get("slug")), (0, 0))))
+        monkeypatch.setattr(pipeline, "asniff_careers_ats", answer(None))
 
     @staticmethod
     def _candidate(name, ats="unknown"):
@@ -1363,10 +1356,9 @@ class TestValidateCandidateResolutionOrder:
         not filed as a dead miss."""
         self._wire(monkeypatch, boards={})
         monkeypatch.setattr(
-            pipeline, "sniff_careers_ats",
-            lambda name, careers_url="": {
-                "confirmed": False, "ats": "eightfold", "slug": "acme",
-                "source_url": "https://acme.example/careers"})
+            pipeline, "asniff_careers_ats",
+            answer({"confirmed": False, "ats": "eightfold", "slug": "acme",
+                    "source_url": "https://acme.example/careers"}))
         c = self._candidate("Acme Devices")
 
         pipeline.validate_candidate(c, delay=0)

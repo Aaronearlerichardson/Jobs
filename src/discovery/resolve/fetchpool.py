@@ -11,6 +11,7 @@ lock), and
 `_fetch_all`, the concurrent fetch that consults them.
 """
 
+import asyncio
 import logging
 import socket
 import threading
@@ -20,7 +21,8 @@ from concurrent.futures import wait as fut_wait
 from src import config
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
-from src.net.http import HEADERS, SESSION, HostBreaker, Unreachable
+from src.net import http
+from src.net.http import HEADERS, HostBreaker, Unreachable
 from src.net.parallel import pool
 from src.net.util import host_of, origin_of
 
@@ -171,12 +173,13 @@ def _memo_put(url, resp):
         _PAGE_MEMO[url] = (time.time(), resp)
 
 
-def _fetch_page(url, timeout=PROBE_TIMEOUT):
+async def _fetch_page(url, timeout=PROBE_TIMEOUT):
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
-    answers fast. Returns the Response on 200 with real content, else None.
-    Outcomes are memoized per URL for the run (see _PAGE_MEMO), and a host
-    that refused a connection is skipped outright (see _DEAD_HOSTS)."""
+    answers fast. Returns the Response on 200 with real content (its text
+    read off the loop), else None. Outcomes are memoized per URL for the
+    run (see _PAGE_MEMO), and a host that refused a connection is skipped
+    outright (see _DEAD_HOSTS)."""
     known, resp = _memo_get(url)
     if known:
         return resp
@@ -184,8 +187,10 @@ def _fetch_page(url, timeout=PROBE_TIMEOUT):
         _log.debug("skip %s: host refused a connection earlier this run", url)
         return None
     try:
-        r = SESSION.get(url, timeout=timeout, headers=HEADERS, allow_redirects=True)
-        resp = r if r.status_code == 200 and len(r.text) >= 300 else None
+        r = await http.send("GET", url, timeout=timeout, headers=HEADERS,
+                            allow_redirects=True)
+        resp = (r if r.status_code == 200
+                and len(await asyncio.to_thread(lambda: r.text)) >= 300 else None)
     except Unreachable:
         # Unreachable (requests' ConnectionError) covers DNS failure,
         # SSLError and ConnectTimeout; ReadTimeout is a Timeout, not one.
@@ -259,12 +264,13 @@ def _drop_unresolvable(urls, timeout=_DNS_TIMEOUT):
             if host_of(u) not in slow and not _DEAD_HOSTS.dead(u)]
 
 
-def _fetch_all(urls):
+async def _fetch_all(urls):
     """Fetch candidates concurrently (a miss otherwise pays ~12 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
     evaluated in priority order regardless of completion order. Every
     requested URL is a key of the result; one on a host that does not
-    resolve (see _drop_unresolvable) maps to None without a GET.
+    resolve (see _drop_unresolvable) maps to None without a GET. At most 8
+    GETs at once; the DNS check runs off the loop.
 
     These are GUESSES — `<token>.io`, `<token>.co`, `careers.<token>.com` —
     so their robots.txt failures are expected and say nothing worth logging;
@@ -272,10 +278,15 @@ def _fetch_all(urls):
     """
     from src.net import robots
     out = dict.fromkeys(urls)
-    live = _drop_unresolvable(urls)
+    live = await asyncio.to_thread(_drop_unresolvable, urls)
     if not live:
         return out
+    slots = asyncio.Semaphore(8)
+
+    async def fetch(url):
+        async with slots:
+            return await _fetch_page(url)
+
     with robots.quiet():
-        with pool(min(8, len(live))) as ex:
-            out.update(zip(live, ex.map(_fetch_page, live)))
+        out.update(zip(live, await asyncio.gather(*map(fetch, live))))
     return out

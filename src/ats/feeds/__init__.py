@@ -10,9 +10,7 @@ A fetcher's `gate=None` is a relevance predicate
 the loop (asyncio.to_thread), so it is pure CPU.
 
 Each fetcher is a coroutine `afetch_<name>` with its sync shim
-`fetch_<name>`, except `fetch_websearch`, which stays sync: net.ddg's
-search is sync network I/O, and asyncio.to_thread's workers (where
-aiohttp resolves DNS) run pure CPU only.
+`fetch_<name>`.
 
 Board-shaped platforms are `config.BOARDS` specs run by the engine in
 src/ats/board/.

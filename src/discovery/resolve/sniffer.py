@@ -13,12 +13,14 @@ src.ats.signatures, and the candidate-URL generation, per-run fetch memo
 and identity guards in this package.
 """
 
+import asyncio
 import logging
 
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.signatures import detect, pack
+from src.net import http
 from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
                        foreign_board)
@@ -28,7 +30,7 @@ from .probes import SCANNED, confirm, slug_keyed
 _log = logging.getLogger("src.discovery.resolve.sniffer")
 
 
-def _scan_root(name, careers_url=""):
+async def _scan_root(name, careers_url=""):
     """Fetch the bare homepage(s) (candidate_urls with ROOT_PATTERNS) and
     return the first fetchable ATS hit (packed like sniff_ats), else None.
 
@@ -41,11 +43,11 @@ def _scan_root(name, careers_url=""):
     collision a second way in (network path, so covered by
     tests/test_parsers.py::TestRootScan rather than a doctest here).
     """
-    for r in candidate_pages(name, careers_url, patterns=ROOT_PATTERNS,
-                             cap=None):
-        hit = detect(r.text, r.url, leads=False)
+    for r in await candidate_pages(name, careers_url, patterns=ROOT_PATTERNS,
+                                   cap=None):
+        hit = await asyncio.to_thread(lambda: detect(r.text, r.url, leads=False))
         if hit:
-            if foreign_board(name, hit[1], hit[2]):
+            if await foreign_board(name, hit[1], hit[2]):
                 continue
             return pack(hit[1], hit[2], r.url)
     return None
@@ -53,17 +55,19 @@ def _scan_root(name, careers_url=""):
 
 # ─── Public API ──────────────────────────────────────────────────────────
 
-def sniff_ats(name, careers_url=""):
+async def asniff_ats(name, careers_url=""):
     """Raw detection: first fetchable ATS found, else a custom self-hosted
     board, else None. Shape:
-    {"ats", "slug"|"triple", "careers_url"}."""
+    {"ats", "slug"|"triple", "careers_url"}. Each page is read off the
+    loop."""
     custom = None
     n_pages = 0
-    for r in candidate_pages(name, careers_url):
+    for r in await candidate_pages(name, careers_url):
         n_pages += 1
-        hit = detect(r.text, r.url, leads=False)
+        text = await asyncio.to_thread(lambda: r.text)
+        hit = await asyncio.to_thread(detect, text, r.url, leads=False)
         if hit:
-            if foreign_board(name, hit[1], hit[2]):
+            if await foreign_board(name, hit[1], hit[2]):
                 hit = None     # keep scanning; the custom fallback may
             else:               # still capture the company's OWN listings
                 _log.debug("sniff %s: %s %r found on %s",
@@ -72,8 +76,8 @@ def sniff_ats(name, careers_url=""):
         if custom is None:
             # Custom board: resolve to the page that actually holds the
             # listings (this page, or the openings page one hop away).
-            from src.ats.board.custom import custom_board_listing_url
-            listing = custom_board_listing_url(r.url, r.text)
+            from src.ats.board.custom import acustom_board_listing_url
+            listing = await acustom_board_listing_url(r.url, text)
             if listing:
                 custom = {"ats": config.CAREERS_PAGE_ATS, "careers_url": listing}
     # Counted after the walk rather than before it: "3 answered" was the
@@ -83,13 +87,16 @@ def sniff_ats(name, careers_url=""):
     # Every careers-path candidate missed: a company whose ATS badge sits on
     # the homepage itself (no dedicated /careers page -- see _scan_root)
     # still has one more place to look before this is a miss.
-    root_hit = _scan_root(name, careers_url)
+    root_hit = await _scan_root(name, careers_url)
     if root_hit:
         return root_hit
     return custom
 
 
-def _confirmed(ats, slug, page_url, tried):
+sniff_ats = http.sync_shim(asniff_ats)
+
+
+async def _confirmed(ats, slug, page_url, tried):
     """A live posting count for a detection on `page_url` (probes.confirm),
     or None. Asked once per board (`tried` memoizes it), at the careers URL
     `pack` gives, and only where no other probe counts the board and the
@@ -103,25 +110,25 @@ def _confirmed(ats, slug, page_url, tried):
     curl = pack(ats, slug, page_url)["careers_url"]
     key = (ats, b.handle(coords.columns(ats, slug, curl)))
     if key not in tried:
-        tried[key] = confirm(ats, slug, curl)
+        tried[key] = await confirm(ats, slug, curl)
     return tried[key]
 
 
-def sniff_careers_ats(name, careers_url=""):
+async def asniff_careers_ats(name, careers_url=""):
     """Pipeline style: prefer coordinates we can CONFIRM with a live count
     (`_confirmed`); otherwise surface the highest-priority detection as a
     lead."""
     lead = None  # first (highest-priority) unconfirmable detection seen
     tried = {}
-    for r in candidate_pages(name, careers_url):
-        hit = detect(r.text, r.url)
+    for r in await candidate_pages(name, careers_url):
+        hit = await asyncio.to_thread(lambda: detect(r.text, r.url))
         if not hit:
             continue
         kind, ats, slug = hit
-        if foreign_board(name, ats, slug):
+        if await foreign_board(name, ats, slug):
             continue
         if kind == "fetchable":
-            count = _confirmed(ats, slug, r.url, tried)
+            count = await _confirmed(ats, slug, r.url, tried)
             if count is not None:
                 return {"confirmed": True, "ats": ats, "slug": slug,
                         "count": count, "source_url": r.url}
@@ -132,16 +139,19 @@ def sniff_careers_ats(name, careers_url=""):
         return lead
     # No candidate careers-path yielded even an unconfirmable lead -- try the
     # bare homepage (see sniff_ats's matching fallback / _scan_root).
-    root_hit = _scan_root(name, careers_url)
+    root_hit = await _scan_root(name, careers_url)
     if root_hit:
         ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
-        count = _confirmed(ats, slug, root_hit["careers_url"], tried)
+        count = await _confirmed(ats, slug, root_hit["careers_url"], tried)
         if count is not None:
             return {"confirmed": True, "ats": ats, "slug": slug,
                     "count": count, "source_url": root_hit["careers_url"]}
         return {"confirmed": False, "ats": ats, "slug": coords.slug_text(ats, slug),
                 "source_url": root_hit["careers_url"]}
     return None
+
+
+sniff_careers_ats = http.sync_shim(asniff_careers_ats)
 
 
 # ─── "no-board-found" subcategories ───────────────────────────────────────
@@ -152,7 +162,7 @@ def sniff_careers_ats(name, careers_url=""):
 # four qualifiers (board.classify_miss appends it to the
 # "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
 
-def diagnose_no_board(name, careers_url=""):
+async def adiagnose_no_board(name, careers_url=""):
     """Why sniff_careers_ats found nothing for `name`, one of:
 
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/
@@ -196,21 +206,20 @@ def diagnose_no_board(name, careers_url=""):
     # this function exists to tell "nothing answered" from "everything that
     # answered was somebody else", and candidate_pages has already dropped
     # the evidence for that distinction.
-    answered = (candidate_responses(name, careers_url)
-                + candidate_responses(name, careers_url,
-                                      patterns=ROOT_PATTERNS, cap=None))
+    answered = (await candidate_responses(name, careers_url)
+                + await candidate_responses(name, careers_url,
+                                            patterns=ROOT_PATTERNS, cap=None))
     hits = [(u, r) for u, r in answered if r is not None]
     if not hits:
         return "domain-unreachable"
-    safe_hits, saw_risky_uncorroborated = [], False
-    for url, r in hits:
-        if not corroborated(url, name, r.text):
-            saw_risky_uncorroborated = True
-            continue
-        safe_hits.append(r)
-    if not safe_hits:
-        return "wrong-domain" if saw_risky_uncorroborated else "domain-unreachable"
+    safe_hits = await asyncio.to_thread(
+        lambda: [r for url, r in hits if corroborated(url, name, r.text)])
+    if not safe_hits:           # every page that answered failed to corroborate
+        return "wrong-domain"
     from src.ats.board.custom import is_board_page
-    if any(is_board_page(r.text) for r in safe_hits):
+    if await asyncio.to_thread(lambda: any(is_board_page(r.text) for r in safe_hits)):
         return "careers-page-no-ats"
     return "site-only-no-careers"
+
+
+diagnose_no_board = http.sync_shim(adiagnose_no_board)

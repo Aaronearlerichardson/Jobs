@@ -4,7 +4,7 @@ DDG is the crawl's single biggest time sink: a plain `DDGS().text(q)` has no
 wall-clock bound, so when DDG rate-limits (frequent), the library's internal
 retry/backoff blocks for many minutes yielding nothing -- profiled at ~1271s
 of a 1726s --local run. Every caller (the local-sourcing resolvers, the ATS
-dork sweep, the websearch fetcher) goes through `search`, which has:
+dork sweep, the websearch fetcher) goes through `asearch`, which has:
 
   * one disk cache (7-day TTL) so repeat runs -- and repeat queries within a
     run -- return instantly instead of re-hitting DDG; only genuine non-empty
@@ -338,9 +338,10 @@ async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
                   retries=RETRIES):
     """Bounded, cached, retried DDG text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
-    package -- every caller already tolerates an empty list."""
+    package -- every caller already tolerates an empty list. The disk
+    cache is read and written off the loop."""
     key = f"{query}||{max_results}" + (f"||page={page}" if page != 1 else "")
-    cached = cache_get(key)
+    cached = await asyncio.to_thread(cache_get, key)
     if cached is not None:
         _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
         return cached
@@ -376,14 +377,14 @@ async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
         return []
     _log.debug("ddg live query, %d result(s): %s", len(out), query)
     if out:                              # cache only genuine hits
-        cache_put(key, out)
+        await asyncio.to_thread(cache_put, key, out)
     return out
 
 
 search = http.sync_shim(asearch)
 
 
-def search_urls(query, max_results=10, page=1):
-    """The result URLs of `search`, in order, skipping results without one."""
-    return [u for r in search(query, max_results, page=page)
+async def search_urls(query, max_results=10, page=1):
+    """The result URLs of `asearch`, in order, skipping results without one."""
+    return [u for r in await asearch(query, max_results, page=page)
             if (u := (r.get("href") or r.get("url")))]

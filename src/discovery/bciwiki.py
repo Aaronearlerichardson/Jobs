@@ -11,9 +11,11 @@ run them through validate_candidate, which hands each name to the shared
 resolver (careers-page sniff, then slug probe, every hit live-validated).
 """
 
+import asyncio
 
 from src.config import FETCH_TIMEOUT
-from src.net.http import SESSION, HEADERS
+from src.net import http
+from src.net.http import HEADERS
 
 API_URL = "https://bciwiki.org/api.php"
 
@@ -33,8 +35,9 @@ _SKIP_SUBSTRINGS = (
 )
 
 
-def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
-    """Return all page titles in a BCIWiki category, following cmcontinue."""
+async def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
+    """Return all page titles in a BCIWiki category, following cmcontinue;
+    each page's JSON decoded off the loop."""
     titles, cont = [], {}
     while len(titles) < max_items:
         params = {
@@ -47,9 +50,10 @@ def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
             **cont,
         }
         try:
-            r = SESSION.get(API_URL, params=params, headers=HEADERS, timeout=timeout)
+            r = await http.send("GET", API_URL, params=params, headers=HEADERS,
+                                timeout=timeout)
             r.raise_for_status()
-            data = r.json()
+            data = await asyncio.to_thread(r.json)
         except Exception as e:
             print(f"    [!] BCIWiki {category}: {e}")
             break
@@ -66,7 +70,7 @@ def _looks_like_employer(title):
     return not any(s in t for s in _SKIP_SUBSTRINGS)
 
 
-def bciwiki_company_names(categories=("companies",), max_items=2000):
+async def bciwiki_company_names(categories=("companies",), max_items=2000):
     """Deduped, cleaned list of employer names from the given BCIWiki
     categories. `categories` keys are from CATEGORIES."""
     seen, out = set(), []
@@ -74,7 +78,7 @@ def bciwiki_company_names(categories=("companies",), max_items=2000):
         cat = CATEGORIES.get(key)
         if not cat:
             continue
-        for title in _category_members(cat, max_items=max_items):
+        for title in await _category_members(cat, max_items=max_items):
             name = title.strip()
             if not name or not _looks_like_employer(name):
                 continue
@@ -85,7 +89,7 @@ def bciwiki_company_names(categories=("companies",), max_items=2000):
     return out
 
 
-def bciwiki_seed_candidates(categories=("companies",), max_items=2000):
+async def abciwiki_seed_candidates(categories=("companies",), max_items=2000):
     """Candidate dicts (same shape as Claude's discovery payload) so the
     names flow through candidate_from_dict / validate_candidate unchanged."""
     return [
@@ -96,5 +100,8 @@ def bciwiki_seed_candidates(categories=("companies",), max_items=2000):
             "careers_url": "",
             "notes":       "[bciwiki]",
         }
-        for name in bciwiki_company_names(categories, max_items=max_items)
+        for name in await bciwiki_company_names(categories, max_items=max_items)
     ]
+
+
+bciwiki_seed_candidates = http.sync_shim(abciwiki_seed_candidates)

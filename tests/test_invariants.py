@@ -999,6 +999,43 @@ def test_every_task_is_kept():
     assert not dropped, f"{dropped}: a task started and not kept. Keep it or use a TaskGroup."
 
 
+def _thread_waits(trees):
+    """[(rel, line)] for each to_thread whose target (a lambda, or a def of
+    its module) is or calls run_sync, SESSION or a module-level sync shim."""
+    shims = {(Path(rel).stem, t.id) for rel, tree in trees for n in tree.body if isinstance(n, ast.Assign)
+             and (_dotted(getattr(n.value, "func", None)) or "").endswith("sync_shim") for t in n.targets}
+    out = []
+    for rel, tree in trees:
+        real = {a.asname or a.name: a.name.rpartition(".")[2] for n in ast.walk(tree)
+                if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+        defs = {f.name: f for f in ast.walk(tree) if isinstance(f, ast.FunctionDef)}
+
+        def waits(node):
+            *qual, name = (_dotted(node) or "?").split(".")
+            return bool({"run_sync", "SESSION", "SyncSession"} & {*qual, name}) or (
+                (real.get(qual[-1], qual[-1]), name) in shims if qual
+                else name not in defs and real.get(name, name) in {s for _, s in shims})
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call) and (_dotted(n.func) or "").endswith("to_thread") and n.args:
+                fn = n.args[0]
+                body = fn if isinstance(fn, ast.Lambda) else defs.get(getattr(fn, "id", None))
+                calls = [c.func for c in ast.walk(body) if isinstance(c, ast.Call)] if body else []
+                out += [(rel, n.lineno)] * any(map(waits, [fn, *calls]))
+    return out
+
+
+def test_no_to_thread_worker_waits_on_the_loop():
+    """Default-executor threads waiting on the loop starve it: the loop's
+    to_thread work queues behind them (32 JS pages hung discovery)."""
+    snippet = ("from src.net import ddg\nasync def f():\n    await asyncio.to_thread(ddg.search)\n"
+               "    await asyncio.to_thread(lambda: http.run_sync(f()))\n"
+               "    await asyncio.to_thread(g)\ndef g():\n    return re.search('a', 'b')\n")
+    assert _thread_waits([("src/net/ddg.py", ast.parse("search = http.sync_shim(asearch)\n")),
+                          ("x.py", ast.parse(snippet))]) == [("x.py", 3), ("x.py", 4)]
+    found = _thread_waits(_parsed())
+    assert not found, f"{found}: a to_thread target waits on the loop; await it there instead."
+
+
 async def test_a_blocked_loop_fails_the_test(loop_blocks):
     """Invariant 5: async tests run in asyncio's debug mode (pytest.ini),
     which logs a callback that holds the loop past 100 ms, and

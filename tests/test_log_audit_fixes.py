@@ -13,11 +13,12 @@ engine's, in tests/test_snapshot_completeness.py):
 
 import requests
 
-from conftest import keep_store_open
+from conftest import answer, keep_store_open
 import src.store as store
 from src.discovery import paste_ingest
 from src.discovery.resolve import board as resolve_board, fetchpool
 from src.match.names import junk_name_reason
+from src.net.http import run_sync
 from src.ops import repair as ops
 
 
@@ -113,18 +114,18 @@ class TestSnifferResolvesHostsOnce:
             return [("addr",)]
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo", _gai)
         monkeypatch.setattr(fetchpool, "_fetch_page",
-                            lambda u, **k: fetched.append(u) or None)
+                            answer(lambda u, **k: fetched.append(u) or None))
         urls = ["https://dead.example/careers", "https://dead.example/",
                 "https://dead.example/jobs", "https://live.example/careers"]
-        out = fetchpool._fetch_all(urls)
+        out = run_sync(fetchpool._fetch_all(urls))
         assert sorted(looked_up) == ["dead.example", "live.example"], \
             "each host resolved once, not once per path"
         assert fetched == ["https://live.example/careers"]
         assert set(out) == set(urls) and out["https://dead.example/"] is None
         # a later stage rebuilding the list asks the resolver nothing
         looked_up.clear()
-        fetchpool._fetch_all(["https://dead.example/en/jobs",
-                            "https://live.example/"])
+        run_sync(fetchpool._fetch_all(["https://dead.example/en/jobs",
+                                       "https://live.example/"]))
         assert looked_up == []
 
     def test_a_silent_resolver_skips_the_host_this_pass_only(self, monkeypatch):
@@ -146,5 +147,5 @@ class TestSnifferResolvesHostsOnce:
         serve(requests.exceptions.ConnectionError("refused"))
         monkeypatch.setattr(fetchpool.socket, "getaddrinfo",
                             lambda *a, **k: [("addr",)])
-        assert fetchpool._fetch_page("https://x.example/") is None
+        assert run_sync(fetchpool._fetch_page("https://x.example/")) is None
         assert fetchpool._drop_unresolvable(["https://x.example/careers"]) == []

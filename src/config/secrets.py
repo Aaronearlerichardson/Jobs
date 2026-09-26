@@ -67,11 +67,9 @@ class Settings(BaseSettings):
     crawler_workers: PositiveInt | None = None
     discovery_workers: PositiveInt | None = None
     harvest_workers: PositiveInt | None = None
-    # Pages at once in the headless browser of discovery's JS fallback. At
-    # most 4: each page's thread may wait on the network loop (run_sync),
-    # and one of the loop's default-executor threads, min(32, CPUs + 4),
-    # must stay free for what they wait on.
-    js_pages: int = Field(4, ge=1, le=4)
+    # Pages at once in the headless browser of discovery's JS fallback,
+    # each about 300 MB of memory.
+    js_pages: PositiveInt = 4
 
     @model_validator(mode="before")
     @classmethod

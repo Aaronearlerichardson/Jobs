@@ -10,8 +10,8 @@ Two entry points:
   * run_ddgs_dorks()  — fully automated via src.net.ddg (DuckDuckGo).
 """
 
+import asyncio
 import json
-import time
 from contextlib import closing
 
 from src import config
@@ -25,7 +25,7 @@ from src.discovery.local_sourcing import score_and_upsert
 from src.discovery.resolve.identity import nc_hq_signal
 from src.discovery.resolve.probes import slug_keyed
 from src.match.names import SLUG_NAME_SOURCE
-from src.net import ddg
+from src.net import ddg, http
 
 
 def _or_group(terms, n=8):
@@ -281,18 +281,23 @@ def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
     query doesn't spend extra requests chasing nothing.
     """
     idx = _next_rotation_index() if rotation is None else rotation
-    queries = build_dork_queries(idx)
     loc_slice = _rotate_terms(_LOCALITY_TERMS, 4, idx)
     print(f"  [dork] rotation slice {idx} (locality terms: "
           f"{', '.join(loc_slice) or '(none configured)'})")
+    return harvest_urls(dork_urls(build_dork_queries(idx), max_results, pause, pages))
 
+
+async def adork_urls(queries, max_results, pause, pages):
+    """The result URLs of each dork query in turn, `pause` seconds apart,
+    with up to `pages` pages for a query whose first page came back full
+    (see run_ddgs_dorks)."""
     urls = []
     first = True
     for q in queries:
         if not first:
-            time.sleep(pause)          # be gentle between queries
+            await asyncio.sleep(pause)          # be gentle between queries
         first = False
-        found = ddg.search_urls(q, max_results)
+        found = await ddg.search_urls(q, max_results)
         print(f"  [dork] {len(found):2} result(s)  page=1  {q[:60]}")
         urls += found
         # A full first page suggests DDG has more to give; an empty or
@@ -300,9 +305,12 @@ def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
         # don't burn extra requests paginating a query that came up short.
         page = 2
         while len(found) >= max_results and page <= pages:
-            time.sleep(pause)
-            found = ddg.search_urls(q, max_results, page=page)
+            await asyncio.sleep(pause)
+            found = await ddg.search_urls(q, max_results, page=page)
             print(f"  [dork] {len(found):2} result(s)  page={page}  {q[:60]}")
             urls += found
             page += 1
-    return harvest_urls(urls)
+    return urls
+
+
+dork_urls = http.sync_shim(adork_urls)

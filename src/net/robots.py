@@ -160,8 +160,9 @@ def quiet():
     anyway, it buries the case the notice exists for — a host we believe is
     a real board, whose robots.txt we could not read before crawling it.
 
-    Deliberately process-wide rather than thread-local: the speculative
-    fetches run on a thread pool, and the point is to cover those workers.
+    Deliberately process-wide rather than per task: the speculative
+    fetches run as tasks of their own (resolve.fetchpool._fetch_all), and
+    the point is to cover every one of them.
     Operations are serialized (one at a time), so no real crawl is running
     concurrently to be silenced by accident.
     """

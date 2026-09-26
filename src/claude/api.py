@@ -16,7 +16,6 @@ from pydantic import StrictBool, ValidationError
 from src import config
 from src.claude.reply import Reply, Unit, choice
 from src.net import http
-from src.net.parallel import SingleFlight
 
 # File-only per-call trace (session log DEBUG channel — never printed).
 _log = logging.getLogger("claude")
@@ -618,17 +617,22 @@ class BoardOwnerReply(Reply):
     reason: str
 
 
-#: Verdicts per (company, board) for the process; concurrent askers of one
-#: pair wait for the first one's paid call. A None is never kept.
-_BOARD_OWNER_CACHE = SingleFlight(keep=lambda verdict: verdict is not None)
+#: (company, board) -> the task of its paid call, while it runs and then
+#: for the process once it answered True/False (see aboard_is_own).
+_BOARD_OWNER_CACHE = {}
 
 
-def board_is_own(company, board, site="", titles=()):
+async def aboard_is_own(company, board, site="", titles=()):
     """True/False: is `board` (a Workday tenant, or "<ats>:<slug>")
     `company`'s own hiring board? None when the API is unavailable or the
     reply is malformed — callers keep the hit on None (offline behavior
     unchanged) and only reject on a clear False. Verdicts are cached per
-    (company, board) for the process, one call per pair however many ask.
+    (company, board) for the process, one call per pair however many ask;
+    a None or an error is asked again by the next asker.
+
+    The call is a task of its own that every asker awaits shielded: an
+    asker cancelled mid-call (a JS scrape's budget) leaves it to finish,
+    and its verdict is kept for the next one.
 
     Notes:
         Consulted only for collision-prone resolutions, a board on a
@@ -639,19 +643,29 @@ def board_is_own(company, board, site="", titles=()):
         until a human looks, a wrong "reject" silently loses a real board
         forever. `titles` (sample postings from the board) is the decisive
         evidence for slug collisions.
-
-        A thread's function still: its memo is net.parallel's thread
-        single-flight.
     """
-    def ask():
+    async def ask():
         user = f"COMPANY: {company}\nBOARD: {board}"
         if site:
             user += f"\nBOARD DISPLAY NAME / SITE: {site}"
         if titles:
             user += "\nSAMPLE JOB TITLES: " + " | ".join(
                 t for t in list(titles)[:8] if t)
-        r = call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
-                             reply=BoardOwnerReply)
+        r = await acall_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
+                                    reply=BoardOwnerReply)
         return None if r is None else r.same_employer
     key = (str(company).lower(), str(board).lower())
-    return _BOARD_OWNER_CACHE.do(key, ask)
+    task = _BOARD_OWNER_CACHE.get(key)
+    if task is None:
+        task = _BOARD_OWNER_CACHE[key] = asyncio.create_task(ask())
+
+        def settled(t):
+            # Runs before any asker resumes; exception() marks an error seen.
+            if ((t.cancelled() or t.exception() is not None or t.result() is None)
+                    and _BOARD_OWNER_CACHE.get(key) is t):
+                del _BOARD_OWNER_CACHE[key]
+        task.add_done_callback(settled)
+    return await asyncio.shield(task)
+
+
+board_is_own = http.sync_shim(aboard_is_own)
