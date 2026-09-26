@@ -358,9 +358,9 @@ POOL_OWNERS = {
         "its own FIRST_COMPLETED watchdog, with a per-pass wall-clock budget",
     "src/discovery/resolve/fetchpool.py":
         "per-run candidate-URL memo; the pool is part of the cache",
-    "src/discovery/resolve/probes.py":
-        "pins one headless browser to one dedicated thread (Playwright "
-        "thread affinity); its queue holds only calls their callers wait on",
+    "src/net/http.py":
+        "the session's DNS lookups, on threads no asyncio.to_thread work can "
+        "queue ahead of (net.parallel imports net.http, so not its pool)",
 }
 
 #: A pool is net.parallel.pool, whose exit cancels the queue however its
@@ -368,7 +368,7 @@ POOL_OWNERS = {
 #: so an import alias cannot hide one).
 _POOL_RE = re.compile(r"\bThreadPoolExecutor\(|\bpool\(")
 _RAW_RE = re.compile(r"\b(Thread|Process)PoolExecutor\b")
-RAW_POOLS = {"src/net/parallel.py", "src/discovery/resolve/probes.py"}
+RAW_POOLS = {"src/net/parallel.py", "src/net/http.py"}
 
 
 def test_thread_pools_go_through_net_parallel():

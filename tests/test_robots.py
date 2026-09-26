@@ -345,11 +345,11 @@ class TestTransport:
 class TestJsProbeDisabledReporting:
     """A missing headless browser is one condition, reported once.
 
-    The JS fallback runs several JsScanProbe instances in parallel, each
-    holding its own enabled flag. Playwright's launch error embeds a ten-line
-    ASCII banner telling you to run `playwright install`, so four probes
-    printed forty lines of identical advice — and the sniffer's browser path
-    had the same shape.
+    The JS fallback ran several browsers in parallel, each holding its own
+    enabled flag, and a web-UI process runs a pool per pass. Playwright's
+    launch error embeds a ten-line ASCII banner telling you to run
+    `playwright install`, so four probes printed forty lines of identical
+    advice, and the sniffer's browser path had the same shape.
     """
 
     LAUNCH_ERR = (
@@ -364,9 +364,9 @@ class TestJsProbeDisabledReporting:
     @pytest.fixture(autouse=True)
     def _rearm(self):
         from src.discovery.resolve import probes
-        probes._clear_js_disabled()
+        probes._JS_NOTICES.clear()
         yield
-        probes._clear_js_disabled()
+        probes._JS_NOTICES.clear()
 
     def test_only_the_first_caller_reports(self, capsys):
         from src.discovery.resolve import probes
@@ -376,25 +376,6 @@ class TestJsProbeDisabledReporting:
         out = capsys.readouterr().out
         assert out.count("JS scan probe disabled") == 1
         assert "second" not in out and "third" not in out
-
-    def test_concurrent_callers_report_once(self, capsys):
-        import threading
-
-        from src.discovery.resolve import probes
-        results, lock = [], threading.Lock()
-
-        def go():
-            r = probes._report_js_disabled("launch failed")
-            with lock:
-                results.append(r)
-
-        threads = [threading.Thread(target=go) for _ in range(8)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        assert results.count(True) == 1
-        assert capsys.readouterr().out.count("JS scan probe disabled") == 1
 
     def test_missing_browser_hint_is_actionable_and_one_line(self):
         from src.discovery.resolve.probes import _js_launch_hint
@@ -407,15 +388,6 @@ class TestJsProbeDisabledReporting:
         from src.discovery.resolve.probes import _js_launch_hint
         assert _js_launch_hint(
             Exception("Timeout 30000ms exceeded\nat stack line")) == "Timeout 30000ms exceeded"
-
-    def test_a_successful_launch_rearms_the_notice(self, capsys):
-        """Otherwise a web-UI process that recovers, then breaks again, goes
-        quiet about the second failure for the rest of its life."""
-        from src.discovery.resolve import probes
-        assert probes._report_js_disabled("failure one") is True
-        probes._clear_js_disabled()               # what a successful launch does
-        assert probes._report_js_disabled("failure two") is True
-        assert capsys.readouterr().out.count("JS scan probe disabled") == 2
 
 
 class TestChromiumChannelFallback:
@@ -438,7 +410,7 @@ class TestChromiumChannelFallback:
             self.tried = []
             self.chromium = self
 
-        def launch(self, **kw):
+        async def launch(self, **kw):
             channel = kw.get("channel")
             self.tried.append(channel)
             if channel not in self.works:
@@ -454,61 +426,61 @@ class TestChromiumChannelFallback:
         yield
         probes._JS_NOTICES.clear()
 
-    def test_bundled_build_is_preferred(self, capsys):
+    async def test_bundled_build_is_preferred(self, capsys):
         from src.discovery.resolve.probes import launch_chromium
         pw = self.FakePlaywright({None, "chrome"})
-        browser, channel = launch_chromium(pw)
+        browser, channel = await launch_chromium(pw)
         assert (browser, channel) == ("browser:None", None)
         assert pw.tried == [None], "a working bundled build must not be skipped"
         assert capsys.readouterr().out == "", "no notice when nothing fell back"
 
-    def test_falls_back_to_system_chrome(self, capsys):
+    async def test_falls_back_to_system_chrome(self, capsys):
         from src.discovery.resolve.probes import launch_chromium
         pw = self.FakePlaywright({"chrome", "msedge"})
-        browser, channel = launch_chromium(pw)
+        browser, channel = await launch_chromium(pw)
         assert (browser, channel) == ("browser:chrome", "chrome")
         assert pw.tried == [None, "chrome"]
         assert "system chrome" in capsys.readouterr().out
 
-    def test_falls_through_to_edge(self):
+    async def test_falls_through_to_edge(self):
         from src.discovery.resolve.probes import launch_chromium
         pw = self.FakePlaywright({"msedge"})
-        assert launch_chromium(pw)[1] == "msedge"
+        assert (await launch_chromium(pw))[1] == "msedge"
         assert pw.tried == [None, "chrome", "msedge"]
 
-    def test_every_channel_missing_reraises_the_bundled_error(self):
+    async def test_every_channel_missing_reraises_the_bundled_error(self):
         """The bundled failure names the missing build and the install command,
         which is the actionable one — not 'msedge not found'."""
         from src.discovery.resolve.probes import launch_chromium
         pw = self.FakePlaywright(set())
         with pytest.raises(RuntimeError) as excinfo:
-            launch_chromium(pw)
+            await launch_chromium(pw)
         assert "chromium_headless_shell" in str(excinfo.value)
 
-    def test_launch_kwargs_are_passed_through(self):
+    async def test_launch_kwargs_are_passed_through(self):
         from src.discovery.resolve.probes import launch_chromium
         captured = {}
 
         class Recorder(self.FakePlaywright):
-            def launch(self, **kw):
+            async def launch(self, **kw):
                 captured.update(kw)
-                return super().launch(**kw)
+                return await super().launch(**kw)
 
-        launch_chromium(Recorder({None}), headless=True)
+        await launch_chromium(Recorder({None}), headless=True)
         assert captured["headless"] is True
 
-    def test_the_fallback_notice_is_printed_once(self, capsys):
+    async def test_the_fallback_notice_is_printed_once(self, capsys):
         from src.discovery.resolve.probes import launch_chromium
-        for _ in range(4):                      # the pass runs k probes
-            launch_chromium(self.FakePlaywright({"chrome"}))
+        for _ in range(4):                      # a web-UI process runs many passes
+            await launch_chromium(self.FakePlaywright({"chrome"}))
         assert capsys.readouterr().out.count("system chrome") == 1
 
-    def test_channel_order_is_configurable(self, monkeypatch):
+    async def test_channel_order_is_configurable(self, monkeypatch):
         from src import config
         from src.discovery.resolve.probes import launch_chromium
         monkeypatch.setattr(config, "BROWSER_CHANNELS", ["msedge", "chrome"])
         pw = self.FakePlaywright({"chrome", "msedge"})
-        assert launch_chromium(pw)[1] == "msedge"
+        assert (await launch_chromium(pw))[1] == "msedge"
         assert pw.tried == ["msedge"]
 
 

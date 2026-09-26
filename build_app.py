@@ -26,7 +26,7 @@ that is most of the binary's size. Two separate pieces are needed to run a
 headless browser, and only one of them can ship:
 
   * the DRIVER (~100 MB of node + JS under playwright/driver/) is package
-    DATA; without it the modules compile in but sync_playwright() cannot
+    DATA; without it the modules compile in but async_playwright() cannot
     start at all. Nuitka ships it for us: its bundled package config
     (nuitka/plugins/standard/standard.nuitka-package.config.yml, entry
     `module-name: 'playwright'`) already claims **/*.json, **/*.js,
@@ -194,7 +194,7 @@ PACKAGES = ["playwright", "fake_useragent"]
 # already know about itself.
 #
 # "playwright" was listed here and is gone. Its driver (the node runtime and
-# cli.js that sync_playwright() execs) still ships: Nuitka 4.2.1's own
+# cli.js that async_playwright() execs) still ships: Nuitka 4.2.1's own
 # package config -- nuitka/plugins/standard/standard.nuitka-package.config.yml,
 # entry `module-name: 'playwright'` -- claims **/*.json, **/*.js, **/*.ts,
 # **/*.html, **/*.css and **/*.svg as package data and registers driver/node*

@@ -33,10 +33,10 @@ from .seeds import seed_candidates_for
 # more concurrent requests. Tune down if you see 429s from a probe provider.
 _DISCOVERY_WORKERS = worker_count("discovery_workers")
 
-# Headless browsers for the parallel JS scan fallback. Each is ~200-300MB
-# of RAM, so keep this modest; raise JS_BROWSERS to scrape more SPA careers
-# pages at once. Capped at the worker count (no point having idle browsers).
-_JS_BROWSERS = min(max(1, SETTINGS.js_browsers), _DISCOVERY_WORKERS)
+# Pages at once in the JS scan fallback's one headless browser, each about
+# 150MB of RAM: JS_PAGES (1-4, see config.secrets), capped at the worker
+# count (no point having idle pages).
+_JS_PAGES = min(SETTINGS.js_pages, _DISCOVERY_WORKERS)
 
 
 @dataclass
@@ -133,7 +133,7 @@ def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
         Two things the shared resolver does not do are kept here as
         fallbacks: a detection-only LEAD (an ATS we can recognize but not
         fetch -- Eightfold, Dayforce, iCIMS), worth reporting so the user can
-        add the board by hand; and the headless-browser scan (JsScanProbe),
+        add the board by hand; and the headless-browser scan (JsScanProbePool),
         for SPA careers pages whose board link only exists once JS has
         run.
 
@@ -245,10 +245,9 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
     input order. Shared by Claude-driven discover() and name-list-driven
     discover_companies().
 
-    use_js gates the headless-browser scan fallback. A single browser is
-    single-threaded (Playwright greenlet affinity), so the fallback runs as
-    a POOL of _JS_BROWSERS browsers — candidates that need it borrow a free
-    one and only block when all are busy, instead of all queuing on one.
+    use_js gates the headless-browser scan fallback, which scrapes in a
+    POOL of _JS_PAGES pages: candidates that need it borrow a free one
+    and only block when all are busy, instead of all queuing on one.
 
     websearch gates the resolver's third step for the same reason the JS
     fallback is gated: it is the slowest thing a miss can pay for, and a
@@ -289,15 +288,15 @@ def _validate_all(candidate_dicts, use_js=True, websearch=True):
                 print(line)
         return idx, cand
 
-    # A pool of browsers for the JS scrapes, each lazy-launched on first
-    # use, so concurrent candidates scrape in parallel (up to _JS_BROWSERS)
+    # A pool of pages for the JS scrapes, in a browser launched on first
+    # use, so concurrent candidates scrape in parallel (up to _JS_PAGES)
     # instead of serializing on one. Skipped entirely when use_js is off,
     # so bulk sweeps never pay the browser cost.
     def _done(fut, _name):
         idx, cand = fut.result()
         validated[idx] = cand
 
-    js_probe = JsScanProbePool(_JS_BROWSERS) if use_js else None
+    js_probe = JsScanProbePool(_JS_PAGES) if use_js else None
     try:
         drain(list(enumerate(candidate_dicts)),
               lambda irc: _worker(irc[0], irc[1], js_probe),

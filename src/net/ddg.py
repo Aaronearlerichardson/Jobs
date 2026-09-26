@@ -9,9 +9,11 @@ dork sweep, the websearch fetcher) goes through `search`, which has:
   * one disk cache (7-day TTL) so repeat runs -- and repeat queries within a
     run -- return instantly instead of re-hitting DDG; only genuine non-empty
     hits are cached, so a throttled/empty query is retried next run;
-  * one wall-clock budget per query, enforced with a worker thread and
-    join(timeout), so one throttled query abandons after ~budget seconds
-    instead of stalling the whole crawl;
+  * one wall-clock budget per query: the library runs on a daemon thread
+    of its own, the caller stops waiting for it at the deadline
+    (asyncio.timeout), and it starts no retry once no one waits, so one
+    throttled query gives up after ~budget seconds instead of stalling
+    the whole crawl;
   * one retry policy: DDG surfaces its throttling as an exception ("No
     results found."/"Ratelimit"), and a fresh session after a pause recovers
     far more than a single try.
@@ -23,11 +25,13 @@ Notes:
     fix) and src.ats.feeds.websearch._ddg_search (none).
 """
 
+import asyncio
 import logging
 import threading
 import time
 
 from src import config
+from src.net import http
 from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
 
 # File-only diagnostics (session log DEBUG channel -- never printed).
@@ -261,9 +265,12 @@ def reset_resolver():
         _RESOLVER_OVERRIDE = None
 
 
-def _query(DDGS, query, max_results, page, budget, retries):
-    """One query with retry/backoff. Runs on the worker thread; the caller
-    may have stopped waiting for it by the time it returns."""
+def _query(DDGS, query, max_results, page, deadline, retries, stop):
+    """One query with retry/backoff, on the search's own thread. Ends by
+    itself about when the caller stops waiting: each attempt's timeout is
+    at most the time left before `deadline` (time.monotonic()), and a retry
+    that would start after it, or once `stop` is set, raises TimeoutError
+    instead."""
     kwargs = {"max_results": max_results}
     if page != 1:
         # Forwarded by ddgs to the engine; the lever for getting past DDG's
@@ -271,17 +278,20 @@ def _query(DDGS, query, max_results, page, budget, retries):
         kwargs["page"] = page
     for attempt in range(retries + 1):
         try:
-            with DDGS(timeout=min(10, int(budget))) as ddg:
+            left = round(deadline - time.monotonic())
+            with DDGS(timeout=max(1, min(10, left))) as ddg:
                 return list(ddg.text(query, **kwargs))
         except Exception as e:
             if _resolver_failure(e):
                 if _install_resolver(query):
-                    return _query(DDGS, query, max_results, page, budget,
-                                  retries)
+                    return _query(DDGS, query, max_results, page, deadline,
+                                  retries, stop)
                 _trip_resolver(query, e)
                 return []
             if attempt < retries:
-                time.sleep(RETRY_PAUSE * (attempt + 1))
+                pause = RETRY_PAUSE * (attempt + 1)
+                if time.monotonic() + pause >= deadline or stop.wait(pause):
+                    raise TimeoutError("no one waits for a retry") from e
                 continue
             # "No results found." is DDG's way of returning an empty page
             # (and sometimes a disguised throttle -- hence the retries above);
@@ -294,7 +304,38 @@ def _query(DDGS, query, max_results, page, budget, retries):
     return []
 
 
-def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
+def _on_own_thread(loop, fn):
+    """(future, stop): fn(stop) run on a daemon thread of its own, its
+    result or exception set on `future` (of `loop`); the caller sets
+    `stop`, a threading.Event, once it no longer waits.
+
+    Notes:
+        Was asyncio.to_thread, whose default executor queued a search
+        behind other work on the search's own budget, and held a Ctrl+C'd
+        exit about 23 s.
+    """
+    future, stop = loop.create_future(), threading.Event()
+
+    def settle(ok, value):
+        if not future.done():            # cancelled: no one waits
+            (future.set_result if ok else future.set_exception)(value)
+
+    def body():
+        try:
+            outcome = True, fn(stop)
+        except Exception as e:
+            outcome = False, e
+        try:
+            loop.call_soon_threadsafe(settle, *outcome)
+        except RuntimeError:             # the loop has closed (exit)
+            pass
+
+    threading.Thread(target=body, daemon=True).start()
+    return future, stop
+
+
+async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
+                  retries=RETRIES):
     """Bounded, cached, retried DDG text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
     package -- every caller already tolerates an empty list."""
@@ -307,28 +348,41 @@ def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
     if probe is None:
         _log.debug("ddg skipped, resolver breaker tripped: %s", query)
         return []
-    DDGS = _ddgs_class()
-    if DDGS is None:
-        return []
-    _ensure_ddgs_engines()
-    box = {}
+    deadline = time.monotonic() + budget
 
-    def _run():
-        box["v"] = _query(DDGS, query, max_results, page, budget, retries)
-        if probe:
-            _probe_passed()
+    def run(stop):
+        # The library blocks, and its first import is slow: off the loop.
+        DDGS = _ddgs_class()
+        if DDGS is None:
+            return None
+        _ensure_ddgs_engines()
+        try:
+            return _query(DDGS, query, max_results, page, deadline, retries,
+                          stop)
+        finally:
+            if probe:
+                _probe_passed()
 
-    th = threading.Thread(target=_run, daemon=True)
-    th.start()
-    th.join(budget)
-    out = box.get("v") or []
-    if th.is_alive():
+    done, stop = _on_own_thread(asyncio.get_running_loop(), run)
+    try:
+        async with asyncio.timeout(budget):
+            out = await done
+    except TimeoutError:
         _log.debug("ddg timed out after %.0fs: %s", budget, query)
-    else:
-        _log.debug("ddg live query, %d result(s): %s", len(out), query)
+        return []
+    finally:
+        stop.set()
+    if out is None:                      # no ddgs package (announced)
+        return []
+    _log.debug("ddg live query, %d result(s): %s", len(out), query)
     if out:                              # cache only genuine hits
         cache_put(key, out)
     return out
+
+
+def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
+    """asearch's results, for a thread."""
+    return http.run_sync(asearch(query, max_results, page, budget, retries))
 
 
 def search_urls(query, max_results=10, page=1):

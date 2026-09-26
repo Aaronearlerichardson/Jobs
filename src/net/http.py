@@ -17,6 +17,7 @@ import atexit
 import concurrent.futures
 import contextvars
 import logging
+import socket
 import ssl
 import sys
 import threading
@@ -227,6 +228,25 @@ def _shutdown():
 _SESSION = None
 
 
+class _Resolver(aiohttp.ThreadedResolver):
+    """aiohttp's ThreadedResolver, its answers and errors unchanged, with
+    its lookups on DNS threads of its own rather than the loop's default
+    executor: there a lookup could queue behind asyncio.to_thread workers
+    that wait on this loop (run_sync), and never run."""
+
+    def __init__(self):
+        self._loop = self                # resolve() calls the two below
+        self._pool = concurrent.futures.ThreadPoolExecutor(thread_name_prefix="dns")
+
+    def getaddrinfo(self, *args, **kwargs):
+        return asyncio.get_running_loop().run_in_executor(
+            self._pool, partial(socket.getaddrinfo, *args, **kwargs))
+
+    def getnameinfo(self, *args):
+        return asyncio.get_running_loop().run_in_executor(
+            self._pool, socket.getnameinfo, *args)
+
+
 def _session():
     """The one aiohttp session, made on the network loop at first use.
 
@@ -245,7 +265,8 @@ def _session():
         _SESSION = aiohttp.ClientSession(
             connector=aiohttp.TCPConnector(limit=100, ssl=tls,
                                            keepalive_timeout=30,
-                                           ttl_dns_cache=300),
+                                           ttl_dns_cache=300,
+                                           resolver=_Resolver()),
             timeout=_timeout(DEFAULT_TIMEOUT),
             cookie_jar=aiohttp.CookieJar(unsafe=True, quote_cookie=False),
             max_line_size=65536, max_field_size=65536)

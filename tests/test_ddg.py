@@ -13,6 +13,9 @@ left 24 names unsearched after a transient host DNS hiccup).
 Offline: the DDGS class and ddgs's HTTP-client module are both faked.
 """
 
+import asyncio
+import threading
+import time
 import types
 
 import pytest
@@ -148,3 +151,39 @@ class TestResolverFallback:
                                           [{"href": "https://a.example/"}]])
         assert out == [{"href": "https://a.example/"}]
         assert wired.primp.Client is wired.original # ordinary retry path
+
+
+@pytest.mark.parametrize("cut", ["budget", "cancel"])
+def test_a_query_no_one_waits_for_is_not_retried(monkeypatch, wired, cut):
+    """The caller stops waiting at the budget or when cancelled (Ctrl+C),
+    and the search's thread starts no retry after that, so it ends by
+    itself."""
+    monkeypatch.setattr(ddg, "RETRY_PAUSE", 0)
+    release, exited, calls = threading.Event(), threading.Event(), []
+
+    class Slow:
+        def __init__(self, timeout=None):
+            calls.append(timeout)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            exited.set()
+
+        def text(self, q, **kw):
+            release.wait(5)
+            raise Exception("Ratelimit")
+
+    monkeypatch.setattr(ddg, "_ddgs_class", lambda: Slow)
+    t0 = time.monotonic()
+    if cut == "budget":
+        assert ddg.search("acme careers", budget=0.3) == []
+    else:
+        with pytest.raises(TimeoutError):
+            asyncio.run(asyncio.wait_for(ddg.asearch("acme careers", budget=60), 0.3))
+    assert time.monotonic() - t0 < 1
+    release.set()
+    assert exited.wait(5)
+    time.sleep(0.2)
+    assert calls == [1 if cut == "budget" else 10]

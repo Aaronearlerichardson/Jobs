@@ -14,7 +14,9 @@ nothing (2026-09-21: 1 closed, 0 live, 36 unverifiable of 37), too loose
 and it closes live postings off a 403.
 """
 
+import asyncio
 import re
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -25,7 +27,9 @@ from conftest import answer, fake_response, iso_days_ago, keep_store_open
 
 from src.ats.board import closure as job_probe
 from src.ats.board import board_for
+from src import config
 from src.discovery.resolve import probes
+from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.ops import repair, roster, scoring, status
 import src.store as store
@@ -164,29 +168,46 @@ class TestFailureIsReportedNeverRaised:
         assert len(calls) == 1
 
 
-def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch):
+@pytest.mark.parametrize("hang", ["page", "thread"])
+def test_a_hung_js_scrape_is_abandoned_at_the_budget(monkeypatch, hang):
     """discover-local 2026-09-22 sat 338s silent in the JS pass: one name's
-    scrape has to give up, and not hand its hung page to the next name."""
-    class HungPage:
-        url = ""
+    scrape has to give up, and not hand its hung page to the next name. A
+    scrape cut off while its thread waits on the loop (a board count)
+    keeps its slot until that thread returns, or such threads would pile
+    up in the loop's default executor."""
+    class Hung:
+        """A browser whose one context's one page names a board."""
+        url = "https://acme.wd5.myworkdayjobs.com/External"
 
-        def goto(self, *_a, **_k):
-            time.sleep(1)
+        def __init__(self):
+            self.context, self.closed = self, 0
 
-        def content(self):
-            return ""
+        async def new_context(self, **_k):
+            return self
 
-        def wait_for_load_state(self, *_a, **_k):
-            pass
+        async def new_page(self):
+            return self
 
-    monkeypatch.setattr(probes, "JS_PROBE_BUDGET_S", 0.1)
-    with probes.JsScanProbe() as js:
-        monkeypatch.setattr(js, "_ensure_page", HungPage)
-        stuck = js._executor
+        async def goto(self, *_a, **_k):
+            if hang == "page":
+                await asyncio.sleep(1)
+
+        async def close(self):
+            self.closed += 1
+
+    counted = threading.Event()
+    monkeypatch.setattr(config, "JS_PROBE_BUDGET_S", 0.1)
+    monkeypatch.setattr(probes, "foreign_board", lambda *_a: False)
+    monkeypatch.setattr(probes, "_scan_meta", lambda *_a: counted.wait(5))
+    with probes.JsScanProbePool(1) as js:
+        js._browser = browser = Hung()
         t0 = time.monotonic()
         assert js.probe("Acme") == (None, "budget exceeded")
         assert time.monotonic() - t0 < 0.5
-        assert js._executor is not stuck and js._page is None
+        assert browser.closed == 1 and not js._idle
+        assert js._slots.locked() == (hang == "thread")
+        counted.set()
+        assert http.run_sync(asyncio.wait_for(js._slots.acquire(), 5))
 
 
 class TestPruneNamesWhatItDeactivates:

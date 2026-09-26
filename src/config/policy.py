@@ -59,6 +59,13 @@ CLAUDE_GATE_WAIT_S = 90
 # Seconds before each retry of a transient 429/5xx: such blips clear fast.
 CLAUDE_RETRY_DELAYS_S = (2.0, 8.0)
 
+# Wall-clock cap on one name's headless-browser scrape (discovery's JS scan
+# probe). candidate_urls yields up to 12 pages and each can spend 20s in
+# goto plus 6s waiting for networkidle, so one name could hold a browser
+# for five minutes: discover-local 2026-09-22 sat 338s with no output
+# inside the JS pass.
+JS_PROBE_BUDGET_S = 60
+
 # Gated-site capture (Playwright). Keep roughly current — a stale UA is a
 # red flag to fingerprinters.
 BROWSER_UA = (

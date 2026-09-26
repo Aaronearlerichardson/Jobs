@@ -1,9 +1,10 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+import asyncio
+import importlib
 import logging
-import queue
-import threading
 import time
+from contextlib import AsyncExitStack
 
 from src import config
 from src.ats import coords
@@ -11,27 +12,25 @@ from src.ats.board import BOARDS, board_for
 from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
+from src.net import http
 from .fetchpool import candidate_urls
 from .identity import candidate_pages, foreign_board
 
 # File-only diagnostics (session log DEBUG channel — never printed).
 _log = logging.getLogger("src.discovery.resolve.probes")
 
-# Whether the headless browser is usable is a PROCESS fact, not a per-probe
-# one. The JS pass runs several JsScanProbe instances in parallel, each with
-# its own enabled flag, so one missing browser printed the failure once per
-# instance — and Playwright's launch error embeds a ten-line ASCII banner, so
-# four probes produced forty lines saying the same thing.
-_JS_NOTICE_LOCK = threading.Lock()
+# Whether the headless browser is usable is a PROCESS fact, not a per-pool
+# one: a long-lived process (the web UI) runs a JsScanProbePool per pass,
+# and Playwright's launch error embeds a ten-line ASCII banner. Read and
+# written on the network loop only.
 _JS_NOTICES = set()
 
 
 def _js_notice_once(key, message):
     """Print a `[js]` notice the first time `key` comes up. True if printed."""
-    with _JS_NOTICE_LOCK:
-        if key in _JS_NOTICES:
-            return False
-        _JS_NOTICES.add(key)
+    if key in _JS_NOTICES:
+        return False
+    _JS_NOTICES.add(key)
     print(f"    [js] {message}")
     return True
 
@@ -56,14 +55,7 @@ def _report_js_disabled(detail):
     return _js_notice_once("disabled", f"{detail}; JS scan probe disabled")
 
 
-def _clear_js_disabled():
-    """A successful launch re-arms the notice, so a later failure in a
-    long-lived process (the web UI runs many passes) is still reported."""
-    with _JS_NOTICE_LOCK:
-        _JS_NOTICES.discard("disabled")
-
-
-def launch_chromium(pw, **kwargs):
+async def launch_chromium(pw, **kwargs):
     """Launch headless Chromium, falling back to a browser the machine has.
 
     Playwright's own pinned build is tried first — it is the most predictable
@@ -89,7 +81,7 @@ def launch_chromium(pw, **kwargs):
             opts = dict(kwargs)
             if channel:
                 opts["channel"] = channel
-            browser = pw.chromium.launch(**opts)
+            browser = await pw.chromium.launch(**opts)
         except Exception as e:
             if first_error is None:
                 first_error = e
@@ -191,103 +183,87 @@ def probe_scan(name: str, careers_url: str = ""):
 # BioSciences, WillowTree, etc.) are React/Angular SPAs: the board link
 # is only inserted into the DOM after JS runs, so the static probe_scan
 # above can't see it.
-#
-# JsScanProbe launches a single headless Playwright browser, reuses
-# it across every candidate in a discover() run (browser startup is
-# ~2-3s — not something we want to pay per candidate), and degrades
-# cleanly when Playwright isn't installed. Use it as a context manager.
-
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import ExitStack
-from src.config import BROWSER_UA
-
-# Wall-clock cap on one name's scrape. candidate_urls yields up to 12 pages
-# and each can spend 20s in goto plus 6s waiting for networkidle, so one
-# name could hold a browser for five minutes: discover-local 2026-09-22 sat
-# 338s with no output inside the JS pass.
-JS_PROBE_BUDGET_S = 60
 
 
-class JsScanProbe:
-    """
-    Lazy-launched headless Playwright wrapper for JS-rendered careers
-    pages, read for a SCANNED platform's board. Amortizes browser startup
-    across many candidates.
+class JsScanProbePool:
+    """Up to `size` JS scan scrapes at once, in one lazily launched
+    headless browser on the network loop.
+
+    Each scrape takes a free page, which lives in a browser context of its
+    own and is kept for later scrapes; a caller waits while all `size`
+    slots are busy, a cut-off scrape's slot until its thread returns.
+    close() shuts the browser down.
 
     Usage:
-        with JsScanProbe() as js:
+        with JsScanProbePool(4) as js:
             meta, outcome = js.probe("NetApp", careers_url="")
 
     If Playwright isn't installed or the browser fails to launch, the
     failure is reported once per process (_report_js_disabled) and every
     later probe() returns (None, "no browser").
+
+    Notes:
+        Was `size` whole browsers, each pinned to a thread of its own
+        because sync Playwright binds to the thread that starts it. Over
+        200 local careers pages 4 wide, pages in one browser answered the
+        same, in the same wall time, with 0.9 GB of private memory
+        against 1.9-2.4 GB. A context per page, not per scrape: a fresh
+        one costs about 3.5x the CPU.
     """
 
-    def __init__(self):
-        self._stack = ExitStack()
-        self._page = None
-        self._enabled = True  # flipped False after a launch failure
-        self._launched = False
-        # Sync Playwright binds its internal greenlet to the thread that
-        # first enters sync_playwright() and MUST be torn down on that
-        # same thread — otherwise close() raises greenlet.error. With a
-        # thread pool dispatching probe() calls, "same thread" is only
-        # guaranteed if we pin Playwright to a dedicated worker.
-        #
-        # One max_workers=1 executor owns every browser call: launch,
-        # navigate, and close. Other worker threads submit probe()
-        # requests and block on .result(), so the static probe_scan
-        # paths stay fully parallel while the JS fallback is serialized
-        # onto a single browser thread.
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="scan-js",
-        )
+    def __init__(self, size):
+        self.size = max(1, int(size))
+        self._slots = asyncio.Semaphore(self.size)
+        self._launching = asyncio.Lock()
+        self._stack = AsyncExitStack()
+        self._browser = None
+        self._idle = []          # pages free for the next scrape
+        self._enabled = True     # False after a launch failure, or close()
 
-    # ── internals ────────────────────────────────────────────────────────
-
-    def _ensure_page(self):
-        if self._page is not None:
-            return self._page
-        if not self._enabled:
-            return None
+    async def _launch(self):
+        """Start Playwright and the browser on self._stack, or report why
+        not and disable the pool."""
         try:
-            # Import locally so we don't sys.exit() when playwright isn't
-            # installed — require_browser() does, which is fine for its
-            # intended callers but not for an opportunistic fallback.
-            from playwright.sync_api import sync_playwright
+            # Off the loop, as the import takes over 100 ms; and only here,
+            # so a process that never probes (the harvester) never loads it.
+            api = await asyncio.to_thread(importlib.import_module,
+                                          "playwright.async_api")
         except ImportError:
             _report_js_disabled("playwright not installed")
             self._enabled = False
-            return None
-        # Held locally: a launch that outlives the budget finishes after
-        # _recycle swapped in a fresh stack, and must not hand its page
-        # (bound to this abandoned thread) to the new one.
-        stack = self._stack
+            return
         try:
-            pw = stack.enter_context(sync_playwright())
-            browser, _channel = launch_chromium(pw, headless=True)
-            stack.callback(browser.close)
-            context = browser.new_context(
-                user_agent=BROWSER_UA,
-                viewport={"width": 1920, "height": 1080},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
-            stack.callback(context.close)
-            page = context.new_page()
+            pw = await self._stack.enter_async_context(api.async_playwright())
+            browser, _channel = await launch_chromium(pw, headless=True)
+            self._stack.push_async_callback(browser.close)
         except Exception as e:
             _report_js_disabled(f"browser launch failed: {_js_launch_hint(e)}")
             self._enabled = False
-            stack.close()
+            await self._stack.aclose()
+            return
+        self._browser = browser
+        # Re-armed, so a later failure in the same process is reported.
+        _JS_NOTICES.discard("disabled")
+
+    async def _page(self):
+        """A free page, made on first need; None when there is no browser."""
+        if self._idle:
+            return self._idle.pop()
+        async with self._launching:
+            if self._browser is None and self._enabled:
+                await self._launch()
+        if self._browser is None:
             return None
-        if stack is self._stack:
-            self._page = page
-            self._launched = True
-        _clear_js_disabled()
-        return page
+        context = await self._browser.new_context(
+            user_agent=config.BROWSER_UA,
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York",
+        )
+        return await context.new_page()
 
     @staticmethod
-    def _scan(page, url: str):
+    async def _scan(page, url: str):
         """
         Navigate + wait for JS, returning `scan_hit`'s (ats, handle) or
         None. Has three short-circuits so we don't pay the full
@@ -297,7 +273,7 @@ class JsScanProbe:
           3. After JS settles (networkidle, capped at 6s), try again.
         """
         try:
-            page.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
         except Exception as e:
             msg = str(e)
             if ("interrupted by another navigation" not in msg
@@ -310,158 +286,126 @@ class JsScanProbe:
         if (hit := scan_hit(cur)):
             return hit
         try:
-            html = page.content()
+            html = await page.content()
         except Exception:
             html = ""
-        if (hit := scan_hit(html)):
+        if (hit := await asyncio.to_thread(scan_hit, html)):
             return hit
         # Wait for JS-deferred content (iframes, ajax-injected links).
         try:
-            page.wait_for_load_state("networkidle", timeout=6000)
+            await page.wait_for_load_state("networkidle", timeout=6000)
         except Exception:
             pass
         try:
             cur = page.url
-            html = page.content()
+            html = await page.content()
         except Exception:
             return None
-        return scan_hit(cur) or scan_hit(html)
+        return scan_hit(cur) or await asyncio.to_thread(scan_hit, html)
 
-    # ── public API ───────────────────────────────────────────────────────
+    @classmethod
+    async def _scrape(cls, page, name, careers_url, held):
+        """aprobe's answer from `page`, once it has one. Its calls that wait
+        on the loop (run_sync) go in `held` as tasks, which a cut-off scrape
+        leaves running."""
 
-    def _probe_impl(self, name, careers_url, deadline):
-        """Runs entirely on the browser-owning thread."""
-        page = self._ensure_page()
-        if page is None:
-            return None, "no browser"
+        async def in_thread(fn, *args):
+            held.append(task := asyncio.create_task(asyncio.to_thread(fn, *args)))
+            await asyncio.wait((task,))
+            return task.result()
+
         for url in candidate_urls(name, careers_url):
-            if time.monotonic() > deadline:
-                # The caller gave up and recycled; stop loading pages so
-                # this abandoned thread reaches its queued close.
-                return None, "budget exceeded"
-            hit = self._scan(page, url)
-            if not hit or foreign_board(name, *hit):
+            hit = await cls._scan(page, url)
+            if not hit or await in_thread(foreign_board, name, *hit):
                 continue
             try:
                 source = page.url
             except Exception:
                 source = url
-            meta = _scan_meta(*hit, source)
+            meta = await in_thread(_scan_meta, *hit, source)
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 
-    def probe(self, name: str, careers_url: str = ""):
+    async def aprobe(self, name: str, careers_url: str = ""):
         """
         (meta, outcome): meta is probe_scan()'s shape or None; outcome
         is "hit", "not validated", "no board link", "no browser",
         "budget exceeded" or "errored: <exception>".
 
-        Thread-safe: every Playwright call is dispatched onto the single
-        browser-owning worker thread and the caller blocks on .result().
-        Workers calling probe() concurrently queue behind each other,
-        but their static probe_scan() work keeps running in parallel.
+        One name's scrape, a browser launch included, gets
+        config.JS_PROBE_BUDGET_S; the wait for a free page does not count.
+        A page cut off (the budget, or a cancel) is closed rather than
+        handed to the next name.
         """
         if not self._enabled:
             return None, "no browser"
+        await self._slots.acquire()
         t0 = time.monotonic()
-        fut = self._executor.submit(
-            self._probe_impl, name, careers_url, t0 + JS_PROBE_BUDGET_S,
-        )
+        budget = asyncio.timeout(config.JS_PROBE_BUDGET_S)
+        page, keep, held = None, False, []
         try:
-            meta, outcome = fut.result(timeout=JS_PROBE_BUDGET_S)
+            async with budget:
+                page = await self._page()
+                meta, outcome = (await self._scrape(page, name, careers_url, held)
+                                 if page else (None, "no browser"))
+            keep = True
         except Exception as e:
             meta = None
-            if fut.done():
-                # A browser-thread crash shouldn't poison the rest of discovery.
-                print(f"    [js] probe for {name!r} errored: {e}")
-                outcome = f"errored: {e}"
-            else:
-                self._recycle()
+            if budget.expired():
                 outcome = "budget exceeded"
+            else:
+                # A browser crash shouldn't poison the rest of discovery.
+                print(f"    [js] probe for {name!r} errored: {e}")
+                outcome, keep = f"errored: {e}", True
+        finally:
+            # A thread cut off in foreign_board or _scan_meta still waits on
+            # the loop (run_sync), so it keeps the slot until it returns: at
+            # most `size` such threads hold default-executor workers.
+            if held and not held[-1].done():
+                held[-1].add_done_callback(self._release)
+            else:
+                self._slots.release()
+            if page is not None and keep:
+                self._idle.append(page)
+            elif page is not None:
+                try:
+                    await page.context.close()
+                except Exception as e:
+                    _log.debug("js page close errored: %s", e)
         _log.debug("js probe %s: %s in %.1fs", name, outcome,
                    time.monotonic() - t0)
         return meta, outcome
 
-    def _recycle(self):
-        """Abandon a browser thread stuck past the budget; start clean.
+    def _release(self, task):
+        """Done callback of a thread that outlived its scrape: frees the
+        slot it kept, and drops its outcome, which no one awaits."""
+        if not task.cancelled():
+            task.exception()
+        self._slots.release()
 
-        A hung Playwright call cannot be interrupted from here, and the
-        browser must be closed on the thread that built it, so the close
-        queues behind the hung call and a fresh thread takes the next name.
-        """
-        old, stack = self._executor, self._stack
-        old.submit(stack.close)
-        old.shutdown(wait=False)
-        self._executor = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="scan-js",
-        )
-        self._stack = ExitStack()
-        self._page = None
-        self._launched = False
-
-    def _close_impl(self):
-        self._stack.close()
-        self._page = None
-
-    def close(self):
-        # Tear the browser down on the same thread that built it — else
-        # Playwright raises greenlet.error. After the close lands, we can
-        # safely shut the executor down.
-        if self._executor is None:
-            return
-        try:
-            if self._launched or self._page is not None:
-                self._executor.submit(self._close_impl).result()
-        except Exception as e:
-            print(f"    [js] browser close errored: {e}")
-        self._executor.shutdown(wait=True)
-        self._executor = None
+    def probe(self, name: str, careers_url: str = ""):
+        """aprobe's (meta, outcome), for a thread."""
+        return http.run_sync(self.aprobe(name, careers_url))
 
     @property
     def launched(self) -> bool:
         """True once the browser has actually started (for logging)."""
-        return self._launched
+        return self._browser is not None
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_a):
-        self.close()
-
-
-class JsScanProbePool:
-    """K headless browsers running JS scan scrapes in parallel.
-
-    A single JsScanProbe is single-threaded by necessity: Playwright's
-    sync API pins its greenlet to one thread, so one instance serializes
-    every scrape onto one browser. But nothing stops running SEVERAL
-    instances at once: each owns its own Playwright + browser + thread, so
-    K of them give K-way parallel scraping. Discovery workers that need the
-    JS fallback borrow a free browser from the pool (blocking only when all
-    K are busy) and hand it back when their scrape finishes.
-    """
-
-    def __init__(self, size):
-        self.size = max(1, int(size))
-        self._probes = [JsScanProbe() for _ in range(self.size)]
-        self._free = queue.Queue()
-        for p in self._probes:
-            self._free.put(p)
-
-    def probe(self, name, careers_url=""):
-        p = self._free.get()          # blocks until a browser is free
-        try:
-            return p.probe(name, careers_url)
-        finally:
-            self._free.put(p)
-
-    @property
-    def launched(self):
-        return any(p.launched for p in self._probes)
+    async def aclose(self):
+        """Shut the browser down, after any launch under way; a later
+        probe answers "no browser"."""
+        async with self._launching:
+            self._enabled, self._browser = False, None
+            self._idle.clear()
+            try:
+                await self._stack.aclose()
+            except Exception as e:
+                print(f"    [js] browser close errored: {e}")
 
     def close(self):
-        for p in self._probes:
-            p.close()
+        """aclose, for a thread."""
+        http.run_sync(self.aclose())
 
     def __enter__(self):
         return self

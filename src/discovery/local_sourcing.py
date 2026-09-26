@@ -118,14 +118,14 @@ def _probe_pass(names, max_workers):
 
 def _js_scan_pass(hits, max_workers):
     """Re-probe the MAJORS that got no board, with a headless browser
-    (probes.JsScanProbe).
+    (probes.JsScanProbePool).
 
     Big employers often have React/SPA careers pages whose board link only
     appears after JS runs, so the static probe misses them entirely.
     """
     missed = _boardless(MAJORS, hits)
     import importlib.util
-    if importlib.util.find_spec("playwright.sync_api") is None:
+    if importlib.util.find_spec("playwright.async_api") is None:
         if missed:
             print(f"    [js] playwright not installed; skipping JS probe "
                   f"of {len(missed)} major(s)")
@@ -134,19 +134,16 @@ def _js_scan_pass(hits, max_workers):
         return
     from .resolve.probes import JsScanProbePool
     # Parallel across DIFFERENT sites is safe: each target still sees
-    # exactly one page load; the serial design existed for sync-
-    # Playwright's thread affinity, not politeness. Each probe instance
-    # already pins its browser to its own dedicated thread, so K instances
-    # + K caller threads = K-way parallelism with the thread-safety model
-    # untouched. K is memory-bound (one headless Chromium each), so it is
-    # capped low and separate from the HTTP worker count.
+    # exactly one page load. K is memory-bound (a page in the one headless
+    # browser each), so it is capped low and separate from the HTTP worker
+    # count.
     #
-    # A pool rather than a fixed `i % k` browser per name: the fixed split
-    # queued two names on one browser while another sat idle, and the
+    # A pool rather than a fixed `i % k` page per name: the fixed split
+    # queued two names on one page while another sat idle, and the
     # per-probe budget would then have counted that queue wait.
-    k = min(4, len(missed))
+    k = min(config.SETTINGS.js_pages, len(missed))
     print(f"  JS-probing {len(missed)} major(s) with no static board "
-          f"({k} parallel browser(s))...")
+          f"({k} parallel page(s))...")
     with JsScanProbePool(k) as pool:
 
         def _js_one(name):
