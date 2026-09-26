@@ -10,15 +10,12 @@ WeWorkRemotely feeds:
     https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
 """
 
+import asyncio
 import re
 
-from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import node_text, parse_markup, stable_id, strip_html, xpath
-
-#: The elements named $name, in any namespace (an Atom feed's are in its own).
-_NAMED = "//*[local-name()=$name]"
-#: An item's body, the first of these it has.
-_BODIES = ("description", "summary", "content")
+from src.net import http
+from src.net.http import HEADERS, fetch_failed
+from src.net.util import named, node_text, parse_markup, stable_id, strip_html
 
 # WWR titles take either shape:
 #   "Company Name: Role Title"            (current convention)
@@ -71,14 +68,14 @@ def _find(item, name):
     >>> _find(entry, "title")[1], _find(entry, "link")[0].get("href"), _find(entry, "guid")
     ('Chemist', 'https://x.test/7', (None, ''))
     """
-    hit = xpath("." + _NAMED)(item, name=name)
-    return (hit[0], node_text(hit[0], "", strip=False)) if hit else (None, "")
+    el = named(item, name, one=True)
+    return (el, node_text(el, "", strip=False)) if el is not None else (None, "")
 
 
-def fetch_rss(source_label, url, default_location="Remote", max_items=200,
-              remote_board=False, gate=None):
+async def afetch_rss(source_label, url, default_location="Remote", max_items=200,
+                     remote_board=False, gate=None):
     """
-    Pull an RSS/Atom feed, yield relevant jobs.
+    Pull an RSS/Atom feed, yield relevant jobs, the feed read off the loop.
 
     `source_label` is used as a fallback company name. If the feed is
     WWR-shaped we extract the real company from each item's title.
@@ -87,13 +84,21 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
     the parsed region is an eligibility constraint, not an office.
     """
     try:
-        r = SESSION.get(url, headers=HEADERS)
+        r = await http.send("GET", url, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         return fetch_failed(f"RSS {source_label}", e)
+    return await asyncio.to_thread(_jobs, r.content, source_label, url, default_location,
+                                   max_items, remote_board, gate)
 
-    root = parse_markup(r.content, xml=True, url=url)
-    items = xpath(_NAMED)(root, name="item") or xpath(_NAMED)(root, name="entry")
+
+fetch_rss = http.sync_shim(afetch_rss)
+
+
+def _jobs(feed, source_label, url, default_location, max_items, remote_board, gate):
+    """The feed body `feed` as fetch_rss's job dicts."""
+    root = parse_markup(feed, xml=True, url=url)
+    items = named(root, "item") or named(root, "entry")
     jobs = []
     for it in items[:max_items]:
         _, raw_title = _find(it, "title")
@@ -107,8 +112,9 @@ def fetch_rss(source_label, url, default_location="Remote", max_items=200,
             link = ""
         guid = _find(it, "guid")[1] or link or raw_title
 
-        desc = next((strip_html(text) for el, text in (_find(it, n) for n in _BODIES)
-                     if el is not None), "")
+        # The item's body: the first of these it has.
+        bodies = (_find(it, n) for n in ("description", "summary", "content"))
+        desc = next((strip_html(text) for el, text in bodies if el is not None), "")
 
         role, company, region = _parse_title(raw_title)
 

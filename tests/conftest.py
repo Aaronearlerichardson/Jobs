@@ -447,6 +447,13 @@ def keep_store_open(monkeypatch, db):
     return db
 
 
+def no_pacing(monkeypatch):
+    """The board engine's page and detail delays at zero, for a test that
+    walks many pages or details."""
+    for name in ("PAGE_DELAY_S", "SWEEP_DETAIL_DELAY_S", "WHOLE_BOARD_DETAIL_DELAY_S"):
+        monkeypatch.setattr(_config, name, 0)
+
+
 def fake_response(payload=None, *, text=None, status=200, content=None, url=""):
     """A stand-in for a requests Response: `status_code`,
     `raise_for_status()`, `json()`, `text`, `content`, `url`,

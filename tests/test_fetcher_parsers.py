@@ -17,17 +17,18 @@ under test, and nobody's job descriptions need committing.
 import copy
 import json
 import re
+import threading
 from pathlib import Path
 
 import pytest
 
-from conftest import fake_response
+from conftest import fake_response, no_pacing
 from src.match.filters import is_relevant
 from src.ats.board import BOARDS, board_for, board_for_url, company, fields
 from src.ats.board import engine as board
 from src.ats.feeds import discourse, getro, remoteok, remotive, usajobs
 from src.discovery import apply
-from src.net import http
+from src.net import http, util
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -129,13 +130,17 @@ class TestSpecdBoardsReadTheirListings:
     rows, which had no sweep, in the sweep's shape; jazzhr: a posting
     whose page has no JSON-LD kept as the index names it, its body the
     page's; successfactors: pages stepped by the rows the tenant serves, a
-    place read off the slug only where it leads the title)."""
+    place read off the slug only where it leads the title). No page is
+    parsed on the network loop's thread."""
 
     @pytest.mark.parametrize("ats,handle,listing,detail", BOARD_FIXTURES)
     def test_rows_match_the_recording(self, serve, monkeypatch, tmp_path, ats,
                                       handle, listing, detail):
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
+        parse, on_loop = util.etree.fromstring, []
+        monkeypatch.setattr(util.etree, "fromstring", lambda *a, **kw: on_loop.append(
+            threading.current_thread() is http._LOOP_THREAD) or parse(*a, **kw))
         if isinstance(listing, dict):
             serve({fragment: _fixture_response(name) for fragment, name in listing.items()})
         else:
@@ -143,12 +148,13 @@ class TestSpecdBoardsReadTheirListings:
                 _fixture_response(listing),
                 _fixture_response(detail) if detail else fake_response(status=404)])
         assert board_for(ats).jobs(handle, "Acme") == load(f"{ats}_rows.json")
+        assert not any(on_loop)
 
     def test_an_icims_row_reads_its_location_column(self, serve, monkeypatch, tmp_path):
         """A tenant's column is a labelled header, a labelled field, or the
         map-marked city, state and country; a row with none takes the
         posting page's, never a place-shaped title."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
 
         def card(n, title, fields=""):
@@ -183,7 +189,7 @@ class TestSpecdBoardsReadTheirListings:
         for one whose search, reporting no total, opens with the unscoped
         page's postings (it ignored the filter): the pull keeps, and the
         local count samples, the listing's own location column."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
         page = form + "<ul>" + "".join(
             f'<li><div class="header"><span class="field-label">Location</span><span>{loc}'
@@ -201,7 +207,7 @@ class TestSpecdBoardsReadTheirListings:
         """A search reading no free-text place (iCIMS lists nothing for
         searchLocation=NC) is scoped by its form's own location options:
         every one whose label the area matches, asked together."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
         log = serve({"searchLocation": _fixture_response("icims_board_located.html"),
                      "/jobs/search": _fixture_response("icims_board.html"),
@@ -929,11 +935,11 @@ class TestMissionContext:
 
 
 class TestADeadEndpointIsNeverAnException:
-    """Every JSON-pulling fetcher goes through net.http.get_json, and the
+    """Every JSON-pulling fetcher goes through net.http.aget_json, and the
     scraped ones report through net.http.fetch_failed, so the "a dead
     source reports and returns empty" contract is ONE contract, checked
     for both failure shapes (a refused socket and an HTTP error reach
-    get_json's handler by different routes).
+    aget_json's handler by different routes).
 
     Parametrised over the fetchable specs themselves, so a board platform
     is covered the day it is specced; FEEDS are the sources outside them.

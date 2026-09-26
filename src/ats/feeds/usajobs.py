@@ -30,23 +30,17 @@ Notes:
     normal rather than a parsing bug.
 """
 
-from src import config
-from src.net.http import HEADERS, SESSION, fetch_failed
-from src.net.util import norm_posted_date, strip_html
+import asyncio
 
-API_URL = "https://data.usajobs.gov/api/search"
+from src import config
+from src.net import http
+from src.net.http import HEADERS, fetch_failed
+from src.net.util import norm_posted_date, strip_html
 
 # Occupational series crawled when the profile names none: 2210 IT
 # management, 1550 computer science, 0601 general health science, 0401
 # general biological science.
 DEFAULT_SERIES = ("2210", "1550", "0601", "0401")
-
-# The API caps ResultsPerPage at 500. 250 is big enough that a regional
-# search is normally one request, small enough to stay polite.
-DEFAULT_RESULTS_PER_PAGE = 250
-
-# Hard stop, so a mistyped filter cannot walk the entire federal board.
-MAX_PAGES = 20
 
 
 def _salary_text(remuneration):
@@ -285,15 +279,17 @@ def _credentials():
         USAJOBS_EMAIL=getattr(config, "USAJOBS_EMAIL", ""))
 
 
-def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
-                  results_per_page=DEFAULT_RESULTS_PER_PAGE,
-                  max_pages=MAX_PAGES, gate=None):
+async def afetch_usajobs(keyword=None, location=None, radius=None, series=None,
+                         results_per_page=250, max_pages=20, gate=None):
     """Search USAJOBS and return the announcements passing `gate` as job
-    dicts (all of them when `gate` is None).
+    dicts (all of them when `gate` is None), each page read off the loop.
 
-    Pages until ``SearchResult.SearchResultCountAll`` is covered. `series`
-    is a list of occupational series codes; every scope argument normally
-    comes from profile ``[sources.usajobs]``.
+    Pages until ``SearchResult.SearchResultCountAll`` is covered, at most
+    `max_pages` (so a mistyped filter cannot walk the entire federal
+    board). `series` is a list of occupational series codes; every scope
+    argument normally comes from profile ``[sources.usajobs]``. The API
+    caps `results_per_page` at 500; 250 is big enough that a regional
+    search is normally one request, small enough to stay polite.
 
     Returns [] — never raises — with no credentials, on an HTTP or JSON
     error, and on an unexpected payload shape. Covered by
@@ -310,10 +306,10 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
     jobs, seen, fetched, total = [], set(), 0, None
     for page in range(1, int(max_pages) + 1):
         try:
-            r = SESSION.get(API_URL, headers=headers,
-                            params={**params, "Page": page})
+            r = await http.send("GET", "https://data.usajobs.gov/api/search", headers=headers,
+                                params={**params, "Page": page})
             r.raise_for_status()
-            data = r.json()
+            data = await asyncio.to_thread(r.json)
         except Exception as e:
             fetch_failed("USAJOBS", e)
             break
@@ -330,8 +326,7 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
             except (TypeError, ValueError):
                 total = 0
 
-        for item in items:
-            job = _parse_item(item)
+        for job in await asyncio.to_thread(list, map(_parse_item, items)):
             if not job or job["id"] in seen:
                 continue
             seen.add(job["id"])
@@ -341,3 +336,6 @@ def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
         if not total or fetched >= total:
             break
     return jobs
+
+
+fetch_usajobs = http.sync_shim(afetch_usajobs)

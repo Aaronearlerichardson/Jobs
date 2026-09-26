@@ -10,19 +10,27 @@ Schema (per job):
     description, location, salary, apply_url, url, original
 """
 
-from src.net.http import get_json
+import asyncio
+
+from src.net import http
 from src.net.util import strip_html
 
-API_URL = "https://remoteok.com/api"
 
-
-def fetch_remoteok(max_jobs=500, gate=None):
+async def afetch_remoteok(max_jobs=500, gate=None):
     """
-    Pull every active listing from RemoteOK, filter to the relevant ones.
-    Returns a list of job dicts in the standard crawler shape.
+    Pull every active listing from RemoteOK, filter to the relevant ones
+    (off the loop). Returns a list of job dicts in the standard crawler
+    shape.
     """
-    data = get_json(API_URL, "RemoteOK", default=[])
+    data = await http.aget_json("https://remoteok.com/api", "RemoteOK", default=[])
+    return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
+
+fetch_remoteok = http.sync_shim(afetch_remoteok)
+
+
+def _jobs(data, max_jobs, gate):
+    """The feed's payload `data` as fetch_remoteok's job dicts."""
     jobs = []
     for entry in data[:max_jobs + 1]:           # +1 for metadata stub
         if not isinstance(entry, dict):

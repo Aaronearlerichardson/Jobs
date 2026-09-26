@@ -12,7 +12,7 @@ import re
 
 import pytest
 
-from conftest import fake_response
+from conftest import fake_response, no_pacing
 from src import config
 from src.ats.board import engine as board
 from src.ats.board import company as company_fetch
@@ -52,7 +52,7 @@ def cxs(serve, monkeypatch, tmp_path):
     and the scoped answer's, default their lengths). A detail GET names
     `detail` as the posting's location. A hyphenated tenant id in the
     path answers 422. Location lookups are cached under tmp_path."""
-    monkeypatch.setattr(board.time, "sleep", lambda s: None)
+    no_pacing(monkeypatch)
     monkeypatch.setattr(board.config, "DATA_DIR", tmp_path)
 
     def _install(postings, scoped=None, totals=None, ignores_scope=False,
@@ -246,7 +246,7 @@ def offset_board(serve, monkeypatch):
     """`serve` an offset-paged board: `pages` maps an offset to the ids
     served there, `total` is on every page; `fail_from` answers 500 at and
     after that offset."""
-    monkeypatch.setattr(board.time, "sleep", lambda s: None)
+    no_pacing(monkeypatch)
 
     def _install(pages, total=None, fail_from=None):
         def reply(url, params=None, **kw):
@@ -339,7 +339,7 @@ class TestEnginePagers:
                                                   pages, read, capped):
         """An offset pager with no size steps by the first page's count, one
         row less with no total: the overlap row makes the last page short."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         _sized_by_server(serve, n, past=past, total=total)
         rows = _engine("offset", pages=pages, total="total").listing("h", "t h")
         assert len(rows) == read and http.snapshot_info()["capped"] is capped
@@ -347,7 +347,7 @@ class TestEnginePagers:
     def test_a_learned_page_size_widens_to_the_row_budget(self, serve, monkeypatch):
         """A mission-worth-it board reads BOARD_MAX_ROWS at the step the
         server serves, not the spec's page count."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 40)
         calls = _sized_by_server(serve, 99, total=99)
         b = _engine("offset", pages=2, total="total")
@@ -425,7 +425,7 @@ class TestSuccessFactorsSnapshot:
 
     @staticmethod
     def walk(serve, monkeypatch, pages, total):
-        monkeypatch.setattr(board.time, "sleep", lambda *a: None)
+        no_pacing(monkeypatch)
         calls = serve(_sf_pages(pages, total))
         return board_for("successfactors").listing("https://careers.example.edu", "t"), calls
 
@@ -501,7 +501,7 @@ class TestPostingPagesAsTheListing:
     def test_past_the_budget_a_row_keeps_what_the_index_names(self, serve, monkeypatch,
                                                               capsys):
         """A posting left unread is still a row, so the snapshot is whole."""
-        monkeypatch.setattr(board.time, "sleep", lambda s: None)
+        no_pacing(monkeypatch)
         spec = config.BOARDS["jazzhr"]
         b = board.Board("jazzhr", {**spec, "rescue": {**spec["rescue"], "cap": 1}})
         posting = ('<script type="application/ld+json">{"@type": "JobPosting", '

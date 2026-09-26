@@ -14,14 +14,17 @@ a bot gate -- is "unverifiable", because a caller acts on a False by
 closing the posting.
 """
 
+import asyncio
 import logging
 import re
 import time
 
 from src import config
-from src.net.http import HEADERS, SESSION, HostBreaker, Unreachable
+from src.net import http
+from src.net.http import HEADERS, HostBreaker, Unreachable
 from src.net.util import clean_url
 from .engine import board_for_url
+from .jsonld import extract_jsonld, is_jobposting
 
 _log = logging.getLogger(__name__)
 
@@ -78,7 +81,7 @@ def probe_family(url):
 _DEAD_HOSTS = HostBreaker(ttl=config.BOARD_MEMO_S, trips=3)
 
 
-def probe_job_open(url, job_id=None):
+async def aprobe_job_open(url, job_id=None):
     """Best-effort liveness check of one job's own detail URL.
 
     Returns (is_open, reason): True = positively live, False = positively
@@ -101,7 +104,8 @@ def probe_job_open(url, job_id=None):
     past JSON-LD validThrough, a spec's `closure.closed` or `unmatched`
     rule, or an id absent from a non-empty board listing.
     403/405/429/5xx/timeouts never close. The page is read with the
-    posting's platform's detail headers (`Board.page_headers`).
+    posting's platform's detail headers (`Board.page_headers`), and
+    judged off the loop (`_page_verdict`).
 
     Notes:
         17 of the 36 unverifiable probes on 2026-09-21 were a WAF's 405
@@ -123,15 +127,15 @@ def probe_job_open(url, job_id=None):
     fallback = ""
     board = board_for_url(url)
     if board:
-        is_open, fallback = board.probe_job(url, job_id)
+        is_open, fallback = await board.probe_job(url, job_id)
         if is_open is not None:
             return is_open, fallback
 
     if _DEAD_HOSTS.dead(url):
         return None, "host unreachable this pass: skipped"
     try:
-        r = SESSION.get(url, headers=board.page_headers(url) if board else HEADERS,
-                        allow_redirects=True)
+        r = await http.send("GET", url, headers=board.page_headers(url) if board else HEADERS,
+                            allow_redirects=True)
     except Exception as e:
         if isinstance(e, Unreachable):
             _DEAD_HOSTS.trip(url)
@@ -140,12 +144,20 @@ def probe_job_open(url, job_id=None):
         return False, f"HTTP {r.status_code}"
     if r.status_code != 200:
         return None, fallback or f"HTTP {r.status_code}"
+    return await asyncio.to_thread(_page_verdict, r, url, fallback)
+
+
+probe_job_open = http.sync_shim(aprobe_job_open)
+
+
+def _page_verdict(r, url, fallback):
+    """probe_job_open's verdict on a posting page `r` that answered 200: a
+    closed notice, else its JSON-LD JobPosting, else `fallback`."""
     html = r.text[:200_000]
     m = _CLOSED_TEXT_RE.search(html)
     if m:
         return False, f"page says {m.group(0)[:50]!r}"
     try:
-        from .jsonld import extract_jsonld, is_jobposting
         for obj in extract_jsonld(html, url):
             if is_jobposting(obj):
                 vt = str(obj.get("validThrough") or "")[:10]

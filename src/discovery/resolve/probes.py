@@ -383,9 +383,7 @@ class JsScanProbePool:
             task.exception()
         self._slots.release()
 
-    def probe(self, name: str, careers_url: str = ""):
-        """aprobe's (meta, outcome), for a thread."""
-        return http.run_sync(self.aprobe(name, careers_url))
+    probe = http.sync_shim(aprobe)
 
     @property
     def launched(self) -> bool:
@@ -403,9 +401,7 @@ class JsScanProbePool:
             except Exception as e:
                 print(f"    [js] browser close errored: {e}")
 
-    def close(self):
-        """aclose, for a thread."""
-        http.run_sync(self.aclose())
+    close = http.sync_shim(aclose)
 
     def __enter__(self):
         return self

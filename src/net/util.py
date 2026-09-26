@@ -12,6 +12,7 @@ import time
 from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
+from cssselect import HTMLTranslator
 from lxml import etree
 
 from src import config
@@ -180,8 +181,8 @@ _local = threading.local()
 def _parser(xml, utf8):
     """This thread's lxml parser, XML (recovering, no entities, no network)
     or HTML, told its input is UTF-8 when `utf8`. Threads sharing one parser
-    take turns, so each keeps its own; the async CPU-parse wrapper builds on
-    this."""
+    take turns, so each keeps its own: asyncio.to_thread's workers, which
+    parse for async code, as well."""
     name = ("xml" if xml else "html") + ("8" if utf8 else "")
     p = getattr(_local, name, None)
     if p is None:
@@ -277,6 +278,62 @@ def xpath(expr):
     if xp is None:
         xp = cache[expr] = etree.XPath(expr, smart_strings=False)
     return xp
+
+
+def first(expr, scope, **variables):
+    """The first node `xpath(expr)` finds from `scope`, its $names filled
+    from `variables`; None when it finds none.
+
+    >>> page = parse_markup("<p>a</p><p>b</p>")
+    >>> first("//p", page).text, first("//p[. = $t]", page, t="b").text, first("//i", page)
+    ('a', 'b', None)
+    """
+    hit = xpath(expr)(scope, **variables)
+    return hit[0] if hit else None
+
+
+def links(tree):
+    """Every <a> with an href in `tree`'s document."""
+    return xpath("//a[@href]")(tree)
+
+
+def jsonld_scripts(tree):
+    """Every schema.org JSON-LD block in `tree`'s document: its
+    <script type="application/ld+json"> elements."""
+    return xpath("//script[@type='application/ld+json']")(tree)
+
+
+def named(scope, name, one=False):
+    """The elements at or below `scope` whose local name is `name`, in any
+    namespace (an Atom feed's are in its own); with `one`, the first, or
+    None.
+
+    >>> feed = parse_markup('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>A</title>'
+    ...                     '</entry><entry/></feed>', xml=True)
+    >>> len(named(feed, "entry")), named(feed, "title", one=True).text, named(feed, "item", one=True)
+    (2, 'A', None)
+    """
+    expr = "descendant-or-self::*[local-name()=$name]"
+    return first(expr, scope, name=name) if one else xpath(expr)(scope, name=name)
+
+
+@functools.cache
+def css(selector, relative=False):
+    """`selector`, CSS in cssselect's HTML dialect, as XPath for `xpath` and
+    `first`: matching the element it runs on and everything below (from
+    the root, the whole document), or only what is below when `relative`.
+    Raises cssselect's SelectorError on CSS the dialect cannot read.
+
+    >>> page = parse_markup('<ul><li><a href="/job/1">A</a><p class="loc">Durham</p></li>'
+    ...                     '<li><a href="/job/2">B</a></li></ul>')
+    >>> [a.get("href") for a in xpath(css("li:has(.loc) a[href*='/job/']"))(page)]
+    ['/job/1']
+    >>> li = page.find(".//li")
+    >>> len(xpath(css("li"))(li)), first(css("li", relative=True), li)
+    (1, None)
+    """
+    return HTMLTranslator().css_to_xpath(
+        selector, prefix="descendant::" if relative else "descendant-or-self::")
 
 
 #: The elements whose text node_text skips.

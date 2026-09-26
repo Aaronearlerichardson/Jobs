@@ -33,20 +33,14 @@ Notes:
     deliberately no headless-browser path here.
 """
 
+import asyncio
 import json
 import re
-import time
 from collections import deque
 
-from src.net.http import HEADERS, SESSION, fetch_failed
+from src.net import http
+from src.net.http import HEADERS, fetch_failed
 from src.net.util import host_of, norm_posted_date, strip_html, text_from_html
-
-# Job pages beyond this many are left for the next crawl. Newest first, so
-# the cap trims the stalest postings, not the freshest.
-DEFAULT_MAX_DETAILS = 150
-DETAIL_DELAY = 0.3
-# A sitemap index is followed one level; this bounds how many children.
-MAX_CHILD_SITEMAPS = 8
 
 _JOB_PATH_RE = re.compile(r"/companies/([^/?#]+)/jobs/(\d+)(?:-([^/?#]*))?")
 _NEXT_DATA_RE = re.compile(
@@ -207,24 +201,25 @@ def parse_job_page(page_html, board_url, page_url=""):
     }
 
 
-def _fetch_sitemap(origin, label):
+async def _fetch_sitemap(origin, label):
     """Every job entry the board's sitemap (or sitemap index) lists, each
-    sitemap read once."""
+    sitemap read once and parsed off the loop. An index is followed one
+    level, eight children at most."""
     entries, seen = [], set()
     queue = deque([f"{origin}/sitemap.xml"])
     queued = set(queue)
     fetched = 0
-    while queue and fetched <= MAX_CHILD_SITEMAPS:
+    while queue and fetched <= 8:
         url = queue.popleft()
         fetched += 1
         try:
-            r = SESSION.get(url,
-                            headers={**HEADERS, "Accept": "application/xml"})
+            r = await http.send("GET", url,
+                                headers={**HEADERS, "Accept": "application/xml"})
             r.raise_for_status()
         except Exception as e:
             fetch_failed(f"Getro {label} sitemap", e)
             continue
-        jobs, children = parse_sitemap(r.text, origin)
+        jobs, children = await asyncio.to_thread(lambda: parse_sitemap(r.text, origin))
         for j in jobs:
             if j["id"] not in seen:
                 seen.add(j["id"])
@@ -235,12 +230,13 @@ def _fetch_sitemap(origin, label):
     return entries
 
 
-def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
-                    detail_delay=DETAIL_DELAY, gate=None):
+async def afetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=None):
     """Relevant postings from one Getro board, as crawler job dicts.
 
     Sitemap first; then, newest first, one page fetch per posting whose
-    slug title passes `gate`, up to `max_details`. The final relevance
+    slug title passes `gate`, up to `max_details` (the rest wait for the
+    next crawl: newest first, the cap trims the stalest), `detail_delay`
+    seconds apart, each page read off the loop. The final relevance
     decision is `gate(title, description)` on the page's full text;
     `gate=None` keeps every posting. Returns [] — never raises — when
     the board is unreachable.
@@ -251,7 +247,7 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
     if not origin:
         return []
     label = board_host(board_url)
-    entries = _fetch_sitemap(origin, label)
+    entries = await _fetch_sitemap(origin, label)
     if not entries:
         return []
     entries.sort(key=lambda e: e["lastmod"], reverse=True)
@@ -265,18 +261,21 @@ def fetch_getro_all(board_url, max_details=DEFAULT_MAX_DETAILS,
                   f"older postings wait for the next crawl")
             break
         try:
-            r = SESSION.get(e["url"], headers=HEADERS)
+            r = await http.send("GET", e["url"], headers=HEADERS)
             r.raise_for_status()
         except Exception as ex:
             fetch_failed(f"Getro {label} {e['url']}", ex)
             fetched += 1
             continue
         fetched += 1
-        job = parse_job_page(r.text, board_url, e["url"])
+        job = await asyncio.to_thread(lambda: parse_job_page(r.text, board_url, e["url"]))
         if job and not job["posted_at"]:
             job["posted_at"] = norm_posted_date(e["lastmod"])
         if job and (gate is None or gate(job["title"], job["description"])):
             jobs.append(job)
         if detail_delay:
-            time.sleep(detail_delay)
+            await asyncio.sleep(detail_delay)
     return jobs
+
+
+fetch_getro_all = http.sync_shim(afetch_getro_all)

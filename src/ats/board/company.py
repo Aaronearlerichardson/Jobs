@@ -18,19 +18,17 @@ per-job open/closed probe is board/closure.py; the careers-page reader
 behind the `custom` spec is board/custom.py.
 """
 
+import asyncio
 import re
 from urllib.parse import unquote
 
 from src import config
 from src.match.locality import NC_RE  # profile [locality]
-from src.net.http import HEADERS, PLAIN_HEADERS, SESSION
-from src.net.util import clean_field, node_text, parse_markup, xpath
+from src.net import http
+from src.net.http import HEADERS, PLAIN_HEADERS
+from src.net.util import clean_field, first, node_text, parse_markup
 from .engine import board_for, board_for_url
 from . import jsonld
-
-# JD text budget (config.MAX_DESC_CHARS): one cap shared with storage and the
-# scoring prompt, so a long posting's requirements block survives end to end.
-_DESC_MAX = config.MAX_DESC_CHARS
 
 
 def _board_of(job):
@@ -65,7 +63,7 @@ def needs_detail(job):
     return board.needs_detail(job) if board else not job.get("description")
 
 
-def hydrate_description(job, company=None):
+async def ahydrate_description(job, company=None):
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
     store row, names its board), else from the posting's own page.
@@ -74,39 +72,20 @@ def hydrate_description(job, company=None):
         return job
     board = _board_of(job)
     if board:
-        board.hydrate(job, company)
+        await board.ahydrate(job, company)
     # A posting no engine gave a body: its own page (a custom board's, a
     # SuccessFactors site's).
     if not job.get("description") and job.get("url"):
-        d = _description_from_job_url(job["url"])
+        d = (await ajob_page_meta(job["url"]))[1]
         if d:
             job["description"] = d
     return job
 
 
-def _description_from_job_url(url):
-    """Best-effort JD text from a job's own detail page (see job_page_meta).
-    Returns '' on miss."""
-    return job_page_meta(url)[1]
+hydrate_description = http.sync_shim(ahydrate_description)
 
 
-#: A posting page's JD container, the first of these found.
-_DESC_PATHS = (
-    "//*[@data-careersite-propertyid='description']",
-    "//*[@data-careersite-propertyid='jobdescription']",
-    # Custom boards that name the JD container ("_flow job-description").
-    # Kept specific ('job-description'/'jobDescription', not a bare
-    # 'description') so a short company tagline can't match.
-    "//*[contains(@class, 'job-description')]",
-    "//*[contains(@class, 'jobDescription')]",
-    # SuccessFactors' CLASSIC (pre-Career-Site-Builder) template wraps the
-    # posting in .jobDisplay. Last in the chain: it carries a little page
-    # chrome, so the precise containers win.
-    "//*[contains(@class, 'jobDisplay')]",
-)
-
-
-def job_page_meta(url):
+async def ajob_page_meta(url):
     """(title, description) read off a job's own detail page, vendor-
     agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
     then page metadata for the title (og:title, then <title> minus a
@@ -116,12 +95,23 @@ def job_page_meta(url):
     URL-only manual adds, which otherwise stored an empty title that
     nothing downstream could score or rank. A page refused with 403/405 is
     asked again with a bare platform UA (`PLAIN_HEADERS`), which WAFs that
-    refuse a Chrome UA without Chrome's client hints accept."""
+    refuse a Chrome UA without Chrome's client hints accept. The page is
+    read off the loop (`_page_meta`)."""
     try:
-        r = SESSION.get(url, headers=HEADERS,
-                        allow_redirects=True)
+        r = await http.send("GET", url, headers=HEADERS, allow_redirects=True)
         if r.status_code in (403, 405):
-            r = SESSION.get(url, allow_redirects=True, headers=PLAIN_HEADERS)
+            r = await http.send("GET", url, allow_redirects=True, headers=PLAIN_HEADERS)
+    except Exception:
+        return "", ""
+    return await asyncio.to_thread(_page_meta, r, url)
+
+
+job_page_meta = http.sync_shim(ajob_page_meta)
+
+
+def _page_meta(r, url):
+    """job_page_meta's (title, description) off the fetched page `r`."""
+    try:
         html = r.text
     except Exception:
         return "", ""
@@ -133,7 +123,7 @@ def job_page_meta(url):
             title = p["title"]
             d = p["description"].strip()
             if len(d) >= 120:
-                desc = d[:_DESC_MAX]
+                desc = d[:config.MAX_DESC_CHARS]
     except Exception:
         pass
     if title and desc:
@@ -141,17 +131,28 @@ def job_page_meta(url):
     try:
         tree = parse_markup(html, url=url)
         if not title:
-            og = next(iter(xpath("//meta[@property='og:title']")(tree)), None)
-            te = next(iter(xpath("//title")(tree)), None)
+            og, te = first("//meta[@property='og:title']", tree), first("//title", tree)
             raw = (og.get("content") if og is not None else "") or \
                 (node_text(te, " ", strip=False) if te is not None else "")
             title = re.sub(r"\s+", " ", raw or "").split(" | ")[0].strip()
         if not desc:
-            el = next((hit for path in _DESC_PATHS for hit in xpath(path)(tree)[:1]), None)
+            # The JD container, the first of these found: SuccessFactors'
+            # Career Site Builder property; a custom board's named container
+            # ('job-description'/'jobDescription', never a bare
+            # 'description' a short company tagline could match); last,
+            # SF's CLASSIC template's .jobDisplay, which carries a little
+            # page chrome.
+            containers = ("//*[@data-careersite-propertyid='description']",
+                          "//*[@data-careersite-propertyid='jobdescription']",
+                          "//*[contains(@class, 'job-description')]",
+                          "//*[contains(@class, 'jobDescription')]",
+                          "//*[contains(@class, 'jobDisplay')]")
+            hits = (first(path, tree) for path in containers)
+            el = next((e for e in hits if e is not None), None)
             if el is not None:
                 d = node_text(el)
                 if len(d) >= 120:
-                    desc = d[:_DESC_MAX]
+                    desc = d[:config.MAX_DESC_CHARS]
     except Exception:
         pass
     return title, desc
@@ -187,7 +188,7 @@ def title_from_url_slug(url):
 
 # --- dispatch ------------------------------------------------------------------ #
 
-def fetch_company(company, loc_re=None):
+async def afetch_company(company, loc_re=None):
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`); [] for a platform no spec fetches.
 
@@ -195,7 +196,10 @@ def fetch_company(company, loc_re=None):
     the profile's locality (the local track's default).
     """
     board = board_for(company.get("ats"))
-    return board.whole_board(company, loc_re) if board else []
+    return await board.awhole_board(company, loc_re) if board else []
+
+
+fetch_company = http.sync_shim(afetch_company)
 
 
 # fetch_company with the profile's locality regex; used by discovery
@@ -206,7 +210,7 @@ def fetch_company_nc(company):
 
 # --- title sampling ------------------------------------------------------------ #
 
-def sample_titles(company, n=6):
+async def asample_titles(company, n=6):
     """Up to `n` distinct posting titles from a store row's board, in board
     order: what the mission scorer is shown of an employer it has only a
     name for. [] when the board is unreadable, empty, or of an ATS with no
@@ -228,7 +232,7 @@ def sample_titles(company, n=6):
     board = board_for(company.get("ats"))
     try:
         handle = board.handle(company) if board else None
-        jobs = board.listing(handle, cheap=True, rescue_cap=n) if handle else []
+        jobs = await board.alisting(handle, cheap=True, rescue_cap=n) if handle else []
     except Exception:
         return []
     titles, seen = [], set()
@@ -240,3 +244,6 @@ def sample_titles(company, n=6):
             if len(titles) >= n:
                 break
     return titles
+
+
+sample_titles = http.sync_shim(asample_titles)

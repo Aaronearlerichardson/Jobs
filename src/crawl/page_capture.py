@@ -18,10 +18,10 @@ import re
 from urllib.parse import urljoin
 
 from src import config
-from src.net.util import host_of, node_text, parse_markup, stable_id, strip_html, xpath
+from src.net.util import (first, host_of, jsonld_scripts, links, node_text, parse_markup,
+                          stable_id, strip_html, xpath)
 
 _LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
-_LI_CURRENT_RE = re.compile(r"currentJobId=(\d+)")
 _INDEED_JK_RE = re.compile(r"[?&]jk=([0-9a-f]+)", re.I)
 
 
@@ -29,15 +29,9 @@ def _txt(el):
     return re.sub(r"\s+", " ", node_text(el)) if el is not None else ""
 
 
-def _first(scope, path):
-    """The first element XPath `path` finds from `scope`, or None."""
-    hit = xpath(path)(scope)
-    return hit[0] if hit else None
-
-
 def _sel(scope, *paths):
     for path in paths:
-        el = _first(scope, path)
+        el = first(path, scope)
         if el is not None and _txt(el):
             return _txt(el)
     return ""
@@ -158,7 +152,7 @@ def parse_linkedin(tree, page_url=""):
 
     # Guest cards (generation 3): title/company live outside the anchor.
     for c in xpath(f"//div[{_class('base-card')}]")(tree):
-        a = _first(c, ".//a[contains(@href, '/jobs/view/')]")
+        a = first(".//a[contains(@href, '/jobs/view/')]", c)
         if a is None:
             continue
         m = _LI_VIEW_RE.search(a.get("href", ""))
@@ -173,7 +167,7 @@ def parse_linkedin(tree, page_url=""):
     # Detail page: <title> is "Job Title | Company | LinkedIn" (with an
     # unread-count "(9) " prefix on live DOM). No stable numeric id is
     # recoverable, so the id hashes title+company.
-    te = _first(tree, "//title")
+    te = first("//title", tree)
     t = node_text(te) if te is not None else ""
     tm = re.match(r"^(?:\(\d+\)\s*)?(.+?)\s*\|\s*(.+?)\s*\|\s*LinkedIn$", t)
     if tm:
@@ -219,8 +213,10 @@ def parse_indeed(tree, page_url=""):
     [('indeed_ab12', 'Data Engineer', 'Acme', 'https://www.indeed.com/viewjob?jk=ab12', 'Durham, NC')]
     """
     jobs = []
-    for c in xpath(f"//div[{_class('job_seen_beacon')}] | //td[{_class('resultContent')}]")(tree):
-        a = _first(c, f".//a[@href][ancestor::h2] | .//a[{_class('jcs-JobTitle')}]")
+    cards = f"//div[{_class('job_seen_beacon')}] | //td[{_class('resultContent')}]"
+    title_link = f".//a[@href][ancestor::h2] | .//a[{_class('jcs-JobTitle')}]"
+    for c in xpath(cards)(tree):
+        a = first(title_link, c)
         if a is None:
             continue
         href = a.get("href", "")
@@ -290,12 +286,12 @@ def parse_metacareers(tree, page_url=""):
     dm = _META_JOB_RE.search(page_url or "")
     if dm:
         jid = dm.group(1)
-        og = _first(tree, "//meta[@property='og:title'][@content]")
-        te = _first(tree, "//title")
+        og = first("//meta[@property='og:title'][@content]", tree)
+        te = first("//title", tree)
         raw = (og.get("content") if og is not None else "") or \
             (node_text(te) if te is not None else "")
         title = re.sub(r"\s*[|\-–—]\s*Meta\b.*$", "", raw).strip() or raw
-        ogd = _first(tree, "//meta[@property='og:description'][@content]")
+        ogd = first("//meta[@property='og:description'][@content]", tree)
         desc = ogd.get("content", "") if ogd is not None else ""
         body = node_text(tree).replace(title, " ", 1) if title else node_text(tree)
         lm = _META_LOC_RE.search(body)
@@ -328,7 +324,7 @@ def parse_jsonld(tree, page_url=""):
     [('Chemist', 'Acme', 'Durham, NC', 'https://acme.example')]
     """
     jobs = []
-    for tag in xpath("//script[@type='application/ld+json']")(tree):
+    for tag in jsonld_scripts(tree):
         try:
             data = json.loads(tag.text or "")
         except Exception:
@@ -408,7 +404,7 @@ def _card_scopes(a):
 def _card_title(a):
     te = next(a.iterdescendants("h1", "h2", "h3", "h4", "h5"), None)
     if te is None:
-        te = _first(a, ".//*[contains(@data-ui, 'title') or contains(@class, 'title')]")
+        te = first(".//*[contains(@data-ui, 'title') or contains(@class, 'title')]", a)
     return _txt(te)
 
 
@@ -451,7 +447,7 @@ def parse_generic(tree, page_url=""):
     for a, href, title in find_job_links(tree):
         _emit(a, href, title)
 
-    for a in xpath("//a[@href]")(tree):
+    for a in links(tree):
         href = a.get("href").split("?")[0]
         host = host_of(urljoin(page_url or "", href))
         if _JOB_ID_PATH_RE.search(href):
@@ -468,9 +464,9 @@ def parse_generic(tree, page_url=""):
 # ─── Entry point ─────────────────────────────────────────────────────────
 
 def _canonical_url(tree):
-    el = _first(tree, "//link[normalize-space(@rel)='canonical'][@href]")
+    el = first("//link[normalize-space(@rel)='canonical'][@href]", tree)
     if el is None:
-        el = _first(tree, "//meta[@property='og:url'][@content]")
+        el = first("//meta[@property='og:url'][@content]", tree)
     return (el.get("href") or el.get("content") or "") if el is not None else ""
 
 
@@ -515,18 +511,18 @@ def parse_page(url, html):
         url = _canonical_url(tree)
     low = (url or "").lower()
     if not low.startswith("http"):
-        te = _first(tree, "//title")
+        te = first("//title", tree)
         t = node_text(te, "") if te is not None else ""
-        if t.endswith("LinkedIn") or _first(
-                tree, "//a[contains(@href, 'linkedin.com/jobs/view/')] | //*[@data-occludable-job-id]"
-                f" | //*[{_class('job-card-container')}] | //*[{_class('base-search-card__title')}]"
-                " | //link[contains(@href, 'licdn.com')] | //img[contains(@src, 'licdn.com')]") \
-                is not None:
+        linkedin_marks = (
+            "//a[contains(@href, 'linkedin.com/jobs/view/')] | //*[@data-occludable-job-id]"
+            f" | //*[{_class('job-card-container')}] | //*[{_class('base-search-card__title')}]"
+            " | //link[contains(@href, 'licdn.com')] | //img[contains(@src, 'licdn.com')]")
+        indeed_marks = f"//div[{_class('job_seen_beacon')}] | //a[{_class('jcs-JobTitle')}]"
+        if t.endswith("LinkedIn") or first(linkedin_marks, tree) is not None:
             low = "linkedin."
-        elif _first(tree, f"//div[{_class('job_seen_beacon')}] | //a[{_class('jcs-JobTitle')}]") \
-                is not None:
+        elif first(indeed_marks, tree) is not None:
             low = "indeed."
-        elif _first(tree, "//a[contains(@href, '/profile/job_details/')]") is not None:
+        elif first("//a[contains(@href, '/profile/job_details/')]", tree) is not None:
             low = "metacareers."
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add

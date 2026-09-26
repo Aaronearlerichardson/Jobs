@@ -9,8 +9,7 @@ mechanism, in src.ats.board.engine, with UKG Pro its first user).
 
 import pytest
 
-from conftest import fake_response
-from src.ats.board import engine as board
+from conftest import fake_response, no_pacing
 from src.ats.board import board_for
 from src.net import http
 
@@ -53,7 +52,7 @@ class _Tenant:
 @pytest.fixture
 def tenant(monkeypatch, serve):
     """Serve a tenant; the engine's page pause is skipped."""
-    monkeypatch.setattr(board.time, "sleep", lambda s: None)
+    no_pacing(monkeypatch)
 
     def _install(host, opps=None, **kw):
         t = _Tenant(host, [_opp(1), _opp(2)] if opps is None else opps, **kw)

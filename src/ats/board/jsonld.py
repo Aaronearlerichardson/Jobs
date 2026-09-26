@@ -11,12 +11,14 @@ Use it two ways:
   fetch_jsonld_page(company, url)
 """
 
+import asyncio
 import json
 import re
 
-from src.net.http import HEADERS, SESSION, fetch_failed
+from src.net import http
+from src.net.http import HEADERS, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
-from src.net.util import parse_markup, stable_id, text_from_html, xpath
+from src.net.util import jsonld_scripts, parse_markup, stable_id, text_from_html
 
 _JOB_URL_HINTS = re.compile(
     r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
@@ -33,7 +35,7 @@ def extract_jsonld(html, url=""):
     [{'@type': 'JobPosting', 'title': 'Chemist'}]
     """
     out = []
-    for script in xpath("//script[@type='application/ld+json']")(parse_markup(html, url=url)):
+    for script in jsonld_scripts(parse_markup(html, url=url)):
         txt = script.text
         if not txt:
             continue
@@ -158,21 +160,20 @@ def _job_from_posting(jp, company_name, source_url):
     return job
 
 
-def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
-    """Fetch ONE URL; extract JobPosting records from its JSON-LD."""
+async def afetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
+    """Fetch ONE URL; extract JobPosting records from its JSON-LD, read off
+    the loop."""
     try:
-        r = SESSION.get(page_url, timeout=timeout, headers=HEADERS)
+        r = await http.send("GET", page_url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         return fetch_failed(f"JSON-LD {company_name} {page_url}", e)
+    jobs = await asyncio.to_thread(
+        lambda: [_job_from_posting(obj, company_name, page_url)
+                 for obj in extract_jsonld(r.text, page_url) if is_jobposting(obj)])
+    return [j for j in jobs if gate is None or gate(j["title"], j["description"])]
 
-    jobs = []
-    for obj in extract_jsonld(r.text, page_url):
-        if not is_jobposting(obj):
-            continue
-        job = _job_from_posting(obj, company_name, page_url)
-        if gate is None or gate(job["title"], job["description"]):
-            jobs.append(job)
-    return jobs
+
+fetch_jsonld_page = http.sync_shim(afetch_jsonld_page)
 
 

@@ -10,6 +10,7 @@ Results are returned in input order so callers can process priority
 sources first and keep dedupe deterministic regardless of completion
 """
 
+import asyncio
 import sys
 import threading
 import time
@@ -270,6 +271,14 @@ class SingleFlight:
     >>> [memo.do("n", lambda: calls.append(1)) for _ in "ab"], len(calls)
     ([None, None], 3)
 
+    `ado` is `do` for a coroutine function `make`, its callers tasks on
+    one event loop:
+
+    >>> async def make():
+    ...     return calls.append(1) or "w"
+    >>> [http.run_sync(memo.ado("a", make)) for _ in "ab"], len(calls)
+    (['w', 'w'], 4)
+
     `hold(key)` is the lock a maker of `key` holds, for a value kept
     somewhere else (the board engine's settled handle parts).
     """
@@ -284,10 +293,11 @@ class SingleFlight:
         """Forget every kept value."""
         self._memo.clear()
 
-    def hold(self, key):
-        """The lock one maker of `key` holds at a time."""
+    def hold(self, key, aio=False):
+        """The lock one maker of `key` holds at a time: a thread's, or with
+        `aio` a task's (an asyncio.Lock)."""
         with self._guard:
-            return self._locks.setdefault(key, threading.Lock())
+            return self._locks.setdefault((key, aio), asyncio.Lock() if aio else threading.Lock())
 
     def _kept(self, key):
         got = self._memo.get(key)
@@ -298,10 +308,20 @@ class SingleFlight:
         got = self._kept(key)
         if got is None:
             with self.hold(key):
-                got = self._kept(key)
-                if got is None:
-                    value = make()
-                    got = (None if ttl is None else time.monotonic() + ttl, value)
-                    if self._keep is None or self._keep(value):
-                        self._memo[key] = got
+                got = self._kept(key) or self._made(key, make(), ttl)
         return got[1]
+
+    async def ado(self, key, make, ttl=None):
+        """`do` for a coroutine function `make` (see the class)."""
+        got = self._kept(key)
+        if got is None:
+            async with self.hold(key, aio=True):
+                got = self._kept(key) or self._made(key, await make(), ttl)
+        return got[1]
+
+    def _made(self, key, value, ttl):
+        """(expiry, value) for a value just made, kept when `keep` allows."""
+        got = (None if ttl is None else time.monotonic() + ttl, value)
+        if self._keep is None or self._keep(value):
+            self._memo[key] = got
+        return got

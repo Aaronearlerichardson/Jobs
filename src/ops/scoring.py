@@ -265,7 +265,7 @@ def _live_jd(row):
         if board:
             text = board.description_for(url)
         if not text and url:
-            text = company_fetch._description_from_job_url(url)
+            text = company_fetch.job_page_meta(url)[1]
     except Exception:
         text = ""
     stored = row.get("description") or ""

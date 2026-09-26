@@ -380,9 +380,7 @@ async def asearch(query, max_results=10, page=1, budget=WALL_BUDGET,
     return out
 
 
-def search(query, max_results=10, page=1, budget=WALL_BUDGET, retries=RETRIES):
-    """asearch's results, for a thread."""
-    return http.run_sync(asearch(query, max_results, page, budget, retries))
+search = http.sync_shim(asearch)
 
 
 def search_urls(query, max_results=10, page=1):

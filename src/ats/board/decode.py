@@ -2,18 +2,14 @@
 (`spec.Decoder`), and a decoded payload's entries and a detail's record.
 """
 
-import functools
 import json
 import re
 from urllib.parse import urljoin
 
-from cssselect import HTMLTranslator
 from lxml import etree
 
-from src.net.util import node_text, parse_markup, xpath
+from src.net.util import css, first, named, node_text, parse_markup, xpath
 from . import custom, fields, jsonld
-
-_CSS = HTMLTranslator()
 
 
 def decode(dec, text, parts, url, area=None, hop=True):
@@ -66,9 +62,9 @@ def _atom(text, url=""):
     [{'title': 'Chemist', 'link': '', 'link@href': 'https://x.test/postings/7', 'author': {'name': 'Chemistry'}, 'feed': {'title': 'State U: All Jobs'}}]
     """
     root = parse_markup(text, xml=True, url=url)
-    feed = _xml_record(next(iter(xpath("descendant-or-self::*[local-name()='feed']")(root)), root),
-                       skip="entry")
-    return [{**_xml_record(e), "feed": feed} for e in xpath("//*[local-name()='entry']")(root)]
+    feed = named(root, "feed", one=True)
+    feed = _xml_record(root if feed is None else feed, skip="entry")
+    return [{**_xml_record(e), "feed": feed} for e in named(root, "entry")]
 
 
 def _xml_record(el, skip=None):
@@ -119,7 +115,7 @@ def elements(dec, tree, parts, url):
     """
     found = []
     for sel in dec.select:
-        found = css(fields.fmt(sel, parts.get))(tree)
+        found = xpath(css(fields.fmt(sel, parts.get)))(tree)
         if found:
             break
     base = fields.fmt(dec.base, parts.get) if dec.base else url
@@ -143,31 +139,9 @@ def _cells(node, cells):
     where it has none."""
     out = {}
     for name, sel in cells.items():
-        hit = css(sel, relative=True)(node) if node is not None else []
-        out[name] = node_text(hit[0]) if hit else None
+        hit = first(css(sel, relative=True), node) if node is not None else None
+        out[name] = None if hit is None else node_text(hit)
     return out
-
-
-@functools.cache
-def _css_xpath(selector, relative):
-    return _CSS.css_to_xpath(selector, prefix="descendant::" if relative else "descendant-or-self::")
-
-
-def css(selector, relative=False):
-    """`selector`, CSS in cssselect's HTML dialect, as this thread's
-    compiled XPath (`net.util.xpath`): matching the element it runs on
-    and everything below (from the root, the whole document), or only
-    what is below when `relative`. Raises cssselect's SelectorError on CSS
-    the dialect cannot read.
-
-    >>> page = parse_markup('<ul><li><a href="/job/1">A</a><p class="loc">Durham</p></li>'
-    ...                     '<li><a href="/job/2">B</a></li></ul>')
-    >>> [a.get("href") for a in css("li:has(.loc) a[href*='/job/']")(page)]
-    ['/job/1']
-    >>> len(css("li")(page.find(".//li"))), css("li", relative=True)(page.find(".//li"))
-    (1, [])
-    """
-    return xpath(_css_xpath(selector, relative))
 
 
 def _context(el, how):

@@ -46,13 +46,15 @@ from src.claude.reply import Reply, Unit, choice
 try:
     from src import config
     from src.claude.api import acall_claude_json, api_disabled, have_api_key
-    from src.net.http import run_sync
+    from src.net.http import sync_shim
 except Exception:                      # importable standalone for calibration
     config = None
     acall_claude_json = None
-    run_sync = asyncio.run
     api_disabled = lambda: None        # noqa: E731
     have_api_key = lambda: False       # noqa: E731
+
+    def sync_shim(afn):                # no network loop to wait on
+        return lambda *a, **kw: asyncio.run(afn(*a, **kw))
 
 try:
     # The one place that knows where a posting IS (profile [locality] /
@@ -760,11 +762,7 @@ async def ascore_resume_fit(title: str, description: str = "", *,
                   description, location)
 
 
-def score_resume_fit(title: str, description: str = "", *, location: str = "",
-                     max_tokens=300) -> FitResult:
-    """ascore_resume_fit's answer, for a thread."""
-    return run_sync(ascore_resume_fit(title, description, location=location,
-                                      max_tokens=max_tokens))
+score_resume_fit = sync_shim(ascore_resume_fit)
 
 
 # The two "gave up without a score" reasons score_resume_fit's own None-score
@@ -881,11 +879,7 @@ async def averify_fit(title: str, description: str = "", *, location: str = "",
     return _gated(r, gates, reason, vmodel, description, location)
 
 
-def verify_fit(title: str, description: str = "", *, location: str = "",
-               max_tokens=8000) -> FitResult:
-    """averify_fit's answer, for a thread."""
-    return run_sync(averify_fit(title, description, location=location,
-                                max_tokens=max_tokens))
+verify_fit = sync_shim(averify_fit)
 
 
 def is_deep_verified(fit_reason) -> bool:

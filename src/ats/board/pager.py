@@ -6,9 +6,9 @@ how pages step; `walk` reads them through the caller's request and row
 callbacks, so it knows nothing of handles, headers or decoders.
 """
 
+import asyncio
 import json
 import math
-import time
 
 from src import config
 from src.net.http import note_capped
@@ -129,12 +129,15 @@ def _fresh(listed, seen):
     return new
 
 
-def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False, budget=None):
+async def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False,
+               budget=None):
     """(rows, total) for one listing `spec`; (None, None) when the first
-    request failed. `ask(n, vals, url)` makes page `n`'s request with the
-    named values `vals` (`page_vals`), or follows a cursor's served `url`,
-    and answers (parts, payload, error); `rows_of(parts, payload)` maps a
-    page to (its entry count, its rows); rows are deduplicated (`_fresh`).
+    request failed. `await ask(n, vals, url)` makes page `n`'s request
+    with the named values `vals` (`page_vals`), or follows a cursor's
+    served `url`, and answers (parts, payload, error); `rows_of(parts,
+    payload)` maps a page to (its entry count, its rows); rows are
+    deduplicated (`_fresh`), both off the loop. Pages are read one at a
+    time, PAGE_DELAY_S apart.
     `size` and `pages` override the pager's; a `cheap` read is one page
     unless `pages` says; else a row `budget` widens the pager's page cap
     at the step the walk takes (`page_cap`).
@@ -168,20 +171,20 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False, b
     ceiling = pager.ceiling if pager else None
     rows, seen, total, size_known, capped, url, n = [], set(), None, None, False, None, 0
     while True:
-        parts, payload, err = ask(n, page_vals(pager, n, step), url)
+        parts, payload, err = await ask(n, page_vals(pager, n, step), url)
         if err:
             return (None, None) if n == 0 else (rows, total)
         if n == 0 and pager and pager.total:
             total = total_of(pager, payload)
             size_known = None if total is not None and ceiling and total >= ceiling else total
-        n_entries, listed = rows_of(parts, payload)
+        n_entries, listed = await asyncio.to_thread(rows_of, parts, payload)
         if learn:
             n_entries = len({r["id"] for r in listed if r["id"] is not None})
             if n == 0:
                 size = n_entries
                 step = size - 1 if size_known is None and size > 1 else size
                 pages = page_cap(pager, budget, step) if widen else pages
-        new = _fresh(listed, seen)
+        new = await asyncio.to_thread(_fresh, listed, seen)
         rows += new
         if not pager:
             break
@@ -199,7 +202,7 @@ def walk(spec, ask, rows_of, size=None, pages=None, cheap=False, scoped=False, b
         if not postings(new) or n + 1 >= pages:
             capped = True
             break
-        time.sleep(config.PAGE_DELAY_S)
+        await asyncio.sleep(config.PAGE_DELAY_S)
         n += 1
     at_ceiling = bool(ceiling) and max(total or 0, len(rows)) >= ceiling
     complete = size_known is not None and len(rows) >= size_known

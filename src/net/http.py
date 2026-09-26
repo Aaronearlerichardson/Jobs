@@ -24,7 +24,7 @@ import threading
 import time
 import weakref
 from datetime import timedelta
-from functools import partial
+from functools import partial, wraps
 
 import aiohttp
 import requests
@@ -170,6 +170,29 @@ def run_sync(coro):
         if not done.done():
             loop.call_soon_threadsafe(_cancel, (me,))
         raise
+
+
+def sync_shim(afn):
+    """`afn`, a coroutine function `a<name>`, as the function `<name>` for
+    a thread: its coroutine run through run_sync. The shims phase 8
+    deletes.
+
+    >>> async def atwice(n):
+    ...     return 2 * n
+    >>> twice = sync_shim(atwice)
+    >>> twice(4), twice.__name__
+    (8, 'twice')
+
+    Notes:
+        The shim keeps this module as its own, so doctest collects
+        `afn`'s docstring once, from `afn`.
+    """
+    @wraps(afn, assigned=("__doc__",))
+    def shim(*args, **kw):
+        return run_sync(afn(*args, **kw))
+    shim.__name__ = afn.__name__.removeprefix("a")
+    shim.__qualname__ = afn.__qualname__.removesuffix(afn.__name__) + shim.__name__
+    return shim
 
 
 def _settle(thread, done, task):
@@ -542,13 +565,8 @@ async def arequest(method, url, label=None, **kw):
     return r.status_code, r, None
 
 
-def request(method, url, label=None, **kw):
-    """arequest's (status, response, error), for a thread."""
-    return run_sync(arequest(method, url, label, **kw))
-
-
 def _json_of(status, r, err, label):
-    """request_json's answer from request's: "empty response" and
+    """arequest_json's answer from arequest's: "empty response" and
     "non-JSON response" are errors too."""
     if err:
         return status, None, err
@@ -562,24 +580,14 @@ def _json_of(status, r, err, label):
 
 async def arequest_json(method, url, label=None, **kw):
     """(status, payload, error) for one JSON request: `arequest`'s, plus
-    "empty response" and "non-JSON response" as errors."""
-    return _json_of(*await arequest(method, url, label, **kw), label)
-
-
-def request_json(method, url, label=None, **kw):
-    """arequest_json's answer, for a thread; the JSON is decoded on this
-    thread, off the loop."""
-    return _json_of(*request(method, url, label, **kw), label)
+    "empty response" and "non-JSON response" as errors. The JSON is
+    decoded off the loop, its failure counted here (`_account`)."""
+    _account()
+    return await asyncio.to_thread(_json_of, *await arequest(method, url, label, **kw), label)
 
 
 async def aget_json(url, label, default=None, **kw):
-    """get_json, awaited."""
-    _status, data, err = await arequest_json("GET", url, label, **kw)
-    return default if err else data
-
-
-def get_json(url, label, default=None, **kw):
-    """The endpoint's JSON, or `default` -- reported (`request_json`'s
+    """The endpoint's JSON, or `default` -- reported (`arequest_json`'s
     reasons), never raised.
 
     A board that 500s, comes back empty, answers with something that will
@@ -601,7 +609,7 @@ def get_json(url, label, default=None, **kw):
         Nine fetchers wrote this out, three of them having already named
         it (`api._get_board`, `hnhiring._get_json`, `company._get_json`).
     """
-    _status, data, err = request_json("GET", url, label, **kw)
+    _status, data, err = await arequest_json("GET", url, label, **kw)
     return default if err else data
 
 

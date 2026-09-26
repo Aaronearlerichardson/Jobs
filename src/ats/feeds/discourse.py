@@ -1,12 +1,13 @@
 """Discourse forum job-category feed."""
 
-from src.net.http import JSON_HEADERS, get_json
+from src.net import http
+from src.net.http import JSON_HEADERS
 
 
-def fetch_discourse(display_name, base_url, category_id, gate=None):
+async def afetch_discourse(display_name, base_url, category_id, gate=None):
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
-    data = get_json(url, f"Discourse {display_name}", default={},
-                    headers=JSON_HEADERS)
+    data = await http.aget_json(url, f"Discourse {display_name}", default={},
+                                headers=JSON_HEADERS)
     topics = (data.get("topic_list") or {}).get("topics", []) if data else []
     jobs = []
     for t in topics:
@@ -27,3 +28,6 @@ def fetch_discourse(display_name, base_url, category_id, gate=None):
                 "description": "",
             })
     return jobs
+
+
+fetch_discourse = http.sync_shim(afetch_discourse)

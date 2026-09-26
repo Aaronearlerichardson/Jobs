@@ -8,7 +8,7 @@ import threading
 
 import pytest
 
-from conftest import company_row as _company, make_board_fn
+from conftest import company_row as _company, fake_response, make_board_fn, no_pacing
 
 from src import config, store
 from src.claude import api as claude_api
@@ -481,31 +481,36 @@ def test_one_board_never_inherits_another_board_fetch_errors(tmp_path,
 # ── snapshot completeness ───────────────────────────────────────────────────
 
 def test_harvest_board_partial_fetch_stores_rows_but_closes_nothing(
-        tmp_path, monkeypatch):
+        tmp_path, monkeypatch, serve):
     """One page of the board failed while the rest arrived (an HTML error
     page under HTTP 200 closed 1037 Stryker rows on 2026-09-15). The rows
     that arrived are stored; the ones that did not prove nothing, so
-    nothing closes."""
+    nothing closes. The board engine judges that page off the network
+    loop, and the failure still reaches this board's snapshot."""
+    no_pacing(monkeypatch)
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    c = _company(conn, "Acme")
-    store.upsert_job(conn, {"job_id": "gh_acme_old", "company_id": c["id"],
+    c = _company(conn, "Acme", ats="workday", wd_tenant="acme", wd_pod=5, wd_site="Site")
+    store.upsert_job(conn, {"job_id": "wd_acme_old", "company_id": c["id"],
                             "title": "Still open", "track": "local"})
 
-    def partial(comp):
-        http.fetch_failed("workday acme p10",
-                          "Expecting value: line 1 column 1 (char 0)")
-        return [_job(1), _job(2)]
+    def reply(url, json, **kw):
+        if json["offset"]:
+            return fake_response(text="<html>Service Unavailable</html>")
+        return fake_response({"total": 40, "jobPostings": [
+            {"title": f"Engineer {i}", "locationsText": "US, NC, Durham",
+             "externalPath": f"/job/x/{i}"} for i in (1, 2)]})
 
-    monkeypatch.setattr(harvest, "fetch_whole_board", partial)
+    serve(reply)
     stats = harvest.harvest_board(c, db, delay=0)
     assert stats["err"] is None
     assert stats["fetch_errors"] == 1 and stats["incomplete"] is True
+    assert "non-JSON response" in stats["last_error"]
     assert stats["capped"] is False
     assert stats["closed"] == 0 and stats["reopened"] == 0
     assert stats["new"] == 2, "the rows that DID arrive are still stored"
     row = conn.execute(
-        "SELECT status FROM jobs WHERE job_id='gh_acme_old'").fetchone()
+        "SELECT status FROM jobs WHERE job_id='wd_acme_old'").fetchone()
     assert row["status"] == "open"
 
 

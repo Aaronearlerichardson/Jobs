@@ -536,12 +536,7 @@ async def acall_claude_json(system_prompt, user_content, max_tokens=1000,
             lead.set()
 
 
-def call_claude_json(system_prompt, user_content, max_tokens=1000,
-                     model=None, thinking=False, cache=True, *, reply):
-    """acall_claude_json's answer, for a thread."""
-    return http.run_sync(acall_claude_json(system_prompt, user_content,
-                                           max_tokens, model, thinking, cache,
-                                           reply=reply))
+call_claude_json = http.sync_shim(acall_claude_json)
 
 
 def expand_search(term):
@@ -599,9 +594,7 @@ async def ascore_company_mission(name, context=""):
     return r.tier, r.score, r.reason
 
 
-def score_company_mission(name, context=""):
-    """ascore_company_mission's answer, for a thread."""
-    return http.run_sync(ascore_company_mission(name, context))
+score_company_mission = http.sync_shim(ascore_company_mission)
 
 
 _BOARD_OWNER_SYSTEM = (

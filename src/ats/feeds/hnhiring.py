@@ -10,11 +10,11 @@ Firebase API:
   - https://hacker-news.firebaseio.com/v0/user/whoishiring.json
 """
 
+import asyncio
 import re
-import time
 
 from src.match.names import strip_parentheticals
-from src.net.http import get_json
+from src.net import http
 from src.net.util import strip_html
 
 BASE = "https://hacker-news.firebaseio.com/v0"
@@ -74,9 +74,9 @@ def _is_location(s):
     return bool(_LOC_HINT_RE.search(s)) and not _ROLE_HINT_RE.search(s)
 
 
-def _get_json(url, timeout=None):
-    """One Firebase item, or None (reported). net.http.get_json."""
-    return get_json(url, f"HN {url}", timeout=timeout)
+async def _get_json(url):
+    """One Firebase item, or None (reported). net.http.aget_json."""
+    return await http.aget_json(url, f"HN {url}")
 
 
 def _parse_post(text):
@@ -134,14 +134,14 @@ def _parse_post(text):
     return company, role, location, url
 
 
-def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
+async def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
     """
     Walk the newest submissions from `whoishiring` until we have
     `max_threads` "Who is hiring?" posts.
     """
     found = []
     for tid in submitted_ids[:lookback]:
-        item = _get_json(f"{BASE}/item/{tid}.json")
+        item = await _get_json(f"{BASE}/item/{tid}.json")
         if not item:
             continue
         title = item.get("title") or ""
@@ -149,21 +149,21 @@ def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
             found.append(item)
             if len(found) >= max_threads:
                 break
-        time.sleep(0.05)
+        await asyncio.sleep(0.05)
     return found
 
 
-def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
+async def afetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
     job comments (those passing `gate(role, text)` when a gate is given).
     """
-    user = _get_json(f"{BASE}/user/whoishiring.json")
+    user = await _get_json(f"{BASE}/user/whoishiring.json")
     if not user:
         return []
 
     submitted = user.get("submitted") or []
-    threads = _find_hiring_threads(submitted, max_threads=max_threads)
+    threads = await _find_hiring_threads(submitted, max_threads=max_threads)
     if not threads:
         print("    [!] No 'Who is hiring?' threads found in latest submissions.")
         return []
@@ -176,8 +176,8 @@ def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
         print(f"    -> {title} (id {tid}, {len(kids)} top-level posts)")
 
         for cid in kids:
-            comment = _get_json(f"{BASE}/item/{cid}.json")
-            time.sleep(0.02)        # gentle on Firebase
+            comment = await _get_json(f"{BASE}/item/{cid}.json")
+            await asyncio.sleep(0.02)        # gentle on Firebase
             if not comment or comment.get("deleted") or comment.get("dead"):
                 continue
             text = strip_html(comment.get("text", ""))
@@ -198,3 +198,6 @@ def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
                 "description": text,
             })
     return jobs
+
+
+fetch_hnhiring = http.sync_shim(afetch_hnhiring)

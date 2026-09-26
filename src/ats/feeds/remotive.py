@@ -10,24 +10,32 @@ Optional `category` parameter narrows by slug
 relevance gate is narrower than any single Remotive category.
 """
 
-from src.net.http import get_json
+import asyncio
+
+from src.net import http
 from src.net.util import strip_html
 
-API_URL = "https://remotive.com/api/remote-jobs"
 
-
-def fetch_remotive(category=None, max_jobs=None, gate=None):
+async def afetch_remotive(category=None, max_jobs=None, gate=None):
     """
-    Pull Remotive's job feed; return relevant listings.
+    Pull Remotive's job feed; return relevant listings, read off the loop.
 
     `category`: optional slug, e.g. "software-dev". None = all categories.
     `max_jobs`: cap iteration (debugging). None = all.
     """
-    url = API_URL
+    url = "https://remotive.com/api/remote-jobs"
     if category:
-        url = f"{API_URL}?category={category}"
+        url = f"{url}?category={category}"
 
-    data = get_json(url, "Remotive", default={})
+    data = await http.aget_json(url, "Remotive", default={})
+    return await asyncio.to_thread(_jobs, data, max_jobs, gate)
+
+
+fetch_remotive = http.sync_shim(afetch_remotive)
+
+
+def _jobs(data, max_jobs, gate):
+    """The feed's payload `data` as fetch_remotive's job dicts."""
     entries = (data.get("jobs") or []) if isinstance(data, dict) else []
     if max_jobs is not None:
         entries = entries[:max_jobs]

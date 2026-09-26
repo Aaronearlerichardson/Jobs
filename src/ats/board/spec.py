@@ -18,7 +18,8 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       ValidationError, model_validator)
 
 from src import config
-from . import decode, fields
+from src.net.util import css, xpath
+from . import fields
 
 RowField = Literal["id", "title", "url", "location", "description", "posted_at",
                    "remote_hint", "department"]
@@ -55,7 +56,7 @@ def _css(v):
     """
     if v != "$job_links":
         try:
-            decode.css(fields.fmt(v, lambda _name: "x"))
+            xpath(css(fields.fmt(v, lambda _name: "x")))
         except SelectorError as e:
             raise ValueError(f"bad CSS: {e}") from None
     return v
@@ -83,7 +84,7 @@ Count = Annotated[int, Strict(), Field(ge=1)]
 Status = Annotated[int, Strict(), Field(ge=100, le=599)]
 Regex = Annotated[str, Strict(), AfterValidator(_regex)]
 Template = Annotated[str, Strict(), StringConstraints(min_length=1), AfterValidator(_template)]
-#: A CSS selector template, compiled as the spec loads (`decode.css`).
+#: A CSS selector template, compiled as the spec loads (`net.util.css`).
 Css = Annotated[Template, AfterValidator(_css)]
 #: A field-grammar spec (fields.py): a path, a dict, or None.
 Grammar = Annotated[Any, AfterValidator(_grammar)]

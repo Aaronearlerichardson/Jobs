@@ -6,7 +6,13 @@ Each fetcher returns a list of job dicts with the shape:
 plus `posted_at` / `remote_hint` where the source supplies them.
 
 A fetcher's `gate=None` is a relevance predicate
-`gate(title[, description])`; None keeps every posting.
+`gate(title[, description])`; None keeps every posting. It may run off
+the loop (asyncio.to_thread), so it is pure CPU.
+
+Each fetcher is a coroutine `afetch_<name>` with its sync shim
+`fetch_<name>`, except `fetch_websearch`, which stays sync: net.ddg's
+search is sync network I/O, and asyncio.to_thread's workers (where
+aiohttp resolves DNS) run pure CPU only.
 
 Board-shaped platforms are `config.BOARDS` specs run by the engine in
 src/ats/board/.

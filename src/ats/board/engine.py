@@ -38,6 +38,12 @@ spec schema (spec.py, the models a spec parses into), the field grammar
 (fields.py), the decoders (decode.py) and the listing walk (pager.py), all
 in src/ats/board/.
 
+The engine is coroutines on the network loop: a page is decoded and its
+rows mapped off the loop (asyncio.to_thread), and a board's pages and
+detail reads go one at a time, their delays awaited. Each coroutine a
+thread calls, `a<name>`, has a sync shim `<name>` (`http.sync_shim`);
+`detail`, `probe_job` and `board_jobs` are awaited only.
+
 Notes:
     2026-09-18 audit: 124 open rows carried an embedded newline or tab
     (a search-row template wrapping onto two lines, a stray tab between
@@ -47,8 +53,8 @@ Notes:
     of the rule.
 """
 
+import asyncio
 import re
-import time
 
 from src import config
 from src.match.locality import location_unknown
@@ -73,14 +79,16 @@ def loc_ok(loc_re, text):
     return loc_re is None or bool(loc_re.search(text or ""))
 
 
-def board_jobs(rows, company_name, gate=None, loc_re=None,
-               fetch_description=None, max_details=config.SWEEP_DETAILS,
-               detail_delay=config.SWEEP_DETAIL_DELAY_S):
+async def board_jobs(rows, company_name, gate=None, loc_re=None,
+                     fetch_description=None, max_details=config.SWEEP_DETAILS,
+                     detail_delay=config.SWEEP_DETAIL_DELAY_S):
     """Job dicts for the rows that pass `loc_re` and `gate` (see module doc).
 
-    `fetch_description(row)` is the ATS's detail call, when it has one; it
-    runs only for a row the listing gave no body, at most `max_details`
-    times per board, `detail_delay` seconds apart.
+    `await fetch_description(row)` is the ATS's detail call, when it has
+    one; it runs only for a row the listing gave no body, at most
+    `max_details` times per board, `detail_delay` seconds apart. The rows
+    are cleaned, placed and screened on their listed text off the loop, so
+    `gate` must be pure CPU (no fetch).
 
     >>> rows = [{"id": "1", "title": "Data Engineer", "url": "u1", "location": "Durham, NC",
     ...          "description": "", "_key": "a"},
@@ -91,10 +99,11 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
     ...         None]
     >>> import re
     >>> calls = []
-    >>> jobs = board_jobs(rows, "Acme", gate=lambda t, d="": "data" in t.lower(),
-    ...                   loc_re=re.compile("NC"),
-    ...                   fetch_description=lambda r: calls.append(r["id"]) or "body",
-    ...                   detail_delay=0)
+    >>> async def body(row):
+    ...     return calls.append(row["id"]) or "body"
+    >>> jobs = http.run_sync(board_jobs(rows, "Acme", gate=lambda t, d="": "data" in t.lower(),
+    ...                                 loc_re=re.compile("NC"), fetch_description=body,
+    ...                                 detail_delay=0))
     >>> [(j["id"], j["company"], j["description"]) for j in jobs]
     [('1', 'Acme', 'body')]
 
@@ -114,42 +123,46 @@ def board_jobs(rows, company_name, gate=None, loc_re=None,
     ...           "location": "Durham,\\tNC", "description": ""},
     ...          {"id": "5", "title": "   ", "url": "u5", "location": "",
     ...           "description": ""}]
-    >>> jobs = board_jobs(messy, "Acme")
+    >>> jobs = http.run_sync(board_jobs(messy, "Acme"))
     >>> [(j["id"], j["title"], j["location"]) for j in jobs]
     [('4', 'Data Engineer', 'Durham, NC')]
     """
+    def screened():
+        for row in rows:
+            if not row or not row.get("id"):
+                continue
+            title = clean_field(row.get("title"))
+            if not title:
+                continue
+            row["title"] = title
+            row["location"] = clean_field(row.get("location"))
+            if not loc_ok(loc_re, row.get("location", "")):
+                continue
+            head = clean_field(row.pop("head", None)) or title
+            desc = row.get("description") or ""
+            yield row, head, desc, gate is None or gate(head), gate is None or gate(head, desc)
+
     out, fetched = [], 0
 
-    def hydrate(row):
+    async def hydrate(row):
         nonlocal fetched
         fetched += 1
-        desc = fetch_description(row) or ""
+        desc = await fetch_description(row) or ""
         if detail_delay:
-            time.sleep(detail_delay)
+            await asyncio.sleep(detail_delay)
         return desc
 
     def can_fetch():
         return fetch_description is not None and fetched < max_details
 
-    for row in rows:
-        if not row or not row.get("id"):
+    for row, head, desc, head_ok, listed_ok in await asyncio.to_thread(list, screened()):
+        if not head_ok and not desc and can_fetch():
+            desc = await hydrate(row)
+            listed_ok = gate(head, desc)
+        if not listed_ok:
             continue
-        title = clean_field(row.get("title"))
-        if not title:
-            continue
-        row["title"] = title
-        row["location"] = clean_field(row.get("location"))
-        if not loc_ok(loc_re, row.get("location", "")):
-            continue
-        head = clean_field(row.pop("head", None)) or title
-        desc = row.get("description") or ""
-        if gate is not None:
-            if not gate(head) and not desc and can_fetch():
-                desc = hydrate(row)
-            if not gate(head, desc):
-                continue
         if not desc and can_fetch():
-            desc = hydrate(row)
+            desc = await hydrate(row)
         job = {k: v for k, v in row.items() if not k.startswith("_")}
         job["company"] = company_name
         job["description"] = desc
@@ -394,15 +407,15 @@ class Board:
 
     # --- requests ----------------------------------------------------------
 
-    def _fetch(self, req, parts, vals=None, label=None, timeout=None, url=None,
-               hop=True):
+    async def _fetch(self, req, parts, vals=None, label=None, timeout=None, url=None,
+                     hop=True):
         """(status, payload, error) for one request built from `req` (the
         listing or detail spec) and the handle `parts`; `url`, a served
         next-page URL, replaces the spec's URL and parameters verbatim. A
         parameter given the applied facets ("$facets") carries the values
         applied under its own name; one whose value is None is left off. A
         page whose decoder names another to read in its place (`hop`) is
-        followed, once."""
+        followed, once. The answer is decoded off the loop."""
         dec = req.decoder
         vals = {**_NAMED, **(vals or {})}
         kw = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
@@ -417,22 +430,23 @@ class Board:
             kw["timeout"] = timeout
         url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else vals.get(f"${k}"))
         if dec.kind == "json":
-            status, payload, err = http.request_json(req.method, url, label, **kw)
+            status, payload, err = await http.arequest_json(req.method, url, label, **kw)
         else:
-            status, r, err = http.request(req.method, url, label, **kw)
+            status, r, err = await http.arequest(req.method, url, label, **kw)
             if err:
                 return status, None, err
             try:
-                payload = decode.decode(dec, r.text, parts, url, vals["$area"], hop)
+                payload = await asyncio.to_thread(
+                    lambda: decode.decode(dec, r.text, parts, url, vals["$area"], hop))
             except ValueError:
                 return status, None, http.failed(label, "unreadable response")
             if isinstance(payload, dict) and payload.get("hop"):
-                return self._fetch(req, parts, vals, label, timeout, payload["hop"], False)
+                return await self._fetch(req, parts, vals, label, timeout, payload["hop"], False)
         if dec.values and payload is not None:
-            payload = decode.unwrap(payload, dec.values)
+            payload = await asyncio.to_thread(decode.unwrap, payload, dec.values)
         return status, payload, err
 
-    def _follow(self, handle, parts, label=None, timeout=None):
+    async def _follow(self, handle, parts, label=None, timeout=None):
         """Settle into `parts` each `handle.follow` part not yet known for
         `handle`: the URL its template redirects to, query and trailing "/"
         dropped (a scheme-less template is https). The error, reported
@@ -442,25 +456,26 @@ class Board:
                 continue
             url = fields.fmt(tpl, parts.get)
             url = url if re.match(r"(?i)^https?://", url) else f"https://{url}"
-            status, r, err = http.request("GET", url, **({"timeout": timeout} if timeout else {}))
+            status, r, err = await http.arequest("GET", url,
+                                                 **({"timeout": timeout} if timeout else {}))
             if err or status != 200:
                 return http.failed(label, f"could not resolve the board's {name}")
             parts[name] = re.sub(r"[?#].*$", "", r.url or url).rstrip("/")
             _VARIANTS.setdefault((self.name, str(handle)), {})[name] = parts[name]
         return None
 
-    def _page(self, req, handle, vals, label=None, timeout=None, url=None):
+    async def _page(self, req, handle, vals, label=None, timeout=None, url=None):
         """(parts, status, payload, error) for one listing request, after
         `_follow`; a handle missing a part is an error, asked nothing."""
         parts = self._parts(handle)
         if not all(parts.get(p) for p in self._part_names):
             return parts, None, None, http.failed(label, f"handle {handle!r} names no board")
-        err = self._follow(handle, parts, label, timeout)
+        err = await self._follow(handle, parts, label, timeout)
         if err:
             return parts, None, None, err
-        return self._ask(req, handle, parts, vals, label, timeout, url)
+        return await self._ask(req, handle, parts, vals, label, timeout, url)
 
-    def _ask(self, req, handle, parts, vals=None, label=None, timeout=None, url=None):
+    async def _ask(self, req, handle, parts, vals=None, label=None, timeout=None, url=None):
         """(parts, status, payload, error) for one request. A `handle.try`
         part not yet settled for `handle` is tried value by value, each a
         template over `parts` (quietly), until an answer `_wrong` does not
@@ -470,21 +485,22 @@ class Board:
         at a time; one that waited asks once with the value it settled."""
         key = (self.name, str(handle))
         if self._unsettled(key):
-            with _SETTLING.hold(key):
+            async with _SETTLING.hold(key, aio=True):
                 tries = self._unsettled(key)
                 if tries:
-                    return self._settle(key, tries, req, parts, vals, label, timeout, url)
+                    return await self._settle(key, tries, req, parts, vals, label, timeout, url)
             parts = {**parts, **_VARIANTS[key]}
-        return (parts, *self._fetch(req, parts, vals, label, timeout, url))
+        return (parts, *await self._fetch(req, parts, vals, label, timeout, url))
 
     def _unsettled(self, key):
         return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS.get(key, {})}
 
-    def _settle(self, key, tries, req, parts, vals, label, timeout, url):
+    async def _settle(self, key, tries, req, parts, vals, label, timeout, url):
         (name, values), = tries.items()
         refused = None
         for v in dict.fromkeys(fields.fmt(t, parts.get) for t in values):
-            status, payload, err = self._fetch(req, {**parts, name: v}, vals, None, timeout, url)
+            status, payload, err = await self._fetch(req, {**parts, name: v}, vals, None, timeout,
+                                                     url)
             if not self._wrong(req, status, payload):
                 if not err:
                     _VARIANTS.setdefault(key, {})[name] = v
@@ -515,21 +531,21 @@ class Board:
     def _label(self, handle, company_name=""):
         return f"{self.name} {company_name or handle}"
 
-    def _walk(self, handle, label=None, cheap=False, size=None, pages=None, vals=None,
-              scoped=False, first=False, budget=None, located=False):
+    async def _walk(self, handle, label=None, cheap=False, size=None, pages=None, vals=None,
+                    scoped=False, first=False, budget=None, located=False):
         """(rows, total) from the first listing alternative whose walk
         (`_walk_listing`) yields a posting, else the last one's answer; only
         the first alternative's when `first`."""
         got = None, None
         for spec, row in list(zip(self._listings, self._rows))[:1 if first else None]:
-            got = self._walk_listing(spec, row, handle, label, cheap, size, pages, vals, scoped,
-                                     budget, located)
+            got = await self._walk_listing(spec, row, handle, label, cheap, size, pages, vals,
+                                           scoped, budget, located)
             if postings(got[0]):
                 break
         return got
 
-    def _walk_listing(self, spec, row, handle, label=None, cheap=False, size=None, pages=None,
-                      vals=None, scoped=False, budget=None, located=False):
+    async def _walk_listing(self, spec, row, handle, label=None, cheap=False, size=None,
+                            pages=None, vals=None, scoped=False, budget=None, located=False):
         """`pager.walk` over one listing `spec`, its entries mapped by `row`:
         (rows, total), (None, None) when the first request failed. `vals`
         fills named request values (`_NAMED`); `cheap` reads one page (or
@@ -541,8 +557,8 @@ class Board:
         timeout = config.PROBE_TIMEOUT if cheap else None
         dec, vals = spec.decoder, vals or {}
 
-        def ask(n, page, url):
-            parts, _status, payload, err = self._page(
+        async def ask(n, page, url):
+            parts, _status, payload, err = await self._page(
                 req, handle, {**vals, **page}, f"{label} p{n}" if label and paged else label,
                 timeout, url)
             return parts, payload, err
@@ -550,28 +566,30 @@ class Board:
         def rows_of(parts, payload):
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
-        return pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
+        return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
 
-    def listing(self, handle, label=None, cheap=False, rescue_cap=None):
+    async def alisting(self, handle, label=None, cheap=False, rescue_cap=None):
         """Every row on the board, mapped by the spec's fields and, where
         the rescue runs on every pull, filled from at most `rescue_cap`
         details (default the rescue's cap); [] when the listing failed
         (reported under `label` when given). A `cheap` read spends no
         detail read."""
-        rows = self._walk(handle, label, cheap)[0] or []
+        rows = (await self._walk(handle, label, cheap))[0] or []
         if cheap:
             return rows
-        return self._rescue_all(rows, label, rescue_cap)
+        return await self._rescue_all(rows, label, rescue_cap)
 
-    def _rescue_all(self, rows, label, cap=None):
+    listing = http.sync_shim(alisting)
+
+    async def _rescue_all(self, rows, label, cap=None):
         """`rows` through an "always" rescue, unscoped; else unchanged."""
         if not self._always:
             return rows
-        return self._rescue(rows, None, False, True, label, cap)
+        return await self._rescue(rows, None, False, True, label, cap)
 
     # --- the locality scope ------------------------------------------------
 
-    def _scope(self, handle, loc_re, timeout=None):
+    async def _scope(self, handle, loc_re, timeout=None):
         """(values, vouched, board_total, board_page) narrowing the listing
         to `loc_re` server-side: the facet values whose label `loc_re`
         matches, read off one unscoped first page (`vouched`: their labels
@@ -580,7 +598,7 @@ class Board:
         total, None when unread; `board_page` its rows where the facets
         vouch (what an answer ignoring them repeats), else []."""
         sc = self.listing_spec.scope
-        parts, _s, payload, err = self._page(
+        parts, _s, payload, err = await self._page(
             self.listing_spec, handle, page_vals(self._pager, 0, 1), timeout=timeout)
         applied, labels, total = {}, {}, None
         if not err:
@@ -606,7 +624,7 @@ class Board:
             return {"$facets": applied, "$search_text": ""}, " or ".join(labels), total, page
         return {"$facets": {}, "$search_text": default_search_text()}, "", total, []
 
-    def _pull(self, handle, label, loc_re=None, budget=None):
+    async def _pull(self, handle, label, loc_re=None, budget=None):
         """The board's rows in `loc_re`'s area (all of them when None), the
         walk's page cap widened to cover `budget` rows where given. A
         facets `scope` narrows the listing server-side (the first
@@ -618,9 +636,9 @@ class Board:
         filter (`_in_area`)."""
         scope = self.listing_spec.scope
         if loc_re is not None and scope:
-            vals, vouched, board_total, page = self._scope(handle, loc_re)
-            rows, total = self._walk(handle, label, vals=vals, scoped=True, first=vouched,
-                                     budget=budget)
+            vals, vouched, board_total, page = await self._scope(handle, loc_re)
+            rows, total = await self._walk(handle, label, vals=vals, scoped=True, first=vouched,
+                                           budget=budget)
             rows = rows or []
             cap = page_size(self._pager) * page_cap(self._pager, budget, self._pager.stride)
             fetch = not scope_failed(total, board_total, cap, rows, page)
@@ -628,9 +646,9 @@ class Board:
                 print(f"    [!] {label}: locality scope came back unnarrowed "
                       f"({len(rows) if total is None else total} of {board_total or '?'} "
                       f"postings) - keeping listed-location matches only, no detail rescue")
-            return self._rescue(rows, loc_re, fetch and vouched, fetch, label)
-        rows = self._walk(handle, label, vals={"$area": loc_re}, budget=budget)[0] or []
-        return [r for r in self._rescue_all(rows, label) if self._in_area(r, loc_re)]
+            return await self._rescue(rows, loc_re, fetch and vouched, fetch, label)
+        rows = (await self._walk(handle, label, vals={"$area": loc_re}, budget=budget))[0] or []
+        return [r for r in await self._rescue_all(rows, label) if self._in_area(r, loc_re)]
 
     def _in_area(self, row, loc_re):
         """Whether `row` passes `loc_re` (every row passes None): on its
@@ -641,7 +659,7 @@ class Board:
             return loc_ok(loc_re, loc)
         return self.spec.unlocated == "keep"
 
-    def _rescue(self, rows, loc_re, vouched, fetch, label, cap=None):
+    async def _rescue(self, rows, loc_re, vouched, fetch, label, cap=None):
         """The rows in `loc_re`'s area, each carrying the location that
         shows it: the listed one; else the rescue's free text (the listed
         one after it in parentheses); else, where `fetch` allows and the
@@ -665,12 +683,12 @@ class Board:
             if loc_ok(loc_re, listed):
                 if vague and spent < cap:
                     spent += 1
-                    self._rescued(row, fill)
+                    await self._rescued(row, fill)
             elif loc_ok(loc_re, free):
                 row["location"] = f"{free} ({listed})" if listed else free
             elif vague and spent < cap:
                 spent += 1
-                self._rescued(row, fill)
+                await self._rescued(row, fill)
                 if not (vouched or loc_ok(loc_re, row["location"])):
                     continue
             elif not vouched:
@@ -684,12 +702,12 @@ class Board:
                   f"{'kept unexpanded' if vouched or loc_re is None else 'dropped'}")
         return out
 
-    def _rescued(self, row, fill):
+    async def _rescued(self, row, fill):
         """Fill `row` in place from its posting's detail: each field in
         `fill` the detail names, the row's own kept where it names none.
         The location comes through `_locate`: a cached one costs no read
         and brings nothing else."""
-        loc, rec, fs, ctx = self._locate(row["url"], True)
+        loc, rec, fs, ctx = await self._locate(row["url"], True)
         if "location" in fill:
             row["location"] = loc or row.get("location") or ""
         for key in fill if rec else ():
@@ -698,22 +716,22 @@ class Board:
             if v:
                 row[key] = v
         if rec and fill != ("location",):
-            time.sleep(config.PAGE_DELAY_S)
+            await asyncio.sleep(config.PAGE_DELAY_S)
 
-    def _locate(self, url, report=False, company=None):
+    async def _locate(self, url, report=False, company=None):
         """(location, record, field readers, job_ref parts) for the posting
         `url` names: the location its detail gives ("" on a miss) and the
         record read, None when the location came from the cache, where a
         found one stays `rescue.cache_days`, keyed by the posting URL."""
         days = self._rescue_spec.cache_days if self._rescue_spec else 0
         path = hashed_cache_path(cache_dir("loc"), url) if days else None
-        hit = json_cache_get(path, days * 86400) if path else None
+        hit = await asyncio.to_thread(json_cache_get, path, days * 86400) if path else None
         if hit is not None:
             return hit.get("location") or "", None, {}, {}
-        rec, fs, ctx = self._posting(url, report, company)
+        rec, fs, ctx = await self._posting(url, report, company)
         loc = (fs["location"](rec, ctx) or "") if rec else ""
         if loc and path:
-            json_cache_put(path, {"location": loc})
+            await asyncio.to_thread(json_cache_put, path, {"location": loc})
         return loc, rec, fs, ctx
 
     # --- the pulls ---------------------------------------------------------
@@ -724,24 +742,27 @@ class Board:
         if not self.detail_spec:
             return None
         if not fill:
-            return lambda row: self.description_for(row.get("url"), report=True)
+            return lambda row: self.adescription_for(row.get("url"), report=True)
 
-        def read(row):
-            rec, fs, ctx = self._posting(row.get("url"), True)
+        async def read(row):
+            rec, fs, ctx = await self._posting(row.get("url"), True)
             if rec:
                 self._apply(row, rec, fs, ctx)
             return row.get("description") or ""
         return read
 
-    def jobs(self, handle, company_name="", gate=None, loc_re=None):
+    async def ajobs(self, handle, company_name="", gate=None, loc_re=None):
         """The sweep: `board_jobs` over the listing (`_pull`), screened by
         `gate`; an `eager` platform's detail reads fill the row as the
         whole-board pull's do."""
-        rows = self._pull(handle, self._label(handle, company_name), loc_re)
-        return board_jobs(rows, company_name, gate=gate,
-                          fetch_description=self._detail_rows(self.spec.eager))
+        rows = await self._pull(handle, self._label(handle, company_name), loc_re)
+        return await board_jobs(rows, company_name, gate=gate,
+                                fetch_description=self._detail_rows(self.spec.eager),
+                                detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
-    def whole_board(self, company, loc_re=None):
+    jobs = http.sync_shim(ajobs)
+
+    async def awhole_board(self, company, loc_re=None):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
         spec is `eager`. The walk reads up to the board's row budget
@@ -749,27 +770,34 @@ class Board:
         handle = self.handle(company)
         if not handle:
             return []
-        rows = self._pull(handle, self._label(handle), loc_re, config.board_max_rows(company))
+        rows = await self._pull(handle, self._label(handle), loc_re,
+                                config.board_max_rows(company))
         eager = self._detail_rows(True) if self.spec.eager else None
-        return adapt(board_jobs(rows, "", fetch_description=eager,
+        jobs = await board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,
-                                detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S),
-                     self.name)
+                                detail_delay=config.WHOLE_BOARD_DETAIL_DELAY_S)
+        return await asyncio.to_thread(adapt, jobs, self.name)
 
-    def probe(self, handle):
+    whole_board = http.sync_shim(awhole_board)
+
+    async def aprobe(self, handle):
         """(ok, n) for a guessed handle: one cheap read, n postings on it (the
         listing's own total where it reports one), ok when there is at least
         one. Quiet: a miss is the expected answer."""
-        n = self.alive(handle)[1]
+        n = (await self.aalive(handle))[1]
         return n > 0, n
 
-    def alive(self, handle, label=None):
+    probe = http.sync_shim(aprobe)
+
+    async def aalive(self, handle, label=None):
         """(ok, n) where ok means the board request itself succeeded, empty
         or not (the dead-board check), and n counts its postings; a failed
         request is reported under `label` when given."""
-        rows, total = self._walk(handle, label, cheap=True, size=1)
+        rows, total = await self._walk(handle, label, cheap=True, size=1)
         n = sum(1 for r in rows or [] if r["id"] is not None)
         return rows is not None, total if total is not None else n
+
+    alive = http.sync_shim(aalive)
 
     def gone(self, error):
         """Whether `error`, a failed listing read's report, proves the board
@@ -784,7 +812,7 @@ class Board:
         """
         return self.spec.prunable and bool(_HTTP_404.search(error or ""))
 
-    def local_count(self, handle, loc_re):
+    async def alocal_count(self, handle, loc_re):
         """Postings on the board in `loc_re`'s area. Where the spec scopes,
         the scoped total (where the facets vouch but the board reports none,
         the postings on the first scoped page), unless the board ignored the
@@ -794,8 +822,9 @@ class Board:
         location or free text passes. 0 when the board is unreadable."""
         scope = self.listing_spec.scope
         if scope:
-            vals, vouched, board_total, page = self._scope(handle, loc_re, config.PROBE_TIMEOUT)
-            rows, total = self._walk(handle, cheap=True, size=1, vals=vals, first=vouched)
+            vals, vouched, board_total, page = await self._scope(handle, loc_re,
+                                                                 config.PROBE_TIMEOUT)
+            rows, total = await self._walk(handle, cheap=True, size=1, vals=vals, first=vouched)
             if rows is None:
                 return 0
             cap = page_size(self._pager) * self._pager.pages
@@ -804,47 +833,54 @@ class Board:
                     return total
                 if vouched:
                     return sum(1 for r in rows if r["id"] is not None)
-        rows = self._walk(handle, cheap=True, pages=config.LOCAL_COUNT_SAMPLE_PAGES,
-                          located=True)[0] or []
+        rows = (await self._walk(handle, cheap=True, pages=config.LOCAL_COUNT_SAMPLE_PAGES,
+                                 located=True))[0] or []
         return sum(1 for r in rows
                    if loc_ok(loc_re, r["location"]) or loc_ok(loc_re, r.get("_free") or ""))
 
-    def employer_name(self, handle):
+    local_count = http.sync_shim(alocal_count)
+
+    async def aemployer_name(self, handle):
         """The employer the listing names on its first posting, or ""."""
         spec, listing = self.spec.employer, self.listing_spec
         if not spec:
             return ""
         req = listing.model_copy(update={"url": listing.probe_url or listing.url})
-        _parts, _s, payload, err = self._page(req, handle, page_vals(self._pager, 0, 1),
-                                              timeout=config.PROBE_TIMEOUT)
+        _parts, _s, payload, err = await self._page(req, handle, page_vals(self._pager, 0, 1),
+                                                    timeout=config.PROBE_TIMEOUT)
         entries = [] if err else decode.entries(payload, listing.decoder)
         return str(fields.value(spec, entries[0]) or "").strip() if entries else ""
 
+    employer_name = http.sync_shim(aemployer_name)
+
     # --- one posting -------------------------------------------------------
 
-    def _listing_entries(self, handle):
+    async def _listing_entries(self, handle):
         """The raw first-page listing entries, memoized for
         config.BOARD_MEMO_S so a board with many stale rows is read once
         per pass, however many callers ask at once. None when the listing
         is unreadable or empty."""
-        def read():
-            _parts, _s, payload, err = self._page(
+        async def read():
+            _parts, _s, payload, err = await self._page(
                 self.listing_spec, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, self.listing_spec.decoder) or None
-        return _MEMO.do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
+        return await _MEMO.ado((self.name, handle), read, ttl=config.BOARD_MEMO_S)
 
-    def _member(self, ref, job_id=None):
+    async def _member(self, ref, job_id=None):
         """The listing entry for the posting `ref` names: by the posting id
         its URL carries, else by the row id `job_id` (a platform whose
-        posting URLs are all the board's own). None when absent."""
+        posting URLs are all the board's own), the rows mapped off the
+        loop. None when absent."""
         handle = self._handle_of(ref)
-        entries = self._listing_entries(handle) or []
+        entries = await self._listing_entries(handle) or []
         if ref.get("jid"):
             want = str(ref["jid"]).lower()
             return next((e for e in entries if str(e.get("id", "")).lower() == want), None)
         parts, want = self._parts(handle), str(job_id or "").lower()
-        return next((e for e in entries
-                     if want and str(self._rows[0](parts, e)["id"] or "").lower() == want), None)
+        return await asyncio.to_thread(
+            lambda: next((e for e in entries
+                          if want and str(self._rows[0](parts, e)["id"] or "").lower() == want),
+                         None))
 
     def row_id(self, handle, url):
         """The id this board's listing gives the posting `url` names, or
@@ -854,7 +890,7 @@ class Board:
         ref = self.job_ref(url)
         return self._rows[0](self._parts(handle), ref)["id"] if ref else None
 
-    def detail(self, ref, report=False, url=None):
+    async def detail(self, ref, report=False, url=None):
         """(status, record, error) for the posting `ref` names, through the
         handle's settled `try` parts (tried, where unsettled, as a listing
         request is); `url`, a template, replaces the detail's."""
@@ -865,10 +901,10 @@ class Board:
                          if x) if report else None
         parts = {**_VARIANTS.get((self.name, handle), {}), **ref}
         req = self.detail_spec.model_copy(update={"url": url}) if url else self.detail_spec
-        _parts, status, payload, err = self._ask(req, handle, parts, label=label)
+        _parts, status, payload, err = await self._ask(req, handle, parts, label=label)
         return status, decode.record(payload, self.detail_spec), err
 
-    def _posting(self, url, report=False, company=None):
+    async def _posting(self, url, report=False, company=None):
         """(record, its field readers, the posting's `job_ref` parts) for
         the posting `url` names (with `company`), read live: the detail
         endpoint, or the listing entry where the platform has none. A
@@ -881,13 +917,15 @@ class Board:
         if not ref:
             return None, {}, {}
         if self.detail_spec:
-            return self.detail(ref, report)[1], self._detail_fields, ref
-        return self._member(ref), self._listing_fields, ref
+            return (await self.detail(ref, report))[1], self._detail_fields, ref
+        return await self._member(ref), self._listing_fields, ref
 
-    def description_for(self, url, report=False):
+    async def adescription_for(self, url, report=False):
         """The posting's description, read live; "" on any miss."""
-        rec, fs, ctx = self._posting(url, report)
+        rec, fs, ctx = await self._posting(url, report)
         return (fs["description"](rec, ctx) or "") if rec else ""
+
+    description_for = http.sync_shim(adescription_for)
 
     @property
     def fills_location(self):
@@ -903,7 +941,7 @@ class Board:
         return (self.fills_location and location_unknown(job.get("location"))
                 and self.owns_url(job.get("url")))
 
-    def hydrate(self, job, company=None):
+    async def ahydrate(self, job, company=None):
         """Fill, in place, what `needs_detail` says `job` lacks (`_apply`),
         a new body capped at MAX_DESC_CHARS. A bodied row's location alone
         is read through `_locate` where the spec caches locations.
@@ -911,16 +949,18 @@ class Board:
         if not self.needs_detail(job):
             return job
         if job.get("description") and self._rescue_spec and self._rescue_spec.cache_days:
-            job["location"] = (self._locate(job.get("url"), True, company)[0]
+            job["location"] = ((await self._locate(job.get("url"), True, company))[0]
                                or job.get("location"))
             return job
-        rec, fs, ctx = self._posting(job.get("url"), report=True, company=company)
+        rec, fs, ctx = await self._posting(job.get("url"), report=True, company=company)
         if rec:
             had = job.get("description")
             self._apply(job, rec, fs, ctx)
             if not had and job.get("description"):
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
+
+    hydrate = http.sync_shim(ahydrate)
 
     def _apply(self, job, rec, fs, ctx):
         """Fill `job` in place from its posting's record: the body when it
@@ -951,7 +991,7 @@ class Board:
         headers = self.detail_spec.headers if self.detail_spec else {}
         return {**HEADERS, **_fill(headers, (self.job_ref(url) or {}).get, _NAMED)}
 
-    def probe_job(self, url, job_id=None):
+    async def probe_job(self, url, job_id=None):
         """(is_open, reason) for a stored posting URL: True live, False
         positively closed, None unverifiable. (None, "") when the URL is not
         this platform's or its closure is judged from the page."""
@@ -961,12 +1001,12 @@ class Board:
         if via == "listing":
             if not (ref.get("jid") or job_id):
                 return None, ""
-            if not self._listing_entries(self._handle_of(ref)):
+            if not await self._listing_entries(self._handle_of(ref)):
                 return None, f"{self.name} api: board unreadable or empty"
-            if self._member(ref, job_id) is not None:
+            if await self._member(ref, job_id) is not None:
                 return True, f"{self.name} api: board lists it"
             return False, f"{self.name} api: board no longer lists it"
-        status, rec, err = self.detail(ref, url=self._closure.url)
+        status, rec, err = await self.detail(ref, url=self._closure.url)
         if status is None:
             return None, f"{self.name} api error: {type(err).__name__}"
         if status in (404, 410):

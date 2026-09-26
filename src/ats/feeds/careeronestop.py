@@ -21,15 +21,14 @@ resume-fit scores for these postings cap at the no-description ceiling
 until you open the URL. Better a shallow lead than an invisible job.
 """
 
+import asyncio
 import re
 from urllib.parse import quote
 
 from src import config
-from src.net.http import HEADERS, SESSION, fetch_failed
+from src.net import http
+from src.net.http import HEADERS, fetch_failed
 from src.net.util import default_search_text, stable_id
-
-# v2 — v1 was retired and returns a blanket 401 even with valid credentials.
-_API = "https://api.careeronestop.org/v2/jobsearch"
 
 
 def _creds():
@@ -67,8 +66,8 @@ def _default_location():
             or re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip())
 
 
-def fetch_nlx_company(name, location=None, days=60,
-                      page_size=50, max_pages=6):
+async def afetch_nlx_company(name, location=None, days=60,
+                             page_size=50, max_pages=6):
     """All NLx postings for one employer in `location`. Returns normalized
     job dicts ({id, title, company, url, location, description}) ready for
     ingest_external_jobs; company is canonicalized to `name` so the store's
@@ -95,14 +94,15 @@ def fetch_nlx_company(name, location=None, days=60,
         #       /{startRecord}/{limitRecord}/{days}
         # safe="" so a slash inside a company or location name is encoded
         # rather than punched through as a new path segment (a 404 that
-        # looks like "the API is down" but is a malformed URL).
-        url = (f"{_API}/{quote(uid, safe='')}/{quote(name, safe='')}/"
-               f"{quote(location, safe='')}/25/0/0/"
+        # looks like "the API is down" but is a malformed URL). v2: v1 was
+        # retired and returns a blanket 401 even with valid credentials.
+        url = (f"https://api.careeronestop.org/v2/jobsearch/{quote(uid, safe='')}/"
+               f"{quote(name, safe='')}/{quote(location, safe='')}/25/0/0/"
                f"{page * page_size}/{page_size}/{days}")
         try:
-            r = SESSION.get(url, headers=hdr,
-                             params={"showFilters": "false",
-                                     "enableJobDescriptionSnippet": "true"})
+            r = await http.send("GET", url, headers=hdr,
+                                params={"showFilters": "false",
+                                        "enableJobDescriptionSnippet": "true"})
         except Exception as e:
             fetch_failed("CareerOneStop", e, indent=2)
             break
@@ -115,7 +115,7 @@ def fetch_nlx_company(name, location=None, days=60,
             fetch_failed("CareerOneStop", f"HTTP {r.status_code}", indent=2)
             break
         try:
-            data = r.json()
+            data = await asyncio.to_thread(r.json)
         except ValueError:
             fetch_failed("CareerOneStop", "non-JSON response", indent=2)
             break
@@ -152,3 +152,6 @@ def fetch_nlx_company(name, location=None, days=60,
     if dropped:
         print(f"    ({dropped} result(s) mentioned {name!r} but were other employers — skipped)")
     return out
+
+
+fetch_nlx_company = http.sync_shim(afetch_nlx_company)

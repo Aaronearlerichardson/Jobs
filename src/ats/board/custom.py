@@ -14,14 +14,16 @@ is a board at all. The reader's constants live in config
 (CAREERS_PAGE_*, BOARD_DETECT_CACHE_S).
 """
 
+import asyncio
 import re
 from urllib.parse import urldefrag, urljoin
 
 from src import config
-from src.net.http import HEADERS, SESSION
-from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field,
+from src.net import http
+from src.net.http import HEADERS
+from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           hashed_cache_path, host_of, json_cache_get,
-                          json_cache_put, node_text, parse_markup, xpath)
+                          json_cache_put, links, node_text, parse_markup)
 
 _JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
                           r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
@@ -71,7 +73,7 @@ def find_job_links(tree):
     >>> [(href, title) for _a, href, title in find_job_links(parse_markup(page))]
     [('/careers/facilities-engineer-88', 'Facilities Engineer')]
     """
-    anchors = xpath("//a[@href]")(tree)
+    anchors = links(tree)
     out, seen = [], {a.get("href") for a in anchors if _in_navigation(a)}
     for a in anchors:
         href = a.get("href")
@@ -89,7 +91,7 @@ def find_job_links(tree):
         seen.add(href)
         te = next(a.iterdescendants("h1", "h2", "h3", "h4", "h5"), None)
         if te is None:
-            te = next(iter(xpath(".//*[contains(@class, 'title')]")(a)), None)
+            te = first(".//*[contains(@class, 'title')]", a)
         title = node_text(te) if te is not None else text
         out.append((a, href, title))
     return out
@@ -101,7 +103,7 @@ def _openings_link(tree, page_url):
     host = host_of(page_url)
     if not host:
         return None
-    for a in xpath("//a[@href]")(tree):
+    for a in links(tree):
         href = a.get("href")
         # Defragmented, so an "#open-positions" link reads as this page and
         # the callers' no-self-hop check refuses it.
@@ -164,14 +166,14 @@ def read_page(tree, page_url, area=None, hop=True):
     return {"elements": out}
 
 
-def _page_tree(url):
-    """`url`'s page, parsed; None on any failure. Silent: a probed page
-    that is not a board is an expected answer."""
+async def _page_tree(url):
+    """`url`'s page, parsed off the loop; None on any failure. Silent: a
+    probed page that is not a board is an expected answer."""
     try:
-        r = SESSION.get(url, headers=HEADERS)
+        r = await http.send("GET", url, headers=HEADERS)
         if r.status_code != 200:
             return None
-        return parse_markup(r.text, url=url)
+        return await asyncio.to_thread(lambda: parse_markup(r.text, url=url))
     except Exception:
         return None
 
@@ -193,7 +195,7 @@ def is_board_page(html):
         return False
 
 
-def custom_board_listing_url(page_url, html=None):
+async def acustom_board_listing_url(page_url, html=None):
     """The URL holding a custom board's listings: `page_url` when it is one
     (CAREERS_PAGE_MIN_LINKS genuine job links), else its openings page one
     hop away when that is; None otherwise, and always for an aggregator or
@@ -201,7 +203,7 @@ def custom_board_listing_url(page_url, html=None):
 
     A decided verdict is cached BOARD_DETECT_CACHE_S per page URL (short,
     so a board going live or dead is re-checked soon); a failed fetch is
-    not cached.
+    not cached. Pages are parsed and judged off the loop.
 
     >>> custom_board_listing_url("https://www.indeed.com/jobs?q=x", "<html></html>") is None
     True
@@ -209,17 +211,20 @@ def custom_board_listing_url(page_url, html=None):
     if _OFFSITE_RE.search(page_url):
         return None
     path = hashed_cache_path(cache_dir("board"), page_url)
-    cached = json_cache_get(path, config.BOARD_DETECT_CACHE_S)
+    cached = await asyncio.to_thread(json_cache_get, path, config.BOARD_DETECT_CACHE_S)
     if cached is not None:
         return cached.get("listing")
-    tree = (parse_markup(html, url=page_url)
-            if html is not None else _page_tree(page_url))
+    tree = (await asyncio.to_thread(parse_markup, html, url=page_url)
+            if html is not None else await _page_tree(page_url))
     if tree is None:
         return None
-    result = page_url if _is_board(tree) else None
-    target = None if result else _hop_target(tree, page_url)
+    result = page_url if await asyncio.to_thread(_is_board, tree) else None
+    target = None if result else await asyncio.to_thread(_hop_target, tree, page_url)
     if target:
-        t2 = _page_tree(target)
-        result = target if t2 is not None and _is_board(t2) else None
-    json_cache_put(path, {"listing": result})
+        t2 = await _page_tree(target)
+        result = target if t2 is not None and await asyncio.to_thread(_is_board, t2) else None
+    await asyncio.to_thread(json_cache_put, path, {"listing": result})
     return result
+
+
+custom_board_listing_url = http.sync_shim(acustom_board_listing_url)
