@@ -188,50 +188,42 @@ def is_active_mission(tier, name, include_missions=None):
 #  Background harvester cadence
 # =========================================================================
 
-# How long a board that is BOTH off-mission and itself inactive waits
-# between whole-board harvests, instead of the harvester's ordinary
-# MIN_AGE_HOURS freshness rule. Such a board is still fetched every pass --
-# "harvest every board" stays true -- just on this longer interval; the
-# predicate, the census behind the default and the --min-age-hours
-# interaction all live with the one reader, src.crawl.harvest.plan.
+# How long an inactive board never mission-scored waits between
+# whole-board harvests, instead of the harvester's ordinary MIN_AGE_HOURS
+# freshness rule (offmission_inactive's "deferred"); the census behind the
+# default and the --min-age-hours interaction live with the one reader,
+# src.crawl.harvest.plan.
 HARVEST_OFFMISSION_HOURS = _pol.harvest_offmission_hours
 
 
-def is_offmission_inactive(c):
-    """True for a board that is BOTH off-mission (mission-scored into a
-    tier the profile marks inactive, or never mission-scored at all) AND
-    itself inactive: the boards the harvester reads on its long interval
-    (HARVEST_OFFMISSION_HOURS, read by src.crawl.harvest.plan). A NULL
-    tier reads as off-mission HERE (unlike is_active_mission, where an
-    unscored company is treated as active) -- an inactive row nobody has
-    bothered to mission-score is exactly as low-priority as one scored
-    into the catch-all tier, and this predicate only ever narrows a
-    harvest CADENCE, never activation or crawl eligibility.
+def offmission_inactive(c):
+    """What the harvester (src.crawl.harvest.plan) does with an inactive
+    board off the mission: "stopped", left out, when it was mission-scored
+    into a tier the profile marks inactive (is_active_mission's answer,
+    the multi-division exemption included); "deferred", read every
+    HARVEST_OFFMISSION_HOURS, when it was never scored (it may be a fresh
+    lead); "" for an active board or tier. Reactivating or re-tiering a
+    company is what brings a stopped board back.
 
-    >>> is_offmission_inactive({"mission_tier": "other", "active": 0})
-    True
-    >>> is_offmission_inactive({"mission_tier": None, "active": 0})
-    True
-    >>> is_offmission_inactive({"mission_tier": "core-mission", "active": 0})
-    False
-    >>> is_offmission_inactive({"mission_tier": "other", "active": 1})
-    False
+    >>> [offmission_inactive({"mission_tier": t, "active": a}) for t, a in
+    ...  (("other", 0), (None, 0), ("other", 1), ("core-mission", 0))]
+    ['stopped', 'deferred', '', '']
 
     Notes:
-        A multi-division conglomerate scored into an inactive tier is
-        exempt already: that exemption (is_multi_division, applied when
-        the row's `active` was last written) is what keeps it `active`,
-        so the `active` check above is enough and nothing here re-checks
-        is_multi_division.
-
-        The asymmetry with is_active_mission above -- an unscored row is
-        ACTIVE but is off-mission for a cadence -- is pinned in
+        A NULL tier reads as off-mission HERE, unlike is_active_mission,
+        where an unscored company is active; the asymmetry is pinned in
         tests/test_invariants.py
-        (TestOffmissionInactiveIsNotTheActivationRule).
+        (TestOffmissionInactiveIsNotTheActivationRule). This decides only
+        a harvest, never activation or crawl eligibility.
+
+        Until 2026-09-26 a scored board was deferred too: 347 companies,
+        all tier `other`, holding 67,312 open postings, were read weekly;
+        triage dropped 84,234 of their postings as off-mission, and the
+        best fit score among them was 0.36.
     """
     tier = c.get("mission_tier")
-    return not c.get("active") and (tier is None
-                                     or tier not in ACTIVE_MISSION_TIERS)
+    off = not c.get("active") and (tier is None or tier not in ACTIVE_MISSION_TIERS)
+    return ("deferred" if is_active_mission(tier, c.get("name")) else "stopped") if off else ""
 
 
 # =========================================================================
@@ -245,10 +237,11 @@ def is_offmission_inactive(c):
 # ThermoFisher's DEDUPED distinct-posting count at ~2,815 -- bigger than
 # Eurofins's previously-assumed high-water mark of 2,579 -- so the default
 # carries headroom above the biggest board actually observed. One budget
-# for every board: until 2026-09-26 an off-mission, inactive one kept its
-# pager's narrower default, which left five Workday boards capped (a capped
-# snapshot closes nothing) and ~1,900 of their rows queued for the
-# closed-URL probe, to save reads that cost a per-host walk no wall clock.
+# for every board a harvest or crawl pull reads: until 2026-09-26 an
+# off-mission, inactive one kept its pager's narrower default, which left
+# five Workday boards capped (a capped snapshot closes nothing) and ~1,900
+# of their rows queued for the closed-URL probe. Discovery's validation
+# pulls (Board.whole_board's `validate`) keep the pager's own budget.
 BOARD_MAX_ROWS = _pol.board_max_rows
 
 # One value per rule for every ATS board (src.ats.board.engine): the
@@ -264,10 +257,13 @@ WHOLE_BOARD_DETAILS = 200
 WHOLE_BOARD_DETAIL_DELAY_S = 0.15
 BOARD_MEMO_S = 600.0
 # Stored rows one board may hydrate per harvest or triage run, the pause
-# between two of those detail GETs, and the pages a local count samples
-# where it cannot ask the board for its area.
+# between two of those detail GETs (and between two closed-URL probes on
+# one host), the probes one host takes per pass (one or two GETs each: a
+# host cut the crawler off after 151 detail GETs on 2026-09-10), and the
+# pages a local count samples where it cannot ask the board for its area.
 HYDRATE_CAP_PER_RUN = 100
 HYDRATE_DELAY_S = 1.0
+CLOSED_PROBE_PER_HOST = 25
 LOCAL_COUNT_SAMPLE_PAGES = 5
 
 # The careers-page reader (src.ats.board.custom): the job links a page

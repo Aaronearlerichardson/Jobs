@@ -48,7 +48,7 @@ from .jobs import (  # noqa: F401
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
     job_exists, join_tracks, mark_desc_checked, merge_jobs, open_in_track_clause,
     ranked_jobs, record_probe_outcome, record_triage, remote_admitted,
-    same_posting, store_body, sync_job_statuses, touch_job, track_set,
+    retire_stopped, same_posting, store_body, sync_job_statuses, touch_job, track_set,
     triage_counts, triage_pending, update_job_scores, upsert_job,
 )
 from .pipeline import (  # noqa: F401

@@ -699,7 +699,7 @@ async def add_board(name, url, capture=False):
     slug = handle or url
     board = coords.columns(ats, handle, found.get("careers_url") or url, name=name)
     try:
-        nc = len(await company_fetch.fetch_company(board, NC_RE))
+        nc = len(await company_fetch.fetch_company(board, NC_RE, validate=True))
     except Exception:
         nc = 0
 

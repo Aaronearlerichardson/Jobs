@@ -237,16 +237,18 @@ multi_division_mission_floor = 0.6
 # watch_division_titles = ["software engineer", "data engineer"]
 
 # The whole-board harvester (harvest.py) normally re-checks every fetchable
-# board every --min-age-hours (default 6h). A board that is BOTH off-mission
-# (mission-scored into an inactive tier, or never scored at all) AND itself
-# inactive waits this many hours instead -- still fetched every pass, just
-# not every few hours for a mission tier no track will ever surface. Default
-# 168 (weekly). An explicit --min-age-hours on the command line (including
-# 0, "harvest everything now") always overrides this for every board,
-# off-mission or not -- see src/crawl/harvest.py's plan() docstring.
+# board every --min-age-hours (default 6h). An inactive board never
+# mission-scored waits this many hours instead: it may be a fresh lead, but
+# not one worth a read every few hours. Default 168 (weekly). An inactive
+# board mission-scored into an inactive tier is not harvested at all, and
+# its open postings are closed, until it is reactivated or re-tiered. An
+# explicit --min-age-hours on the command line (including 0, "harvest
+# everything now") always overrides this interval for every board -- see
+# src/crawl/harvest.py's plan() docstring.
 harvest_offmission_hours = 168
 
-# Rows a whole-board pull reads before giving up, on every board. Default
+# Rows a harvest or crawl pull reads before giving up, on every board
+# (discovery's candidate checks keep each pager's own page budget). Default
 # 3000, which carries headroom above the biggest board measured live --
 # see src/config/policy.py's BOARD_MAX_ROWS for that measurement. This only
 # changes how MUCH of the biggest boards a pass sees; a board read short of

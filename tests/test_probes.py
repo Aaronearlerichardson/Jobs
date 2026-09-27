@@ -33,6 +33,13 @@ from src.ops import repair, roster, scoring, status
 import src.store as store
 
 
+@pytest.fixture(autouse=True)
+def _no_probe_pause(monkeypatch):
+    """check_closed_jobs pauses config.HYDRATE_DELAY_S between two probes
+    on one host; the test that times it sets its own."""
+    monkeypatch.setattr(config, "HYDRATE_DELAY_S", 0)
+
+
 def seed_stale(db, name="Acme", *, ats="greenhouse", urls=None, n=1,
                days_stale=30, harvested=None, miss_reason=None, **company):
     """One company and its OPEN job rows, none of them seen for
@@ -465,9 +472,11 @@ class TestClosedProbeRotation:
     (unlike a closed one) left a row exactly where it was for the next
     pass to pick again."""
 
-    async def test_250_stale_rows_are_fully_covered_in_three_passes_of_100(
+    URLS = [f"https://h{i % 5}.example/{i}" for i in range(25)]
+
+    async def test_25_stale_rows_are_fully_covered_in_three_passes_of_10(
             self, db, monkeypatch):
-        seed_stale(db, n=250)
+        seed_stale(db, urls=self.URLS)
         # Worst case: every probe is unverifiable, so nothing ever leaves
         # the WHERE clause by closing -- rotation is the only thing that
         # can cover the backlog.
@@ -475,24 +484,24 @@ class TestClosedProbeRotation:
                             answer(lambda url, job_id=None: (None, "gated")))
 
         for _ in range(3):
-            await status.check_closed_jobs(db=db, stale_days=1, limit=100)
+            await status.check_closed_jobs(db=db, stale_days=1, limit=10)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
             "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
-        assert covered == 250
+        assert covered == 25
 
     async def test_a_single_pass_still_leaves_the_rest_for_next_time(self, db, monkeypatch):
-        seed_stale(db, n=250)
+        seed_stale(db, urls=self.URLS)
         monkeypatch.setattr(status.closure, "probe_job_open",
                             answer(lambda url, job_id=None: (None, "gated")))
 
-        await status.check_closed_jobs(db=db, stale_days=1, limit=100)
+        await status.check_closed_jobs(db=db, stale_days=1, limit=10)
 
         covered = db.execute(
             "SELECT COUNT(*) AS n FROM jobs "
             "WHERE desc_checked_at IS NOT NULL").fetchone()["n"]
-        assert covered == 100
+        assert covered == 10
 
 
 class TestClosedProbeGiveUp:
@@ -884,10 +893,9 @@ class TestProbeSelectionFollowsTheHarvestCadence:
 
     async def test_a_board_whose_next_walk_is_not_due_yet_contributes_nothing(
             self, db, monkeypatch, capsys):
-        # Off-mission and inactive, so it waits 168h; last walked just
-        # past the 7-day staleness line, i.e. due but not yet run.
-        seed_stale(db, "Deferred", harvested=iso_days_ago(8),
-                   active=0, mission_tier="other")
+        # Inactive and never mission-scored, so it waits 168h; last walked
+        # just past the 7-day staleness line, i.e. due but not yet run.
+        seed_stale(db, "Deferred", harvested=iso_days_ago(8), active=0)
         urls = self._probed(monkeypatch)
 
         await status.check_closed_jobs(db=db, stale_days=7)
@@ -977,3 +985,40 @@ async def test_one_origin_is_probed_one_row_at_a_time(db, monkeypatch):
 
     assert not any({GH_JOB, other_gh} <= s for s in seen)
     assert {GH_JOB, WD_JOB} in seen or {other_gh, WD_JOB} in seen
+
+
+async def test_one_host_waits_between_its_probes_and_no_other_host_does(db, monkeypatch):
+    monkeypatch.setattr(config, "HYDRATE_DELAY_S", 0.3)
+    a1, a2, b1 = "https://a.example/1", "https://a.example/2", "https://b.example/1"
+    seed_stale(db, urls=[a1, a2, b1])
+    began = {}
+
+    async def probe(url, job_id=None):
+        began[url] = time.monotonic()
+        return None, "gated"
+    monkeypatch.setattr(status.closure, "probe_job_open", probe)
+
+    await status.check_closed_jobs(db=db, stale_days=7)
+
+    first, second = sorted((began[a1], began[a2]))
+    assert second - first >= 0.25
+    assert began[b1] < second
+
+
+async def test_a_pass_deals_round_robin_across_hosts_up_to_the_host_cap(db, monkeypatch):
+    """The queue's head is one host's; a pass takes every host's
+    longest-waiting rows in turn, at most config.CLOSED_PROBE_PER_HOST."""
+    monkeypatch.setattr(config, "CLOSED_PROBE_PER_HOST", 3)
+    seed_stale(db, "A", urls=[f"https://a.example/{i}" for i in range(10)])
+    seed_stale(db, "B", urls=["https://b.example/1"])
+    seed_stale(db, "C", urls=["https://c.example/1", "https://c.example/2"])
+    hosts = []
+    monkeypatch.setattr(status.closure, "probe_job_open", answer(
+        lambda url, job_id=None: hosts.append(url.split("/")[2]) or (None, "gated")))
+
+    await status.check_closed_jobs(db=db, stale_days=7, limit=5)
+    assert sorted(hosts) == ["a.example"] * 2 + ["b.example"] + ["c.example"] * 2
+
+    hosts.clear()
+    await status.check_closed_jobs(db=db, stale_days=7)
+    assert sorted(hosts) == ["a.example"] * 3 + ["b.example"] + ["c.example"] * 2

@@ -17,7 +17,9 @@ import json
 import logging
 import socket
 import sys
+import threading
 import time
+import traceback
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -80,32 +82,60 @@ def _web_loop_debug():
 
 
 @pytest.fixture(autouse=True)
-def loop_blocks():
+def loop_blocks(monkeypatch):
     """Fails the test when a callback held an event loop past 100 ms, which
     asyncio's debug mode logs: a blocking call hidden in async code stalls
-    every request at once. The garbage collector's pauses, which can land
-    in any callback on any thread, are not counted. Yields the records it
-    caught, for the test that proves it can see one."""
-    seen, paused, began = [], [0.0], [0.0]
+    every request at once. What debug mode adds inside the callback is not
+    counted: the stack it captures for each new future and task on that
+    thread, and the garbage collector's pauses on any thread. Yields the
+    records it caught, for the test that proves it can see one.
+
+    Notes:
+        A capture takes the whole stack with its source lines, 1.5-3.5 ms
+        each, so a callback that starts forty tasks read as a block: 21
+        unrelated tests failed so beside an exe build on 2026-09-26.
+    """
+    seen, spent, began = [], [], [0.0]      # spent: (thread or None, start, end)
+    extract = traceback.StackSummary.extract.__func__
+
+    def _captured(cls, *args, **kw):
+        start = time.monotonic()
+        try:
+            return extract(cls, *args, **kw)
+        finally:
+            spent.append((threading.get_ident(), start, time.monotonic()))
 
     def _collector(phase, _info):
         if phase == "start":
-            began[0] = time.perf_counter()
+            began[0] = time.monotonic()
         else:
-            paused[0] += time.perf_counter() - began[0]
+            spent.append((None, began[0], time.monotonic()))
+
+    def _emit(record):
+        # Logged as the callback returns, on its thread: its own time is
+        # its duration less the union of debug time inside it.
+        if str(record.msg).startswith("Executing"):
+            end, me = time.monotonic(), threading.get_ident()
+            start = reach = end - record.args[-1]
+            record.own = record.args[-1]
+            for a, b in sorted((max(a, start), min(b, end)) for t, a, b in spent
+                               if t in (None, me) and b > start and a < end):
+                record.own -= max(0.0, b - max(a, reach))
+                reach = max(reach, b)
+        seen.append(record)
 
     catch = logging.Handler(logging.WARNING)
-    catch.emit = seen.append
+    catch.emit = _emit
     log = logging.getLogger("asyncio")
     log.addHandler(catch)
+    monkeypatch.setattr(traceback.StackSummary, "extract", classmethod(_captured))
     gc.callbacks.append(_collector)
     try:
         yield seen
     finally:
         gc.callbacks.remove(_collector)
         log.removeHandler(catch)
-    slow = [r.getMessage() for r in seen if str(r.msg).startswith("Executing")
-            and r.args[-1] - paused[0] > 0.1]
+    slow = [r.getMessage() for r in seen if getattr(r, "own", 0) > 0.1]
     if slow:
         pytest.fail(f"a callback blocked an event loop: {slow}")
 

@@ -598,7 +598,9 @@ dead board can't nuke its history. `--check-closed` covers what board fetches
 can't vouch for — orphans, inactive companies, boards that died or moved — by
 probing each job URL for definite death signals (404/410, "no longer
 accepting" notices, past JSON-LD `validThrough`, a Workday CXS miss);
-indeterminate probes leave rows open.
+indeterminate probes leave rows open. Probes go one at a time per host, a
+second apart, at most 25 per host per pass (`CLOSED_PROBE_PER_HOST` in
+`src/config/policy.py`), spread round-robin across hosts.
 
 Closed jobs drop out of the ranked digest automatically and are skipped by
 `--rescore` and both backfills, so no API spend goes to dead postings.
@@ -682,9 +684,13 @@ crawl (active, not parked dormant), scoped to your locality unless a company
 is watched, sweep-tagged or above the mission floor, and hydrates only rows
 that pass the gates. `harvest.py` is the other half — a slow, thorough pass
 that pulls **every** board with a fetchable ATS (dormant, inactive, pending
-review, any mission score; only dead/no-board rows and blocklisted names are
-skipped), whole and unfiltered, and stores every listing **unscored and
-bodiless**. A full snapshot is the best evidence of what a board lists, so
+review; only dead/no-board rows and blocklisted names are skipped), whole and
+unfiltered, and stores every listing **unscored and bodiless**. An inactive
+company never mission-scored is read weekly (`harvest_offmission_hours`); one
+scored into an inactive mission tier is not read at all until you reactivate
+or re-tier it, and each pass closes its open postings except the ones you
+acted on (a disposition, an applied or follow-up date, a contact or an
+outcome). A full snapshot is the best evidence of what a board lists, so
 the harvester closes stored rows that have vanished and reopens returners.
 
 Each pass then ends with **triage** (`src/crawl/triage.py`), which is where

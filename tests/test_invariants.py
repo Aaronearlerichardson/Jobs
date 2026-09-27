@@ -157,37 +157,37 @@ class TestActivationRule:
 
 
 class TestOffmissionInactiveIsNotTheActivationRule:
-    """`config.is_offmission_inactive` sits beside `is_active_mission` in
-    config/policy.py and reads the same ACTIVE_MISSION_TIERS, one word
-    apart. They answer different questions, and the difference is
-    deliberate -- pinned here because nothing else says which is which:
+    """`config.offmission_inactive` sits beside `is_active_mission` in
+    config/policy.py and reads the same ACTIVE_MISSION_TIERS. They answer
+    different questions, and the difference is deliberate -- pinned here
+    because nothing else says which is which:
 
       * is_active_mission decides `active`. An UNSCORED company (tier
         None) is active: scoring was unavailable, so the row is not
         punished for it.
-      * is_offmission_inactive only ever narrows a CADENCE
-        (harvest.plan's HARVEST_OFFMISSION_HOURS). An unscored row reads
-        as off-mission there: nobody has bothered to score it, so it does
-        not earn the frequent read.
+      * offmission_inactive only ever decides a harvest (harvest.plan:
+        the long HARVEST_OFFMISSION_HOURS interval, or left out). An
+        unscored inactive row reads as off-mission there: nobody has
+        bothered to score it, so it does not earn the frequent read.
     """
 
     def test_an_unscored_row_is_active_but_still_off_mission(self):
         assert is_active_mission(None, "Nowhere Robotics") == 1
-        assert config.is_offmission_inactive({"mission_tier": None,
-                                              "active": 0}) is True
+        assert config.offmission_inactive({"mission_tier": None,
+                                           "active": 0}) == "deferred"
 
     @pytest.mark.parametrize("tier", ALL_TIERS)
     def test_a_row_the_roster_calls_active_is_never_off_mission(self, tier):
         """Whatever the tier: the activation decision is already recorded
         in `active` (multi-division exemptions included), and this
         predicate never re-litigates it."""
-        assert not config.is_offmission_inactive({"mission_tier": tier,
-                                                  "active": 1})
+        assert not config.offmission_inactive({"mission_tier": tier,
+                                               "active": 1})
 
     def test_an_active_tier_is_never_off_mission(self):
         for tier in ACTIVE_MISSION_TIERS:
-            assert not config.is_offmission_inactive({"mission_tier": tier,
-                                                      "active": 0})
+            assert not config.offmission_inactive({"mission_tier": tier,
+                                                   "active": 0})
 
 
 # --------------------------------------------------------------------------- #
@@ -1018,8 +1018,11 @@ async def test_a_blocked_loop_fails_the_test(loop_blocks):
     """Invariant 5: async tests run in asyncio's debug mode (pytest.ini),
     which logs a callback that holds the loop past 100 ms, and
     conftest.loop_blocks fails the test for it. This one blocks on purpose
-    and takes the record back."""
+    and takes the record back; the callback before it only starts tasks,
+    whose stack captures (debug mode's own cost) are not a block."""
+    await asyncio.gather(*[asyncio.create_task(asyncio.sleep(0)) for _ in range(100)])
     time.sleep(0.15)
     await asyncio.sleep(0)
-    assert any(str(r.msg).startswith("Executing") for r in loop_blocks)
+    assert [r.own > 0.1 for r in loop_blocks][-1:] == [True]
+    assert sum(r.own > 0.1 for r in loop_blocks) == 1
     loop_blocks.clear()

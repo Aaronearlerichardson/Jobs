@@ -207,7 +207,7 @@ async def harvest_urls(urls, verbose=True):
             if store.board_key(comp) in have:
                 continue
             try:
-                jobs = await company_fetch.fetch_company(comp, NC_RE)
+                jobs = await company_fetch.fetch_company(comp, NC_RE, validate=True)
             except Exception:
                 jobs = []
             nc = len(jobs)

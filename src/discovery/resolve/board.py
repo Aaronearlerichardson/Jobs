@@ -38,8 +38,9 @@ from .websearch_board import websearch_board
 
 
 async def read_board(comp, loc_re=None):
-    """A resolved board's postings (`company.fetch_company` over its store
-    columns `comp`), or None when the fetch failed and read nothing.
+    """A resolved board's postings (`company.fetch_company`'s `validate`
+    pull over its store columns `comp`), or None when the fetch failed
+    and read nothing.
 
     A failed fetch (a timeout, a refusal, a 5xx) is no evidence the board
     is empty, so a caller never files it dead: closure's positive-evidence
@@ -49,7 +50,7 @@ async def read_board(comp, loc_re=None):
     from src.ats.board import company as company_fetch
     before = http.fetch_failures()
     try:
-        rows = await company_fetch.fetch_company(comp, loc_re)
+        rows = await company_fetch.fetch_company(comp, loc_re, validate=True)
     except Exception:
         return None
     if rows or http.fetch_failures() == before:

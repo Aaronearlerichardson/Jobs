@@ -143,12 +143,11 @@ def test_harvestable_ignores_active_dormant_and_tags_but_not_dead_boards():
 # ── plan: off-mission cadence ────────────────────────────────────────────────
 
 class TestOffmissionCadence:
-    """A board that is BOTH off-mission (mission_tier 'other', or never
-    scored) AND inactive waits config.HARVEST_OFFMISSION_HOURS
-    instead of plan()'s ordinary min_age_hours freshness cutoff -- see
-    config.is_offmission_inactive and plan()'s docstring for the
-    --min-age-hours interaction (an explicit override, including 0, always
-    wins for every board)."""
+    """An inactive board never mission-scored waits
+    config.HARVEST_OFFMISSION_HOURS instead of plan()'s ordinary
+    min_age_hours freshness cutoff (an explicit override, including 0,
+    always wins for every board); one scored off-mission ('other') is left
+    out -- see config.offmission_inactive and plan()'s docstring."""
 
     def _stale_board(self, conn, name, hours_ago, **extra):
         c = _company(conn, name, ats="lever", **extra)
@@ -156,22 +155,23 @@ class TestOffmissionCadence:
                  - harvest.timedelta(hours=hours_ago)).isoformat()
         conn.execute("UPDATE companies SET last_harvested_at=? WHERE id=?",
                      (stamp, c["id"]))
+        conn.commit()
         return c
 
-    def test_offmission_inactive_board_skipped_on_a_6h_pass(
+    def test_unscored_inactive_board_skipped_on_a_6h_pass(
             self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
         conn = store.connect(tmp_path / "s.db")
-        self._stale_board(conn, "Dominos", 24, active=0, mission_tier="other")
+        self._stale_board(conn, "Dominos", 24, active=0)
         stats = {}
         assert harvest.plan(conn, stats=stats) == []
-        assert stats["offmission_skipped"] == 1
+        assert (stats["offmission_skipped"], stats["offmission_stopped"]) == (1, 0)
 
-    def test_offmission_inactive_board_is_due_after_the_long_interval(
+    def test_unscored_inactive_board_is_due_after_the_long_interval(
             self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
         conn = store.connect(tmp_path / "s.db")
-        self._stale_board(conn, "Dominos", 200, active=0, mission_tier="other")
+        self._stale_board(conn, "Dominos", 200, active=0)
         assert [c["name"] for c in harvest.plan(conn)] == ["Dominos"]
 
     def test_active_core_board_is_unaffected_by_the_long_interval(
@@ -197,7 +197,7 @@ class TestOffmissionCadence:
             self, tmp_path, monkeypatch):
         monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
         conn = store.connect(tmp_path / "s.db")
-        self._stale_board(conn, "Dominos", 1, active=0, mission_tier="other")
+        self._stale_board(conn, "Dominos", 1, active=0)
         assert [c["name"] for c in harvest.plan(conn, min_age_hours=0)] \
             == ["Dominos"]
 
@@ -206,13 +206,46 @@ class TestOffmissionCadence:
         monkeypatch.setattr(config, "HARVEST_OFFMISSION_HOURS", 168.0)
         db = tmp_path / "s.db"
         conn = store.connect(db)
-        self._stale_board(conn, "Dominos", 24, active=0, mission_tier="other")
+        self._stale_board(conn, "Dominos", 24, active=0)
+        self._stale_board(conn, "Parked", 24, active=0, mission_tier="other")
         self._stale_board(conn, "Acme", 24, active=1, mission_tier="core-mission")
         await harvest.run(db_path=db, max_workers=1, board_fn=make_board_fn(),
                           triage=False)
         out = capsys.readouterr().out
         header = next(l for l in out.splitlines() if "board(s)" in l)
-        assert "1 off-mission board(s) deferred to 168h" in header
+        assert ("1 off-mission board(s) deferred to 168h, "
+                "1 left out (inactive, scored off-mission)") in header
+
+    async def test_a_pass_closes_a_stopped_boards_postings_and_a_retier_reopens_them(
+            self, tmp_path, monkeypatch, capsys):
+        """A company that becomes stopped has its open postings closed by the
+        next pass, bar the one the user applied to; re-tiered, its board is
+        walked again and reopens what it still lists (sync_job_statuses)."""
+        db = tmp_path / "s.db"
+        conn = store.connect(db)
+        c = _company(conn, "Acme", active=1, mission_tier="core-mission")
+        for i in range(3):
+            store.upsert_job(conn, {"job_id": f"gh_acme_{i}", "title": f"Engineer {i}",
+                                    "url": f"https://x.test/j/{i}", "company_id": c["id"]})
+        store.set_disposition(conn, "gh_acme_2", "applied")
+        conn.execute("UPDATE companies SET active=0, mission_tier='other' WHERE id=?",
+                     (c["id"],))
+        conn.commit()
+        _fetches(monkeypatch, lambda company: [_job(0), _job(2)])
+
+        summary = await harvest.run(db_path=db, triage=False)
+        assert (summary["boards"], summary["retired"]) == (0, 2)
+        assert "nothing to do; 2 job(s) closed at stopped boards" in capsys.readouterr().out
+        status = "SELECT job_id, status FROM jobs ORDER BY job_id"
+        assert [tuple(r) for r in conn.execute(status)] == [
+            ("gh_acme_0", "closed"), ("gh_acme_1", "closed"), ("gh_acme_2", "open")]
+
+        conn.execute("UPDATE companies SET mission_tier='core-mission' WHERE id=?", (c["id"],))
+        conn.commit()
+        summary = await harvest.run(db_path=db, triage=False)
+        assert (summary["boards"], summary["reopened"], summary["retired"]) == (1, 1, 0)
+        assert [tuple(r) for r in conn.execute(status)] == [
+            ("gh_acme_0", "open"), ("gh_acme_1", "closed"), ("gh_acme_2", "open")]
 
 
 # ── harvest_board ───────────────────────────────────────────────────────────

@@ -1,6 +1,8 @@
 """Open/closed reconciliation of stored job rows: the board-snapshot status
 sync and the closed-URL probe."""
 
+import asyncio
+import itertools
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
@@ -301,18 +303,26 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
     config.HARVEST_OFFMISSION_HOURS cadence (168h, against a 7-day
     CLOSED_PROBE_STALE_DAYS) every one of its rows goes "not
     board-verified in 7+ days" by arithmetic just before each walk, and
-    probing them says nothing the imminent walk will not say better.
+    probing them says nothing the imminent walk will not say better. A
+    board the harvest has stopped walking (config.offmission_inactive's
+    "stopped") has its open rows closed by each pass instead
+    (store.retire_stopped); the ones a user acted on stay open, and leave
+    this selection `stale_days` after the board's last walk.
 
     Pacing: one probe at a time per origin it asks first
-    (board.closure.probe_origin), every origin at once.
+    (board.closure.probe_origin), config.HYDRATE_DELAY_S apart, and every
+    origin at once; at most config.CLOSED_PROBE_PER_HOST rows of an
+    origin and `limit` in all, dealt round-robin across origins (each
+    one's first row, then each one's second) so one pass spreads over
+    every host in the queue.
 
     Reporting: outcomes are tallied per ATS family (per host for what no
     family claims) and printed under the summary line, because "36
     unverifiable" named nothing an audit could act on and "icims: 17
     closed [icims api HTTP 410 x17]" names all of it.
 
-    Probe rotation: the `limit` rows are the ones this op has gone longest
-    without probing -- ordered by desc_checked_at, never-probed-by-it
+    Probe rotation: each origin's rows are the ones this op has gone
+    longest without probing -- ordered by desc_checked_at, never-probed-by-it
     first -- and every live/unverifiable verdict stamps that column, so
     successive bounded passes cover the backlog instead of re-probing one
     head of the queue (tests/test_probes.py's TestClosedProbeRotation). A
@@ -348,7 +358,9 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
 
         Until 2026-09-26 the probes ran max_workers at a time on any
         host, so rows ordered by company put up to 11 concurrent GETs on
-        one Workday tenant.
+        one Workday tenant; then, the same day, one at a time per origin
+        with no pause and no per-host cap, taking the head of a queue in
+        which one SmartRecruiters host held 876 of 3,309 rows.
 
         last_seen is NEVER written here, on any of the three verdicts: it
         means "a board vouched for this", a direct URL probe is not a
@@ -379,23 +391,31 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
         # yet": either way no board snapshot has ever ruled on the row.
         rows = [r for r in rows if not walked.get(r["company_id"])
                 or walked[r["company_id"]] > cutoff]
-        n_deferred = n_rows - len(rows)
-        if limit:
-            rows = rows[:int(limit)]
-        print(f"  probing {len(rows)} open job(s) not board-verified in "
-              f"{stale_days}+ day(s)"
+        n_deferred, n_queued = n_rows - len(rows), len(rows)
+        hosts = group_by_company(await asyncio.to_thread(
+            lambda: [{**r, "origin": closure.probe_origin(r["url"])} for r in rows]), "origin")
+        ranks = itertools.zip_longest(*(q[:config.CLOSED_PROBE_PER_HOST] for q in hosts.values()))
+        rows = [r for rank in ranks for r in rank if r is not None][:int(limit) if limit else None]
+        print(f"  probing {len(rows)} open job(s) on "
+              f"{len({r['origin'] for r in rows})} host(s) not "
+              f"board-verified in {stale_days}+ day(s)"
               + (f" ({n_deferred} skipped: board not walked since)"
-                 if n_deferred else "") + "...")
+                 if n_deferred else "")
+              + (f", {n_queued - len(rows)} left for later passes"
+                 if n_queued > len(rows) else "") + "...")
 
         async def _probe(r):
             # A probe that RAISES is not a failure to report and skip, it
             # is an unverifiable row -- the third outcome this op counts.
             # So it is caught here rather than left to fan_out, which would
-            # drop the row and quietly shrink the denominator.
+            # drop the row and quietly shrink the denominator. The pause
+            # is taken inside the host's turn, before its next probe.
             try:
-                return await closure.probe_job_open(r["url"], r["job_id"])
+                got = await closure.probe_job_open(r["url"], r["job_id"])
             except Exception as e:          # noqa: BLE001 - an outcome
-                return None, f"probe error: {type(e).__name__}"
+                got = None, f"probe error: {type(e).__name__}"
+            await asyncio.sleep(config.HYDRATE_DELAY_S)
+            return got
 
         now = datetime.now()
         n_closed = n_live = n_unknown = n_parked = 0
@@ -407,8 +427,7 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
                 rows, _probe,
                 lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",
                 with_item=True, budget_s=config.PASS_BUDGET_S,
-                on_abandon=abandoned.append,
-                key=lambda r: closure.probe_origin(r["url"])):
+                on_abandon=abandoned.append, key=lambda r: r["origin"]):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
             bucket = _probe_label(r["url"])
             reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1

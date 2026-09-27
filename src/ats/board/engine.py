@@ -778,14 +778,17 @@ class Board:
                                 fetch_description=self._detail_rows(self.spec.eager),
                                 detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
-    async def whole_board(self, company, loc_re=None):
+    async def whole_board(self, company, loc_re=None, validate=False):
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
-        spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`."""
+        spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`; a
+        `validate` pull (discovery confirming a board and counting its
+        local postings) reads the pager's own page budget."""
         handle = self.handle(company)
         if not handle:
             return []
-        rows = await self._pull(handle, self._label(handle), loc_re, config.BOARD_MAX_ROWS)
+        rows = await self._pull(handle, self._label(handle), loc_re,
+                                None if validate else config.BOARD_MAX_ROWS)
         eager = self._detail_rows(True) if self.spec.eager else None
         jobs = await board_jobs(rows, "", fetch_description=eager,
                                 max_details=config.WHOLE_BOARD_DETAILS,

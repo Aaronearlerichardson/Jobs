@@ -73,7 +73,8 @@ async def track_writer(t=None, db=None):
 
 
 def group_by_company(rows, key="company_id"):
-    """`rows` bucketed by their company id, in first-seen order.
+    """`rows` bucketed by `key` (their company id by default), in
+    first-seen order.
 
     >>> group_by_company([{"company_id": 1, "t": "a"}, {"company_id": 2},
     ...                   {"company_id": 1, "t": "b"}])

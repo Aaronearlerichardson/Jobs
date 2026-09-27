@@ -656,6 +656,41 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     return (n_reopened, n_closed)
 
 
+def retire_stopped(conn, now=None):
+    """Close the open postings of every board the harvester has stopped
+    reading (harvestable_companies that config.offmission_inactive calls
+    "stopped"), all at one `now` (default: the clock), except the ones
+    the user acted on: a disposition, applied_at, followup_at, contact or
+    outcome_reason keeps a posting open. Returns the closed rows' (job_id,
+    company_id). A board reactivated or re-tiered is walked again, and the
+    walk reopens what it still lists (sync_job_statuses).
+
+    >>> from .companies import upsert_company
+    >>> conn = connect(":memory:")
+    >>> cid = upsert_company(conn, {"name": "Parked", "ats": "lever", "slug": "p",
+    ...                             "active": 0, "mission_tier": "other"})
+    >>> for j in ("seen", "applied"):
+    ...     _ = upsert_job(conn, {"job_id": j, "title": j, "company_id": cid})
+    >>> _ = conn.execute("UPDATE jobs SET applied_at='2026-09-01' WHERE job_id='applied'")
+    >>> retire_stopped(conn), retire_stopped(conn)
+    ([('seen', 1)], [])
+    """
+    # Deferred, like _collapse_key's reach into review.py (see the module doc).
+    from .companies import harvestable_companies
+    ids = [c["id"] for c in harvestable_companies(conn)
+           if config.offmission_inactive(c) == "stopped"]
+    acted = " OR ".join(f"COALESCE({col}, '') != ''" for col in (
+        "disposition", "applied_at", "followup_at", "contact", "outcome_reason"))
+    rows = conn.execute(
+        f"UPDATE jobs SET status='closed', closed_at=? "
+        f"WHERE company_id IN ({', '.join('?' for _ in ids)}) "
+        f"AND COALESCE(status, 'open') != 'closed' AND NOT ({acted}) "
+        f"RETURNING job_id, company_id",
+        ((now or datetime.now()).isoformat(), *ids)).fetchall()
+    _commit(conn)
+    return [tuple(r) for r in rows]
+
+
 # Fit columns written together by the rescore path (see update_job_scores).
 _SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates", "fit_model",
                "fit_domain", "fit_function", "fit_stack", "fit_seniority")

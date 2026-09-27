@@ -12,8 +12,10 @@ This module is the other half: a slow, thorough pass that runs in the
 background (Task Scheduler at log-on, repeating every few hours) and
 
   * takes every company with a fetchable board (store.harvestable_companies:
-    active or not, dormant or not, any tag, any mission score -- only rows
-    with no board, or a blocklisted name, are skipped);
+    active or not, dormant or not, any tag -- only rows with no board, or a
+    blocklisted name, are skipped), except an inactive one mission-scored
+    off-mission (plan), whose open postings the pass closes instead
+    (store.retire_stopped);
   * pulls the WHOLE board, no location filter, as a bodiless listing;
   * stores the rows unscored and untracked (jobs.harvested_at stamped), and
     reconciles open/closed status against the full snapshot;
@@ -82,16 +84,16 @@ DEFAULT_WORKERS = worker_count("harvest_workers")
 MISS_BACKOFF_S = 90.0
 # A board harvested more recently than this is skipped, which is what makes
 # a restarted (or Task-Scheduler-repeated) run resume where it left off.
-# A board that is BOTH off-mission and inactive waits the longer
+# An inactive board never mission-scored waits the longer
 # config.HARVEST_OFFMISSION_HOURS instead -- see plan()'s docstring.
 MIN_AGE_HOURS = 6.0
 # The post-triage closed-URL probe (ops.check_closed_jobs): how stale a
 # tracked OPEN row has to be (no board has vouched for it in this many
 # days) before its detail URL is worth a live GET, and how many such probes
-# one pass spends -- the harvester's own per-board caps bound the fetch
-# side, this bounds the probe side the same way.
+# one pass spends. A host takes at most config.CLOSED_PROBE_PER_HOST of
+# them, paced, so this bounds the pass's total, not its time.
 CLOSED_PROBE_STALE_DAYS = 7
-CLOSED_PROBE_LIMIT = 100
+CLOSED_PROBE_LIMIT = 500
 
 
 # --------------------------------------------------------------------------- #
@@ -99,18 +101,21 @@ CLOSED_PROBE_LIMIT = 100
 # --------------------------------------------------------------------------- #
 
 def deferred_note(stats):
-    """The ", N off-mission board(s) deferred to Xh" clause for a plan()
-    `stats` dict, and "" when this pass deferred none. run()'s header and
-    harvest.py --list both print it; neither spells it out.
+    """The clause naming the boards a plan() `stats` dict left out as
+    off-mission and inactive, deferred to the long interval or stopped;
+    "" when there are none. run()'s header and harvest.py --list both
+    print it; neither spells it out.
 
-    >>> deferred_note({"offmission_skipped": 0})
+    >>> deferred_note({"offmission_skipped": 0, "offmission_stopped": 0})
     ''
-    >>> deferred_note({"offmission_skipped": 2})    # doctest: +ELLIPSIS
-    ', 2 off-mission board(s) deferred to ...h'
+    >>> stats = {"offmission_skipped": 2, "offmission_stopped": 347}
+    >>> deferred_note(stats)    # doctest: +ELLIPSIS
+    ', 2 off-mission board(s) deferred to ...h, 347 left out (inactive, scored off-mission)'
     """
-    n = stats.get("offmission_skipped", 0)
-    return (f", {n} off-mission board(s) deferred to "
-            f"{config.HARVEST_OFFMISSION_HOURS:g}h") if n else ""
+    n, m = stats.get("offmission_skipped", 0), stats.get("offmission_stopped", 0)
+    return ((f", {n} off-mission board(s) deferred to "
+             f"{config.HARVEST_OFFMISSION_HOURS:g}h" if n else "")
+            + (f", {m} left out (inactive, scored off-mission)" if m else ""))
 
 
 def plan(conn, only=None, names=None, min_age_hours=None,
@@ -123,10 +128,12 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     total_job_count): each host walks its boards in this order, and its
     longest walk is what the pass waits for.
 
-    A board that is config.is_offmission_inactive waits the longer
-    config.HARVEST_OFFMISSION_HOURS instead of `min_age_hours`. Such a
-    board is still fetched every pass, per the "harvest every board"
-    mandate -- just not every `min_age_hours`.
+    A board config.offmission_inactive calls "deferred" (inactive, never
+    mission-scored) waits the longer config.HARVEST_OFFMISSION_HOURS
+    instead of `min_age_hours`; one it calls "stopped" (inactive, scored
+    into a tier the profile marks inactive) is left out whatever
+    `min_age_hours` says, until it is reactivated or re-tiered. Naming a
+    board explicitly bypasses both.
 
     `min_age_hours=None` -- the default, and what harvest.py passes when
     the flag is absent -- means the pass chooses both intervals itself:
@@ -140,8 +147,9 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     `stats`, when given, gets `"offmission_skipped"` set to the number of
     boards this call left out ONLY because of the long interval -- i.e.
     boards that would already be due under plain `min_age_hours` freshness
-    -- and `"min_age_hours"` set to the ordinary cutoff this call resolved
-    the sentinel to. Both are what a caller's header line says (pull
+    --, `"offmission_stopped"` to the number it left out as stopped, and
+    `"min_age_hours"` to the ordinary cutoff this call resolved the
+    sentinel to. All three are what a caller's header line says (pull
     below, harvest.py --list); neither re-derives the default itself, so
     the sentinel rule has exactly one writer. The out-parameter shape is
     this module's own (see hydrate_rows' `stats`): the return value is
@@ -170,13 +178,12 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     >>> [c["name"] for c in plan(conn, only={"workday"}, now=now)]
     ['Big']
 
-    An off-mission, inactive board waits the long interval instead of
-    `min_age_hours` -- unless it is named explicitly, or the caller passes
-    a `min_age_hours` other than the default:
+    An inactive board never mission-scored waits the long interval instead
+    of `min_age_hours` -- unless it is named explicitly, or the caller
+    passes a `min_age_hours` other than the default:
 
     >>> _ = store.upsert_company(conn, {"name": "Stale", "ats": "lever",
-    ...                                 "slug": "stale", "active": 0,
-    ...                                 "mission_tier": "other"})
+    ...                                 "slug": "stale", "active": 0})
     >>> _ = conn.execute("UPDATE companies SET last_harvested_at=? "
     ...                  "WHERE name=?", ("2026-09-09T12:00:00", "Stale"))
     >>> stats = {}
@@ -193,6 +200,18 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     ['Stale']
     >>> [c["name"] for c in plan(conn, names=["stale"], now=now)]
     ['Stale']
+
+    One scored off-mission is left out at any `min_age_hours`, until it is
+    reactivated:
+
+    >>> _ = store.upsert_company(conn, {"name": "Parked", "ats": "lever", "slug": "p",
+    ...                                 "active": 0, "mission_tier": "other"})
+    >>> [c["name"] for c in plan(conn, min_age_hours=0, now=now, stats=stats)
+    ...  if c["name"] == "Parked"], stats["offmission_stopped"]
+    ([], 1)
+    >>> _ = conn.execute("UPDATE companies SET active=1 WHERE name='Parked'")
+    >>> "Parked" in [c["name"] for c in plan(conn, min_age_hours=0, now=now)]
+    True
 
     Notes:
         The 2026-09-17 audit counted 289 off-mission inactive boards
@@ -217,7 +236,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
     cutoff = (now - timedelta(hours=min_age_hours)).isoformat()
     want = {n.strip().lower() for n in names or [] if n.strip()}
     rows = []
-    offmission_skipped = 0
+    offmission_skipped = offmission_stopped = 0
     for c in store.harvestable_companies(conn):
         if only and c.get("ats") not in only:
             continue
@@ -225,9 +244,13 @@ def plan(conn, only=None, names=None, min_age_hours=None,
             if (c.get("name") or "").lower() not in want:
                 continue
         else:
+            off = config.offmission_inactive(c)
+            if off == "stopped":
+                offmission_stopped += 1
+                continue
             last = c.get("last_harvested_at") or ""
             board_cutoff = cutoff
-            if offmission_cutoff is not None and config.is_offmission_inactive(c):
+            if offmission_cutoff is not None and off:
                 board_cutoff = offmission_cutoff
                 if cutoff >= last > offmission_cutoff:
                     offmission_skipped += 1
@@ -238,6 +261,7 @@ def plan(conn, only=None, names=None, min_age_hours=None,
                              (c.get("name") or "").lower()))
     if stats is not None:
         stats["offmission_skipped"] = offmission_skipped
+        stats["offmission_stopped"] = offmission_stopped
         stats["min_age_hours"] = min_age_hours
     return rows[:limit] if limit else rows
 
@@ -514,18 +538,26 @@ async def pull(db_path, only=None, names=None, min_age_hours=None,
     total, so a server trickling bytes could hold one forever.
 
     The header line names how many off-mission, inactive boards `plan`
-    deferred to its longer interval this pass (plan's `stats` output;
-    silent when there are none), so a run that looks small is never a
-    silent drop -- it says which boards it left for later and why.
+    deferred to its longer interval this pass and how many it left out
+    (plan's `stats` output; silent when there are none), so a run that
+    looks small is never a silent drop -- it says which boards it left
+    and why. The open postings of the boards it leaves out as stopped are
+    closed first (store.retire_stopped), counted as the summary's
+    "retired"; a `names` pass leaves them to the next full one.
     """
     summary = {"boards": 0, "ok": 0, "err": 0, "abandoned": 0, "dead": 0,
                "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
-               "reopened": 0, "secs": 0.0}
+               "reopened": 0, "retired": 0, "secs": 0.0}
     async with store.Writer(db_path) as db:
         plan_stats = {}
         boards = await db.run(plan, only=only, names=names,
                               min_age_hours=min_age_hours, limit=limit,
                               stats=plan_stats)
+        if not names:
+            try:
+                summary["retired"] = len(await db.run(store.retire_stopped))
+            except Exception as e:              # noqa: BLE001 - the next pass retries
+                print(f"  [!] stopped boards' postings left open: {type(e).__name__}: {e}")
         hosts = {}
         for c in boards:
             hosts.setdefault(company_fetch.board_origin(c), []).append(c)
@@ -538,7 +570,8 @@ async def pull(db_path, only=None, names=None, min_age_hours=None,
               + deferred_note(plan_stats)
               + (f", stop after {max_hours:g}h" if max_hours else "") + f"\n{bar}\n")
         if not boards:
-            print("  nothing to do")
+            print("  nothing to do" + (f"; {summary['retired']} job(s) closed at "
+                                       f"stopped boards" if summary["retired"] else ""))
             return summary
 
         t_start = time.monotonic()
@@ -584,7 +617,9 @@ async def pull(db_path, only=None, names=None, min_age_hours=None,
           + (f", {skipped} not started" if skipped > 0 else ""))
     print(f"  jobs:   {summary['fetched']} fetched, {summary['new']} new, "
           f"{summary['hydrated']} hydrated, {summary['closed']} closed, "
-          f"{summary['reopened']} reopened")
+          f"{summary['reopened']} reopened"
+          + (f", {summary['retired']} closed at stopped boards"
+             if summary["retired"] else ""))
     # Roster hygiene: a board still named after its own slug/tenant
     # fetches fine, so nothing else in the log names it for renaming.
     unnamed = sorted((c for c in boards if slug_named(c)),

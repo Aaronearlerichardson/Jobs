@@ -218,10 +218,11 @@ def main(argv=None):
     ap.add_argument("--min-age-hours", type=float, default=None,
                     help="Skip boards harvested more recently than this "
                          "(default 6, or [policy] "
-                         "harvest_offmission_hours for an off-mission, "
-                         "inactive board). Passing this applies ONE "
+                         "harvest_offmission_hours for an inactive board "
+                         "never mission-scored). Passing this applies ONE "
                          "cutoff to every board, so 0 means harvest "
-                         "everything now")
+                         "everything now (an inactive board scored "
+                         "off-mission stays out unless --names names it)")
     ap.add_argument("--max-hours", type=float,
                     help="Abandon whatever is still running after this long")
     ap.add_argument("--workers", type=int, default=None,

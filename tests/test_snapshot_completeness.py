@@ -119,12 +119,15 @@ class TestWorkdaySnapshot:
         assert [c.method for c in calls] == ["POST"]
         assert "[!]" not in capsys.readouterr().out
 
-    async def test_the_page_budget_widens_to_the_row_budget(self, cxs, monkeypatch):
-        """config.BOARD_MAX_ROWS past the spec's 60 pages, for every board:
-        WD (unscored, inactive) is one that kept the 60 until 2026-09-26."""
+    @pytest.mark.parametrize("validate,n", [(False, 1300), (True, 1200)])
+    async def test_the_page_budget_widens_to_the_row_budget(self, cxs, monkeypatch,
+                                                            validate, n):
+        """A pull reads config.BOARD_MAX_ROWS past the spec's 60 pages, on
+        any row (WD names no `active` or tier); a `validate` pull keeps the
+        60 pages (1,200 rows)."""
         cxs(_postings(1300))
         monkeypatch.setattr(board.config, "BOARD_MAX_ROWS", 1400)
-        assert len(await company_fetch.fetch_company(WD, None)) == 1300
+        assert len(await company_fetch.fetch_company(WD, None, validate)) == n
 
 
 class TestWorkdayScope:
