@@ -23,9 +23,9 @@ from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import profile_edit
 from src.config.profile_schema import error_lines
-from src.match import locality
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
+from src.match import locality
 from src.ops.maintenance import track_store
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart

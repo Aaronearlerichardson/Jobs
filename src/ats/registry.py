@@ -29,7 +29,6 @@ from typing import Any
 
 from src import tags
 from src.match.filters import is_relevant
-
 from .board import board_for
 
 

@@ -249,6 +249,18 @@ class _Redirects(SessionRedirectMixin):
     max_redirects, trust_env, cookies = MAX_REDIRECTS, False, RequestsCookieJar()
 
 
+def _target(url: str) -> URL:
+    """aiohttp's URL for `url`: as encoded, its host lower-cased, as
+    urllib3 sends it. aiohttp's cookie jar matches hosts by case, so a
+    redirect to an upper-case host would lose the run's cookies.
+
+    >>> str(_target("https://CSS-A.Example.COM:443/sso?u=a%2Fb"))
+    'https://css-a.example.com/sso?u=a%2Fb'
+    """
+    target = URL(url, encoded=True)
+    return target.with_host(target.raw_host.lower()) if target.raw_host else target
+
+
 async def _hop(req: requests.PreparedRequest, timeout: aiohttp.ClientTimeout) -> requests.Response:
     """The requests.Response to the prepared `req`, redirects unfollowed."""
     method, url = cast(str, req.method), cast(str, req.url)     # prepare() set both
@@ -257,7 +269,7 @@ async def _hop(req: requests.PreparedRequest, timeout: aiohttp.ClientTimeout) ->
     _HANDSHAKING.set(began)
     t0 = time.monotonic()
     try:
-        async with _session().request(method, URL(url, encoded=True),
+        async with _session().request(method, _target(url),
                                       headers=req.headers,  # type: ignore[arg-type]  # str values
                                       data=body,
                                       allow_redirects=False,

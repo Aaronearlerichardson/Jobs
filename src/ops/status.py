@@ -14,13 +14,12 @@ from typing import Any
 
 from src import config
 from src import store
-from src.ats.board import company as company_fetch
 from src.ats.board import closure
+from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out, fetch_all
 from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
                                  group_by_company, rewrite_digest, track_writer)
-
 
 # Why a fetched board can't be reconciled, in the order the footer reports
 # them. Distinct on purpose: "the fetch raised", "the fetch came back with

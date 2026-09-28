@@ -16,7 +16,6 @@ from typing import Any
 
 from src import config
 from src.net.http import note_capped
-
 from . import fields
 from .spec import CursorPager, Listing, Pager
 

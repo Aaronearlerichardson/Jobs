@@ -52,7 +52,7 @@ def _first_string(tree: etree._Element, rx: re.Pattern[str]) -> Any:
     return next((s for s in tree.xpath("//text()") if rx.search(s)), None)
 
 
-def _company_site(*urls: Any) -> str:
+def _company_site(*urls: str) -> str:
     """First real company-owned website (scheme+host) among the given URLs,
     skipping aggregator/ATS/social hosts. Recorded on a lead as careers_url so
     the resolver can probe {domain}/careers instead of guessing the domain from

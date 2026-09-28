@@ -36,7 +36,6 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
-
 from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import websearch_board

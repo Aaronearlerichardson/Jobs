@@ -107,8 +107,8 @@ async def probe_job_open(url: str | None, job_id: str | None = None) -> tuple[bo
 
     A row is closed ONLY on positive evidence: 404/410 from one of those
     endpoints or from the page, an ATS "no longer available" notice, a
-    past JSON-LD validThrough, a spec's `closure.closed` or `unmatched`
-    rule, or an id absent from a non-empty board listing.
+    past JSON-LD validThrough, a spec's `closure.closed`, `unmatched` or
+    `page_closed` rule, or an id absent from a non-empty board listing.
     403/405/429/5xx/timeouts never close. The page is read with the
     posting's platform's detail headers (`Board.page_headers`), and
     judged off the loop (`_page_verdict`).
@@ -150,24 +150,30 @@ async def probe_job_open(url: str | None, job_id: str | None = None) -> tuple[bo
         return False, f"HTTP {r.status_code}"
     if r.status_code != 200:
         return None, fallback or f"HTTP {r.status_code}"
-    return await asyncio.to_thread(_page_verdict, r, url, fallback)
+    closed = board.spec.closure.page_closed if board else None
+    return await asyncio.to_thread(_page_verdict, r, url, fallback, closed)
 
 
-def _page_verdict(r: Any, url: str, fallback: str) -> tuple[bool | None, str]:
+def _page_verdict(r: Any, url: str, fallback: str,
+                  closed: str | None = None) -> tuple[bool | None, str]:
     """probe_job_open's verdict on a posting page `r` that answered 200: a
-    closed notice, else its JSON-LD JobPosting, else `fallback`. The
-    notices are curated and phrase-anchored, never a bare "closed" or
-    "expired", so a live posting mentioning "closed-loop" cannot trip one.
+    closed notice (the platform's `closed` pattern, else a generic one),
+    else its JSON-LD JobPosting, else `fallback`. The generic notices are
+    curated and phrase-anchored, never a bare "closed" or "expired", so a
+    live posting mentioning "closed-loop" cannot trip one.
 
     >>> from types import SimpleNamespace as Page
     >>> _page_verdict(Page(text="This position is no longer available"), "https://x.test/j", "")
     (False, "page says 'no longer available'")
     >>> _page_verdict(Page(text="develop closed-loop neurostimulation"), "https://x.test/j", "")
     (None, 'no closed signal')
+    >>> _page_verdict(Page(text="{open: false}"), "https://x.test/j", "", r"open:\\s*false")
+    (False, "page says 'open: false'")
     """
     html = r.text[:200_000]
-    # Standard "this posting is gone" notices across ATS templates.
-    m = re.search("|".join((
+    # The platform's own marker, else the standard "this posting is gone"
+    # notices across ATS templates.
+    m = (closed and re.search(closed, html)) or re.search("|".join((
         r"no longer (open|available|active|posted|accepting applications)",
         r"(position|role|job|posting|vacancy|requisition) (has been|is|was) "
         r"(filled|closed|cancell?ed|removed)",

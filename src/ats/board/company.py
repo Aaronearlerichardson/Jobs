@@ -30,8 +30,8 @@ from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.net.util import clean_field, first, node_text, parse_markup
-from .engine import Board, board_for, board_for_url
 from . import jsonld
+from .engine import Board, board_for, board_for_url
 
 
 def _board_of(job: dict[str, Any]) -> Board | None:

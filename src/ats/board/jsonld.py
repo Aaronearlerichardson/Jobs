@@ -21,8 +21,8 @@ from typing import Any
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
-from src.net.util import norm_posted_date as _norm_posted
 from src.net.util import jsonld_scripts, parse_markup, stable_id, text_from_html
+from src.net.util import norm_posted_date as _norm_posted
 
 
 def extract_jsonld(html: str, url: str = "") -> list[Any]:

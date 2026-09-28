@@ -474,7 +474,10 @@ BOARDS: dict[str, dict[str, Any]] = {
             },
             "location": "if_unknown",
         },
+        # A pulled posting can also answer 403 "S22"; its page then renders
+        # no posting (60 listed live, 63 pulled, 2026-09-28).
         "closure": {"open": {"any": [{"truthy": "jobDescription"}, {"truthy": "title"}]},
+                    "page_closed": r"postingAvailable:\s*false",
                     "unmatched": "no posting record",
                     "why": "a pulled posting's record answers 200 without a title or a body, "
                            "2026-08"},

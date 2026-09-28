@@ -26,25 +26,6 @@ RowField = Literal["id", "title", "url", "location", "description", "posted_at",
                    "remote_hint", "department"]
 ROW_FIELDS = set(get_args(RowField))
 
-
-def _grammar(v: Any) -> Any:
-    fields.check(v)
-    return v
-
-
-def _template(v: str) -> str:
-    fields.check_template(v)
-    return v
-
-
-def _regex(v: str) -> str:
-    try:
-        re.compile(v)
-    except re.error as e:
-        raise ValueError(f"bad regex: {e}") from None
-    return v
-
-
 def _css(v: str) -> str:
     """`v` once it compiles as CSS in cssselect's dialect, each {placeholder}
     a sample value; the "$job_links" sentinel passes.
@@ -63,12 +44,7 @@ def _css(v: str) -> str:
     return v
 
 
-def _condition(v: dict[str, Any]) -> dict[str, Any]:
-    fields.check({"const": 1, "when": v})
-    return v
-
-
-def _listed(v: Any) -> Any:
+def _listed(v: list | str | dict) -> list:
     """A key taking one value or several: a lone value as a list of one."""
     return [v] if isinstance(v, (str, dict)) else v
 
@@ -76,14 +52,15 @@ def _listed(v: Any) -> Any:
 Str = Annotated[str, Strict()]
 Int = Annotated[int, Strict()]
 Bool = Annotated[bool, Strict()]
-Count = Annotated[int, Strict(), Field(ge=1)]
+Count = Annotated[config.Count, Strict(), Field(ge=1)]
 Status = Annotated[int, Strict(), Field(ge=100, le=599)]
-Regex = Annotated[str, Strict(), AfterValidator(_regex)]
-Template = Annotated[str, Strict(), StringConstraints(min_length=1), AfterValidator(_template)]
+Regex = Annotated[config.Regex, Strict()]
+Template = Annotated[str, Strict(), StringConstraints(min_length=1),
+    AfterValidator(lambda v: [v, fields.check_template(v)][0])]
 #: A CSS selector template, compiled as the spec loads (`net.util.css`).
 Css = Annotated[Template, AfterValidator(_css)]
 #: A field-grammar spec (fields.py): a path, a dict, or None.
-Grammar = Annotated[Any, AfterValidator(_grammar)]
+Grammar = Annotated[Any, AfterValidator(lambda v: [v, fields.check(v)][0])]
 Paths = Annotated[tuple[Str, ...], BeforeValidator(_listed)]
 #: Search terms each placed among every platform's: [position, text] pairs.
 Ranked = tuple[tuple[Int, Str], ...]
@@ -394,7 +371,8 @@ class Rescue(_Spec):
 
 
 class Rule(_Spec):
-    when: Annotated[dict[Str, Any], AfterValidator(_condition)] = Field(
+    when: Annotated[dict[Str, Any],
+    AfterValidator(lambda v: [v, fields.check({"const": 1, "when": v})][0])] = Field(
         description="A condition on the record")
     why: Grammar = Field(None, description="Names the reason")
 
@@ -414,6 +392,8 @@ class Closure(_Workaround):
     closed: Rules = Field((), description="A condition, or rules, proving it closed")
     unmatched: Str | None = Field(None, description="The reason a readable answer neither "
                                                     "rule matches closes the posting")
+    page_closed: Regex | None = Field(None, description="A match on the posting's own page "
+                                                        "proving it closed")
 
 
 def _default_of(model: type[BaseModel], key: str) -> Any:

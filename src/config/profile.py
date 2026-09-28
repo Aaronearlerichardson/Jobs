@@ -67,25 +67,15 @@ _PROFILE, _SOURCE_PATH = _load_profile()
 PROFILE_SOURCE = _SOURCE_PATH.name if _SOURCE_PATH else None
 PROFILE = parse(_PROFILE, _SOURCE_PATH or "profile")
 
-
-_kw   = PROFILE.keywords
-_exc  = PROFILE.exclude
-_loc  = PROFILE.locations
-_cand = PROFILE.candidate
-_mis  = PROFILE.mission
-_lcl  = PROFILE.locality
-_dsc  = PROFILE.discovery
-_fitp = PROFILE.fit
-
 # =========================================================================
 #  KEYWORDS / EXCLUDES / LOCATIONS
 # =========================================================================
 
 # Tiered relevance: a job is relevant if it hits any CORE term, or a DOMAIN
 # term AND a SKILL term (see profile.example.toml).
-CORE_KEYWORDS   = list(_kw.core)
-DOMAIN_KEYWORDS = list(_kw.domain)
-SKILL_KEYWORDS  = list(_kw.skill)
+CORE_KEYWORDS   = list(PROFILE.keywords.core)
+DOMAIN_KEYWORDS = list(PROFILE.keywords.domain)
+SKILL_KEYWORDS  = list(PROFILE.keywords.skill)
 # Flat view of the three tiers (discover.py --from-keywords, tools/expand.py
 # and the source checkers read it). src/crawl/runner.py rebuilds it IN PLACE
 # when a track swaps its keyword focus, so hold the list, not a copy.
@@ -169,45 +159,45 @@ def _self() -> ModuleType:
     return _cfg
 
 
-EXCLUDE_PHRASES       = list(_exc.phrases)
-EXCLUDE_TITLE_PHRASES = list(_exc.title_phrases)
+EXCLUDE_PHRASES       = list(PROFILE.exclude.phrases)
+EXCLUDE_TITLE_PHRASES = list(PROFILE.exclude.title_phrases)
 # Titles a title_phrase must NOT drop: blanked out of the title before the
 # title_phrases walk (src/match/filters._excluded), so "manager" can keep
 # dropping Program/Engineering Manager while "Clinical Data Manager" —
 # an individual-contributor data role — survives.
-EXCLUDE_TITLE_EXEMPT_PHRASES = list(_exc.title_exempt_phrases)
+EXCLUDE_TITLE_EXEMPT_PHRASES = list(PROFILE.exclude.title_exempt_phrases)
 # Regex fragments (ORed together in src/match/filters.scrub_boilerplate) for
 # benefits/EEO/infra-health idioms that contain domain-looking words without
 # meaning them.
-EXCLUDE_BOILERPLATE_PHRASES = list(_exc.boilerplate_phrases)
+EXCLUDE_BOILERPLATE_PHRASES = list(PROFILE.exclude.boilerplate_phrases)
 
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own sub-dict (e.g. KEYWORDS_BY_TRACK.get("local"))
 # instead of hardcoding their vocabulary; see src/crawl/runner.py.
-KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in (_kw.model_extra or {}).items()}
-EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in (_exc.model_extra or {}).items()}
+KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in (PROFILE.keywords.model_extra or {}).items()}
+EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in (PROFILE.exclude.model_extra or {}).items()}
 
 # Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
 # `accept_remote` and src/dispatch/background.py restores it between operations. Read it
 # through the package (`config.ACCEPT_REMOTE`), never from-import it.
-ACCEPT_REMOTE    = _loc.accept_remote
-LOCATION_EXCLUDE = list(_loc.exclude)
+ACCEPT_REMOTE    = PROFILE.locations.accept_remote
+LOCATION_EXCLUDE = list(PROFILE.locations.exclude)
 # [locations] onsite + remote, flattened — nothing reads the two halves apart.
-LOCATION_INCLUDE = _loc.onsite + _loc.remote
+LOCATION_INCLUDE = PROFILE.locations.onsite + PROFILE.locations.remote
 
 # --- Remote-eligibility detection (src/match/locality.py) -------------------
-REMOTE_LOC_TOKENS     = list(_loc.remote_tokens)
-REMOTE_BODY_PHRASES   = list(_loc.remote_phrases)
-REMOTE_HARD_NEGATIONS = list(_loc.hard_negations)
-REMOTE_US_MARKERS     = list(_loc.us_markers)
-REMOTE_NON_US_REGIONS = list(_loc.non_us_regions)
+REMOTE_LOC_TOKENS     = list(PROFILE.locations.remote_tokens)
+REMOTE_BODY_PHRASES   = list(PROFILE.locations.remote_phrases)
+REMOTE_HARD_NEGATIONS = list(PROFILE.locations.hard_negations)
+REMOTE_US_MARKERS     = list(PROFILE.locations.us_markers)
+REMOTE_NON_US_REGIONS = list(PROFILE.locations.non_us_regions)
 
 # --- Candidate identity (injected into Claude prompts; src/claude/api.py,
 #     src/claude/fit.py) --
-CANDIDATE_SUMMARY   = _cand.summary.strip()
-CANDIDATE_STRENGTHS = list(_cand.strengths)
-CANDIDATE_FIT_CAPS  = list(_cand.fit_caps)
-CANDIDATE_AVOID     = _cand.avoid.strip()
+CANDIDATE_SUMMARY   = PROFILE.candidate.summary.strip()
+CANDIDATE_STRENGTHS = list(PROFILE.candidate.strengths)
+CANDIDATE_FIT_CAPS  = list(PROFILE.candidate.fit_caps)
+CANDIDATE_AVOID     = PROFILE.candidate.avoid.strip()
 
 # =========================================================================
 #  RÉSUMÉ
@@ -228,7 +218,7 @@ RESUME_SUFFIXES = (".docx", ".txt", ".md")
 
 
 def _resolve_resume_path() -> Path:
-    override = SETTINGS.jobs_resume or _cand.resume.strip()
+    override = SETTINGS.jobs_resume or PROFILE.candidate.resume.strip()
     if override:
         p = Path(override).expanduser()
         return p if p.is_absolute() else DATA_DIR / p
@@ -254,55 +244,55 @@ RESUME_PATH = _resolve_resume_path()
 #     dicts (the profile's entries over the schema defaults); domain_ladder is
 #     a list of {score, terms}; stack_* / region_terms are joined to text,
 #     None when unset so fit.py derives them from the rest of the profile. ---
-FIT_WEIGHTS       = _fitp.weights.model_dump()
-FIT_GATE_PENALTY  = _fitp.gate_penalty.model_dump()
-FIT_DOMAIN_LADDER = [r.model_dump() for r in _fitp.domain_ladder] or None
-FIT_STACK_CORE    = ", ".join(_fitp.stack_core) or None
-FIT_STACK_ANTI    = ", ".join(_fitp.stack_anti) or None
-FIT_REGION        = ", ".join(_fitp.region_terms) or None
+FIT_WEIGHTS       = PROFILE.fit.weights.model_dump()
+FIT_GATE_PENALTY  = PROFILE.fit.gate_penalty.model_dump()
+FIT_DOMAIN_LADDER = [r.model_dump() for r in PROFILE.fit.domain_ladder] or None
+FIT_STACK_CORE    = ", ".join(PROFILE.fit.stack_core) or None
+FIT_STACK_ANTI    = ", ".join(PROFILE.fit.stack_anti) or None
+FIT_REGION        = ", ".join(PROFILE.fit.region_terms) or None
 # How many of your own --mark decisions (applied/dismissed, each) are fed to
 # the fit scorer as few-shot calibration; 0 disables.
-FIT_DISPOSITION_EXAMPLES = _fitp.disposition_examples
+FIT_DISPOSITION_EXAMPLES = PROFILE.fit.disposition_examples
 # Deterministic "clearance" gate backstop (src/claude/fit.py _CLEARANCE_RE).
 # Empty -> fit.py falls back to its own built-in defaults.
-FIT_CLEARANCE_VERBS      = list(_fitp.clearance_verbs)
-FIT_CLEARANCE_QUALIFIERS = list(_fitp.clearance_qualifiers)
+FIT_CLEARANCE_VERBS      = list(PROFILE.fit.clearance_verbs)
+FIT_CLEARANCE_QUALIFIERS = list(PROFILE.fit.clearance_qualifiers)
 
 # --- Mission taxonomy (employer-alignment ladder; src/claude/api.py) -------
 # Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
-MISSION_TIERS = [t.model_dump() for t in _mis.tiers]
-MISSION_BULLSEYE_REGEX = _mis.bullseye_regex.strip()
-MISSION_BULLSEYE_TIER  = _mis.bullseye_tier.strip()
+MISSION_TIERS = [t.model_dump() for t in PROFILE.mission.tiers]
+MISSION_BULLSEYE_REGEX = PROFILE.mission.bullseye_regex.strip()
+MISSION_BULLSEYE_TIER  = PROFILE.mission.bullseye_tier.strip()
 
 # --- Locality (what counts as "local"; src/match/locality.py) ----------------------
-LOCALITY_NAME         = _lcl.name
-LOCALITY_WORD_TOKENS  = list(_lcl.word_tokens)
-LOCALITY_SUBSTRINGS   = list(_lcl.substrings)
-LOCALITY_STATE_SUFFIX = list(_lcl.state_suffix)
+LOCALITY_NAME         = PROFILE.locality.name
+LOCALITY_WORD_TOKENS  = list(PROFILE.locality.word_tokens)
+LOCALITY_SUBSTRINGS   = list(PROFILE.locality.substrings)
+LOCALITY_STATE_SUFFIX = list(PROFILE.locality.state_suffix)
 
 # --- Discovery sourcing (discover.py --local; discovery/local_sourcing) -
 DISCOVERY_SEED_COMPANIES = [{"name": s.name, "notes": s.notes.strip()}
-                            for s in _dsc.seed_companies]
+                            for s in PROFILE.discovery.seed_companies]
 DISCOVERY_SEED_NAMES         = [s["name"] for s in DISCOVERY_SEED_COMPANIES]
 # Discovery terms that pull the seeds in (empty = always). See src/discovery/seeds.py.
-DISCOVERY_SEED_TRIGGERS      = list(_dsc.seed_triggers)
-DISCOVERY_SCAN_MAJORS        = list(_dsc.scan_majors)
-DISCOVERY_DIRECTORY_URLS     = list(_dsc.directory_urls)
-DISCOVERY_NAME_SEARCH_QUERIES = list(_dsc.name_search_queries)
+DISCOVERY_SEED_TRIGGERS      = list(PROFILE.discovery.seed_triggers)
+DISCOVERY_SCAN_MAJORS        = list(PROFILE.discovery.scan_majors)
+DISCOVERY_DIRECTORY_URLS     = list(PROFILE.discovery.directory_urls)
+DISCOVERY_NAME_SEARCH_QUERIES = list(PROFILE.discovery.name_search_queries)
 # LLM name-brainstorm source for discovery (names verified downstream, so
 # hallucinations are harmless); 0 disables.
-DISCOVERY_BRAINSTORM_NAMES   = _dsc.brainstorm_names
+DISCOVERY_BRAINSTORM_NAMES   = PROFILE.discovery.brainstorm_names
 DISCOVERY_NAME_BLOCKLIST     = {re.sub(r"[^a-z0-9]", "", n.lower())
-                                for n in _dsc.name_blocklist}
+                                for n in PROFILE.discovery.name_blocklist}
 # Cap on how many still-unresolved names discover_local's bulk pass will
 # send through the websearch fallback (DDG-bound, so uncapped would risk
 # minutes of rate-limit stalls across a full ~100+ name gather); 0 disables
 # the bulk websearch pass entirely.
-DISCOVERY_WEBSEARCH_CAP      = _dsc.websearch_cap
+DISCOVERY_WEBSEARCH_CAP      = PROFILE.discovery.websearch_cap
 # Job-aggregator hosts to skip, and generic words to ignore, when resolving a
 # search result to a company's own ATS board (src/discovery/websearch_board.py).
-DISCOVERY_AGGREGATOR_HOSTS    = tuple(_dsc.aggregator_hosts)
-DISCOVERY_GENERIC_NAME_WORDS  = set(_dsc.generic_name_words)
+DISCOVERY_AGGREGATOR_HOSTS    = tuple(PROFILE.discovery.aggregator_hosts)
+DISCOVERY_GENERIC_NAME_WORDS  = set(PROFILE.discovery.generic_name_words)
 # Named company targets a track fetches first, as (name, ats, slug).
 DISCOVERY_PRIORITY_COMPANIES = [(c.name, c.ats, c.slug)
-                                for c in _dsc.priority_companies]
+                                for c in PROFILE.discovery.priority_companies]

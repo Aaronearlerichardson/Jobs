@@ -16,8 +16,8 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
-from src.net import ddg
 from src.ats.board.jsonld import fetch_jsonld_page
+from src.net import ddg
 
 
 async def fetch_websearch(label: str, query: str, max_results: int = 15,

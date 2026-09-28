@@ -65,7 +65,6 @@ from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put, origin_of)
-
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of

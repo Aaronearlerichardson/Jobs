@@ -47,6 +47,7 @@ from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
 from .resolve.websearch_board import websearch_board
 
+
 # --------------------------------------------------------------------------- #
 #  discover_local: the bulk pass over gathered names                          #
 # --------------------------------------------------------------------------- #

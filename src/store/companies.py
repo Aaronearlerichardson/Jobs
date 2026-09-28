@@ -27,9 +27,9 @@ from typing import Any
 from pydantic import ConfigDict, Field, TypeAdapter, create_model
 
 from src import config
-
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
+
 
 # --------------------------------------------------------------------------- #
 #  Companies                                                                   #

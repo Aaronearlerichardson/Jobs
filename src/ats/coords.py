@@ -19,7 +19,6 @@ from __future__ import annotations
 from typing import Any
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
-
 from .board import BOARDS
 from .board.spec import Handle
 

@@ -79,6 +79,7 @@ from .profile import (  # noqa: F401
     DISCOVERY_AGGREGATOR_HOSTS, DISCOVERY_GENERIC_NAME_WORDS,
     DISCOVERY_PRIORITY_COMPANIES,
 )
+from .profile_schema import Regex, Count
 from .secrets import (  # noqa: F401
     SETTINGS, require_creds,
     GMAIL_ADDRESS, GMAIL_APP_PASSWORD,

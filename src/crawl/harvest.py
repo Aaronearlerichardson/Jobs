@@ -64,9 +64,9 @@ from typing import Any, cast
 
 from src import config
 from src import store
-from src.ats.coords import slug_named
 from src.ats.board import board_for
 from src.ats.board import company as company_fetch
+from src.ats.coords import slug_named
 from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
