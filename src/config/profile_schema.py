@@ -9,16 +9,14 @@ error rather than a silent default.
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator,
                       ConfigDict, Field, ValidationError, ValidationInfo,
                       field_validator, model_validator)
-from pydantic_core import ErrorDetails
-
 from src import tags
+from src.validation import Regex, error_lines
 
 
 class ProfileError(ValueError):
@@ -41,14 +39,6 @@ def _filled(v: str) -> str:
     return v.strip()
 
 
-def _regex(v: str) -> str:
-    try:
-        re.compile(v)
-    except re.error as e:
-        raise ValueError(f"not a valid regex ({e})") from None
-    return v
-
-
 def _table_only(v: object) -> dict[Any, Any]:
     if not isinstance(v, dict):
         raise ValueError("unknown key")
@@ -58,7 +48,6 @@ def _table_only(v: object) -> dict[Any, Any]:
 Unit = Annotated[float, Field(ge=0.0, le=1.0)]
 Count = Annotated[int, Field(ge=0)]
 Filled = Annotated[str, AfterValidator(_filled)]
-Regex = Annotated[str, AfterValidator(_regex)]
 
 
 # --- [keywords] / [exclude] -------------------------------------------------
@@ -471,23 +460,6 @@ class Profile(_Table):
                                        for k in stray)
                              + " names no [tracks.*] table")
         return v
-
-
-def _line(err: ErrorDetails) -> str:
-    path = "".join(f"[{p}]" if isinstance(p, int) else f".{p}"
-                   for p in err["loc"]).lstrip(".")
-    ctx = err.get("ctx") or {}
-    msg = {"missing": "required", "extra_forbidden": "unknown key",
-           "model_type": "must be a table", "dict_type": "must be a table",
-           }.get(err["type"]) or str(ctx.get("error") or err["msg"])
-    return f"{path}: {msg}" if path else msg
-
-
-def error_lines(err: ValidationError) -> list[str]:
-    """A pydantic ValidationError as one 'path: problem' line per error,
-    never quoting the bad value (see `problems`)."""
-    return [_line(x) for x in err.errors(include_url=False,
-                                         include_input=False)]
 
 
 def parse(raw: dict[str, Any], source: str | Path = "profile") -> Profile:

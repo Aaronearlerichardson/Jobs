@@ -116,7 +116,7 @@ def _cmd_pipeline(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
 def _cmd_companies_io(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
     from pydantic import ValidationError
     from src import store
-    from src.config.profile_schema import error_lines
+    from src.validation import error_lines
     conn = _store(t)
     try:
         if args.export_companies:

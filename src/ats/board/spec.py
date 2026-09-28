@@ -18,7 +18,7 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Discriminator, Field, Strict, StringConstraints, Tag,
                       ValidationError, model_validator)
 
-from src import config
+from src import config, validation
 from src.net.util import css, xpath
 from . import fields
 
@@ -52,9 +52,9 @@ def _listed(v: list | str | dict) -> list:
 Str = Annotated[str, Strict()]
 Int = Annotated[int, Strict()]
 Bool = Annotated[bool, Strict()]
-Count = Annotated[config.Count, Strict(), Field(ge=1)]
+Count = Annotated[int, Strict(), Field(ge=1)]
 Status = Annotated[int, Strict(), Field(ge=100, le=599)]
-Regex = Annotated[config.Regex, Strict()]
+Regex = Annotated[validation.Regex, Strict()]
 Template = Annotated[str, Strict(), StringConstraints(min_length=1),
     AfterValidator(lambda v: [v, fields.check_template(v)][0])]
 #: A CSS selector template, compiled as the spec loads (`net.util.css`).

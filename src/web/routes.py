@@ -22,7 +22,7 @@ from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import profile_edit
-from src.config.profile_schema import error_lines
+from src.validation import Text, error_lines
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
@@ -233,7 +233,7 @@ def api_job(job_id: str) -> ResponseReturnValue:
 
 class _Disposition(_Body):
     disposition: str = ""
-    note: str | None = None
+    note: Text = None
 
 
 @app.post("/api/job/<job_id>/disposition")
@@ -242,7 +242,7 @@ def api_disposition(job_id: str) -> ResponseReturnValue:
     with track_store(_track(p.track)) as conn:
         row, err = store.set_disposition(
             conn, job_id, p.disposition,
-            note=(p.note or "").strip() or None)
+            note=p.note)
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job_id=cast(dict[str, Any], row)["job_id"])

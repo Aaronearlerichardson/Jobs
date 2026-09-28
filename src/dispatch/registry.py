@@ -42,7 +42,7 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
 
 from src import config
-from src.config.profile_schema import error_lines
+from src.validation import drop_blank, error_lines
 from src.crawl import runner, triage
 from src.discovery import local_sourcing, paste_ingest
 from src.ops import (backfill, ingest, rekey, repair, roster, scoring,
@@ -115,12 +115,7 @@ class OpParams(BaseModel):
     track_kw: ClassVar[str | None] = None
     track: str | None = None
 
-    @model_validator(mode="before")
-    @classmethod
-    def _blank_is_absent(cls, data: Any) -> Any:
-        if isinstance(data, dict):
-            return {k: v for k, v in data.items() if v is not None and v != ""}
-        return data
+    _blank_is_absent = model_validator(mode="before")(drop_blank)
 
     def kwargs(self, track: dict[str, Any] | None) -> dict[str, Any]:
         """The target's keyword arguments, with `track` (a track config or

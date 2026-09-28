@@ -39,12 +39,13 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from pydantic import BeforeValidator
 
 from src import runstate
-from src.claude.reply import Reply, Unit, choice
+from src.claude.reply import Reply, Unit
+from src.validation import OneOf
 
 config: Any
 call_claude_json: Any
@@ -449,9 +450,7 @@ def _parse_gates(raw: Any) -> list[str]:
 
 # The schema tells the API the gate names; _parse_gates keeps the dict
 # tolerance for the legacy tool-call path, where nothing enforces it.
-# GATES is built at runtime (from DEFAULT_GATE_PENALTY), which mypy cannot
-# read into a Literal's arguments.
-Gates = Annotated[list[Literal[GATES]], BeforeValidator(_parse_gates)]  # type: ignore[valid-type]
+Gates = Annotated[list[Annotated[str, OneOf(GATES)]], BeforeValidator(_parse_gates)]
 
 SEAT_TYPES = ("ic-engineering", "ic-science", "management",
               "program-product", "sales-field", "support-ops")
@@ -472,7 +471,7 @@ class FitReply(Reply):
 
 class _Requirements(Reply):
     years_required: float | None
-    seat_type: choice(*SEAT_TYPES)  # type: ignore[valid-type]
+    seat_type: Annotated[str, OneOf(SEAT_TYPES, loose=True)]
     must_haves: list[str]
     candidate_gaps: list[str]
 

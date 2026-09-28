@@ -9,11 +9,13 @@ with placeholders for local development. Nothing here reads the profile.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import (BeforeValidator, Field, PositiveInt, ValidationError,
                       model_validator)
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from src.validation import drop_blank
 
 
 class Settings(BaseSettings):
@@ -71,12 +73,7 @@ class Settings(BaseSettings):
     # each about 300 MB of memory.
     js_pages: PositiveInt = 4
 
-    @model_validator(mode="before")
-    @classmethod
-    def _blank_is_unset(cls, data: dict[str, Any]) -> dict[str, Any]:
-        return {k: v.strip() if isinstance(v, str) else v
-                for k, v in data.items()
-                if not (isinstance(v, str) and not v.strip())}
+    _blank_is_unset = model_validator(mode="before")(drop_blank)
 
 
 def read_env() -> Settings:

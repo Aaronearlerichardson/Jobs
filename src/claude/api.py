@@ -9,13 +9,14 @@ import logging
 import re
 import time
 from collections.abc import Iterable
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import StrictBool, ValidationError
 
 from src import config, runstate
-from src.claude.reply import Reply, Unit, choice
+from src.claude.reply import Reply, Unit
 from src.net import http
+from src.validation import OneOf
 
 # File-only per-call trace (session log DEBUG channel — never printed).
 _log = logging.getLogger("claude")
@@ -108,17 +109,16 @@ Rules:
 _GATED_SITES = ("linkedin", "indeed", "builtin", "wellfound")
 
 
-# choice() builds its type at runtime (reply.py), which mypy cannot read.
 class DiscoveredCompany(Reply):
     name: str
-    ats: choice(*_ATS_GUESSES)  # type: ignore[valid-type]
+    ats: Annotated[str, OneOf(_ATS_GUESSES, loose=True)]
     slug_guess: str | None
     careers_url: str
     notes: str
 
 
 class GatedSite(Reply):
-    site: choice(*_GATED_SITES)  # type: ignore[valid-type]
+    site: Annotated[str, OneOf(_GATED_SITES, loose=True)]
     query: str
     notes: str
 
@@ -514,7 +514,7 @@ Use lowercase unless the token is normally capitalized (country codes etc)."""
 
 
 class MissionReply(Reply):
-    mission: choice(*_MISSION_TIERS)  # type: ignore[valid-type]  # see DiscoveredCompany
+    mission: Annotated[str, OneOf(_MISSION_TIERS, loose=True)]
     score: Unit
     reason: str
 

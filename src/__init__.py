@@ -4,6 +4,7 @@ Entry points stay at the repository root (run_scraper.py, discover.py,
 harvest.py, webapp.py, capture.py, crawler.py); everything they drive
 lives here, grouped by what it does rather than by when it was written:
 
+    src/validation.py  the pydantic field types schemas share   (leaf)
     config/     profile.toml, tracks, paths, secrets, policy  (leaf)
     src/tags.py     the company scope-tag vocabulary              (leaf)
     src/runstate.py what one run remembers: memos, caches, breakers (leaf)

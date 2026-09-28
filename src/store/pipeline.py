@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
 
-from src.config.profile_schema import error_lines
+from src.validation import OneOf, Text, blank_is_none, error_lines
 from .schema import apply_update, sql
 
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
@@ -49,13 +49,6 @@ OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
 FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
 
 
-def _blank_is_null(v: object) -> object:
-    return (v.strip() or None) if isinstance(v, str) else v
-
-
-_Text = Annotated[str | None, BeforeValidator(_blank_is_null)]
-
-
 class PipelineFields(BaseModel):
     """The user-editable application-tracking columns, as stored: text
     stripped with a blank as NULL, `referral` as 0/1, `outcome_reason` one
@@ -64,13 +57,12 @@ class PipelineFields(BaseModel):
     column through update_pipeline_fields."""
     model_config = ConfigDict(extra="forbid")
 
-    followup_at: _Text = None
-    contact: _Text = None
+    followup_at: Text = None
+    contact: Text = None
     referral: Annotated[bool | None,
                         PlainSerializer(int, when_used="unless-none")] = None
-    # pydantic reads the runtime tuple; mypy wants literals spelled out.
-    outcome_reason: Annotated[Literal[OUTCOME_REASONS] | None,  # type: ignore[valid-type]
-                              BeforeValidator(_blank_is_null)] = None
+    outcome_reason: Annotated[Annotated[str, OneOf(OUTCOME_REASONS)] | None,
+                              BeforeValidator(blank_is_none)] = None
 
 
 def set_job_status(conn: sqlite3.Connection, job_id: str, status: str) -> None:

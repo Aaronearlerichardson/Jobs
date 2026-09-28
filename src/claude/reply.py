@@ -1,4 +1,4 @@
-"""The base every Claude reply shape subclasses, and the field types the
+"""The base every Claude reply shape subclasses, and the score type the
 shapes share.
 
 Each shape lives beside the prompt that asks for it; call_claude_json
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field
+from pydantic import AfterValidator, BaseModel, ConfigDict
 
 
 def _api_schema(schema: dict[str, Any], _cls: type[BaseModel]) -> None:
@@ -38,6 +38,15 @@ class Reply(BaseModel):
 
     >>> Pair.model_validate({"name": " Acme ", "score": 1.7, "note": "?"})
     Pair(name='Acme', score=1.0)
+
+    An enum field is `OneOf(values, loose=True)`: the schema names
+    `values`, and a reply outside them is the caller's to judge:
+
+    >>> from src.validation import OneOf
+    >>> class Seat(Reply):
+    ...     seat: Annotated[str, OneOf(("ic", "manager"), loose=True)]
+    >>> Seat(seat="Director").seat, Seat.model_json_schema()["properties"]["seat"]["enum"]
+    ('director', ['ic', 'manager'])
     """
     model_config = ConfigDict(extra="ignore", str_strip_whitespace=True,
                               json_schema_extra=_api_schema)
@@ -45,19 +54,3 @@ class Reply(BaseModel):
 
 #: A 0..1 score (see Reply).
 Unit = Annotated[float, AfterValidator(lambda x: min(1.0, max(0.0, x)))]
-
-
-def choice(*values: str) -> Any:
-    """A string field the API schema limits to `values`, lower-cased on the
-    way in: structured outputs do not guarantee an enum value's case. A
-    value outside `values` still validates, for the caller to judge.
-
-    >>> class Seat(Reply):
-    ...     seat: choice("ic", "manager")
-    >>> Seat.model_json_schema()["properties"]["seat"]["enum"]
-    ['ic', 'manager']
-    >>> Seat(seat="Manager").seat, Seat(seat="Director").seat
-    ('manager', 'director')
-    """
-    return Annotated[str, AfterValidator(str.lower),
-                     Field(json_schema_extra={"enum": list(values)})]
