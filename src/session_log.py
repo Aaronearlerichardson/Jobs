@@ -20,9 +20,8 @@ Two kinds of record end up here:
   other diagnostics too chatty for the terminal.
 
 Notes:
-    run_scraper.main() and discover.main() call start() right after
-    argument parsing and finish() on the way out, harvest.py both once per
-    pass; src/dispatch/background.py opens one SessionLog per UI operation and streams its
+    run_scraper.main() calls start() right after argument parsing;
+    src/dispatch/background.py opens one SessionLog per UI operation and streams its
     browser tee into it. The offline test suite never calls start()
     (tests/conftest.py points _log_dir at a tmp directory, autouse);
     tests/test_session_log.py enforces the record format, the level
@@ -33,7 +32,6 @@ Notes:
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import contextvars
 import logging
@@ -155,10 +153,9 @@ class SessionLog:
         ``logging.getLogger(__name__)`` records land in the file with no
         wiring — and nowhere else, because no console handler exists.
         close() detaches the handler, restores the root level and stamps
-        the footer, which ends ", stopped" when the close runs while a
-        Ctrl+C or a stop (a cancel) unwinds; it is safe to call more than
-        once (and runs atexit for CLI sessions, so a crash still gets a
-        footer after Python prints the traceback to the tee'd stderr).
+        the footer; it is safe to call more than once (and runs atexit for
+        CLI sessions, so a crash still gets a footer after Python prints
+        the traceback to the tee'd stderr).
     """
 
     def __init__(self, mode: str, invocation: str, now: datetime | None = None) -> None:
@@ -233,7 +230,6 @@ class SessionLog:
     def close(self) -> None:
         if self._closed:
             return
-        stopped = isinstance(sys.exception(), (KeyboardInterrupt, asyncio.CancelledError))
         for err in (False, True):
             rest = _PARTIAL.get().get((self, err), "")
             if rest.strip():
@@ -244,8 +240,7 @@ class SessionLog:
         root.setLevel(self._prev_root_level)
         try:
             self._fh.write(f"\n# ended   : {datetime.now():%Y-%m-%d %H:%M:%S}"
-                           f"  ({time.monotonic() - self._t0:.0f}s"
-                           f"{', stopped' if stopped else ''})\n")
+                           f"  ({time.monotonic() - self._t0:.0f}s)\n")
             self._fh.close()
         except ValueError:
             pass
@@ -315,20 +310,16 @@ def open_log(mode: str, invocation: str, now: datetime | None = None) -> Session
     return SessionLog(mode, invocation, now=now)
 
 
-def start(argv: list[str], now: datetime | None = None, *,
-          script: str = "run_scraper.py",
-          mode: str | None = None) -> Path:
+def start(argv: list[str], now: datetime | None = None) -> Path:
     """Begin mirroring stdout/stderr into a new session log; returns its
     path. finish() (registered atexit) restores the streams, detaches the
-    logging handler and stamps a footer with the elapsed time. The log is
-    named `mode` (default: argv's first run-naming flag) and its header
-    says `script` ran with argv.
+    logging handler and stamps a footer with the elapsed time.
 
     Notes:
         argv is the CLI argument list *without* the program name, exactly
-        what the entry point's main() received. `now` exists for tests.
+        what run_scraper.main() received. `now` exists for tests.
     """
-    session = open_log(mode or _mode(argv), f"{script} {' '.join(argv)}", now)
+    session = open_log(_mode(argv), "run_scraper.py " + " ".join(argv), now)
 
     # A Windows binary running with no console starts with sys.stdout and
     # sys.stderr both None. The tee still needs a stream behind it -- the

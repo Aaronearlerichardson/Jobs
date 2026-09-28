@@ -173,7 +173,7 @@ class Handle(_Workaround):
         {}, alias="try", max_length=1,
         description="One part's templates, tried until an answer `accept` allows; "
                     "settled once per handle")
-    accept: Accept = Field(Accept(),  # type: ignore[call-arg]  # positional Field defaults
+    accept: Accept = Field(Accept(),
                            description="The answers that settle a `try` value")
     follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
                                                        "its URL template; settled once per handle")
@@ -351,7 +351,7 @@ class _Request(_Spec):
                                                             "left off")
     json_: dict[Str, Any] | None = Field(None, alias="json", description="A JSON body template")
     headers: dict[Str, Str] = Field({}, description="Over the shared request headers")
-    decoder: Decoder = Field(JsonDecoder(),  # type: ignore[call-arg]  # positional Field defaults
+    decoder: Decoder = Field(JsonDecoder(),
                              description="Reads the response body")
     fields: dict[Str, Grammar] = Field({}, description="Row field (or internal _field) -> "
                                                        "field spec")
@@ -445,7 +445,7 @@ class BoardSpec(_Spec):
     prunable: Bool = Field(False, description="prune_dead_boards may deactivate it")
     guess: Bool = Field(False, description="Discovery may guess its handle from a name")
     eager: Bool = Field(False, description="A whole-board pull reads each kept row's detail")
-    handle: Handle = Field(Handle(),  # type: ignore[call-arg]  # positional Field defaults
+    handle: Handle = Field(Handle(),
                            description="How a store row names the board")
     job_ref: JobRef | None = Field(None, description="Reads a stored posting URL")
     listing: tuple[Listing, ...] = Field(
@@ -453,7 +453,7 @@ class BoardSpec(_Spec):
                         "one taking what it does not set from the first")
     rescue: Rescue | None = Field(None, description="Fills vague listed rows from the detail")
     detail: Detail | None = Field(None, description="Reads one posting back")
-    closure: Closure = Field(Closure(),  # type: ignore[call-arg]  # positional Field defaults
+    closure: Closure = Field(Closure(),
                              description="Judges a stored posting open or closed")
     employer: Grammar = Field(None, description="Names the employer on a listing entry")
     unlocated: Literal["drop", "keep"] = Field(
@@ -461,7 +461,7 @@ class BoardSpec(_Spec):
     detect: tuple[Detect, ...] = Field((), description="How a URL or page names the board")
     canary: Canary | None = Field(None, description="The public board tools/check_boards.py "
                                                     "probes")
-    discovery: Discovery = Field(Discovery(),  # type: ignore[call-arg]  # positional Field defaults
+    discovery: Discovery = Field(Discovery(),
                                  description="How discovery finds and vets a board")
 
     @model_validator(mode="before")

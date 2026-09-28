@@ -156,9 +156,6 @@ def main() -> None:
 
     args = ap.parse_args()
 
-    from src import session_log
-    session_log.start(sys.argv[1:], script="discover.py", mode="discover")
-
     from src.config import bootstrap
     bootstrap.ensure_profile()
 
@@ -177,9 +174,6 @@ def main() -> None:
             "dry_run": args.dry_run}, track=None))
     except registry.ParamError as e:
         ap.error(str(e))
-    finally:
-        # As run_scraper.main: closed while a Ctrl+C still unwinds.
-        session_log.finish()
 
 
 if __name__ == "__main__":

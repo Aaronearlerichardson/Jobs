@@ -24,7 +24,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
+from pydantic import ConfigDict, Field, TypeAdapter, create_model
 
 from src import config
 
@@ -563,8 +563,7 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
                               **dict.fromkeys(sorted(known), (Any, None))}
     row = create_model("CompanyRow", __config__=ConfigDict(extra="forbid"), **fields)
     with open(path, "rb") as f:
-        # list[row]: a model built at runtime, which mypy cannot check.
-        rows: list[BaseModel] = TypeAdapter(list[row]).validate_json(f.read())  # type: ignore[valid-type]
+        rows = TypeAdapter(list[row]).validate_json(f.read())
     for r in rows:
         upsert_company(conn, r.model_dump(exclude_unset=True))
     return len(rows)

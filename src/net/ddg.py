@@ -340,8 +340,9 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
         except RuntimeError:             # the loop has closed (exit)
             pass
 
-    threading.Thread(target=body, daemon=True,
-                     context=contextvars.copy_context()).start()
+    # ctx.run, not Thread(context=): that keyword is 3.14+ only.
+    threading.Thread(target=contextvars.copy_context().run, args=(body,),
+                     daemon=True).start()
     return future, stop
 
 

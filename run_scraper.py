@@ -324,10 +324,6 @@ def main(argv: list[str] | None = None) -> None:
         runstate.run(crawl())
     except registry.ParamError as e:
         ap.error(str(e))
-    finally:
-        # Here, not only atexit: a Ctrl+C is still unwinding, so the
-        # footer can say the run was stopped.
-        session_log.finish()
 
 
 if __name__ == "__main__":

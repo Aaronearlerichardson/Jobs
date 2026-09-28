@@ -27,7 +27,7 @@ from .board.spec import Handle
 def _handle(ats: str | None) -> tuple[tuple[str, ...], str]:
     """(columns, sep) of `ats`'s handle (`spec.Handle`; default the slug)."""
     board = BOARDS.get(ats) if ats else None
-    h = board.spec.handle if board else Handle()  # type: ignore[call-arg]  # positional Field defaults
+    h = board.spec.handle if board else Handle()
     return h.columns, h.sep
 
 
