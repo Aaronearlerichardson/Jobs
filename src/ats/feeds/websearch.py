@@ -10,14 +10,19 @@ ATS tenants.
 Pipeline per query:
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 from src.net import ddg
 from src.ats.board.jsonld import fetch_jsonld_page
 
 
-async def fetch_websearch(label, query, max_results=15, per_result_delay=0.5,
-                          gate=None):
+async def fetch_websearch(label: str, query: str, max_results: int = 15,
+                          per_result_delay: float = 0.5,
+                          gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """
     Run one DDG query; for each result URL, scan for JSON-LD JobPosting.
     `label` is used as the company name when we can't infer one.
@@ -27,7 +32,8 @@ async def fetch_websearch(label, query, max_results=15, per_result_delay=0.5,
     if not results:
         return []
 
-    jobs, seen_urls = [], set()
+    jobs: list[dict[str, Any]] = []
+    seen_urls: set[str] = set()
     for r in results:
         url = r.get("href") or r.get("url")
         if not url or url in seen_urls:

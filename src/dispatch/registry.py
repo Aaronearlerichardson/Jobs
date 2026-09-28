@@ -36,7 +36,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import operator
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
@@ -56,46 +56,28 @@ class ParamError(ValueError):
     """Params an op does not accept; `lines` holds one 'key: problem'
     entry per bad key."""
 
-    def __init__(self, name, lines):
+    def __init__(self, name: str, lines: list[str]) -> None:
         self.lines = lines
         super().__init__(f"bad parameters for {name!r}: " + "; ".join(lines))
 
 
-def _is_none(v):
-    return v is None
-
-
-def _omit(key=None):
+def _omit(key: str | None = None) -> Any:
     """A field left out of the kwargs while absent, so the target's own
     default applies."""
-    return Field(None, validation_alias=key, exclude_if=_is_none)
-
-
-def _veto(v):
-    return False if v else None
-
-
-def _force(v):
-    return True if v else None
-
-
-def _split(v):
-    return v.split(",") if isinstance(v, str) else v
-
-
-def _filled(names):
-    return [s for s in names if s]
+    return Field(None, validation_alias=key, exclude_if=lambda v: v is None)
 
 
 #: A "skip X" flag delivered as X: no_fit=True -> fit=False.
 Negated = Annotated[bool, AfterValidator(operator.not_)]
 #: A "skip X" flag for a target whose X=None means "the track's own
 #: setting": ticked -> False, otherwise None.
-Veto = Annotated[bool | None, AfterValidator(_veto)]
+Veto = Annotated[bool | None, AfterValidator(lambda v: False if v else None)]
 #: The mirror image, "force X on": ticked -> True, otherwise None.
-Force = Annotated[bool | None, AfterValidator(_force)]
+Force = Annotated[bool | None, AfterValidator(lambda v: True if v else None)]
 #: Names as a list or one comma-separated string; blanks dropped.
-Names = Annotated[list[str], BeforeValidator(_split), AfterValidator(_filled)]
+Names = Annotated[list[str],
+                  BeforeValidator(lambda v: v.split(",") if isinstance(v, str) else v),
+                  AfterValidator(lambda names: [s for s in names if s])]
 
 
 class OpParams(BaseModel):
@@ -135,12 +117,12 @@ class OpParams(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _blank_is_absent(cls, data):
+    def _blank_is_absent(cls, data: Any) -> Any:
         if isinstance(data, dict):
             return {k: v for k, v in data.items() if v is not None and v != ""}
         return data
 
-    def kwargs(self, track):
+    def kwargs(self, track: dict[str, Any] | None) -> dict[str, Any]:
         """The target's keyword arguments, with `track` (a track config or
         None) passed as `track_kw` says."""
         out = self.model_dump(exclude={"track"})
@@ -271,7 +253,7 @@ class ResolveLeads(OpParams):
     limit: int | None = _omit()
 
 
-REGISTRY = {
+REGISTRY: dict[str, dict[str, Any]] = {
     # ── the crawl ─────────────────────────────────────────────────────
     "crawl": {
         "label": "Crawl",
@@ -419,12 +401,13 @@ REGISTRY = {
 }
 
 
-def ui_ops():
+def ui_ops() -> dict[str, dict[str, Any]]:
     """The entries the web UI exposes as buttons (everything not `ui: False`)."""
     return {n: e for n, e in REGISTRY.items() if e.get("ui", True)}
 
 
-async def invoke(name, params=None, *, track=UNSET):
+async def invoke(name: str, params: dict[str, Any] | OpParams | None = None, *,
+                 track: Any = UNSET) -> Any:
     """Run operation `name` with a front end's params (a dict, or the op's
     model already validated); returns what the target returns. Params the
     op does not accept raise ParamError before anything runs.
@@ -446,7 +429,7 @@ async def invoke(name, params=None, *, track=UNSET):
     except ValidationError as e:
         raise ParamError(name, error_lines(e)) from None
     if track is UNSET:
-        track = config.UI_TRACKS.get(args.track or config.DEFAULT_TRACK)
+        track = config.UI_TRACKS.get(args.track or config.DEFAULT_TRACK or "")
     target, kw = entry["target"], args.kwargs(track)
     if inspect.iscoroutinefunction(target):
         return await target(**kw)
@@ -455,6 +438,8 @@ async def invoke(name, params=None, *, track=UNSET):
         return await asyncio.shield(done)
     except asyncio.CancelledError:
         await asyncio.wait([done])
-        asyncio.current_task().uncancel()
+        task = asyncio.current_task()
+        if task is not None:
+            task.uncancel()
         print(f"  {name}: the stop came too late; a started store op runs to its end")
         return done.result()

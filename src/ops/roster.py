@@ -13,8 +13,12 @@ default TRACK -- so under a profile that gives a track its own `db`, one
 op reached a different store depending on which front end asked for it.
 """
 
+from __future__ import annotations
 
-def dedup(t=None):
+from typing import Any
+
+
+def dedup(t: dict[str, Any] | None = None) -> tuple[int, int]:
     """Merge duplicate company rows pointing at one board, then duplicate
     job rows. Returns (companies merged, jobs dropped)."""
     from src import store
@@ -27,7 +31,7 @@ def dedup(t=None):
     return n, n_jobs
 
 
-async def prune(offmission=False, t=None):
+async def prune(offmission: bool = False, t: dict[str, Any] | None = None) -> tuple[int, int]:
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
     from src.ops.maintenance import track_writer
@@ -40,7 +44,7 @@ async def prune(offmission=False, t=None):
     return n_dead, n_off
 
 
-def backfill_axes(t=None):
+def backfill_axes(t: dict[str, Any] | None = None) -> int:
     """Populate the per-axis fit columns from fit_reason (offline)."""
     from src import store
     from src.ops.maintenance import track_store
@@ -48,7 +52,7 @@ def backfill_axes(t=None):
         return store.backfill_axis_columns(conn)
 
 
-async def ingest_nlx(companies, t=None):
+async def ingest_nlx(companies: list[str] | None, t: dict[str, Any] | None = None) -> int:
     """Pull postings for bot-gated employers from the federal NLx feed and
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""
@@ -67,7 +71,7 @@ async def ingest_nlx(companies, t=None):
     return total
 
 
-async def dork_sweep():
+async def dork_sweep() -> tuple[int, int]:
     """ATS dorking via DuckDuckGo: mine search-indexed board URLs for
     companies in your locality into the store. Returns (added, checked)."""
     from src.discovery.dork import run_ddgs_dorks
@@ -77,7 +81,8 @@ async def dork_sweep():
     return added, checked
 
 
-async def discover_term(term, no_report=False, dry_run=False):
+async def discover_term(term: str | None, no_report: bool = False,
+                        dry_run: bool = False) -> dict[str, Any] | None:
     """Free-text sector discovery: ask Claude for likely employers matching
     `term`, probe each against the ATS registry, and (apply-by-default)
     queue the confirmed ones unless `dry_run`. Returns the discovery

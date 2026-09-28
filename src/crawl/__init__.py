@@ -8,3 +8,5 @@
 The crawl is the fast path and the harvest is the thorough one; triage is
 what makes the thorough one affordable.
 """
+
+from __future__ import annotations

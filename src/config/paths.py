@@ -18,6 +18,8 @@ Three roots:
                `git pull`, a re-clone, or deleting the checkout.
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -30,7 +32,7 @@ APP_NAME = "JobCrawler"
 _DB_NAMES = ("jobs.db", "local_tech.db")
 
 
-def _platform_data_dir():
+def _platform_data_dir() -> Path:
     """The conventional per-user application-data directory for this OS.
 
     Windows: %LOCALAPPDATA%\\JobCrawler
@@ -46,13 +48,7 @@ def _platform_data_dir():
     return base / "job-crawler"
 
 
-def _looks_like_install(d):
-    """True if `d` already holds this app's data — a store, or a profile."""
-    return ((d / "profile.toml").exists()
-            or any((d / n).exists() for n in _DB_NAMES))
-
-
-def _resolve_data_dir(app_home):
+def _resolve_data_dir(app_home: Path) -> Path:
     """Where this machine's data lives, in precedence order:
 
     1. JOBS_DATA_DIR — an explicit override, always wins.
@@ -75,11 +71,14 @@ def _resolve_data_dir(app_home):
 if "__compiled__" in globals():
     _exe_dir = Path(sys.argv[0]).resolve().parent
     SCRIPT_DIR = _exe_dir
-    # APP_HOME: first place that looks like an install — the exe's own folder
-    # (copied-to-another-machine layout), else the folder ABOVE the dist dir
-    # (dist still inside the checkout), else the exe's folder.
+    # APP_HOME: first place that looks like an install (a profile, a store
+    # or a data folder) — the exe's own folder (copied-to-another-machine
+    # layout), else the folder ABOVE the dist dir (dist still inside the
+    # checkout), else the exe's folder.
     APP_HOME = next((d for d in (_exe_dir, _exe_dir.parent)
-                     if _looks_like_install(d) or (d / "data").is_dir()),
+                     if (d / "profile.toml").exists()
+                     or any((d / n).exists() for n in _DB_NAMES)
+                     or (d / "data").is_dir()),
                     _exe_dir)
 else:
     # This file is <root>/src/config/paths.py, so the checkout root is two

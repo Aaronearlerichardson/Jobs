@@ -15,11 +15,16 @@ out to be genuinely independent -- not one reference crosses between them
 Never imports store/__init__ at load time (that module imports this one).
 """
 
+from __future__ import annotations
+
 import re
+import sqlite3
+from collections.abc import Collection
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any
 
-from pydantic import ConfigDict, Field, TypeAdapter, create_model
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, create_model
 
 from src import config
 
@@ -30,20 +35,7 @@ from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
 #  Companies                                                                   #
 # --------------------------------------------------------------------------- #
 
-_COMPANY_COLS = (
-    "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url",
-    "local_job_count", "total_job_count", "mission_tier",
-    "mission_score", "mission_reason", "tags", "source", "active",
-    "last_probed", "notes", "created_at", "miss_reason", "miss_at",
-)
-
-# Columns an upsert may write on INSERT but must never overwrite on UPDATE:
-# created_at is the row's birth stamp, so a re-probe of a known company must
-# leave it (and a legacy NULL) alone.
-_INSERT_ONLY_COLS = ("created_at",)
-
-
-def upsert_company(conn, c):
+def upsert_company(conn: sqlite3.Connection, c: dict[str, Any]) -> int | None:
     """Insert or update a company by name. `c` is a dict of column->value.
 
     `tags` merge instead of overwrite: a company discovered by the local
@@ -82,10 +74,17 @@ def upsert_company(conn, c):
         merged = set(t for t in old["tags"].split(",") if t)
         merged |= set(t for t in (c.get("tags") or "").split(",") if t)
         c["tags"] = ",".join(sorted(merged))
-    cols = [k for k in _COMPANY_COLS if k in c]
+    cols = [k for k in ("name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
+                        "careers_url", "local_job_count", "total_job_count", "mission_tier",
+                        "mission_score", "mission_reason", "tags", "source", "active",
+                        "last_probed", "notes", "created_at", "miss_reason", "miss_at")
+            if k in c]
     placeholders = ", ".join("?" for _ in cols)
+    # created_at is written on INSERT but never overwritten on UPDATE: it is
+    # the row's birth stamp, so a re-probe of a known company must leave it
+    # (and a legacy NULL) alone.
     updates = ", ".join(f"{k}=excluded.{k}" for k in cols
-                        if k != "name" and k not in _INSERT_ONLY_COLS)
+                        if k not in ("name", "created_at"))
     conn.execute(
         f"INSERT INTO companies ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(name) DO UPDATE SET {updates}",
@@ -130,7 +129,7 @@ MISS_REASONS = (
 )
 
 
-def miss_family(reason):
+def miss_family(reason: str | None) -> str:
     """The family part of a miss reason: the token before any ':' qualifier.
 
     >>> miss_family("no-local-jobs")
@@ -143,7 +142,7 @@ def miss_family(reason):
     return (reason or "").split(":", 1)[0]
 
 
-def record_miss(conn, name, reason, **fields):
+def record_miss(conn: sqlite3.Connection, name: str, reason: str, **fields: Any) -> bool:
     """Record that `name` failed to become a crawlable company, and why.
 
     The row is always written inactive, so it is invisible to every crawl
@@ -192,7 +191,7 @@ def record_miss(conn, name, reason, **fields):
     return True
 
 
-def miss_counts(conn):
+def miss_counts(conn: sqlite3.Connection) -> list[tuple[str, int]]:
     """Misses per reason family, biggest first: the "where are we losing
     companies" tally.
 
@@ -206,14 +205,14 @@ def miss_counts(conn):
     """
     rows = conn.execute("SELECT miss_reason FROM companies "
                         "WHERE miss_reason IS NOT NULL").fetchall()
-    tally = {}
+    tally: dict[str, int] = {}
     for r in rows:
         fam = miss_family(r["miss_reason"])
         tally[fam] = tally.get(fam, 0) + 1
     return sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def recent_miss_names(conn, days=14):
+def recent_miss_names(conn: sqlite3.Connection, days: int = 14) -> set[str]:
     """Names whose miss was recorded within `days`: the set a rerun skips
     instead of re-probing.
 
@@ -238,7 +237,7 @@ def recent_miss_names(conn, days=14):
         "AND miss_at IS NOT NULL AND miss_at >= ?", (cutoff,)).fetchall()}
 
 
-def roster_growth(conn, days=7):
+def roster_growth(conn: sqlite3.Connection, days: int = 7) -> int:
     """How many companies joined the roster in the last `days`.
 
     Counts `created_at`, not `last_probed`: bulk mission re-scoring rewrites
@@ -285,21 +284,8 @@ def roster_growth(conn, days=7):
 # fetch error for a board nobody asked.
 CAPTURE_ATS = "capture"
 
-# Multi-tenant hosts (config.SHARED_HOSTS). A page there says which BOARD it
-# is, not which company owns it, so company_by_host trusts a domain-level
-# match against a roster row's careers_url only on company-owned hosts; on
-# these it insists on the board's own path.
-_SHARED_HOST_RE = config.hosts_re(config.SHARED_HOSTS)
 
-#: ats -> the store columns naming its board (config.BOARDS `handle.columns`,
-#: default the slug); a capture-only board is named by its careers_url.
-_BOARD_COLUMNS = {**{ats: tuple((s.get("handle") or {}).get(
-                         "columns", config.DEFAULT_HANDLE_COLUMNS))
-                     for ats, s in config.BOARDS.items()},
-                  CAPTURE_ATS: ("careers_url",)}
-
-
-def _split_url(url):
+def _split_url(url: str | None) -> tuple[str, str]:
     """(host, path) of an http(s) URL, host lower-cased without a leading
     ``www.``; ('', '') for anything else.
 
@@ -315,14 +301,14 @@ def _split_url(url):
     return host, (m.group(2) or "/")
 
 
-def _board_prefix(path):
+def _board_prefix(path: str) -> str:
     """The first path segment of a careers URL, the piece that names a tenant
     on a shared host ('/axoft/40863' -> '/axoft'); '' for a bare origin."""
     seg = path.strip("/").split("/")[0] if path else ""
     return f"/{seg}" if seg else ""
 
 
-def company_by_host(conn, url):
+def company_by_host(conn: sqlite3.Connection, url: str | None) -> dict[str, Any] | None:
     """The roster company whose careers_url (or URL-shaped slug) claims the
     host of `url`, or None. The manual capture path asks this so a page the
     person saved from an employer's own careers site lands under that
@@ -361,7 +347,11 @@ def company_by_host(conn, url):
     host, path = _split_url(url)
     if not host:
         return None
-    shared = bool(_SHARED_HOST_RE.search(host))
+    # Multi-tenant hosts (config.SHARED_HOSTS). A page there says which
+    # BOARD it is, not which company owns it, so a domain-level match
+    # against a roster row's careers_url is trusted only on company-owned
+    # hosts; on these the board's own path must match.
+    shared = bool(config.hosts_re(config.SHARED_HOSTS).search(host))
     idx = _company_index(conn)
     for c, cpath in idx["by_host"].get(host, ()):
         prefix = _board_prefix(cpath) if shared else ""
@@ -375,7 +365,7 @@ def company_by_host(conn, url):
     return None
 
 
-def board_key(r):
+def board_key(r: dict[str, Any]) -> tuple[Any, ...] | None:
     """The identity of a company row's BOARD, independent of its name:
     (ats, *the values of the columns its spec's handle names), a
     careers_url lowercased with no trailing "/". None when the row has no
@@ -399,18 +389,25 @@ def board_key(r):
     True
     """
     ats = r.get("ats")
+    if not ats:
+        return None
+    # The columns naming its board: config.BOARDS `handle.columns`, default
+    # the slug; a capture-only board is named by its careers_url.
+    cols = (("careers_url",) if ats == CAPTURE_ATS
+            else ((config.BOARDS.get(ats) or {}).get("handle") or {}).get(
+                "columns", config.DEFAULT_HANDLE_COLUMNS))
     vals = [(r.get(c) or "").rstrip("/").lower() if c == "careers_url" else r.get(c)
-            for c in _BOARD_COLUMNS.get(ats, config.DEFAULT_HANDLE_COLUMNS)]
-    return (ats, *vals) if ats and vals[0] else None
+            for c in cols]
+    return (ats, *vals) if vals[0] else None
 
 
-def _domain(host):
+def _domain(host: str) -> str:
     """The registrable-ish tail of a host, the piece two sibling careers
     hosts share ('jobs.acme.org' -> 'acme.org')."""
     return ".".join(host.split(".")[-2:])
 
 
-def _company_index(conn):
+def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     """One scan of the companies table, shaped for the identity lookups
     (company_by_host, company_by_board, dedup_companies) so none of them
     re-walks and re-parses the roster on its own. Built per call, never
@@ -443,7 +440,9 @@ def _company_index(conn):
 
     rows = [dict(r) for r in
             conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
-    by_board, by_host, by_domain = defaultdict(list), defaultdict(list), defaultdict(list)
+    by_board: defaultdict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    by_host: defaultdict[str, list[tuple[dict[str, Any], str]]] = defaultdict(list)
+    by_domain: defaultdict[str, list[tuple[dict[str, Any], str]]] = defaultdict(list)
     for c in rows:
         key = board_key(c)
         if key is not None:
@@ -462,7 +461,7 @@ def _company_index(conn):
             "by_host": by_host, "by_domain": by_domain}
 
 
-def company_by_board(conn, row):
+def company_by_board(conn: sqlite3.Connection, row: dict[str, Any]) -> dict[str, Any] | None:
     """The existing company row whose board matches `row`'s (see board_key),
     or None. Discovery asks it before inserting, because a name the roster
     spells differently passes the name-keyed already-tracked check and
@@ -481,7 +480,7 @@ def company_by_board(conn, row):
     return matches[0] if matches else None
 
 
-def dedup_companies(conn):
+def dedup_companies(conn: sqlite3.Connection) -> int:
     """Merge company rows that point at the SAME board (same ats+slug, or the
     same Workday triple) but were created under different name spellings
     ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
@@ -491,13 +490,13 @@ def dedup_companies(conn):
     jobcount = {cid: n for cid, n in conn.execute(
         "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
 
-    def keep_first(r):
+    def keep_first(r: dict[str, Any]) -> tuple[bool, int, int, int]:
         # Survivor first: a scored row, then active, then most-referenced,
         # then the shortest (most canonical) name.
         return (r.get("mission_tier") is None, -(r.get("active") or 0),
                 -jobcount.get(r["id"], 0), len(r.get("name") or ""))
 
-    def carry_over(keep, losers):
+    def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
         tags = set(t for t in (keep.get("tags") or "").split(",") if t)
         for l in losers:
             tags |= set(t for t in (l.get("tags") or "").split(",") if t)
@@ -536,7 +535,7 @@ def dedup_companies(conn):
     return merged
 
 
-def export_companies(conn, path):
+def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Dump the company roster to JSON — the shareable/bootstrap artifact
     that replaced config.py's seed lists. Secrets-free by construction."""
     import json
@@ -549,7 +548,7 @@ def export_companies(conn, path):
     return len(rows)
 
 
-def import_companies(conn, path):
+def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Upsert companies from an export_companies JSON file (idempotent;
     tags merge, existing mission scores survive None fields).
 
@@ -560,17 +559,19 @@ def import_companies(conn, path):
     """
     known = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
     known.discard("name")
-    row = create_model("CompanyRow", __config__=ConfigDict(extra="forbid"),
-                       name=(str, Field(min_length=1)),
-                       **dict.fromkeys(sorted(known), (Any, None)))
+    fields: dict[str, Any] = {"name": (str, Field(min_length=1)),
+                              **dict.fromkeys(sorted(known), (Any, None))}
+    row = create_model("CompanyRow", __config__=ConfigDict(extra="forbid"), **fields)
     with open(path, "rb") as f:
-        rows = TypeAdapter(list[row]).validate_json(f.read())
+        # list[row]: a model built at runtime, which mypy cannot check.
+        rows: list[BaseModel] = TypeAdapter(list[row]).validate_json(f.read())  # type: ignore[valid-type]
     for r in rows:
         upsert_company(conn, r.model_dump(exclude_unset=True))
     return len(rows)
 
 
-def set_company_tag(conn, name, tag, add=True):
+def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
+                    add: bool = True) -> str | None:
     """Add or remove one scope tag on a company (case-insensitive name
     match). Returns the company's new comma-joined tag string ('' when the
     last tag was removed), or None if no such company exists."""
@@ -590,7 +591,7 @@ def set_company_tag(conn, name, tag, add=True):
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
 # merging needs a query builder, not a lookup.
 
-def get_company(conn, company_id):
+def get_company(conn: sqlite3.Connection, company_id: int | None) -> dict[str, Any] | None:
     """One company row by id, or None."""
     if not company_id:
         return None
@@ -598,7 +599,7 @@ def get_company(conn, company_id):
     return dict(row) if row else None
 
 
-def company_id_by_name(conn, name):
+def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None:
     """Resolve a company name to its id (case-insensitive exact match), or
     None if the store has no such company. Used to link externally-ingested
     jobs to their vetted company row so they inherit its mission score."""
@@ -610,10 +611,13 @@ def company_id_by_name(conn, name):
     return row["id"] if row else None
 
 
-def get_companies(conn, active_only=True, missions=None, tag=None):
+def get_companies(conn: sqlite3.Connection, active_only: bool = True,
+                  missions: Collection[str] | None = None,
+                  tag: str | None = None) -> list[dict[str, Any]]:
     """Companies, optionally filtered by mission tier(s) and/or scope tag."""
     q = "SELECT * FROM companies"
-    conds, args = [], []
+    conds: list[str] = []
+    args: list[Any] = []
     if active_only:
         conds.append("active = 1")
     if missions:
@@ -650,10 +654,9 @@ def get_companies(conn, active_only=True, missions=None, tag=None):
 # Off-mission volume rule. A board this big that has never scored above
 # this is not a scoring accident, it is the wrong employer for the profile.
 _OFFMISSION_MIN_JOBS = 30
-_OFFMISSION_MAX_FIT = 0.20
 
 
-def _offmission_volume(conn, company_id):
+def _offmission_volume(conn: sqlite3.Connection, company_id: int) -> bool:
     """True when this company has stored >= 30 jobs and its BEST resume fit
     is still under 0.20 -- the high-volume off-mission board pattern. A NULL
     max (nothing scored yet) is missing data, not a verdict, so it fails."""
@@ -666,11 +669,12 @@ def _offmission_volume(conn, company_id):
         (company_id,)).fetchone()
     return bool(row and row["n"] >= _OFFMISSION_MIN_JOBS
                 and row["best"] is not None
-                and row["best"] < _OFFMISSION_MAX_FIT)
+                and row["best"] < 0.20)
 
 
-def record_crawl_outcome(conn, company_id, n_jobs, err=None,
-                         dormant_after=4, dormant_days=7):
+def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
+                         err: BaseException | None = None, dormant_after: int = 4,
+                         dormant_days: int = 7) -> str | None:
     """Stamp one company's crawl result and re-decide its crawl_state.
 
     `n_jobs` is what the board returned for this track (already location
@@ -703,7 +707,7 @@ def record_crawl_outcome(conn, company_id, n_jobs, err=None,
     now = datetime.now()
     stamp = now.isoformat()
     streak = row["empty_streak"] or 0
-    sets = {"last_crawled_at": stamp}
+    sets: dict[str, Any] = {"last_crawled_at": stamp}
 
     if n_jobs:
         streak = 0
@@ -730,7 +734,7 @@ def record_crawl_outcome(conn, company_id, n_jobs, err=None,
     return state
 
 
-def _is_crawlable(company, now=None):
+def _is_crawlable(company: dict[str, Any], now: str | None = None) -> bool:
     """Does this company row come up for a crawl right now? A NULL
     crawl_state reads as 'active' (rows that predate the column), a dormant
     row only once its next_crawl_at has passed, an 'off' row never."""
@@ -743,7 +747,7 @@ def _is_crawlable(company, now=None):
     return False
 
 
-def crawlable_companies(conn, tag=None):
+def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> list[dict[str, Any]]:
     """The active companies due for a crawl: everything except the dormant
     rows whose weekly slot has not come round yet. What build_sources and
     sync_status_all fetch, in place of every active row.
@@ -772,13 +776,7 @@ def crawlable_companies(conn, tag=None):
             if c.get("ats") != CAPTURE_ATS and _is_crawlable(c, now)]
 
 
-# miss_reason families that mean there is nothing at the board's address.
-# Everything else (inactive, dormant, pending review, off-mission, even
-# 'no-local-jobs') still HAS a board, and the harvester pulls it.
-_NO_BOARD_PREFIXES = ("board-dead", "no-board-found")
-
-
-def harvestable_companies(conn):
+def harvestable_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every company with a fetchable board, for the background harvester:
     active or not, dormant or not, any tag, any mission score. Skipped only
     when there is no board to fetch (capture rows, no ATS, a dead-board or
@@ -807,12 +805,16 @@ def harvestable_companies(conn):
     # know what a company name is; that much they genuinely share.
     from .review import _name_key, blocked_name_keys
     blocked = blocked_name_keys(conn)
-    out = []
+    out: list[dict[str, Any]] = []
     for c in get_companies(conn, active_only=False):
         ats = c.get("ats")
         if not ats or ats == CAPTURE_ATS:
             continue
-        if (c.get("miss_reason") or "").startswith(_NO_BOARD_PREFIXES):
+        # miss_reason families that mean there is nothing at the board's
+        # address. Everything else (inactive, dormant, pending review,
+        # off-mission, even 'no-local-jobs') still HAS a board, and the
+        # harvester pulls it.
+        if (c.get("miss_reason") or "").startswith(("board-dead", "no-board-found")):
             continue
         if _name_key(c.get("name") or "") in blocked:
             continue
@@ -820,21 +822,15 @@ def harvestable_companies(conn):
     return out
 
 
-# The harvester's own dead-board qualifier: a pass whose board answered
-# with an error and returned no jobs (see mark_harvested's `soft_fail`).
-# A generic "fetch-error" miss (src.discovery) means the RESOLUTION
-# attempt raised; this one means a board the roster already trusts kept
-# failing to answer during ordinary harvesting.
-_HARVEST_FETCH_ERROR = "fetch-error:harvest"
-
-# Consecutive calendar days a board may carry _HARVEST_FETCH_ERROR before
-# mark_harvested promotes it to 'board-dead:<ats>' -- the same family
-# src.ops.repair.RERESOLVE_FAMILIES retries and harvestable_companies
-# skips (_NO_BOARD_PREFIXES above).
+# Consecutive calendar days a board may carry the harvester's own
+# 'fetch-error:harvest' miss before mark_harvested promotes it to
+# 'board-dead:<ats>' -- the same family src.ops.repair.RERESOLVE_FAMILIES
+# retries and harvestable_companies skips.
 HARVEST_DEAD_AFTER_DAYS = 3
 
 
-def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
+def mark_harvested(conn: sqlite3.Connection, company_id: int, n_jobs: int,
+                   soft_fail: bool = False, now: datetime | None = None) -> str | None:
     """Stamp one harvest pass's outcome for a board, and run the
     dead-board promotion cycle on its miss_reason.
 
@@ -847,16 +843,16 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
     A normal pass (`soft_fail=False`) always stamps `last_harvested_at`
     and the board's true size (`total_job_count`), and `last_nonempty_at`
     too when `n_jobs` is nonzero. A non-empty pass also clears a still-
-    pending _HARVEST_FETCH_ERROR miss -- the board recovered.
+    pending 'fetch-error:harvest' miss -- the board recovered.
 
     A soft-failed pass (`soft_fail=True`) stamps only `last_harvested_at`:
     `total_job_count` keeps its last known-good value instead of being
-    zeroed by a fetch hiccup. It records _HARVEST_FETCH_ERROR as the
+    zeroed by a fetch hiccup. It records 'fetch-error:harvest' as the
     row's miss_reason/miss_at on its FIRST occurrence only -- a miss
     already on the row (any family, including a repeat
-    _HARVEST_FETCH_ERROR) is left untouched, so neither `miss_at` nor a
+    'fetch-error:harvest') is left untouched, so neither `miss_at` nor a
     genuinely different failure is overwritten. A row already carrying
-    _HARVEST_FETCH_ERROR for >= HARVEST_DEAD_AFTER_DAYS days is promoted
+    'fetch-error:harvest' for >= HARVEST_DEAD_AFTER_DAYS days is promoted
     to 'board-dead:<its ats>' instead (and deactivated, the same as a manually
     pruned dead board -- see src.ops.repair.prune_dead_boards's
     deactivate_company call -- which is what lets reresolve_misses pick it
@@ -878,7 +874,7 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
         therefore pulls it out of BOTH: the daily crawl on whatever
         track(s) watch it, and every later harvest pass (already true
         of any 'board-dead'/'no-board-found' row via
-        harvestable_companies's _NO_BOARD_PREFIXES check). That is the
+        harvestable_companies's no-board check). That is the
         deliberate trade here, for two reasons: (1) _reresolve_candidates
         only ever selects `COALESCE(active, 0) = 0` rows -- exactly as
         record_miss's own inactive-by-construction misses do -- so a
@@ -889,7 +885,7 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
         of a board answering with nothing is treated as at least as
         strong evidence as that single live probe.
 
-        This does NOT extend to the pre-promotion _HARVEST_FETCH_ERROR
+        This does NOT extend to the pre-promotion 'fetch-error:harvest'
         state: an active row keeps that miss_reason (and stays active,
         still crawled and still harvested -- harvestable_companies only
         skips the 'board-dead'/'no-board-found' prefixes) for up to
@@ -920,9 +916,15 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
     >>> row["total_job_count"], row["miss_reason"]
     (0, None)
     """
+    # The harvester's own dead-board qualifier: a pass whose board answered
+    # with an error and returned no jobs. A generic "fetch-error" miss
+    # (src.discovery) means the RESOLUTION attempt raised; this one means a
+    # board the roster already trusts kept failing to answer during
+    # ordinary harvesting.
+    fetch_error = "fetch-error:harvest"
     now_dt = now or datetime.now()
     stamp = now_dt.isoformat()
-    sets = {"last_harvested_at": stamp}
+    sets: dict[str, Any] = {"last_harvested_at": stamp}
     if not soft_fail:
         sets["total_job_count"] = n_jobs
         if n_jobs:
@@ -933,11 +935,11 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
                        "WHERE id=?", (company_id,)).fetchone()
     cur_reason = row["miss_reason"] if row else None
     promoted = None
-    miss = {}
+    miss: dict[str, Any] = {}
     if soft_fail:
         if cur_reason is None:
-            miss = {"miss_reason": _HARVEST_FETCH_ERROR, "miss_at": stamp}
-        elif cur_reason == _HARVEST_FETCH_ERROR:
+            miss = {"miss_reason": fetch_error, "miss_at": stamp}
+        elif cur_reason == fetch_error:
             cutoff = (now_dt - timedelta(days=HARVEST_DEAD_AFTER_DAYS)
                       ).isoformat()
             if (row["miss_at"] or "") <= cutoff:
@@ -946,13 +948,13 @@ def mark_harvested(conn, company_id, n_jobs, soft_fail=False, now=None):
                 miss = {"miss_reason": promoted, "miss_at": stamp, "active": 0}
         # any other family already on the row (no-board-found, ats-
         # unsupported, ...): leave it alone, per record_miss's contract.
-    elif n_jobs and cur_reason == _HARVEST_FETCH_ERROR:
+    elif n_jobs and cur_reason == fetch_error:
         miss = {"miss_reason": None, "miss_at": None}
     apply_update(conn, "companies", "id", company_id, miss)
     return promoted
 
 
-def reactivate_company(conn, company_id):
+def reactivate_company(conn: sqlite3.Connection, company_id: int) -> None:
     """Undormant one company: back to 'active', streak cleared, no parked
     wake time. The escape hatch for a board the rules retired too eagerly."""
     conn.execute(
@@ -961,7 +963,8 @@ def reactivate_company(conn, company_id):
     _commit(conn)
 
 
-def deactivate_company(conn, company_id, note=None):
+def deactivate_company(conn: sqlite3.Connection, company_id: int,
+                       note: str | None = None) -> None:
     """Flip one company's `active` switch off, optionally recording why in
     `notes`. The primitive behind src.ops.repair.prune_dead_boards; the
     decision (probe the board, apply the off-mission policy) lives there,

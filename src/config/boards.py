@@ -17,9 +17,13 @@ the layers under the engine (the store, the careers-page reader, the
 closure prober, page capture) know every vendor host without naming one.
 """
 
-import re
+from __future__ import annotations
 
-BOARDS = {
+import re
+from collections.abc import Iterable
+from typing import Any
+
+BOARDS: dict[str, dict[str, Any]] = {
     "greenhouse": {
         "detect": [{"host": "greenhouse.io",
                     "re": [r"(?i)(?:boards|job-boards)\.greenhouse\.io/(?:embed/job_board\?for=)?([a-z0-9_-]+)"]}],
@@ -1013,7 +1017,7 @@ AGGREGATOR_HOSTS = ("linkedin.com", "indeed.com", "glassdoor.", "ziprecruiter.co
                     "simplyhired.com", "monster.com", "dice.com", "builtin.com")
 
 
-def _hosts(fetchable):
+def _hosts(fetchable: bool) -> tuple[str, ...]:
     """The vendor hosts the specs' `detect` entries claim, in spec order;
     only a fetchable spec's (one with a `listing`) when `fetchable`."""
     return tuple(dict.fromkeys(d["host"] for s in BOARDS.values()
@@ -1021,18 +1025,16 @@ def _hosts(fetchable):
                                for d in s.get("detect", []) if "host" in d))
 
 
-#: Every ATS vendor host, fetchable or lead: a page there names a board,
-#: not the company that owns it.
-BOARD_HOSTS = _hosts(fetchable=False)
 #: The vendor hosts of the platforms the engine fetches.
 FETCHABLE_HOSTS = _hosts(fetchable=True)
 #: Hosts shared by many employers: a page there names a board or a listing,
 #: never the company that owns it, so it is no company's own careers page
-#: or website. Google's serve its search and many employers' Sites pages.
-SHARED_HOSTS = AGGREGATOR_HOSTS + BOARD_HOSTS + ("google.com",)
+#: or website: the aggregators, every ATS vendor host (fetchable or lead),
+#: and Google's, which serve its search and many employers' Sites pages.
+SHARED_HOSTS = AGGREGATOR_HOSTS + _hosts(fetchable=False) + ("google.com",)
 
 
-def hosts_re(hosts):
+def hosts_re(hosts: Iterable[str]) -> re.Pattern[str]:
     """A case-blind regex finding any of `hosts` (literal fragments) in a
     URL or host."""
     return re.compile("|".join(map(re.escape, hosts)), re.I)

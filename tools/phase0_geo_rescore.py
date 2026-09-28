@@ -63,9 +63,11 @@ from __future__ import annotations
 import argparse
 import csv
 import random
+import sqlite3
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -73,7 +75,7 @@ if str(ROOT) not in sys.path:
 
 from tools._harness import console_utf8                    # noqa: E402
 from src import config, runstate, store                    # noqa: E402
-from src.claude.fit import score_resume_fit                # noqa: E402
+from src.claude.fit import FitResult, score_resume_fit      # noqa: E402
 from src.match.locality import NC_RE                       # noqa: E402
 
 BACKUP_PATH = config.DATA_DIR / "db_backups" / "jobs_20260916_pre_phase0.db"
@@ -99,7 +101,8 @@ def _is_local_or_remote(location: str) -> bool:
     return bool(NC_RE.search(loc)) or ("remote" in loc.lower())
 
 
-def select_candidates(conn, exclude_ids=frozenset()):
+def select_candidates(conn: sqlite3.Connection,
+                      exclude_ids: frozenset[str] = frozenset()) -> list[dict[str, Any]]:
     """Every row the bug could have hurt, per the brief's two-population
     selection plus the locality/remote restriction. `exclude_ids` lets
     --full skip rows the pilot already rescored."""
@@ -108,20 +111,20 @@ def select_candidates(conn, exclude_ids=frozenset()):
            if r["job_id"] not in exclude_ids and _is_local_or_remote(r.get("location"))]
 
 
-def _floor_for_row(row):
+def _floor_for_row(row: dict[str, Any]) -> float:
     tracks = store.track_set(row.get("track"))
     floors = [t["digest_min_fit"] for t in config.UI_TRACKS.values()
               if t["track"] in tracks]
     return min(floors) if floors else DIGEST_MIN_FIT_FALLBACK
 
 
-def confirm_backup():
+def confirm_backup() -> None:
     if not BACKUP_PATH.exists():
         raise SystemExit(f"[!] Backup not found at {BACKUP_PATH} -- refusing to write.")
     print(f"  backup OK: {BACKUP_PATH} ({BACKUP_PATH.stat().st_size / 1e6:.0f} MB)")
 
 
-def confirm_api_key():
+def confirm_api_key() -> None:
     """Refuse to run without a real key. Without one, call_claude_json
     fails per-row and score_resume_fit's `reason` for that comes back
     identical to a legitimate malformed-JSON miss ("unscored") -- not
@@ -137,7 +140,7 @@ def confirm_api_key():
     print("  ANTHROPIC_API_KEY is set")
 
 
-def confirm_no_harvest_running():
+def confirm_no_harvest_running() -> None:
     cutoff = time.time() - 600   # 10 minutes
     for p in sorted(LOG_DIR.glob("session-*-harvest.log")):
         if p.stat().st_mtime < cutoff:
@@ -150,14 +153,15 @@ def confirm_no_harvest_running():
     print("  no harvest pass appears to be mid-run")
 
 
-async def rescore_row(row):
+async def rescore_row(row: dict[str, Any]) -> FitResult:
     """Score one candidate with the FIXED scorer (location threaded
     through)."""
     return await score_resume_fit(row["title"] or "", row.get("description") or "",
                                   location=row.get("location") or "")
 
 
-def apply_result(conn, row, res, dry_run):
+def apply_result(conn: sqlite3.Connection, row: dict[str, Any], res: FitResult,
+                 dry_run: bool) -> tuple[bool, bool]:
     """Write one row's rescore. Crossing the digest floor gets the full
     triage relabel (record_triage: status='ok', track merged, scores set);
     otherwise only the fit columns move (store.update_job_scores), mirroring
@@ -177,7 +181,7 @@ def apply_result(conn, row, res, dry_run):
     return crossed, now_ok
 
 
-def _fmt(v, width, prec=None):
+def _fmt(v: Any, width: int, prec: int | None = None) -> str:
     if v is None:
         s = "None"
     elif prec is not None:
@@ -187,7 +191,7 @@ def _fmt(v, width, prec=None):
     return f"{s[:width]:<{width}}"
 
 
-def print_table(rows_and_results):
+def print_table(rows_and_results: list[tuple[dict[str, Any], FitResult]]) -> None:
     hdr = (f"{'title':32} {'company':20} {'location':24} {'old':>5} {'new':>5}  "
           f"old_gates -> new_gates")
     print(hdr)
@@ -200,7 +204,8 @@ def print_table(rows_and_results):
               f"{row['fit_gates'] or '-'} -> {','.join(res.gates) or '-'}")
 
 
-async def run_pilot(n=25, dry_run=False, seed=0):
+async def run_pilot(n: int = 25, dry_run: bool = False, seed: int = 0
+                    ) -> tuple[list[tuple[dict[str, Any], FitResult]], list[str]]:
     confirm_backup()
     confirm_api_key()
     confirm_no_harvest_running()
@@ -227,7 +232,8 @@ async def run_pilot(n=25, dry_run=False, seed=0):
         conn.close()
 
 
-async def run_full(exclude_ids=(), dry_run=False):
+async def run_full(exclude_ids: tuple[str, ...] = (),
+                   dry_run: bool = False) -> list[dict[str, Any]]:
     confirm_backup()
     confirm_api_key()
     confirm_no_harvest_running()
@@ -277,7 +283,7 @@ async def run_full(exclude_ids=(), dry_run=False):
         conn.close()
 
 
-def main():
+def main() -> None:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--pilot", type=int, default=None, metavar="N",

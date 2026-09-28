@@ -7,10 +7,15 @@ roster write. The resolution itself used to be a second, probe-first
 implementation living here; see validate_candidate for why it isn't any more.
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+from typing import Any, cast
 
 from src.ats import coords
 from src.ats.board import board_for
@@ -65,7 +70,7 @@ class Candidate:
     ats_lead: str = ""
 
 
-def candidate_from_dict(d):
+def candidate_from_dict(d: dict[str, Any]) -> Candidate:
     """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
     a seed, or a directory name."""
     return Candidate(**DiscoveredCompany.model_validate(d).model_dump())
@@ -85,7 +90,7 @@ _VIA_NOTES = {
 }
 
 
-def _flag_for_verification(c, claimed_ats):
+def _flag_for_verification(c: Candidate, claimed_ats: str) -> None:
     """Tag a confirmed hit whose identity deserves a human look: the ATS
     disagreeing with Claude's guess, and how the board was found at all
     (see _VIA_NOTES)."""
@@ -99,13 +104,16 @@ def _flag_for_verification(c, claimed_ats):
         c.notes = f"{c.notes} {note}".strip() if c.notes else note
 
 
-def verify_note(c) -> str:
+def verify_note(c: Candidate) -> str:
     """Extract the VERIFY text from a candidate's notes, or ''."""
     m = re.search(r"\[VERIFY: ([^\]]+)\]", c.notes or "")
     return m.group(1) if m else ""
 
 
-async def validate_candidate(c, delay=0.3, js_probe=None, log=print, websearch=True):
+async def validate_candidate(c: Candidate, delay: float = 0.3,
+                             js_probe: JsScanProbePool | None = None,
+                             log: Callable[[str], object] = print,
+                             websearch: bool = True) -> Candidate:
     """
     Resolve one candidate to a crawlable board and record what happened.
 
@@ -208,7 +216,7 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     ]
 
 
-async def discover(term):
+async def discover(term: str) -> dict[str, Any]:
     print(f"  > Asking Claude for companies in: {term!r}")
     payload = await call_claude_json(DISCOVER_SYSTEM, term, max_tokens=2000,
                                      reply=DiscoverReply)
@@ -239,7 +247,8 @@ async def discover(term):
     }
 
 
-async def _validate_all(candidate_dicts, use_js=True, websearch=True):
+async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = True,
+                        websearch: bool = True) -> list[Candidate]:
     """Validate candidate dicts concurrently; return Candidate objects in
     input order. Shared by Claude-driven discover() and name-list-driven
     discover_companies().
@@ -257,9 +266,9 @@ async def _validate_all(candidate_dicts, use_js=True, websearch=True):
     # headless scrape..." messages for one candidate always appear
     # contiguously, however many run at once.
     total     = len(candidate_dicts)
-    validated = [None] * total
+    validated: list[Candidate | None] = [None] * total
 
-    async def _worker(irc):
+    async def _worker(irc: tuple[int, dict[str, Any]]) -> tuple[Candidate, list[str]]:
         cand = candidate_from_dict(irc[1])
         buf: list[str] = []
         # Small inter-step delay: each resolution step hits a different host,
@@ -281,7 +290,7 @@ async def _validate_all(candidate_dicts, use_js=True, websearch=True):
 
     # A candidate whose validation raises is counted and kept, marked
     # with its error, rather than silently skipped.
-    def raised(irc, e):
+    def raised(irc: tuple[int, dict[str, Any]], e: Exception) -> None:
         nonlocal done
         done += 1
         cand = candidate_from_dict(irc[1])
@@ -318,10 +327,11 @@ async def _validate_all(candidate_dicts, use_js=True, websearch=True):
             cand = candidate_from_dict(rc)
             cand.tried_slugs.append("[stalled: abandoned by the watchdog]")
             validated[i] = cand
-    return validated
+    return cast(list[Candidate], validated)
 
 
-async def discover_companies(candidate_dicts, term, use_js=False):
+async def discover_companies(candidate_dicts: list[dict[str, Any]], term: str,
+                             use_js: bool = False) -> dict[str, Any]:
     """Resolve an explicit list of candidate dicts (e.g. harvested from the
     BCIWiki directory) to crawlable boards — no Claude call. Returns the
     same result shape as discover().
@@ -343,7 +353,7 @@ async def discover_companies(candidate_dicts, term, use_js=False):
 
 # ─── Report ──────────────────────────────────────────────────────────────
 
-def write_discovery_report(result):
+def write_discovery_report(result: dict[str, Any]) -> Path:
     REPORT_DIR.mkdir(exist_ok=True)
     date_str = datetime.now().strftime("%Y-%m-%d")
     slug = "".join(c if c.isalnum() else "_" for c in result["term"].lower())[:40]
@@ -353,7 +363,7 @@ def write_discovery_report(result):
     confirmed = [c for c in companies if c.confirmed]
     unconfirmed = [c for c in companies if not c.confirmed]
 
-    by_ats = {}
+    by_ats: dict[str, list[Candidate]] = {}
     for c in confirmed:
         by_ats.setdefault(c.ats, []).append(c)
 
@@ -412,7 +422,7 @@ def write_discovery_report(result):
     return path
 
 
-def print_summary(result):
+def print_summary(result: dict[str, Any]) -> None:
     companies = result["companies"]
     confirmed = [c for c in companies if c.confirmed]
     w = 62

@@ -8,6 +8,7 @@ Pulls are whole-board (`loc_re=None`, the harvester's call shape) unless a
 test says otherwise.
 """
 
+import asyncio
 import re
 
 import pytest
@@ -391,15 +392,19 @@ class TestEnginePagers:
         assert http.snapshot_info()["capped"]
 
     async def test_a_followed_part_is_resolved_once_per_handle(self, serve):
-        """`handle.follow`: the base a board's root redirects to, asked on
-        the handle's first listing and remembered."""
-        calls = serve(lambda url, **kw: fake_response(
-            {"items": _items([0])} if "/list" in url else None, url="https://x.test/us/en"))
+        """`handle.follow`: the base a board's root redirects to, asked
+        once on the handle's first listings, however many ask at once, and
+        remembered."""
+        async def reply(url, **kw):
+            await asyncio.sleep(0.05)       # both listings are asking by now
+            return fake_response({"items": _items([0])} if "/list" in url else None,
+                                 url="https://x.test/us/en")
+        calls = serve(reply)
         b = _engine("offset", handle={"follow": {"base": "{slug}"}}, url="{base}/list",
                     size=9, pages=1)
-        assert len(await b.listing("x.test")) == len(await b.listing("x.test")) == 1
-        assert [c.url for c in calls] == ["https://x.test", "https://x.test/us/en/list",
-                                          "https://x.test/us/en/list"]
+        both = await asyncio.gather(b.listing("x.test"), b.listing("x.test"))
+        assert [len(rows) for rows in both] == [1, 1] and len(await b.listing("x.test")) == 1
+        assert [c.url for c in calls] == ["https://x.test"] + ["https://x.test/us/en/list"] * 3
 
     async def test_a_handle_missing_a_part_names_no_board(self, serve):
         calls = serve(fake_response({"items": _items([0])}))

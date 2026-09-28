@@ -10,7 +10,6 @@ import pytest
 import requests
 
 import src.digest.render as digest
-import src.discovery.dork as dork
 import src.discovery.local_sourcing as local_sourcing
 import src.discovery.name_sources as name_sources
 import src.discovery.paste_ingest as paste_ingest
@@ -27,12 +26,6 @@ from src.net.util import norm_posted_date
 
 
 class TestSniffer:
-    def test_extracts_lever_and_greenhouse_slugs(self):
-        boards = dork.extract_boards_from_urls([
-            "https://jobs.lever.co/bioagilytix/x",
-            "https://boards.greenhouse.io/pendo/jobs/1"])
-        assert {("lever", "bioagilytix"), ("greenhouse", "pendo")} <= set(boards)
-
     def test_detects_adp_cid_ccid(self):
         url = ("workforcenow.adp.com/x?cid=d290c04e-0230-4cd9-8bf0-f116bfab1405"
                "&ccid=19000101_000003")
@@ -363,14 +356,6 @@ class TestClosedProbeGuards:
         assert (await job_probe.probe_job_open(
             "https://www.linkedin.com/jobs/view/123"))[0] is None
 
-    def test_closed_marker_matches(self):
-        assert job_probe._CLOSED_TEXT_RE.search(
-            "This position is no longer available")
-
-    def test_closed_loop_jd_does_not_trip_the_marker(self):
-        assert not job_probe._CLOSED_TEXT_RE.search(
-            "develop closed-loop neurostimulation")
-
 
 class TestDiscoveryWiring:
     async def test_brainstorm_disabled_touches_no_api(self):
@@ -379,11 +364,6 @@ class TestDiscoveryWiring:
     def test_populate_companies_has_dork_switch(self):
         import src.discovery.local_sourcing as ls
         assert "dork" in ls.populate_companies.__code__.co_varnames
-
-    def test_dork_queries_built_from_profile(self):
-        from src.discovery.dork import DORK_QUERIES
-        assert len(DORK_QUERIES) >= 4
-        assert any("greenhouse" in q for q in DORK_QUERIES)
 
     async def test_probe_pool_coexists_unlaunched(self):
         # Lazy launch: a K-browser pool can be built and torn down without

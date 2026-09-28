@@ -1,16 +1,8 @@
-"""RFC 9309 path matching, and the polite transport around it (net.http).
+"""The robots.txt cache and the polite transport around it (net.http).
 
-Offline: every case parses a robots.txt body from a string, or answers
-the request from the test (conftest.serve, conftest.wire). No host is
-contacted, so these pin the MATCHER, not any site's current policy.
-
-Why this file exists: `urllib.robotparser` matches with
-`path.startswith(rule)` and takes the first rule in file order. That is
-wrong in both directions — it over-blocks hosts whose carve-outs use `*`
-(Hacker News publishes `Allow: /*.json$` for exactly the API this crawler
-reads, and stdlib turned the whole source off), and it under-blocks
-wildcard `Disallow:` patterns, which is the direction that would have us
-fetching paths a host asked us to leave alone.
+Offline: every case answers the request from the test (conftest.serve,
+conftest.wire). No host is contacted. The RFC 9309 matcher itself is
+pinned by src/net/robots.py's doctests.
 """
 
 import asyncio
@@ -27,62 +19,6 @@ import requests
 
 from conftest import answer
 from src.net import http, robots
-from src.net.robots import _match_group, _pattern_to_re, parse_groups
-
-UA = "Mozilla/5.0 (Windows NT 10.0) Chrome/124.0.0.0 Safari/537.36"
-
-
-def allows(body, path, user_agent=UA):
-    group = _match_group(parse_groups(body), user_agent)
-    return True if group is None else group.allows(path)
-
-
-class TestWildcards:
-    """§2.2.3 — `*` and `$` MUST be supported."""
-
-    # Verbatim from https://hacker-news.firebaseio.com/robots.txt: a
-    # deliberate carve-out letting automated clients read the JSON API while
-    # everything else is off-limits.
-    HN = ("User-agent: *\n"
-          "Allow: /*.json$\n"
-          "Allow: /*.json?*$\n"
-          "Disallow: /")
-
-    def test_wildcard_allow_reopens_the_json_api(self):
-        assert allows(self.HN, "/v0/user/whoishiring.json")
-        assert allows(self.HN, "/v0/item/38912345.json")
-
-    def test_non_json_paths_stay_blocked(self):
-        assert not allows(self.HN, "/v0/whatever")
-        assert not allows(self.HN, "/")
-
-    def test_dollar_anchors_the_end(self):
-        body = "User-agent: *\nDisallow: /x$"
-        assert not allows(body, "/x")          # exact match: blocked
-        assert allows(body, "/x/y")            # anchored, so not a match
-
-    def test_wildcard_disallow_actually_bites(self):
-        # The under-blocking direction: stdlib never matched this at all.
-        assert not allows("User-agent: *\nDisallow: /*/private", "/x/private")
-
-    def test_query_string_is_matchable(self):
-        assert not allows("User-agent: *\nDisallow: /*?feed=", "/?feed=job_feed")
-
-
-class TestSpecificity:
-    """§2.2.2 — the longest match wins, and Allow breaks ties."""
-
-    def test_longest_match_beats_file_order(self):
-        # stdlib returns the FIRST match, so it read this as a blanket block.
-        assert allows("User-agent: *\nDisallow: /\nAllow: /api/", "/api/x")
-
-    def test_allow_wins_an_exact_tie(self):
-        assert allows("User-agent: *\nDisallow: /a\nAllow: /a", "/a")
-
-    def test_more_specific_disallow_beats_broader_allow(self):
-        body = "User-agent: *\nAllow: /api/\nDisallow: /api/internal/"
-        assert allows(body, "/api/public")
-        assert not allows(body, "/api/internal/x")
 
 
 class TestExemptHosts:
@@ -120,46 +56,6 @@ class TestExemptHosts:
     async def test_other_hosts_still_obey_their_robots(self, cache):
         assert not await cache.allowed("https://jobs.smartrecruiters.com/x")
         assert cache.fetched == ["https://jobs.smartrecruiters.com"]
-
-
-class TestGroups:
-    def test_blanket_disallow(self):
-        assert not allows("User-agent: *\nDisallow: /", "/anything")
-
-    def test_empty_disallow_means_allow_all(self):
-        assert allows("User-agent: *\nDisallow:", "/anything")
-
-    def test_rules_for_other_bots_do_not_apply_to_us(self):
-        # Several job hosts allow Googlebot/Twitterbot and no one else.
-        body = ("User-agent: Googlebot\nAllow: /\n\n"
-                "User-agent: *\nDisallow: /")
-        assert not allows(body, "/postings")
-        assert allows(body, "/postings", user_agent="Googlebot/2.1")
-
-    def test_consecutive_user_agents_share_one_group(self):
-        body = "User-agent: a\nUser-agent: b\nDisallow: /x"
-        assert not allows(body, "/x", user_agent="bot-a-1.0")
-        assert not allows(body, "/x", user_agent="bot-b-1.0")
-
-    def test_no_rules_at_all_is_unrestricted(self):
-        assert allows("# just a comment", "/x")
-        assert allows("", "/x")
-
-    def test_comments_and_blank_lines_are_ignored(self):
-        assert not allows("# hi\n\nUser-agent: *   # us\nDisallow: /x  # no\n",
-                          "/x")
-
-
-class TestPatternCompiler:
-    @pytest.mark.parametrize("pattern,path,expected", [
-        ("/a.b", "/a.b", True),
-        ("/a.b", "/axb", False),      # `.` is literal, not a regex wildcard
-        ("/a*b", "/axxxb", True),
-        ("/a*b", "/ab", True),
-        ("/p", "/prefix/deep", True),  # unanchored patterns are prefixes
-    ])
-    def test_literal_characters_are_escaped(self, pattern, path, expected):
-        assert bool(_pattern_to_re(pattern).match(path)) is expected
 
 
 class TestFetchDeduplication:

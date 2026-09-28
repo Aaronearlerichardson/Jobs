@@ -12,8 +12,13 @@ results in input order so callers can process priority sources first and
 keep dedupe deterministic regardless of completion order.
 """
 
+from __future__ import annotations
+
 import asyncio
 import time
+from collections.abc import (AsyncGenerator, AsyncIterator, Awaitable, Callable,
+                             Hashable, Iterable, Sequence)
+from typing import Any, Literal, overload
 
 from src import config
 from . import http
@@ -29,9 +34,30 @@ DEFAULT_WORKERS = worker_count("crawler_workers")
 RESOLVE_STALL_S = 300.0
 
 
-async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
-                  with_item=False, on_error=None, budget_s=None,
-                  on_abandon=None, stall_s=None, key=None):
+@overload
+def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
+                  label: str | Callable[[T], str] = ..., max_workers: int = ...,
+                  with_item: Literal[False] = ...,
+                  on_error: Callable[[T, Exception], object] | None = ...,
+                  budget_s: float | None = ..., on_abandon: Callable[[T], object] | None = ...,
+                  stall_s: float | None = ..., key: Callable[[T], Hashable] | None = ...
+                  ) -> AsyncGenerator[R, None]: ...
+@overload
+def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
+                  label: str | Callable[[T], str] = ..., max_workers: int = ..., *,
+                  with_item: Literal[True],
+                  on_error: Callable[[T, Exception], object] | None = ...,
+                  budget_s: float | None = ..., on_abandon: Callable[[T], object] | None = ...,
+                  stall_s: float | None = ..., key: Callable[[T], Hashable] | None = ...
+                  ) -> AsyncGenerator[tuple[T, R], None]: ...
+async def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
+                        label: str | Callable[[T], str] = "task",
+                        max_workers: int = DEFAULT_WORKERS, with_item: bool = False,
+                        on_error: Callable[[T, Exception], object] | None = None,
+                        budget_s: float | None = None,
+                        on_abandon: Callable[[T], object] | None = None,
+                        stall_s: float | None = None, key: Callable[[T], Hashable] | None = None
+                        ) -> AsyncIterator[R | tuple[T, R]]:
     """Run the coroutine function `fn` over every item, at most
     `max_workers` at a time; yield what came back.
 
@@ -101,6 +127,17 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
     the calls still running; under contextlib.aclosing at once, otherwise
     when the generator is collected.
 
+    When to use `key=` over a TaskGroup of per-origin walks (as
+    crawl.harvest.pull does): `fan_out(key=...)` fits when each item is
+    ONE call and the caller only needs the results as they land. Reach for
+    per-origin TaskGroup walks instead when a single "item" is really a
+    WHOLE WALK of many calls to one origin and the caller needs to watch
+    that walk from outside -- pull reports each board's own progress
+    stall (a board wedged mid-walk, not just one request) and a
+    "not started" count for boards a budget cut off before their walk
+    began, neither of which `fan_out` hands back: it yields only finished
+    results, with no view into a call still in flight or never begun.
+
     Notes:
         Was a thread pool (fan_out, and drain for the stall watchdog)
         until phase 7 of the async migration: a running thread could only
@@ -112,9 +149,9 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
         return
     what = label if callable(label) else (lambda _item: label)
     slots = asyncio.Semaphore(max(1, max_workers))
-    hosts = {}
+    hosts: dict[Hashable, asyncio.Lock] = {}
 
-    async def call(item):
+    async def call(item: T) -> R:
         async with hosts.setdefault(key(item), asyncio.Lock()) if key else slots:
             http.reset_fetch_failures()     # this item's own count
             return await fn(item)
@@ -154,8 +191,12 @@ async def fan_out(items, fn, label="task", max_workers=DEFAULT_WORKERS,
             await asyncio.wait(pending)
 
 
-async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
-                    budget_s=None):
+async def fetch_all(
+        sources: Sequence[tuple[str, str, Callable[[], Awaitable[list[Any] | None]]]],
+        max_workers: int = DEFAULT_WORKERS,
+        on_done: Callable[[str, str, list[Any], BaseException | None], object] | None = None,
+        budget_s: float | None = None
+        ) -> list[tuple[list[Any], BaseException | None, dict[str, Any] | None]]:
     """Run every (name, platform, fetch) source concurrently: `fetch()` is
     the source's coroutine.
 
@@ -195,18 +236,20 @@ async def fetch_all(sources, max_workers=DEFAULT_WORKERS, on_done=None,
     (completion order), for progress output.
     """
     budget_s = config.FETCH_BUDGET_S if budget_s is None else budget_s
-    results = [([], None, None)] * len(sources)
+    results: list[tuple[list[Any], BaseException | None, dict[str, Any] | None]] = [
+        ([], None, None)] * len(sources)
 
-    def done(i, got):
+    def done(i: int, got: tuple[list[Any], BaseException | None, dict[str, Any] | None]
+             ) -> None:
         results[i] = got
         if on_done:
             on_done(sources[i][0], sources[i][1], got[0], got[1])
 
-    async def accounted(i):
+    async def accounted(i: int) -> tuple[list[Any], dict[str, Any]]:
         jobs = await sources[i][2]() or []
         return jobs, http.snapshot_info()
 
-    def abandoned(i):
+    def abandoned(i: int) -> None:
         results[i] = ([], TimeoutError(f"past its {budget_s:g}s budget"), None)
 
     async for i, (jobs, snap) in fan_out(
@@ -243,20 +286,21 @@ class SingleFlight:
     somewhere else (the board engine's settled handle parts).
     """
 
-    def __init__(self, keep=None):
+    def __init__(self, keep: Callable[[Any], bool] | None = None) -> None:
         self._keep = keep
-        self._memo = {}                 # key -> (expires or None, value)
-        self._locks = {}
+        self._memo: dict[Hashable, tuple[float | None, Any]] = {}   # key -> (expires, value)
+        self._locks: dict[Hashable, asyncio.Lock] = {}
 
-    def hold(self, key):
+    def hold(self, key: Hashable) -> asyncio.Lock:
         """The asyncio.Lock one maker of `key` holds at a time."""
         return self._locks.setdefault(key, asyncio.Lock())
 
-    def _kept(self, key):
+    def _kept(self, key: Hashable) -> tuple[float | None, Any] | None:
         got = self._memo.get(key)
         return got if got and (got[0] is None or time.monotonic() < got[0]) else None
 
-    async def do(self, key, make, ttl=None):
+    async def do(self, key: Hashable, make: Callable[[], Awaitable[Any]],
+                 ttl: float | None = None) -> Any:
         """The value kept for `key`, else make()'s (see the class)."""
         got = self._kept(key)
         if got is None:
@@ -264,7 +308,7 @@ class SingleFlight:
                 got = self._kept(key) or self._made(key, await make(), ttl)
         return got[1]
 
-    def _made(self, key, value, ttl):
+    def _made(self, key: Hashable, value: Any, ttl: float | None) -> tuple[float | None, Any]:
         """(expiry, value) for a value just made, kept when `keep` allows."""
         got = (None if ttl is None else time.monotonic() + ttl, value)
         if self._keep is None or self._keep(value):

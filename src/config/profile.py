@@ -14,9 +14,13 @@ MISSION_TIERS, ...) are each a view of one validated key; several are
 mutated at runtime, so they stay plain module attributes.
 """
 
+from __future__ import annotations
+
 import re
 import tomllib
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 from .paths import APP_HOME, DATA_DIR, SCRIPT_DIR
 from .profile_schema import parse
@@ -34,7 +38,7 @@ from .secrets import SETTINGS
 #      file the Settings tab creates on first save.
 # The bundled profile.example.toml is the read-only fallback when none of the
 # above exists, so the app runs immediately after a clone.
-def _resolve_profile_path():
+def _resolve_profile_path() -> Path:
     if SETTINGS.jobs_profile:
         return SETTINGS.jobs_profile.expanduser()
     if (APP_HOME / "profile.toml").exists():
@@ -48,7 +52,7 @@ PROFILE_EXAMPLE_PATH = (APP_HOME / "profile.example.toml"
                         else SCRIPT_DIR / "profile.example.toml")
 
 
-def _load_profile():
+def _load_profile() -> tuple[dict[str, Any], Path | None]:
     """(parsed TOML, path) of the first profile that exists (yours, else
     the example), or ({}, None). The two are NOT merged: a key your profile
     leaves out takes the schema default, not the example's value."""
@@ -87,28 +91,23 @@ SKILL_KEYWORDS  = list(_kw.skill)
 # when a track swaps its keyword focus, so hold the list, not a copy.
 INCLUDE_KEYWORDS = CORE_KEYWORDS + DOMAIN_KEYWORDS + SKILL_KEYWORDS
 
-#: The lists a track's keyword focus mutates, in the order the snapshot
-#: helpers below carry them. Named once so a new tier cannot be added to
-#: one restorer and forgotten in the others.
-_FOCUSED_LISTS = ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS",
-                  "INCLUDE_KEYWORDS")
-
 #: What `widen_keywords` empties. EXCLUDE_* are not part of the keyword
 #: FOCUS (a track swap leaves them alone), but they are part of "the
 #: profile is not judging this posting", so widening clears them too.
 _WIDENED_EMPTY = ("DOMAIN_KEYWORDS", "SKILL_KEYWORDS", "EXCLUDE_PHRASES",
                   "EXCLUDE_TITLE_PHRASES")
 
-#: Every list the snapshot helpers below carry, in order: the focus lists,
-#: then whatever else a widening clears. Derived from the two tuples above
-#: rather than written out a third time -- the EXCLUDE_* lists were emptied
-#: by every widening and put back by none, because the save/restore kept
-#: its own copy of the names.
-_SNAPSHOT_LISTS = _FOCUSED_LISTS + tuple(
-    n for n in _WIDENED_EMPTY if n not in _FOCUSED_LISTS)
+#: Every list the snapshot helpers below carry, in order: the lists a
+#: track's keyword focus mutates, then whatever else a widening clears.
+#: Derived from `_WIDENED_EMPTY` rather than written out again -- the
+#: EXCLUDE_* lists were emptied by every widening and put back by none,
+#: because the save/restore kept its own copy of the names.
+_SNAPSHOT_LISTS = tuple(dict.fromkeys(
+    ("CORE_KEYWORDS", "DOMAIN_KEYWORDS", "SKILL_KEYWORDS", "INCLUDE_KEYWORDS")
+    + _WIDENED_EMPTY))
 
 
-def keyword_snapshot(cfg=None):
+def keyword_snapshot(cfg: Any = None) -> tuple[list[str] | bool, ...]:
     """The shared keyword and exclude lists and ACCEPT_REMOTE as they stand
     now.
 
@@ -126,7 +125,8 @@ def keyword_snapshot(cfg=None):
             bool(getattr(cfg, "ACCEPT_REMOTE", False)))
 
 
-def restore_keywords(snapshot, cfg=None):
+def restore_keywords(snapshot: tuple[list[str] | bool, ...],
+                     cfg: Any = None) -> None:
     """Put a `keyword_snapshot` back, in place."""
     cfg = _self() if cfg is None else cfg
     for name, saved in zip(_SNAPSHOT_LISTS, snapshot):
@@ -134,7 +134,7 @@ def restore_keywords(snapshot, cfg=None):
     cfg.ACCEPT_REMOTE = snapshot[-1]
 
 
-def widen_keywords(cfg=None):
+def widen_keywords(cfg: Any = None) -> None:
     """Turn the relevance filter off, in place: everything is relevant.
 
     For measuring a SOURCE rather than the profile. Every fetcher applies
@@ -162,7 +162,7 @@ def widen_keywords(cfg=None):
     cfg.ACCEPT_REMOTE = True
 
 
-def _self():
+def _self() -> ModuleType:
     """The config PACKAGE, which is what every caller mutates -- its
     attributes are these module's objects, re-exported."""
     import src.config as _cfg
@@ -184,8 +184,8 @@ EXCLUDE_BOILERPLATE_PHRASES = list(_exc.boilerplate_phrases)
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own sub-dict (e.g. KEYWORDS_BY_TRACK.get("local"))
 # instead of hardcoding their vocabulary; see src/crawl/runner.py.
-KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in _kw.model_extra.items()}
-EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in _exc.model_extra.items()}
+KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in (_kw.model_extra or {}).items()}
+EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in (_exc.model_extra or {}).items()}
 
 # Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
 # `accept_remote` and src/dispatch/background.py restores it between operations. Read it
@@ -227,7 +227,7 @@ CANDIDATE_AVOID     = _cand.avoid.strip()
 RESUME_SUFFIXES = (".docx", ".txt", ".md")
 
 
-def _resolve_resume_path():
+def _resolve_resume_path() -> Path:
     override = SETTINGS.jobs_resume or _cand.resume.strip()
     if override:
         p = Path(override).expanduser()

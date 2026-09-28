@@ -17,23 +17,28 @@ Every flag except --from-bciwiki is the CLI spelling of an operation in
 src/dispatch/registry.py, the same table the web UI's roster buttons run from.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
+from collections.abc import Callable
+from typing import Any
 
 from src import config, runstate
 from src.dispatch import registry
 
 
-def _op(name, params):
+def _op(name: str, params: Callable[[argparse.Namespace], dict[str, Any]]
+        ) -> Callable[[argparse.Namespace], None]:
     """A handler that runs registry op `name` with `params(args)`: the
     process's one run (src/runstate.py)."""
-    def run(args):
+    def run(args: argparse.Namespace) -> None:
         runstate.run(registry.invoke(name, params(args), track=None))
     return run
 
 
-def _cmd_from_keywords(args):
-    async def each():
+def _cmd_from_keywords(args: argparse.Namespace) -> None:
+    async def each() -> None:
         for kw in config.INCLUDE_KEYWORDS:
             await registry.invoke("discover-term", {
                 "term": kw, "no_report": args.no_report, "dry_run": args.dry_run},
@@ -41,7 +46,7 @@ def _cmd_from_keywords(args):
     runstate.run(each())
 
 
-def _cmd_from_bciwiki(args):
+def _cmd_from_bciwiki(args: argparse.Namespace) -> None:
     """A worked example of bulk-importing a public industry directory: the
     BCIWiki company list, resolved to crawlable boards. Not a registry op —
     it is directory-specific and only useful if that is your field."""
@@ -51,7 +56,7 @@ def _cmd_from_bciwiki(args):
     cats = tuple(c.strip() for c in args.bciwiki_categories.split(",") if c.strip())
     print(f"  > Harvesting BCIWiki categories: {', '.join(cats)}")
 
-    async def resolve():
+    async def resolve() -> None:
         seeds = await bciwiki_seed_candidates(categories=cats)
         if args.limit:
             seeds = seeds[: args.limit]
@@ -82,7 +87,7 @@ _COMMANDS = [
 ]
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description="Expand the crawler's company universe.")
     ap.add_argument("term", nargs="?",
                     help="Sector/industry/term to search for "
@@ -151,6 +156,9 @@ def main():
 
     args = ap.parse_args()
 
+    from src import session_log
+    session_log.start(sys.argv[1:], script="discover.py", mode="discover")
+
     from src.config import bootstrap
     bootstrap.ensure_profile()
 
@@ -169,6 +177,9 @@ def main():
             "dry_run": args.dry_run}, track=None))
     except registry.ParamError as e:
         ap.error(str(e))
+    finally:
+        # As run_scraper.main: closed while a Ctrl+C still unwinds.
+        session_log.finish()
 
 
 if __name__ == "__main__":

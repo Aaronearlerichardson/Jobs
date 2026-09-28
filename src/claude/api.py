@@ -8,6 +8,8 @@ import json
 import logging
 import re
 import time
+from collections.abc import Iterable
+from typing import Any
 
 from pydantic import StrictBool, ValidationError
 
@@ -45,17 +47,7 @@ ACTIVE_MISSION_TIERS = config.ACTIVE_MISSION_TIERS
 is_active_mission = config.is_active_mission
 
 
-# Compiled bullseye pin (profile [mission].bullseye_regex); None when disabled.
-_BULLSEYE_RE = re.compile(config.MISSION_BULLSEYE_REGEX, re.I) \
-    if config.MISSION_BULLSEYE_REGEX else None
-
-
-def _tier_enum():
-    """`"name" (desc)` lines for the mission-tier list in prompts."""
-    return "\n".join(f'    "{t["name"]}" — {t["desc"]}' for t in config.MISSION_TIERS)
-
-
-def _tier_bands():
+def _tier_bands() -> str:
     """`lo-hi = name: desc` score-band lines for the mission prompt."""
     out = []
     for t in config.MISSION_TIERS:
@@ -64,27 +56,10 @@ def _tier_bands():
     return "\n".join(out)
 
 
-_EXPAND_SYSTEM = f"""You are a job-search strategist for this candidate:
-
-{_CANDIDATE}
-{_AVOID}
-
-Given a job title, skill, or concept, return ONLY a JSON object with exactly three keys:
-- "titles": array of up to 12 alternative job-title strings to search for, matched to the candidate's reachable level.
-- "keywords": array of up to 12 technical keywords/skills/domain terms that surface more relevant listings.
-- "sectors": array of up to 12 company types, industry verticals, or named employers/labs where these roles exist."""
-
-
 class ExpandReply(Reply):
     titles: list[str]
     keywords: list[str]
     sectors: list[str]
-
-
-_LOCATION_EXPAND_SYSTEM = """You are a geographic search strategist. Given a location term (a city, region, country, or qualifier like "remote"), return ONLY a JSON object with exactly two keys:
-- "include": array of up to 15 related location strings that should ALSO match when filtering jobs for this area. Examples: for "North Carolina", include "NC", "Durham", "Raleigh", "Chapel Hill", "Research Triangle", "RTP". For "remote", include "work from home", "wfh", "fully remote", "distributed", "anywhere".
-- "exclude": array of up to 8 location strings that should be explicitly excluded when someone specifies this search. Examples: for "us only", include common offshore locations the user likely wants to filter out.
-Use lowercase unless the token is normally capitalized (country codes etc)."""
 
 
 class LocationReply(Reply):
@@ -133,16 +108,17 @@ Rules:
 _GATED_SITES = ("linkedin", "indeed", "builtin", "wellfound")
 
 
+# choice() builds its type at runtime (reply.py), which mypy cannot read.
 class DiscoveredCompany(Reply):
     name: str
-    ats: choice(*_ATS_GUESSES)
+    ats: choice(*_ATS_GUESSES)  # type: ignore[valid-type]
     slug_guess: str | None
     careers_url: str
     notes: str
 
 
 class GatedSite(Reply):
-    site: choice(*_GATED_SITES)
+    site: choice(*_GATED_SITES)  # type: ignore[valid-type]
     query: str
     notes: str
 
@@ -150,29 +126,6 @@ class GatedSite(Reply):
 class DiscoverReply(Reply):
     companies: list[DiscoveredCompany]
     gated_sites: list[GatedSite]
-
-
-# 5-family models think when `thinking` is omitted, and max_tokens caps
-# thinking + response text TOGETHER, so thinking could eat a 300-token
-# scoring budget and truncate the JSON. When the caller does not ask for
-# thinking (docs build-with-claude/thinking-troubleshooting, 2026-09):
-# these accept {"type": "disabled"} (Opus 5 only at effort high or below,
-# its default, which build_payload leaves alone)...
-_THINKING_OPTIONAL_MODELS = ("claude-sonnet-5", "claude-opus-5")
-# ...and these always think and reject "disabled" with a 400, so they get
-# no `thinking` field, effort "low", and room for that thinking on top of
-# the caller's max_tokens (see build_payload). Matched first:
-# "claude-opus-5" is a prefix of "claude-opus-5-5".
-_THINKING_ALWAYS_MODELS = ("claude-opus-5-5", "claude-fable-5",
-                           "claude-mythos-5")
-
-# Models without structured outputs (absent from the feature's
-# supportedModels, docs build-with-claude/structured-outputs, 2026-09).
-# They get the reply as a forced tool call instead; none of them thinks
-# unless asked, and build_payload never asks, so forcing is always allowed.
-_LEGACY_MODELS = ("claude-3", "claude-opus-4-0", "claude-opus-4-1",
-                  "claude-opus-4-2025", "claude-sonnet-4-0",
-                  "claude-sonnet-4-2025")
 
 
 # --------------------------------------------------------------------------- #
@@ -216,18 +169,18 @@ class _Calls:
     for, config.CLAUDE_OWNER_WAIT_S at most, before its session closes and
     its footer prints (see board_is_own)."""
 
-    def __init__(self):
-        self.gates = {}
+    def __init__(self) -> None:
+        self.gates: dict[tuple[str, int], asyncio.Event] = {}
         self.usage = dict.fromkeys(("calls", "uncached_input", "cache_write",
                                     "cache_read", "output"), 0)
         self.reported = dict(self.usage)
-        self.fatal = None
-        self.asking = set()
+        self.fatal: str | None = None
+        self.asking: set[asyncio.Future[bool | None]] = set()
         if config.SETTINGS.claude_usage_summary:
             runstate.at_exit(report_cache_stats)
         runstate.at_exit(self._land_asks)
 
-    async def _land_asks(self):
+    async def _land_asks(self) -> None:
         if self.asking:
             await asyncio.wait(self.asking, timeout=config.CLAUDE_OWNER_WAIT_S)
 
@@ -235,27 +188,28 @@ class _Calls:
 _CALLS = runstate.per_run(_Calls)
 
 
-def _system_field(system_prompt, cache=True):
+def _system_field(system_prompt: str, cache: bool = True) -> str | list[dict[str, Any]]:
     """`system` as a cache-marked block list, or the plain string when caching
     is off. One breakpoint, on the last (only) system block — that covers the
     whole tools->system prefix and leaves the varying user turn uncached."""
     if not (cache and config.SETTINGS.claude_prompt_cache and system_prompt):
         return system_prompt
-    control = {"type": "ephemeral"}
+    control: dict[str, str] = {"type": "ephemeral"}
     if config.SETTINGS.claude_cache_ttl == "1h":
         control["ttl"] = "1h"
     return [{"type": "text", "text": system_prompt, "cache_control": control}]
 
 
-def build_payload(system_prompt, user_content, max_tokens=1000,
-                  model=None, thinking=False, cache=True, *, reply=None):
+def build_payload(system_prompt: str, user_content: str, max_tokens: int = 1000,
+                  model: str | None = None, thinking: bool = False, cache: bool = True, *,
+                  reply: type[Reply] | None = None) -> dict[str, Any]:
     """The /v1/messages request body. Split out from the POST so the payload
     shape (cache breakpoint placement, thinking guard, reply schema) is
     testable offline.
 
     `reply` (a Reply subclass) holds the answer to its schema: structured
-    outputs (`output_config.format`), or a forced tool call on a
-    _LEGACY_MODELS model.
+    outputs (`output_config.format`), or a forced tool call on a legacy
+    model (one without structured outputs).
 
     Notes:
         Structured outputs add their own system prompt, and changing the
@@ -264,27 +218,45 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
         stable. Thinking is compatible: the grammar constrains only the
         final text, not the thinking blocks (the verify pass relies on it).
     """
+    # 5-family models think when `thinking` is omitted, and max_tokens caps
+    # thinking + response text TOGETHER, so thinking could eat a 300-token
+    # scoring budget and truncate the JSON. When the caller does not ask for
+    # thinking (docs build-with-claude/thinking-troubleshooting, 2026-09):
+    # these accept {"type": "disabled"} (Opus 5 only at effort high or below,
+    # its default, which build_payload leaves alone)...
+    thinking_optional = ("claude-sonnet-5", "claude-opus-5")
+    # ...and these always think and reject "disabled" with a 400, so they get
+    # no `thinking` field, effort "low", and room for that thinking on top of
+    # the caller's max_tokens. Matched first: "claude-opus-5" is a prefix of
+    # "claude-opus-5-5".
+    thinking_always = ("claude-opus-5-5", "claude-fable-5", "claude-mythos-5")
+    # Models without structured outputs (absent from the feature's
+    # supportedModels, docs build-with-claude/structured-outputs, 2026-09).
+    # They get the reply as a forced tool call instead; none of them thinks
+    # unless asked, and build_payload never asks, so forcing is always allowed.
+    legacy = ("claude-3", "claude-opus-4-0", "claude-opus-4-1", "claude-opus-4-2025",
+              "claude-sonnet-4-0", "claude-sonnet-4-2025")
     use_model = model or config.CLAUDE_MODEL
-    payload = {
+    payload: dict[str, Any] = {
         "model":      use_model,
         "max_tokens": max_tokens,
         "system":     _system_field(system_prompt, cache),
         "messages":   [{"role": "user", "content": user_content}],
     }
-    output = {}
+    output: dict[str, Any] = {}
     if not thinking:
-        if use_model.startswith(_THINKING_ALWAYS_MODELS):
+        if use_model.startswith(thinking_always):
             # max_tokens is the only cap on their thinking (budget_tokens
             # 400s too), and callers size it for the reply alone (120-300
             # tokens for a score): headroom for low-effort thinking, billed
             # only as used and bounded by config.CLAUDE_TIMEOUT.
             payload["max_tokens"] += config.CLAUDE_THINKING_HEADROOM
             output["effort"] = "low"
-        elif use_model.startswith(_THINKING_OPTIONAL_MODELS):
+        elif use_model.startswith(thinking_optional):
             payload["thinking"] = {"type": "disabled"}
     if reply is not None:
         schema = reply.model_json_schema()
-        if use_model.startswith(_LEGACY_MODELS):
+        if use_model.startswith(legacy):
             payload["tools"] = [{"name": reply.__name__, "input_schema": schema}]
             payload["tool_choice"] = {"type": "tool", "name": reply.__name__}
         else:
@@ -294,7 +266,7 @@ def build_payload(system_prompt, user_content, max_tokens=1000,
     return payload
 
 
-async def _claim_prefix(model, system_prompt):
+async def _claim_prefix(model: str, system_prompt: str) -> asyncio.Event | None:
     """The first caller for this prefix leads: it gets the Event to set when
     its request finishes. Everyone else waits for the leader,
     config.CLAUDE_GATE_WAIT_S at most, and gets None."""
@@ -309,7 +281,7 @@ async def _claim_prefix(model, system_prompt):
     return None
 
 
-def _record_usage(usage):
+def _record_usage(usage: dict[str, Any]) -> None:
     u = _CALLS().usage
     u["calls"] += 1
     u["uncached_input"] += int(usage.get("input_tokens") or 0)
@@ -318,7 +290,7 @@ def _record_usage(usage):
     u["output"] += int(usage.get("output_tokens") or 0)
 
 
-def report_cache_stats():
+def report_cache_stats() -> None:
     """Print the one-line usage footer for the calls this run made since
     its last footer, if there were any.
 
@@ -356,11 +328,8 @@ def report_cache_stats():
 # and explains itself (2026-09-09: a crawl tripped it at 18:22, and the
 # verify runs at 18:29 and 19:24 skipped every call without saying why).
 
-# Transient statuses worth one short retry ladder (529 = overloaded_error).
-_RETRY_STATUSES = (429, 500, 502, 503, 529)
 
-
-def _trip_fatal(msg):
+def _trip_fatal(msg: str) -> None:
     calls = _CALLS()
     if calls.fatal is None:
         calls.fatal = msg
@@ -368,7 +337,7 @@ def _trip_fatal(msg):
               f"(unrecoverable): {msg}")
 
 
-def api_disabled():
+def api_disabled() -> str | None:
     """The breaker's message while an unrecoverable API error has disabled
     Claude calls for this run, else None. Long loops (the deep-verify pass)
     check it to stop with one line instead of a per-row 'unverified' for
@@ -376,7 +345,7 @@ def api_disabled():
     return _CALLS().fatal
 
 
-def have_api_key():
+def have_api_key() -> bool:
     """Whether an API key is configured at all. call_claude_json returns
     None without asking when it is not, exactly as it does for a refusal, so
     a caller that has to tell "the model said nothing" apart from "we
@@ -388,8 +357,10 @@ def have_api_key():
     return config.ANTHROPIC_API_KEY != "YOUR_ANTHROPIC_API_KEY_HERE"
 
 
-async def call_claude_json(system_prompt, user_content, max_tokens=1000,
-                           model=None, thinking=False, cache=True, *, reply):
+async def call_claude_json[R: Reply](system_prompt: str, user_content: str,
+                                     max_tokens: int = 1000, model: str | None = None,
+                                     thinking: bool = False, cache: bool = True, *,
+                                     reply: type[R]) -> R | None:
     """POST to /v1/messages and return Claude's answer as a `reply` (a Reply
     subclass) instance, held to its schema (see build_payload).
 
@@ -441,7 +412,8 @@ async def call_claude_json(system_prompt, user_content, max_tokens=1000,
                 json=payload,
                 timeout=config.CLAUDE_TIMEOUT,
             )
-            if r.status_code in _RETRY_STATUSES and attempt < len(delays):
+            # Transient statuses worth one short retry ladder (529 = overloaded_error).
+            if r.status_code in (429, 500, 502, 503, 529) and attempt < len(delays):
                 try:
                     delay = float(r.headers.get("retry-after", ""))
                 except ValueError:
@@ -520,33 +492,34 @@ async def call_claude_json(system_prompt, user_content, max_tokens=1000,
             lead.set()
 
 
-async def expand_search(term):
-    return await call_claude_json(_EXPAND_SYSTEM, term, reply=ExpandReply)
-
-
-async def expand_location(term):
-    return await call_claude_json(_LOCATION_EXPAND_SYSTEM, term, reply=LocationReply)
-
-
-_COMPANY_MISSION_SYSTEM = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
+async def expand_search(term: str) -> ExpandReply | None:
+    system = f"""You are a job-search strategist for this candidate:
 
 {_CANDIDATE}
+{_AVOID}
 
-Return ONLY a JSON object with exactly:
-- "mission": one of
-{_tier_enum()}
-- "score": 0.0-1.0 alignment with the candidate's target — pick within the band for the tier you chose:
-{_tier_bands()}
-- "reason": one short phrase (<= 12 words)."""
+Given a job title, skill, or concept, return ONLY a JSON object with exactly three keys:
+- "titles": array of up to 12 alternative job-title strings to search for, matched to the candidate's reachable level.
+- "keywords": array of up to 12 technical keywords/skills/domain terms that surface more relevant listings.
+- "sectors": array of up to 12 company types, industry verticals, or named employers/labs where these roles exist."""
+    return await call_claude_json(system, term, reply=ExpandReply)
+
+
+async def expand_location(term: str) -> LocationReply | None:
+    system = """You are a geographic search strategist. Given a location term (a city, region, country, or qualifier like "remote"), return ONLY a JSON object with exactly two keys:
+- "include": array of up to 15 related location strings that should ALSO match when filtering jobs for this area. Examples: for "North Carolina", include "NC", "Durham", "Raleigh", "Chapel Hill", "Research Triangle", "RTP". For "remote", include "work from home", "wfh", "fully remote", "distributed", "anywhere".
+- "exclude": array of up to 8 location strings that should be explicitly excluded when someone specifies this search. Examples: for "us only", include common offshore locations the user likely wants to filter out.
+Use lowercase unless the token is normally capitalized (country codes etc)."""
+    return await call_claude_json(system, term, reply=LocationReply)
 
 
 class MissionReply(Reply):
-    mission: choice(*_MISSION_TIERS)
+    mission: choice(*_MISSION_TIERS)  # type: ignore[valid-type]  # see DiscoveredCompany
     score: Unit
     reason: str
 
     @property
-    def tier(self):
+    def tier(self) -> str | None:
         """`mission` when the profile names that tier, else None."""
         return self.mission if self.mission in _MISSION_TIERS else None
 
@@ -556,7 +529,8 @@ class MissionReply(Reply):
 # and its _STRENGTHS / _FIT_CAPS blocks were retired with it.
 
 
-async def score_company_mission(name, context=""):
+async def score_company_mission(name: str,
+                                context: str = "") -> tuple[str | None, float | None, str]:
     """Return (mission_tier|None, score|None, reason) for an employer."""
     # Deterministic bullseye anchor (profile [mission].bullseye_regex), checked
     # BEFORE the LLM: a company whose NAME is the candidate's exact target is
@@ -565,30 +539,25 @@ async def score_company_mission(name, context=""):
     # careers page anyway (this is how Science.xyz got mis-scored to 0.10).
     # Match the NAME only, never the reason text, where the model's negations
     # live ("no neurotech focus") and a substring match would invert the result.
-    if _BULLSEYE_RE is not None and _BULLSEYE_RE.search(name.lower()):
+    bullseye = config.MISSION_BULLSEYE_REGEX
+    if bullseye and re.search(bullseye, name.lower(), re.I):
         return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
+    tiers = "\n".join(f'    "{t["name"]}" — {t["desc"]}' for t in config.MISSION_TIERS)
+    system = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
+
+{_CANDIDATE}
+
+Return ONLY a JSON object with exactly:
+- "mission": one of
+{tiers}
+- "score": 0.0-1.0 alignment with the candidate's target — pick within the band for the tier you chose:
+{_tier_bands()}
+- "reason": one short phrase (<= 12 words)."""
     user = f"COMPANY: {name}\n\nSAMPLE POSTINGS / CONTEXT:\n{(context or '(none)')[:1500]}"
-    r = await call_claude_json(_COMPANY_MISSION_SYSTEM, user, max_tokens=120,
-                               reply=MissionReply)
+    r = await call_claude_json(system, user, max_tokens=120, reply=MissionReply)
     if r is None:
         return None, None, ""
     return r.tier, r.score, r.reason
-
-
-_BOARD_OWNER_SYSTEM = (
-    "You judge job-board ownership. Given a company name and evidence about "
-    "the ATS board its name resolved to (tenant/slug tokens, the board's "
-    "display name, sample job titles), decide whether that board is the "
-    "company's OWN hiring board — including former names, rebrands and "
-    "merged identities (Merck & Co. posts on Workday tenant 'msd') — or a "
-    "DIFFERENT organization's board: a parent conglomerate's shared board "
-    "(Genedata linking to Danaher's 'danaher'/'DanaherJobs'), or an "
-    "unrelated company that happens to hold a colliding short slug "
-    "(greenhouse 'ripple' is Ripple the payments company, not Ripple "
-    "Neuro). Sample job titles reveal the board's real industry — weigh "
-    "them heavily when given. "
-    'Reply with JSON only: {"same_employer": true|false, "reason": "<one line>"}'
-)
 
 
 class BoardOwnerReply(Reply):
@@ -599,10 +568,11 @@ class BoardOwnerReply(Reply):
 #: (company, board) -> the task of its paid call while it runs, then for
 #: the process a done future of its True/False (see board_is_own). Not run
 #: state (src/runstate.py): the next web UI op or harvest pass reuses it.
-_BOARD_OWNER_CACHE = {}
+_BOARD_OWNER_CACHE: dict[tuple[str, str], asyncio.Future[bool | None]] = {}
 
 
-async def board_is_own(company, board, site="", titles=()):
+async def board_is_own(company: str, board: str, site: str = "",
+                       titles: Iterable[str] = ()) -> bool | None:
     """True/False: is `board` (a Workday tenant, or "<ats>:<slug>")
     `company`'s own hiring board? None when the API is unavailable or the
     reply is malformed — callers keep the hit on None (offline behavior
@@ -625,15 +595,28 @@ async def board_is_own(company, board, site="", titles=()):
         forever. `titles` (sample postings from the board) is the decisive
         evidence for slug collisions.
     """
-    async def ask():
+    async def ask() -> bool | None:
+        system = (
+            "You judge job-board ownership. Given a company name and evidence about "
+            "the ATS board its name resolved to (tenant/slug tokens, the board's "
+            "display name, sample job titles), decide whether that board is the "
+            "company's OWN hiring board — including former names, rebrands and "
+            "merged identities (Merck & Co. posts on Workday tenant 'msd') — or a "
+            "DIFFERENT organization's board: a parent conglomerate's shared board "
+            "(Genedata linking to Danaher's 'danaher'/'DanaherJobs'), or an "
+            "unrelated company that happens to hold a colliding short slug "
+            "(greenhouse 'ripple' is Ripple the payments company, not Ripple "
+            "Neuro). Sample job titles reveal the board's real industry — weigh "
+            "them heavily when given. "
+            'Reply with JSON only: {"same_employer": true|false, "reason": "<one line>"}'
+        )
         user = f"COMPANY: {company}\nBOARD: {board}"
         if site:
             user += f"\nBOARD DISPLAY NAME / SITE: {site}"
         if titles:
             user += "\nSAMPLE JOB TITLES: " + " | ".join(
                 t for t in list(titles)[:8] if t)
-        r = await call_claude_json(_BOARD_OWNER_SYSTEM, user, max_tokens=150,
-                                   reply=BoardOwnerReply)
+        r = await call_claude_json(system, user, max_tokens=150, reply=BoardOwnerReply)
         return None if r is None else r.same_employer
     key = (str(company).lower(), str(board).lower())
     task = _BOARD_OWNER_CACHE.get(key)
@@ -643,7 +626,7 @@ async def board_is_own(company, board, site="", titles=()):
         asking.add(task)
         task.add_done_callback(asking.discard)
 
-        def settled(t):
+        def settled(t: asyncio.Future[bool | None]) -> None:
             # Runs before any asker resumes; exception() marks an error seen.
             if _BOARD_OWNER_CACHE.get(key) is not t:
                 return

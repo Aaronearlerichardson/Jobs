@@ -22,6 +22,11 @@ config, the store, and the scrapers all depend on it, so it must stay a
 leaf (it used to be core.tags, which made config depend on core).
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import Any
+
 LOCAL = "local"
 SWEEP = "sweep"
 WATCH = "watch"
@@ -38,7 +43,7 @@ ALIASES = {
 }
 
 
-def canonical(tag):
+def canonical(tag: str | None) -> str:
     """The current name for a possibly-legacy tag token.
 
     Case- and whitespace-insensitive; unknown tokens pass through unchanged
@@ -62,7 +67,7 @@ def canonical(tag):
     return ALIASES.get(t, t)
 
 
-def parse(raw):
+def parse(raw: str | None) -> set[str]:
     """A company row's `tags` string -> a set of canonical tokens.
 
     Set order is not part of the contract, so sort before comparing —
@@ -89,7 +94,7 @@ def parse(raw):
     return {canonical(t) for t in (raw or "").split(",") if t.strip()}
 
 
-def join(tags):
+def join(tags: Iterable[str | None]) -> str | None:
     """A set of tokens -> the stored `tags` string (None when empty).
 
     Output is sorted, so the same token set always stores the same string
@@ -116,7 +121,7 @@ def join(tags):
     return ",".join(sorted({canonical(t) for t in tags if t})) or None
 
 
-def has(raw, tag):
+def has(raw: str | dict[str, Any] | None, tag: str) -> bool:
     """True if a company's stored `tags` -- the column, or the whole row --
     includes `tag`, legacy names too.
 

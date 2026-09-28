@@ -14,25 +14,29 @@ slot. Those were the thread runner's two bugs: a double-claimed slot, and
 a queue that stopped draining.
 """
 
+from __future__ import annotations
+
 import asyncio
 import functools
 import io
 import secrets
 import sys
 from collections import deque
+from collections.abc import Awaitable, Callable
 from datetime import datetime
+from typing import Any, TextIO
 
 from src import config, runstate
 from src import session_log
 from src.claude import api as claude_api
 from src.dispatch import registry
 
-TASK = {"name": None, "task": None, "log": [], "log_offset": 0,
-        "started": None, "ended": None, "error": None, "stopped": False,
-        "active": False}
+TASK: dict[str, Any] = {"name": None, "task": None, "log": [], "log_offset": 0,
+                        "started": None, "ended": None, "error": None, "stopped": False,
+                        "active": False}
 
 
-def _log_lines(lines):
+def _log_lines(lines: list[str]) -> None:
     """Add `lines` to the op's log, its head trimmed past 5000 lines (see
     _Tee). On the loop."""
     log = TASK["log"]
@@ -66,13 +70,14 @@ class _Tee(io.TextIOBase):
     `status` can translate an absolute cursor back into a list index
     (`since - log_offset`) that stays correct across trims."""
 
-    def __init__(self, orig, loop, sink=None, err=False):
+    def __init__(self, orig: TextIO, loop: asyncio.AbstractEventLoop,
+                 sink: session_log.SessionLog | None = None, err: bool = False) -> None:
         self.orig = orig
         self.loop = loop
         self.sink = sink
         self._err = err
 
-    def write(self, s):
+    def write(self, s: str) -> int:
         try:
             self.orig.write(s)
         except Exception:
@@ -97,7 +102,7 @@ class _Tee(io.TextIOBase):
                 pass
         return len(s)
 
-    def flush(self):
+    def flush(self) -> None:
         try:
             self.orig.flush()
         except Exception:
@@ -113,7 +118,7 @@ class _Tee(io.TextIOBase):
 _BASELINE_KW = config.keyword_snapshot()
 
 
-def _start(entry):
+def _start(entry: dict[str, Any]) -> None:
     """Claim the slot for `entry` and start its op's task. On the loop."""
     TASK.update(name=entry["name"], error=None, ended=None, stopped=False,
                 started=datetime.now().isoformat(), active=True,
@@ -123,7 +128,7 @@ def _start(entry):
     task.add_done_callback(_hand_off)
 
 
-def _hand_off(task):
+def _hand_off(task: asyncio.Task[None]) -> None:
     """The op task's done callback: the slot to the next queued entry, or
     freed. On the loop, so nothing can queue between the look and the
     release; a callback, so a task cancelled before its first step (its
@@ -138,13 +143,14 @@ def _hand_off(task):
         _start(entry)
 
 
-async def _run(name, fn):
+async def _run(name: str, fn: Callable[[], Awaitable[Any]]) -> None:
     """One op, a run of its own (src/runstate.py: fresh memos, a re-armed
     Claude breaker): `await fn()` with the console tee'd into its log (and
     a session log of its own). An exception is the op's error; a cancel
     (`stop`) marks it stopped."""
     async with runstate.Run():
         orig_out, orig_err = sys.stdout, sys.stderr
+        slog: session_log.SessionLog | None
         try:
             slog = session_log.open_log(f"webui-{name}", f"web UI op {name!r}")
         except OSError:
@@ -162,7 +168,8 @@ async def _run(name, fn):
             # browser shows it like any print.
             print(f"  [!] operation failed: {TASK['error']}", file=sys.stderr)
         finally:
-            if asyncio.current_task().cancelling():
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
                 TASK["stopped"] = True
                 print("  [!] operation stopped", file=sys.stderr)
             # This op's own Claude spend, while its log is still open.
@@ -193,19 +200,21 @@ async def _run(name, fn):
 # Nothing here survives a restart: the queue is in memory, and a config save
 # relaunches the process (src/web/server.py schedule_restart), which is why
 # routes.py refuses to save while entries are waiting.
-QUEUE = deque()
+QUEUE: deque[dict[str, Any]] = deque()
 
 
-def _entry_json(entry, position, duplicate=None):
+def _entry_json(entry: dict[str, Any], position: int,
+                duplicate: bool | None = None) -> dict[str, Any]:
     """One queue entry as the browser sees it — everything but the callable."""
-    d = {"id": entry["id"], "name": entry["name"], "position": position,
-         "enqueued_at": entry["enqueued_at"], "params": entry["params"]}
+    d: dict[str, Any] = {"id": entry["id"], "name": entry["name"], "position": position,
+                         "enqueued_at": entry["enqueued_at"], "params": entry["params"]}
     if duplicate is not None:
         d["duplicate"] = duplicate
     return d
 
 
-async def submit(name, args, fn):
+async def submit(name: str, args: registry.OpParams,
+                 fn: Callable[[], Awaitable[Any]]) -> dict[str, Any] | None:
     """Run `fn()` (a coroutine) now if the slot is free, else put it in
     the run queue.
 
@@ -233,7 +242,7 @@ async def submit(name, args, fn):
     return _entry_json(entry, len(QUEUE), duplicate=False)
 
 
-async def stop():
+async def stop() -> bool:
     """Cancel the running op (its open store batch rolls back), once; True
     when one was running. The queue is left as it is: the next entry
     starts once the op has unwound."""
@@ -245,7 +254,7 @@ async def stop():
     return True
 
 
-async def status(since=0):
+async def status(since: int = 0) -> dict[str, Any]:
     """The runner as the browser polls it: whether an op runs, its name,
     times, error and `stopped`, the log lines past the absolute cursor
     `since` (see _Tee) with the new `total`, and the waiting queue."""
@@ -258,7 +267,7 @@ async def status(since=0):
             "queue": [_entry_json(e, i + 1) for i, e in enumerate(QUEUE)]}
 
 
-async def queue_remove(entry_id):
+async def queue_remove(entry_id: str) -> bool:
     """Drop one WAITING entry. False if it is unknown — which includes the
     entry that has just been handed the runner slot (`stop` ends that)."""
     for i, e in enumerate(QUEUE):
@@ -268,7 +277,7 @@ async def queue_remove(entry_id):
     return False
 
 
-async def queue_clear():
+async def queue_clear() -> int:
     """Drop every waiting entry; returns how many there were. Whatever is
     already running keeps running."""
     n = len(QUEUE)

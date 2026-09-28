@@ -1,12 +1,15 @@
 """Résumé text extraction + caching for per-job fit scoring."""
 
+from __future__ import annotations
+
 import re
 import zipfile
+from os import PathLike
 
 from src import config, runstate
 
 
-def _extract_docx(path):
+def _extract_docx(path: str | PathLike[str]) -> str:
     with zipfile.ZipFile(path) as z:
         xml = z.read("word/document.xml").decode("utf-8", "ignore")
     lines = []
@@ -22,7 +25,7 @@ def _extract_docx(path):
     return text
 
 
-def _read_resume():
+def _read_resume() -> str:
     """The résumé as plain text: .docx, or plain .txt/.md; "" (said) when
     the configured RESUME_PATH is missing or unreadable."""
     path = config.RESUME_PATH

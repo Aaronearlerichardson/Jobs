@@ -12,6 +12,11 @@ model suggested and a resolver confirmed is exactly the kind of name that
 used to reach the roster without ever having been an employer.
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, Any
+
 from src import store
 from src import tags
 from src.ats import coords
@@ -20,8 +25,13 @@ from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 
+if TYPE_CHECKING:
+    import sqlite3
 
-def _candidate_hit(c):
+    from .pipeline import Candidate
+
+
+def _candidate_hit(c: Candidate) -> dict[str, Any] | None:
     """A confirmed Candidate as the resolver-shaped hit dict the store write
     path takes, or None when its coordinates are malformed. A handle
     spanning several store columns ('t|p|s', Workday's) goes back to the
@@ -36,13 +46,15 @@ def _candidate_hit(c):
     its URL, as a malformed one (src.discovery.resolve.board returns exactly
     that for a real careers page on no known platform).
     """
-    slug = (c.slug_guess or "").strip() or None
+    # The handle: a string, or the tuple of a multi-column one.
+    slug: Any = (c.slug_guess or "").strip() or None
     board = board_for(c.ats)
     if board and board.multi_column:
         parts = (slug or "").split(board.spec.handle.sep)
         kinds = next((d.transform for d in board.spec.detect if d.transform),
                      (None,) * len(parts))
-        slug = tuple(TRANSFORMS[k](p) if k else p for p, k in zip(parts, kinds))
+        slug = tuple(TRANSFORMS[k](p) if k else p
+                     for p, k in zip(parts, kinds))
         if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in slug):
             return None
     hit = {"name": c.name, "ats": c.ats, "slug": slug,
@@ -53,7 +65,7 @@ def _candidate_hit(c):
     return hit if store.board_key(coords.from_hit(hit)) else None
 
 
-async def apply_to_store(result, dry_run: bool = False) -> list[str]:
+async def apply_to_store(result: dict[str, Any], dry_run: bool = False) -> list[str]:
     """Mission-score confirmed candidates and write them to the companies
     table; return summary lines. `dry_run=True` reports without writing —
     and without paying for a mission call.
@@ -142,7 +154,7 @@ async def apply_to_store(result, dry_run: bool = False) -> list[str]:
 # Getro-specific except the `source` prefix, which is now an argument.
 
 
-def _coords_from_urls(urls):
+def _coords_from_urls(urls: Iterable[str | None]) -> dict[str, Any] | None:
     """Roster-shaped board coordinates for the employer, read off its
     apply links, or None when none of them names a known ATS."""
     for url in urls:
@@ -150,11 +162,12 @@ def _coords_from_urls(urls):
         if not hit:
             continue
         return coords.columns(hit[1], hit[2],
-                              pack(hit[1], hit[2], url)["careers_url"])
+                              pack(hit[1], hit[2], url or "")["careers_url"])
     return None
 
 
-def attribute_employers(conn, jobs, commit=True, source="getro"):
+def attribute_employers(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
+                        commit: bool = True, source: str = "getro") -> list[dict[str, Any]]:
     """Link each board-sourced job to its employer's roster row, queueing
     employers the roster lacks for review. Returns the jobs to keep.
 
@@ -181,7 +194,7 @@ def attribute_employers(conn, jobs, commit=True, source="getro"):
 
     See tests/test_fetcher_parsers.py::TestGetroAttribution.
     """
-    groups = {}
+    groups: dict[str, list[dict[str, Any]]] = {}
     for j in jobs:
         emp = j.get("_employer")
         if isinstance(emp, dict) and (emp.get("name") or emp.get("slug")):
@@ -191,7 +204,7 @@ def attribute_employers(conn, jobs, commit=True, source="getro"):
         return list(jobs)
 
     blocked = store.blocked_name_keys(conn)
-    drop = set()
+    drop: set[int] = set()
     for key, group in groups.items():
         emp = group[0]["_employer"]
         name = emp.get("name") or key

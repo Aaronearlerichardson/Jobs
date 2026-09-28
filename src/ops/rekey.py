@@ -1,16 +1,18 @@
 """Job-id migration: rows stored under an id rule a board spec has since
 changed."""
 
+from __future__ import annotations
+
+import sqlite3
+from typing import Any, cast
+
 from src import store
 from src.ats.board import board_for
 from src.ops.maintenance import track_store
 
 
-REKEY_BUCKETS = ("unchanged", "rekey", "merge", "conflict", "cross-tenant",
-                 "unresolvable")
-
-
-def rekey_jobs(ats, commit=False, t=None, conn=None):
+def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
+               conn: sqlite3.Connection | None = None) -> dict[str, int]:
     """PREVIEW (default) or APPLY moving every stored job under an `ats`
     company to the id that board's spec gives it now (`Board.row_id`: the
     company's handle and the posting the row's URL names). Prints each
@@ -37,6 +39,8 @@ def rekey_jobs(ats, commit=False, t=None, conn=None):
         harvest under a new rule: upsert_job re-keys a row itself only on
         an exact URL and title match, and never moves its company_id.
     """
+    rekey_buckets = ("unchanged", "rekey", "merge", "conflict", "cross-tenant",
+                     "unresolvable")
     board = board_for(ats)
     if board is None:
         print(f"  [!] no board spec reads {ats!r} rows")
@@ -48,8 +52,9 @@ def rekey_jobs(ats, commit=False, t=None, conn=None):
         rows = [dict(r) for r in conn.execute(
             f"SELECT id, job_id, company_id, url, title FROM jobs "
             f"WHERE company_id IN ({ph}) ORDER BY id", tuple(companies))] if companies else []
-        buckets = {b: [] for b in REKEY_BUCKETS}
-        plan, claimed = [], {}
+        buckets: dict[str, list[tuple[str, str | None]]] = {b: [] for b in rekey_buckets}
+        plan: list[tuple[str, dict[str, Any], str | None, dict[str, Any] | None]] = []
+        claimed: dict[str | None, dict[str, Any]] = {}
         for r in rows:
             handle = board.handle(companies[r["company_id"]])
             new_id = board.row_id(handle, r["url"]) if handle else None
@@ -76,9 +81,11 @@ def rekey_jobs(ats, commit=False, t=None, conn=None):
                     if kind == "rekey":
                         conn.execute("UPDATE jobs SET job_id=? WHERE id=?", (new_id, r["id"]))
                     else:
-                        store.merge_jobs(conn, [holder["id"], r["id"]], new_id)
+                        # a "merge" always has its holder
+                        store.merge_jobs(conn, [cast(dict[str, Any], holder)["id"], r["id"]],
+                                         cast(str, new_id))
     print(f"  {ats}: {len(rows)} stored row(s) under {len(companies)} compan(ies)")
-    for b in REKEY_BUCKETS:
+    for b in rekey_buckets:
         print(f"    {b:13} {len(buckets[b])}")
         for old, new in buckets[b][:5] if b != "unchanged" else []:
             print(f"      {old!r} -> {new}")

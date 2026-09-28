@@ -9,12 +9,12 @@ profile-reading imports fail.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field
 
 
-def _api_schema(schema, _cls):
+def _api_schema(schema: dict[str, Any], _cls: type[BaseModel]) -> None:
     schema.pop("description", None)
     schema["additionalProperties"] = False
 
@@ -47,7 +47,7 @@ class Reply(BaseModel):
 Unit = Annotated[float, AfterValidator(lambda x: min(1.0, max(0.0, x)))]
 
 
-def choice(*values):
+def choice(*values: str) -> Any:
     """A string field the API schema limits to `values`, lower-cased on the
     way in: structured outputs do not guarantee an enum value's case. A
     value outside `values` still validates, for the caller to judge.

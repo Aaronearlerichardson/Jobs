@@ -28,32 +28,29 @@ changing which postings survive. What they do share is the matcher:
 every vocabulary walk in both goes through `filters.first_hit`.
 """
 
+from __future__ import annotations
+
 import re
 from functools import lru_cache
+from typing import Any
 
 from src import config
 from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
                                scrub_boilerplate, token_in)
 
-#: "radar" is only a defense signal in defense company. Not from the
-#: profile: this is the shape of the false positive (radar appears in
-#: automotive, weather and imaging postings), not a vocabulary choice.
-_RADAR_CONTEXT = ("military", "defense", "defence", "weapon", "warfare",
-                  "missile", "rf")
-
 
 @lru_cache(maxsize=32)
-def _title_re(pattern):
+def _title_re(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.I)
 
 
-def is_technical_role(title, t):
+def is_technical_role(title: str | None, t: dict[str, Any]) -> bool:
     """Cheap positive title gate for track `t` (a config.UI_TRACKS entry)."""
     return bool(_title_re(t["tech_title_regex"]).search(title or ""))
 
 
 @lru_cache(maxsize=32)
-def _exclude_tables(track_id):
+def _exclude_tables(track_id: str) -> dict[str, tuple[str, ...]]:
     """The [exclude.<track_id>] vocabulary, shaped for exclude_reason().
     Cached per track id — EXCLUDE_BY_TRACK is a load-time constant."""
     exc = getattr(config, "EXCLUDE_BY_TRACK", {}).get(track_id, {}) or {}
@@ -68,8 +65,8 @@ def _exclude_tables(track_id):
     }
 
 
-def exclude_reason(title, description="", allow_defense=False, *,
-                   track_id):
+def exclude_reason(title: str | None, description: str = "", allow_defense: bool = False, *,
+                   track_id: str) -> str | None:
     """Return a short reason string if the posting must be dropped, else
     None. Vocabulary comes from profile.toml [exclude.<track_id>].
 
@@ -134,9 +131,12 @@ def exclude_reason(title, description="", allow_defense=False, *,
             return f"defense: {'+'.join(weak[:3])}"
         # Military RF-radar: only exclude "radar" in a defense context
         # ("rf" is a bounded token, so "RF/microwave" counts and "perf"
-        # does not).
-        if "radar" in scrubbed and first_hit(_RADAR_CONTEXT, scrubbed,
-                                             SHORT_EXCLUDE):
+        # does not). Not from the profile: this is the shape of the false
+        # positive (radar appears in automotive, weather and imaging
+        # postings), not a vocabulary choice.
+        if "radar" in scrubbed and first_hit(
+                ("military", "defense", "defence", "weapon", "warfare", "missile", "rf"),
+                scrubbed, SHORT_EXCLUDE):
             return "defense: military radar"
 
     hit = first_hit(tables["nonclinical"], text, BOUNDED)

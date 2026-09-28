@@ -9,9 +9,10 @@ import json
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
-from flask import abort, jsonify, make_response, request, send_file
+from flask import Response, abort, jsonify, make_response, request, send_file
+from flask.typing import ResponseReturnValue
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from src import config
@@ -38,13 +39,13 @@ class _Body(BaseModel):
     track: str | None = None
 
 
-def _invalid(lines, what="bad request"):
+def _invalid(lines: list[str], what: str = "bad request") -> tuple[Response, int]:
     """The 400 for input that failed validation: `error` for the UI's toast,
     `errors` one 'path: problem' line per bad key."""
     return jsonify(error=f"{what}: " + "; ".join(lines), errors=lines), 400
 
 
-def _body(model=_Body):
+def _body[M: BaseModel](model: type[M]) -> M:
     """The request's JSON body (none reads as {}) as `model`; aborts with
     `_invalid` otherwise."""
     try:
@@ -53,16 +54,17 @@ def _body(model=_Body):
         abort(make_response(_invalid(error_lines(e))))
 
 
-def _track(tid=None):
+def _track(tid: str | None = None) -> dict[str, Any]:
     """Resolve the request's track config ([tracks.*] in profile.toml) from
     ?track=<id>, else `tid` (a JSON body's "track"). Unknown ids fall back
     to the default track rather than erroring: a stale localStorage value
     after a config edit shouldn't brick the UI."""
     tid = request.args.get("track") or tid or config.DEFAULT_TRACK
-    return config.UI_TRACKS.get(tid) or config.UI_TRACKS[config.DEFAULT_TRACK]
+    return (config.UI_TRACKS.get(cast(str, tid))
+            or config.UI_TRACKS[cast(str, config.DEFAULT_TRACK)])
 
 
-def _today():
+def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
@@ -71,7 +73,7 @@ def _today():
 # --------------------------------------------------------------------------- #
 
 @app.post("/api/run/<name>")
-def api_run(name):
+def api_run(name: str) -> ResponseReturnValue:
     """Start an operation, or put it in the run queue behind the one already
     running (202 rather than the old 409 — the request is kept, not lost).
 
@@ -104,26 +106,26 @@ def api_run(name):
 
 
 @app.delete("/api/run/queue/<entry_id>")
-def api_run_queue_remove(entry_id):
+def api_run_queue_remove(entry_id: str) -> ResponseReturnValue:
     if not call(queue_remove(entry_id)):
         return jsonify(error="not waiting in the run queue"), 404
     return jsonify(removed=True)
 
 
 @app.delete("/api/run/queue")
-def api_run_queue_clear():
+def api_run_queue_clear() -> ResponseReturnValue:
     return jsonify(removed=call(queue_clear()))
 
 
 @app.post("/api/run/stop")
-def api_run_stop():
+def api_run_stop() -> ResponseReturnValue:
     """Cancel the running operation (`stopping`: whether one was running);
     the queue behind it carries on."""
     return jsonify(stopping=call(stop()))
 
 
 @app.get("/api/run/status")
-def api_run_status():
+def api_run_status() -> ResponseReturnValue:
     # `since` is an ABSOLUTE line count (src.dispatch.background._Tee), not
     # a raw index into the log, which gets its head chopped off once it
     # passes 5000 lines (see background.status).
@@ -135,23 +137,7 @@ def api_run_status():
 #  Jobs / pipeline / companies / stats                                         #
 # --------------------------------------------------------------------------- #
 
-_JOB_FIELDS = (
-    "job_id", "title", "company_name", "url", "location", "geo_mode",
-    "resume_fit_score", "combined_score", "mission_tier", "mission_score",
-    "fit_reason", "fit_gates", "fit_domain", "fit_function", "fit_stack",
-    "fit_seniority", "posted_at", "first_seen", "last_seen", "status",
-    "disposition", "disposition_note", "disposition_at",
-    # Application-pipeline tracking (store.PipelineFields + the stamp).
-    "applied_at", "followup_at", "contact", "referral", "outcome_reason",
-    # store.ranked_jobs(collapse=True) (the default /api/jobs uses): how many
-    # same-company/same-title postings this row stands in for, and the
-    # job_id/url of each of the others, so the Jobs tab can say "(N similar
-    # postings)" the way the digest does and let a person open them too.
-    "dup_count", "dup_job_ids", "dup_urls",
-)
-
-
-def _geo_tag(r):
+def _geo_tag(r: dict[str, Any]) -> str:
     """Live geo bucket for a job row: "local" (configured locality),
     "remote", or "relocation" (onsite somewhere the user would have to move
     to). Derived at serve time from the location string — the stored
@@ -167,8 +153,23 @@ def _geo_tag(r):
     return "relocation"
 
 
-def _job_json(r, today, rank=None, remote_floor=None):
-    d = {k: r.get(k) for k in _JOB_FIELDS}
+def _job_json(r: dict[str, Any], today: str, rank: int | None = None,
+              remote_floor: float | None = None) -> dict[str, Any]:
+    fields = (
+        "job_id", "title", "company_name", "url", "location", "geo_mode",
+        "resume_fit_score", "combined_score", "mission_tier", "mission_score",
+        "fit_reason", "fit_gates", "fit_domain", "fit_function", "fit_stack",
+        "fit_seniority", "posted_at", "first_seen", "last_seen", "status",
+        "disposition", "disposition_note", "disposition_at",
+        # Application-pipeline tracking (store.PipelineFields + the stamp).
+        "applied_at", "followup_at", "contact", "referral", "outcome_reason",
+        # store.ranked_jobs(collapse=True) (the default /api/jobs uses): how many
+        # same-company/same-title postings this row stands in for, and the
+        # job_id/url of each of the others, so the Jobs tab can say "(N similar
+        # postings)" the way the digest does and let a person open them too.
+        "dup_count", "dup_job_ids", "dup_urls",
+    )
+    d: dict[str, Any] = {k: r.get(k) for k in fields}
     d["rank"] = rank
     d["age"] = digest.age_tag(r, today)
     d["verified"] = is_deep_verified(r.get("fit_reason"))
@@ -184,7 +185,7 @@ def _job_json(r, today, rank=None, remote_floor=None):
 
 
 @app.get("/api/jobs")
-def api_jobs():
+def api_jobs() -> ResponseReturnValue:
     t = _track()
     with track_store(t) as conn:
         # No server-side geo gate (location_re=None): every row in the track
@@ -204,7 +205,7 @@ def api_jobs():
 
 
 @app.get("/api/tracks")
-def api_tracks():
+def api_tracks() -> ResponseReturnValue:
     return jsonify([
         {"id": t["id"], "label": t["label"], "engine": t["engine"],
          "min_fit_default": t["min_fit_default"],
@@ -219,7 +220,7 @@ def api_tracks():
 
 
 @app.get("/api/job/<job_id>")
-def api_job(job_id):
+def api_job(job_id: str) -> ResponseReturnValue:
     with track_store(_track()) as conn:
         row = conn.execute("SELECT * FROM jobs WHERE job_id=?",
                            (job_id,)).fetchone()
@@ -236,7 +237,7 @@ class _Disposition(_Body):
 
 
 @app.post("/api/job/<job_id>/disposition")
-def api_disposition(job_id):
+def api_disposition(job_id: str) -> ResponseReturnValue:
     p = _body(_Disposition)
     with track_store(_track(p.track)) as conn:
         row, err = store.set_disposition(
@@ -244,7 +245,7 @@ def api_disposition(job_id):
             note=(p.note or "").strip() or None)
     if err:
         return jsonify(error=err), 400
-    return jsonify(ok=True, job_id=row["job_id"])
+    return jsonify(ok=True, job_id=cast(dict[str, Any], row)["job_id"])
 
 
 class _Pipeline(_Body, store.PipelineFields):
@@ -252,7 +253,7 @@ class _Pipeline(_Body, store.PipelineFields):
 
 
 @app.post("/api/job/<job_id>/pipeline")
-def api_pipeline_fields(job_id):
+def api_pipeline_fields(job_id: str) -> ResponseReturnValue:
     """Edit one application's tracking fields (store.PipelineFields).
 
     Only the keys actually present in the body are written, so the SPA's
@@ -268,11 +269,11 @@ def api_pipeline_fields(job_id):
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job=_job_json(
-        row, _today(), remote_floor=t.get("remote_mission_floor")))
+        cast(dict[str, Any], row), _today(), remote_floor=t.get("remote_mission_floor")))
 
 
 @app.get("/api/pipeline")
-def api_pipeline():
+def api_pipeline() -> ResponseReturnValue:
     t = _track()
     today = _today()
     floor = t.get("remote_mission_floor")
@@ -284,7 +285,7 @@ def api_pipeline():
 
 
 @app.get("/api/report/conversion")
-def api_conversion():
+def api_conversion() -> ResponseReturnValue:
     """Applications per fit band x geo_mode, with the interview rate — the
     Pipeline tab's answer to "which kind of job is actually converting?"."""
     with track_store(_track()) as conn:
@@ -293,7 +294,7 @@ def api_conversion():
 
 
 @app.get("/api/companies")
-def api_companies():
+def api_companies() -> ResponseReturnValue:
     with track_store(_track()) as conn:
         comps = store.get_companies(conn, active_only=False)
         # Open-job count AND best résumé fit per company in one pass: the
@@ -328,7 +329,7 @@ class _Toggle(_Body):
 
 
 @app.post("/api/company/<int:cid>/watch")
-def api_watch(cid):
+def api_watch(cid: int) -> ResponseReturnValue:
     p = _body(_Toggle)
     with track_store(_track(p.track)) as conn:
         row = conn.execute("SELECT name FROM companies WHERE id=?",
@@ -340,11 +341,11 @@ def api_watch(cid):
 
 
 @app.post("/api/company/<int:cid>/reactivate")
-def api_reactivate(cid):
+def api_reactivate(cid: int) -> ResponseReturnValue:
     """Undormant a company: crawl it every run again. The manual override
     for a board the dormancy rules retired too eagerly (a slug that was
     briefly broken, a team that has only just started hiring)."""
-    with track_store(_track(_body().track)) as conn:
+    with track_store(_track(_body(_Body).track)) as conn:
         row = conn.execute("SELECT id FROM companies WHERE id=?",
                            (cid,)).fetchone()
         if not row:
@@ -354,7 +355,7 @@ def api_reactivate(cid):
 
 
 @app.post("/api/company/<int:cid>/active")
-def api_active(cid):
+def api_active(cid: int) -> ResponseReturnValue:
     p = _body(_Toggle)
     with track_store(_track(p.track)) as conn:
         conn.execute("UPDATE companies SET active=? WHERE id=?",
@@ -372,25 +373,25 @@ def api_active(cid):
 
 
 @app.get("/api/pending")
-def api_pending():
+def api_pending() -> ResponseReturnValue:
     with track_store(_track()) as conn:
         rows = store.pending_companies(conn)
     return jsonify(rows)
 
 
 @app.post("/api/company/<int:cid>/confirm")
-def api_confirm(cid):
+def api_confirm(cid: int) -> ResponseReturnValue:
     """Accept a review candidate: the pending tag comes off and the shared
     mission rule decides whether it is crawled."""
     from src.claude.api import is_active_mission
-    with track_store(_track(_body().track)) as conn:
+    with track_store(_track(_body(_Body).track)) as conn:
         pending = store.get_company(conn, cid)
         if not pending:
             return jsonify(error="not found"), 404
         # The activation verdict is decided here and handed to the store, so
         # the persistence layer never has to reach into the Claude module.
         active = is_active_mission(pending.get("mission_tier"), pending["name"])
-        row = store.confirm_company(conn, cid, active=active)
+        row = cast(dict[str, Any], store.confirm_company(conn, cid, active=active))
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
 
@@ -399,7 +400,7 @@ class _Reason(_Body):
 
 
 @app.post("/api/company/<int:cid>/reject")
-def api_reject(cid):
+def api_reject(cid: int) -> ResponseReturnValue:
     """Throw a review candidate away: the row and its jobs go, and the name
     is blocklisted so discovery stops re-finding it."""
     p = _body(_Reason)
@@ -417,7 +418,7 @@ class _Paste(_Body):
 
 
 @app.post("/api/names/preview")
-def api_names_preview():
+def api_names_preview() -> ResponseReturnValue:
     """Parse a pasted page into review rows WITHOUT resolving anything.
 
     Step one of the paste flow: resolving is what costs the requests, so the
@@ -439,7 +440,7 @@ class _Block(_Reason):
 
 
 @app.post("/api/names/block")
-def api_names_block():
+def api_names_block() -> ResponseReturnValue:
     """Blocklist the names a person marked 'not a company', so no discovery
     path spends requests on them again."""
     # No busy guard, for two reasons. Correctness: the paste flow blocks the
@@ -461,7 +462,7 @@ def api_names_block():
 
 
 @app.post("/api/import/companies")
-def api_import():
+def api_import() -> ResponseReturnValue:
     """Upsert companies from an exported roster JSON (idempotent — tags
     merge, existing mission scores survive None fields)."""
     f = request.files.get("file")
@@ -487,7 +488,7 @@ def api_import():
 
 
 @app.get("/api/export/companies")
-def api_export():
+def api_export() -> ResponseReturnValue:
     with track_store(_track()) as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM companies ORDER BY name").fetchall()]
@@ -502,7 +503,7 @@ def api_export():
 #  Config editing (Settings tab) + graceful self-restart                        #
 # --------------------------------------------------------------------------- #
 
-def _config_busy():
+def _config_busy() -> ResponseReturnValue | None:
     """Refuse a config save while work is running OR waiting.
 
     Saving schedules a self-restart (server.py schedule_restart relaunches
@@ -526,7 +527,7 @@ def _config_busy():
 
 
 @app.get("/api/config")
-def api_config_get():
+def api_config_get() -> ResponseReturnValue:
     raw, source = profile_edit.read_raw()
     try:
         import tomllib
@@ -545,11 +546,11 @@ class _Updates(_Body):
 
 
 @app.post("/api/config/validate")
-def api_config_validate():
+def api_config_validate() -> ResponseReturnValue:
     return jsonify(errors=profile_edit.validate(_body(_Toml).toml))
 
 
-def _save_config(text):
+def _save_config(text: str) -> ResponseReturnValue:
     errors = profile_edit.validate(text)
     if errors:
         return _invalid(errors, "validation failed")
@@ -559,7 +560,7 @@ def _save_config(text):
 
 
 @app.put("/api/config")
-def api_config_put():
+def api_config_put() -> ResponseReturnValue:
     busy = _config_busy()
     if busy:
         return busy
@@ -574,7 +575,7 @@ def api_config_put():
 
 
 @app.put("/api/config/raw")
-def api_config_put_raw():
+def api_config_put_raw() -> ResponseReturnValue:
     busy = _config_busy()
     if busy:
         return busy
@@ -582,12 +583,12 @@ def api_config_put_raw():
 
 
 @app.get("/api/stats")
-def api_stats():
+def api_stats() -> ResponseReturnValue:
     t = _track()
     today = _today()
     with track_store(t) as conn:
 
-        def one(q, args=()):
+        def one(q: str, args: tuple[Any, ...] = ()) -> Any:
             return conn.execute(q, args).fetchone()[0]
 
         stats = {
@@ -640,7 +641,7 @@ def api_stats():
     return jsonify(stats)
 
 
-def _asset_version():
+def _asset_version() -> str:
     """Fingerprint of the front-end files, for cache-busting."""
     h = hashlib.md5()
     for p in sorted((Path(app.root_path) / "static").rglob("*")):
@@ -651,7 +652,7 @@ def _asset_version():
 
 
 @app.get("/")
-def index():
+def index() -> Response:
     # Served as a plain file, NOT via Jinja — the SPA's JS contains
     # template-looking fragments a render pass would corrupt. The only
     # rewriting is a cache-buster stamped onto the asset URLs: the CSS/JS
@@ -669,7 +670,7 @@ def index():
 
 
 @app.after_request
-def _no_store_assets(resp):
+def _no_store_assets(resp: Response) -> Response:
     """Never let the browser reuse a stale front-end. Single-user localhost:
     correctness beats the microscopic win from caching a 40 KB file."""
     if request.path.startswith("/static/"):

@@ -23,3 +23,5 @@ lives here, grouped by what it does rather than by when it was written:
                 web UI's op runner
     web/        the Flask UI
 """
+
+from __future__ import annotations

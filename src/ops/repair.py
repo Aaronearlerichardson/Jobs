@@ -1,18 +1,28 @@
 """Roster repair: deactivate dead boards, retry the rows that never
 resolved, rename boards still named after their own slug."""
 
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 from src import config
 from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
+from src.ats.board.engine import Board
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
 
+if TYPE_CHECKING:
+    from sqlite3 import Connection
 
-async def prune_dead_boards(db, max_workers=12, deactivate_offmission=False):
+
+async def prune_dead_boards(db: store.Writer | Connection, max_workers: int = 12,
+                            deactivate_offmission: bool = False) -> tuple[int, int]:
     """Deactivate active companies whose JSON-API ATS board no longer resolves
     (a hard 404/error, the source of the crawl's `HTTP 404` spam), and
     optionally off-mission `other`-tier companies (excluding multi-division).
@@ -37,7 +47,7 @@ async def prune_dead_boards(db, max_workers=12, deactivate_offmission=False):
                 if c.get("ats") in PROBE and c.get("slug")]
         print(f"  probing {len(rows)} board(s) for a dead ATS endpoint...")
 
-        async def _check(c):
+        async def _check(c: dict[str, Any]) -> tuple[dict[str, Any], bool]:
             ok, _ = await PROBE[c["ats"]](c["slug"])
             return c, ok
 
@@ -49,7 +59,7 @@ async def prune_dead_boards(db, max_workers=12, deactivate_offmission=False):
         return len(dead), await db.batch(_deactivate, dead, deactivate_offmission)
 
 
-def _deactivate(conn, dead, offmission):
+def _deactivate(conn: sqlite3.Connection, dead: list[dict[str, Any]], offmission: bool) -> int:
     """prune_dead_boards' writes, in its one batch: the `dead` boards, then
     with `offmission` the off-mission companies; returns how many of those."""
     for c in dead:
@@ -99,15 +109,8 @@ RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
 # _silent_board_candidates -- so a pass opts into it through
 # reresolve_misses's `families` rather than getting it by default.
 SILENT_FAMILY = "silent-board"
-# How long a board must have listed nothing before it counts as silent
-# (last_nonempty_at, or created_at when it never had one, at least this
-# old), and how recently it must still have been harvested to count as
-# "still being tracked" rather than abandoned.
-SILENT_DAYS = 7
-SILENT_HARVESTED_WITHIN_DAYS = 3
-
-
-def _silent_board_candidates(conn, now=None):
+def _silent_board_candidates(conn: sqlite3.Connection,
+                             now: datetime | None = None) -> list[dict[str, Any]]:
     """Harvested boards that have listed nothing in >= SILENT_DAYS days --
     a resolution that stopped being true, not a resolution failure (those
     are RERESOLVE_FAMILIES's job). Carries no miss_reason of its own, so
@@ -184,9 +187,15 @@ def _silent_board_candidates(conn, now=None):
     """
     from src.store.companies import CAPTURE_ATS
 
+    # How long a board must have listed nothing before it counts as silent
+    # (last_nonempty_at, or created_at when it never had one, at least this
+    # old), and how recently it must still have been harvested to count as
+    # "still being tracked" rather than abandoned.
+    silent_days = 7
+    silent_harvested_within_days = 3
     now = now or datetime.now()
-    silent_cut = (now - timedelta(days=SILENT_DAYS)).isoformat()
-    harvested_cut = (now - timedelta(days=SILENT_HARVESTED_WITHIN_DAYS)
+    silent_cut = (now - timedelta(days=silent_days)).isoformat()
+    harvested_cut = (now - timedelta(days=silent_harvested_within_days)
                     ).isoformat()
     return [dict(r) for r in conn.execute(
         "SELECT * FROM companies WHERE ats IS NOT NULL AND ats != ? "
@@ -199,8 +208,9 @@ def _silent_board_candidates(conn, now=None):
         (CAPTURE_ATS, harvested_cut, silent_cut, silent_cut)).fetchall()]
 
 
-def _reresolve_candidates(conn, days=None, names=None, limit=50,
-                          families=RERESOLVE_FAMILIES):
+def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
+                          names: Iterable[str] | None = None, limit: int | None = 50,
+                          families: Collection[str] = RERESOLVE_FAMILIES) -> list[dict[str, Any]]:
     """The rows a re-resolution pass should retry, oldest evidence first.
 
     Only the requested miss families are selected among rows the crawl is
@@ -273,7 +283,7 @@ def _reresolve_candidates(conn, days=None, names=None, limit=50,
     if SILENT_FAMILY in families:
         rows += _silent_board_candidates(conn)
 
-    def since(r):
+    def since(r: dict[str, Any]) -> str:
         # A NULL miss_at predates the column: unknown age, so old enough.
         if r["miss_reason"]:
             return r.get("miss_at") or ""
@@ -285,9 +295,11 @@ def _reresolve_candidates(conn, days=None, names=None, limit=50,
     return out[:int(limit)] if limit else out
 
 
-async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
-                           names=None, t=None, families=RERESOLVE_FAMILIES,
-                           commit=True):
+async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
+                           max_workers: int = 6, days: int | None = None,
+                           names: Iterable[str] | None = None, t: dict[str, Any] | None = None,
+                           families: Iterable[str] | None = RERESOLVE_FAMILIES,
+                           commit: bool = True) -> list[dict[str, Any]]:
     """Retry the roster rows that died at resolution; queue every hit for
     human review. Returns the rows written.
 
@@ -340,7 +352,7 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
     t = _t(t)
     async with track_writer(t, db) as db:
 
-        async def miss(name, reason):
+        async def miss(name: str, reason: str) -> None:
             if commit:
                 await db.run(store.record_miss, name, reason)
 
@@ -370,7 +382,10 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
         # is the point of the family), so `was` falls back to naming the
         # family for the [miss]/[pending] print lines below.
         was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
-        written, still, dups, stalled = [], [], [], []
+        written: list[dict[str, Any]] = []
+        still: list[tuple[str, str]] = []
+        dups: list[str] = []
+        stalled: list[dict[str, Any]] = []
 
         async for r, (hit, reason) in fan_out(
                 rows, lambda r: resolved(r["name"], r.get("careers_url") or ""),
@@ -378,8 +393,8 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
                 stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
             name = r["name"]
             if not hit:
-                await miss(name, reason)
-                still.append((name, reason))
+                await miss(name, cast(str, reason))
+                still.append((name, cast(str, reason)))
                 print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
                 continue
             board = coords.from_hit(hit, name=name)
@@ -428,7 +443,7 @@ async def reresolve_misses(db=None, limit=50, max_workers=6, days=None,
         return written
 
 
-def _retarget(conn, name, row):
+def _retarget(conn: sqlite3.Connection, name: str, row: dict[str, Any]) -> None:
     """Point the company `name` at the board `row` names. upsert_company
     drops None values so it can never erase a stored one -- which would
     leave the dead board's slug beside a new Workday triple -- so the
@@ -474,12 +489,8 @@ def _retarget(conn, name, row):
 #     read at all rather than screen-scraped freshly for this one op.
 
 
-def _employer_atses():
-    return sorted(b.name for b in BOARDS.values() if b.spec.employer)
-
-
-def _slug_named_boards(conn):
-    """The active companies on a supported ATS (_employer_atses)
+def _slug_named_boards(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """The active companies on a supported ATS (a spec naming its `employer`)
     that src.ats.coords.slug_named calls slug-named -- the same rule, and
     the same one definition of it, the HARVEST SUMMARY's own tally
     applies. Biggest board first -- the boards a wrong name embarrasses
@@ -499,7 +510,7 @@ def _slug_named_boards(conn):
         or a human to catch, not this op to paper over by renaming NeU to
         Fora.
     """
-    atses = _employer_atses()
+    atses = sorted(b.name for b in BOARDS.values() if b.spec.employer)
     ph = ",".join("?" for _ in atses)
     rows = [dict(r) for r in conn.execute(
         f"SELECT id, name, ats, slug, source, total_job_count FROM companies "
@@ -510,7 +521,9 @@ def _slug_named_boards(conn):
     return rows
 
 
-async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
+async def rename_slug_boards(db: store.Writer | None = None, t: dict[str, Any] | None = None,
+                             commit: bool = False, limit: int | None = None
+                             ) -> list[tuple[int, str, str]]:
     """PREVIEW (default) or APPLY a rename of every active, dork-sourced
     Greenhouse/SmartRecruiters board whose stored name is nothing but its
     own board slug (_slug_named_boards) to the employer name the board's
@@ -573,9 +586,9 @@ async def rename_slug_boards(db=None, t=None, commit=False, limit=None):
               f"its employer name...")
         existing = {name_key(r["name"]): r["name"] for r in await db.run(
             lambda conn: conn.execute("SELECT name FROM companies").fetchall())}
-        out = []
+        out: list[tuple[int, str, str]] = []
         for c in rows:
-            new_name = await board_for(c["ats"]).employer_name(c["slug"])
+            new_name = await cast(Board, board_for(c["ats"])).employer_name(c["slug"])
             label = f"{c['name'][:30]:30} {c['ats']:15}"
             if not new_name:
                 print(f"    [skip]      {label} board answered no employer name")

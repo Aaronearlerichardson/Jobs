@@ -19,19 +19,26 @@ not registry ops (watch, mark, pipeline, export/import) are store
 queries and edits with their own positional arguments.
 """
 
+from __future__ import annotations
+
 import argparse
+import sqlite3
 import sys
+from collections.abc import Callable
+from typing import Any
 
 from src import config, runstate
 from src.dispatch import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
+    # console stream is a TextIOWrapper, and anything else raises here.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 except Exception:
     pass
 
 
-def _resolve_track(name):
+def _resolve_track(name: str) -> dict[str, Any]:
     """A configured track by its id, or by its jobs.track value."""
     t = config.UI_TRACKS.get(name)
     if t:
@@ -43,22 +50,23 @@ def _resolve_track(name):
                      f"{', '.join(config.UI_TRACKS)}")
 
 
-def _op(name, params):
+def _op(name: str, params: Callable[[argparse.Namespace], dict[str, Any]]
+        ) -> Callable[[argparse.Namespace, dict[str, Any] | None], None]:
     """A command handler that runs registry op `name` with the params
     `params(args)` draws off the parsed arguments, against the --track
     selection (None = the op's own default-track rule): the process's one
     run (src/runstate.py)."""
-    def run(args, t):
+    def run(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
         runstate.run(registry.invoke(name, params(args), track=t))
     return run
 
 
-def _store(t):
+def _store(t: dict[str, Any] | None) -> sqlite3.Connection:
     from src import store
     return store.connect(t["db_path"] if t else None)
 
 
-def _cmd_watch(args, t):
+def _cmd_watch(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
     from src import store
     name = args.watch or args.unwatch
     conn = _store(t)
@@ -72,7 +80,7 @@ def _cmd_watch(args, t):
         print(f"  {verb} {name}  (tags: {tags or 'none'})")
 
 
-def _cmd_mark(args, t):
+def _cmd_mark(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
     from src import store
     disp, ref = args.mark
     conn = _store(t)
@@ -89,7 +97,7 @@ def _cmd_mark(args, t):
         print(f"    why: {args.why}")
 
 
-def _cmd_pipeline(args, t):
+def _cmd_pipeline(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
     from src import store
     conn = _store(t)
     rows = store.get_pipeline(conn)
@@ -105,7 +113,7 @@ def _cmd_pipeline(args, t):
               f"{p['company_name']}{note}")
 
 
-def _cmd_companies_io(args, t):
+def _cmd_companies_io(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
     from pydantic import ValidationError
     from src import store
     from src.config.profile_schema import error_lines
@@ -159,14 +167,14 @@ _COMMANDS = [
 ]
 
 
-def _selected(args, dest):
+def _selected(args: argparse.Namespace, dest: str) -> bool:
     """True when the flag behind `dest` was given: store_true flags are
     True, valued flags are non-None (an explicit 0 still counts)."""
     v = getattr(args, dest)
     return v is not None and v is not False
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description="Job crawler — daily refresh + maintenance",
         epilog="No flags = crawl every configured track (the daily refresh).")
@@ -310,12 +318,16 @@ def main(argv=None):
                   "confirm_cost": args.confirm_cost, "workers": args.workers,
                   "top": args.top, "samples": args.samples}
 
-        async def crawl():
+        async def crawl() -> None:
             for tcfg in ([t] if t else list(config.UI_TRACKS.values())):
                 await registry.invoke("crawl", params, track=tcfg)
         runstate.run(crawl())
     except registry.ParamError as e:
         ap.error(str(e))
+    finally:
+        # Here, not only atexit: a Ctrl+C is still unwinding, so the
+        # footer can say the run was stopped.
+        session_log.finish()
 
 
 if __name__ == "__main__":

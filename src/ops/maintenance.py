@@ -8,7 +8,13 @@ local-engine track) and derives the store, jobs.track value, gates and
 ranking knobs from it.
 """
 
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import AsyncIterator, Iterable, Iterator
 from contextlib import asynccontextmanager, contextmanager
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 from src import config
 from src import digest
@@ -20,19 +26,18 @@ from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
-from src.net.parallel import fan_out
+
+if TYPE_CHECKING:
+    from sqlite3 import Connection
 
 
-def _default_track():
-    return config.track_for_engine("local")
-
-
-def _t(t):
-    return t if t is not None else _default_track()
+def _t(t: dict[str, Any] | None) -> dict[str, Any]:
+    return t if t is not None else config.track_for_engine("local")
 
 
 @contextmanager
-def track_store(t=None, conn=None):
+def track_store(t: dict[str, Any] | None = None, conn: sqlite3.Connection | None = None
+                ) -> Iterator[sqlite3.Connection]:
     """The track's store, closed on the way out however the block ends --
     or `conn` itself, left open, when the caller already holds one (the
     crawl and the harvest pass hand an op the store they have open, which
@@ -60,11 +65,18 @@ def track_store(t=None, conn=None):
 
 
 @asynccontextmanager
-async def track_writer(t=None, db=None):
+async def track_writer(t: dict[str, Any] | None = None, db: store.Writer | Connection | None = None
+                       ) -> AsyncIterator[store.Writer]:
     """`track_store` for async code: the track's store on a store.Writer
     for the block -- or `db` itself when the caller already holds a Writer
     (the crawl, the harvest pass), or a Writer over `db` when it is an open
-    connection, which stays open."""
+    connection, which stays open.
+
+    Notes:
+        Its annotations name sqlite3's Connection unqualified: the
+        blocking-name check (tests/test_invariants.py) reads an async
+        def's signature too, and a type is not a call.
+    """
     if isinstance(db, store.Writer):
         yield db
         return
@@ -72,7 +84,7 @@ async def track_writer(t=None, db=None):
         yield w
 
 
-def group_by_company(rows, key="company_id"):
+def group_by_company(rows: Iterable[dict[str, Any]], key: str = "company_id") -> dict[Any, list[dict[str, Any]]]:
     """`rows` bucketed by `key` (their company id by default), in
     first-seen order.
 
@@ -83,13 +95,13 @@ def group_by_company(rows, key="company_id"):
     Both backfill paths need this: a board with several stale rows must be
     fetched once, not once per row.
     """
-    out = {}
+    out: dict[Any, list[dict[str, Any]]] = {}
     for r in rows:
         out.setdefault(r[key], []).append(r)
     return out
 
 
-async def board_index(company):
+async def board_index(company: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """One company's whole board, indexed by normalised title.
 
     Empty when the board cannot be pulled -- which is the same outcome as a
@@ -104,7 +116,7 @@ async def board_index(company):
     return {(b.get("title") or "").strip().lower(): b for b in board}
 
 
-async def board_match(index, title):
+async def board_match(index: dict[str, dict[str, Any]], title: str | None) -> dict[str, Any] | None:
     """The board row for `title`, hydrated, or None when the board does not
     cover it (or covers it with no body).
 
@@ -121,7 +133,7 @@ async def board_match(index, title):
     return match if match.get("description") else None
 
 
-def _ranked(conn, t, limit=None):
+def _ranked(conn: sqlite3.Connection, t: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
     """The track's ranked view — same knobs the crawl digest uses."""
     return store.ranked_jobs(
         conn, track=t["track"],
@@ -131,7 +143,9 @@ def _ranked(conn, t, limit=None):
         remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
 
 
-def _write_digest(conn, t, watch_hits=None):
+def _write_digest(conn: sqlite3.Connection, t: dict[str, Any],
+                  watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] | None = None
+                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
     triage funnel included. Returns (ranked, pipeline, followups,
     digest_path).
@@ -148,7 +162,8 @@ def _write_digest(conn, t, watch_hits=None):
     return ranked, pipeline, followups, path
 
 
-def rewrite_digest(conn, t, top_n=15, heading=""):
+def rewrite_digest(conn: sqlite3.Connection, t: dict[str, Any], top_n: int = 15,
+                   heading: str = "") -> list[dict[str, Any]]:
     """Rewrite the track's ranked digest from the store as it stands now,
     and print the top `top_n` of it. Returns the ranked list.
 
@@ -172,7 +187,7 @@ def rewrite_digest(conn, t, top_n=15, heading=""):
 #  Tag checks are tags.has(company, tags.WATCH) etc.                           #
 # --------------------------------------------------------------------------- #
 
-def _mission_trusted(company, floor):
+def _mission_trusted(company: dict[str, Any] | None, floor: float | None) -> bool:
     """True if a store company row earns watch-grade remote treatment on its
     mission score alone: `floor` (the track's `remote_mission_floor`,
     None = off) or better.
@@ -200,13 +215,15 @@ def _mission_trusted(company, floor):
          "mission_score": company.get("mission_score")}, floor)
 
 
-def _whole_board(company, mission_floor=None):
+def _whole_board(company: dict[str, Any], mission_floor: float | None = None) -> bool:
     """Whether a company's ENTIRE board is fetched, with no location filter.
 
     Either scope tag qualifies on its own — a sweep board is cheap to pull
     whole, a watched one must never miss a posting:
 
     >>> _whole_board({"name": "Acme", "tags": "watch"})
+    True
+    >>> _whole_board({"name": "Acme", "tags": "sweep"})
     True
     >>> _whole_board({"name": "Acme", "tags": "local"})
     False
@@ -219,6 +236,8 @@ def _whole_board(company, mission_floor=None):
     >>> core = {"name": "Acme", "tags": "local", "mission_score": 0.9}
     >>> _whole_board(core), _whole_board(core, 0.85)
     (False, True)
+    >>> _whole_board({"name": "Acme", "mission_score": 0.5}, 0.85)
+    False
 
     Everyone else gets the locality-scoped pull.
 
@@ -236,7 +255,7 @@ def _whole_board(company, mission_floor=None):
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company, job, t):
+async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any]) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -282,7 +301,8 @@ async def _keep_job(company, job, t):
     return True
 
 
-async def _scored_row(job, *, company_id, company_name, track, status=None):
+async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_name: str | None,
+                      track: str, status: str | None = None) -> dict[str, Any]:
     """Score one fetched posting and shape it into a jobs-table row.
 
     The crawl path and the external-ingest path build the same row and had
@@ -297,7 +317,7 @@ async def _scored_row(job, *, company_id, company_name, track, status=None):
     """
     res = await score_resume_fit(job["title"], job.get("description", ""),
                                  location=job.get("location") or "")
-    row = {
+    row: dict[str, Any] = {
         "job_id": job["id"], "company_id": company_id,
         "company_name": company_name,
         "title": job.get("title"), "url": job.get("url"),
@@ -314,46 +334,10 @@ async def _scored_row(job, *, company_id, company_name, track, status=None):
     return row
 
 
-async def _score_job(company, job, track):
+async def _score_job(company: dict[str, Any], job: dict[str, Any], track: str) -> dict[str, Any]:
     await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)
-
-
-async def crawl_company(db, company, max_workers=6, t=None):
-    """Fetch ONE store company's locality-scoped board (whole board for
-    watched/sweep-tagged companies), apply the track's filters, resume-fit-
-    score the new postings, and store them on `db` (a store.Writer).
-    Returns (n_fetched, n_kept, n_new). Used by the manual-add flow to pull
-    a company's other jobs once it's in the roster."""
-    t = _t(t)
-    loc_re = None if _whole_board(company,
-                                  t.get("remote_mission_floor")) else NC_RE
-    try:
-        jobs = await company_fetch.fetch_company(company, loc_re)
-    except Exception as e:
-        fetch_failed(f"fetch error for {company['name']}", e)
-        return (0, 0, 0)
-    # A successful non-empty snapshot is the authority on what this company
-    # currently lists: close stored rows that vanished, revive returners.
-    if jobs and company.get("id"):
-        await db.run(store.sync_job_statuses, company["id"], jobs, track=t["track"])
-    kept = [j for j in jobs if await _keep_job(company, j, t)]
-    fresh = await db.run(lambda conn: [j for j in kept
-                                       if not store.job_exists(conn, j["id"])])
-    n_new = 0
-    async for row in fan_out(fresh, lambda j: _score_job(company, j, t["track"]),
-                             "scoring", max_workers):
-        # Kept separate from the scoring failure fan_out reports: a store
-        # write that fails is not a scoring problem, and lumping the two
-        # together is what hid the write-lock starvation in harvest.py for
-        # a day (every locked write read as an unreachable board).
-        try:
-            await db.run(store.upsert_job, row)
-            n_new += 1
-        except Exception as e:
-            print(f"    [!] store error: {e}")
-    return (len(jobs), len(kept), n_new)
 
 
 # The miss-reason family status.check_closed_jobs closes on -- the one of

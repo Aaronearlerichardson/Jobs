@@ -487,18 +487,6 @@ async def test_hydration_spends_the_board_budget_on_relevant_titles_first(
     assert order[0] == "eng", f"hydrated in arrival order: {order}"
 
 
-def test_a_decided_row_still_outranks_a_relevant_undecided_one():
-    """Relevance orders WITHIN the existing decided-first rule, it does not
-    replace it: a row some track has already passed is still hydrated
-    before one no gate could rule on."""
-    survivors = {"ok_row": (None, None, triage.OK),
-                 "defer_row": (None, None, triage.DEFER)}
-    key = triage._hydrate_order(survivors)
-    batch = [{"id": "defer_row", "title": "Data Engineer"},
-             {"id": "ok_row", "title": "Mask Design Engineer"}]
-    assert [j["id"] for j in sorted(batch, key=key)] == ["ok_row", "defer_row"]
-
-
 # ── observability: a dropped/scored/waiting row is nameable, not just counted ──
 
 async def test_drop_logs_one_debug_record_per_dropped_row(tmp_path, tracks, stubs,

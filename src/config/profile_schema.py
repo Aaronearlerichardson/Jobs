@@ -10,11 +10,13 @@ error rather than a silent default.
 from __future__ import annotations
 
 import re
-from typing import Annotated, Literal
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator,
                       ConfigDict, Field, ValidationError, ValidationInfo,
                       field_validator, model_validator)
+from pydantic_core import ErrorDetails
 
 from src import tags
 
@@ -23,7 +25,7 @@ class ProfileError(ValueError):
     """A profile that does not match the schema. `lines` holds one
     'path: problem' entry per bad key."""
 
-    def __init__(self, source, lines):
+    def __init__(self, source: str | Path, lines: list[str]) -> None:
         self.lines = lines
         super().__init__(f"{source} does not match the profile schema:\n"
                          + "\n".join(f"  {ln}" for ln in lines))
@@ -33,13 +35,13 @@ class _Table(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
-def _filled(v):
+def _filled(v: str) -> str:
     if not v.strip():
         raise ValueError("must not be blank")
     return v.strip()
 
 
-def _regex(v):
+def _regex(v: str) -> str:
     try:
         re.compile(v)
     except re.error as e:
@@ -47,11 +49,7 @@ def _regex(v):
     return v
 
 
-def _false_is_none(v):
-    return None if v is False else v
-
-
-def _table_only(v):
+def _table_only(v: object) -> dict[Any, Any]:
     if not isinstance(v, dict):
         raise ValueError("unknown key")
     return v
@@ -75,8 +73,9 @@ class TrackKeywords(_Table):
 
 class Keywords(TrackKeywords):
     model_config = ConfigDict(extra="allow")
+    # `Field(init=False)` only keeps it out of __init__ for type checkers.
     __pydantic_extra__: dict[str, Annotated[TrackKeywords,
-                                            BeforeValidator(_table_only)]]
+                                            BeforeValidator(_table_only)]] = Field(init=False)
 
 
 class TrackExclude(_Table):
@@ -92,7 +91,7 @@ class TrackExclude(_Table):
 class Exclude(_Table):
     model_config = ConfigDict(extra="allow")
     __pydantic_extra__: dict[str, Annotated[TrackExclude,
-                                            BeforeValidator(_table_only)]]
+                                            BeforeValidator(_table_only)]] = Field(init=False)
     phrases: list[str] = []
     title_phrases: list[str] = []
     title_exempt_phrases: list[str] = []
@@ -112,25 +111,6 @@ class Locations(_Table):
 
 
 # --- [tracks.<id>] ----------------------------------------------------------
-
-#: The default technical-title gate: a posting whose TITLE doesn't match
-#: this never costs an API call. Broad and field-neutral on purpose; narrow
-#: or widen it per track with `tech_title_regex`.
-DEFAULT_TECH_TITLE_REGEX = (
-    r"\b("
-    r"engineer|engineering|developer|develop|software|programmer|programming|"
-    r"architect|devops|sre|reliability|infrastructure|platform|security|"
-    r"data|database|analyst|analytics|quantitative|"
-    r"scientist|science|sciences|scientific|research|researcher|"
-    r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
-    r"simulation|computational|"
-    r"informatic\w*|bioinformatic\w*|statistic\w*|biostatistic\w*|"
-    r"epidemiolog\w*|"
-    r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
-    r"quality|validation|verification|qa|test|r&d|python"
-    r")\b"
-)
-
 
 class TrackSources(_Table):
     store: bool = True
@@ -154,8 +134,8 @@ class Methodology(_Table):
     require_core_anchor: bool = False
     geo_gate: bool = True
     # TOML has no null: `false` switches the admission off.
-    remote_mission_floor: Annotated[Unit | None,
-                                    BeforeValidator(_false_is_none)] = 0.85
+    remote_mission_floor: Annotated[Unit | None, BeforeValidator(
+        lambda v: None if v is False else v)] = 0.85
     verify_top: Count = 15
     verify_floor: Unit = 0.25
     cost_guard: Count = 0
@@ -165,7 +145,23 @@ class Methodology(_Table):
     exclude_gate: bool = True
     dormant_after: Annotated[int, Field(ge=1)] = 4
     dormant_days: Annotated[int, Field(ge=1)] = 7
-    tech_title_regex: Regex = DEFAULT_TECH_TITLE_REGEX
+    # The default technical-title gate: a posting whose TITLE doesn't match
+    # this never costs an API call. Broad and field-neutral on purpose;
+    # narrow or widen it per track.
+    tech_title_regex: Regex = (
+        r"\b("
+        r"engineer|engineering|developer|develop|software|programmer|programming|"
+        r"architect|devops|sre|reliability|infrastructure|platform|security|"
+        r"data|database|analyst|analytics|quantitative|"
+        r"scientist|science|sciences|scientific|research|researcher|"
+        r"ml|machine learning|deep learning|ai|algorithm|algorithms|modeling|"
+        r"simulation|computational|"
+        r"informatic\w*|bioinformatic\w*|statistic\w*|biostatistic\w*|"
+        r"epidemiolog\w*|"
+        r"firmware|hardware|embedded|robotics|systems|automation|technologist|"
+        r"quality|validation|verification|qa|test|r&d|python"
+        r")\b"
+    )
 
 
 ENGINE_DEFAULTS = {
@@ -186,7 +182,7 @@ ENGINE_DEFAULTS = {
 ENGINE_ALIASES = {"neural": "sweep"}
 
 
-def _engine(v):
+def _engine(v: str) -> str:
     v = ENGINE_ALIASES.get(v, v)
     if v not in ENGINE_DEFAULTS:
         raise ValueError("unknown engine; expected "
@@ -212,14 +208,14 @@ class Track(Methodology):
 
     @model_validator(mode="before")
     @classmethod
-    def _blank_is_unset(cls, data):
+    def _blank_is_unset(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
         return {k: v for k, v in data.items()
                 if k == "db" or not (isinstance(v, str) and not v.strip())}
 
     @model_validator(mode="after")
-    def _engine_fills_the_rest(self):
+    def _engine_fills_the_rest(self) -> Track:
         eng = ENGINE_DEFAULTS[self.engine]
         fill = {n: getattr(eng, n) for n in Methodology.model_fields
                 if n not in self.model_fields_set}
@@ -273,7 +269,7 @@ class Candidate(_Table):
     resume: str = ""
 
 
-def _ordered(band):
+def _ordered(band: list[float]) -> list[float]:
     if band[0] > band[1]:
         raise ValueError("must be [lo, hi] with lo <= hi")
     return band
@@ -293,7 +289,7 @@ class Mission(_Table):
     bullseye_tier: str = ""
 
     @model_validator(mode="after")
-    def _bullseye_names_a_tier(self):
+    def _bullseye_names_a_tier(self) -> Mission:
         names = {t.name for t in self.tiers}
         if names and self.bullseye_tier.strip() and (
                 self.bullseye_tier.strip() not in names):
@@ -309,7 +305,7 @@ class Locality(_Table):
 
     @field_validator("name")
     @classmethod
-    def _blank_is_local(cls, v):
+    def _blank_is_local(cls, v: str) -> str:
         return v.strip() or "local"
 
 
@@ -333,7 +329,7 @@ class RssFeed(_Table):
     location: str = "Remote"
 
 
-def _default_rss():
+def _default_rss() -> list[RssFeed]:
     wwr = "https://weworkremotely.com/categories"
     return [RssFeed(label="WeWorkRemotely - Programming",
                     url=f"{wwr}/remote-programming-jobs.rss"),
@@ -442,14 +438,11 @@ class Fit(_Table):
 
 # --- the whole profile -------------------------------------------------------
 
-def _builtin_tracks():
-    return {tid: Track.model_validate(t) for tid, t in DEFAULT_TRACKS.items()}
-
-
 class Profile(_Table):
     # `tracks` first: the per-track [keywords.<id>] / [exclude.<id>] checks
     # below read the validated track ids.
-    tracks: dict[str, Track] = Field(default_factory=_builtin_tracks)
+    tracks: dict[str, Track] = Field(default_factory=lambda: {
+        tid: Track.model_validate(t) for tid, t in DEFAULT_TRACKS.items()})
     keywords: Keywords = Field(default_factory=Keywords)
     exclude: Exclude = Field(default_factory=Exclude)
     locations: Locations = Field(default_factory=Locations)
@@ -463,14 +456,16 @@ class Profile(_Table):
 
     @field_validator("tracks", mode="before")
     @classmethod
-    def _empty_is_builtin(cls, v):
+    def _empty_is_builtin(cls, v: Any) -> Any:
         return v or DEFAULT_TRACKS
 
     @field_validator("keywords", "exclude")
     @classmethod
-    def _tables_name_tracks(cls, v, info: ValidationInfo):
-        ids = info.data.get("tracks", v.model_extra)
-        stray = sorted(k for k in v.model_extra if k not in ids)
+    def _tables_name_tracks(cls, v: Keywords | Exclude,
+                            info: ValidationInfo) -> Keywords | Exclude:
+        extra = v.model_extra or {}                 # a dict: extra="allow"
+        ids = info.data.get("tracks", extra)
+        stray = sorted(k for k in extra if k not in ids)
         if stray:
             raise ValueError(", ".join(f"[{info.field_name}.{k}]"
                                        for k in stray)
@@ -478,26 +473,24 @@ class Profile(_Table):
         return v
 
 
-_PHRASES = {"missing": "required", "extra_forbidden": "unknown key",
-            "model_type": "must be a table", "dict_type": "must be a table"}
-
-
-def _line(err):
+def _line(err: ErrorDetails) -> str:
     path = "".join(f"[{p}]" if isinstance(p, int) else f".{p}"
                    for p in err["loc"]).lstrip(".")
     ctx = err.get("ctx") or {}
-    msg = _PHRASES.get(err["type"]) or str(ctx.get("error") or err["msg"])
+    msg = {"missing": "required", "extra_forbidden": "unknown key",
+           "model_type": "must be a table", "dict_type": "must be a table",
+           }.get(err["type"]) or str(ctx.get("error") or err["msg"])
     return f"{path}: {msg}" if path else msg
 
 
-def error_lines(err):
+def error_lines(err: ValidationError) -> list[str]:
     """A pydantic ValidationError as one 'path: problem' line per error,
     never quoting the bad value (see `problems`)."""
     return [_line(x) for x in err.errors(include_url=False,
                                          include_input=False)]
 
 
-def parse(raw, source="profile"):
+def parse(raw: dict[str, Any], source: str | Path = "profile") -> Profile:
     """`raw` (a parsed profile.toml) as a validated Profile, or ProfileError
     listing every bad key path (the lines `problems` returns)."""
     try:
@@ -506,7 +499,7 @@ def parse(raw, source="profile"):
         raise ProfileError(source, error_lines(e)) from None
 
 
-def problems(raw):
+def problems(raw: dict[str, Any]) -> list[str]:
     """What is wrong with `raw`, one 'path: problem' line per bad key; []
     when it is a valid profile. A line names the key, never its value: a
     profile holds personal data.

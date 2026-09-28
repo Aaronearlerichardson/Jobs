@@ -31,6 +31,7 @@ in its spec rather than given a floor of 0.
 Statuses: ok | degraded (reachable, fewer postings than the floor) |
 blocked (rate-limited/challenged — not our bug) | broken (4xx/5xx/exception)
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -40,8 +41,10 @@ import json
 import re
 import sys
 import time
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -55,11 +58,12 @@ from pydantic import BaseModel                       # noqa: E402
 
 from src import runstate                            # noqa: E402
 from src.ats.board import BOARDS, spec              # noqa: E402
+from src.ats.board.engine import Board               # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
 
-async def check_board(board):
+async def check_board(board: Board) -> dict[str, Any]:
     """Probe one platform's canary board and classify the outcome."""
     canary = board.spec.canary
     ats, name, floor = board.name, canary.name, canary.min_jobs
@@ -89,7 +93,7 @@ async def check_board(board):
             "detail": detail, "seconds": round(time.monotonic() - started, 1)}
 
 
-def _leaves(board):
+def _leaves(board: Board) -> Iterator[tuple[str, Any, bool]]:
     """(path, value, set) for every key of a board's spec that is not
     itself a model or a list of them (their own keys follow)."""
     for path, value, given, _default in spec.walk(board.spec):
@@ -98,14 +102,14 @@ def _leaves(board):
             yield path, value, given
 
 
-def print_resolved(name):
+def print_resolved(name: str) -> None:
     """Every key of `name`'s spec with its value, marked set (the spec
     gives it) or default."""
     for path, value, given in _leaves(BOARDS[name]):
         print(f"  {'set    ' if given else 'default'}  {path} = {json.dumps(value)}")
 
 
-def promotion_candidates(least=3):
+def promotion_candidates(least: int = 3) -> list[tuple[str, Any, list[str]]]:
     """(path, value, platforms) for each key `least` or more specs set to
     one value other than its default: a default worth promoting. A union's
     `kind` picks a model, so it is left out."""
@@ -119,7 +123,7 @@ def promotion_candidates(least=3):
                    if len(names) >= least), key=lambda c: (-len(c[2]), c[0]))
 
 
-def render_markdown(results, checked_at):
+def render_markdown(results: list[dict[str, Any]], checked_at: str) -> str:
     ok = sum(r["status"] == "ok" for r in results)
     lines = [
         "# Board health",
@@ -150,7 +154,7 @@ def render_markdown(results, checked_at):
     return "\n".join(lines)
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="ATS board health canary")
     ap.add_argument("--json", type=Path, help="write machine-readable results")
     ap.add_argument("--markdown", type=Path, help="write a status table")
@@ -171,7 +175,7 @@ def main():
             print(f"  {len(names):2}  {path} = {value}  ({', '.join(names)})")
         return 0
 
-    async def every_board():
+    async def every_board() -> list[dict[str, Any]]:
         results = []
         for board in (b for b in BOARDS.values() if b.fetchable and b.spec.canary):
             r = await check_board(board)

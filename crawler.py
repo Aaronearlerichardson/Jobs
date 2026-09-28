@@ -11,10 +11,12 @@ remote-neural` resolve against each track's jobs.track value, and the old
 remote-neural passthrough flags (--commit/--fit) map to the new ones.
 """
 
+from __future__ import annotations
+
 import sys
 
 
-def main():
+def main() -> None:
     print("  [crawler.py is deprecated - forwarding to run_scraper.py]",
           file=sys.stderr)
     argv = sys.argv[1:]

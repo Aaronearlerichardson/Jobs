@@ -39,17 +39,23 @@ file in the data directory). Each pass gets its own session log
 (data/logs/session-*-harvest.log).
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import os
 import sys
 import time
 import traceback
+from collections.abc import Awaitable, Callable
 from contextlib import closing
 from datetime import datetime
+from typing import Any, TextIO
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
+    # console stream is a TextIOWrapper, and anything else raises here.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 except Exception:
     pass
 
@@ -65,7 +71,7 @@ WAIT_CHUNK_S = 300.0
 OVERDUE_THRESHOLD_S = 15 * 60
 
 
-def next_pass_at(started, every_hours):
+def next_pass_at(started: float, every_hours: float) -> float:
     """The epoch time of the pass after one that started at `started`:
     `every_hours` after its START, never after its end. run_forever waits
     for it and main() prints it, so the promise and the wait agree.
@@ -76,7 +82,8 @@ def next_pass_at(started, every_hours):
     return started + every_hours * 3600
 
 
-def overdue_warning(scheduled, started, threshold_s=OVERDUE_THRESHOLD_S):
+def overdue_warning(scheduled: float | None, started: float,
+                    threshold_s: float = OVERDUE_THRESHOLD_S) -> str | None:
     """The `[!]` line for a pass that started more than `threshold_s` after
     it was `scheduled`, or None. The first pass of a run (`scheduled` None)
     is never late.
@@ -105,7 +112,7 @@ def overdue_warning(scheduled, started, threshold_s=OVERDUE_THRESHOLD_S):
     return f"[!] pass is {how} late (scheduled {when:%Y-%m-%d %H:%M})"
 
 
-def acquire_lock(path=None):
+def acquire_lock(path: str | os.PathLike[str] | None = None) -> TextIO | None:
     """Hold an OS-level exclusive lock on `path` (default
     <DATA_DIR>/harvest.lock) for the life of the process (released by the
     OS on any exit, so a crash never leaves a stale lock). Returns the open
@@ -117,7 +124,7 @@ def acquire_lock(path=None):
         path = config.DATA_DIR / "harvest.lock"
     fh = open(path, "a+")
     try:
-        if os.name == "nt":
+        if sys.platform == "win32":
             import msvcrt
             fh.seek(0)
             msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
@@ -134,8 +141,11 @@ def acquire_lock(path=None):
     return fh
 
 
-async def run_forever(pass_fn, every_hours, wait=asyncio.sleep, clock=time.time,
-                      chunk_s=WAIT_CHUNK_S):
+async def run_forever(pass_fn: Callable[[float | None], Awaitable[object]],
+                      every_hours: float,
+                      wait: Callable[[float], Awaitable[bool | None]] = asyncio.sleep,
+                      clock: Callable[[], float] = time.time,
+                      chunk_s: float = WAIT_CHUNK_S) -> None:
     """Run `pass_fn` now and then once every `every_hours`, measured via
     `next_pass_at` from the START of the previous pass (a pass that takes
     three hours does not push the schedule back). Never returns unless
@@ -185,7 +195,7 @@ async def run_forever(pass_fn, every_hours, wait=asyncio.sleep, clock=time.time,
     >>> [(started / 3600, sched and sched / 3600) for started, sched in log]
     [(0.0, None), (20.0, 12.0), (32.0, 32.0)]
     """
-    scheduled = None
+    scheduled: float | None = None
     while True:
         started = clock()
         await pass_fn(scheduled)
@@ -198,7 +208,7 @@ async def run_forever(pass_fn, every_hours, wait=asyncio.sleep, clock=time.time,
                 return
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     ap = argparse.ArgumentParser(
         description="Pull every board whole and store it unscored, on a "
@@ -255,7 +265,7 @@ def main(argv=None):
     if args.list:
         from src import store
         with closing(store.connect(args.db)) as conn:
-            plan_stats = {}
+            plan_stats: dict[str, Any] = {}
             boards = harvest.plan(conn, only=only, names=args.names,
                                   min_age_hours=min_age, limit=args.limit,
                                   stats=plan_stats)
@@ -271,7 +281,7 @@ def main(argv=None):
         print("  [!] another harvester holds the lock; exiting")
         return 0
 
-    async def one_pass(scheduled=None):
+    async def one_pass(scheduled: float | None = None) -> None:
         # Captured before session_log.start() so a slow log-file open (or
         # the [!] print it enables below) is never counted as lateness.
         started = time.time()

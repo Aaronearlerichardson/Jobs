@@ -7,6 +7,8 @@ The application lives in src/web/ (routes.py, server.py, templates/,
 static/) and its operations in src/dispatch/; this file only starts it.
 """
 
+from __future__ import annotations
+
 import sys
 
 if __name__ == "__main__":

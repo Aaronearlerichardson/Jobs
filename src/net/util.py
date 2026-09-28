@@ -1,5 +1,7 @@
 """Small shared helpers."""
 
+from __future__ import annotations
+
 import functools
 import hashlib
 import html
@@ -10,6 +12,9 @@ import re
 import threading
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+from types import ModuleType
+from typing import Any, overload
 from urllib.parse import urlsplit
 
 from cssselect import HTMLTranslator
@@ -25,21 +30,21 @@ LOC_TEXT_RE = re.compile(r"[A-Z][A-Za-z.\-']+(?:\s+[A-Z][A-Za-z.\-']+)*,\s*"
                          r"(?:[A-Z]{2}|[A-Z][a-z]+)\b|\bremote\b", re.I)
 
 
-def cache_dir(*parts):
+def cache_dir(*parts: str) -> Path:
     """A directory under the data dir's `.cache/` for a fetcher's disk
     cache (board detection, Workday and iCIMS location lookups). Not
     created here: callers mkdir when they first write."""
     return config.DATA_DIR.joinpath(".cache", *parts)
 
 
-def hashed_cache_path(base_dir, key):
+def hashed_cache_path(base_dir: Path, key: str) -> Path:
     """The JSON cache file for `key` under `base_dir`: sha1(key) + ".json",
     so callers never handle raw keys as filenames."""
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()
     return base_dir / f"{h}.json"
 
 
-def json_cache_get(path, ttl):
+def json_cache_get(path: Path, ttl: float) -> Any:
     """The JSON value stored at `path`, or None when the file is absent,
     unreadable, or older than `ttl` seconds.
 
@@ -55,7 +60,7 @@ def json_cache_get(path, ttl):
         return None
 
 
-def json_cache_put(path, value):
+def json_cache_put(path: Path, value: Any) -> None:
     """Best-effort JSON write to `path`; a cache failure never fails the
     caller."""
     try:
@@ -65,7 +70,7 @@ def json_cache_put(path, value):
         pass
 
 
-def default_search_text():
+def default_search_text() -> str:
     """A free-text place term derived from the profile's [locality], for
     the search boxes that narrow a board server-side (Workday's
     `searchText`, the discovery probe's local count).
@@ -81,7 +86,7 @@ def default_search_text():
     return max(places, key=len) if places else ""
 
 
-def worker_count(setting, floor=4):
+def worker_count(setting: str, floor: int = 4) -> int:
     """Thread-pool size: config.SETTINGS.<setting> (the CRAWLER_WORKERS,
     DISCOVERY_WORKERS or HARVEST_WORKERS variable) when set, else
     n_cpus - 1 and at least `floor`.
@@ -99,13 +104,9 @@ def worker_count(setting, floor=4):
 
 _TAG_RE    = re.compile(r"<[^>]+>")
 _SPACE_RE  = re.compile(r"\s+")
-_SCRIPT_RE = re.compile(r"(?is)<(script|style).*?</\1>")
-_BLOCK_RE  = re.compile(r"(?i)<(/p|/li|/h[1-6]|br\s*/?|/div)\s*>")
-_HSPACE_RE = re.compile(r"[ \t]+")
-_BLANKS_RE = re.compile(r"\n\s*\n+")
 
 
-def text_from_html(raw):
+def text_from_html(raw: str | None) -> str:
     r"""An HTML job description as readable text, paragraph breaks kept.
 
     The stripper every ATS description goes through. Nine fetchers had
@@ -143,16 +144,16 @@ def text_from_html(raw):
     """
     if not raw:
         return ""
-    txt = _SCRIPT_RE.sub(" ", raw)
-    txt = _BLOCK_RE.sub("\n", txt)
+    txt = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
+    txt = re.sub(r"(?i)<(/p|/li|/h[1-6]|br\s*/?|/div)\s*>", "\n", txt)
     txt = _TAG_RE.sub(" ", txt)
     txt = html.unescape(txt)
-    txt = _HSPACE_RE.sub(" ", txt)
-    txt = _BLANKS_RE.sub("\n\n", txt)
+    txt = re.sub(r"[ \t]+", " ", txt)
+    txt = re.sub(r"\n\s*\n+", "\n\n", txt)
     return txt.strip()
 
 
-def strip_html(s):
+def strip_html(s: object) -> str:
     """Markup out, one line of readable text back. "" for anything falsy;
     any other non-string is str()-ed first (payloads are untrusted).
 
@@ -178,7 +179,7 @@ def strip_html(s):
 _local = threading.local()
 
 
-def _parser(xml, utf8):
+def _parser(xml: bool, utf8: bool) -> etree.XMLParser | etree.HTMLParser:
     """This thread's lxml parser, XML (recovering, no entities, no network)
     or HTML, told its input is UTF-8 when `utf8`. Threads sharing one parser
     take turns, so each keeps its own: asyncio.to_thread's workers, which
@@ -197,7 +198,7 @@ def _parser(xml, utf8):
     return p
 
 
-def parse_markup(markup, xml=False, url=""):
+def parse_markup(markup: str | bytes | None, xml: bool = False, url: str = "") -> etree._Element:
     """`markup` (str or bytes) as an lxml tree, its root element: HTML, or
     XML when `xml` (a feed: HTML reads <link> as a void tag and loses its
     URL). The one parser choice in src/.
@@ -230,7 +231,7 @@ def parse_markup(markup, xml=False, url=""):
     parser = _parser(xml, utf8)
     try:
         root = etree.fromstring(markup.replace("\x00", "\ufffd").encode("utf-8", "replace")
-                                if utf8 else markup, parser)
+                                if isinstance(markup, str) else markup, parser)
     except (etree.LxmlError, ValueError, LookupError) as e:
         reason = f"lxml: {e}"
     else:
@@ -251,7 +252,7 @@ def parse_markup(markup, xml=False, url=""):
 
 
 @functools.cache
-def _html5lib():
+def _html5lib() -> ModuleType:
     """html5lib, imported on first use (about 120 ms), its warnings about
     names it had to coerce silenced."""
     import warnings
@@ -262,7 +263,7 @@ def _html5lib():
     return html5lib
 
 
-def xpath(expr):
+def xpath(expr: str) -> etree.XPath:
     """`expr`, an XPath 1.0 expression, compiled (plain-str results) once
     per thread: threads sharing one compiled expression take turns. Raises
     lxml's XPathSyntaxError when it will not compile.
@@ -280,7 +281,7 @@ def xpath(expr):
     return xp
 
 
-def first(expr, scope, **variables):
+def first(expr: str, scope: etree._Element, **variables: Any) -> Any:
     """The first node `xpath(expr)` finds from `scope`, its $names filled
     from `variables`; None when it finds none.
 
@@ -292,18 +293,18 @@ def first(expr, scope, **variables):
     return hit[0] if hit else None
 
 
-def links(tree):
+def links(tree: etree._Element) -> list[etree._Element]:
     """Every <a> with an href in `tree`'s document."""
     return xpath("//a[@href]")(tree)
 
 
-def jsonld_scripts(tree):
+def jsonld_scripts(tree: etree._Element) -> list[etree._Element]:
     """Every schema.org JSON-LD block in `tree`'s document: its
     <script type="application/ld+json"> elements."""
     return xpath("//script[@type='application/ld+json']")(tree)
 
 
-def named(scope, name, one=False):
+def named(scope: etree._Element, name: str, one: bool = False) -> Any:
     """The elements at or below `scope` whose local name is `name`, in any
     namespace (an Atom feed's are in its own); with `one`, the first, or
     None.
@@ -318,7 +319,7 @@ def named(scope, name, one=False):
 
 
 @functools.cache
-def css(selector, relative=False):
+def css(selector: str, relative: bool = False) -> str:
     """`selector`, CSS in cssselect's HTML dialect, as XPath for `xpath` and
     `first`: matching the element it runs on and everything below (from
     the root, the whole document), or only what is below when `relative`.
@@ -336,11 +337,11 @@ def css(selector, relative=False):
         selector, prefix="descendant::" if relative else "descendant-or-self::")
 
 
-#: The elements whose text node_text skips.
-_NO_TEXT = frozenset(("script", "style", "template", "rt", "rp"))
-
-
-def node_text(el, sep=" ", strip=True):
+@overload
+def node_text(el: etree._Element, sep: str = " ", strip: bool = True) -> str: ...
+@overload
+def node_text(el: etree._Element, sep: None, strip: bool = True) -> list[str]: ...
+def node_text(el: etree._Element, sep: str | None = " ", strip: bool = True) -> str | list[str]:
     r"""`el`'s text: its text nodes, none inside script, style, template or
     a ruby annotation, each stripped and the blank ones dropped when
     `strip`, joined by `sep` (a list when `sep` is None).
@@ -355,14 +356,15 @@ def node_text(el, sep=" ", strip=True):
         one space or newline. A walk, not XPath: an `ancestor::` test per
         text node ran 14x slower over the recorded pages.
     """
-    parts = []
-    if next(el.iterancestors(*_NO_TEXT), None) is None:
+    no_text = frozenset(("script", "style", "template", "rt", "rp"))
+    parts: list[str] = []
+    if next(el.iterancestors(*no_text), None) is None:
         walk = etree.iterwalk(el, events=("start", "end", "comment", "pi"))
         for event, node in walk:
             if event != "start":
                 if node is not el and node.tail:
                     parts.append(node.tail)
-            elif node.tag in _NO_TEXT:
+            elif node.tag in no_text:
                 walk.skip_subtree()
             elif node.text:
                 parts.append(node.text)
@@ -371,7 +373,7 @@ def node_text(el, sep=" ", strip=True):
     return parts if sep is None else sep.join(parts)
 
 
-def clean_field(text):
+def clean_field(text: str | None) -> str:
     r"""`text` with every run of whitespace -- a newline, a tab, repeated
     spaces -- collapsed to one space, and the ends trimmed. None reads as
     "".
@@ -401,10 +403,7 @@ def clean_field(text):
     return _SPACE_RE.sub(" ", text or "").strip()
 
 
-_URL_BREAK_RE = re.compile(r"\s*[\r\n\t]\s*")
-
-
-def clean_url(u):
+def clean_url(u: str | None) -> str | None:
     """`u` trimmed, minus any whitespace run holding a line break or tab.
     A lone space stays (requests percent-encodes it); falsy passes through.
 
@@ -418,10 +417,10 @@ def clean_url(u):
         network. Duke Health's Phenom ids ("job/DPC VCT 03") carry real
         spaces, which is why only runs with a break or tab go.
     """
-    return _URL_BREAK_RE.sub("", u).strip() if u else u
+    return re.sub(r"\s*[\r\n\t]\s*", "", u).strip() if u else u
 
 
-def host_of(url):
+def host_of(url: str | None) -> str:
     """The host `url` names, lowercased, without port or credentials;
     "" when it names none.
 
@@ -436,7 +435,7 @@ def host_of(url):
         return ""
 
 
-def origin_of(url):
+def origin_of(url: str | None) -> str:
     """`url`'s `scheme://netloc`, host case and port kept; "" when it
     names no host.
 
@@ -452,7 +451,7 @@ def origin_of(url):
     return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
 
 
-def stable_id(*parts) -> str:
+def stable_id(*parts: object) -> str:
     """Deterministic short hash for building job IDs.
 
     Python's built-in hash() is salted per process (PYTHONHASHSEED), so
@@ -464,11 +463,7 @@ def stable_id(*parts) -> str:
     return hashlib.sha1(key.encode("utf-8", "replace")).hexdigest()[:16]
 
 
-_ISO_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
-_REL_DAYS_RE = re.compile(r"(\d+)\s*\+?\s*days?\s+ago", re.I)
-
-
-def norm_posted_date(value):
+def norm_posted_date(value: object) -> str | None:
     """Normalize an ATS posting-date value to 'YYYY-MM-DD', or None.
 
     The formats seen in the wild (verified against live boards):
@@ -492,7 +487,7 @@ def norm_posted_date(value):
                 return None
         return None
     text = str(value).strip()
-    m = _ISO_DATE_RE.match(text)
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", text)
     if m:
         return m.group(1)
     low = text.lower()
@@ -500,7 +495,7 @@ def norm_posted_date(value):
         return datetime.now().strftime("%Y-%m-%d")
     if "yesterday" in low:
         return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    m = _REL_DAYS_RE.search(low)
+    m = re.search(r"(\d+)\s*\+?\s*days?\s+ago", low, re.I)
     if m:
         return (datetime.now() - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%d")
     return None

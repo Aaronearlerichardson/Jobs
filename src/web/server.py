@@ -2,23 +2,27 @@
 self-restart used by the Settings tab, main(), and the event loop the
 request threads reach async code through (`call`)."""
 
+from __future__ import annotations
+
 import asyncio
 import atexit
 import os
 import subprocess
 import sys
 import threading
+from collections.abc import Coroutine
+from typing import Any
 
 from src import config, runstate
 from src.claude.api import have_api_key
 from . import STATE, app
 
 #: The web UI's event loop, on a daemon thread of its own, once started.
-_LOOP = None
+_LOOP: asyncio.AbstractEventLoop | None = None
 _LOOP_START = threading.Lock()
 
 
-def call(coro):
+def call[T](coro: Coroutine[Any, Any, T]) -> T:
     """`coro`'s result, run on the web UI's event loop while this request
     thread waits, as a run of its own (src/runstate.py): the one way a
     thread reaches async code. The loop starts at first use; at exit, what
@@ -45,32 +49,32 @@ def call(coro):
             _LOOP = asyncio.new_event_loop()
             threading.Thread(target=_LOOP.run_forever, name="web-loop",
                              daemon=True).start()
-            atexit.register(_unwind)
+            atexit.register(_unwind, _LOOP)
 
-    async def in_run():
+    async def in_run() -> T:
         async with runstate.Run():
             return await coro
     return asyncio.run_coroutine_threadsafe(in_run(), _LOOP).result()
 
 
-def _unwind():
-    """At exit: cancel the loop's tasks (a running op) and give them 10 s to
+def _unwind(loop: asyncio.AbstractEventLoop) -> None:
+    """At exit: cancel `loop`'s tasks (a running op) and give them 10 s to
     unwind, so an open store batch rolls back and a run closes its
     session, then stop the loop."""
-    async def cancel_all():
+    async def cancel_all() -> None:
         tasks = asyncio.all_tasks() - {asyncio.current_task()}
         for t in tasks:
             t.cancel()
         if tasks:
             await asyncio.wait(tasks, timeout=10)
     try:
-        asyncio.run_coroutine_threadsafe(cancel_all(), _LOOP).result(timeout=12)
+        asyncio.run_coroutine_threadsafe(cancel_all(), loop).result(timeout=12)
     except Exception:
         pass
-    _LOOP.call_soon_threadsafe(_LOOP.stop)
+    loop.call_soon_threadsafe(loop.stop)
 
 
-def _ours_on(port):
+def _ours_on(port: int) -> bool:
     """True if a RUNNING instance of this app already serves `port`."""
     import urllib.request
     try:
@@ -81,7 +85,7 @@ def _ours_on(port):
         return False
 
 
-def _port_free(port):
+def _port_free(port: int) -> bool:
     """Exclusive-bind probe. Windows quietly lets several servers bind the
     SAME port when SO_REUSEADDR is involved (Werkzeug sets it), and then
     delivers connections to an arbitrary one — the browser sees random
@@ -98,14 +102,14 @@ def _port_free(port):
         s.close()
 
 
-def _open_when_up(url, port, timeout=25.0):
+def _open_when_up(url: str, port: int, timeout: float = 25.0) -> None:
     """Open the browser only once the server actually accepts connections
     (a fixed delay races antivirus-slowed first launches of the exe)."""
     import socket
     import time
     import webbrowser
 
-    def waiter():
+    def waiter() -> None:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -117,14 +121,14 @@ def _open_when_up(url, port, timeout=25.0):
     threading.Thread(target=waiter, daemon=True).start()
 
 
-def schedule_restart():
+def schedule_restart() -> None:
     """Spawn a detached successor process on the same port and exit. The
     successor runs --takeover (waits for this process's socket to free up
     instead of bailing out on the already-running probe). Works for both
     `python webapp.py` and the Nuitka exe (sys.argv[0] is the exe)."""
     STATE["restarting"] = True
 
-    def worker():
+    def worker() -> None:
         import time
         time.sleep(0.75)          # let the HTTP response flush to the browser
         if "__compiled__" in globals():
@@ -140,7 +144,7 @@ def schedule_restart():
     threading.Thread(target=worker, daemon=True).start()
 
 
-def main():
+def main() -> None:
     """Start the UI. Flags: --port=N (default 5533, or WEBUI_PORT env),
     --open (launch the default browser once the server is up — the default
     when running as a compiled executable), --no-open, --takeover (restart

@@ -10,8 +10,13 @@ Two entry points:
   * run_ddgs_dorks()  — fully automated via src.net.ddg (DuckDuckGo).
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
+import sqlite3
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 from src import config
 from src import store
@@ -28,7 +33,7 @@ from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 
 
-def _or_group(terms, n=8):
+def _or_group(terms: Sequence[str], n: int = 8) -> str:
     """A `("a" OR b OR "c d")` search clause from profile terms (multi-word
     terms quoted). Empty string when there are no terms."""
     picked = [t for t in terms[:n] if t]
@@ -42,7 +47,7 @@ _DOMAIN = _or_group(config.DOMAIN_KEYWORDS, n=6)
 _CORE = _or_group(config.CORE_KEYWORDS, n=6)
 
 
-def _rotate_terms(terms, group_size, index):
+def _rotate_terms(terms: Sequence[str], group_size: int, index: int) -> list[str]:
     """A deterministic, cyclically-rotating slice of `terms`, `group_size`
     long, for rotation `index` (0, 1, 2, ...). Successive indices advance
     through the whole list instead of always returning the same head, so
@@ -77,12 +82,7 @@ def _rotate_terms(terms, group_size, index):
     return [terms[(start + i) % n] for i in range(group_size)]
 
 
-#: (position, host form, narrow) for every spec's `discovery.search` form.
-_SITES = sorted((at, host, b.spec.discovery.narrow)
-                for b in BOARDS.values() for at, host in b.spec.discovery.search)
-
-
-def build_dork_queries(rotation=0):
+def build_dork_queries(rotation: int = 0) -> list[str]:
     """The dork query set for rotation index `rotation`: one `site:` dork
     per host form a spec's `discovery.search` names, in position order (a
     `discovery.narrow` spec's searched by name with the profile's domain
@@ -96,8 +96,8 @@ def build_dork_queries(rotation=0):
     top-ranked results DDG would otherwise return for an unchanging query.
 
     >>> qs = build_dork_queries(0)
-    >>> any("greenhouse" in q for q in qs)
-    True
+    >>> len(qs) >= 4, any("greenhouse" in q for q in qs)
+    (True, True)
     >>> any("icims" in q for q in qs)
     True
 
@@ -107,10 +107,13 @@ def build_dork_queries(rotation=0):
     >>> build_dork_queries(0) != build_dork_queries(1)
     True
     """
+    # (position, host form, narrow) for every spec's `discovery.search` form.
+    sites = sorted((at, host, b.spec.discovery.narrow)
+                   for b in BOARDS.values() for at, host in b.spec.discovery.search)
     loc_site = _or_group(_rotate_terms(_LOCALITY_TERMS, 4, rotation), n=4)
     loc_wide = _or_group(_rotate_terms(_LOCALITY_TERMS, 8, rotation), n=8)
     queries = [f'"{host}" {loc_site}' + (f" {_DOMAIN}" if _DOMAIN else "") if narrow
-               else f'site:{host} {loc_site}' for _, host, narrow in _SITES]
+               else f'site:{host} {loc_site}' for _, host, narrow in sites]
     if _CORE:
         # Bullseye sweep — target companies are often on custom boards /
         # non-.com domains that name-guessing misses.
@@ -122,7 +125,7 @@ def build_dork_queries(rotation=0):
 # added, so existing callers that just want "the dork queries" keep working.
 DORK_QUERIES = build_dork_queries(0)
 
-def extract_boards_from_urls(urls):
+def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
     """From a list of URLs, return de-duped [(ats, slug|triple)] board handles.
 
     List in, list out: one handle per distinct board, in first-seen order.
@@ -162,7 +165,8 @@ def extract_boards_from_urls(urls):
     ...                           "https://unc.peopleadmin.com/postings/123"])
     []
     """
-    out, seen = [], set()
+    out: list[tuple[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
     for u in urls:
         hit = detect("", u, leads=False)
         # A lead (Taleo, Eightfold, ...) has no fetchable coordinates, and a
@@ -179,14 +183,14 @@ def extract_boards_from_urls(urls):
     return out
 
 
-def _existing_boards(conn):
+def _existing_boards(conn: sqlite3.Connection) -> set[Any]:
     """The roster's boards, as `store.board_key` names them."""
     rows = conn.execute("SELECT ats, slug, wd_tenant, wd_pod, wd_site, careers_url "
                         "FROM companies").fetchall()
     return {k for k in (store.board_key(dict(r)) for r in rows) if k}
 
 
-async def harvest_urls(urls, verbose=True):
+async def harvest_urls(urls: Iterable[str], verbose: bool = True) -> tuple[int, int]:
     """
     Extract boards from `urls`, NC-verify + mission-score the new ones, and
     queue them for review. Returns (added, checked).
@@ -239,29 +243,28 @@ async def harvest_urls(urls, verbose=True):
     return added, len(boards)
 
 
-# Persisted rotation counter, so successive runs advance through the locality
-# vocabulary instead of repeating the same slice (and a re-read reproduces
-# exactly which slice a past run covered) — deterministic, not `random`-based.
-_ROTATION_STATE_PATH = config.DATA_DIR / ".cache" / "dork_rotation.json"
-
-
-def _next_rotation_index():
+def _next_rotation_index() -> int:
     """Read-then-increment the persisted rotation counter. Best-effort: a
     read/write failure just falls back to index 0 (the original fixed
     top-4/top-8 query set) rather than crashing the sweep."""
+    # Persisted, so successive runs advance through the locality vocabulary
+    # instead of repeating the same slice (and a re-read reproduces exactly
+    # which slice a past run covered) — deterministic, not `random`-based.
+    state = config.DATA_DIR / ".cache" / "dork_rotation.json"
     try:
-        idx = int(json.loads(_ROTATION_STATE_PATH.read_text("utf-8")).get("index", 0))
+        idx = int(json.loads(state.read_text("utf-8")).get("index", 0))
     except Exception:
         idx = 0
     try:
-        _ROTATION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _ROTATION_STATE_PATH.write_text(json.dumps({"index": idx + 1}), encoding="utf-8")
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text(json.dumps({"index": idx + 1}), encoding="utf-8")
     except Exception:
         pass
     return idx
 
 
-async def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
+async def run_ddgs_dorks(max_results: int = 25, pause: float = 2.5, pages: int = 2,
+                         rotation: int | None = None) -> tuple[int, int]:
     """Automated dorking via ddgs (best-effort; DDG's ATS index is patchy).
     Queries are spaced out — hammering DDG back-to-back is what makes it start
     returning 'No results found' mid-run.
@@ -288,11 +291,12 @@ async def run_ddgs_dorks(max_results=25, pause=2.5, pages=2, rotation=None):
                                               pause, pages))
 
 
-async def dork_urls(queries, max_results, pause, pages):
+async def dork_urls(queries: Iterable[str], max_results: int, pause: float,
+                    pages: int) -> list[str]:
     """The result URLs of each dork query in turn, `pause` seconds apart,
     with up to `pages` pages for a query whose first page came back full
     (see run_ddgs_dorks)."""
-    urls = []
+    urls: list[str] = []
     first = True
     for q in queries:
         if not first:

@@ -15,6 +15,8 @@ Board-shaped platforms are `config.BOARDS` specs run by the engine in
 src/ats/board/.
 """
 
+from __future__ import annotations
+
 from .careeronestop import fetch_nlx_company
 from .discourse import fetch_discourse
 from .getro import fetch_getro_all

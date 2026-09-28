@@ -10,7 +10,8 @@ A key that exists only because one platform misbehaves (a model's
 from __future__ import annotations
 
 import re
-from typing import Annotated, Any, ClassVar, Literal, Union, get_args
+from collections.abc import Iterator
+from typing import Annotated, Any, ClassVar, Literal, Self, Union, get_args
 
 from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
@@ -26,17 +27,17 @@ RowField = Literal["id", "title", "url", "location", "description", "posted_at",
 ROW_FIELDS = set(get_args(RowField))
 
 
-def _grammar(v):
+def _grammar(v: Any) -> Any:
     fields.check(v)
     return v
 
 
-def _template(v):
+def _template(v: str) -> str:
     fields.check_template(v)
     return v
 
 
-def _regex(v):
+def _regex(v: str) -> str:
     try:
         re.compile(v)
     except re.error as e:
@@ -44,7 +45,7 @@ def _regex(v):
     return v
 
 
-def _css(v):
+def _css(v: str) -> str:
     """`v` once it compiles as CSS in cssselect's dialect, each {placeholder}
     a sample value; the "$job_links" sentinel passes.
 
@@ -62,19 +63,14 @@ def _css(v):
     return v
 
 
-def _condition(v):
+def _condition(v: dict[str, Any]) -> dict[str, Any]:
     fields.check({"const": 1, "when": v})
     return v
 
 
-def _listed(v):
+def _listed(v: Any) -> Any:
     """A key taking one value or several: a lone value as a list of one."""
     return [v] if isinstance(v, (str, dict)) else v
-
-
-def _ruled(v):
-    """A closure condition as its one rule; a rule list as it is."""
-    return [{"when": v}] if isinstance(v, dict) else v
 
 
 Str = Annotated[str, Strict()]
@@ -106,7 +102,7 @@ class _Workaround(_Spec):
     why: Why | None = Field(None, description='Why a workaround key is set: "reason, YYYY-MM"')
 
     @model_validator(mode="after")
-    def _explained(self):
+    def _explained(self) -> Self:
         used = [type(self).model_fields[k].alias or k for k in self.WORKAROUNDS
                 if k in self.model_fields_set]
         if used and self.why is None:
@@ -135,7 +131,7 @@ class Detect(_Spec):
                                                            "carried the signature")
 
     @model_validator(mode="after")
-    def _groups(self):
+    def _groups(self) -> Self:
         groups = sum(re.compile(rx).groups for rx in self.re)
         if not (self.re or self.host):
             raise ValueError("detect: regexes, or a host")
@@ -154,7 +150,7 @@ class JobRef(_Spec):
                                                "posting's own (jid, or listing keys its id reads)")
 
     @model_validator(mode="after")
-    def _named(self):
+    def _named(self) -> Self:
         if re.compile(self.re).groups != len(self.parts):
             raise ValueError("job_ref.parts must name every group")
         return self
@@ -177,12 +173,13 @@ class Handle(_Workaround):
         {}, alias="try", max_length=1,
         description="One part's templates, tried until an answer `accept` allows; "
                     "settled once per handle")
-    accept: Accept = Field(Accept(), description="The answers that settle a `try` value")
+    accept: Accept = Field(Accept(),  # type: ignore[call-arg]  # positional Field defaults
+                           description="The answers that settle a `try` value")
     follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
                                                        "its URL template; settled once per handle")
 
     @property
-    def names(self):
+    def names(self) -> tuple[str, ...]:
         return self.parts or self.columns
 
 
@@ -192,14 +189,14 @@ class _Decoder(_Spec):
     values: Str | None = Field(None, description="Every dict holding this key stands for its value")
 
     @property
-    def first(self):
+    def first(self) -> str:
         """A detail answer's record unless `record` says: the first entry."""
         return f"{self.entries[0]}[0]"
 
 
 class _Json(_Decoder):
     @property
-    def first(self):
+    def first(self) -> str:
         return ""
 
 
@@ -240,7 +237,7 @@ class HtmlDecoder(_Decoder):
                                              '[{name, options: [{value, label}]}]')
 
 
-def _decoder_kind(v):
+def _decoder_kind(v: Any) -> str | None:
     """A decoder's `kind`: a dict naming none is JsonDecoder's default."""
     if isinstance(v, dict):
         return v["kind"] if "kind" in v else JsonDecoder.model_fields["kind"].default
@@ -256,7 +253,7 @@ Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
 
 
 class _Pager(_Workaround):
-    WORKAROUNDS = ("ceiling",)
+    WORKAROUNDS: ClassVar[tuple[str, ...]] = ("ceiling",)
     size: Count = Field(description="Rows asked per page")
     pages: Count = Field(10, description="The most pages a walk reads")
     total: Grammar = Field(None, description="Names the board's total on the first page")
@@ -265,30 +262,31 @@ class _Pager(_Workaround):
     declared: Grammar = Field(None, description="Names the last page, on every page")
 
     @property
-    def stride(self):
+    def stride(self) -> int | None:
         """Rows between one page's first row and the next's."""
         return self.size
 
-    def number(self, n):
+    def number(self, n: int) -> int:
         """Page `n`'s (from 0) own number."""
         return n
 
-    def page(self, n):
+    def page(self, n: int) -> int | None:
         """The "$page" value page `n` asks for."""
         return self.number(n)
 
-    def offset(self, n, size):
+    def offset(self, n: int, size: int) -> int:
         """The "$offset" value page `n` of `size` rows asks for."""
         return n * size
 
 
 class OffsetPager(_Pager):
     kind: Literal["offset"] = Field(description='"$offset" steps a page')
-    size: Count | None = Field(None, description="Rows asked per page; unset, the server sizes "
-                                                 "its pages and the walk learns it (pager.walk)")
+    size: Count | None = Field(  # type: ignore[assignment]  # pydantic lets it widen
+        None, description="Rows asked per page; unset, the server sizes its pages and the walk "
+                          "learns it (pager.walk)")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first row's offset")
 
-    def offset(self, n, size):
+    def offset(self, n: int, size: int) -> int:
         return self.start + n * size
 
 
@@ -298,30 +296,31 @@ class OverlapPager(_Pager):
     step: Count = Field(description="Rows each page steps")
 
     @model_validator(mode="after")
-    def _overlaps(self):
+    def _overlaps(self) -> Self:
         if self.step >= self.size:
             raise ValueError("pager: an overlap steps less than a page")
         return self
 
     @property
-    def stride(self):
+    def stride(self) -> int:
         return self.step
 
-    def offset(self, n, size):
+    def offset(self, n: int, size: int) -> int:
         return n * self.step
 
 
 class PagePager(_Pager):
     WORKAROUNDS = ("ceiling", "bare_first")
     kind: Literal["page"] = Field(description='"$page" counts pages')
-    size: Count | None = Field(None, description="Rows a page holds, when known")
+    size: Count | None = Field(  # type: ignore[assignment]  # pydantic lets it widen
+        None, description="Rows a page holds, when known")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first page's number")
     bare_first: Bool = Field(False, description="The first page's request names no page")
 
-    def number(self, n):
+    def number(self, n: int) -> int:
         return self.start + n
 
-    def page(self, n):
+    def page(self, n: int) -> int | None:
         return None if n == 0 and self.bare_first else self.start + n
 
 
@@ -352,12 +351,13 @@ class _Request(_Spec):
                                                             "left off")
     json_: dict[Str, Any] | None = Field(None, alias="json", description="A JSON body template")
     headers: dict[Str, Str] = Field({}, description="Over the shared request headers")
-    decoder: Decoder = Field(JsonDecoder(), description="Reads the response body")
+    decoder: Decoder = Field(JsonDecoder(),  # type: ignore[call-arg]  # positional Field defaults
+                             description="Reads the response body")
     fields: dict[Str, Grammar] = Field({}, description="Row field (or internal _field) -> "
                                                        "field spec")
 
     @model_validator(mode="after")
-    def _row_fields(self):
+    def _row_fields(self) -> Self:
         extra = sorted(k for k in self.fields if k not in ROW_FIELDS and not k.startswith("_"))
         if extra:
             raise ValueError(f"unknown field(s) {extra}")
@@ -399,7 +399,9 @@ class Rule(_Spec):
     why: Grammar = Field(None, description="Names the reason")
 
 
-Rules = Annotated[tuple[Rule, ...], BeforeValidator(_ruled)]
+#: A closure condition is its one rule; a rule list is as it is.
+Rules = Annotated[tuple[Rule, ...],
+                  BeforeValidator(lambda v: [{"when": v}] if isinstance(v, dict) else v)]
 
 
 class Closure(_Workaround):
@@ -414,7 +416,7 @@ class Closure(_Workaround):
                                                     "rule matches closes the posting")
 
 
-def _default_of(model, key):
+def _default_of(model: type[BaseModel], key: str) -> Any:
     """The default of `model`'s field named (or aliased) `key`; a marker
     no value equals when there is no such field."""
     info = next((f for n, f in model.model_fields.items() if key in (n, f.alias)), None)
@@ -443,25 +445,28 @@ class BoardSpec(_Spec):
     prunable: Bool = Field(False, description="prune_dead_boards may deactivate it")
     guess: Bool = Field(False, description="Discovery may guess its handle from a name")
     eager: Bool = Field(False, description="A whole-board pull reads each kept row's detail")
-    handle: Handle = Field(Handle(), description="How a store row names the board")
+    handle: Handle = Field(Handle(),  # type: ignore[call-arg]  # positional Field defaults
+                           description="How a store row names the board")
     job_ref: JobRef | None = Field(None, description="Reads a stored posting URL")
     listing: tuple[Listing, ...] = Field(
         (), description="Alternatives tried in order until one yields a posting, each later "
                         "one taking what it does not set from the first")
     rescue: Rescue | None = Field(None, description="Fills vague listed rows from the detail")
     detail: Detail | None = Field(None, description="Reads one posting back")
-    closure: Closure = Field(Closure(), description="Judges a stored posting open or closed")
+    closure: Closure = Field(Closure(),  # type: ignore[call-arg]  # positional Field defaults
+                             description="Judges a stored posting open or closed")
     employer: Grammar = Field(None, description="Names the employer on a listing entry")
     unlocated: Literal["drop", "keep"] = Field(
         "drop", description="A location filter's verdict on a row naming no place")
     detect: tuple[Detect, ...] = Field((), description="How a URL or page names the board")
     canary: Canary | None = Field(None, description="The public board tools/check_boards.py "
                                                     "probes")
-    discovery: Discovery = Field(Discovery(), description="How discovery finds and vets a board")
+    discovery: Discovery = Field(Discovery(),  # type: ignore[call-arg]  # positional Field defaults
+                                 description="How discovery finds and vets a board")
 
     @model_validator(mode="before")
     @classmethod
-    def _alternatives(cls, data):
+    def _alternatives(cls, data: Any) -> Any:
         """A lone listing as the one alternative; a later one completed
         from the first, a key it resets to its default left unset."""
         listing = data.get("listing") if isinstance(data, dict) else None
@@ -478,7 +483,7 @@ class BoardSpec(_Spec):
         return {**data, "listing": [first, *alts]}
 
     @model_validator(mode="after")
-    def _fallbacks_explained(self):
+    def _fallbacks_explained(self) -> Self:
         for i, alt in enumerate(self.listing):
             if i == 0 and alt.why is not None:
                 raise ValueError("listing[0].why: the first alternative is no fallback")
@@ -487,7 +492,7 @@ class BoardSpec(_Spec):
         return self
 
     @model_validator(mode="after")
-    def _closure_servable(self):
+    def _closure_servable(self) -> Self:
         if self.via == "detail" and not self.detail:
             raise ValueError("closure.via detail needs a detail")
         if self.via == "listing" and (not self.listing or any(a.pager for a in self.listing)):
@@ -495,24 +500,24 @@ class BoardSpec(_Spec):
         return self
 
     @model_validator(mode="after")
-    def _rescue_servable(self):
+    def _rescue_servable(self) -> Self:
         scoped = self.listing and self.listing[0].scope
         if self.rescue and not (self.detail and (scoped or self.rescue.when == "always")):
             raise ValueError("rescue: a detail, and a scoped listing unless `when` is always")
         return self
 
     @property
-    def via(self):
+    def via(self) -> Literal["detail", "listing", "page"]:
         """What judges a stored posting (`closure.via`, resolved)."""
         return self.closure.via or self.default_via
 
     @property
-    def default_via(self):
+    def default_via(self) -> Literal["detail", "page"]:
         """`closure.via` unless set: the detail where there is one, else the page."""
         return "detail" if self.detail else "page"
 
 
-def parse(name, raw):
+def parse(name: str, raw: Any) -> BoardSpec:
     """`raw`, a `config.BOARDS` entry, as a BoardSpec; ValueError naming
     `name` and every broken key's path when it breaks the schema."""
     try:
@@ -521,7 +526,7 @@ def parse(name, raw):
         raise ValueError(f"{name}: {e}") from None
 
 
-def walk(model, path=""):
+def walk(model: BaseModel, path: str = "") -> Iterator[tuple[str, Any, bool, Any]]:
     """(path, value, set, default) for every key of `model` and of the
     models under it, depth first; `set` when the spec gave the key."""
     for name, info in type(model).model_fields.items():

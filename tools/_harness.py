@@ -20,6 +20,8 @@ The `sys.path` line at the top of each script stays where it is: it is what
 makes importing this module possible, so it cannot live in it.
 """
 
+from __future__ import annotations
+
 import re
 import sys
 
@@ -32,7 +34,7 @@ BLOCKED_RE = re.compile(
     r"too many requests|access denied|challenge", re.I)
 
 
-def console_utf8():
+def console_utf8() -> None:
     """Make stdout carry the status glyphs.
 
     Windows consoles default to cp1252, which has none of ✅⚠️🚧❌, so a
@@ -46,7 +48,7 @@ def console_utf8():
         pass
 
 
-def blame(note):
+def blame(note: str | None) -> str:
     """Whose fault a failure is, from a fetcher's diagnostic text.
 
     >>> blame("HTTPError: 429 Too Many Requests")

@@ -15,7 +15,11 @@ preview_names (parse and classify, no network) then add_names (resolve via
 resolve.board.resolve_or_miss, score, queue for review).
 """
 
+from __future__ import annotations
+
 import re
+import sqlite3
+from typing import Any, cast
 
 from src import store
 from src.claude.api import have_api_key
@@ -25,66 +29,8 @@ from .local_sourcing import score_and_upsert
 from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
 from .resolve.board import resolved
 
-# Lines that are never a company name in a pasted results page.
-_PASTE_NOISE_RE = re.compile(
-    r"^(?:"
-    r"promoted|easy apply|actively recruiting|be an early applicant|viewed|"
-    r"applied|saved|save|dismiss|see all|show more|load more|next|previous|"
-    r"remote|hybrid|on-?site|full-?time|part-?time|contract|internship|"
-    r"\d*\s*(?:day|week|month|hour|minute)s?\s*ago|reposted.*|"
-    r"[\d,]*\s*[km]?\s*(?:followers?|employees?|connections?|applicants?)|"
-    r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*|"
-    r"\$.*|"                     # any $-leading line: salary in every format
-    # LinkedIn company/profile page stat lines ("11 results", "615 on
-    # LinkedIn", "501-1000 employees", "2 year growth", "42Fair Match",
-    # "4 connections work here", "75% have a Doctor of Philosophy")
-    r"[\d,\-–]+\s*(?:results?|notifications?|on linkedin|"
-    r"year growth|fair match|employees?)|"
-    r"\d+\s*(?:company |school )?(?:alumni|connections?)\s+works? here.*|"
-    r"\d+%.*|"
-    r"401\(k\).*|"
-    r"in the past \w+|"
-    r".*(?:©|\(c\)|�)\s*\d{4}.*|.*\bcorporation\b\W*\d{4}"
-    r")\W*$", re.I)
 
-# A line that reads as a JOB TITLE rather than an employer. Results pages
-# interleave the two, and a title resolves to nothing, so this saves the probe.
-_TITLE_WORD_RE = re.compile(
-    r"\b(?:engineer|scientist|developer|analyst|manager|director|specialist|"
-    r"coordinator|associate|assistant|technician|architect|consultant|intern|"
-    r"lead|head of|vp|president|officer|administrator|nurse|physician|"
-    r"recruiter|designer|researcher|postdoc|fellow|programmer|"
-    r"(?:bio)?statistician)\b",
-    re.I)
-
-# "Durham, NC" / "Durham, NC (Hybrid)" / "Raleigh-Durham-Chapel Hill Area" /
-# "North Carolina, United States (Remote)" — the region after the comma may
-# be several words, and a clipped paste can truncate the trailing "(Remote)"
-# to "(R", so the closing paren is optional.
-_LOCATION_LINE_RE = re.compile(
-    r"^[A-Z][\w.'-]+(?:[ \-][\w.'-]+)*,\s*"
-    r"(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
-    r"(?:\s*\([^)]*\)?)?$|.*\bArea$|.*\bMetropolitan\b", re.I)
-
-
-# A results row whose job title is rendered twice, optionally with a badge
-# wedged between the halves: "Signal Processing Engineer (Verified job)Signal
-# Processing Engineer". LinkedIn emits this for every hit, and the employer is
-# always the next line — so the doubled line is an unambiguous "company below"
-# marker. `.{4,}?` is lazy so the shortest repeating half wins.
-_DOUBLED_TITLE_RE = re.compile(r"^(.{4,}?)(?:\s*\([^)]{,24}\))?\1$")
-
-
-# Words that stay lowercase in a real Title-Case name ("Bank of America",
-# "University of North Carolina", "Bausch + Lomb") and so don't count as
-# evidence either way when judging capitalisation.
-_CASE_STOPWORDS = {
-    "of", "and", "for", "the", "a", "an", "in", "at", "to", "on", "or",
-    "&", "+", "de", "la", "le", "van", "von",
-}
-
-
-def _is_sentence_case(name):
+def _is_sentence_case(name: str) -> bool:
     """True if a MULTI-WORD `name` reads as sentence-case UI prose (only the
     first significant word capitalised -- "Date posted", "Salary estimate")
     rather than a Title-Case company name (every significant word
@@ -122,7 +68,15 @@ def _is_sentence_case(name):
         case, and a false reject here is a lost real company, not a
         dropped chrome line.
     """
-    def _is_connector(w):
+    # Words that stay lowercase in a real Title-Case name ("Bank of
+    # America", "University of North Carolina", "Bausch + Lomb") and so
+    # don't count as evidence either way when judging capitalisation.
+    case_stopwords = {
+        "of", "and", "for", "the", "a", "an", "in", "at", "to", "on", "or",
+        "&", "+", "de", "la", "le", "van", "von",
+    }
+
+    def _is_connector(w: str) -> bool:
         # A word only counts as one of the fixed CASE_STOPWORDS after
         # stripping trailing punctuation, NOT the symbols that ARE
         # stopwords ("+", "&") -- stripping those first would zero the
@@ -130,7 +84,7 @@ def _is_sentence_case(name):
         # letters at all (a bare number, "+", "&") never carries a case
         # signal either way, so it's a connector too.
         core = w.lower().strip(".,’")
-        return core in _CASE_STOPWORDS or not any(c.isalpha() for c in w)
+        return core in case_stopwords or not any(c.isalpha() for c in w)
 
     words = name.split()
     if len(words) < 2:
@@ -139,7 +93,7 @@ def _is_sentence_case(name):
     if len(significant) < 2:
         return False
 
-    def _starts_upper(w):
+    def _starts_upper(w: str) -> bool:
         core = w.lstrip("(\"'")
         return bool(core) and core[0].isalpha() and core[0].isupper()
 
@@ -158,7 +112,7 @@ def _is_sentence_case(name):
     return any(not _starts_upper(w) for w in rest)
 
 
-def _clean_candidate(raw, drop_titles=True):
+def _clean_candidate(raw: str, drop_titles: bool = True) -> str | None:
     """One line -> a usable company name, or None.
 
     `drop_titles=False` for structurally-located names: the doubled-title
@@ -167,10 +121,50 @@ def _clean_candidate(raw, drop_titles=True):
     (Headwater Science, Vadum). The keyword screen is only needed when we
     are guessing from unstructured lines.
     """
+    # Lines that are never a company name in a pasted results page.
+    paste_noise_re = re.compile(
+        r"^(?:"
+        r"promoted|easy apply|actively recruiting|be an early applicant|viewed|"
+        r"applied|saved|save|dismiss|see all|show more|load more|next|previous|"
+        r"remote|hybrid|on-?site|full-?time|part-?time|contract|internship|"
+        r"\d*\s*(?:day|week|month|hour|minute)s?\s*ago|reposted.*|"
+        r"[\d,]*\s*[km]?\s*(?:followers?|employees?|connections?|applicants?)|"
+        r"over \d+ applicants|(?:page\s*)?\d* *of *\d+|see all.*|show all.*|"
+        r"\$.*|"                     # any $-leading line: salary in every format
+        # LinkedIn company/profile page stat lines ("11 results", "615 on
+        # LinkedIn", "501-1000 employees", "2 year growth", "42Fair Match",
+        # "4 connections work here", "75% have a Doctor of Philosophy")
+        r"[\d,\-–]+\s*(?:results?|notifications?|on linkedin|"
+        r"year growth|fair match|employees?)|"
+        r"\d+\s*(?:company |school )?(?:alumni|connections?)\s+works? here.*|"
+        r"\d+%.*|"
+        r"401\(k\).*|"
+        r"in the past \w+|"
+        r".*(?:©|\(c\)|�)\s*\d{4}.*|.*\bcorporation\b\W*\d{4}"
+        r")\W*$", re.I)
+    # A line that reads as a JOB TITLE rather than an employer. Results
+    # pages interleave the two, and a title resolves to nothing, so this
+    # saves the probe.
+    title_word_re = re.compile(
+        r"\b(?:engineer|scientist|developer|analyst|manager|director|specialist|"
+        r"coordinator|associate|assistant|technician|architect|consultant|intern|"
+        r"lead|head of|vp|president|officer|administrator|nurse|physician|"
+        r"recruiter|designer|researcher|postdoc|fellow|programmer|"
+        r"(?:bio)?statistician)\b",
+        re.I)
+    # "Durham, NC" / "Durham, NC (Hybrid)" / "Raleigh-Durham-Chapel Hill
+    # Area" / "North Carolina, United States (Remote)" — the region after
+    # the comma may be several words, and a clipped paste can truncate the
+    # trailing "(Remote)" to "(R", so the closing paren is optional.
+    location_line_re = re.compile(
+        r"^[A-Z][\w.'-]+(?:[ \-][\w.'-]+)*,\s*"
+        r"(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)"
+        r"(?:\s*\([^)]*\)?)?$|.*\bArea$|.*\bMetropolitan\b", re.I)
+
     stripped = raw.strip()
     # Test noise BEFORE removing list markers: "2 days ago" and "1K followers"
     # only read as noise while they still carry their leading digits.
-    if _PASTE_NOISE_RE.match(stripped):
+    if paste_noise_re.match(stripped):
         return None
     # Markdown export turns nav into "[Help Center](https://...)".
     if re.match(r"^\[[^\]]*\]\(", stripped):
@@ -180,15 +174,15 @@ def _clean_candidate(raw, drop_titles=True):
     name = re.sub(r"^(?:[-*•]|\d+[.)])\s*", "", name).strip()
     if not (2 < len(name) <= 60):
         return None
-    if _PASTE_NOISE_RE.match(name) or _is_nav_noise(name):
+    if paste_noise_re.match(name) or _is_nav_noise(name):
         return None
-    if drop_titles and _TITLE_WORD_RE.search(name):
+    if drop_titles and title_word_re.search(name):
         return None
     if drop_titles and " / " in name:
         return None        # breadcrumb/CTA pair ("Employers / Post Job"), not a name
     if drop_titles and _is_sentence_case(name):
         return None        # sentence-case UI prose ("Date posted"), not Title Case
-    if _LOCATION_LINE_RE.match(name):
+    if location_line_re.match(name):
         return None
     if not re.search(r"[A-Za-z]{2}", name):          # numbers / punctuation only
         return None
@@ -197,7 +191,15 @@ def _clean_candidate(raw, drop_titles=True):
     return name
 
 
-def _names_from_doubled_titles(lines):
+# A results row whose job title is rendered twice, optionally with a badge
+# wedged between the halves: "Signal Processing Engineer (Verified job)Signal
+# Processing Engineer". LinkedIn emits this for every hit, and the employer is
+# always the next line — so the doubled line is an unambiguous "company below"
+# marker. `.{4,}?` is lazy so the shortest repeating half wins.
+_DOUBLED_TITLE_RE = re.compile(r"^(.{4,}?)(?:\s*\([^)]{,24}\))?\1$")
+
+
+def _names_from_doubled_titles(lines: list[str]) -> list[str]:
     """Employers located by the repeated-title marker, in page order."""
     out = []
     for i, line in enumerate(lines):
@@ -212,7 +214,8 @@ def _names_from_doubled_titles(lines):
     return out
 
 
-def parse_company_names(blob, limit=300):
+def parse_company_names(blob: str | bytes | list[str] | tuple[str, ...],
+                        limit: int = 300) -> list[str]:
     """Plausible employer names out of a pasted block of page text.
 
     Two passes. If the page repeats each job title — the shape every
@@ -271,7 +274,8 @@ def parse_company_names(blob, limit=300):
     return out
 
 
-async def extract_names_llm(blob, limit=60):
+async def extract_names_llm(blob: str | bytes | list[str] | tuple[str, ...],
+                            limit: int = 60) -> list[str]:
     """Ask the model which employers a pasted page mentions.
 
     The regex path cannot tell "Fennec Pharmaceuticals" from a job title whose
@@ -300,7 +304,7 @@ _TRACKED_NAMES_SQL = ("SELECT name FROM companies "
                       "WHERE ats IS NOT NULL AND miss_reason IS NULL")
 
 
-def _blocked_keys(conn):
+def _blocked_keys(conn: sqlite3.Connection) -> set[str]:
     """Normalized name keys no path may add: the store's rejection blocklist
     (src.store.blocked_name_keys) union the profile's [discovery]
     name_blocklist."""
@@ -308,7 +312,7 @@ def _blocked_keys(conn):
     return blocked_name_keys(conn) | set(NAME_BLOCKLIST)
 
 
-def screen_names(names):
+def screen_names(names: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
     """Split `names` into (employer-shaped, [(name, reason)]) with
     src.match.names.junk_name_reason. Runs ahead of every resolution path,
     because a section heading or a category noun that reaches the resolver
@@ -323,14 +327,19 @@ def screen_names(names):
         Qualifications", "Proficiency in SQL.", "Oncology" and "99+
         results".
     """
-    kept, junk = [], []
+    kept: list[str] = []
+    junk: list[tuple[str, str]] = []
     for n in names:
         why = junk_name_reason(n)
-        (junk if why else kept).append((n, why) if why else n)
+        if why:
+            junk.append((n, why))
+        else:
+            kept.append(n)
     return kept, junk
 
 
-def _name_state(key, tracked, blocked, missed):
+def _name_state(key: str, tracked: set[str], blocked: set[str],
+                missed: set[str]) -> str:
     """Which review bucket a parsed name falls in, given the three key sets
     the store answers with.
 
@@ -365,7 +374,8 @@ def _name_state(key, tracked, blocked, missed):
     return "new"
 
 
-async def preview_names(blob, use_llm=None):
+async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
+                        use_llm: bool | None = None) -> list[dict[str, Any]]:
     """A pasted page -> the list a person ticks through before anything is
     resolved: ``[{"name", "key", "state"}]``, one entry per distinct name, in
     the order they appear, with `state` from `_name_state`.
@@ -410,7 +420,9 @@ async def preview_names(blob, use_llm=None):
     return out
 
 
-async def add_names(names, use_llm=False, max_workers=6, include_missions=None):
+async def add_names(names: str | bytes | list[str], use_llm: bool = False,
+                    max_workers: int = 6,
+                    include_missions: list[str] | None = None) -> list[dict[str, Any]]:
     """Resolve company names to boards and queue the ones that verify.
 
     `names` is the list of names a person confirmed in the review step. A raw
@@ -453,7 +465,9 @@ async def add_names(names, use_llm=False, max_workers=6, include_missions=None):
         if not fresh:
             return []
 
-        written, unresolved, stalled = [], [], []
+        written: list[dict[str, Any]] = []
+        unresolved: list[tuple[str, str | None]] = []
+        stalled: list[str] = []
 
         async for name, (hit, reason) in fan_out(
                 fresh, resolved, str, max_workers, with_item=True,
@@ -462,7 +476,7 @@ async def add_names(names, use_llm=False, max_workers=6, include_missions=None):
                 # A pasted name that resolves to nothing used to be printed
                 # once and lost; keep it with a reason so the paste is a
                 # worklist, not a one-shot.
-                await db.run(store.record_miss, name, reason, source="paste")
+                await db.run(store.record_miss, name, cast(str, reason), source="paste")
                 unresolved.append((name, reason))
                 continue
             result = await score_and_upsert(db, hit, source="paste",
@@ -479,7 +493,7 @@ async def add_names(names, use_llm=False, max_workers=6, include_missions=None):
             # inactive) here; the review queue is that check now, and it shows
             # the reviewer which one they are looking at.
             flag = {"probe": "  [slug-guess]",
-                    "websearch": "  [websearch match]"}.get(hit.get("via"), "")
+                    "websearch": "  [websearch match]"}.get(hit.get("via") or "", "")
             state = ("pending review" if pending
                      else "active" if active else "inactive")
             print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "

@@ -32,6 +32,8 @@ name one of them needs from another is imported directly from that
 sibling.
 """
 
+from __future__ import annotations
+
 from .companies import (  # noqa: F401
     CAPTURE_ATS, MISS_REASONS, _OFFMISSION_MIN_JOBS, _offmission_volume,
     board_key, company_by_board,

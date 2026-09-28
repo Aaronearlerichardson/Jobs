@@ -21,8 +21,11 @@ resume-fit scores for these postings cap at the no-description ceiling
 until you open the URL. Better a shallow lead than an invisible job.
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from typing import Any
 from urllib.parse import quote
 
 from src import config
@@ -31,26 +34,13 @@ from src.net.http import HEADERS, fetch_failed
 from src.net.util import default_search_text, stable_id
 
 
-def _creds():
-    """(user id, token) from config, or None with one line out — see
-    config.require_creds, which both keyed sources share."""
-    return config.require_creds(
-        "CareerOneStop",
-        "https://www.careeronestop.org/Developers/WebAPI/registration.aspx",
-        CAREERONESTOP_USER_ID=getattr(config, "CAREERONESTOP_USER_ID", ""),
-        CAREERONESTOP_TOKEN=getattr(config, "CAREERONESTOP_TOKEN", ""))
-
-
-_CORP_SUFFIXES = {"inc", "incorporated", "corp", "corporation", "llc", "ltd",
-                  "co", "company", "plc", "lp", "the"}
-
-
-def _tokens(s):
+def _tokens(s: str | None) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower())
-            if w not in _CORP_SUFFIXES}
+            if w not in {"inc", "incorporated", "corp", "corporation", "llc", "ltd",
+                          "co", "company", "plc", "lp", "the"}}
 
 
-def _company_match(posted_company, queried_name):
+def _company_match(posted_company: str | None, queried_name: str) -> bool:
     """Keyword search matches title/description too — keep only rows whose
     Company field is plausibly the employer we asked for. Whole-word token
     match, not substring: 'Meta' must match 'Meta Platforms, Inc.' but NOT
@@ -59,15 +49,8 @@ def _company_match(posted_company, queried_name):
     return bool(p and q) and (q <= p or p <= q)
 
 
-def _default_location():
-    """`default_search_text()`, else the [locality] label with `/` cut --
-    a raw `/` in this API's path segment 404s; `quote()` leaves it alone."""
-    return (default_search_text()
-            or re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip())
-
-
-async def fetch_nlx_company(name, location=None, days=60,
-                            page_size=50, max_pages=6):
+async def fetch_nlx_company(name: str, location: str | None = None, days: int = 60,
+                            page_size: int = 50, max_pages: int = 6) -> list[dict[str, Any]]:
     """All NLx postings for one employer in `location`. Returns normalized
     job dicts ({id, title, company, url, location, description}) ready for
     ingest_external_jobs; company is canonicalized to `name` so the store's
@@ -77,8 +60,17 @@ async def fetch_nlx_company(name, location=None, days=60,
     requires a location segment in the path, so there is no "anywhere" to
     fall back to. It wants a real place ("North Carolina", "Durham, NC"),
     not a label."""
-    location = location or _default_location()
-    creds = _creds()
+    # Else the [locality] label with `/` cut: a raw `/` in this API's path
+    # segment 404s, and `quote()` leaves it alone.
+    location = (location or default_search_text()
+                or re.split(r"[/|,]", config.LOCALITY_NAME or "")[0].strip())
+    # (user id, token), or None with one line out: config.require_creds,
+    # which both keyed sources share.
+    creds = config.require_creds(
+        "CareerOneStop",
+        "https://www.careeronestop.org/Developers/WebAPI/registration.aspx",
+        CAREERONESTOP_USER_ID=getattr(config, "CAREERONESTOP_USER_ID", ""),
+        CAREERONESTOP_TOKEN=getattr(config, "CAREERONESTOP_TOKEN", ""))
     if not creds:
         return []
     if not location:
@@ -88,7 +80,9 @@ async def fetch_nlx_company(name, location=None, days=60,
     uid, tok = creds
     hdr = {**HEADERS, "Authorization": f"Bearer {tok}", "Accept": "application/json"}
 
-    out, seen, dropped = [], set(), 0
+    out: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    dropped = 0
     for page in range(max_pages):
         # Path: /{userId}/{keyword}/{location}/{radius}/{sortCol}/{sortOrder}
         #       /{startRecord}/{limitRecord}/{days}

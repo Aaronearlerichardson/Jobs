@@ -1,14 +1,19 @@
 """ATS slug probes — cheap HEAD/GET checks to confirm a slug is real."""
 
+from __future__ import annotations
+
 import asyncio
 import importlib
 import logging
 import time
+from collections.abc import Callable
 from contextlib import AsyncExitStack
+from typing import Any, Self, cast
 
 from src import config, runstate
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
+from src.ats.board.engine import Board
 from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
@@ -21,10 +26,10 @@ _log = logging.getLogger("src.discovery.resolve.probes")
 # Whether the headless browser is usable is a RUN fact, not a per-pool
 # one: a run can start more than one JsScanProbePool, and Playwright's
 # launch error embeds a ten-line ASCII banner.
-_JS_NOTICES = runstate.per_run(set)
+_JS_NOTICES: Callable[[], set[str]] = runstate.per_run(set)
 
 
-def _js_notice_once(key, message):
+def _js_notice_once(key: str, message: str) -> bool:
     """Print a `[js]` notice the first time `key` comes up. True if printed."""
     notices = _JS_NOTICES()
     if key in notices:
@@ -34,7 +39,7 @@ def _js_notice_once(key, message):
     return True
 
 
-def _js_launch_hint(exc):
+def _js_launch_hint(exc: Exception) -> str:
     """The actionable sentence from a Playwright launch error, without the box.
 
     Playwright renders "run `playwright install`" inside a drawn ASCII frame.
@@ -49,12 +54,12 @@ def _js_launch_hint(exc):
     return text.split("\n", 1)[0].strip()
 
 
-def _report_js_disabled(detail):
+def _report_js_disabled(detail: str) -> bool:
     """Say the JS fallback is off, once per run. True if we reported."""
     return _js_notice_once("disabled", f"{detail}; JS scan probe disabled")
 
 
-async def launch_chromium(pw, **kwargs):
+async def launch_chromium(pw: Any, **kwargs: Any) -> tuple[Any, str | None]:
     """Launch headless Chromium, falling back to a browser the machine has.
 
     Playwright's own pinned build is tried first — it is the most predictable
@@ -91,7 +96,7 @@ async def launch_chromium(pw, **kwargs):
                 f"using the system {channel} browser "
                 f"(playwright's own build is not installed)")
         return browser, channel
-    raise first_error
+    raise cast(Exception, first_error)
 
 
 # ─── Scanned platforms (a handle no name guess reaches) ──────────────────
@@ -106,26 +111,28 @@ async def launch_chromium(pw, **kwargs):
 SCANNED = tuple(b.name for b in BOARDS.values() if b.fetchable and b.spec.discovery.scan)
 
 
-def slug_keyed(board):
+def slug_keyed(board: Board) -> bool:
     """Whether `board`'s handle is the parts a detection reads (a slug,
     Workday's triple) rather than a careers URL, which a URL on the vendor's
     host does not name."""
     return "careers_url" not in board.spec.handle.columns
 
 
-async def confirm(ats, slug, careers_url=None):
+async def confirm(ats: str, slug: Any, careers_url: str | None = None) -> int | None:
     """A live posting count for detected coordinates, or None: the board's
     probe on the handle they name as store columns (`coords.columns`), so
     a careers_url-keyed board is probed at its careers URL."""
     b = board_for(ats)
-    handle = b.handle(coords.columns(ats, slug, careers_url)) if b else None
+    if not b:
+        return None
+    handle = b.handle(coords.columns(ats, slug, careers_url))
     if not handle:
         return None
     ok, count = await b.probe(handle)
     return count if ok else None
 
 
-def scan_hit(text):
+def scan_hit(text: str | None) -> tuple[str, Any] | None:
     """(ats, handle) of the first board of a SCANNED platform `text` names
     (`signatures.detect` restricted to each), or None."""
     for ats in SCANNED:
@@ -135,22 +142,22 @@ def scan_hit(text):
     return None
 
 
-def _handle(ats, slug):
+def _handle(ats: str, slug: Any) -> Any:
     """The engine handle for a resolver hit's slug (a tuple where the
     board spans several columns)."""
-    return board_for(ats).handle(coords.columns(ats, slug))
+    return cast(Board, board_for(ats)).handle(coords.columns(ats, slug))
 
 
-async def _scan_meta(ats, handle, source_url):
+async def _scan_meta(ats: str, handle: Any, source_url: str) -> dict[str, Any]:
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
     answered."""
-    ok, n = await board_for(ats).alive(_handle(ats, handle))
+    ok, n = await cast(Board, board_for(ats)).alive(_handle(ats, handle))
     return {"ats": ats, "slug": handle, "count": n if ok else 0,
             "validated": ok, "source_url": source_url}
 
 
-async def probe_scan(name: str, careers_url: str = ""):
+async def probe_scan(name: str, careers_url: str = "") -> dict[str, Any] | None:
     """
     The board of a SCANNED platform that `name`'s careers pages name
     (identity.candidate_pages, fetched through the per-run memo, each read
@@ -209,16 +216,16 @@ class JsScanProbePool:
         one costs about 3.5x the CPU.
     """
 
-    def __init__(self, size):
+    def __init__(self, size: int) -> None:
         self.size = max(1, int(size))
         self._slots = asyncio.Semaphore(self.size)
         self._launching = asyncio.Lock()
         self._stack = AsyncExitStack()
-        self._browser = None
-        self._idle = []          # pages free for the next scrape
+        self._browser: Any = None
+        self._idle: list[Any] = []          # pages free for the next scrape
         self._enabled = True     # False after a launch failure, or close()
 
-    async def _launch(self):
+    async def _launch(self) -> None:
         """Start Playwright and the browser on self._stack, or report why
         not and disable the pool."""
         try:
@@ -243,7 +250,7 @@ class JsScanProbePool:
         # Re-armed, so a later failure in the same run is reported.
         _JS_NOTICES().discard("disabled")
 
-    async def _page(self):
+    async def _page(self) -> Any:
         """A free page, made on first need; None when there is no browser."""
         if self._idle:
             return self._idle.pop()
@@ -261,7 +268,7 @@ class JsScanProbePool:
         return await context.new_page()
 
     @staticmethod
-    async def _scan(page, url: str):
+    async def _scan(page: Any, url: str) -> tuple[str, Any] | None:
         """
         Navigate + wait for JS, returning `scan_hit`'s (ats, handle) or
         None. Has three short-circuits so we don't pay the full
@@ -302,7 +309,8 @@ class JsScanProbePool:
         return scan_hit(cur) or await asyncio.to_thread(scan_hit, html)
 
     @classmethod
-    async def _scrape(cls, page, name, careers_url):
+    async def _scrape(cls, page: Any, name: str,
+                      careers_url: str) -> tuple[dict[str, Any] | None, str]:
         """probe's answer from `page`, once it has one."""
         for url in candidate_urls(name, careers_url):
             hit = await cls._scan(page, url)
@@ -316,7 +324,7 @@ class JsScanProbePool:
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 
-    async def probe(self, name: str, careers_url: str = ""):
+    async def probe(self, name: str, careers_url: str = "") -> tuple[dict[str, Any] | None, str]:
         """
         (meta, outcome): meta is probe_scan()'s shape or None; outcome
         is "hit", "not validated", "no board link", "no browser",
@@ -365,7 +373,7 @@ class JsScanProbePool:
         """True once the browser has actually started (for logging)."""
         return self._browser is not None
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         """Shut the browser down, after any launch under way; a later
         probe answers "no browser"."""
         async with self._launching:
@@ -376,10 +384,10 @@ class JsScanProbePool:
             except Exception as e:
                 print(f"    [js] browser close errored: {e}")
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Self:
         return self
 
-    async def __aexit__(self, *_a):
+    async def __aexit__(self, *_a: object) -> None:
         await self.aclose()
 
 
@@ -397,14 +405,14 @@ class JsScanProbePool:
 # was.
 
 
-async def nc_count(ats, slug):
+async def nc_count(ats: str, slug: Any) -> int:
     """Postings on a board that are in your [locality] (`Board.local_count`):
     the count that rejects a slug guess landing on somebody else's board.
     `slug` is a resolver hit's."""
-    return await board_for(ats).local_count(_handle(ats, slug), NC_RE)
+    return await cast(Board, board_for(ats)).local_count(_handle(ats, slug), NC_RE)
 
 
-async def probe_company(name, scan=True):
+async def probe_company(name: str, scan: bool = True) -> dict[str, Any] | None:
     """
     Probe every platform whose spec sets ``guess`` (fast) then, only if
     ``scan``, the SCANNED platforms (probe_scan, the slow careers-page
@@ -415,7 +423,7 @@ async def probe_company(name, scan=True):
     hit = None
     for slug in slug_guesses(name):
         for ats in (b.name for b in BOARDS.values() if b.spec.guess):
-            ok, count = await board_for(ats).probe(slug)
+            ok, count = await cast(Board, board_for(ats)).probe(slug)
             if ok:
                 hit = {"name": name, "ats": ats, "slug": slug,
                        "count": count, "nc": await nc_count(ats, slug)}

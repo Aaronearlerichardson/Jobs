@@ -7,6 +7,11 @@ not here. Manage it with discover.py --local / --add-board, or
 run_scraper.py --import-companies roster.json.
 """
 
+from __future__ import annotations
+
+from collections.abc import Collection
+from typing import Any
+
 # _self: the config PACKAGE, which is what callers monkeypatch.
 # profile.py defines it; two identical copies is one too many for
 # a function whose whole job is naming one module.
@@ -112,7 +117,7 @@ WATCH_DIVISION_TITLES = tuple(s.strip().lower()
                               if s.strip())
 
 
-def is_multi_division(name):
+def is_multi_division(name: str | None) -> bool:
     """True if `name` is a known multi-division conglomerate (profile policy).
 
     >>> is_multi_division("")
@@ -128,7 +133,8 @@ def is_multi_division(name):
 ACTIVE_MISSION_TIERS = tuple(t["name"] for t in MISSION_TIERS if t["active"])
 
 
-def is_active_mission(tier, name, include_missions=None):
+def is_active_mission(tier: str | None, name: str | None,
+                      include_missions: Collection[str] | None = None) -> int:
     """The one activation rule: should a newly-sourced company be crawled?
 
     `tier` is the mission tier from src.claude.api.score_company_mission, `name`
@@ -196,7 +202,7 @@ def is_active_mission(tier, name, include_missions=None):
 HARVEST_OFFMISSION_HOURS = _pol.harvest_offmission_hours
 
 
-def offmission_inactive(c):
+def offmission_inactive(c: dict[str, Any]) -> str:
     """What the harvester (src.crawl.harvest.plan) does with an inactive
     board off the mission: "stopped", left out, when it was mission-scored
     into a tier the profile marks inactive (is_active_mission's answer,

@@ -19,12 +19,16 @@ Notes:
     them, and tests/conftest.py reset each one by hand.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextvars
 import inspect
+from collections.abc import Awaitable, Callable
+from typing import Any, cast
 
 #: The current run. Tests set a fresh one per test (tests/conftest.py).
-RUN = contextvars.ContextVar("run")
+RUN: contextvars.ContextVar[Run] = contextvars.ContextVar("run")
 
 
 class Run:
@@ -42,15 +46,15 @@ class Run:
     (set(), {'outer'})
     """
 
-    def __init__(self):
-        self.state = {}                 # declaration -> this run's value
-        self.exits = []
+    def __init__(self) -> None:
+        self.state: dict[Callable[[], Any], Any] = {}   # declaration -> this run's value
+        self.exits: list[Callable[[], object]] = []
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Run:
         self._token = RUN.set(self)
         return self
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, *exc: Any) -> None:
         """Run every exit hook, the last registered first, past any that
         raises; then raise the first hook's error, unless the block's own
         is already on its way out (the hook's is added to it as a note).
@@ -75,7 +79,7 @@ class Run:
         if first is not None:
             exc[1].add_note(f"and a run exit hook raised {first!r}")
 
-    async def _unwind(self):
+    async def _unwind(self) -> Exception | None:
         """Pop and run the exit hooks; the first Exception is returned. A
         cancel (a BaseException) still runs the rest, then goes on."""
         first = None
@@ -93,23 +97,24 @@ class Run:
         return first
 
 
-def run(main):
+def run[T](main: Awaitable[T]) -> T:
     """The coroutine `main`'s result, awaited as one run on an event loop
     of its own: a CLI entry point's one asyncio.run. Ctrl+C cancels `main`
     and, once the run has ended, raises KeyboardInterrupt, also when `main`
     absorbed the cancel (a started sync op runs to its end,
     dispatch.registry.invoke)."""
-    async def whole():
+    async def whole() -> T:
         async with Run():
             # A task of its own, so an absorbed cancel still counts here.
             got = await asyncio.ensure_future(main)
-        if asyncio.current_task().cancelling():
+        # whole() runs as asyncio.run's task, so there is a current task.
+        if cast("asyncio.Task[T]", asyncio.current_task()).cancelling():
             raise asyncio.CancelledError
         return got
     return asyncio.run(whole())
 
 
-def _current():
+def _current() -> Run:
     try:
         return RUN.get()
     except LookupError:
@@ -117,10 +122,10 @@ def _current():
                            "(runstate.run, or `async with runstate.Run():`)") from None
 
 
-def per_run(make):
+def per_run[T](make: Callable[[], T]) -> Callable[[], T]:
     """A piece of run state: the function returning this run's value,
     `make()` at its first use in the run."""
-    def get():
+    def get() -> T:
         state = _current().state
         try:
             return state[get]
@@ -130,7 +135,7 @@ def per_run(make):
     return get
 
 
-def at_exit(fn, last=False):
+def at_exit(fn: Callable[[], object], last: bool = False) -> None:
     """Call `fn()` (awaited when it returns an awaitable) as the current
     run ends, the last registered first; with `last`, after every other
     hook (the run's session, which the others may still use)."""

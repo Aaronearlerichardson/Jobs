@@ -35,15 +35,19 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import sqlite3
+from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BeforeValidator
 
 from src import runstate
 from src.claude.reply import Reply, Unit, choice
 
+config: Any
+call_claude_json: Any
 try:
     from src import config
     from src.claude.api import api_disabled, call_claude_json, have_api_key
@@ -53,6 +57,7 @@ except Exception:                      # importable standalone for calibration
     api_disabled = lambda: None        # noqa: E731
     have_api_key = lambda: False       # noqa: E731
 
+locality: Any
 try:
     # The one place that knows where a posting IS (profile [locality] /
     # [locations]): is_nc reads a stored location one office-segment at a
@@ -123,14 +128,13 @@ FALLBACK_DOMAIN_LADDER = [
     (0.15, "an unrelated field"),
 ]
 FALLBACK_STACK_CORE = "the tools named in your résumé"
-FALLBACK_REGION = "remote"
 
 
-def _cfg(name, default):
+def _cfg(name: str, default: Any) -> Any:
     return (getattr(config, name, None) or default) if config else default
 
 
-def _derived_domain_ladder():
+def _derived_domain_ladder() -> list[tuple[float, str]]:
     """A domain ladder built from the profile's keyword tiers.
 
     `core` terms are what you actually want (top rung), `domain` terms are the
@@ -150,33 +154,35 @@ def _derived_domain_ladder():
     return rungs
 
 
-def _derived_region():
+def _derived_region() -> str:
     """The region string for the geo gate, from [locality]."""
+    # Last resort only: applies to an empty profile.
+    fallback_region = "remote"
     name = _cfg("LOCALITY_NAME", "")
     places = list(_cfg("LOCALITY_SUBSTRINGS", []))[:8]
     if not name and not places:
-        return FALLBACK_REGION
+        return fallback_region
     where = name or ", ".join(places)
     if places and name:
         where = f"{name} ({', '.join(places)})"
     return f"remote, or {where}"
 
 
-def _domain_ladder_text():
+def _domain_ladder_text() -> str:
     ladder = _cfg("FIT_DOMAIN_LADDER", None)
     rungs = ([(r.get("score"), ", ".join(r.get("terms", []))) for r in ladder]
              if ladder else _derived_domain_ladder())
     return "; ".join(f"{txt} ~{score:.2f}" for score, txt in rungs)
 
 
-def _stack_core_text():
+def _stack_core_text() -> str:
     """The candidate's tools: [fit].stack_core, else the profile's `skill`
     keyword tier — which is already a list of the tools they work with."""
     return _cfg("FIT_STACK_CORE", None) or (
         ", ".join(_cfg("SKILL_KEYWORDS", [])) or FALLBACK_STACK_CORE)
 
 
-def _anti_stack_clause():
+def _anti_stack_clause() -> str:
     """The 'tools that disqualify' half of the stack axis — only rendered when
     the profile names some. There is no way to derive an anti-stack (the tools
     you DON'T want are not implied by the ones you do), and inventing one
@@ -193,9 +199,9 @@ def _anti_stack_clause():
 @dataclass
 class FitResult:
     """One role's fit: the scalar, the axis vector, the tripped gates, why."""
-    score: float
-    axes: dict = field(default_factory=dict)
-    gates: list = field(default_factory=list)   # names of FAILED gates
+    score: float | None
+    axes: dict[str, float] = field(default_factory=dict)
+    gates: list[str] = field(default_factory=list)   # names of FAILED gates
     reason: str = ""
     model: str = ""     # model id that produced the score ("" = unknown)
 
@@ -209,7 +215,7 @@ class FitResult:
         g = f" gate:{'+'.join(self.gates)}" if self.gates else ""
         return f"[{a}{g}] {self.reason}".strip()
 
-    def as_columns(self) -> dict:
+    def as_columns(self) -> dict[str, Any]:
         """DB-ready fields: the scalar, the reason tag, the tripped gates, the
         scoring model, and one column per axis. Keys match the jobs-table
         columns added in __init__.py. Axes are None on an unscored result, so
@@ -227,7 +233,9 @@ class FitResult:
 #  core. Weighted geometric mean of the axes, times the worst gate penalty.    #
 # --------------------------------------------------------------------------- #
 
-def combine(axes: dict, failed_gates=(), weights=None, penalties=None) -> float:
+def combine(axes: dict[str, float], failed_gates: Iterable[str] = (),
+            weights: dict[str, float] | None = None,
+            penalties: dict[str, float] | None = None) -> float:
     weights = weights or DEFAULT_WEIGHTS
     penalties = penalties or DEFAULT_GATE_PENALTY
     eps = 1e-6
@@ -244,7 +252,7 @@ def combine(axes: dict, failed_gates=(), weights=None, penalties=None) -> float:
 #  and honest. Candidate profile is injected from config (whoever is loaded).  #
 # --------------------------------------------------------------------------- #
 
-def _profile_block():
+def _profile_block() -> str:
     if config and getattr(config, "CANDIDATE_STRENGTHS", None):
         strengths = "\n".join(f"  {i}. {s}" for i, s in enumerate(config.CANDIDATE_STRENGTHS, 1))
         summary = getattr(config, "CANDIDATE_SUMMARY", "") or ""
@@ -262,7 +270,7 @@ def _profile_block():
     return "A technical candidate. (No profile loaded; judge on general merit.)"
 
 
-def disposition_examples_block(conn, limit=3):
+def disposition_examples_block(conn: sqlite3.Connection, limit: int = 3) -> str:
     """Few-shot calibration from the candidate's OWN recorded decisions
     (run_scraper.py --mark): up to `limit` applied/interviewing postings as
     positive examples, `limit` dismissed ones as negatives, and `limit`
@@ -421,7 +429,7 @@ Return ONLY a JSON object with exactly:
 - "reason": one phrase, <= 14 words, naming the deciding factor."""
 
 
-def _parse_gates(raw):
+def _parse_gates(raw: Any) -> list[str]:
     """The known gates a `gates` value trips, lower-cased: an array's
     names, or a {gate: bool} object's truthy keys.
 
@@ -441,7 +449,9 @@ def _parse_gates(raw):
 
 # The schema tells the API the gate names; _parse_gates keeps the dict
 # tolerance for the legacy tool-call path, where nothing enforces it.
-Gates = Annotated[list[Literal[GATES]], BeforeValidator(_parse_gates)]
+# GATES is built at runtime (from DEFAULT_GATE_PENALTY), which mypy cannot
+# read into a Literal's arguments.
+Gates = Annotated[list[Literal[GATES]], BeforeValidator(_parse_gates)]  # type: ignore[valid-type]
 
 SEAT_TYPES = ("ic-engineering", "ic-science", "management",
               "program-product", "sales-field", "support-ops")
@@ -456,13 +466,13 @@ class FitReply(Reply):
     gates: Gates
     reason: str
 
-    def axes(self):
+    def axes(self) -> dict[str, float]:
         return self.model_dump(include=set(AXES))
 
 
 class _Requirements(Reply):
     years_required: float | None
-    seat_type: choice(*SEAT_TYPES)
+    seat_type: choice(*SEAT_TYPES)  # type: ignore[valid-type]
     must_haves: list[str]
     candidate_gaps: list[str]
 
@@ -479,29 +489,27 @@ class VerifyReply(FitReply, _Requirements):
 # Workday backfill's notion of "missing" so the two stay consistent.
 MIN_DESC_CHARS = 200
 
-# Deterministic backstop for the "clearance" gate: ACTIVE/current-clearance
-# demands are formulaic enough to regex, and a missed gate means a wasted
-# application at a role the candidate cannot hold. Deliberately does NOT
-# match "eligible for" / "ability to obtain" a clearance — the candidate is
-# a clearable US citizen, so only holding-one-today requirements gate.
-# verbs/qualifiers come from config.FIT_CLEARANCE_VERBS/_QUALIFIERS
-# (profile.toml [fit] clearance_verbs / clearance_qualifiers), falling back
-# to these defaults when unconfigured.
-_DEFAULT_CLEARANCE_VERBS = ("active", "current")
-_DEFAULT_CLEARANCE_QUALIFIERS = (
-    "us", "u\\.s\\.", "government", "dod", "top[-\\s]?secret", "ts/?\\s?sci", "secret",
-)
-
-
-def _clearance_regex():
+def _clearance_regex() -> re.Pattern[str]:
+    # Deterministic backstop for the "clearance" gate: ACTIVE/current-clearance
+    # demands are formulaic enough to regex, and a missed gate means a wasted
+    # application at a role the candidate cannot hold. Deliberately does NOT
+    # match "eligible for" / "ability to obtain" a clearance — the candidate is
+    # a clearable US citizen, so only holding-one-today requirements gate.
+    # verbs/qualifiers come from config.FIT_CLEARANCE_VERBS/_QUALIFIERS
+    # (profile.toml [fit] clearance_verbs / clearance_qualifiers), falling back
+    # to these defaults when unconfigured.
+    default_verbs = ("active", "current")
+    default_qualifiers = (
+        "us", "u\\.s\\.", "government", "dod", "top[-\\s]?secret", "ts/?\\s?sci", "secret",
+    )
     cfg_verbs = getattr(config, "FIT_CLEARANCE_VERBS", None)
     cfg_quals = getattr(config, "FIT_CLEARANCE_QUALIFIERS", None)
     # Config values are plain words (escaped here); the built-in defaults are
     # already hand-tuned regex fragments (character classes for spacing
     # variants like "top secret" / "top-secret"), used verbatim.
-    verbs = [re.escape(v) for v in cfg_verbs] if cfg_verbs else list(_DEFAULT_CLEARANCE_VERBS)
+    verbs = [re.escape(v) for v in cfg_verbs] if cfg_verbs else list(default_verbs)
     quals = [re.escape(q).replace(r"\ ", r"[-\s]") for q in cfg_quals] if cfg_quals \
-        else list(_DEFAULT_CLEARANCE_QUALIFIERS)
+        else list(default_qualifiers)
     return re.compile(
         rf"\b(?:{'|'.join(verbs)})\s+"
         rf"(?:(?:{'|'.join(quals)})\s+)*"
@@ -511,7 +519,7 @@ def _clearance_regex():
 _CLEARANCE_RE = _clearance_regex()
 
 
-def _clearance_required(text):
+def _clearance_required(text: str | None) -> bool:
     return bool(_CLEARANCE_RE.search(text or ""))
 
 
@@ -540,43 +548,7 @@ def _clearance_required(text):
 # crawl reads, and they leave the axis scores, the weights, the combiner
 # and the prompts untouched. A gate the evidence still supports survives.
 
-# Every clause that mentions a clearance. Clause, not sentence: an ATS
-# requirements block packs several demands into one line separated by
-# ";" / newlines / bullets, and "must hold an active TS/SCI; must be
-# eligible for a CI polygraph" has to read as two facts, not one.
-# "TS/SCI" and "top secret" count as mentions on their own — a posting can
-# demand one without ever spelling the word "clearance".
-_CLEARANCE_MENTION = r"clearance|ts\s*/?\s*sci|top[-\s]?secret"
-_CLEARANCE_CLAUSE_RE = re.compile(rf"[^.;\n•]*(?:{_CLEARANCE_MENTION})[^.;\n•]*",
-                                  re.I)
-
-# The period inside an abbreviation is not a clause break. Without this,
-# the single commonest eligibility sentence there is — "must be eligible to
-# obtain and maintain a U.S. security clearance" — clause-splits at the "S."
-# and the surviving fragment ("security clearance") carries none of the
-# eligibility language that is the whole point of reading it.
-_ABBREV_DOT_RE = re.compile(r"\b([A-Za-z])\.")
-
-# ELIGIBILITY language: being able to GET one, or being the kind of person
-# who could. The candidate is a US citizen, so none of this is a
-# disqualifier — profile.toml [fit] clearance_verbs says as much.
-_CLEARANCE_ELIGIBLE_RE = re.compile(
-    r"\b(?:eligib\w*|clearable|ability|able|willing\w*|capable|qualify|"
-    r"qualified|obtain\w*|acquir\w*|apply\s+for|sponsor\w*|undergo|"
-    r"subject\s+to|if\s+required|may\s+be\s+required|upon\s+hire|"
-    r"citizen\w*)\b", re.I)
-
-# HOLDING language: the posting wants a clearance you already have. Note
-# what is NOT here — a bare "maintain", which is half of the extremely
-# common eligibility phrase "able to obtain AND MAINTAIN a clearance", and
-# a bare "required", which says nothing about whether it is required today
-# or by the start date.
-_CLEARANCE_HELD_RE = re.compile(
-    r"\b(?:active|current(?:ly)?|existing|present(?:ly)?|already|"
-    r"hold(?:s|ing)?|possess(?:es|ing)?|in\s+hand)\b", re.I)
-
-
-def _clearance_gate_holds(text):
+def _clearance_gate_holds(text: str | None) -> bool:
     """True when a "clearance" gate on this posting stands; False only when
     the text shows POSITIVE eligibility-only evidence.
 
@@ -607,16 +579,48 @@ def _clearance_gate_holds(text):
     >>> _clearance_gate_holds("We build scientific pipelines.")
     True
     """
+    # Every clause that mentions a clearance. Clause, not sentence: an ATS
+    # requirements block packs several demands into one line separated by
+    # ";" / newlines / bullets, and "must hold an active TS/SCI; must be
+    # eligible for a CI polygraph" has to read as two facts, not one.
+    # "TS/SCI" and "top secret" count as mentions on their own — a posting
+    # can demand one without ever spelling the word "clearance".
+    clearance_mention = r"clearance|ts\s*/?\s*sci|top[-\s]?secret"
+    clearance_clause_re = re.compile(rf"[^.;\n•]*(?:{clearance_mention})[^.;\n•]*",
+                                     re.I)
+    # The period inside an abbreviation is not a clause break. Without this,
+    # the single commonest eligibility sentence there is — "must be eligible
+    # to obtain and maintain a U.S. security clearance" — clause-splits at
+    # the "S." and the surviving fragment ("security clearance") carries
+    # none of the eligibility language that is the whole point of reading it.
+    abbrev_dot_re = re.compile(r"\b([A-Za-z])\.")
+    # ELIGIBILITY language: being able to GET one, or being the kind of
+    # person who could. The candidate is a US citizen, so none of this is a
+    # disqualifier — profile.toml [fit] clearance_verbs says as much.
+    clearance_eligible_re = re.compile(
+        r"\b(?:eligib\w*|clearable|ability|able|willing\w*|capable|qualify|"
+        r"qualified|obtain\w*|acquir\w*|apply\s+for|sponsor\w*|undergo|"
+        r"subject\s+to|if\s+required|may\s+be\s+required|upon\s+hire|"
+        r"citizen\w*)\b", re.I)
+    # HOLDING language: the posting wants a clearance you already have. Note
+    # what is NOT here — a bare "maintain", which is half of the extremely
+    # common eligibility phrase "able to obtain AND MAINTAIN a clearance",
+    # and a bare "required", which says nothing about whether it is
+    # required today or by the start date.
+    clearance_held_re = re.compile(
+        r"\b(?:active|current(?:ly)?|existing|present(?:ly)?|already|"
+        r"hold(?:s|ing)?|possess(?:es|ing)?|in\s+hand)\b", re.I)
+
     text = text or ""
     if _clearance_required(text):
         return True
-    clauses = _CLEARANCE_CLAUSE_RE.findall(_ABBREV_DOT_RE.sub(r"\1", text))
-    if not any(_CLEARANCE_ELIGIBLE_RE.search(c) for c in clauses):
+    clauses = clearance_clause_re.findall(abbrev_dot_re.sub(r"\1", text))
+    if not any(clearance_eligible_re.search(c) for c in clauses):
         return True
-    return any(_CLEARANCE_HELD_RE.search(c) for c in clauses)
+    return any(clearance_held_re.search(c) for c in clauses)
 
 
-def _geo_gate_holds(location, description=""):
+def _geo_gate_holds(location: str, description: str = "") -> bool:
     """True unless the posting is deterministically somewhere the candidate
     can work from: a stored location inside the configured locality, or a
     US-eligible remote posting.
@@ -642,7 +646,8 @@ def _geo_gate_holds(location, description=""):
     return True
 
 
-def apply_gate_overrides(gates, *, location="", description=""):
+def apply_gate_overrides(gates: list[str], *, location: str = "",
+                          description: str = "") -> list[str]:
     """The tripped gates with any the deterministic checks above refute
     removed. Additive-free by construction: this only ever returns a subset
     of `gates`, and it never touches the axis scores or the weights.
@@ -658,27 +663,26 @@ def apply_gate_overrides(gates, *, location="", description=""):
     return [g for g in gates if g not in checks or checks[g]()]
 
 
-# How much of the tail survives clipping. Corporate JDs put the
-# requirements/qualifications block LAST, after pages of mission boilerplate
-# — a plain head-truncation is what let a TPM posting score 0.69 on its EEG
-# preamble while "8+ years program management" sat unseen past the cap.
-_CLIP_TAIL_CHARS = 3000
-
-
-def clip_desc(text, max_chars=None):
+def clip_desc(text: str | None, max_chars: int | None = None) -> str:
     """Clip a JD to the scoring budget, keeping HEAD + TAIL (never head only):
     the head carries the role summary, the tail carries the requirements
     block. Marks the elision so the model knows text was cut."""
+    # How much of the tail survives clipping. Corporate JDs put the
+    # requirements/qualifications block LAST, after pages of mission
+    # boilerplate — a plain head-truncation is what let a TPM posting score
+    # 0.69 on its EEG preamble while "8+ years program management" sat
+    # unseen past the cap.
+    clip_tail_chars = 3000
     text = text or ""
     max_chars = max_chars or _cfg("MAX_DESC_CHARS", 12000)
     if len(text) <= max_chars:
         return text
-    head = max(max_chars - _CLIP_TAIL_CHARS, max_chars // 2)
+    head = max(max_chars - clip_tail_chars, max_chars // 2)
     return (text[:head] + "\n[... middle of posting elided ...]\n"
             + text[-(max_chars - head):])
 
 
-def _user_turn(title, location, body_label, body):
+def _user_turn(title: str, location: str | None, body_label: str, body: str) -> str:
     """The per-posting user turn both scorers send: the title, the STORED
     location (the ATS field, not the JD prose) when there is one, then the
     posting text under `body_label`.
@@ -703,7 +707,8 @@ def _user_turn(title, location, body_label, body):
     return f"JOB TITLE: {title}\n{loc_line}{body_label}:\n{body}"
 
 
-def _gated(r, gates, reason, model, description, location):
+def _gated(r: FitReply, gates: list[str], reason: str, model: str,
+           description: str, location: str) -> FitResult:
     """Both scorers' FitResult for reply `r` and its `gates`, after the
     clearance backstop and the gate overrides."""
     # Regex backstop on the FULL pre-clip text (clipping could elide it)...
@@ -719,7 +724,7 @@ def _gated(r, gates, reason, model, description, location):
 
 
 async def score_resume_fit(title: str, description: str = "", *,
-                           location: str = "", max_tokens=300) -> FitResult:
+                           location: str = "", max_tokens: int=300) -> FitResult:
     """Score one posting. Returns a None-scored result when the API is
     unavailable OR when there is no real description to assess (callers treat a
     None score as 'don't rank this'), so unscorable rows drop out instead of
@@ -795,7 +800,7 @@ _UNSCORED_CAUSES = {
 UNSCORED_CAUSES = tuple(dict.fromkeys(_UNSCORED_CAUSES.values()))
 
 
-def unscored_cause(reason):
+def unscored_cause(reason: str | None) -> str | None:
     """"short" | "refused" | None for a None-scored FitResult's `.reason`.
     None means the failure isn't a verdict on this posting at all (the
     scorer was offline, or `reason` isn't one score_resume_fit produces)
@@ -808,7 +813,7 @@ def unscored_cause(reason):
     >>> unscored_cause("scorer unavailable") is None
     True
     """
-    return _UNSCORED_CAUSES.get(reason)
+    return _UNSCORED_CAUSES.get(reason) if reason is not None else None
 
 
 # The tag verify_fit writes at the head of a deep-pass fit_reason, and the
@@ -818,7 +823,7 @@ DEEP_MARKER = "deep:"
 
 
 async def verify_fit(title: str, description: str = "", *, location: str = "",
-                     max_tokens=8000) -> FitResult:
+                     max_tokens: int=8000) -> FitResult:
     """Deep second pass for ranking FINALISTS: same axes/gates as the screen,
     but run on the (near-)full posting text with an explicit requirements
     extraction step first — years required, seat type, must-haves, and the
@@ -870,7 +875,7 @@ async def verify_fit(title: str, description: str = "", *, location: str = "",
     return _gated(r, gates, reason, vmodel, description, location)
 
 
-def is_deep_verified(fit_reason) -> bool:
+def is_deep_verified(fit_reason: str | None) -> bool:
     """Whether a stored `fit_reason` carries verify_fit's DEEP_MARKER, i.e.
     this row's score came from the deep pass and not the screen.
 
@@ -951,7 +956,8 @@ _ANCHORS = {
 }
 
 
-def calibrate(weights=None, penalties=None):
+def calibrate(weights: dict[str, float] | None = None,
+              penalties: dict[str, float] | None = None) -> tuple[float, float]:
     print(f"{'role':32} {'pred':>5} {'hand':>5} {'delta':>6}  gates")
     print("-" * 72)
     rows = []
@@ -968,7 +974,7 @@ def calibrate(weights=None, penalties=None):
     return mae, tau
 
 
-def _rank_agreement(a, b):
+def _rank_agreement(a: list[str], b: list[str]) -> float:
     idx = {n: i for i, n in enumerate(b)}
     seq = [idx[n] for n in a]
     conc = disc = 0

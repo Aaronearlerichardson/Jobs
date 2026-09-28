@@ -22,13 +22,18 @@ Notes:
     requests like the rest of the sweep.
 """
 
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable, Iterable, Iterator
+from typing import Any
+
 from src import tags
 from src.match.filters import is_relevant
 
 from .board import board_for
 
 
-def seed_tag_for(ats):
+def seed_tag_for(ats: str) -> str | None:
     """The tag a newly found `ats` board seeds: SWEEP where its spec sets
     `sweep`, else LOCAL; None for a platform no spec fetches."""
     board = board_for(ats)
@@ -37,7 +42,8 @@ def seed_tag_for(ats):
     return tags.SWEEP if board.spec.sweep else tags.LOCAL
 
 
-def sweep(ats, name, handle):
+def sweep(ats: str, name: str,
+          handle: str) -> Callable[[], Awaitable[list[dict[str, Any]]]] | None:
     """The sweep's fetch for one board: a thunk whose coroutine pulls it
     through the profile's keyword gate (the engine itself is ungated; the
     company-vetted path, board/company.py, passes a location regex
@@ -46,12 +52,13 @@ def sweep(ats, name, handle):
     return (lambda: board.jobs(handle, name, gate=is_relevant)) if board else None
 
 
-def iter_store_sources(companies):
+def iter_store_sources(companies: Iterable[dict[str, Any]]) -> Iterator[
+        tuple[str, str, str, Callable[[], Awaitable[list[dict[str, Any]]]] | None]]:
     """Yield (ats, name, handle, thunk) for the store rows on a platform
     the lightweight sweep pulls whole (its spec's `sweep`) that name a
     board."""
     for c in companies:
         board = board_for(c.get("ats"))
         handle = board.handle(c) if board and board.spec.sweep else None
-        if handle:
+        if board and handle:
             yield board.name, c["name"], handle, sweep(board.name, c["name"], handle)

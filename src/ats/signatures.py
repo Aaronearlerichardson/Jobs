@@ -8,7 +8,10 @@ probes, ATS dorking, web-search resolution) and the crawl-side consumers
 share one definition of "what is a board".
 """
 
+from __future__ import annotations
+
 import html
+from typing import Any
 
 from .board import BOARDS, board_for
 
@@ -24,16 +27,8 @@ BAD_SLUGS = frozenset({
 })
 
 
-def _board_part(part):
-    """Whether a fetchable detection's first part can name a board."""
-    return len(part) >= 2 and part.lower() not in BAD_SLUGS
-
-
-def _lead_part(part):
-    return len(part) >= 2
-
-
-def detect(text, final_url="", leads=True, only=None):
+def detect(text: str, final_url: str = "", leads: bool = True,
+           only: str | None = None) -> tuple[str, str, str | tuple[str, ...]] | None:
     """Scan text + final URL (HTML entities decoded) for an ATS signature.
 
     Returns (kind, ats, slug) or None: kind "fetchable" for a spec with a
@@ -93,13 +88,14 @@ def detect(text, final_url="", leads=True, only=None):
     for b in (BOARDS.get(only),) if only else BOARDS.values():
         if b is None or not (b.fetchable or leads):
             continue
-        slug = b.detect(blob, _board_part if b.fetchable else _lead_part)
+        slug = b.detect(blob, (lambda part: len(part) >= 2 and part.lower() not in BAD_SLUGS)
+                        if b.fetchable else (lambda part: len(part) >= 2))
         if slug:
             return ("fetchable" if b.fetchable else "lead"), b.name, slug
     return None
 
 
-def pack(ats, slug, careers_url):
+def pack(ats: str, slug: str | tuple[Any, ...] | None, careers_url: str) -> dict[str, Any]:
     """A detection -> the coordinate dict every resolver consumes.
 
     A handle spanning several store columns (Workday's (tenant, pod, site))
@@ -130,6 +126,6 @@ def pack(ats, slug, careers_url):
     """
     b = board_for(ats)
     rebuilt = b.careers_url(slug, careers_url) if b and slug else None
-    out = {"ats": ats, "careers_url": rebuilt or careers_url}
+    out: dict[str, Any] = {"ats": ats, "careers_url": rebuilt or careers_url}
     out["triple" if b and b.multi_column else "slug"] = slug
     return out

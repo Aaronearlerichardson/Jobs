@@ -23,17 +23,24 @@ their boards. No automated fetching of logged-in sites happens here — you
 drive the browser; this just keeps what you saw.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import json
 import re
+import sqlite3
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 
 try:
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
+    # console stream is a TextIOWrapper, and anything else raises here.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 except Exception:
     pass
 
@@ -44,7 +51,87 @@ from src.ops.ingest import ingest_external_jobs
 
 PORT_DEFAULT = 8877
 
-USERSCRIPT = r"""// ==UserScript==
+
+def _record_companies(conn: sqlite3.Connection, names: Iterable[str | None],
+                      source_site: str, sites: dict[str, str] | None = None) -> list[str]:
+    """Record captured company names as inactive store leads. `sites` maps a
+    company name -> its own website (from JSON-LD hiringOrganization); stored as
+    careers_url so `discover.py --resolve-leads` can probe {domain}/careers
+    instead of guessing the domain from the name."""
+    sites = sites or {}
+    fresh = []
+    have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
+    for n in sorted({n.strip() for n in names if n and n.strip()}):
+        if n.lower() in have:
+            continue
+        row: dict[str, Any] = {"name": n, "active": 0, "source": "page_capture",
+                               "notes": f"seen on {source_site}; resolve board via "
+                                        f"discover.py --resolve-leads"}
+        if sites.get(n):
+            row["careers_url"] = sites[n]
+        store.upsert_company(conn, row)
+        fresh.append(n)
+    return fresh
+
+
+def attribute_company(conn: sqlite3.Connection, url: str,
+                      jobs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The roster company that owns a captured page, or None -- and the jobs
+    rewritten to carry its name, so the ingest links them to that row.
+
+    A page saved from an employer's own careers host (or a hosted board the
+    roster already knows by careers_url, or a posting whose JSON-LD names the
+    employer's site) belongs to that employer; without this the parsed jobs
+    would land under whatever the page text says and the roster would grow
+    a second, unreviewed row for a company it already tracks. A matched row
+    with no board of its own is marked capture-only (ats = "capture",
+    active): a real roster member whose pages the person saves by hand, and
+    one no crawl path will ever try to fetch. A row waiting in the review
+    queue, or one that already has a board, is left as it is."""
+    hints = [url] + [j.get("company_url") for j in jobs if j.get("company_url")]
+    row = next((r for r in (store.company_by_host(conn, h) for h in hints if h)
+                if r), None)
+    if row is None:
+        return None
+    for j in jobs:
+        j["company"] = row["name"]
+    if not row.get("ats") and not tags.has(row.get("tags"), tags.PENDING):
+        store.upsert_company(conn, {
+            "name": row["name"], "ats": store.CAPTURE_ATS, "active": 1,
+            "notes": "capture-only board: browse it yourself and save pages "
+                     "with capture.py --watch"})
+        row = store.get_company(conn, row["id"]) or row
+    return row
+
+
+async def ingest_html(url: str, html: str, label: str = "") -> dict[str, Any]:
+    """Parse one page (off the loop) and feed the standard ingest pipeline.
+    Returns a summary dict."""
+    jobs, source, where = await asyncio.to_thread(
+        lambda: (*parse_page(url, html), page_url(html, url)))
+    async with store.Writer() as db:
+        owner = await db.run(attribute_company, where, jobs)
+        ingested = await ingest_external_jobs(jobs, source=source) if jobs else 0
+        # Company name -> its own website, when the page exposed it (JSON-LD).
+        sites = {j["company"]: j["company_url"] for j in jobs
+                 if j.get("company") and j.get("company_url")}
+        new_cos = await db.run(_record_companies, [j.get("company") for j in jobs],
+                               source, sites)
+    tag = label or url or source
+    print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
+          + (f" under {owner['name']} ({owner.get('ats') or '?'})" if owner else "")
+          + (f", {len(new_cos)} new compan(ies): {', '.join(new_cos[:6])}"
+             + ("..." if len(new_cos) > 6 else "") if new_cos else ""))
+    return {"parsed": len(jobs), "ingested": ingested, "companies": new_cos,
+            "company": owner["name"] if owner else None}
+
+
+async def serve(port: int) -> None:
+    """The capture server on 127.0.0.1:`port`, until Ctrl+C: the
+    userscript, its install page, and POST /page (a page's DOM, ingested),
+    CORS-open for the userscript's cross-origin POST. No request size
+    limit: a page's DOM runs to megabytes."""
+    userscript = r"""// ==UserScript==
 // @name         Jobs capture button
 // @namespace    jobs-crawler
 // @version      1.0
@@ -95,7 +182,7 @@ USERSCRIPT = r"""// ==UserScript==
 })();
 """
 
-INDEX_HTML = """<!doctype html><meta charset="utf-8">
+    index_html = """<!doctype html><meta charset="utf-8">
 <title>Jobs capture server</title>
 <body style="font-family:sans-serif;max-width:640px;margin:40px auto">
 <h2>Jobs capture server &mdash; running</h2>
@@ -110,86 +197,8 @@ INDEX_HTML = """<!doctype html><meta charset="utf-8">
 <code>python capture.py saved-page.html</code></p>
 </body>"""
 
-
-def _record_companies(conn, names, source_site, sites=None):
-    """Record captured company names as inactive store leads. `sites` maps a
-    company name -> its own website (from JSON-LD hiringOrganization); stored as
-    careers_url so `discover.py --resolve-leads` can probe {domain}/careers
-    instead of guessing the domain from the name."""
-    sites = sites or {}
-    fresh = []
-    have = {c["name"].lower() for c in store.get_companies(conn, active_only=False)}
-    for n in sorted({n.strip() for n in names if n and n.strip()}):
-        if n.lower() in have:
-            continue
-        row = {"name": n, "active": 0, "source": "page_capture",
-               "notes": f"seen on {source_site}; resolve board via "
-                        f"discover.py --resolve-leads"}
-        if sites.get(n):
-            row["careers_url"] = sites[n]
-        store.upsert_company(conn, row)
-        fresh.append(n)
-    return fresh
-
-
-def attribute_company(conn, url, jobs):
-    """The roster company that owns a captured page, or None -- and the jobs
-    rewritten to carry its name, so the ingest links them to that row.
-
-    A page saved from an employer's own careers host (or a hosted board the
-    roster already knows by careers_url, or a posting whose JSON-LD names the
-    employer's site) belongs to that employer; without this the parsed jobs
-    would land under whatever the page text says and the roster would grow
-    a second, unreviewed row for a company it already tracks. A matched row
-    with no board of its own is marked capture-only (ats = "capture",
-    active): a real roster member whose pages the person saves by hand, and
-    one no crawl path will ever try to fetch. A row waiting in the review
-    queue, or one that already has a board, is left as it is."""
-    hints = [url] + [j.get("company_url") for j in jobs if j.get("company_url")]
-    row = next((r for r in (store.company_by_host(conn, h) for h in hints if h)
-                if r), None)
-    if row is None:
-        return None
-    for j in jobs:
-        j["company"] = row["name"]
-    if not row.get("ats") and not tags.has(row.get("tags"), tags.PENDING):
-        store.upsert_company(conn, {
-            "name": row["name"], "ats": store.CAPTURE_ATS, "active": 1,
-            "notes": "capture-only board: browse it yourself and save pages "
-                     "with capture.py --watch"})
-        row = store.get_company(conn, row["id"]) or row
-    return row
-
-
-async def ingest_html(url, html, label=""):
-    """Parse one page (off the loop) and feed the standard ingest pipeline.
-    Returns a summary dict."""
-    jobs, source, where = await asyncio.to_thread(
-        lambda: (*parse_page(url, html), page_url(html, url)))
-    async with store.Writer() as db:
-        owner = await db.run(attribute_company, where, jobs)
-        ingested = await ingest_external_jobs(jobs, source=source) if jobs else 0
-        # Company name -> its own website, when the page exposed it (JSON-LD).
-        sites = {j["company"]: j["company_url"] for j in jobs
-                 if j.get("company") and j.get("company_url")}
-        new_cos = await db.run(_record_companies, [j.get("company") for j in jobs],
-                               source, sites)
-    tag = label or url or source
-    print(f"  {tag}: {len(jobs)} job(s) parsed, {ingested} ingested"
-          + (f" under {owner['name']} ({owner.get('ats') or '?'})" if owner else "")
-          + (f", {len(new_cos)} new compan(ies): {', '.join(new_cos[:6])}"
-             + ("..." if len(new_cos) > 6 else "") if new_cos else ""))
-    return {"parsed": len(jobs), "ingested": ingested, "companies": new_cos,
-            "company": owner["name"] if owner else None}
-
-
-async def serve(port):
-    """The capture server on 127.0.0.1:`port`, until Ctrl+C: the
-    userscript, its install page, and POST /page (a page's DOM, ingested),
-    CORS-open for the userscript's cross-origin POST. No request size
-    limit: a page's DOM runs to megabytes."""
-    async def answer(request):
-        status, body, ctype = 200, INDEX_HTML, "text/html"
+    async def answer(request: web.Request) -> web.Response:
+        status, body, ctype = 200, index_html, "text/html"
         if request.method == "OPTIONS":
             status, body, ctype = 204, "", "application/json"
         elif request.method == "POST" and not request.path.startswith("/page"):
@@ -206,7 +215,7 @@ async def serve(port):
         elif request.method != "GET":
             status, body, ctype = 501, "Unsupported method", "text/plain"
         elif request.path.startswith("/jobs-capture.user.js"):
-            body, ctype = USERSCRIPT.replace("__PORT__", str(port)), "text/javascript"
+            body, ctype = userscript.replace("__PORT__", str(port)), "text/javascript"
         return web.Response(status=status, text=body, content_type=ctype, charset="utf-8",
                             headers={"Access-Control-Allow-Origin": "*",
                                      "Access-Control-Allow-Headers": "Content-Type"})
@@ -225,7 +234,7 @@ async def serve(port):
         await runner.cleanup()
 
 
-def _url_from_saved(html):
+def _url_from_saved(html: str) -> str:
     """Source URL of a saved page: Chrome's 'saved from url' comment,
     SingleFile's banner, else the page's own canonical/og:url."""
     m = re.search(r"<!--\s*saved from url=\(\d+\)(\S+)", html) or \
@@ -233,12 +242,12 @@ def _url_from_saved(html):
     return m.group(1) if m else ""      # parse_page falls back to canonical
 
 
-async def watch(folder, interval=2.0):
+async def watch(folder: str | Path, interval: float = 2.0) -> None:
     folder = Path(folder).expanduser()
     folder.mkdir(parents=True, exist_ok=True)
     print(f"\n  Watching {folder.resolve()}")
     print("  Save pages there (Ctrl+S -> 'Web Page, complete'). Ctrl+C to stop.\n")
-    seen = {}
+    seen: dict[str, int] = {}
     while True:
         for p in sorted(folder.glob("*.htm*")):
             try:
@@ -260,7 +269,7 @@ async def watch(folder, interval=2.0):
         await asyncio.sleep(interval)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(description="Manual page capture for the job crawler")
     ap.add_argument("files", nargs="*", help="Saved .html pages to ingest (Ctrl+S fallback)")
     ap.add_argument("--serve", action="store_true", help="Run the capture server (default when no files)")
@@ -294,7 +303,7 @@ def main():
         return
 
     if args.files:
-        async def each():
+        async def each() -> None:
             for f in args.files:
                 p = Path(f)
                 html = p.read_text(encoding="utf-8", errors="replace")

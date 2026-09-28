@@ -10,13 +10,17 @@ Schema (per job):
     description, location, salary, apply_url, url, original
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 from src.net import http
 from src.net.util import strip_html
 
 
-async def fetch_remoteok(max_jobs=500, gate=None):
+async def fetch_remoteok(max_jobs: int = 500, gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """
     Pull every active listing from RemoteOK, filter to the relevant ones
     (off the loop). Returns a list of job dicts in the standard crawler
@@ -26,7 +30,7 @@ async def fetch_remoteok(max_jobs=500, gate=None):
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
 
-def _jobs(data, max_jobs, gate):
+def _jobs(data: Any, max_jobs: int, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
     """The feed's payload `data` as fetch_remoteok's job dicts."""
     jobs = []
     for entry in data[:max_jobs + 1]:           # +1 for metadata stub

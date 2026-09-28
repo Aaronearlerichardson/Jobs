@@ -11,13 +11,15 @@ run them through validate_candidate, which hands each name to the shared
 resolver (careers-page sniff, then slug probe, every hit live-validated).
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Iterable
+from typing import Any
 
 from src.config import FETCH_TIMEOUT
 from src.net import http
 from src.net.http import HEADERS
-
-API_URL = "https://bciwiki.org/api.php"
 
 # Category -> the ats hint we hand each candidate. Companies/labs/orgs all
 # go in as "unknown": the resolver reads the ATS off the company's own
@@ -28,17 +30,13 @@ CATEGORIES = {
     "organizations": "Organizations",
 }
 
-# Wiki pages that are clearly not employers — skip so discovery doesn't
-# waste probes on them. Matched case-insensitively as a substring.
-_SKIP_SUBSTRINGS = (
-    "list of", "category:", "template:", "comparison of", "index of",
-)
-
-
-async def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
+async def _category_members(category: str, max_items: int = 2000,
+                            timeout: float | tuple[float, float] = FETCH_TIMEOUT
+                            ) -> list[str]:
     """Return all page titles in a BCIWiki category, following cmcontinue;
     each page's JSON decoded off the loop."""
-    titles, cont = [], {}
+    titles: list[str] = []
+    cont: dict[str, Any] = {}
     while len(titles) < max_items:
         params = {
             "action":  "query",
@@ -50,8 +48,8 @@ async def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
             **cont,
         }
         try:
-            r = await http.send("GET", API_URL, params=params, headers=HEADERS,
-                                timeout=timeout)
+            r = await http.send("GET", "https://bciwiki.org/api.php", params=params,
+                                headers=HEADERS, timeout=timeout)
             r.raise_for_status()
             data = await asyncio.to_thread(r.json)
         except Exception as e:
@@ -65,15 +63,22 @@ async def _category_members(category, max_items=2000, timeout=FETCH_TIMEOUT):
     return titles
 
 
-def _looks_like_employer(title):
+def _looks_like_employer(title: str) -> bool:
+    # Wiki pages that are clearly not employers — skip so discovery doesn't
+    # waste probes on them. Matched case-insensitively as a substring.
+    skip_substrings = (
+        "list of", "category:", "template:", "comparison of", "index of",
+    )
     t = title.lower()
-    return not any(s in t for s in _SKIP_SUBSTRINGS)
+    return not any(s in t for s in skip_substrings)
 
 
-async def bciwiki_company_names(categories=("companies",), max_items=2000):
+async def bciwiki_company_names(categories: Iterable[str] = ("companies",),
+                                max_items: int = 2000) -> list[str]:
     """Deduped, cleaned list of employer names from the given BCIWiki
     categories. `categories` keys are from CATEGORIES."""
-    seen, out = set(), []
+    seen: set[str] = set()
+    out: list[str] = []
     for key in categories:
         cat = CATEGORIES.get(key)
         if not cat:
@@ -89,7 +94,8 @@ async def bciwiki_company_names(categories=("companies",), max_items=2000):
     return out
 
 
-async def bciwiki_seed_candidates(categories=("companies",), max_items=2000):
+async def bciwiki_seed_candidates(categories: Iterable[str] = ("companies",),
+                                  max_items: int = 2000) -> list[dict[str, Any]]:
     """Candidate dicts (same shape as Claude's discovery payload) so the
     names flow through candidate_from_dict / validate_candidate unchanged."""
     return [

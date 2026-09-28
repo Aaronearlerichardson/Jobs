@@ -13,23 +13,27 @@ then JSON-LD JobPosting blocks, then a generic job-link sweep — whichever
 layers hit, results are merged and de-duplicated by job id.
 """
 
+from __future__ import annotations
+
 import json
 import re
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 from src import config
 from src.net.util import (first, host_of, jsonld_scripts, links, node_text, parse_markup,
                           stable_id, strip_html, xpath)
 
-_LI_VIEW_RE = re.compile(r"/jobs/view/(\d+)")
-_INDEED_JK_RE = re.compile(r"[?&]jk=([0-9a-f]+)", re.I)
+if TYPE_CHECKING:
+    from lxml import etree
 
 
-def _txt(el):
+def _txt(el: etree._Element | None) -> str:
     return re.sub(r"\s+", " ", node_text(el)) if el is not None else ""
 
 
-def _sel(scope, *paths):
+def _sel(scope: etree._Element, *paths: str) -> str:
     for path in paths:
         el = first(path, scope)
         if el is not None and _txt(el):
@@ -37,48 +41,49 @@ def _sel(scope, *paths):
     return ""
 
 
-def _class(name):
+def _class(name: str) -> str:
     """An XPath test: the element's class attribute lists `name`."""
     return f"contains(concat(' ', normalize-space(@class), ' '), ' {name} ')"
 
 
-def _first_string(tree, rx):
+def _first_string(tree: etree._Element, rx: re.Pattern[str]) -> Any:
     """The first text node in `tree` (script text included) that `rx`
     searches, or None."""
     return next((s for s in tree.xpath("//text()") if rx.search(s)), None)
 
 
-# Aggregator / ATS / social hosts — a URL on one of these is NOT the
-# company's own website, so it can't seed a careers-page guess for the lead
-# resolver. Only a company-owned domain is worth recording.
-_AGG_HOST_RE = config.hosts_re(config.SHARED_HOSTS + (
-    "facebook.", "twitter.", "x.com", "youtube.", "instagram.", "crunchbase",
-    "wellfound", "schema.org"))
-
-
-def _company_site(*urls):
+def _company_site(*urls: Any) -> str:
     """First real company-owned website (scheme+host) among the given URLs,
     skipping aggregator/ATS/social hosts. Recorded on a lead as careers_url so
     the resolver can probe {domain}/careers instead of guessing the domain from
     the name (which misses acronym/hyphenated domains: OXB->oxb.com,
     'United Imaging'->united-imaging.com). '' if none qualifies."""
+    # Aggregator / ATS / social hosts — a URL on one of these is NOT the
+    # company's own website, so it can't seed a careers-page guess for the lead
+    # resolver. Only a company-owned domain is worth recording.
+    agg_host = config.hosts_re(config.SHARED_HOSTS + (
+        "facebook.", "twitter.", "x.com", "youtube.", "instagram.", "crunchbase",
+        "wellfound", "schema.org"))
     for u in urls:
         if not u or not isinstance(u, str):
             continue
         m = re.match(r"https?://([^/]+)", u.strip())
-        if not m or _AGG_HOST_RE.search(m.group(1)):
+        if not m or agg_host.search(m.group(1)):
             continue
         return f"https://{m.group(1)}"
     return ""
 
 
-def _job(jid, title, company, url, location, description="", company_url=""):
+def _job(jid: str, title: str | None, company: str | None, url: str | None,
+         location: str | None, description: str | None = "",
+         company_url: str = "") -> dict[str, Any] | None:
     title = (title or "").strip()
     if not title or not jid:
         return None
-    j = {"id": jid, "title": title[:120], "company": (company or "").strip()[:80],
-         "url": url or "", "location": (location or "").strip()[:80],
-         "description": (description or "")[:config.MAX_DESC_CHARS]}
+    j: dict[str, Any] = {"id": jid, "title": title[:120],
+                         "company": (company or "").strip()[:80],
+                         "url": url or "", "location": (location or "").strip()[:80],
+                         "description": (description or "")[:config.MAX_DESC_CHARS]}
     if company_url:
         j["company_url"] = company_url
     return j
@@ -96,16 +101,15 @@ def _job(jid, title, company, url, location, description="", company_url=""):
 # section. NOTE: "Top job picks" collection pages are virtualized — a Ctrl+S
 # save contains almost no job data; save Job tracker / search / detail pages.
 
-_MODE_RE = re.compile(r"\((Remote|Hybrid|On-site)\)")
 _NONTITLE_RE = re.compile(r"^(apply|easy apply|save|saved|dismiss|x)$", re.I)
 
 
-def _split_company_loc(text):
+def _split_company_loc(text: str) -> tuple[str, str]:
     company, _, location = text.partition("\u00b7")
     return company.strip(), location.strip()
 
 
-def parse_linkedin(tree, page_url=""):
+def parse_linkedin(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
     """A LinkedIn page's jobs: its job anchors and guest cards, and a
     detail page's own posting.
 
@@ -118,11 +122,12 @@ def parse_linkedin(tree, page_url=""):
     >>> [(j["company"], j["location"], j["description"][:30]) for j in parse_linkedin(parse_markup(page))]
     [('Acme', 'Durham, NC (Hybrid)', 'About the job Build pipelines.')]
     """
+    li_view = re.compile(r"/jobs/view/(\d+)")
     jobs = []
     # Job anchors (generations 1 + 2). Visible strings first; classic-card
     # selectors as fallback for the older markup.
     for a in xpath("//a[contains(@href, '/jobs/view/')]")(tree):
-        m = _LI_VIEW_RE.search(a.get("href", ""))
+        m = li_view.search(a.get("href", ""))
         if not m:
             continue
         parts = node_text(a, None)
@@ -155,7 +160,7 @@ def parse_linkedin(tree, page_url=""):
         a = first(".//a[contains(@href, '/jobs/view/')]", c)
         if a is None:
             continue
-        m = _LI_VIEW_RE.search(a.get("href", ""))
+        m = li_view.search(a.get("href", ""))
         title = _sel(c, f".//h3[{_class('base-search-card__title')}]")
         j = _job(f"linkedin_{m.group(1)}" if m else f"linkedin_{stable_id(title)}",
                  title, _sel(c, f".//h4[{_class('base-search-card__subtitle')}]"),
@@ -172,7 +177,7 @@ def parse_linkedin(tree, page_url=""):
     tm = re.match(r"^(?:\(\d+\)\s*)?(.+?)\s*\|\s*(.+?)\s*\|\s*LinkedIn$", t)
     if tm:
         title, company = tm.group(1), tm.group(2)
-        loc_el = _first_string(tree, _MODE_RE)
+        loc_el = _first_string(tree, re.compile(r"\((Remote|Hybrid|On-site)\)"))
         location = re.sub(r"\s+", " ", str(loc_el)).strip() if loc_el else ""
         desc, marker = "", _first_string(tree, re.compile(r"^\s*About the job\s*$"))
         # The element holding the marker: a tail's is its element's parent.
@@ -202,7 +207,7 @@ def parse_linkedin(tree, page_url=""):
 
 # ─── Indeed ──────────────────────────────────────────────────────────────
 
-def parse_indeed(tree, page_url=""):
+def parse_indeed(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
     """An Indeed results page's job cards.
 
     >>> page = ('<div class="job_seen_beacon"><h2><a href="/viewjob?jk=ab12">Data Engineer</a></h2>'
@@ -220,7 +225,7 @@ def parse_indeed(tree, page_url=""):
         if a is None:
             continue
         href = a.get("href", "")
-        m = _INDEED_JK_RE.search(href) or re.search(r"jk=([0-9a-f]+)", str(a.get("data-jk", "")))
+        m = re.search(r"[?&]jk=([0-9a-f]+)", href, re.I) or re.search(r"jk=([0-9a-f]+)", str(a.get("data-jk", "")))
         jid = (m.group(1) if m else a.get("data-jk")) or stable_id(href, _txt(a))
         j = _job(f"indeed_{jid}", _txt(a),
                  _sel(c, ".//*[@data-testid='company-name']",
@@ -244,13 +249,8 @@ def parse_indeed(tree, page_url=""):
 # (The local-tech NC gate still applies downstream, so out-of-NC Meta roles
 # are dropped at ingest — as intended.)
 
-_META_JOB_RE = re.compile(r"/profile/job_details/(\d+)")
-_META_LOC_RE = re.compile(
-    r"([A-Z][A-Za-z.\-]+(?:\s[A-Z][A-Za-z.\-]+)*,\s*[A-Z]{2}\b"
-    r"|Remote(?:,\s*[A-Za-z .]+)?|Multiple Locations)")
 
-
-def parse_metacareers(tree, page_url=""):
+def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
     """A metacareers page's job cards, and a detail page's own posting.
 
     >>> page = ('<div><a href="/profile/job_details/42/">Research Scientist</a>'
@@ -258,10 +258,15 @@ def parse_metacareers(tree, page_url=""):
     >>> [(j["id"], j["title"], j["location"]) for j in parse_metacareers(parse_markup(page))]
     [('meta_42', 'Research Scientist', 'Menlo Park, CA')]
     """
-    jobs, seen = [], set()
+    meta_job = re.compile(r"/profile/job_details/(\d+)")
+    meta_loc = re.compile(
+        r"([A-Z][A-Za-z.\-]+(?:\s[A-Z][A-Za-z.\-]+)*,\s*[A-Z]{2}\b"
+        r"|Remote(?:,\s*[A-Za-z .]+)?|Multiple Locations)")
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
     # Listing/search page: one card per job, each linking to a job_details URL.
     for a in xpath("//a[contains(@href, '/profile/job_details/')]")(tree):
-        m = _META_JOB_RE.search(a.get("href", ""))
+        m = meta_job.search(a.get("href", ""))
         if not m or m.group(1) in seen:
             continue
         jid = m.group(1)
@@ -275,7 +280,7 @@ def parse_metacareers(tree, page_url=""):
         # titles like "Engineer, Reality Labs" carry their own comma and would
         # otherwise bleed into the greedy "City, ST" match.
         rest = node_text(card).replace(title, " ", 1) if title else node_text(card)
-        lm = _META_LOC_RE.search(rest)
+        lm = meta_loc.search(rest)
         j = _job(f"meta_{jid}", title, "Meta",
                  f"https://www.metacareers.com/profile/job_details/{jid}/",
                  lm.group(1) if lm else "")
@@ -283,7 +288,7 @@ def parse_metacareers(tree, page_url=""):
             jobs.append(j)
 
     # Single job-detail page: emit/enrich from the title tag + og:description.
-    dm = _META_JOB_RE.search(page_url or "")
+    dm = meta_job.search(page_url or "")
     if dm:
         jid = dm.group(1)
         og = first("//meta[@property='og:title'][@content]", tree)
@@ -294,7 +299,7 @@ def parse_metacareers(tree, page_url=""):
         ogd = first("//meta[@property='og:description'][@content]", tree)
         desc = ogd.get("content", "") if ogd is not None else ""
         body = node_text(tree).replace(title, " ", 1) if title else node_text(tree)
-        lm = _META_LOC_RE.search(body)
+        lm = meta_loc.search(body)
         j = _job(f"meta_{jid}", title, "Meta",
                  f"https://www.metacareers.com/profile/job_details/{jid}/",
                  lm.group(1) if lm else "", desc)
@@ -311,7 +316,7 @@ def parse_metacareers(tree, page_url=""):
 
 # ─── Generic (JSON-LD + job-link sweep + job-card sweep) ─────────────────
 
-def parse_jsonld(tree, page_url=""):
+def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
     """A page's schema.org JobPostings, the employer's own site kept as
     `company_url`.
 
@@ -372,21 +377,9 @@ def parse_jsonld(tree, page_url=""):
 # so the second pass takes an anchor on a job-board host whose LAST path
 # segment is id-shaped and that carries its own heading — the shape every
 # job card shares, whatever renders it.
-_ID_TAIL_RE = re.compile(r"/(?:j/)?([0-9]{4,}|[A-Z0-9]{6,})/?$")
-# /jobs/<id>/<slug>/job (iCIMS Attract) ends in a nav-looking "job" segment
-# that find_job_links refuses; an id straight after /jobs/ is a posting.
-_JOB_ID_PATH_RE = re.compile(r"/jobs?/[0-9]{3,}(?:/|$)", re.I)
-_BOARD_HOST_RE = re.compile(r"^(jobs|careers|apply|boards|talent|recruiting)\.", re.I)
-# "City, ST" | "Remote" (optionally qualified) | "Multiple Locations". At most
-# four words before the comma: enough for "Research Triangle Park, NC",
-# too few to swallow a title that precedes the place in one run of text.
-_LOC_RE = re.compile(
-    r"([A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3},\s*[A-Z]{2}\b"
-    r"|\bRemote\b(?:\s*[-–,(]\s*[A-Za-z .]+\)?)?|Multiple Locations)")
-_SHIFT_PREFIX_RE = re.compile(r"^(?:Full|Part)[- ]time\s+", re.I)
 
 
-def _card_scopes(a):
+def _card_scopes(a: etree._Element) -> Iterator[etree._Element]:
     """The elements a job card's fields can live in: the anchor, its parent,
     and the grandparent only while that is still ONE card -- every link in it
     points where this one does (a table row that links the same posting from
@@ -401,39 +394,46 @@ def _card_scopes(a):
             yield gp
 
 
-def _card_title(a):
+def _card_title(a: etree._Element) -> str:
     te = next(a.iterdescendants("h1", "h2", "h3", "h4", "h5"), None)
     if te is None:
         te = first(".//*[contains(@data-ui, 'title') or contains(@class, 'title')]", a)
     return _txt(te)
 
 
-def _card_location(a, title=""):
+def _card_location(a: etree._Element, title: str = "") -> str:
     """Location for a job card: the smallest element inside the card whose
     whole text is a place ("Cambridge, MA", "Remote"), else the first place
     named in the card's text once the title is taken out of it."""
+    # "City, ST" | "Remote" (optionally qualified) | "Multiple Locations". At most
+    # four words before the comma: enough for "Research Triangle Park, NC",
+    # too few to swallow a title that precedes the place in one run of text.
+    place = re.compile(
+        r"([A-Z][A-Za-z.'\-]+(?:\s+[A-Z][A-Za-z.'\-]+){0,3},\s*[A-Z]{2}\b"
+        r"|\bRemote\b(?:\s*[-–,(]\s*[A-Za-z .]+\)?)?|Multiple Locations)")
     for scope in _card_scopes(a):
         for el in scope.iterdescendants("li", "span", "td", "div", "p", "small"):
             t = _txt(el)
             if not t or len(t) > 60 or (title and title in t):
                 continue
-            if _LOC_RE.fullmatch(t):
+            if place.fullmatch(t):
                 return t
     for scope in _card_scopes(a):
         text = node_text(scope)
         if title:
             text = text.replace(title, " ", 1)
-        m = _LOC_RE.search(text)
+        m = place.search(text)
         if m:
-            return _SHIFT_PREFIX_RE.sub("", m.group(1))
+            return re.sub(r"^(?:Full|Part)[- ]time\s+", "", m.group(1), flags=re.I)
     return ""
 
 
-def parse_generic(tree, page_url=""):
+def parse_generic(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
     from src.ats.board.custom import find_job_links
-    jobs, seen = [], set()
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
 
-    def _emit(a, href, title):
+    def _emit(a: etree._Element, href: str, title: str) -> None:
         url = urljoin(page_url or "", href)
         key = url.split("?")[0].rstrip("/")
         if key in seen:
@@ -450,10 +450,15 @@ def parse_generic(tree, page_url=""):
     for a in links(tree):
         href = a.get("href").split("?")[0]
         host = host_of(urljoin(page_url or "", href))
-        if _JOB_ID_PATH_RE.search(href):
+        # /jobs/<id>/<slug>/job (iCIMS Attract) ends in a nav-looking "job"
+        # segment that find_job_links refuses; an id straight after /jobs/
+        # is a posting.
+        if re.search(r"/jobs?/[0-9]{3,}(?:/|$)", href, re.I):
             pass
-        elif not _ID_TAIL_RE.search(href) or (
-                "/j/" not in href and not _BOARD_HOST_RE.match(host)):
+        elif not re.search(r"/(?:j/)?([0-9]{4,}|[A-Z0-9]{6,})/?$", href) or (
+                "/j/" not in href
+                and not re.match(r"^(jobs|careers|apply|boards|talent|recruiting)\.",
+                                 host, re.I)):
             continue
         title = _card_title(a) or _txt(a)
         if len(title) >= 4 and not _NONTITLE_RE.match(title):
@@ -463,14 +468,14 @@ def parse_generic(tree, page_url=""):
 
 # ─── Entry point ─────────────────────────────────────────────────────────
 
-def _canonical_url(tree):
+def _canonical_url(tree: etree._Element) -> str:
     el = first("//link[normalize-space(@rel)='canonical'][@href]", tree)
     if el is None:
         el = first("//meta[@property='og:url'][@content]", tree)
     return (el.get("href") or el.get("content") or "") if el is not None else ""
 
 
-def page_url(html, url=""):
+def page_url(html: str, url: str = "") -> str:
     """The URL a captured page came from: `url` when the caller knows it
     (userscript POST, Chrome's "saved from url" comment), else the page's own
     canonical / og:url tag. What capture.py hands to store.company_by_host.
@@ -488,7 +493,7 @@ def page_url(html, url=""):
     return _canonical_url(parse_markup(html))
 
 
-def parse_page(url, html):
+def parse_page(url: str, html: str) -> tuple[list[dict[str, Any]], str]:
     """Parse captured page HTML -> (jobs, source_label). Layered parsers;
     de-duplicated by job id, site-specific hits first. When `url` is empty
     (Ctrl+S saves carry none), the site is detected from the canonical URL
@@ -524,6 +529,7 @@ def parse_page(url, html):
             low = "indeed."
         elif first("//a[contains(@href, '/profile/job_details/')]", tree) is not None:
             low = "metacareers."
+    layers: list[Callable[[etree._Element, str], list[dict[str, Any]]]]
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
         # the same postings under synthetic ids.
@@ -535,7 +541,7 @@ def parse_page(url, html):
     else:
         layers, source = [parse_jsonld, parse_generic], "page"
 
-    by_id = {}
+    by_id: dict[str, dict[str, Any]] = {}
     for layer in layers:
         try:
             found = layer(tree, url)

@@ -12,18 +12,24 @@ because ranking and upsert are their only callers.
 Never imports store/__init__ at load time (that module imports this one).
 """
 
+from __future__ import annotations
+
 import math
 import re
+import sqlite3
+from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
+from typing import Any
 
 from src import config
 from src import tags
+from src.match.locality import LocationRE
 from src.net.util import clean_url
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql)
 
 
-def combined_score(fit, mission):
+def combined_score(fit: float | None, mission: float | None) -> float | None:
     """Geometric mean sqrt(fit * mission) of the resume-fit and company
     mission scores (both 0..1).
 
@@ -81,18 +87,19 @@ def combined_score(fit, mission):
 # area is both local and neural material), and one store now serves every
 # track. Same shape as companies.tags, and matched the same way in SQL.
 
-def track_set(value):
+def track_set(value: str | None) -> set[str]:
     """The set of track names in a stored `track` value ('' / None -> set())."""
     return {t.strip() for t in (value or "").split(",") if t.strip()}
 
 
-def join_tracks(tracks):
+def join_tracks(tracks: Iterable[str | None]) -> str | None:
     """Canonical stored form for a set of track names (sorted, comma-joined)."""
     return ",".join(sorted(t for t in tracks if t)) or None
 
 
-def open_in_track_clause(track=None, *, alias="", include_closed=False,
-                         include_dispositioned=False):
+def open_in_track_clause(track: str | None = None, *, alias: str = "",
+                         include_closed: bool = False,
+                         include_dispositioned: bool = False) -> tuple[list[str], list[Any]]:
     """The baseline "a job that could still surface" filter, as
     (conditions, args) for any query over the jobs table.
 
@@ -125,7 +132,8 @@ def open_in_track_clause(track=None, *, alias="", include_closed=False,
     ["COALESCE(status,'open') != 'closed'"]
     """
     p = f"{alias}." if alias else ""
-    conds, args = [], []
+    conds: list[str] = []
+    args: list[Any] = []
     if track:
         conds.append(f"(',' || COALESCE({p}track,'') || ',') LIKE ?")
         args.append(f"%,{track},%")
@@ -147,11 +155,11 @@ def open_in_track_clause(track=None, *, alias="", include_closed=False,
 #  Jobs                                                                        #
 # --------------------------------------------------------------------------- #
 
-def job_exists(conn, job_id):
+def job_exists(conn: sqlite3.Connection, job_id: str) -> bool:
     return conn.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone() is not None
 
 
-def crawl_seen(conn, job_id):
+def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:
     """Has a CRAWL already handled this posting? True for a row that
     carries a track label -- the crawl stamps one whether it scored the row
     or stored it unscored under a budget guard. A row the harvester stored
@@ -171,7 +179,7 @@ def crawl_seen(conn, job_id):
     return bool(row and (row["track"] or "").strip())
 
 
-def descriptions_for_company(conn, company_id):
+def descriptions_for_company(conn: sqlite3.Connection, company_id: int | None) -> dict[str, str]:
     """{job_id: description} for a company's stored rows that have a body,
     so a crawl can reuse what the harvester already hydrated instead of
     re-fetching every detail page."""
@@ -193,7 +201,8 @@ TRIAGE_GATES = ("mission", "title", "anchor", "geo", "exclude", "division",
 TRIAGE_OK = "ok"
 
 
-def triage_pending(conn, company_id=None, limit=None):
+def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
+                   limit: int | None = None) -> list[dict[str, Any]]:
     """Open, company-linked rows no crawl has adopted (no track label) and
     triage has not judged yet -- the harvester's unscored material. A row
     triage looked at but could not hydrate stays NULL, so it comes back
@@ -216,7 +225,7 @@ def triage_pending(conn, company_id=None, limit=None):
          "WHERE j.triage_status IS NULL "
          "AND COALESCE(j.track,'') = '' "
          "AND COALESCE(j.status,'open') != 'closed'")
-    args = []
+    args: list[Any] = []
     if company_id is not None:
         q += " AND j.company_id = ?"
         args.append(company_id)
@@ -227,8 +236,10 @@ def triage_pending(conn, company_id=None, limit=None):
     return [dict(r) for r in conn.execute(q, args).fetchall()]
 
 
-def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
-                  geo_mode=None, remote_signal=None, scores=None, now=None):
+def record_triage(conn: sqlite3.Connection, job_id: str, status: str, detail: str, *,
+                  tracks: Iterable[str] = (), description: str | None = None,
+                  geo_mode: str | None = None, remote_signal: str | None = None,
+                  scores: dict[str, Any] | None = None, now: datetime | None = None) -> None:
     """Write one row's triage verdict. `tracks` (the track labels the row
     surfaced into) MERGE into the stored set exactly as a crawl's label
     would, so crawl_seen reads the row as handled; `description` fills an
@@ -243,8 +254,8 @@ def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
     ...  r["description"], r["resume_fit_score"])
     ('ok', 'y=ok', ['x', 'y'], 'body', 0.5)
     """
-    sets = {"triage_status": status, "triage_detail": detail,
-            "triaged_at": (now or datetime.now()).isoformat()}
+    sets: dict[str, Any] = {"triage_status": status, "triage_detail": detail,
+                            "triaged_at": (now or datetime.now()).isoformat()}
     if tracks:
         prev = conn.execute("SELECT track FROM jobs WHERE job_id=?",
                             (job_id,)).fetchone()
@@ -263,13 +274,7 @@ def record_triage(conn, job_id, status, detail, *, tracks=(), description=None,
     apply_update(conn, "jobs", "job_id", job_id, sets)
 
 
-# What record_triage writes besides the body and the scores (_SCORE_COLS):
-# clear_triage resets these and the scores.
-_TRIAGE_COLS = ("track", "triage_status", "triage_detail", "triaged_at",
-                "geo_mode", "remote_eligible", "remote_signal")
-
-
-def clear_triage(conn, job_id):
+def clear_triage(conn: sqlite3.Connection, job_id: str) -> None:
     """Undo record_triage on one row, so store.triage_pending selects it
     again: every column it writes goes back to NULL except the body, and
     desc_checked_at (the detail retry clock) is left alone.
@@ -284,11 +289,15 @@ def clear_triage(conn, job_id):
     ...  r["description"])
     (None, None, None, 'body')
     """
+    # What record_triage writes besides the body: these and the scores.
     apply_update(conn, "jobs", "job_id", job_id,
-                 {c: None for c in (*_TRIAGE_COLS, *_SCORE_COLS)})
+                 {c: None for c in ("track", "triage_status", "triage_detail", "triaged_at",
+                                    "geo_mode", "remote_eligible", "remote_signal",
+                                    *_SCORE_COLS)})
 
 
-def store_body(conn, job_id, description, location=None):
+def store_body(conn: sqlite3.Connection, job_id: str, description: str | None,
+               location: str | None = None) -> None:
     """Keep a freshly fetched body (and, when the detail page named one,
     the real location) on a row whose verdict is still open, so the next
     pass does not fetch it again. An empty body never blanks a stored one.
@@ -308,7 +317,8 @@ def store_body(conn, job_id, description, location=None):
     _commit(conn)
 
 
-def mark_desc_checked(conn, job_id, now=None):
+def mark_desc_checked(conn: sqlite3.Connection, job_id: str,
+                      now: datetime | None = None) -> None:
     """Stamp a failed body fetch so the next pass does not retry it at once
     (the same desc_checked_at the backfill ops honour)."""
     conn.execute("UPDATE jobs SET desc_checked_at=? WHERE job_id=?",
@@ -316,7 +326,8 @@ def mark_desc_checked(conn, job_id, now=None):
     _commit(conn)
 
 
-def record_probe_outcome(conn, job_id, verified, now=None):
+def record_probe_outcome(conn: sqlite3.Connection, job_id: str, verified: bool,
+                         now: datetime | None = None) -> int:
     """Stamp one closure probe that left the row OPEN and return the row's
     new probe_streak: 0 when the probe `verified` the posting is still
     live, one more than before when it could not tell either way.
@@ -357,7 +368,7 @@ def record_probe_outcome(conn, job_id, verified, now=None):
     return streak
 
 
-def triage_counts(conn, days=None):
+def triage_counts(conn: sqlite3.Connection, days: float | None = None) -> dict[str, int]:
     """{verdict: n} over triaged rows, optionally only those judged in the
     last `days` days -- the per-gate funnel the digest shows.
 
@@ -370,7 +381,7 @@ def triage_counts(conn, days=None):
     """
     q = ("SELECT triage_status AS s, COUNT(*) AS n FROM jobs "
          "WHERE triage_status IS NOT NULL")
-    args = []
+    args: list[Any] = []
     if days:
         q += " AND triaged_at >= ?"
         args.append((datetime.now() - timedelta(days=days)).isoformat())
@@ -382,7 +393,7 @@ def triage_counts(conn, days=None):
         else len(order))}
 
 
-def upsert_job(conn, j, keep_location=False):
+def upsert_job(conn: sqlite3.Connection, j: dict[str, Any], keep_location: bool = False) -> bool:
     """Insert or refresh a job. Returns True if it was new.
 
     `first_seen` stays stable across re-runs; scores refresh so the stored
@@ -490,18 +501,18 @@ def upsert_job(conn, j, keep_location=False):
 #  Job status sync, score columns, ranking                                     #
 # --------------------------------------------------------------------------- #
 
-def _norm_title(t):
+def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
 
 
-def _norm_url(u):
+def _norm_url(u: str | None) -> str:
     """Scheme/query/fragment/trailing-slash-insensitive URL key."""
     u = (u or "").strip().lower()
     u = re.sub(r"^https?://", "", u)
     return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
 
 
-def touch_job(conn, job_id):
+def touch_job(conn: sqlite3.Connection, job_id: str) -> None:
     """Record that a job was just observed live at its source — reopen it and
     refresh last_seen, touching nothing else. For dedupe paths that skip the
     full upsert (e.g. a re-captured LinkedIn card already in the store): the
@@ -515,8 +526,10 @@ def touch_job(conn, job_id):
     _commit(conn)
 
 
-def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
-                      external_grace_days=3, capped=False, now=None):
+def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
+                      fetched_jobs: list[dict[str, Any]], track: str | None = None,
+                      external_grace_days: float = 3, capped: bool = False,
+                      now: datetime | None = None) -> tuple[int, int]:
     """Reconcile ONE company's stored jobs against a live board snapshot
     (`fetched_jobs`: dicts with id/title/url, as returned by
     board.company.fetch_company). Rows matched by job_id, URL, or
@@ -589,13 +602,13 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     """
     if not company_id or not fetched_jobs:
         return (0, 0)
-    ids = {j.get("id") for j in fetched_jobs if j.get("id")}
+    ids = {j["id"] for j in fetched_jobs if j.get("id")}
     urls = {u for u in (_norm_url(j.get("url")) for j in fetched_jobs) if u}
     titles = {t for t in (_norm_title(j.get("title")) for j in fetched_jobs) if t}
     # Posting dates piggyback on the sync: every matched row gets its NULL
     # posted_at backfilled from the live snapshot, so the whole store gains
     # real posting dates over normal crawls with zero extra HTTP.
-    posted = {}
+    posted: dict[str, Any] = {}
     for j in fetched_jobs:
         p = j.get("posted_at")
         if not p:
@@ -610,7 +623,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
     # ever close via the grace path — right for the flakiest scraped boards.
     prefixes = tuple({"_".join(i.split("_", 2)[:2]) + "_"
                       for i in ids if "_" in i})
-    now = (now or datetime.now()).isoformat()
+    stamp = (now or datetime.now()).isoformat()
     grace_cutoff = (datetime.now()
                     - timedelta(days=external_grace_days)).isoformat()
     n_reopened = n_closed = 0
@@ -632,7 +645,7 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
                 "UPDATE jobs SET status='open', closed_at=NULL, last_seen=?, "
                 "posted_at=COALESCE(posted_at, ?), probe_streak=0 "
                 "WHERE job_id=?",
-                (now, p, r["job_id"]))
+                (stamp, p, r["job_id"]))
             continue
         if track is not None and track not in track_set(r["track"]):
             continue
@@ -650,13 +663,13 @@ def sync_job_statuses(conn, company_id, fetched_jobs, track=None,
         if closeable:
             conn.execute(
                 "UPDATE jobs SET status='closed', closed_at=? WHERE job_id=?",
-                (now, r["job_id"]))
+                (stamp, r["job_id"]))
             n_closed += 1
     _commit(conn)
     return (n_reopened, n_closed)
 
 
-def retire_stopped(conn, now=None):
+def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> list[tuple[Any, ...]]:
     """Close the open postings of every board the harvester has stopped
     reading (harvestable_companies that config.offmission_inactive calls
     "stopped"), all at one `now` (default: the clock), except the ones
@@ -696,7 +709,7 @@ _SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates", "fit_model",
                "fit_domain", "fit_function", "fit_stack", "fit_seniority")
 
 
-def update_job_scores(conn, job_id, cols):
+def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: dict[str, Any]) -> None:
     """Overwrite only the fit columns for one job (used by rescore). `cols` is a
     FitResult.as_columns() dict; any missing key is written NULL, so passing an
     empty/partial dict clears a stale score (an unscorable row drops out of
@@ -705,13 +718,7 @@ def update_job_scores(conn, job_id, cols):
                  {c: cols.get(c) for c in _SCORE_COLS})
 
 
-# Matches the fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
-# sen0.80 gate:geo+embedded] reason". Gates are '+'-joined in the tag.
-_AXIS_TAG = re.compile(
-    r"\[dom([\d.]+) fun([\d.]+) sta([\d.]+) sen([\d.]+)(?: gate:([^\]]+))?\]")
-
-
-def backfill_axis_columns(conn):
+def backfill_axis_columns(conn: sqlite3.Connection) -> int:
     """Populate the per-axis columns (fit_domain/function/stack/seniority,
     fit_gates) from the tag already embedded in fit_reason. Offline, no API.
     Only touches rows that have the tag and a NULL fit_domain, and leaves
@@ -723,7 +730,10 @@ def backfill_axis_columns(conn):
     ).fetchall()
     n = 0
     for r in rows:
-        m = _AXIS_TAG.match(r["fit_reason"] or "")
+        # The fit_reason tag summary() writes: "[dom0.45 fun0.72 sta0.55
+        # sen0.80 gate:geo+embedded] reason". Gates are '+'-joined in the tag.
+        m = re.match(r"\[dom([\d.]+) fun([\d.]+) sta([\d.]+) sen([\d.]+)"
+                     r"(?: gate:([^\]]+))?\]", r["fit_reason"] or "")
         if not m:
             continue
         dom, fun, sta, sen, gates = m.groups()
@@ -739,7 +749,7 @@ def backfill_axis_columns(conn):
     return n
 
 
-def remote_admitted(row, remote_mission_floor):
+def remote_admitted(row: dict[str, Any], remote_mission_floor: float | None) -> bool:
     """Whether an out-of-area REMOTE `row` (a ranked_jobs row) is still
     worth showing in a location-scoped view.
 
@@ -790,7 +800,7 @@ def remote_admitted(row, remote_mission_floor):
     return mission is not None and mission >= remote_mission_floor
 
 
-def _collapse_key(r):
+def _collapse_key(r: dict[str, Any]) -> tuple[Any, str]:
     """Group-by key for 'same opening at the same employer' in
     ranked_jobs(collapse=True): (company key, normalised title), from
     _norm_title and review._name_key rather than a second normaliser of
@@ -820,6 +830,7 @@ def _collapse_key(r):
     # module depends on the other at load time (see review.py's header).
     from .review import _name_key
     cid = r.get("company_id")
+    company_key: Any
     if cid is not None:
         company_key = cid
     else:
@@ -828,7 +839,7 @@ def _collapse_key(r):
     return (company_key, _norm_title(r.get("title")))
 
 
-def _collapse_same_opening(rows):
+def _collapse_same_opening(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse `rows` (already ranked best-first) to one row per
     (company, normalised title) group: the survivor is the FIRST member of
     each group, i.e. the best-ranked one, since `rows` arrives pre-sorted.
@@ -853,14 +864,15 @@ def _collapse_same_opening(rows):
     >>> out[1]["dup_count"]
     1
     """
-    groups, order = {}, []
+    groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
+    order: list[tuple[Any, str]] = []
     for r in rows:
         key = _collapse_key(r)
         if key not in groups:
             groups[key] = []
             order.append(key)
         groups[key].append(r)
-    out = []
+    out: list[dict[str, Any]] = []
     for key in order:
         survivor, *losers = groups[key]
         survivor["dup_count"] = len(losers) + 1
@@ -870,10 +882,13 @@ def _collapse_same_opening(rows):
     return out
 
 
-def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combined",
-                allow_geo_modes=None, min_mission=None,
-                remote_mission_floor=None, include_closed=False,
-                include_dispositioned=False, collapse=True):
+def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
+                location_re: LocationRE | None = None, rank_by: str = "combined",
+                allow_geo_modes: Collection[str] | None = None,
+                min_mission: float | None = None,
+                remote_mission_floor: float | None = None, include_closed: bool = False,
+                include_dispositioned: bool = False,
+                collapse: bool = True) -> list[dict[str, Any]]:
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -960,7 +975,7 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
                 if location_re.search(r.get("location") or "")
                 or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes
                     and remote_admitted(r, remote_mission_floor))]
-    def _effective_mission(r):
+    def _effective_mission(r: dict[str, Any]) -> float | None:
         # A conglomerate's own mission score is ~0.05 (off-mission overall),
         # but a job here already passed the health keyword filter at crawl
         # time — so rank it at the keyword-vetted floor, not the company's
@@ -979,7 +994,7 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     # Primary sort key per rank_by, then the other factors as tiebreaks; None
     # sorts last via the -1 sentinel (all real scores are >= 0).
     primary = "resume_fit_score" if rank_by == "fit" else "combined_score"
-    def _k(r):
+    def _k(r: dict[str, Any]) -> tuple[float, ...]:
         vals = (r.get(primary), r.get("combined_score"),
                 r.get("resume_fit_score"), r.get("mission_score"))
         return tuple(v if v is not None else -1.0 for v in vals)
@@ -991,7 +1006,7 @@ def ranked_jobs(conn, track=None, limit=None, location_re=None, rank_by="combine
     return rows
 
 
-def _survivor_first(r):
+def _survivor_first(r: dict[str, Any]) -> tuple[bool, bool, str]:
     """dedup_jobs' sort key, survivor first: a dispositioned row, then an
     open one, then the EARLIEST first_seen (ISO strings sort by time, and
     a row with none sorts before every dated one)."""
@@ -1000,7 +1015,7 @@ def _survivor_first(r):
             r.get("first_seen") or "")
 
 
-def same_posting(a, b):
+def same_posting(a: dict[str, Any], b: dict[str, Any]) -> bool:
     """Whether two job rows name one posting: the same URL modulo scheme,
     query and fragment (_norm_url), and the same normalized title.
 
@@ -1015,12 +1030,12 @@ def same_posting(a, b):
     return all(key) and key == _posting_key(b)
 
 
-def _posting_key(r):
+def _posting_key(r: dict[str, Any]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
     return _norm_url(r.get("url")), _norm_title(r.get("title"))
 
 
-def merge_jobs(conn, row_ids, job_id):
+def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) -> int:
     """Fold the job rows `row_ids` (one posting stored under several ids)
     into one row named `job_id`; returns its row id. The survivor is
     dedup_jobs' (_survivor_first) and keeps its values, `closed_at` with
@@ -1046,7 +1061,7 @@ def merge_jobs(conn, row_ids, job_id):
     keep, losers = rows[0], rows[1:]
     if not all(same_posting(keep, l) for l in losers):
         raise ValueError(f"job rows {sorted(row_ids)} are not one posting")
-    fill = {}
+    fill: dict[str, Any] = {}
     for col, mine in keep.items():
         if col in ("id", "job_id", "closed_at"):
             continue
@@ -1066,7 +1081,7 @@ def merge_jobs(conn, row_ids, job_id):
     return keep["id"]
 
 
-def dedup_jobs(conn):
+def dedup_jobs(conn: sqlite3.Connection) -> int:
     """Collapse job rows that are the SAME posting under different ids: same
     company, same URL modulo scheme/query/fragment (_norm_url), same
     normalized title. upsert_job's re-key only catches an EXACT URL match,
@@ -1093,7 +1108,7 @@ def dedup_jobs(conn):
         would have merged three Butterfly Network pairs.
     """
     from collections import defaultdict
-    groups = defaultdict(list)
+    groups: defaultdict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for r in map(dict, conn.execute(
             "SELECT job_id, company_id, url, title, disposition, status, "
             "first_seen FROM jobs WHERE company_id IS NOT NULL "
