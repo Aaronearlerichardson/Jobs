@@ -10,8 +10,12 @@ Firebase API:
   - https://hacker-news.firebaseio.com/v0/user/whoishiring.json
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from collections.abc import Callable
+from typing import Any
 
 from src.match.names import strip_parentheticals
 from src.net import http
@@ -19,10 +23,6 @@ from src.net.util import strip_html
 
 BASE = "https://hacker-news.firebaseio.com/v0"
 
-_HIRING_TITLE_RE = re.compile(r"^Ask HN:\s*Who is hiring\??", re.I)
-
-# Heuristic: "Company | Role | Location | ..." — split on | or •.
-_SPLIT_RE = re.compile(r"\s*[|•·]\s*")
 _URL_RE   = re.compile(r"https?://[^\s<>\"']+")
 
 # Field classifiers for the loosely-structured first line. The convention is
@@ -38,48 +38,40 @@ _ROLE_HINT_RE = re.compile(
     r"research|infrastructure|platform|security|biostat|bioinformatic)\b",
     re.I,
 )
-_LOC_HINT_RE = re.compile(
-    r"\b(remote|onsite|on-site|hybrid|wfh|anywhere|relocation|visa|"
-    r"usa?|uk|eu|emea|apac|canada|europe|worldwide|global|nationwide|"
-    r"(north|south|latin)\s+america|america|americas|latam|united\s+states|"
-    r"new\s+york|boston|london|berlin|austin|seattle|durham|raleigh|"
-    r"san\s+francisco|sf\b|nyc\b)\b",
-    re.I,
-)
 _COMP_RE = re.compile(
     r"(\$|€|£|\d{2,3}\s*[-–]\s*\d{2,3}\s*k|\bk\+|/yr|/year|salary|equity|"
     r"benefits|compensation|\bcomp\b)",
     re.I,
 )
-_EMPLOY_RE = re.compile(
-    r"^\s*(full[\s-]?time|part[\s-]?time|contract|permanent|intern(ship)?|"
-    r"w2|c2c|freelance|multiple\s+roles?|various\s+roles?)\s*$",
-    re.I,
-)
 _URLISH_RE = re.compile(r"https?://|www\.|\.(com|io|ai|org|net|co|health|dev)\b", re.I)
 
 
-def _clean_company(s):
+def _clean_company(s: str) -> str:
     """Strip trailing URLs / parentheticals and surrounding punctuation."""
     s = strip_parentheticals(_URL_RE.sub("", s))
     return re.sub(r"\s+", " ", s).strip(" -—|·•:,")
 
 
-def _is_role(s):
+def _is_role(s: str) -> bool:
     return bool(_ROLE_HINT_RE.search(s)) and not _COMP_RE.search(s) \
         and not _URLISH_RE.search(s)
 
 
-def _is_location(s):
-    return bool(_LOC_HINT_RE.search(s)) and not _ROLE_HINT_RE.search(s)
+def _is_location(s: str) -> bool:
+    return bool(re.search(
+        r"\b(remote|onsite|on-site|hybrid|wfh|anywhere|relocation|visa|"
+        r"usa?|uk|eu|emea|apac|canada|europe|worldwide|global|nationwide|"
+        r"(north|south|latin)\s+america|america|americas|latam|united\s+states|"
+        r"new\s+york|boston|london|berlin|austin|seattle|durham|raleigh|"
+        r"san\s+francisco|sf\b|nyc\b)\b", s, re.I)) and not _ROLE_HINT_RE.search(s)
 
 
-async def _get_json(url):
+async def _get_json(url: str) -> Any:
     """One Firebase item, or None (reported). net.http.get_json."""
     return await http.get_json(url, f"HN {url}")
 
 
-def _parse_post(text):
+def _parse_post(text: str) -> tuple[str, str, str, str]:
     """
     Best-effort extract (company, title, location, url) from a HN job
     comment. The first line is "Company | … | … | …" with the role,
@@ -95,7 +87,8 @@ def _parse_post(text):
     # be chopped at "Inc. ".
     if "|" not in first_line:
         first_line = first_line.split(". ", 1)[0]
-    parts = [p.strip() for p in _SPLIT_RE.split(first_line) if p.strip()]
+    # Heuristic: "Company | Role | Location | ..." — split on | or •.
+    parts = [p.strip() for p in re.split(r"\s*[|•·]\s*", first_line) if p.strip()]
 
     company = _clean_company(parts[0]) if parts else ""
     rest = parts[1:]
@@ -117,7 +110,10 @@ def _parse_post(text):
         role = next(
             (p for p in rest
              if not _is_location(p) and not _COMP_RE.search(p)
-             and not _EMPLOY_RE.match(p) and not _URLISH_RE.search(p)),
+             and not re.match(r"^\s*(full[\s-]?time|part[\s-]?time|contract|permanent|"
+                              r"intern(ship)?|w2|c2c|freelance|multiple\s+roles?|"
+                              r"various\s+roles?)\s*$", p, re.I)
+             and not _URLISH_RE.search(p)),
             "",
         )
 
@@ -134,7 +130,8 @@ def _parse_post(text):
     return company, role, location, url
 
 
-async def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
+async def _find_hiring_threads(submitted_ids: list[Any], max_threads: int = 2,
+                               lookback: int = 30) -> list[dict[str, Any]]:
     """
     Walk the newest submissions from `whoishiring` until we have
     `max_threads` "Who is hiring?" posts.
@@ -145,7 +142,7 @@ async def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
         if not item:
             continue
         title = item.get("title") or ""
-        if _HIRING_TITLE_RE.search(title):
+        if re.search(r"^Ask HN:\s*Who is hiring\??", title, re.I):
             found.append(item)
             if len(found) >= max_threads:
                 break
@@ -153,7 +150,8 @@ async def _find_hiring_threads(submitted_ids, max_threads=2, lookback=30):
     return found
 
 
-async def fetch_hnhiring(max_threads=2, max_comments_per_thread=400, gate=None):
+async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 400,
+                         gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
     job comments (those passing `gate(role, text)` when a gate is given).

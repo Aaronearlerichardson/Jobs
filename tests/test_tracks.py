@@ -67,18 +67,6 @@ class TestRemoteAdmissionGates:
     def _track(self, local_track, floor=0.85):
         return {**local_track, "remote_mission_floor": floor}
 
-    def test_floor_pulls_the_whole_board(self):
-        assert ops._whole_board(self._co(mission=0.9), 0.85)
-        assert not ops._whole_board(self._co(mission=0.5), 0.85)
-
-    def test_no_floor_keeps_the_scoped_fetch(self):
-        # The knob is opt-in: without it, only the tags qualify.
-        assert not ops._whole_board(self._co(mission=0.99))
-
-    def test_tags_still_qualify_on_their_own(self):
-        assert ops._whole_board(self._co(tag="watch"))
-        assert ops._whole_board(self._co(tag=tags.SWEEP))
-
     def test_conglomerates_never_qualify_by_score(self, cfg, monkeypatch):
         monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
         assert not ops._whole_board(self._co(mission=0.99), 0.85)

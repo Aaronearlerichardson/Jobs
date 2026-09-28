@@ -46,11 +46,14 @@ RobotFileParser is still used for `Crawl-delay` (its parsing of that is
 fine, and it is not part of the RFC's matching rules).
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
 import re
 import socket
 import time
+from collections.abc import Iterable, Iterator
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
@@ -58,20 +61,25 @@ from src import config, runstate
 from . import http
 from .util import host_of, origin_of
 
-# How long a parsed robots.txt stays good before we re-fetch it.
-CACHE_TTL_SECONDS = 3600
-
 
 # --------------------------------------------------------------------------- #
 #  RFC 9309 §2.2 path matching                                                 #
 # --------------------------------------------------------------------------- #
 
-def _pattern_to_re(path):
+def _pattern_to_re(path: str) -> re.Pattern[str]:
     """A robots.txt path pattern -> a compiled prefix regex.
 
     `*` matches any sequence; a trailing `$` anchors the end of the URL path.
     Everything else is literal. An empty pattern matches nothing (an empty
-    `Disallow:` means "no restriction", handled by the caller)."""
+    `Disallow:` means "no restriction", handled by the caller).
+
+    >>> [bool(_pattern_to_re(pat).match(path)) for pat, path in (
+    ...     ("/a.b", "/a.b"), ("/a.b", "/axb"), ("/a*b", "/axxxb"), ("/a*b", "/ab"),
+    ...     ("/p", "/prefix/deep"), ("/*?feed=", "/?feed=x"))]
+    [True, False, True, True, True, True]
+    >>> bool(_pattern_to_re("/x$").match("/x")), bool(_pattern_to_re("/x$").match("/x/y"))
+    (True, False)
+    """
     anchored = path.endswith("$")
     if anchored:
         path = path[:-1]
@@ -84,20 +92,31 @@ class _Group:
 
     __slots__ = ("agents", "rules")
 
-    def __init__(self):
-        self.agents = []
-        self.rules = []            # [(specificity, allow, compiled_pattern)]
+    def __init__(self) -> None:
+        self.agents: list[str] = []
+        self.rules: list[tuple[int, bool, re.Pattern[str]]] = []  # (specificity, allow, pattern)
 
-    def add_rule(self, path, allow):
+    def add_rule(self, path: str, allow: bool) -> None:
         # An empty `Disallow:` is the documented way to say "allow all" —
         # it is not a rule, it is the absence of one.
         if not path and not allow:
             return
         self.rules.append((len(path.rstrip("$")), allow, _pattern_to_re(path)))
 
-    def allows(self, path):
+    def allows(self, path: str) -> bool:
         """RFC 9309 §2.2.2: the longest matching pattern wins; Allow wins a
-        tie. No match at all means allowed."""
+        tie. No match at all means allowed.
+
+        Hacker News' carve-out (§2.2.3 wildcards) reopens its JSON API only:
+
+        >>> [hn] = parse_groups("User-agent: *\\nAllow: /*.json$\\nDisallow: /")
+        >>> hn.allows("/v0/item/38912345.json"), hn.allows("/v0/whatever")
+        (True, False)
+        >>> [g] = parse_groups("User-agent: *\\nDisallow: /\\nAllow: /api/\\n"
+        ...                    "Disallow: /api/internal/\\nDisallow: /a\\nAllow: /a")
+        >>> g.allows("/api/x"), g.allows("/api/internal/x"), g.allows("/a")
+        (True, False, True)
+        """
         best_len, best_allow = -1, True
         for length, allow, rx in self.rules:
             if rx.match(path) and (length > best_len
@@ -106,10 +125,21 @@ class _Group:
         return best_allow
 
 
-def parse_groups(text):
+def parse_groups(text: str | None) -> list[_Group]:
     """robots.txt body -> [_Group]. Consecutive `User-agent:` lines share one
-    group, per §2.2.1."""
-    groups, current, expecting_agent = [], None, False
+    group, per §2.2.1; comments are dropped, and an empty `Disallow:` is no
+    rule at all.
+
+    >>> [g] = parse_groups("# hi\\n\\nUser-agent: a  # us\\nUser-agent: b\\n"
+    ...                    "Disallow: /x  # no\\nDisallow:")
+    >>> g.agents, len(g.rules), g.allows("/x")
+    (['a', 'b'], 1, False)
+    >>> parse_groups("# just a comment"), parse_groups(None)
+    ([], [])
+    """
+    groups: list[_Group] = []
+    current: _Group | None = None
+    expecting_agent = False
     for raw in (text or "").splitlines():
         line = raw.split("#", 1)[0].strip()
         if not line or ":" not in line:
@@ -128,12 +158,20 @@ def parse_groups(text):
     return groups
 
 
-def _match_group(groups, user_agent):
+def _match_group(groups: list[_Group], user_agent: str | None) -> _Group | None:
     """The group governing `user_agent`: the longest matching product token,
-    else the `*` group, else None (= unrestricted)."""
+    else the `*` group, else None (= unrestricted).
+
+    >>> groups = parse_groups("User-agent: Googlebot\\nAllow: /\\n\\nUser-agent: *\\nDisallow: /")
+    >>> [_match_group(groups, ua).allows("/x") for ua in ("Googlebot/2.1", "Chrome")]
+    [True, False]
+    >>> _match_group([], "Chrome") is None
+    True
+    """
     ua = (user_agent or "").lower()
-    best, best_len = None, -1
-    wildcard = None
+    best: _Group | None = None
+    best_len = -1
+    wildcard: _Group | None = None
     for g in groups:
         for agent in g.agents:
             if agent == "*":
@@ -144,7 +182,7 @@ def _match_group(groups, user_agent):
 
 
 @contextlib.contextmanager
-def quiet():
+def quiet() -> Iterator[None]:
     """Suppress the per-host "unreachable" notice for SPECULATIVE probes.
 
     Discovery guesses hostnames from a company name — `red.io`, `410.co`,
@@ -167,7 +205,7 @@ def quiet():
         rules.quiet -= 1
 
 
-def _is_dns_failure(exc, _depth=6):
+def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
     """True when `exc` bottoms out in a name-resolution error — i.e. the host
     does not exist, as opposed to a server that refused, hung, or failed TLS.
 
@@ -199,7 +237,8 @@ def _is_dns_failure(exc, _depth=6):
 class _HostRules:
     __slots__ = ("parser", "group", "disallow_all", "sitemaps")
 
-    def __init__(self, parser=None, group=None, disallow_all=False, sitemaps=()):
+    def __init__(self, parser: RobotFileParser | None = None, group: _Group | None = None,
+                 disallow_all: bool = False, sitemaps: Iterable[str] = ()) -> None:
         self.parser = parser          # RobotFileParser: Crawl-delay only
         self.group = group            # _Group: the RFC-compliant matcher
         self.disallow_all = disallow_all
@@ -209,15 +248,16 @@ class _HostRules:
 class RobotsCache:
     """Per-host robots.txt rules, fetched lazily and cached."""
 
-    def __init__(self, user_agent=None, ttl=CACHE_TTL_SECONDS):
+    def __init__(self, user_agent: str | None = None, ttl: float = 3600) -> None:
         self.user_agent = user_agent or config.USER_AGENT
-        self.ttl = ttl
-        self._fetches = {}      # origin -> (started, the fetch's Task)
+        self.ttl = ttl          # seconds a parsed robots.txt stays good
+        # origin -> (started, the fetch's Task)
+        self._fetches: dict[str, tuple[float, asyncio.Task[_HostRules]]] = {}
         self.quiet = 0          # open quiet() blocks
 
     # -- internals --------------------------------------------------------
 
-    async def _fetch(self, origin):
+    async def _fetch(self, origin: str) -> _HostRules:
         """Fetch + parse one host's robots.txt. Never raises."""
         try:
             r = await http.send("GET", f"{origin}/robots.txt", polite=False,
@@ -249,7 +289,7 @@ class RobotsCache:
                     if ln.strip().lower().startswith("sitemap:")]
         return _HostRules(parser=parser, group=group, sitemaps=sitemaps)
 
-    async def _rules(self, url):
+    async def _rules(self, url: str) -> _HostRules | None:
         origin = origin_of(url)
         if not origin:
             return None
@@ -269,7 +309,7 @@ class RobotsCache:
     # -- public API -------------------------------------------------------
 
     @staticmethod
-    def host_exempt(url):
+    def host_exempt(url: str) -> bool:
         """Is `url`'s host on config.ROBOTS_EXEMPT_HOSTS? Exact match, or a
         dotted entry matching the host's suffix (".peopleadmin.com" covers
         unc.peopleadmin.com). Case-insensitive; the port is ignored.
@@ -298,7 +338,7 @@ class RobotsCache:
                 return True
         return False
 
-    async def allowed(self, url):
+    async def allowed(self, url: str) -> bool:
         """May we fetch `url`? True when robots is absent/permissive, or
         when the host is exempted in the profile (see host_exempt) — the
         exemption skips the robots.txt fetch for that request entirely,
@@ -319,7 +359,7 @@ class RobotsCache:
         except Exception:
             return True
 
-    async def crawl_delay(self, url):
+    async def crawl_delay(self, url: str) -> float | None:
         """Seconds this host asks us to wait between requests, or None."""
         rules = await self._rules(url)
         if not rules or rules.parser is None:
@@ -330,13 +370,13 @@ class RobotsCache:
         except Exception:
             return None
 
-    async def sitemaps(self, url):
+    async def sitemaps(self, url: str) -> list[str]:
         """Sitemap URLs the host advertises — a discovery hint, since this
         is exactly where sites publish them."""
         rules = await self._rules(url)
         return list(rules.sitemaps) if rules else []
 
-    async def wait_turn(self, url):
+    async def wait_turn(self, url: str) -> None:
         """Wait as long as this host's Crawl-delay requires (a turn on
         net.http.LIMITER): requests to the SAME host queue up, while other
         hosts keep going."""

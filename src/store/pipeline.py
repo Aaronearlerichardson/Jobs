@@ -12,8 +12,9 @@ inside the function.
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
@@ -48,7 +49,7 @@ OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
 FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
 
 
-def _blank_is_null(v):
+def _blank_is_null(v: object) -> object:
     return (v.strip() or None) if isinstance(v, str) else v
 
 
@@ -67,11 +68,12 @@ class PipelineFields(BaseModel):
     contact: _Text = None
     referral: Annotated[bool | None,
                         PlainSerializer(int, when_used="unless-none")] = None
-    outcome_reason: Annotated[Literal[OUTCOME_REASONS] | None,
+    # pydantic reads the runtime tuple; mypy wants literals spelled out.
+    outcome_reason: Annotated[Literal[OUTCOME_REASONS] | None,  # type: ignore[valid-type]
                               BeforeValidator(_blank_is_null)] = None
 
 
-def set_job_status(conn, job_id, status):
+def set_job_status(conn: sqlite3.Connection, job_id: str, status: str) -> None:
     """Mark one job 'open' or 'closed' directly (closed_at maintained)."""
     apply_update(conn, "jobs", "job_id", job_id, {
         "status": status,
@@ -79,7 +81,7 @@ def set_job_status(conn, job_id, status):
     })
 
 
-def _resolve_job(conn, ref):
+def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[dict[str, Any]]:
     """Resolve a user-supplied job reference to rows: exact job_id first,
     then any job_id substring, then normalized URL. Returns a list of
     matching rows (ideally one; several = ambiguous; empty = no match) so
@@ -100,7 +102,8 @@ def _resolve_job(conn, ref):
     return []
 
 
-def set_disposition(conn, ref, disposition, note=None):
+def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
+                    note: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
     """Record the user's decision on one job. `ref` is a job_id, a unique
     job_id fragment, or the posting URL; `disposition` is one of
     DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
@@ -123,9 +126,9 @@ def set_disposition(conn, ref, disposition, note=None):
         return None, f"{ref!r} is ambiguous ({len(matches)} matches):\n{opts}"
     row = matches[0]
     now = datetime.now().isoformat()
-    sets = {"disposition": None if clearing else d,
-            "disposition_note": None if clearing else note,
-            "disposition_at": None if clearing else now}
+    sets: dict[str, Any] = {"disposition": None if clearing else d,
+                            "disposition_note": None if clearing else note,
+                            "disposition_at": None if clearing else now}
     if d == "applied":
         # COALESCE, not an assignment: the FIRST apply owns the date. Without
         # it, re-marking a row that came back 'rejected' and then 'applied'
@@ -136,7 +139,7 @@ def set_disposition(conn, ref, disposition, note=None):
     return row, None
 
 
-def get_pipeline(conn):
+def get_pipeline(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Every job the user has dispositioned, newest decision first — the
     digest's pipeline section and the --pipeline CLI. Includes closed rows
     on purpose: 'posting closed after you applied' is a signal."""
@@ -145,7 +148,8 @@ def get_pipeline(conn):
         "ORDER BY disposition_at DESC").fetchall()]
 
 
-def update_pipeline_fields(conn, job_id, **fields):
+def update_pipeline_fields(conn: sqlite3.Connection, job_id: str,
+                           **fields: Any) -> tuple[dict[str, Any] | None, str | None]:
     """Write the given application-tracking columns (PipelineFields) on one
     job. Returns (row, error) like set_disposition: the updated job on
     success, otherwise a printable message with one 'field: problem' per
@@ -170,7 +174,7 @@ def update_pipeline_fields(conn, job_id, **fields):
                              (job_id,)).fetchone()), None
 
 
-def _fit_band(score):
+def _fit_band(score: float | None) -> str:
     """The conversion_report bucket one resume_fit_score falls in.
 
     >>> _fit_band(0.2), _fit_band(0.45), _fit_band(0.9)
@@ -204,7 +208,7 @@ def _fit_band(score):
     return FIT_BANDS[0][0] if score < FIT_BANDS[0][1] else FIT_BANDS[-1][0]
 
 
-def conversion_report(conn):
+def conversion_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Where applications actually convert, sliced by fit band and geo_mode.
 
     One dict per (band, geo_mode) that has at least one application, ordered
@@ -225,7 +229,7 @@ def conversion_report(conn):
         f"FROM jobs WHERE disposition IN ({ph})",
         APPLIED_DISPOSITIONS).fetchall()
     order = [name for name, _, _ in FIT_BANDS] + ["unscored"]
-    buckets = {}
+    buckets: dict[tuple[str, str], dict[str, Any]] = {}
     for r in rows:
         key = (_fit_band(r["resume_fit_score"]), r["geo_mode"] or "unknown")
         bucket = buckets.setdefault(key, {
@@ -244,7 +248,7 @@ def conversion_report(conn):
     return out
 
 
-def followups_due(conn, today=None):
+def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[dict[str, Any]]:
     """Live applications whose follow-up date has arrived, oldest first.
 
     A row qualifies when `followup_at` is set and not in the future and the

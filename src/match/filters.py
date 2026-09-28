@@ -17,8 +17,12 @@ Relevance model (tiered):
      nothing outside that one gate can reach it.
 """
 
+from __future__ import annotations
+
 import re
+from collections.abc import Iterable
 from functools import lru_cache
+from typing import Final, Literal
 
 from src import config
 from src.config import (
@@ -71,11 +75,11 @@ SHORT_PLACE = 4
 #: fire inside "describe" and "data entry" must not fire mid-word.
 #: SUBSTRING asks for none -- the profile's global EXCLUDE_PHRASES, which
 #: are written as fragments meant to match anywhere.
-BOUNDED = "bounded"
+BOUNDED: Final = "bounded"
 SUBSTRING = 0
 
 
-def _bounded(term, short_len):
+def _bounded(term: str, short_len: int | Literal["bounded"]) -> bool:
     """Whether `term` gets \\b anchors under the `short_len` rule.
 
     A boundary needs a word character on the inside of it, so a term that
@@ -85,13 +89,13 @@ def _bounded(term, short_len):
     hole: an exclude phrase ending in punctuation silently never fired.
     BOUNDED means "anchor where anchoring is meaningful", not "anchor".
     """
-    if short_len is BOUNDED:
+    if short_len == BOUNDED:
         return bool(term) and (term[0].isalnum() or term[0] == "_") \
             and (term[-1].isalnum() or term[-1] == "_")
     return term.isalpha() and len(term) <= short_len
 
 
-def token_pattern(term, short_len):
+def token_pattern(term: str, short_len: int | Literal["bounded"]) -> str:
     """Regex source that matches `term` literally: on word boundaries when it
     is an alphabetic token of at most `short_len` characters, as a bare
     substring otherwise. For building alternations; compile with re.I.
@@ -110,7 +114,8 @@ def token_pattern(term, short_len):
 
 
 @lru_cache(maxsize=4096)
-def _term_rule(term, short_len):
+def _term_rule(term: str, short_len: int | Literal["bounded"]
+               ) -> tuple[str, re.Pattern[str] | None]:
     """(`term` lowercased, its boundary regex or None) under the
     token_pattern rule."""
     term = term.lower()
@@ -118,7 +123,7 @@ def _term_rule(term, short_len):
                   if _bounded(term, short_len) else None)
 
 
-def token_in(term, text, short_len):
+def token_in(term: str, text: str, short_len: int | Literal["bounded"]) -> bool:
     """Whether `term` occurs in `text` under the `token_pattern` rule.
     `text` must already be lowercase — every caller lowercases a posting
     once up front, and the long-term case is a plain substring test so a
@@ -147,7 +152,8 @@ def token_in(term, text, short_len):
     return bounded is None or bounded.search(text) is not None
 
 
-def first_hit(terms, text, short_len):
+def first_hit(terms: Iterable[str], text: str,
+              short_len: int | Literal["bounded"]) -> str | None:
     """The first of `terms` that occurs in `text`, or None.
 
     The shape every vocabulary gate in this package was writing out for
@@ -167,14 +173,14 @@ def first_hit(terms, text, short_len):
 #  Relevance                                                             #
 # --------------------------------------------------------------------- #
 
-def _kw_in(text, keywords):
+def _kw_in(text: str, keywords: Iterable[str]) -> bool:
     """Any keyword hits `text` — acronyms on word boundaries (a bare "meg"
     would fire inside "omega" and flood aggregator sources with off-topic
     roles), longer terms as substrings (see SHORT_KEYWORD)."""
     return any(token_in(k, text, SHORT_KEYWORD) for k in keywords)
 
 
-def blank_phrases(text, phrases):
+def blank_phrases(text: str, phrases: Iterable[str | None]) -> str:
     """`text` with every one of `phrases` replaced by a space.
 
     The same move `scrub_boilerplate` makes on a posting body, over a list
@@ -205,7 +211,7 @@ def blank_phrases(text, phrases):
     return text
 
 
-def _excluded(title, text):
+def _excluded(title: str | None, text: str) -> bool:
     """EXCLUDE_PHRASES match anywhere; EXCLUDE_TITLE_PHRASES title-only,
     over a title EXCLUDE_TITLE_EXEMPT_PHRASES has been blanked out of.
 
@@ -237,55 +243,48 @@ def _excluded(title, text):
     return bool(first_hit(EXCLUDE_TITLE_PHRASES, title_l, SUBSTRING))
 
 
-# DOMAIN+SKILL pairing only reads the posting head. Specific CORE terms
-# (eeg, bci, neural decoding) are signal wherever they appear, but generic
-# domain words deep in a posting are usually benefits boilerplate —
-# "medical, dental, vision" + "data" would tier-match nearly every US job
-# ad if the pairing scanned full text.
-_PAIR_SCAN_CHARS = 1200
-
-# Boilerplate idioms that contain domain-looking words without meaning them:
-# benefits sections ("medical, dental, vision", "health savings account",
-# "drug-free workplace"), EEO statements ("military or veteran status" — the
-# defense gate's #1 false positive: 126 of 1116 stored JDs), vaccination
-# policies, and infra-health prose ("service health checks"). Scrubbed from
-# text before keyword/exclusion matching. Shared with the per-track defense
-# gate (src/match/gates.py) via scrub_boilerplate(). Source list:
-# config.EXCLUDE_BOILERPLATE_PHRASES (profile.toml [exclude]
-# boilerplate_phrases); these are the fallback when it is empty.
-_DEFAULT_BOILERPLATE_PHRASES = (
-    # benefits
-    r"medical[,/&\s]+(?:dental|vision)(?:[,/&\s]+(?:dental|vision))?(?:\s+(?:insurance|coverage|benefits|plans?))?",
-    r"health\s+(?:insurance|savings|benefits?|plans?|coverage|reimbursement)",
-    r"health\s*(?:&|and)\s*well(?:ness|-?being)",
-    r"drug[-\s]free\s+work(?:place|\s*environment)",
-    r"drug\s+(?:screen(?:ing)?|test(?:ing)?)",
-    r"(?:covid(?:-19)?\s+)?vaccin(?:e|ation)\s+(?:policy|requirement|status)",
-    # EEO
-    r"military\s+(?:or\s+|and\s+|/\s*)?veteran'?s?\s+status",
-    r"veteran'?s?\s+(?:or\s+|and\s+|/\s*)?military\s+status",
-    r"military\s+(?:status|service|spouses?|caregivers?|leave|families|obligations?)",
-    r"protected\s+veterans?", r"veterans?'?s?\s+status", r"uniformed\s+services?",
-    r"status\s+as\s+an?\s+(?:protected\s+)?veteran",
-    # infra-health prose
-    r"(?:system|service|cluster|application|platform|code(?:base)?)\s+health",
-    r"health\s+(?:checks?|monitoring|metrics)",
-    r"health\s+of\s+(?:the|our|your)",
-)
-_BOILERPLATE_RE = re.compile(
-    "|".join(getattr(config, "EXCLUDE_BOILERPLATE_PHRASES", None) or _DEFAULT_BOILERPLATE_PHRASES),
-    re.I,
-)
-
-
-def scrub_boilerplate(text):
+def scrub_boilerplate(text: str | None) -> str:
     """`text` with benefits/EEO/infra-health idioms blanked — for matchers
     whose keywords those idioms would otherwise false-trigger ("medical",
     "health", "drug", "military")."""
-    return _BOILERPLATE_RE.sub(" ", text or "")
+    # Boilerplate idioms that contain domain-looking words without meaning
+    # them: benefits sections ("medical, dental, vision", "health savings
+    # account", "drug-free workplace"), EEO statements ("military or
+    # veteran status" — the defense gate's #1 false positive: 126 of 1116
+    # stored JDs), vaccination policies, and infra-health prose ("service
+    # health checks"). Scrubbed from text before keyword/exclusion
+    # matching. Shared with the per-track defense gate (src/match/gates.py)
+    # via this function. Source list: config.EXCLUDE_BOILERPLATE_PHRASES
+    # (profile.toml [exclude] boilerplate_phrases); these are the fallback
+    # when it is empty.
+    default_boilerplate_phrases = (
+        # benefits
+        r"medical[,/&\s]+(?:dental|vision)(?:[,/&\s]+(?:dental|vision))?(?:\s+(?:insurance|coverage|benefits|plans?))?",
+        r"health\s+(?:insurance|savings|benefits?|plans?|coverage|reimbursement)",
+        r"health\s*(?:&|and)\s*well(?:ness|-?being)",
+        r"drug[-\s]free\s+work(?:place|\s*environment)",
+        r"drug\s+(?:screen(?:ing)?|test(?:ing)?)",
+        r"(?:covid(?:-19)?\s+)?vaccin(?:e|ation)\s+(?:policy|requirement|status)",
+        # EEO
+        r"military\s+(?:or\s+|and\s+|/\s*)?veteran'?s?\s+status",
+        r"veteran'?s?\s+(?:or\s+|and\s+|/\s*)?military\s+status",
+        r"military\s+(?:status|service|spouses?|caregivers?|leave|families|obligations?)",
+        r"protected\s+veterans?", r"veterans?'?s?\s+status", r"uniformed\s+services?",
+        r"status\s+as\s+an?\s+(?:protected\s+)?veteran",
+        # infra-health prose
+        r"(?:system|service|cluster|application|platform|code(?:base)?)\s+health",
+        r"health\s+(?:checks?|monitoring|metrics)",
+        r"health\s+of\s+(?:the|our|your)",
+    )
+    boilerplate_re = re.compile(
+        "|".join(getattr(config, "EXCLUDE_BOILERPLATE_PHRASES", None)
+                 or default_boilerplate_phrases),
+        re.I,
+    )
+    return boilerplate_re.sub(" ", text or "")
 
 
-def watch_division_title(title):
+def watch_division_title(title: str | None) -> str | None:
     """The config.WATCH_DIVISION_TITLES entry `title` carries, or None —
     profile [policy] watch_division_titles, matched BOUNDED against the
     title alone. See that constant for the scope argument; this is only the
@@ -301,13 +300,14 @@ def watch_division_title(title):
 
 
 @lru_cache(maxsize=64)
-def _untiered(include, core, domain, skill):
+def _untiered(include: tuple[str, ...], core: tuple[str, ...], domain: tuple[str, ...],
+              skill: tuple[str, ...]) -> tuple[str, ...]:
     """The `include` keywords no tier lists, compared case-insensitively."""
     tiered = {k.lower() for k in core + domain + skill}
     return tuple(k for k in include if k.lower() not in tiered)
 
 
-def is_relevant(title, description="", *, watch_titles=False):
+def is_relevant(title: str, description: str = "", *, watch_titles: bool = False) -> bool:
     """Whether a posting is in-field, under the tiered model at the top of
     this module.
 
@@ -338,8 +338,12 @@ def is_relevant(title, description="", *, watch_titles=False):
         return True
 
     # Tier 2 x Tier 3: adjacent medical/bio domain + transferable skill.
-    # Head-only scan — see _PAIR_SCAN_CHARS.
-    head = scrub_boilerplate((title + " " + description[:_PAIR_SCAN_CHARS]).lower())
+    # Head-only scan (1200 chars). Specific CORE terms (eeg, bci, neural
+    # decoding) are signal wherever they appear, but generic domain words
+    # deep in a posting are usually benefits boilerplate — "medical,
+    # dental, vision" + "data" would tier-match nearly every US job ad if
+    # the pairing scanned full text.
+    head = scrub_boilerplate((title + " " + description[:1200]).lower())
     if _kw_in(head, DOMAIN_KEYWORDS) and _kw_in(head, SKILL_KEYWORDS):
         return True
 

@@ -30,20 +30,19 @@ Notes:
     normal rather than a parsing bug.
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from src import config
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import norm_posted_date, strip_html
 
-# Occupational series crawled when the profile names none: 2210 IT
-# management, 1550 computer science, 0601 general health science, 0401
-# general biological science.
-DEFAULT_SERIES = ("2210", "1550", "0601", "0401")
 
-
-def _salary_text(remuneration):
+def _salary_text(remuneration: Any) -> str:
     """The advertised pay band from a ``PositionRemuneration`` list.
 
     >>> _salary_text([{"MinimumRange": "99908", "MaximumRange": "129878",
@@ -74,7 +73,7 @@ def _salary_text(remuneration):
     return ""
 
 
-def _locations(descriptor):
+def _locations(descriptor: dict[str, Any]) -> str:
     """Every duty station on the announcement, joined with "; ".
 
     >>> _locations({"PositionLocation": [{"LocationName": "Durham, NC"},
@@ -101,7 +100,7 @@ def _locations(descriptor):
     return "; ".join(names) or strip_html(descriptor.get("PositionLocationDisplay"))
 
 
-def _describe(details, descriptor):
+def _describe(details: dict[str, Any], descriptor: dict[str, Any]) -> str:
     """The scoreable body of an announcement: summary, duties, quals, pay.
 
     ``MajorDuties`` is a list of paragraphs and is flattened in order:
@@ -136,7 +135,7 @@ def _describe(details, descriptor):
     return " ".join(c for c in chunks if c).strip()
 
 
-def _parse_item(item):
+def _parse_item(item: Any) -> dict[str, Any] | None:
     """One ``SearchResultItem`` as a crawler job dict, or None if unusable.
 
     The id is namespaced by source, and the company is the hiring
@@ -212,7 +211,7 @@ def _parse_item(item):
     if department:
         body = f"{department}. {body}".strip()
 
-    job = {
+    job: dict[str, Any] = {
         "id":          f"usajobs_{jid}",
         "company":     strip_html(descriptor.get("OrganizationName")) or "USAJOBS",
         "title":       title,
@@ -228,7 +227,8 @@ def _parse_item(item):
     return job
 
 
-def _search_params(keyword, location, radius, series, results_per_page):
+def _search_params(keyword: str | None, location: str | None, radius: int | None,
+                   series: Sequence[str] | None, results_per_page: int) -> dict[str, int | str]:
     """The query string for one search, minus the page number.
 
     Series codes go to ``JobCategoryCode`` semicolon-joined, and ``Radius``
@@ -247,10 +247,14 @@ def _search_params(keyword, location, radius, series, results_per_page):
     >>> sorted(_search_params(None, None, 50, [], 25))
     ['ResultsPerPage']
     """
+    # Occupational series crawled when the profile names none: 2210 IT
+    # management, 1550 computer science, 0601 general health science, 0401
+    # general biological science.
+    default_series = ("2210", "1550", "0601", "0401")
     codes = [str(s).strip()
-             for s in (DEFAULT_SERIES if series is None else series)
+             for s in (default_series if series is None else series)
              if str(s).strip()]
-    params = {"ResultsPerPage": int(results_per_page)}
+    params: dict[str, int | str] = {"ResultsPerPage": int(results_per_page)}
     if keyword:
         params["Keyword"] = keyword
     if location:
@@ -262,25 +266,10 @@ def _search_params(keyword, location, radius, series, results_per_page):
     return params
 
 
-def _credentials():
-    """The (key, registered email) pair from config, or None with one line.
-
-    Tested in ``tests/test_fetcher_parsers.py::TestUsajobs`` — it reads the
-    live config module, so it needs a monkeypatch rather than a doctest.
-
-    Notes:
-        Missing credentials are not an error. The source is opt-in, and a
-        crawl with no federal key must still run every other source, so
-        this degrades exactly like a dead board.
-    """
-    return config.require_creds(
-        "USAJOBS", "https://developer.usajobs.gov/apirequest/",
-        USAJOBS_API_KEY=getattr(config, "USAJOBS_API_KEY", ""),
-        USAJOBS_EMAIL=getattr(config, "USAJOBS_EMAIL", ""))
-
-
-async def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
-                        results_per_page=250, max_pages=20, gate=None):
+async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
+                        radius: int | None = None, series: Sequence[str] | None = None,
+                        results_per_page: int = 250, max_pages: int = 20,
+                        gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """Search USAJOBS and return the announcements passing `gate` as job
     dicts (all of them when `gate` is None), each page read off the loop.
 
@@ -294,8 +283,17 @@ async def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
     Returns [] — never raises — with no credentials, on an HTTP or JSON
     error, and on an unexpected payload shape. Covered by
     ``tests/test_fetcher_parsers.py::TestUsajobs``.
+
+    Notes:
+        Missing credentials (the key and its registered email, from config)
+        are not an error. The source is opt-in, and a crawl with no federal
+        key must still run every other source, so this degrades exactly
+        like a dead board.
     """
-    creds = _credentials()
+    creds = config.require_creds(
+        "USAJOBS", "https://developer.usajobs.gov/apirequest/",
+        USAJOBS_API_KEY=getattr(config, "USAJOBS_API_KEY", ""),
+        USAJOBS_EMAIL=getattr(config, "USAJOBS_EMAIL", ""))
     if not creds:
         return []
     key, email = creds
@@ -303,7 +301,9 @@ async def fetch_usajobs(keyword=None, location=None, radius=None, series=None,
                "Authorization-Key": key, "Accept": "application/json"}
     params = _search_params(keyword, location, radius, series, results_per_page)
 
-    jobs, seen, fetched, total = [], set(), 0, None
+    jobs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    fetched, total = 0, None
     for page in range(1, int(max_pages) + 1):
         try:
             r = await http.send("GET", "https://data.usajobs.gov/api/search", headers=headers,

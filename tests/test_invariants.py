@@ -749,42 +749,27 @@ def test_compiled_code_has_no_assert_or_debug():
                        "Raise an exception instead.")
 
 
-def _model_classes(trees):
-    """(rel, class node) for every pydantic model class: a subclass, by
-    base name, of BaseModel, BaseSettings or another model class."""
-    classes = [(rel, c) for rel, t in trees.items() for c in ast.walk(t)
-               if isinstance(c, ast.ClassDef)]
-    bases = {id(c): {getattr(b, "id", getattr(b, "attr", None)) for b in c.bases}
-             for _, c in classes}
-    names, grew = {"BaseModel", "BaseSettings"}, True
-    while grew:
-        found = {c.name for _, c in classes if bases[id(c)] & names}
-        grew, names = not found <= names, names | found
-    return [(rel, c) for rel, c in classes if bases[id(c)] & names]
-
-
-def test_pydantic_models_keep_their_annotations_as_strings():
-    """Every module defining a pydantic model has `from __future__ import
-    annotations`. Without it Nuitka compiles each class's `__annotate__`,
+def test_every_module_keeps_its_annotations_as_strings():
+    """Every first-party module has `from __future__ import annotations`:
+    one annotation style for mypy, and pydantic models whose annotations
+    stay strings. Without it Nuitka compiles each class's `__annotate__`,
     and on Python 3.14 pydantic's FORWARDREF read of that raises TypeError
     whenever an annotation holds a lambda reading a name, or `str.lower`:
     the exe dies at import while every test passes.
 
     Notes:
         Found 2026-09-24 building JobHarvester.exe (config.secrets.Settings,
-        then profile_schema.Methodology).
+        then profile_schema.Methodology); widened from the pydantic-model
+        modules to every module when src/ was annotated.
     """
     trees = dict(_parsed())
-    modules = {rel for rel, _ in _model_classes(trees)}
-    assert "src/ats/board/spec.py" in modules, "the model scan found nothing"
-    bare = sorted(rel for rel in modules
+    assert "src/ats/board/spec.py" in trees, "the scan found nothing"
+    bare = sorted(rel for rel, tree in trees.items()
                   if not any(isinstance(n, ast.ImportFrom)
                              and n.module == "__future__"
                              and any(a.name == "annotations" for a in n.names)
-                             for n in trees[rel].body))
-    assert not bare, (f"pydantic models in {bare} without `from __future__ "
-                      "import annotations`: the compiled exe cannot import "
-                      "them. Add the import.")
+                             for n in tree.body))
+    assert not bare, f"{bare} lack `from __future__ import annotations`. Add it."
 
 
 # --------------------------------------------------------------------------- #
@@ -1026,3 +1011,182 @@ async def test_a_blocked_loop_fails_the_test(loop_blocks):
     assert [r.own > 0.1 for r in loop_blocks][-1:] == [True]
     assert sum(r.own > 0.1 for r in loop_blocks) == 1
     loop_blocks.clear()
+
+
+# --------------------------------------------------------------------------- #
+#  Module-level names with one reader, and one-use private helpers            #
+# --------------------------------------------------------------------------- #
+#
+# The standing rule: a module-level constant or compiled regex that one
+# function in its module reads, and nothing else in src, tools or tests
+# reads, belongs inside that function (`re` caches compiled patterns). A
+# `_private` helper called once whose body is one simple statement is
+# inlined. Module level stays for shared values, declared tables, measured
+# hot compiles, loggers and process-wide state (a name a function rebinds
+# with `global`). The allowlists name the exceptions.
+
+MODULE_LEVEL_NAME_ALLOW = {
+    ("src/store/schema.py", "_SCHEMA"): "declared table: the SQL DDL",
+    ("src/store/schema.py", "_INDEXES"): "declared table: the SQL DDL",
+    ("src/discovery/name_sources.py", "_NAV_CHROME_RE"):
+        "declared table: ~65 lines of site-chrome vocabulary",
+    ("src/crawl/triage.py", "SCORE_CAP"):
+        "run()'s default, cited by name in harvest.py's --help and crawl.harvest",
+    ("src/match/filters.py", "SUBSTRING"):
+        "a match mode token_in()'s doctest reads beside _excluded()",
+    **{("src/match/locality.py", name): "measured hot compile: the geo gate, per posting"
+       for name in ("_OTHER_STATE_NAME_RE", "_OTHER_STATE_ABBR_RE", "_OWN_STATE_RE",
+                    "_WB_LOW_RE", "_NON_US_REGION_RE")},
+}
+
+SINGLE_USE_HELPER_ALLOW = {
+    ("src/claude/fit.py", "_stack_core_text"):
+        "called inside the fit prompt's f-string, where its fallback chain "
+        "would be unreadable",
+}
+
+
+@functools.cache
+def _parsed_tests():
+    """tests/ as (rel, tree), parsed once: the rule counts a test's read."""
+    return [(p.relative_to(ROOT).as_posix(), ast.parse(p.read_text(encoding="utf-8")))
+            for p in sorted((ROOT / "tests").rglob("*.py"))]
+
+
+def _module_of(rel):
+    parts = rel[:-3].split("/")
+    return ".".join(parts[:-1] if parts[-1] == "__init__" else parts)
+
+
+def _import_source(rel, node):
+    """The module an ImportFrom in file `rel` names, a relative one
+    resolved against `rel`'s package."""
+    if not node.level:
+        return node.module
+    pkg = _module_of(rel).split(".")
+    if not rel.endswith("__init__.py"):
+        pkg = pkg[:-1]
+    pkg = pkg[:len(pkg) - node.level + 1]
+    return ".".join(pkg + ([node.module] if node.module else []))
+
+
+def _outside_reads(rel, tree):
+    """Names file `rel` can read from another module: what it imports, as
+    (source module, name), plus every attribute name and every name a
+    `setattr(obj, "name", ...)` patches, as (None, name)."""
+    out = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.ImportFrom):
+            src = _import_source(rel, n)
+            out |= {(src, a.name) for a in n.names}
+        elif isinstance(n, ast.Attribute):
+            out.add((None, n.attr))
+        elif (isinstance(n, ast.Call) and len(n.args) > 1
+              and getattr(n.func, "id", getattr(n.func, "attr", None)) == "setattr"
+              and isinstance(n.args[1], ast.Constant)):
+            out.add((None, n.args[1].value))
+    return out
+
+
+def _readers(tree):
+    """{name: the outermost functions reading it}; None stands for code
+    that runs at import (module or class body)."""
+    out = {}
+
+    def visit(node, fn):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Name) and isinstance(child.ctx, ast.Load):
+                out.setdefault(child.id, set()).add(fn)
+            inner = isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            visit(child, child.name if inner and fn is None else fn)
+    visit(tree, None)
+    return out
+
+
+def module_level_single_reader_names(trees=None):
+    """(rel, name, reader) for every module-level constant (a literal, a
+    non-empty flat tuple/list/set of literals) or `*.compile(...)` under
+    src/ that exactly one function in its module reads and no other file
+    reads, minus MODULE_LEVEL_NAME_ALLOW."""
+    trees = trees if trees is not None else _parsed() + _parsed_tests()
+    outside = {rel: _outside_reads(rel, t) for rel, t in trees}
+    found = []
+    for rel, tree in trees:
+        if not rel.startswith("src/"):
+            continue
+        rebound = {name for n in ast.walk(tree) if isinstance(n, ast.Global)
+                   for name in n.names}
+        readers = _readers(tree)
+        for node in tree.body:
+            target = node.targets[0] if isinstance(node, ast.Assign) else getattr(node, "target", None)
+            value = getattr(node, "value", None)
+            if not isinstance(target, ast.Name) or value is None or target.id in rebound:
+                continue
+            literal = isinstance(value, ast.Constant) or (
+                isinstance(value, (ast.Tuple, ast.List, ast.Set)) and value.elts
+                and all(isinstance(e, ast.Constant) for e in value.elts))
+            compiled = isinstance(value, ast.Call) and getattr(value.func, "attr", None) == "compile"
+            name, fns = target.id, readers.get(target.id, set())
+            if (not (literal or compiled) or len(fns) != 1 or None in fns
+                    or (rel, name) in MODULE_LEVEL_NAME_ALLOW
+                    or any(key in outside[other] for key in ((_module_of(rel), name), (None, name))
+                           for other, _ in trees if other != rel)):
+                continue
+            found.append((rel, name, *fns))
+    return found
+
+
+def single_use_private_helpers(trees=None):
+    """(rel, name, lineno) for every undecorated `_private` function under
+    src/ whose body (past a docstring) is one simple statement, called
+    once by name in src and referenced nowhere else (a callback, an
+    attribute, a test's setattr), minus SINGLE_USE_HELPER_ALLOW."""
+    trees = trees if trees is not None else _parsed() + _parsed_tests()
+    calls, other_refs = Counter(), Counter()
+    for rel, tree in trees:
+        called = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load):
+                (calls if id(n) in called and rel.startswith("src/") else other_refs)[n.id] += 1
+        other_refs.update(name for _src, name in _outside_reads(rel, tree))
+    simple = (ast.Return, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr, ast.Raise, ast.Pass)
+    return [(rel, n.name, n.lineno) for rel, tree in trees if rel.startswith("src/")
+            for n in ast.walk(tree)
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and n.name.startswith("_") and not n.name.startswith("__") and not n.decorator_list
+            and len(body := n.body[1:] if ast.get_docstring(n) is not None else n.body) == 1
+            and isinstance(body[0], simple)
+            and calls[n.name] == 1 and not other_refs[n.name]
+            and (rel, n.name) not in SINGLE_USE_HELPER_ALLOW]
+
+
+def test_module_level_names_have_more_than_one_reader():
+    found = module_level_single_reader_names()
+    assert not found, (f"{found}: read by one function and nowhere else. Move each "
+                       "into its reader, or allow it in MODULE_LEVEL_NAME_ALLOW.")
+
+
+def test_single_use_private_helpers_are_inlined():
+    found = single_use_private_helpers()
+    assert not found, f"{found}: one-statement private helpers called once. Inline them."
+
+
+def test_the_module_level_guards_can_actually_see_a_violation():
+    """Both detectors flag a planted violation, and neither flags what the
+    rule allows: a second reader in a test, a rebound name, a compound
+    body."""
+    def trees(**files):
+        return [(rel.replace("_", "/", 1) + ".py", ast.parse(src)) for rel, src in files.items()]
+    one_reader = "import re\n_PAT = re.compile('x')\ndef reader(s):\n    return _PAT.search(s)\n"
+    assert module_level_single_reader_names(trees(src_m=one_reader)) == [
+        ("src/m.py", "_PAT", "reader")]
+    assert module_level_single_reader_names(trees(
+        src_m=one_reader, tests_t="from src import m\nm._PAT\n")) == []
+    assert module_level_single_reader_names(trees(
+        src_m="_N = None\ndef f():\n    global _N\n    _N = _N or 1\n")) == []
+    helper = "def _helper(x):\n    return x + 1\ndef caller(x):\n    return _helper(x)\n"
+    assert single_use_private_helpers(trees(src_m=helper)) == [("src/m.py", "_helper", 1)]
+    compound = ("def _helper(x):\n    try:\n        return 1 / x\n"
+                "    except ZeroDivisionError:\n        return 0\n"
+                "def caller(x):\n    return _helper(x)\n")
+    assert single_use_private_helpers(trees(src_m=compound)) == []

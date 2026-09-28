@@ -80,6 +80,9 @@ jobs:
         # package re-export facades and the doctest-only imports carry.
         run: python -m flake8 --select=F src tools tests *.py
 
+      - name: Type check (mypy)
+        run: python -m mypy
+
       - name: Validate the example profile
         run: |
           python -c "

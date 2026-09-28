@@ -11,8 +11,12 @@ local, so neither module depends on the other at load time and the
 package may import them in any order. Doctests import what they use.
 """
 
+from __future__ import annotations
+
 import re
+import sqlite3
 from datetime import datetime
+from typing import Any
 
 from src import config
 from src import tags
@@ -34,7 +38,7 @@ from .schema import _commit, connect  # noqa: F401  (connect: the doctests open 
 # until a person confirms or rejects it.
 
 
-def _name_key(name):
+def _name_key(name: str | None) -> str:
     """Normalized comparison key for a company name: [a-z0-9] only.
 
     The key discovery already compares names by (local_sourcing's
@@ -51,7 +55,7 @@ def _name_key(name):
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def mark_pending(row):
+def mark_pending(row: dict[str, Any]) -> dict[str, Any]:
     """A company-row dict rewritten as a REVIEW CANDIDATE: inactive, and
     carrying the pending-review scope tag.
 
@@ -70,7 +74,7 @@ def mark_pending(row):
             "tags": tags.join(tags.parse(row.get("tags")) | {tags.PENDING})}
 
 
-def is_confirmed_company(conn, name):
+def is_confirmed_company(conn: sqlite3.Connection, name: str) -> bool:
     """True when the roster already holds a REVIEWED company under `name`: a
     row with a board that is not sitting in the review queue.
 
@@ -105,16 +109,7 @@ def is_confirmed_company(conn, name):
     return bool(row and row["ats"] and not tags.has(row["tags"], tags.PENDING))
 
 
-# What the review UI shows per candidate: who it is, what board was found,
-# how much it produces, and where the guess came from.
-_PENDING_FIELDS = (
-    "id", "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
-    "careers_url", "local_job_count", "total_job_count", "mission_tier",
-    "mission_score", "mission_reason", "tags", "source", "created_at", "notes",
-)
-
-
-def pending_companies(conn):
+def pending_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """The review queue: candidates an automated path resolved and nobody has
     ruled on yet, newest first.
 
@@ -134,7 +129,12 @@ def pending_companies(conn):
     >>> [c["name"] for c in pending_companies(conn)]
     ['Second', 'First']
     """
-    cols = ", ".join(_PENDING_FIELDS)
+    # What the review UI shows per candidate: who it is, what board was
+    # found, how much it produces, and where the guess came from.
+    cols = ", ".join((
+        "id", "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
+        "careers_url", "local_job_count", "total_job_count", "mission_tier",
+        "mission_score", "mission_reason", "tags", "source", "created_at", "notes"))
     return [dict(r) for r in conn.execute(
         f"SELECT {cols} FROM companies "
         "WHERE (',' || COALESCE(tags,'') || ',') LIKE ? "
@@ -142,7 +142,8 @@ def pending_companies(conn):
         (f"%,{tags.PENDING},%",)).fetchall()]
 
 
-def confirm_company(conn, cid, active=None):
+def confirm_company(conn: sqlite3.Connection, cid: int,
+                    active: int | None = None) -> dict[str, Any] | None:
     """Accept a review candidate onto the roster: the pending tag comes off
     and `active` is written as given (1 = crawl it, 0 = park it).
 
@@ -193,7 +194,7 @@ def confirm_company(conn, cid, active=None):
     return get_company(conn, cid)
 
 
-def reject_company(conn, cid, reason=None):
+def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None) -> str | None:
     """Throw a review candidate away for good: the row and any jobs it
     produced are deleted, and its name is blocklisted so no discovery path
     re-finds it.
@@ -234,7 +235,7 @@ def reject_company(conn, cid, reason=None):
     return name
 
 
-def block_name(conn, name, reason=None):
+def block_name(conn: sqlite3.Connection, name: str, reason: str | None = None) -> str | None:
     """Blocklist a company name so no discovery path adds it again. Returns
     its normalized key.
 
@@ -267,7 +268,7 @@ def block_name(conn, name, reason=None):
     return key
 
 
-def blocked_name_keys(conn):
+def blocked_name_keys(conn: sqlite3.Connection) -> set[str]:
     """Every blocklisted name key -- the set a paste is filtered against.
 
     >>> conn = connect(":memory:")

@@ -15,10 +15,15 @@ builders (`_link`, `_fit`, `_cells`, `_bullet`, ...) are the pieces the
 four public renderers compose.
 """
 
+from __future__ import annotations
+
 import smtplib
+from collections.abc import Collection, Iterable, Sequence
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
+from typing import Any
 
 from src import config
 from src.match import locality
@@ -31,7 +36,7 @@ APPLY_BAND = (0.40, 0.70)
 APPLY_BAND_LIMIT = 10
 
 
-def age_tag(row, today=None):
+def age_tag(row: dict[str, Any], today: str | None = None) -> str:
     """Compact posting-age tag for console/digest rows: 'NEW' the day we
     first see it, else days since posted_at ('6d', '45d!' when stale — a
     45+-day-old posting is often a ghost req). '?' when no date is known.
@@ -51,15 +56,16 @@ def age_tag(row, today=None):
     return f"{days}d!" if days >= 45 else f"{days}d"
 
 
-def _today():
+def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _tag(t):
+def _tag(t: dict[str, Any]) -> str:
     return f"[{t['label'].upper()}]"
 
 
-def apply_band_rows(ranked, limit=APPLY_BAND_LIMIT):
+def apply_band_rows(ranked: list[dict[str, Any]] | None,
+                    limit: int = APPLY_BAND_LIMIT) -> list[dict[str, Any]]:
     """The undecided open local rows scored inside APPLY_BAND, best fit
     first, at most `limit` of them.
 
@@ -70,7 +76,7 @@ def apply_band_rows(ranked, limit=APPLY_BAND_LIMIT):
     included). Enforced by tests/test_digest.py::TestApplyBand.
     """
     lo, hi = APPLY_BAND
-    picked = []
+    picked: list[dict[str, Any]] = []
     for j in ranked or []:
         fit = j.get("resume_fit_score")
         if not isinstance(fit, (int, float)) or not (lo <= fit < hi):
@@ -84,7 +90,8 @@ def apply_band_rows(ranked, limit=APPLY_BAND_LIMIT):
     return picked[:limit]
 
 
-def new_ranked_rows(ranked, t, new_since=None):
+def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: dict[str, Any],
+                    new_since: str | None = None) -> list[dict[str, Any]]:
     """The ranked rows first seen on or after `new_since` (default today)
     that score at least the track's `digest_min_fit`.
 
@@ -126,7 +133,7 @@ def new_ranked_rows(ranked, t, new_since=None):
     """
     since = (new_since or _today())[:10]
     floor = float(t.get("digest_min_fit") or 0.0)
-    fresh = []
+    fresh: list[dict[str, Any]] = []
     for j in ranked or []:
         if (j.get("first_seen") or "")[:10] < since:
             continue
@@ -146,15 +153,15 @@ def new_ranked_rows(ranked, t, new_since=None):
 # markup: links, bold, emphasis. Rows are built from cells and are pairs
 # too; a section body is a pair for the whole table or list.
 
-def _pair(cell):
+def _pair(cell: object) -> tuple[str, str]:
     return cell if isinstance(cell, tuple) else (str(cell), str(cell))
 
 
-def _bold(text):
+def _bold(text: object) -> tuple[str, str]:
     return f"**{text}**", f"<strong>{text}</strong>"
 
 
-def _link(j):
+def _link(j: dict[str, Any]) -> tuple[str, str]:
     """The posting's title linked to its URL, plus a "(N similar postings)"
     note when `j` is a ranked_jobs(collapse=True) survivor standing in for
     others (store.ranked_jobs' `dup_count` > 1) — the count includes the row
@@ -181,24 +188,19 @@ def _link(j):
     return f"[{title}]({url}){note}", f"<a href='{url}'>{title}</a>{note}"
 
 
-def _fit(score):
+def _fit(score: object) -> str:
     """A fit/combined score to two places; 'n/a' when nobody scored it."""
     return f"{score:.2f}" if isinstance(score, (int, float)) else "n/a"
 
 
-def _company(j):
-    """Sweep rows carry `company`, store rows `company_name`."""
-    return j.get("company") or j.get("company_name")
-
-
-def _cells(cells):
+def _cells(cells: Iterable[object]) -> tuple[str, str]:
     """One table row."""
     md, html = zip(*map(_pair, cells))
     return ("| " + " | ".join(md) + " |",
             "<tr>" + "".join(f"<td>{c}</td>" for c in html) + "</tr>")
 
 
-def _bullet(parts):
+def _bullet(parts: Iterable[object]) -> tuple[str, str]:
     """One list item: the first part bold, the parts joined by em dashes."""
     md, html = zip(*map(_pair, parts))
     bmd, bhtml = _bold(md[0]), _bold(html[0])
@@ -206,7 +208,8 @@ def _bullet(parts):
             "<li>" + " — ".join((bhtml[1],) + html[1:]) + "</li>")
 
 
-def _table(cols, rows, numeric=()):
+def _table(cols: Sequence[str], rows: Sequence[tuple[str, str]],
+           numeric: Collection[str] = ()) -> tuple[str, str]:
     """A table body. `numeric` names the right-aligned columns; a table with
     any gets padded `----:` markdown separators, one with none keeps the bare
     `|---|` form. Both render identically; the split keeps the written files
@@ -224,18 +227,19 @@ def _table(cols, rows, numeric=()):
     return "\n".join(md), html
 
 
-def _list(rows):
+def _list(rows: Sequence[tuple[str, str]]) -> tuple[str, str]:
     """A bullet-list body."""
     return "\n".join(r[0] for r in rows), "<ul>" + "".join(r[1] for r in rows) + "</ul>"
 
 
-def _render(title, sections):
+def _render(title: str, sections: Iterable[tuple[str | None, object, tuple[str, str] | None]]
+            ) -> tuple[str, str]:
     """(markdown, html) documents for a title and its sections. A section is
     `(heading, intro, body)`; any part may be None. The HTML is the body
     only — `_html_doc` wraps it for mail."""
     md, html = [f"# {title}\n"], [f"<h2>{title}</h2>"]
     for heading, intro, body in sections:
-        parts = []
+        parts: list[str] = []
         if heading:
             parts.append(f"## {heading}")
             html.append(f"<h3>{heading}</h3>")
@@ -250,12 +254,12 @@ def _render(title, sections):
     return "\n".join(md), "".join(html)
 
 
-def _html_doc(body, width):
+def _html_doc(body: str, width: int) -> str:
     return (f'<html><body style="font-family:sans-serif;max-width:{width}px">'
             f"{body}</body></html>")
 
 
-def _digest_path(report_dir, name):
+def _digest_path(report_dir: Path | None, name: str) -> Path:
     """`name` under `report_dir` (default config.REPORT_DIR), creating it."""
     report_dir = report_dir or config.REPORT_DIR
     report_dir.mkdir(exist_ok=True)
@@ -266,31 +270,35 @@ def _digest_path(report_dir, name):
 
 _FOLLOWUPS = "Follow-ups due"
 _APPLY_BAND = "Apply band"
-_WATCH = "Watched companies — new postings this run"
 
 
-def _band_intro(tail=""):
+def _band_intro(tail: str = "") -> str:
     lo, hi = APPLY_BAND
     return (f"Open local postings scored {lo:.2f} to {hi:.2f} that you have "
             f"not decided on, best fit first.{tail}")
 
 
-def _watch_section(watch_hits, intro=None):
+def _watch_section(watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]], intro: str | None = None
+                   ) -> tuple[str | None, object, tuple[str, str] | None]:
     rows = []
     for c, j, in_pipeline in watch_hits:
         note = "scored" if in_pipeline else "listed only, outside local scope"
         loc = j.get("location") or "?"
         rows.append(_bullet([c["name"], _link(j),
                              (f"{loc} *({note})*", f"{loc} <em>({note})</em>")]))
-    return _WATCH, intro, _list(rows)
+    return "Watched companies — new postings this run", intro, _list(rows)
 
 
 # --------------------------------------------------------------------------- #
 #  Ranked digest (store-crawl tracks)
 # --------------------------------------------------------------------------- #
 
-def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
-                        followups=None, report_dir=None, triage=None):
+def write_ranked_digest(
+        ranked: list[dict[str, Any]], t: dict[str, Any],
+        watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
+        pipeline: list[dict[str, Any]] | None = None,
+        followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
+        triage: dict[str, int] | None = None) -> Path:
     """Fit-ranked markdown digest for a store-crawl track: pipeline section,
     follow-ups due, apply band, watched-company section, then the full
     ranked table. `followups` is `store.followups_due` output; omitted, the
@@ -298,7 +306,7 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
     harvest funnel, rows per gate); omitted or empty, no section. Written
     under `report_dir` (default config.REPORT_DIR); returns the path."""
     today = _today()
-    sections = []
+    sections: list[tuple[str | None, object, tuple[str, str] | None]] = []
     if pipeline:
         rows = [_cells([p.get("disposition"),
                         (p.get("disposition_at") or "")[:10],
@@ -371,8 +379,11 @@ def write_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
     return path
 
 
-def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
-                       new_since=None, followups=None):
+def send_ranked_digest(
+        ranked: list[dict[str, Any]], t: dict[str, Any],
+        watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
+        pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
+        followups: list[dict[str, Any]] | None = None) -> bool:
     """Email a store-crawl track's new ranked rows. True when a message
     actually went out.
 
@@ -400,7 +411,7 @@ def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
         return False
 
     tag, today = _tag(t), _today()
-    sections = []
+    sections: list[tuple[str | None, object, tuple[str, str] | None]] = []
     if closed:
         rows = [_bullet([p.get("disposition"), p.get("company_name"),
                          _link(p), "posting CLOSED"]) for p in closed]
@@ -445,7 +456,7 @@ def send_ranked_digest(ranked, t, watch_hits=None, pipeline=None,
     return False
 
 
-def toast(t, count, path):
+def toast(t: dict[str, Any], count: int, path: str | Path) -> bool:
     """Raise a Windows desktop toast for a just-sent digest. True only when
     one was actually shown.
 
@@ -478,7 +489,8 @@ def toast(t, count, path):
 #  Matches digest (sweep tracks)
 # --------------------------------------------------------------------------- #
 
-def _matches_sections(matches, tag):
+def _matches_sections(matches: list[dict[str, Any]], tag: str
+                      ) -> list[tuple[str | None, object, tuple[str, str] | None]]:
     if not matches:
         return [(None, "_No matching postings this run._", None)]
     n_remote = sum(1 for j in matches if j.get("remote_eligible"))
@@ -487,15 +499,18 @@ def _matches_sections(matches, tag):
     with_fit = any(j.get("resume_fit_score") is not None for j in matches)
     cols = (("Fit",) if with_fit else ()) + (
         "Tag", "Company", "Title", "Location", "Anchor", "Remote signal")
+    # Sweep rows carry `company`, store rows `company_name`.
     rows = [_cells(([_fit(j.get("resume_fit_score"))] if with_fit else [])
-                   + [tag, _company(j), _link(j), j.get("location"),
-                      j.get("anchor_signal", ""), j.get("remote_signal", "")])
+                   + [tag, j.get("company") or j.get("company_name"), _link(j),
+                      j.get("location"), j.get("anchor_signal", ""),
+                      j.get("remote_signal", "")])
             for j in matches]
     return [(None, (n_md + tail, n_html + tail),
              _table(cols, rows, numeric={"Fit"}))]
 
 
-def write_matches_digest(matches, report_dir, t):
+def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
+                         t: dict[str, Any]) -> Path:
     """Flat surfaced-postings digest for a sweep track, written under
     `report_dir` (default config.REPORT_DIR); returns the path."""
     today, tag = _today(), _tag(t)
@@ -506,7 +521,8 @@ def write_matches_digest(matches, report_dir, t):
     return path
 
 
-def send_matches_digest(matches, t, cfg=None):
+def send_matches_digest(matches: list[dict[str, Any]], t: dict[str, Any],
+                        cfg: object = None) -> bool:
     """Email the matches digest — the same table `write_matches_digest`
     writes. True when a message went out; a no-op without matches. `cfg`
     is unused (the runner still passes it)."""
@@ -527,7 +543,7 @@ def send_matches_digest(matches, t, cfg=None):
 #  Mail
 # --------------------------------------------------------------------------- #
 
-def _send_gmail(subject, plain, html):
+def _send_gmail(subject: str, plain: str, html: str) -> bool:
     """Send a plain+HTML digest to yourself. Returns True on success;
     no-ops with a hint when the app password is unset."""
     if config.GMAIL_APP_PASSWORD == "YOUR_APP_PASSWORD_HERE":

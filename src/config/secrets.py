@@ -9,7 +9,7 @@ with placeholders for local development. Nothing here reads the profile.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (BeforeValidator, Field, PositiveInt, ValidationError,
                       model_validator)
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     localappdata: Path | None = None
     xdg_data_home: Path | None = None
     # Web UI port (src/web/server.py; --port=N overrides).
-    webui_port: int = Field(5533, ge=1, le=65535)
+    webui_port: int = Field(default=5533, ge=1, le=65535)
     # Concurrency limits; unset -> n_cpus - 1 (src/net/util.worker_count).
     crawler_workers: PositiveInt | None = None
     discovery_workers: PositiveInt | None = None
@@ -73,24 +73,25 @@ class Settings(BaseSettings):
 
     @model_validator(mode="before")
     @classmethod
-    def _blank_is_unset(cls, data):
+    def _blank_is_unset(cls, data: dict[str, Any]) -> dict[str, Any]:
         return {k: v.strip() if isinstance(v, str) else v
                 for k, v in data.items()
                 if not (isinstance(v, str) and not v.strip())}
 
 
-def read_env():
+def read_env() -> Settings:
     """A fresh Settings from the environment, or ValueError naming every bad
     variable (never its value: some are secrets)."""
     try:
         return Settings()
     except ValidationError as e:
-        bad = "".join(f"\n  {x['loc'][0].upper()}: {x['msg']}" for x in
+        bad = "".join(f"\n  {str(x['loc'][0]).upper()}: {x['msg']}" for x in
                       e.errors(include_url=False, include_input=False))
         raise ValueError(f"bad environment variable(s):{bad}") from None
 
 
-def require_creds(source, register_url, **values):
+def require_creds(source: str, register_url: str,
+                  **values: str | None) -> tuple[str, ...] | None:
     """The named credentials in the order given, or None with one line out.
 
     Every keyed source here needs SEVERAL env-backed values at once (a user

@@ -1,10 +1,16 @@
 """Discourse forum job-category feed."""
 
+from __future__ import annotations
+
+from collections.abc import Callable
+from typing import Any
+
 from src.net import http
 from src.net.http import JSON_HEADERS
 
 
-async def fetch_discourse(display_name, base_url, category_id, gate=None):
+async def fetch_discourse(display_name: str, base_url: str, category_id: int,
+                          gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     data = await http.get_json(url, f"Discourse {display_name}", default={},
                                headers=JSON_HEADERS)

@@ -33,9 +33,11 @@ from __future__ import annotations
 
 import argparse
 import re
+import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -128,7 +130,7 @@ _INTRO_RE = re.compile(
 _LIST_SPLIT_RE = re.compile(r",\s*(?:and\s+)?|\s+and\s+")
 
 
-def _split_list(span):
+def _split_list(span: str) -> list[str]:
     return [s.strip(" .,") for s in _LIST_SPLIT_RE.split(span) if s.strip(" .,")]
 
 
@@ -145,14 +147,14 @@ _LEADING_FILLER_WORDS = {
 }
 
 
-def _strip_leading_filler(name):
+def _strip_leading_filler(name: str) -> str:
     words = name.split()
     while len(words) > 1 and words[0].lower() in _LEADING_FILLER_WORDS:
         words = words[1:]
     return " ".join(words)
 
 
-def _collapse_repeated_run(name):
+def _collapse_repeated_run(name: str) -> str:
     """Collapse a name that is itself a repeated run of words down to one
     copy of the shortest repeating unit.
 
@@ -175,7 +177,7 @@ def _collapse_repeated_run(name):
     return name
 
 
-def extract_candidates(text):
+def extract_candidates(text: str | None) -> list[tuple[str, str]]:
     """Candidate org names in one description, tagged with evidence kind.
 
     'intro' means the name followed a third-party-introducing phrase (the
@@ -289,7 +291,7 @@ _BLOCKLIST_KEYS = (_AGGREGATORS | _BENEFITS_PROVIDERS | _EEO_BOILERPLATE
 _FILLER_LEAD_WORDS = {"the", "our", "this", "a", "an", "your", "their"}
 
 
-def _looks_like_filler(name):
+def _looks_like_filler(name: str) -> bool:
     words = name.split()
     return len(words) <= 2 and words[0].lower() in _FILLER_LEAD_WORDS
 
@@ -351,7 +353,7 @@ _INFIX_STOPWORDS = {
 }
 
 
-def _is_generic_bare_phrase(name):
+def _is_generic_bare_phrase(name: str) -> bool:
     """True if every word in `name` is a generic corporate/department/
     subject-area noun (see `_GENERIC_CATEGORY_WORDS`) or corporate-suffix
     word, i.e. nothing in the span could distinguish one organization from
@@ -371,7 +373,7 @@ def _is_generic_bare_phrase(name):
     return all(w in _GENERIC_CATEGORY_WORDS or w in suffix_words for w in words)
 
 
-def _is_bare_word_without_suffix(name):
+def _is_bare_word_without_suffix(name: str) -> bool:
     """True if `name` is a single word (no internal space) with no
     corporate suffix -- the shape almost every internal team/role/function
     name has when a "partner with"/"collaborate with" cue phrase (written
@@ -397,7 +399,7 @@ def _is_bare_word_without_suffix(name):
     return name.strip(".,").lower() not in suffix_words
 
 
-def _has_infix_stopword(name):
+def _has_infix_stopword(name: str) -> bool:
     """True if a word after the first is a sentence-glue stopword (see
     `_INFIX_STOPWORDS`), the signature of a mangled sentence fragment
     rather than a name.
@@ -411,7 +413,7 @@ def _has_infix_stopword(name):
     return any(w.lower() in _INFIX_STOPWORDS for w in words[1:])
 
 
-def is_plausible_org(name, employer_key):
+def is_plausible_org(name: str | None, employer_key: str) -> bool:
     """True if `name` survives every precision filter.
 
     `employer_key` is the normalized name (see `_norm_key`) of the company
@@ -510,7 +512,8 @@ _SUFFIX_POSTING_WEIGHT = 1.0
 _HIGH_FIT_MULTIPLIER = 1.3
 
 
-def _evidence_score(name, intro_postings, suffix_postings, high_fit):
+def _evidence_score(name: str | None, intro_postings: int, suffix_postings: int,
+                    high_fit: bool) -> float:
     """Rank score for one candidate: cue-phrase ('intro') evidence
     dominates, and for a short (<=2 word) name with NO intro evidence, raw
     posting-count is dampened (square root) instead of counted linearly --
@@ -547,7 +550,7 @@ def _evidence_score(name, intro_postings, suffix_postings, high_fit):
     return round(score, 2)
 
 
-def _merge_variants(hits):
+def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Merge candidates whose display name is a contiguous prefix or
     suffix (at word boundaries) of another candidate's display name,
     summing their evidence into whichever variant was independently seen
@@ -634,8 +637,9 @@ def _merge_variants(hits):
     return merged
 
 
-def harvest_from_store(conn, min_mentions=2, min_score=None, use_llm=False,
-                       limit=None):
+def harvest_from_store(conn: sqlite3.Connection, min_mentions: int = 2,
+                       min_score: float | None = None, use_llm: bool = False,
+                       limit: int | None = None) -> list[dict[str, Any]]:
     """Mine every stored job description for third-party organization names
     not already in the company roster.
 
@@ -724,7 +728,7 @@ class KeepList(Reply):
     keep: list[str]
 
 
-def _llm_refine(candidates):
+def _llm_refine(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Optional second pass: ask Claude to drop anything in `candidates`
     that isn't really a distinct organization (catches shapes the regex
     heuristics can't, e.g. a person's name with a corporate-suffix-looking
@@ -762,7 +766,7 @@ def _llm_refine(candidates):
 #  Report + CLI                                                               #
 # --------------------------------------------------------------------------- #
 
-def _print_safe(line):
+def _print_safe(line: str) -> None:
     """print() a line, tolerating a console codepage (cp1252 on a default
     Windows shell) that can't encode every character real posting text
     contains -- a narrow no-break space (U+202F) is common enough to have
@@ -782,7 +786,7 @@ def _print_safe(line):
         print(line.encode(enc, errors="replace").decode(enc))
 
 
-def print_report(candidates):
+def print_report(candidates: list[dict[str, Any]]) -> None:
     w = 66
     _print_safe(f"\n{'='*w}")
     _print_safe("  Snowball: company names mined from stored job descriptions")
@@ -800,8 +804,9 @@ def print_report(candidates):
                 "company store -- resolve/verify separately before adding.\n")
 
 
-def run_snowball(min_mentions=2, min_score=None, use_llm=False, limit=None,
-                 db_path=None):
+def run_snowball(min_mentions: int = 2, min_score: float | None = None,
+                 use_llm: bool = False, limit: int | None = None,
+                 db_path: str | Path | None = None) -> list[dict[str, Any]]:
     """Callable entry point (also used by tests): connect, harvest, report,
     and return the candidate list."""
     conn = connect(db_path or config.STORE_DB_PATH)
@@ -815,7 +820,7 @@ def run_snowball(min_mentions=2, min_score=None, use_llm=False, limit=None,
     return candidates
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description="Mine stored job descriptions for third-party company "
                     "names (partners/parents/acquirers/investors/clients) "

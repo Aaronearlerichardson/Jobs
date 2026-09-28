@@ -14,9 +14,14 @@ is a board at all. The reader's constants live in config
 (CAREERS_PAGE_*, BOARD_DETECT_CACHE_S).
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from typing import Any
 from urllib.parse import urldefrag, urljoin
+
+from lxml import etree
 
 from src import config
 from src.net import http
@@ -25,45 +30,14 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           hashed_cache_path, host_of, json_cache_get,
                           json_cache_put, links, node_text, parse_markup)
 
-_JOB_HREF_RE = re.compile(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
-                          r"([a-z0-9][a-z0-9\-_/]{2,})", re.I)
-_NAV_SLUGS = {
-    "open-positions", "open-roles", "career-opportunities", "current-openings",
-    "job-openings", "openings", "opportunities", "jobs", "job", "careers",
-    "career", "apply", "application", "search", "all", "browse", "students",
-    "internships", "benefits", "culture", "life", "teams", "team", "departments",
-    "locations", "faq", "contact", "index", "home", "overview",
-    "login", "logon", "signin", "sign-in",
-}
-#: A class or id naming site navigation: "navbar", "sub-nav", "menu-item",
-#: "header__nav", "topnavigation".
-_NAV_BLOCK_RE = re.compile(r"(?i)(?:^|[-_])(?:top|sub|main|site|desk|mobile|global)?"
-                           r"(?:nav|navbar|navigation|menu)s?(?:$|[-_])")
-_NAV_TEXT_RE = re.compile(
-    r"^(careers?|jobs?|view (all|current|open)|open (positions?|roles?)|"
-    r"see (all|open)|apply|search|browse|all (jobs|openings|roles)|"
-    r"current openings|open positions|view (job )?openings|join( us)?|"
-    r"work (with|at) us|learn more|explore|opportunities|all roles)\b", re.I)
-_OPENINGS_HREF_RE = re.compile(
-    r"/(open-positions|open-roles|career-opportunities|current-openings|"
-    r"job-openings|openings|opportunities|positions|jobs)\b", re.I)
-_OPENINGS_TEXT_RE = re.compile(
-    r"(current|open|view|see|all).{0,12}(opening|position|role|job)", re.I)
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 
 
-def _in_navigation(a):
-    """Whether anchor `a` sits in the site's navigation: a <nav>, or an
-    element whose class or id names a nav bar or menu (`_NAV_BLOCK_RE`)."""
-    return any(el.tag == "nav" or any(_NAV_BLOCK_RE.search(t)
-                                      for t in (*(el.get("class") or "").split(), el.get("id") or ""))
-               for el in a.iterancestors())
-
-
-def find_job_links(tree):
+def find_job_links(tree: etree._Element) -> list[tuple[etree._Element, str, str]]:
     """(anchor, href, title) for each real job-posting link on a careers
     page's parsed `tree`, one per href: nav, login and index links filtered,
-    and any href the site's navigation links (`_in_navigation`), a section
+    and any href the site's navigation links (an anchor inside a <nav>, or
+    inside an element whose class or id names a nav bar or menu), a section
     of the site wherever the page repeats it. The title is the anchor's
     heading (or title-classed) element's text, else its own.
 
@@ -73,18 +47,40 @@ def find_job_links(tree):
     >>> [(href, title) for _a, href, title in find_job_links(parse_markup(page))]
     [('/careers/facilities-engineer-88', 'Facilities Engineer')]
     """
+    nav_slugs = {
+        "open-positions", "open-roles", "career-opportunities", "current-openings",
+        "job-openings", "openings", "opportunities", "jobs", "job", "careers",
+        "career", "apply", "application", "search", "all", "browse", "students",
+        "internships", "benefits", "culture", "life", "teams", "team", "departments",
+        "locations", "faq", "contact", "index", "home", "overview",
+        "login", "logon", "signin", "sign-in",
+    }
+    # A class or id naming site navigation: "navbar", "sub-nav", "menu-item",
+    # "header__nav", "topnavigation".
+    nav_block = (r"(?i)(?:^|[-_])(?:top|sub|main|site|desk|mobile|global)?"
+                 r"(?:nav|navbar|navigation|menu)s?(?:$|[-_])")
     anchors = links(tree)
-    out, seen = [], {a.get("href") for a in anchors if _in_navigation(a)}
+    out: list[tuple[etree._Element, str, str]] = []
+    seen = {a.get("href") for a in anchors
+            if any(el.tag == "nav" or any(re.search(nav_block, t)
+                                          for t in (*(el.get("class") or "").split(),
+                                                    el.get("id") or ""))
+                   for el in a.iterancestors())}
     for a in anchors:
         href = a.get("href")
-        m = _JOB_HREF_RE.search(href)
+        m = re.search(r"/(careers?|jobs?|positions?|openings?|roles?|job)/"
+                      r"([a-z0-9][a-z0-9\-_/]{2,})", href, re.I)
         if not m:
             continue
         slug = m.group(2).rstrip("/").split("/")[-1].split("?")[0].lower()
-        if slug in _NAV_SLUGS or len(slug) < 4:
+        if slug in nav_slugs or len(slug) < 4:
             continue
         text = node_text(a)
-        if not text or len(text) < 4 or _NAV_TEXT_RE.match(text):
+        if not text or len(text) < 4 or re.match(
+                r"^(careers?|jobs?|view (all|current|open)|open (positions?|roles?)|"
+                r"see (all|open)|apply|search|browse|all (jobs|openings|roles)|"
+                r"current openings|open positions|view (job )?openings|join( us)?|"
+                r"work (with|at) us|learn more|explore|opportunities|all roles)\b", text, re.I):
             continue
         if href in seen:
             continue
@@ -97,7 +93,7 @@ def find_job_links(tree):
     return out
 
 
-def _openings_link(tree, page_url):
+def _openings_link(tree: etree._Element, page_url: str) -> str | None:
     """A same-host "see current openings" link, defragmented, or None. Never
     an aggregator's or an ATS vendor's: those are not a custom board."""
     host = host_of(page_url)
@@ -111,18 +107,21 @@ def _openings_link(tree, page_url):
         if host_of(absu) != host or _OFFSITE_RE.search(absu):
             continue
         text = node_text(a).lower()
-        if _OPENINGS_HREF_RE.search(href) or _OPENINGS_TEXT_RE.search(text):
+        if re.search(r"/(open-positions|open-roles|career-opportunities|current-openings|"
+                     r"job-openings|openings|opportunities|positions|jobs)\b", href, re.I) \
+                or re.search(r"(current|open|view|see|all).{0,12}(opening|position|role|job)",
+                             text, re.I):
             return absu
     return None
 
 
-def _hop_target(tree, page_url):
+def _hop_target(tree: etree._Element, page_url: str) -> str | None:
     """The openings page to read in place of `page_url`, or None."""
     op = _openings_link(tree, page_url)
     return op if op and op.rstrip("/") != page_url.rstrip("/") else None
 
 
-def _location_near(a, area=None):
+def _location_near(a: etree._Element, area: re.Pattern[str] | None = None) -> str:
     """The place named nearest a job link: in the link, else its parent,
     else its grandparent. Where `area` (a location regex) matches in that
     element its match wins, so a role listed "Alameda, CA | Durham, NC" is
@@ -138,7 +137,8 @@ def _location_near(a, area=None):
     return ""
 
 
-def read_page(tree, page_url, area=None, hop=True):
+def read_page(tree: etree._Element, page_url: str, area: re.Pattern[str] | None = None,
+              hop: bool = True) -> dict[str, Any]:
     """A careers page's parsed `tree` as the html decoder's payload:
     {"elements"}, one per job link (its `title`, `href`, absolute `url` and
     `location`, read `_location_near` with `area`), or {"hop"}, the
@@ -166,7 +166,7 @@ def read_page(tree, page_url, area=None, hop=True):
     return {"elements": out}
 
 
-async def _page_tree(url):
+async def _page_tree(url: str) -> etree._Element | None:
     """`url`'s page, parsed off the loop; None on any failure. Silent: a
     probed page that is not a board is an expected answer."""
     try:
@@ -178,11 +178,11 @@ async def _page_tree(url):
         return None
 
 
-def _is_board(tree):
+def _is_board(tree: etree._Element) -> bool:
     return len(find_job_links(tree)) >= config.CAREERS_PAGE_MIN_LINKS
 
 
-def is_board_page(html):
+def is_board_page(html: str) -> bool:
     """Whether a page's `html` holds CAREERS_PAGE_MIN_LINKS genuine job
     links; False when it will not parse.
 
@@ -195,7 +195,7 @@ def is_board_page(html):
         return False
 
 
-async def custom_board_listing_url(page_url, html=None):
+async def custom_board_listing_url(page_url: str, html: str | None = None) -> str | None:
     """The URL holding a custom board's listings: `page_url` when it is one
     (CAREERS_PAGE_MIN_LINKS genuine job links), else its openings page one
     hop away when that is; None otherwise, and always for an aggregator or

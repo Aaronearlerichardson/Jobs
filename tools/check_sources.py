@@ -31,6 +31,7 @@ your own store — the practical "which of my saved boards died" pass).
 Read-only: every probe is a GET or a documented public API call, one per
 host, paced. Nothing is written to the store.
 """
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -40,8 +41,10 @@ import json
 import re
 import sys
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, TextIO
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -67,7 +70,7 @@ EMOJI = {OK: "✅", BLOCKED: "🚧", BROKEN: "❌", ROBOTS_OFF: "🤖", SKIPPED:
 _ROBOTS_RE = re.compile(r"robots\.txt disallows|RobotsDisallowed", re.I)
 
 
-def verdict(blob, has_rows):
+def verdict(blob: str | None, has_rows: bool) -> str:
     """Classify a fetcher outcome from its diagnostics. Policy beats
     failure: a robots refusal is not a broken endpoint, and reporting it as
     one sends you off debugging a parser that is working fine."""
@@ -78,7 +81,7 @@ def verdict(blob, has_rows):
     return blame(blob)
 
 
-def classify(status_code=None, note=""):
+def classify(status_code: int | None = None, note: str = "") -> str:
     """HTTP status + any diagnostic text -> one of our four verdicts."""
     if BLOCKED_RE.search(note or ""):
         return BLOCKED
@@ -142,7 +145,7 @@ ROBOTS_TARGETS = [
 ]
 
 
-async def probe_robots(label, url):
+async def probe_robots(label: str, url: str) -> dict[str, Any]:
     """What does this host's robots.txt say about the path we'd fetch?"""
     origin = origin_of(url)
     started = time.monotonic()
@@ -202,18 +205,18 @@ class _TaskCapture:
     once for a whole concurrent section instead, with per-task buffers.
     """
 
-    def __init__(self, passthrough):
-        self._buffers = {}
+    def __init__(self, passthrough: TextIO) -> None:
+        self._buffers: dict[Any, io.StringIO] = {}
         self._passthrough = passthrough
 
-    def start(self):
+    def start(self) -> None:
         self._buffers[asyncio.current_task()] = io.StringIO()
 
-    def take(self):
+    def take(self) -> str:
         buf = self._buffers.pop(asyncio.current_task(), None)
         return " ".join(buf.getvalue().split()) if buf else ""
 
-    def write(self, s):
+    def write(self, s: str) -> int:
         try:
             buf = self._buffers.get(asyncio.current_task())
         except RuntimeError:                # a thread's print: no task
@@ -221,11 +224,12 @@ class _TaskCapture:
         (buf or self._passthrough).write(s)
         return len(s)
 
-    def flush(self):
+    def flush(self) -> None:
         self._passthrough.flush()
 
 
-async def _run_fetcher(fn, *a, **kw):
+async def _run_fetcher(fn: Callable[..., Awaitable[list[dict[str, Any]] | None]],
+                       *a: Any, **kw: Any) -> tuple[list[dict[str, Any]], str, str]:
     """Await a fetcher, capturing the diagnostics it prints. Returns
     (rows, note, exception_text).
 
@@ -248,7 +252,7 @@ async def _run_fetcher(fn, *a, **kw):
         return [], " ".join(buf.getvalue().split()), f"{type(e).__name__}: {e}"
 
 
-async def probe_feeds():
+async def probe_feeds() -> list[dict[str, Any]]:
     from src.ats.feeds import (fetch_hnhiring, fetch_remoteok,
                                fetch_remotive, fetch_rss)
 
@@ -289,7 +293,7 @@ SEARCH_QUERIES = [
 ]
 
 
-async def probe_search(deep=False):
+async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
     from src.net.ddg import search as ddg_text
 
     out = []
@@ -366,7 +370,7 @@ async def probe_search(deep=False):
 #  4. forums                                                                   #
 # --------------------------------------------------------------------------- #
 
-async def probe_forums():
+async def probe_forums() -> list[dict[str, Any]]:
     from src.ats.feeds.discourse import fetch_discourse
     out = []
     if not config.DISCOURSE_BOARDS:
@@ -390,7 +394,7 @@ async def probe_forums():
 #  5. keyed APIs                                                               #
 # --------------------------------------------------------------------------- #
 
-async def probe_api():
+async def probe_api() -> list[dict[str, Any]]:
     out = []
     has_key = bool(config.CAREERONESTOP_USER_ID and config.CAREERONESTOP_TOKEN)
     started = time.monotonic()
@@ -416,7 +420,7 @@ async def probe_api():
 #  6. deliberately gated hosts                                                 #
 # --------------------------------------------------------------------------- #
 
-async def probe_gated():
+async def probe_gated() -> list[dict[str, Any]]:
     """Hosts the crawler refuses to fetch by policy, not by capability.
 
     Nothing is requested here — that is the point. This section exists so the
@@ -436,7 +440,7 @@ async def probe_gated():
 #  7. your own roster                                                          #
 # --------------------------------------------------------------------------- #
 
-async def probe_roster(limit=None, workers=8):
+async def probe_roster(limit: int | None = None, workers: int = 8) -> list[dict[str, Any]]:
     """Probe every ACTIVE board in the store. This is the practical 404 pass:
     discovery imports leave stale slugs behind, companies get acquired, and
     boards move — all of which show up here as broken."""
@@ -459,7 +463,7 @@ async def probe_roster(limit=None, workers=8):
     skipped = len(rows) - len(todo)
     paged = "/".join(sorted({r["ats"] for r in rows} - cheap))
 
-    async def one(row):
+    async def one(row: dict[str, Any]) -> dict[str, Any]:
         board = board_for(row["ats"])
         if not board:
             return {"section": "roster", "name": row["name"], "ats": row["ats"],
@@ -501,7 +505,7 @@ async def probe_roster(limit=None, workers=8):
 #  Reporting                                                                   #
 # --------------------------------------------------------------------------- #
 
-async def _probe_robots_all():
+async def _probe_robots_all() -> list[dict[str, Any]]:
     return [await probe_robots(label, url) for label, url in ROBOTS_TARGETS]
 
 
@@ -516,7 +520,7 @@ SECTIONS = {
 }
 
 
-def print_section(title, results):
+def print_section(title: str, results: list[dict[str, Any]]) -> None:
     print(f"\n  {title}")
     print(f"  {'-' * (len(title))}")
     for r in results:
@@ -525,14 +529,14 @@ def print_section(title, results):
               f"{r['status']:8} {r.get('seconds', 0):5.1f}s  {r['detail'][:76]}")
 
 
-def summarize(results):
+def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
     counts = {}
     for r in results:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     return counts
 
 
-async def _probe_all(wanted, args):
+async def _probe_all(wanted: list[str], args: argparse.Namespace) -> list[dict[str, Any]]:
     """Every wanted section's results, each printed as it lands, then the
     roster's when asked for."""
     all_results = []
@@ -561,7 +565,7 @@ async def _probe_all(wanted, args):
     return all_results
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(description="Comprehensive source health probe")
     ap.add_argument("--only", action="append", choices=sorted(SECTIONS),
                     help="run only these sections (repeatable)")

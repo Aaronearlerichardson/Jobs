@@ -30,13 +30,18 @@ Notes:
     doesn't flood the file with connection chatter.
 """
 
+from __future__ import annotations
+
 import atexit
 import contextvars
 import logging
 import os
 import sys
 import time
+from collections.abc import Callable, Hashable
 from datetime import datetime
+from pathlib import Path
+from typing import Any, TextIO
 
 from src import config
 
@@ -44,56 +49,34 @@ from src import config
 # a day), crawls and web-UI ops. 60 was barely a week by 2026-09-16.
 KEEP = 200
 
-# One record per line: timestamp, level, source logger, message.
-_FMT = "%(asctime)s %(levelname)-8s %(name)s | %(message)s"
-_DATEFMT = "%Y-%m-%d %H:%M:%S"
-
-# Third-party loggers capped at WARNING so the file stays about THIS
-# application's decisions: urllib3/requests/playwright emit per-connection
-# DEBUG chatter, werkzeug logs an INFO access line for EVERY request — the
-# browser polls /api/run/status every ~1.5s, which buried a web-UI op's real
-# records under hundreds of poll lines (2026-08-28 discover-term log) — and
-# asyncio announces its event-loop policy at DEBUG. Their WARNING+ records
-# (retries, request failures) still land.
-_NOISY = ("urllib3", "requests", "charset_normalizer", "playwright",
-          "werkzeug", "asyncio")
-
-# Logger namespaces whose DEBUG records belong in the file: this
-# application's own. Every other DEBUG source is some dependency's
-# internals — the blocklist above can't enumerate them all (ddgs' Rust HTTP
-# bridge alone emits hyper_util connection-pool and h2 frame traces, which
-# flooded the 2026-08-28 discover-local log) — so DEBUG is allowlisted by
-# first name component while INFO+ passes from anyone.
-_APP_DEBUG_ROOTS = {"console", "http", "claude", "discovery", "src",
-                    "capture", "tools"}
-
 
 class _AppDebugOnly(logging.Filter):
     """Pass every record at INFO+; pass DEBUG only from this app's loggers."""
 
-    def filter(self, record):
+    def filter(self, record: logging.LogRecord) -> bool:
+        # Logger namespaces whose DEBUG records belong in the file: this
+        # application's own. Every other DEBUG source is some dependency's
+        # internals, which SessionLog's noisy-logger cap can't enumerate
+        # (ddgs' Rust HTTP bridge alone emits hyper_util connection-pool and
+        # h2 frame traces, which flooded the 2026-08-28 discover-local log),
+        # so DEBUG is allowlisted by first name component while INFO+
+        # passes from anyone.
         return (record.levelno > logging.DEBUG
-                or record.name.split(".", 1)[0] in _APP_DEBUG_ROOTS)
-
-# Flags that tune or scope a run rather than naming what kind of run it is.
-# A session whose only flags are these is the daily crawl.
-_MODIFIERS = {
-    "track", "preview", "no-fit", "send", "no-websearch", "confirm-cost",
-    "samples", "top", "workers", "no-verify", "stale-days", "limit",
-    "described-only", "why", "db",
-}
+                or record.name.split(".", 1)[0] in {"console", "http", "claude", "discovery",
+                                                    "src", "capture", "tools"})
 
 # Finishers for session logs opened by start(); finish() drains it. Not
 # run state (src/runstate.py): what they undo, the swap of sys.stdout and
 # sys.stderr, is the process's, and the atexit finish() must find them.
-_active = []
+_active: list[Callable[[], None]] = []
 
 #: The line this writer has begun and not ended, per sink: {sink: text}.
 #: A ContextVar, so each task, and each thread, assembles its own lines.
-_PARTIAL = contextvars.ContextVar("partial_lines", default={})
+_PARTIAL: contextvars.ContextVar[dict[Hashable, str]] = contextvars.ContextVar(
+    "partial_lines", default={})
 
 
-def whole_lines(sink, text):
+def whole_lines(sink: Hashable, text: str) -> list[str]:
     """The lines this task or thread completes by writing `text` to `sink`;
     the rest waits for its next write there.
 
@@ -112,7 +95,7 @@ def whole_lines(sink, text):
     return lines
 
 
-def _log_dir():
+def _log_dir() -> Path:
     """Where session logs live.
 
     Notes:
@@ -124,7 +107,7 @@ def _log_dir():
 
 
 
-def _mode(argv):
+def _mode(argv: list[str]) -> str:
     """The first flag that isn't a scope/tuning modifier, else 'crawl'.
 
     >>> _mode(["--rescore", "--limit", "20"])
@@ -132,26 +115,18 @@ def _mode(argv):
     >>> _mode(["--track", "remote"])
     'crawl'
     """
+    # Flags that tune or scope a run rather than naming what kind of run it
+    # is. A session whose only flags are these is the daily crawl.
     for tok in argv:
-        if tok.startswith("--") and tok[2:] not in _MODIFIERS:
+        if tok.startswith("--") and tok[2:] not in {
+                "track", "preview", "no-fit", "send", "no-websearch", "confirm-cost",
+                "samples", "top", "workers", "no-verify", "stale-days", "limit",
+                "described-only", "why", "db"}:
             return tok[2:]
     return "crawl"
 
 
-def _clean(mode):
-    """`mode` reduced to filename-safe characters.
-
-    >>> _clean("sync-status")
-    'sync-status'
-    >>> _clean("weird/../mode")
-    'weirdmode'
-    >>> _clean("")
-    'crawl'
-    """
-    return "".join(c for c in mode if c.isalnum() or c == "-") or "crawl"
-
-
-def _level_for(line, err):
+def _level_for(line: str, err: bool) -> int:
     """The record level for one mirrored console line.
 
     >>> _level_for("  [!] greenhouse arine: HTTP 404", err=False) == logging.WARNING
@@ -183,7 +158,7 @@ class SessionLog:
         the traceback to the tee'd stderr).
     """
 
-    def __init__(self, mode, invocation, now=None):
+    def __init__(self, mode: str, invocation: str, now: datetime | None = None) -> None:
         log_dir = _log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         _prune(log_dir)
@@ -196,7 +171,8 @@ class SessionLog:
         # truncate the first one's finished log away. "x" turns the collision
         # into an error, answered with a -2, -3 ... suffix instead of a lost
         # log. Suffixed names still match _prune's session-*.log glob.
-        stem = f"session-{now:%Y%m%d-%H%M%S}-{_clean(mode)}"
+        safe = "".join(c for c in mode if c.isalnum() or c == "-") or "crawl"
+        stem = f"session-{now:%Y%m%d-%H%M%S}-{safe}"
         n = 1
         while True:
             self.path = log_dir / (f"{stem}.log" if n == 1
@@ -214,19 +190,30 @@ class SessionLog:
         self._closed = False
 
         self._handler = logging.StreamHandler(self._fh)
-        self._handler.setFormatter(logging.Formatter(_FMT, datefmt=_DATEFMT))
+        # One record per line: timestamp, level, source logger, message.
+        self._handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)-8s %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
         self._handler.addFilter(_AppDebugOnly())
         root = logging.getLogger()
         self._prev_root_level = root.level
         root.addHandler(self._handler)
         root.setLevel(logging.DEBUG)
-        for name in _NOISY:
+        # Third-party loggers capped at WARNING so the file stays about THIS
+        # application's decisions: urllib3/requests/playwright emit
+        # per-connection DEBUG chatter, werkzeug logs an INFO access line for
+        # EVERY request — the browser polls /api/run/status every ~1.5s,
+        # which buried a web-UI op's real records under hundreds of poll
+        # lines (2026-08-28 discover-term log) — and asyncio announces its
+        # event-loop policy at DEBUG. Their WARNING+ records (retries,
+        # request failures) still land.
+        for name in ("urllib3", "requests", "charset_normalizer", "playwright",
+                     "werkzeug", "asyncio"):
             noisy = logging.getLogger(name)
             if noisy.level == logging.NOTSET or noisy.level < logging.WARNING:
                 noisy.setLevel(logging.WARNING)
 
     # ── console mirror ──────────────────────────────────────────────────
-    def feed(self, text, err=False):
+    def feed(self, text: str, err: bool = False) -> None:
         """One record per line tee'd console output completes, lines
         assembled per writer (`whole_lines`)."""
         if self._closed:
@@ -234,13 +221,13 @@ class SessionLog:
         for line in whole_lines((self, err), text):
             self._route(line, err)
 
-    def _route(self, line, err):
+    def _route(self, line: str, err: bool) -> None:
         if not line.strip():
             return                            # layout blanks aren't records
         logging.getLogger("console").log(_level_for(line, err), "%s", line)
 
     # ── teardown ────────────────────────────────────────────────────────
-    def close(self):
+    def close(self) -> None:
         if self._closed:
             return
         for err in (False, True):
@@ -259,7 +246,7 @@ class SessionLog:
             pass
 
 
-def _null_stream():
+def _null_stream() -> TextIO:
     """A real file object that swallows everything, so the tee can treat it
     exactly like a console stream (write/flush/encoding/isatty all work)."""
     return open(os.devnull, "w", encoding="utf-8")
@@ -274,12 +261,12 @@ class _Tee:
         teardown, double finish) can never break console output.
     """
 
-    def __init__(self, stream, session, err=False):
+    def __init__(self, stream: TextIO, session: SessionLog, err: bool = False) -> None:
         self._stream = stream
         self._session = session
         self._err = err
 
-    def write(self, text):
+    def write(self, text: str) -> int:
         n = self._stream.write(text)
         try:
             self._session.feed(text, err=self._err)
@@ -287,14 +274,14 @@ class _Tee:
             pass
         return n
 
-    def flush(self):
+    def flush(self) -> None:
         self._stream.flush()
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
 
 
-def _prune(log_dir, keep=KEEP):
+def _prune(log_dir: Path, keep: int = KEEP) -> None:
     """Delete the oldest session logs so that after the new file is
     created at most `keep` remain.
 
@@ -310,7 +297,7 @@ def _prune(log_dir, keep=KEEP):
             pass
 
 
-def open_log(mode, invocation, now=None):
+def open_log(mode: str, invocation: str, now: datetime | None = None) -> SessionLog:
     """Create a fresh SessionLog (file + attached logging handler). The
     caller owns close() — start() below wires it up for CLI runs,
     src/dispatch/background.py streams its browser-tee'd output into one per UI
@@ -323,7 +310,7 @@ def open_log(mode, invocation, now=None):
     return SessionLog(mode, invocation, now=now)
 
 
-def start(argv, now=None):
+def start(argv: list[str], now: datetime | None = None) -> Path:
     """Begin mirroring stdout/stderr into a new session log; returns its
     path. finish() (registered atexit) restores the streams, detaches the
     logging handler and stamps a footer with the elapsed time.
@@ -348,7 +335,7 @@ def start(argv, now=None):
     sys.stdout = _Tee(out, session)
     sys.stderr = _Tee(err, session, err=True)
 
-    def _finish():
+    def _finish() -> None:
         sys.stdout, sys.stderr = out, err
         session.close()
 
@@ -357,7 +344,7 @@ def start(argv, now=None):
     return session.path
 
 
-def finish():
+def finish() -> None:
     """Close every session log opened by start(), restoring the original
     streams. Safe to call more than once.
     """

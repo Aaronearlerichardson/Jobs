@@ -10,13 +10,18 @@ Optional `category` parameter narrows by slug
 relevance gate is narrower than any single Remotive category.
 """
 
+from __future__ import annotations
+
 import asyncio
+from collections.abc import Callable
+from typing import Any
 
 from src.net import http
 from src.net.util import strip_html
 
 
-async def fetch_remotive(category=None, max_jobs=None, gate=None):
+async def fetch_remotive(category: str | None = None, max_jobs: int | None = None,
+                         gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """
     Pull Remotive's job feed; return relevant listings, read off the loop.
 
@@ -31,7 +36,7 @@ async def fetch_remotive(category=None, max_jobs=None, gate=None):
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
 
-def _jobs(data, max_jobs, gate):
+def _jobs(data: Any, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
     """The feed's payload `data` as fetch_remotive's job dicts."""
     entries = (data.get("jobs") or []) if isinstance(data, dict) else []
     if max_jobs is not None:

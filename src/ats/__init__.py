@@ -34,3 +34,5 @@ ATS boards while their WORK was sourcing companies:
 Subject and layer are different axes. A module belongs where its
 dependencies point, not where its topic sounds like it fits.
 """
+
+from __future__ import annotations

@@ -32,10 +32,15 @@ are not data — the technical-title regex, the exclude gate, digest
 rendering — but never the methodology.
 """
 
+from __future__ import annotations
+
 import asyncio
+import sqlite3
 from collections import defaultdict, deque
+from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import NamedTuple
+from types import ModuleType
+from typing import Any, NamedTuple, cast
 
 from src import config
 from src import store
@@ -47,13 +52,6 @@ from src.match.locality import NC_RE, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
 
-# Rough per-posting cost for the cost_guard message: ~700 input tokens
-# (cached system prompt) + ~120 output at a blended per-token rate.
-# Order-of-magnitude only — for deciding whether to stop and ask.
-_EST_TOKENS_PER_POSTING = 820
-_EST_USD_PER_MTOK = 4.0
-
-
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
 #: not a compatibility shim -- "the track this engine runs" is a question
@@ -62,7 +60,7 @@ _EST_USD_PER_MTOK = 4.0
 track_for_engine = config.track_for_engine
 
 
-def apply_keyword_focus(cfg, t):
+def apply_keyword_focus(cfg: Any, t: dict[str, Any]) -> None:
     """Point the shared keyword filter at this track's focus. Mutates the
     live list objects in place so filters.is_relevant (which imported them
     at load time) sees the change without a re-import. "extend" adds the
@@ -91,7 +89,7 @@ def apply_keyword_focus(cfg, t):
     cfg.ACCEPT_REMOTE = t["accept_remote"]
 
 
-def core_anchor(title, description=""):
+def core_anchor(title: str, description: str = "") -> str | None:
     """The require_core_anchor gate: the CORE keyword that anchors this
     posting, or None. Short single-token acronyms (eeg, ecg, rf...) match
     on word boundaries — "ecog" fires inside "recognized" — while longer
@@ -102,7 +100,8 @@ def core_anchor(title, description=""):
                      SHORT_KEYWORD)
 
 
-async def build_sources(cfg, t, include_websearch=None):
+async def build_sources(cfg: ModuleType, t: dict[str, Any],
+                        include_websearch: bool | None = None) -> list[dict[str, Any]]:
     """Assemble the track's source specs from its `sources` config table.
     Returns a list of dicts {name, platform, thunk, company}: `thunk()` is
     the source's fetch coroutine; `company` is
@@ -116,9 +115,12 @@ async def build_sources(cfg, t, include_websearch=None):
 
     src = t["sources"]
     use_ws = src["websearch"] if include_websearch is None else include_websearch
-    specs, used = [], set()
+    specs: list[dict[str, Any]] = []
+    used: set[tuple[str, str]] = set()
 
-    def add(name, platform, thunk, company=None, key=None):
+    # A thunk may carry what it closes over as a defaulted parameter.
+    def add(name: str, platform: str, thunk: Callable[..., Awaitable[Any]],
+            company: dict[str, Any] | None = None, key: tuple[str, str] | None = None) -> None:
         k = key or (platform, name.lower())
         if k in used:
             return
@@ -161,7 +163,7 @@ async def build_sources(cfg, t, include_websearch=None):
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;
             # the heavyweight onsite ATSes are only worth fetching scoped).
             for ats, name, slug, thunk in iter_store_sources(rows):
-                add(name, ats, thunk, key=(ats, str(slug)))
+                add(name, ats, cast(Callable[..., Any], thunk), key=(ats, str(slug)))
 
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are
@@ -233,7 +235,7 @@ async def build_sources(cfg, t, include_websearch=None):
     return specs
 
 
-def _short(text, n):
+def _short(text: str, n: int) -> str:
     """`text` as one line of readable prose, truncated to `n` characters —
     the console blurb under a sampled match. The markup half is
     net.util.strip_html, which also unescapes entities (a JD blurb reading
@@ -242,13 +244,13 @@ def _short(text, n):
     return text if len(text) <= n else text[: n - 1] + "..."
 
 
-def _diversify(matches, n):
+def _diversify(matches: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     """Up to n samples spread round-robin across companies so the precision
     sanity-check isn't dominated by one prolific employer."""
-    by_company = defaultdict(deque)
+    by_company: defaultdict[Any, deque[dict[str, Any]]] = defaultdict(deque)
     for j in matches:
         by_company[j.get("company") or j.get("company_name")].append(j)
-    picked = []
+    picked: list[dict[str, Any]] = []
     while len(picked) < n and any(by_company.values()):
         for waiting in by_company.values():
             if waiting:
@@ -258,14 +260,17 @@ def _diversify(matches, n):
     return picked
 
 
-def _cost_guard_trips(t, n_to_score, confirm_cost):
+def _cost_guard_trips(t: dict[str, Any], n_to_score: int, confirm_cost: bool) -> bool:
     """True (and prints the budget banner) when scoring n_to_score postings
     would blow the track's cost_guard without an explicit confirmation."""
     guard = t["cost_guard"]
     if not guard or n_to_score <= guard or confirm_cost:
         return False
-    est_tokens = n_to_score * _EST_TOKENS_PER_POSTING
-    est_usd = est_tokens / 1_000_000 * _EST_USD_PER_MTOK
+    # Rough per-posting cost: ~700 input tokens (cached system prompt) +
+    # ~120 output, at a blended $4 per million tokens. Order-of-magnitude
+    # only -- for deciding whether to stop and ask.
+    est_tokens = n_to_score * 820
+    est_usd = est_tokens / 1_000_000 * 4.0
     bar = "=" * 70
     print(f"\n{bar}")
     print(f"  [!] BUDGET GUARD: {n_to_score} posting(s) would be scored via "
@@ -284,16 +289,19 @@ class Collected(NamedTuple):
     phase hands the rest; naming it is what let the others become
     functions.
     """
-    to_score: list      # (company, job) -- fresh company-linked rows to score
-    matches: list       # sweep rows surfaced (fetcher dict shape)
-    watch_hits: list    # (company, job, in_pipeline) at watched companies
-    funnel: list        # per-source summary rows, in source order
+    to_score: list[tuple[dict[str, Any], dict[str, Any]]]     # (company, job) -- fresh company-linked rows to score
+    matches: list[dict[str, Any]]      # sweep rows surfaced (fetcher dict shape)
+    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]]   # (company, job, in_pipeline) at watched companies
+    funnel: list[tuple[str, int, int, int, int, str]]   # per-source summary rows, in source order
     n_closed: int
     n_reopened: int
     n_seen: int
 
 
-async def _gate_company_board(db, t, c, jobs, commit, snapshot=None):
+async def _gate_company_board(
+        db: store.Writer, t: dict[str, Any], c: dict[str, Any], jobs: list[dict[str, Any]], commit: bool,
+        snapshot: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
     store.Writer).
 
@@ -324,7 +332,7 @@ async def _gate_company_board(db, t, c, jobs, commit, snapshot=None):
             if not j.get("description") and j["id"] in stored:
                 j["description"] = stored[j["id"]]
 
-    kept = []
+    kept: list[dict[str, Any]] = []
     for j in jobs:
         if t["require_core_anchor"] and not core_anchor(
                 j.get("title", ""), j.get("description", "")):
@@ -336,14 +344,16 @@ async def _gate_company_board(db, t, c, jobs, commit, snapshot=None):
     return kept, fresh, watch_hits, n_reopened, n_closed
 
 
-def _fresh_and_watched(conn, t, c, jobs, kept, commit):
+def _fresh_and_watched(conn: sqlite3.Connection, t: dict[str, Any], c: dict[str, Any], jobs: list[dict[str, Any]],
+                       kept: list[dict[str, Any]], commit: bool
+                       ) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
     has handled, and the watch section's hits among `jobs`."""
     from src.match import gates
     from src.match.locality import geo_mode
 
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
-    watch_hits = []
+    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
     if tags.has(c, tags.WATCH):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company, any geography -- out-of-scope ones stored
@@ -372,7 +382,8 @@ def _fresh_and_watched(conn, t, c, jobs, kept, commit):
     return fresh, watch_hits
 
 
-def _gate_sweep_source(conn, t, jobs, seen_ids):
+def _gate_sweep_source(conn: sqlite3.Connection, t: dict[str, Any], jobs: list[dict[str, Any]],
+                      seen_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
     """One sweep source's jobs through the gates: anchor + title (+ engine
     excludes), remote signal stamped (or geo-gated when configured),
     deduped across sources via `seen_ids` (mutated).
@@ -383,7 +394,7 @@ def _gate_sweep_source(conn, t, jobs, seen_ids):
     from src.match import gates
     from src.match.locality import geo_mode
 
-    out = []
+    out: list[dict[str, Any]] = []
     anchor_here = tech_here = surfaced = 0
     for job in jobs:
         title = job.get("title", "")
@@ -420,7 +431,8 @@ def _gate_sweep_source(conn, t, jobs, seen_ids):
     return out, anchor_here, tech_here, surfaced
 
 
-async def _gate_sources(db, t, specs, fetched, commit):
+async def _gate_sources(db: store.Writer, t: dict[str, Any], specs: list[dict[str, Any]],
+                        fetched: list[tuple[Any, Any, Any]], commit: bool) -> Collected:
     """Every fetched source through its gates, in SOURCE order, on `db`
     (the crawl's store.Writer).
 
@@ -430,8 +442,11 @@ async def _gate_sources(db, t, specs, fetched, commit):
     """
     from src.crawl.harvest import bury_404_board
 
-    to_score, matches, watch_hits, funnel = [], [], [], []
-    seen_ids = set()
+    to_score: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    matches: list[dict[str, Any]] = []
+    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    funnel: list[tuple[str, int, int, int, int, str]] = []
+    seen_ids: set[str] = set()
     n_closed = n_reopened = n_seen = 0
 
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
@@ -482,8 +497,9 @@ async def _gate_sources(db, t, specs, fetched, commit):
                      n_closed, n_reopened, n_seen)
 
 
-async def _score_and_persist(db, t, got, resume, *, fit, commit, guard_tripped,
-                             max_workers):
+async def _score_and_persist(db: store.Writer, t: dict[str, Any], got: Collected, resume: str | None,
+                             *, fit: bool, commit: bool, guard_tripped: bool,
+                             max_workers: int) -> int:
     """Score what the gates kept and write it. Returns the number scored.
 
     Two populations with two shapes: company-linked rows go through
@@ -532,7 +548,7 @@ async def _score_and_persist(db, t, got, resume, *, fit, commit, guard_tripped,
         from src.claude.fit import score_resume_fit
         print(f"  scoring {len(got.matches)} match(es) against resume...")
 
-        async def _one(j):
+        async def _one(j: dict[str, Any]) -> None:
             res = await score_resume_fit(j["title"], j.get("description", ""),
                                          location=j.get("location") or "")
             j.update(res.as_columns())
@@ -571,7 +587,7 @@ async def _score_and_persist(db, t, got, resume, *, fit, commit, guard_tripped,
     return scored
 
 
-def _print_funnel(funnel, bar):
+def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -> None:
     """Per-source: what the board served, what each gate left, what was new."""
     print(f"\n{bar}")
     print("  PER-SOURCE FUNNEL  (FETCH -> anchor/gates -> KEPT; NEW=unseen)")
@@ -581,7 +597,8 @@ def _print_funnel(funnel, bar):
         print(f"  {label:<46} {n_f:>5} {g1:>5} {kept_n:>5} {new_n:>5}{tail}")
 
 
-async def _report_ranked(db, t, got, scored, *, send, top_n, bar):
+async def _report_ranked(db: store.Writer, t: dict[str, Any], got: Collected, scored: int, *,
+                         send: bool, top_n: int, bar: str) -> list[dict[str, Any]]:
     """Write (and maybe email) the ranked digest for a company-linked crawl,
     print the watch section and the top N, and return the ranked list.
 
@@ -630,7 +647,8 @@ async def _report_ranked(db, t, got, scored, *, send, top_n, bar):
     return ranked
 
 
-async def _report_matches(matches, t, *, send, samples, bar):
+async def _report_matches(matches: list[dict[str, Any]], t: dict[str, Any], *, send: bool, samples: int,
+                          bar: str) -> None:
     """The sweep side: a diversified sample for a precision eyeball, then
     the matches digest."""
     from src import digest
@@ -662,9 +680,10 @@ async def _report_matches(matches, t, *, send, samples, bar):
         print("  (email suppressed — enable [tracks.*].email or --send)")
 
 
-async def run_track(t, *, fit=True, commit=True, send=None, verify=None,
-                    websearch=None, confirm_cost=False, max_workers=6, top_n=15,
-                    samples=5):
+async def run_track(t: dict[str, Any], *, fit: bool = True, commit: bool = True,
+                    send: bool | None = None, verify: bool | None = None,
+                    websearch: bool | None = None, confirm_cost: bool = False,
+                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]]:
     """Run one crawl of track `t` (a config.UI_TRACKS entry).
 
     Every methodology switch reads the track config; the keyword args only
@@ -698,7 +717,7 @@ async def run_track(t, *, fit=True, commit=True, send=None, verify=None,
     async with store.Writer(t["db_path"]) as db:
 
         bar = "=" * 70
-        gates_desc = []
+        gates_desc: list[str] = []
         if t["require_core_anchor"]:
             gates_desc.append("core-anchor")
         gates_desc.append("technical-title")
@@ -716,7 +735,8 @@ async def run_track(t, *, fit=True, commit=True, send=None, verify=None,
 
         done_count = [0]
 
-        def _progress(name, platform, jobs, err):
+        def _progress(name: str, platform: str, jobs: list[dict[str, Any]],
+                      err: object) -> None:
             done_count[0] += 1
             status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"
             print(f"  [{done_count[0]:>3}/{len(sources)}] {name} ({platform}): "
@@ -743,7 +763,7 @@ async def run_track(t, *, fit=True, commit=True, send=None, verify=None,
 
         _print_funnel(got.funnel, bar)
 
-        ranked = None
+        ranked: list[dict[str, Any]] | None = None
         if linked:
             ranked = await _report_ranked(db, t, got, scored, send=send,
                                           top_n=top_n, bar=bar)

@@ -24,6 +24,8 @@ attribute at use time — src/crawl/runner.py and src/dispatch/background.py rea
 while a track runs, and a from-bound copy goes stale.
 """
 
+from __future__ import annotations
+
 from .boards import (  # noqa: F401
     BOARDS, AGGREGATOR_HOSTS, CAREERS_PAGE_ATS, DEFAULT_HANDLE_COLUMNS,
     FETCHABLE_HOSTS, SHARED_HOSTS, hosts_re,

@@ -25,11 +25,17 @@ Notes:
     fix) and src.ats.feeds.websearch._ddg_search (none).
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextvars
 import logging
 import threading
 import time
+from collections.abc import Callable
+from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 from src import config, runstate
 from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
@@ -38,9 +44,6 @@ from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
 _log = logging.getLogger("discovery")
 
 CACHE_DIR = config.DATA_DIR / ".cache" / "ddg"
-CACHE_TTL = 7 * 24 * 3600       # seconds
-WALL_BUDGET = 25.0              # hard per-query wall-clock cap (seconds)
-RETRIES = 2
 RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 
 # ddgs (via primp) resolves hostnames with its OWN resolver rather than the
@@ -49,16 +52,16 @@ RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 # fine. First sighting switches ddgs's client to config.SEARCH_DNS_FALLBACK
 # (primp accepts a `dns_resolver` list that ddgs does not expose) and retries;
 # if that is refused too, or no fallback is configured, the breaker trips
-# and later queries return [] at once instead of burning RETRIES x
+# and later queries return [] at once instead of burning `retries` x
 # RETRY_PAUSE per name. The trip is timed, not permanent: the 2026-09-22
 # reresolve lost 24 of its 45 misses to a host DNS hiccup that had long
 # cleared, because the breaker stayed shut for the rest of the run. After
 # each window one query goes through as a probe; a refused probe doubles
-# the window (capped). The breaker is the run's; the override patches the
-# library, so it is the process's, until `reset_resolver()` drops it.
+# the window (capped at 600 s). The breaker is the run's; the override
+# patches the library, so it is the process's, until `reset_resolver()`
+# drops it.
 RESOLVER_WINDOW = 90.0          # seconds of skipping after the first trip
-RESOLVER_WINDOW_CAP = 600.0
-_RESOLVER_OVERRIDE = None       # (module, original Client) while installed
+_RESOLVER_OVERRIDE: tuple[ModuleType, Any] | None = None   # (module, original Client)
 
 
 class _Searches:
@@ -66,7 +69,7 @@ class _Searches:
     missing package was announced. Their threads share it too, hence the
     lock."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.down_until = 0.0       # time.monotonic() deadline of the window
         self.backoff = 0.0          # current window; 0 = breaker closed
         self.probing = False        # a probe is in flight; others keep skipping
@@ -79,25 +82,25 @@ _SEARCHES = runstate.per_run(_Searches)
 
 # ─── Disk cache ──────────────────────────────────────────────────────────
 
-def _cache_path(key):
+def _cache_path(key: str) -> Path:
     return hashed_cache_path(CACHE_DIR, key)
 
 
-def cache_get(key):
+def cache_get(key: str) -> Any:
     """The cached JSON value for `key`, or None when absent or older than
-    CACHE_TTL. Also used by the LLM name brainstorm, which rides the same
+    seven days. Also used by the LLM name brainstorm, which rides the same
     TTL."""
-    return json_cache_get(_cache_path(key), CACHE_TTL)
+    return json_cache_get(_cache_path(key), 7 * 24 * 3600)
 
 
-def cache_put(key, value):
+def cache_put(key: str, value: Any) -> None:
     """Best-effort write; a cache failure never fails the search."""
     json_cache_put(_cache_path(key), value)
 
 
 # ─── The ddgs package ────────────────────────────────────────────────────
 
-def _ddgs_class():
+def _ddgs_class() -> type | None:
     """The DDGS class from whichever package name is installed, or None
     (announced once per run)."""
     try:
@@ -106,8 +109,8 @@ def _ddgs_class():
     except ImportError:
         pass
     try:
-        from duckduckgo_search import DDGS    # legacy name
-        return DDGS
+        from duckduckgo_search import DDGS as LegacyDDGS
+        return LegacyDDGS
     except ImportError:
         searches = _SEARCHES()
         if not searches.missing_announced:
@@ -116,24 +119,20 @@ def _ddgs_class():
         return None
 
 
-# ddgs builds its engine registry by WALKING ITS OWN PACKAGE DIRECTORY
-# (pkgutil.iter_modules in ddgs/engines/__init__.py). A compiled build has no
-# directory to walk, so the registry comes up empty and every search dies on
-# `ENGINES["text"]` -- a bare KeyError('text'), raised before ddgs's own backend
-# error handling can run, so the whole search silently returns 0 results.
-# Fallback list only -- a new ddgs release can add an engine this misses, which
-# costs that one backend rather than the whole search.
-_DDGS_ENGINE_MODULES = (
-    "annasarchive", "bing", "bing_images", "bing_news", "brave", "duckduckgo",
-    "duckduckgo_images", "duckduckgo_news", "duckduckgo_videos", "google",
-    "grokipedia", "mojeek", "startpage", "wikipedia", "yahoo", "yahoo_news",
-    "yandex",
-)
-
-
-def _ensure_ddgs_engines():
+def _ensure_ddgs_engines() -> None:
     """Re-register ddgs's search engines when its own discovery came up empty.
-    No-op on a normal source run."""
+    No-op on a normal source run.
+
+    Notes:
+        ddgs builds its engine registry by WALKING ITS OWN PACKAGE DIRECTORY
+        (pkgutil.iter_modules in ddgs/engines/__init__.py). A compiled build
+        has no directory to walk, so the registry comes up empty and every
+        search dies on `ENGINES["text"]` -- a bare KeyError('text'), raised
+        before ddgs's own backend error handling can run, so the whole
+        search silently returns 0 results. The module list is a fallback
+        only -- a new ddgs release can add an engine it misses, which costs
+        that one backend rather than the whole search.
+    """
     import importlib
     import inspect
     try:
@@ -143,7 +142,10 @@ def _ensure_ddgs_engines():
         return
     if ENGINES.get("text"):
         return
-    for modname in _DDGS_ENGINE_MODULES:
+    for modname in ("annasarchive", "bing", "bing_images", "bing_news", "brave",
+                    "duckduckgo", "duckduckgo_images", "duckduckgo_news",
+                    "duckduckgo_videos", "google", "grokipedia", "mojeek", "startpage",
+                    "wikipedia", "yahoo", "yahoo_news", "yandex"):
         try:
             module = importlib.import_module(f"ddgs.engines.{modname}")
         except Exception:
@@ -160,7 +162,7 @@ def _ensure_ddgs_engines():
 
 # ─── Search ──────────────────────────────────────────────────────────────
 
-def _resolver_failure(exc):
+def _resolver_failure(exc: BaseException) -> bool:
     """True when `exc` is the library's own resolver failing, as opposed
     to a throttle or an engine error.
 
@@ -174,7 +176,7 @@ def _resolver_failure(exc):
     return any(m in msg for m in ("dns error", "query refused"))
 
 
-def _http_client_module():
+def _http_client_module() -> ModuleType | None:
     """ddgs's HTTP-client module, where `primp.Client` is looked up each
     time a client is built (None when ddgs is not installed)."""
     try:
@@ -184,7 +186,7 @@ def _http_client_module():
         return None
 
 
-def _install_resolver(query):
+def _install_resolver(query: str) -> bool:
     """Route ddgs's name resolution through config.SEARCH_DNS_FALLBACK by
     wrapping the `primp.Client` factory it builds its client from. Returns
     True when the override was installed just now (the caller retries),
@@ -196,7 +198,7 @@ def _install_resolver(query):
         return False
     orig = hc.primp.Client
 
-    def client(*a, **kw):
+    def client(*a: Any, **kw: Any) -> Any:
         kw.setdefault("dns_resolver", list(servers))
         return orig(*a, **kw)
 
@@ -209,13 +211,13 @@ def _install_resolver(query):
     return True
 
 
-def _trip_resolver(query, exc):
+def _trip_resolver(query: str, exc: BaseException) -> None:
     s = _SEARCHES()
     with s.lock:
         prev = s.backoff
         if prev and not s.probing:
             return      # a query already in flight when the breaker tripped
-        s.backoff = min(prev * 2, RESOLVER_WINDOW_CAP) if prev else RESOLVER_WINDOW
+        s.backoff = min(prev * 2, 600.0) if prev else RESOLVER_WINDOW
         s.down_until = time.monotonic() + s.backoff
         s.probing = False
     if prev:
@@ -232,7 +234,7 @@ def _trip_resolver(query, exc):
           f"Skipping web search for {s.backoff:.0f}s, then probing.")
 
 
-def _resolver_gate():
+def _resolver_gate() -> bool | None:
     """None (skip) while the breaker window is open, True for the one caller
     that becomes the probe after it expires, else False. The probe holds
     the rest off until it reports."""
@@ -246,7 +248,7 @@ def _resolver_gate():
         return True
 
 
-def _probe_passed():
+def _probe_passed() -> None:
     """The probe got past name resolution (a hit, an empty or a throttle all
     count): close the breaker."""
     s = _SEARCHES()
@@ -258,7 +260,7 @@ def _probe_passed():
     print("  web search resolver recovered")
 
 
-def reset_resolver():
+def reset_resolver() -> None:
     """Drop the DNS override (tests, or a long-lived process after the
     network changed); each run's breaker starts closed."""
     global _RESOLVER_OVERRIDE
@@ -268,7 +270,8 @@ def reset_resolver():
         _RESOLVER_OVERRIDE = None
 
 
-def _query(DDGS, query, max_results, page, deadline, retries, stop):
+def _query(DDGS: Any, query: str, max_results: int, page: int, deadline: float,
+           retries: int, stop: threading.Event) -> list[dict[str, Any]]:
     """One query with retry/backoff, on the search's own thread. Ends by
     itself about when the caller stops waiting: each attempt's timeout is
     at most the time left before `deadline` (time.monotonic()), and a retry
@@ -307,7 +310,8 @@ def _query(DDGS, query, max_results, page, deadline, retries, stop):
     return []
 
 
-def _on_own_thread(loop, fn):
+def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.Event], T]
+                      ) -> tuple[asyncio.Future[T], threading.Event]:
     """(future, stop): fn(stop) run on a daemon thread of its own, in a
     copy of the caller's context (its run), its result or exception set on
     `future` (of `loop`); the caller sets `stop`, a threading.Event, once
@@ -318,13 +322,15 @@ def _on_own_thread(loop, fn):
         behind other work on the search's own budget, and held a Ctrl+C'd
         exit about 23 s.
     """
-    future, stop = loop.create_future(), threading.Event()
+    future: asyncio.Future[T] = loop.create_future()
+    stop = threading.Event()
 
-    def settle(ok, value):
+    def settle(ok: bool, value: Any) -> None:
         if not future.done():            # cancelled: no one waits
             (future.set_result if ok else future.set_exception)(value)
 
-    def body():
+    def body() -> None:
+        outcome: tuple[bool, Any]
         try:
             outcome = True, fn(stop)
         except Exception as e:
@@ -334,17 +340,19 @@ def _on_own_thread(loop, fn):
         except RuntimeError:             # the loop has closed (exit)
             pass
 
-    threading.Thread(target=body, daemon=True,
-                     context=contextvars.copy_context()).start()
+    # ctx.run, not Thread(context=): that keyword is 3.14+ only.
+    threading.Thread(target=contextvars.copy_context().run, args=(body,),
+                     daemon=True).start()
     return future, stop
 
 
-async def search(query, max_results=10, page=1, budget=WALL_BUDGET,
-                 retries=RETRIES):
+async def search(query: str, max_results: int = 10, page: int = 1, budget: float = 25.0,
+                 retries: int = 2) -> list[dict[str, Any]]:
     """Bounded, cached, retried DDG text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
-    package -- every caller already tolerates an empty list. The disk
-    cache is read and written off the loop."""
+    package -- every caller already tolerates an empty list. `budget` is
+    the hard per-query wall-clock cap, in seconds. The disk cache is read
+    and written off the loop."""
     key = f"{query}||{max_results}" + (f"||page={page}" if page != 1 else "")
     cached = await asyncio.to_thread(cache_get, key)
     if cached is not None:
@@ -356,7 +364,7 @@ async def search(query, max_results=10, page=1, budget=WALL_BUDGET,
         return []
     deadline = time.monotonic() + budget
 
-    def run(stop):
+    def run(stop: threading.Event) -> list[dict[str, Any]] | None:
         # The library blocks, and its first import is slow: off the loop.
         DDGS = _ddgs_class()
         if DDGS is None:
@@ -386,7 +394,7 @@ async def search(query, max_results=10, page=1, budget=WALL_BUDGET,
     return out
 
 
-async def search_urls(query, max_results=10, page=1):
+async def search_urls(query: str, max_results: int = 10, page: int = 1) -> list[str]:
     """The result URLs of `search`, in order, skipping results without one."""
     return [u for r in await search(query, max_results, page=page)
             if (u := (r.get("href") or r.get("url")))]

@@ -13,3 +13,5 @@
 Pure text in, verdict out -- no network, no API, no store. The crawl, the
 harvest triage pass and the ranking all read the same rules from here.
 """
+
+from __future__ import annotations

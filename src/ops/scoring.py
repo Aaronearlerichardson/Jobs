@@ -1,20 +1,28 @@
 """Scoring over stored rows: the unscored-row self-heal, the full rescore,
 and the deep verify of the ranking's finalists."""
 
+from __future__ import annotations
+
 import re
+import sqlite3
+from collections.abc import Collection
 from contextlib import aclosing
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 
 from src import config
 from src import store
 from src.ats.board import company as company_fetch
 from src.ats.board import board_for_url
-from src.claude.fit import UNSCORED_CAUSES, score_resume_fit
+from src.claude.fit import UNSCORED_CAUSES, FitResult, score_resume_fit
 from src.claude.resume import resume_text
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out
 from src.net.util import text_from_html
 from src.ops.maintenance import _ranked, _t, rewrite_digest, track_writer
+
+if TYPE_CHECKING:
+    from sqlite3 import Connection
 
 
 # How long a REFUSED marker holds off a retry (fit.unscored_cause's
@@ -24,19 +32,8 @@ from src.ops.maintenance import _ranked, _t, rewrite_digest, track_writer
 # anything, and growth is free to detect (the row's own description length).
 UNSCORED_RETRY_DAYS = 30
 
-# fit_reason for a row self_heal_unscored (or rescore_all) could not score:
-# "unscored:<cause>:<body length when marked>:<date marked>". Distinct from
-# every OTHER fit_reason shape in the store -- a real score's tag always
-# starts "[dom" (FitResult.summary), a deep-verified one always contains
-# "deep:" (verify_top._stale, web.routes._job_json read that substring) --
-# so this can never be mistaken for either by an existing reader. The cause
-# alternation is fit.UNSCORED_CAUSES itself: fit.unscored_cause decides the
-# vocabulary, this only parses back what _unscored_marker wrote.
-_UNSCORED_MARKER_RE = re.compile(
-    r"^unscored:(" + "|".join(UNSCORED_CAUSES) + r"):(\d+):(\d{4}-\d{2}-\d{2})$")
 
-
-def _unscored_marker(cause, desc_len, when):
+def _unscored_marker(cause: str, desc_len: int, when: datetime) -> str:
     """The fit_reason marker for `cause` (fit.unscored_cause's "short" or
     "refused"), carrying what a later pass needs to decide whether another
     attempt is due: the body's length right now (so a changed body is a
@@ -50,7 +47,7 @@ def _unscored_marker(cause, desc_len, when):
     return f"unscored:{cause}:{int(desc_len)}:{when.date().isoformat()}"
 
 
-def _unscored_due(fit_reason, desc_len, now=None):
+def _unscored_due(fit_reason: str | None, desc_len: int, now: datetime | None = None) -> bool:
     """Whether a row already carrying an _unscored_marker is due for another
     scoring attempt. No marker at all -- NULL, a real score's tag, or a
     legacy bare "unscored"/"no description; unscored" from before this
@@ -87,7 +84,17 @@ def _unscored_due(fit_reason, desc_len, now=None):
     True
     """
     from src.claude.fit import MIN_DESC_CHARS
-    m = _UNSCORED_MARKER_RE.match(fit_reason or "")
+    # fit_reason for a row self_heal_unscored (or rescore_all) could not
+    # score: "unscored:<cause>:<body length when marked>:<date marked>".
+    # Distinct from every OTHER fit_reason shape in the store -- a real
+    # score's tag always starts "[dom" (FitResult.summary), a deep-verified
+    # one always contains "deep:" (verify_top._stale, web.routes._job_json
+    # read that substring) -- so this can never be mistaken for either by an
+    # existing reader. The cause alternation is fit.UNSCORED_CAUSES itself:
+    # fit.unscored_cause decides the vocabulary, this only parses back what
+    # _unscored_marker wrote.
+    m = re.match(r"^unscored:(" + "|".join(UNSCORED_CAUSES) + r"):(\d+):(\d{4}-\d{2}-\d{2})$",
+                 fit_reason or "")
     if not m:
         return True
     cause, marked_len, marked_date = m.group(1), int(m.group(2)), m.group(3)
@@ -101,7 +108,8 @@ def _unscored_due(fit_reason, desc_len, now=None):
     return age_days >= UNSCORED_RETRY_DAYS
 
 
-async def self_heal_unscored(db, resume, track, max_workers=6):
+async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: str | None,
+                             max_workers: int = 6) -> int:
     """Self-heal: the fresh-only crawl loop never revisits an already-stored
     job, so a row that was ingested bodyless (unscorable -> NULL score) would
     stay out of the ranking forever even once its description is recovered.
@@ -187,7 +195,8 @@ async def self_heal_unscored(db, resume, track, max_workers=6):
         return scored
 
 
-async def rescore_all(max_workers=6, track=None, described_only=False, t=None):
+async def rescore_all(max_workers: int = 6, track: str | None = None,
+                      described_only: bool = False, t: dict[str, Any] | None = None) -> int:
     """Re-run resume-fit scoring over every stored job in the track's DB
     (all jobs.track values unless `track` names one). Use after changing the
     resume or the scoring prompt — the normal crawl only scores jobs it
@@ -222,7 +231,7 @@ async def rescore_all(max_workers=6, track=None, described_only=False, t=None):
         print(f"  rescoring {len(rows)} job(s) against the current resume...")
         now = datetime.now()
 
-        async def _one(r):
+        async def _one(r: dict[str, Any]) -> tuple[str, FitResult, str]:
             res = await score_resume_fit(r["title"], r.get("description", ""),
                                          location=r.get("location") or "")
             return r["job_id"], res, r.get("description", "")
@@ -245,7 +254,7 @@ async def rescore_all(max_workers=6, track=None, described_only=False, t=None):
     return n
 
 
-async def _live_jd(row):
+async def _live_jd(row: dict[str, Any]) -> str:
     """Freshest full JD text for one stored job row, preferring a live
     detail fetch (the platform's own detail endpoint through the board
     engine, then the generic JSON-LD/careers-page extractor)
@@ -275,7 +284,8 @@ async def _live_jd(row):
     return text if text and len(text) >= len(text_from_html(stored)) else stored
 
 
-def _verify_floor_candidates(conn, t, floor, exclude_ids=()):
+def _verify_floor_candidates(conn: sqlite3.Connection, t: dict[str, Any], floor: float,
+                             exclude_ids: Collection[str] = ()) -> list[dict[str, Any]]:
     """Track `t`'s open triage_status='fit' rows screened at or above
     `floor`, located locally (NC_RE) or stored remote_eligible, best screen
     score first, less `exclude_ids` (the top-N slice): the rows verify_top
@@ -323,11 +333,12 @@ VERIFY_HEAD = 25
 # asks for them again only under `force`; they keep their first-pass score.
 # Not run state (src/runstate.py): the next web UI op or harvest pass skips
 # them too.
-_GIVEN_UP = set()
+_GIVEN_UP: set[str] = set()
 
 
-async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
-                     force=False):
+async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
+                     db: store.Writer | None = None, t: dict[str, Any] | None = None,
+                     force: bool = False) -> int:
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
     each of the current top `top_n` jobs (past rank VERIFY_HEAD, only those
     stored at or above the track's `verify_floor`), PLUS enough
@@ -369,13 +380,13 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
         fetched for nothing.
     """
     from src.claude.api import api_disabled
-    from src.claude.fit import (DEEP_MARKER, FitResult, verify_fit,
-                                is_deep_verified, verify_model)
+    from src.claude.fit import (DEEP_MARKER, verify_fit, is_deep_verified,
+                                verify_model)
     t = _t(t)
     current = verify_model()
-    done_ids = set()   # verified THIS run: never stale again, even under force
+    done_ids: set[str] = set()   # verified THIS run: never stale again, even under force
 
-    def _stale(r):
+    def _stale(r: dict[str, Any]) -> bool:
         if r["job_id"] in done_ids or (r["job_id"] in _GIVEN_UP and not force):
             return False
         if force or not is_deep_verified(r.get("fit_reason")):
@@ -405,7 +416,7 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
                       f"{VERIFY_HEAD}-{len(ranked)} below the {floor:.2f} floor "
                       f"left unverified")
             remaining = top_n - len(stale_top)
-            candidates = []
+            candidates: list[dict[str, Any]] = []
             if remaining > 0:
                 seen_ids = {r["job_id"] for r in ranked}
                 floor_rows = await db.run(_verify_floor_candidates, t, floor,
@@ -423,14 +434,17 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
                   + f" with {current} (round {rnd + 1}/{rounds}"
                   f"{', forced' if force else ''})...")
 
-            started = set()
+            started: set[str] = set()
 
-            async def _one(r):
+            async def _one(r: dict[str, Any]) -> tuple[dict[str, Any], str | None, FitResult]:
                 # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
                 # verify call hit an exhausted credit balance). A row the API
                 # can no longer score doesn't need its live JD fetched.
                 if api_disabled():
-                    return r, None, FitResult(score=None, reason="api disabled")
+                    # FitResult.score is declared float, but an unscored
+                    # result carries None (src/claude/fit.py does the same).
+                    return r, None, FitResult(score=None,
+                                              reason="api disabled")
                 started.add(r["job_id"])
                 text = await _live_jd(r)
                 return r, text, await verify_fit(r["title"], text,
@@ -438,7 +452,7 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
 
             n_scored = n_crushed = 0
             halted = None
-            abandoned = []
+            abandoned: list[dict[str, Any]] = []
             async with aclosing(fan_out(
                     todo, _one,
                     lambda r: f"verify {r['company_name']}: {(r['title'] or '')[:40]}",
@@ -507,7 +521,8 @@ async def verify_top(top_n=15, max_workers=4, rounds=2, db=None, t=None,
         return n_done
 
 
-async def verify_top_cli(top_n=15, max_workers=4, t=None, force=False):
+async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: dict[str, Any] | None = None,
+                         force: bool = False) -> int:
     """Standalone verify: deep-verify the current top N in the store (no
     crawl), then rewrite the digest and print the corrected top. `force`
     re-verifies rows the current verify model already checked."""

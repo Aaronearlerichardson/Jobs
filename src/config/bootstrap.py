@@ -13,12 +13,14 @@ have nothing to save to. `ensure_profile()` copies the example across on the
 first run and says where it went.
 """
 
+from __future__ import annotations
+
 import shutil
 
 from src import config
 
 
-def ensure_profile(announce=True):
+def ensure_profile(announce: bool = True) -> bool:
     """Seed config.PROFILE_PATH from the bundled example if it doesn't exist.
 
     Returns True if a profile was created (first run), False if one was
@@ -49,7 +51,7 @@ def ensure_profile(announce=True):
     return True
 
 
-def status_lines():
+def status_lines() -> list[str]:
     """Lines naming where this install reads its settings and data from,
     and where session logs land.
 

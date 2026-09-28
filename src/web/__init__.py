@@ -9,6 +9,8 @@ Single-user by design — one operation at a time, same SQLite stores as the
 CLI (run_scraper.py).
 """
 
+from __future__ import annotations
+
 import sys
 import uuid
 
@@ -17,11 +19,13 @@ from flask import Flask
 from src import config
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    # typeshed types sys.stdout as TextIO, which has no reconfigure; the
+    # console stream is a TextIOWrapper, and anything else raises here.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 except Exception:
     pass
 
-app = Flask(__name__, static_folder="static", static_url_path="/static")
+app: Flask = Flask(__name__, static_folder="static", static_url_path="/static")
 
 # Changes on every process start; the restart overlay polls /api/stats until
 # this differs from the value it remembered, i.e. the successor is up.

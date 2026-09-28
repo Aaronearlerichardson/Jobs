@@ -13,8 +13,11 @@ src.ats.signatures, and the candidate-URL generation, per-run fetch memo
 and identity guards in this package.
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import Any
 
 from src import config
 from src.ats import coords
@@ -29,7 +32,7 @@ from .probes import SCANNED, confirm, slug_keyed
 _log = logging.getLogger("src.discovery.resolve.sniffer")
 
 
-async def _scan_root(name, careers_url=""):
+async def _scan_root(name: str, careers_url: str = "") -> dict[str, Any] | None:
     """Fetch the bare homepage(s) (candidate_urls with ROOT_PATTERNS) and
     return the first fetchable ATS hit (packed like sniff_ats), else None.
 
@@ -54,7 +57,7 @@ async def _scan_root(name, careers_url=""):
 
 # ─── Public API ──────────────────────────────────────────────────────────
 
-async def sniff_ats(name, careers_url=""):
+async def sniff_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
     """Raw detection: first fetchable ATS found, else a custom self-hosted
     board, else None. Shape:
     {"ats", "slug"|"triple", "careers_url"}. Each page is read off the
@@ -92,7 +95,8 @@ async def sniff_ats(name, careers_url=""):
     return custom
 
 
-async def _confirmed(ats, slug, page_url, tried):
+async def _confirmed(ats: str, slug: Any, page_url: str,
+                     tried: dict[Any, int | None]) -> int | None:
     """A live posting count for a detection on `page_url` (probes.confirm),
     or None. Asked once per board (`tried` memoizes it), at the careers URL
     `pack` gives, and only where no other probe counts the board and the
@@ -110,12 +114,12 @@ async def _confirmed(ats, slug, page_url, tried):
     return tried[key]
 
 
-async def sniff_careers_ats(name, careers_url=""):
+async def sniff_careers_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
     """Pipeline style: prefer coordinates we can CONFIRM with a live count
     (`_confirmed`); otherwise surface the highest-priority detection as a
     lead."""
     lead = None  # first (highest-priority) unconfirmable detection seen
-    tried = {}
+    tried: dict[Any, int | None] = {}
     for r in await candidate_pages(name, careers_url):
         hit = await asyncio.to_thread(lambda: detect(r.text, r.url))
         if not hit:
@@ -137,12 +141,12 @@ async def sniff_careers_ats(name, careers_url=""):
     # bare homepage (see sniff_ats's matching fallback / _scan_root).
     root_hit = await _scan_root(name, careers_url)
     if root_hit:
-        ats, slug = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
-        count = await _confirmed(ats, slug, root_hit["careers_url"], tried)
+        ats, slug2 = root_hit["ats"], root_hit.get("slug", root_hit.get("triple"))
+        count = await _confirmed(ats, slug2, root_hit["careers_url"], tried)
         if count is not None:
-            return {"confirmed": True, "ats": ats, "slug": slug,
+            return {"confirmed": True, "ats": ats, "slug": slug2,
                     "count": count, "source_url": root_hit["careers_url"]}
-        return {"confirmed": False, "ats": ats, "slug": coords.slug_text(ats, slug),
+        return {"confirmed": False, "ats": ats, "slug": coords.slug_text(ats, slug2),
                 "source_url": root_hit["careers_url"]}
     return None
 
@@ -155,7 +159,7 @@ async def sniff_careers_ats(name, careers_url=""):
 # four qualifiers (board.classify_miss appends it to the
 # "no-board-found" family, e.g. "no-board-found:site-only-no-careers").
 
-async def diagnose_no_board(name, careers_url=""):
+async def diagnose_no_board(name: str, careers_url: str = "") -> str:
     """Why sniff_careers_ats found nothing for `name`, one of:
 
     - "domain-unreachable": not one candidate URL answered at all (DNS/SSL/

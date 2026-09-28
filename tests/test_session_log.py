@@ -185,11 +185,12 @@ class TestNaming:
         second the file name is precise to; the second must not truncate the
         first one's log away."""
         when = datetime(2026, 8, 28, 9, 30, 0)
-        first = session_log.open_log("sync", "web UI op 'sync'", now=when)
+        first = session_log.open_log("sync-status/..", "web UI op 'sync'", now=when)
         first.close()
-        second = session_log.open_log("sync", "web UI op 'sync'", now=when)
+        second = session_log.open_log("sync-status/..", "web UI op 'sync'", now=when)
         second.close()
 
+        assert first.path.name == "session-20260828-093000-sync-status.log"   # filename-safe
         assert first.path != second.path
         assert first.path.exists() and second.path.exists()
         assert "# run     : web UI op 'sync'" in first.path.read_text(

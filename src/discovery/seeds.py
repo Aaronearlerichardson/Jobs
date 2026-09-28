@@ -25,12 +25,11 @@ Short triggers (<= 3 chars) are word-boundary matched so "nc" can't fire
 inside "neuroscience".
 """
 
+from __future__ import annotations
+
 import re
 
 from src import config
-
-_SHORT_TOKEN_LEN = 3
-
 
 SEED_COMPANIES: list[dict] = config.DISCOVERY_SEED_COMPANIES
 SEED_TRIGGERS: tuple[str, ...] = tuple(
@@ -41,13 +40,14 @@ SEED_TRIGGERS: tuple[str, ...] = tuple(
 def _matches_term(term: str) -> bool:
     """True if `term` should pull the seeds in. No configured triggers means
     the seeds are unconditional — the common case for a hand-picked list."""
+    short_token_len = 3
     if not SEED_TRIGGERS:
         return True
     if not term:
         return False
     t = term.lower()
     for trig in SEED_TRIGGERS:
-        if len(trig) <= _SHORT_TOKEN_LEN:
+        if len(trig) <= short_token_len:
             if re.search(rf"\b{re.escape(trig)}\b", t):
                 return True
         elif trig in t:

@@ -14,6 +14,8 @@ SUGGESTIONS to copy into profile.toml (or the Settings tab); nothing here
 mutates config or the store.
 """
 
+from __future__ import annotations
+
 import argparse
 import asyncio
 import sys
@@ -26,7 +28,7 @@ if str(ROOT) not in sys.path:
 
 from src import config, runstate  # noqa: E402
 
-from src.claude.api import expand_location, expand_search  # noqa: E402
+from src.claude.api import ExpandReply, LocationReply, expand_location, expand_search  # noqa: E402
 
 INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
 LOCATION_INCLUDE = config.LOCATION_INCLUDE
@@ -36,7 +38,7 @@ REPORT_DIR = config.REPORT_DIR
 
 # ─── Expansion pretty-printers ────────────────────────────────────────────
 
-def print_expansion(term, expanded):
+def print_expansion(term: str, expanded: ExpandReply) -> None:
     w = 62
     bar = "=" * w
     print(f"\n{bar}")
@@ -64,7 +66,7 @@ def print_expansion(term, expanded):
     print(f"{bar}\n")
 
 
-def print_location_expansion(term, expanded):
+def print_location_expansion(term: str, expanded: LocationReply) -> None:
     w = 62
     bar = "=" * w
     print(f"\n{bar}")
@@ -91,7 +93,7 @@ def print_location_expansion(term, expanded):
 
 # ─── Bulk keyword report ──────────────────────────────────────────────────
 
-async def generate_keyword_report(delay=0.5):
+async def generate_keyword_report(delay: float = 0.5) -> Path:
     """
     Expand every INCLUDE_KEYWORDS entry via Claude, aggregate unique
     new titles/keywords/sectors, write a markdown report.
@@ -121,7 +123,7 @@ async def generate_keyword_report(delay=0.5):
             all_sectors.setdefault(s, []).append(kw)
         await asyncio.sleep(delay)
 
-    def sort_by_freq(d):
+    def sort_by_freq(d: dict[str, list[str]]) -> list[tuple[str, list[str]]]:
         return sorted(d.items(), key=lambda kv: (-len(kv[1]), kv[0].lower()))
 
     with open(path, "w", encoding="utf-8") as f:
@@ -161,7 +163,7 @@ async def generate_keyword_report(delay=0.5):
 
 # ─── CLI ────────────────────────────────────────────────────────────────
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(
         description="Expand a term, a location, or your whole keyword list "
                     "into suggestions. Reports only — nothing is written to "

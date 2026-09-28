@@ -29,6 +29,8 @@ uses them. It is a directory now so the next reader can see it without
 building the graph.
 """
 
+from __future__ import annotations
+
 from .board import classify_miss, resolve_board_sniff_first, resolve_or_miss
 from .fetchpool import ROOT_PATTERNS, candidate_urls
 from .identity import candidate_pages, corroborated, nc_hq_signal

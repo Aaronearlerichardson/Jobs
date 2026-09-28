@@ -18,19 +18,23 @@ per-job open/closed probe is board/closure.py; the careers-page reader
 behind the `custom` spec is board/custom.py.
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from typing import Any
 from urllib.parse import unquote
 
 from src import config
+from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.net.util import clean_field, first, node_text, parse_markup
-from .engine import board_for, board_for_url
+from .engine import Board, board_for, board_for_url
 from . import jsonld
 
 
-def _board_of(job):
+def _board_of(job: dict[str, Any]) -> Board | None:
     """The engine that reads `job`'s posting: its ATS's, when that one
     reads the URL; else the one whose `job_ref` does; else its ATS's."""
     board = board_for(job.get("ats"))
@@ -39,7 +43,7 @@ def _board_of(job):
     return board_for_url(job.get("url")) or board
 
 
-def needs_detail(job):
+def needs_detail(job: dict[str, Any]) -> bool:
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
     that the posting's engine can fill (`Board.needs_detail`). Shared by
@@ -62,7 +66,8 @@ def needs_detail(job):
     return board.needs_detail(job) if board else not job.get("description")
 
 
-async def hydrate_description(job, company=None):
+async def hydrate_description(job: dict[str, Any],
+                              company: dict[str, Any] | None = None) -> dict[str, Any]:
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
     store row, names its board), else from the posting's own page.
@@ -81,7 +86,7 @@ async def hydrate_description(job, company=None):
     return job
 
 
-async def job_page_meta(url):
+async def job_page_meta(url: str) -> tuple[str, str]:
     """(title, description) read off a job's own detail page, vendor-
     agnostically: schema.org JSON-LD JobPosting first (hundreds of sites),
     then page metadata for the title (og:title, then <title> minus a
@@ -102,7 +107,7 @@ async def job_page_meta(url):
     return await asyncio.to_thread(_page_meta, r, url)
 
 
-def _page_meta(r, url):
+def _page_meta(r: Any, url: str) -> tuple[str, str]:
     """job_page_meta's (title, description) off the fetched page `r`."""
     try:
         html = r.text
@@ -151,7 +156,7 @@ def _page_meta(r, url):
     return title, desc
 
 
-def title_from_url_slug(url):
+def title_from_url_slug(url: str | None) -> str:
     """Last-resort title for a URL-only manual add: the path segment with
     the most word tokens, digits and separators normalized. Two words
     minimum, so an id-only path yields '' rather than nonsense.
@@ -165,7 +170,7 @@ def title_from_url_slug(url):
     """
     path = re.sub(r"[?#].*$", "", url or "")
     path = re.sub(r"^https?://[^/]+", "", path)
-    best = []
+    best: list[str] = []
     for seg in path.split("/"):
         seg = unquote(seg)
         if re.search(r"\.[a-z]{2,5}$", seg, re.I):     # a file, not a slug
@@ -181,7 +186,8 @@ def title_from_url_slug(url):
 
 # --- dispatch ------------------------------------------------------------------ #
 
-async def fetch_company(company, loc_re=None, validate=False):
+async def fetch_company(company: dict[str, Any], loc_re: LocationRE | None = None,
+                        validate: bool = False) -> list[dict[str, Any]]:
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`); [] for a platform no spec fetches.
 
@@ -194,7 +200,7 @@ async def fetch_company(company, loc_re=None, validate=False):
     return await board.whole_board(company, loc_re, validate) if board else []
 
 
-def board_origin(company):
+def board_origin(company: dict[str, Any]) -> str | None:
     """The host a store row's board is read from, which one walk visits
     at a time (the harvest pull, triage's hydration): its engine's
     `origin`, else its ATS name (an origin not settled yet, or no engine).
@@ -210,7 +216,7 @@ def board_origin(company):
 
 # --- title sampling ------------------------------------------------------------ #
 
-async def sample_titles(company, n=6):
+async def sample_titles(company: dict[str, Any], n: int = 6) -> list[str]:
     """Up to `n` distinct posting titles from a store row's board, in board
     order: what the mission scorer is shown of an employer it has only a
     name for. [] when the board is unreadable, empty, or of an ATS with no
@@ -232,10 +238,11 @@ async def sample_titles(company, n=6):
     board = board_for(company.get("ats"))
     try:
         handle = board.handle(company) if board else None
-        jobs = await board.listing(handle, cheap=True, rescue_cap=n) if handle else []
+        jobs = await board.listing(handle, cheap=True, rescue_cap=n) if board and handle else []
     except Exception:
         return []
-    titles, seen = [], set()
+    titles: list[str] = []
+    seen: set[str] = set()
     for j in jobs:
         title = clean_field(j.get("title"))
         if title and title.lower() not in seen:

@@ -33,11 +33,14 @@ pass `--max-bacon=0`. Its default of 2 truncates by distance from the
 entry point and reports 26 of the harvester's 86 modules.
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 from collections import Counter, defaultdict
-from modulefinder import ModuleFinder
+from modulefinder import Module, ModuleFinder
 from pathlib import Path
+from typing import IO, Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -66,14 +69,16 @@ class _Finder(ModuleFinder):
     catches ImportError and files it under badmodules.
     """
 
-    def find_module(self, name, path, parent=None):
+    def find_module(self, name: str, path: str | None,
+                    parent: Module | None = None
+                    ) -> tuple[IO[Any] | None, str | None, tuple[str, str, int]]:
         try:
             return super().find_module(name, path, parent)
         except AttributeError:
             raise ImportError(f"{name} is a namespace package") from None
 
 
-def reachable(entry):
+def reachable(entry: str) -> set[str]:
     """Every first-party module `entry` can reach, as a set of dotted names.
 
     modulefinder imports nothing and runs nothing: it walks compiled code
@@ -84,13 +89,13 @@ def reachable(entry):
     return {m for m in finder.modules if m == "src" or m.startswith("src.")}
 
 
-def package_of(dotted):
+def package_of(dotted: str) -> str:
     """src.ats.feeds.getro -> ats. Bare `src` is the package __init__."""
     parts = dotted.split(".")
     return parts[1] if len(parts) > 1 else "(src root)"
 
 
-def report(sets, show_modules=False):
+def report(sets: dict[str, set[str]], show_modules: bool = False) -> None:
     """Per entry: how many modules, broken down by package."""
     for entry, mods in sets.items():
         binary = BINARY.get(entry)
@@ -104,7 +109,7 @@ def report(sets, show_modules=False):
                 print(f"      {m}")
 
 
-def compare(sets):
+def compare(sets: dict[str, set[str]]) -> None:
     """What the entry points share, and what each one alone drags in."""
     if len(sets) < 2:
         return
@@ -116,7 +121,7 @@ def compare(sets):
         print(f"  only {entry:<16} {len(only):>2}: {', '.join(only) or '-'}")
 
 
-def check_build(sets):
+def check_build(sets: dict[str, set[str]]) -> None:
     """The harvester's reachable set against build_app.py's skip list: a
     skip that names something the entry cannot reach anyway is harmless
     but is not what is keeping the binary small; worth knowing which is
@@ -140,7 +145,7 @@ def check_build(sets):
                                   "not reachable anyway — belt and braces"))
 
 
-def graph(sets, mermaid=False):
+def graph(sets: dict[str, set[str]], mermaid: bool = False) -> None:
     """A PACKAGE-level DAG: 13 nodes instead of 86, which is the difference
     between a picture and a hairball."""
     edges, packages = set(), defaultdict(set)
@@ -170,7 +175,7 @@ def graph(sets, mermaid=False):
     print("}")
 
 
-def main():
+def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)

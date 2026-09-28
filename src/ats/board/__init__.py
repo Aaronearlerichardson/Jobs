@@ -16,4 +16,6 @@ spec by one engine.
 No module outside config/boards.py names a platform.
 """
 
+from __future__ import annotations
+
 from .engine import BOARDS, board_for, board_for_url  # noqa: F401

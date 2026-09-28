@@ -7,10 +7,14 @@ the live `config` module — edits take effect when the server restarts
 (the config package snapshots the profile at import time, as do most consumers).
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 import tomllib
 from datetime import datetime
+from pathlib import Path
+from typing import Any
 
 import tomlkit
 
@@ -21,7 +25,7 @@ BACKUP_DIR_NAME = "config_backups"
 BACKUP_KEEP = 20
 
 
-def read_raw():
+def read_raw() -> tuple[str, str | None]:
     """Return (text, source_filename) — profile.toml if present, else the
     checked-in example (mirrors config._load_profile)."""
     for p in (config.PROFILE_PATH, config.PROFILE_EXAMPLE_PATH):
@@ -30,7 +34,7 @@ def read_raw():
     return "", None
 
 
-def validate(text):
+def validate(text: str) -> list[str]:
     """Profile TOML text checked against the profile schema, the same one
     the loader applies: one 'path: problem' string per bad key (see
     profile_schema.problems), [] when valid."""
@@ -41,7 +45,7 @@ def validate(text):
     return problems(data)
 
 
-def apply_updates(updates):
+def apply_updates(updates: dict[str, Any]) -> str:
     """Apply {dotted.path: value} updates to the profile with tomlkit
     (comments/order preserved) and return the new TOML text. Creates the
     document from the example template first when the user is still on the
@@ -62,7 +66,7 @@ def apply_updates(updates):
     return tomlkit.dumps(doc)
 
 
-def backup_then_write(text):
+def backup_then_write(text: str) -> Path | None:
     """Back up the current profile.toml (timestamped, last BACKUP_KEEP kept),
     then atomically replace it with `text`. Returns the backup path (or None
     when there was nothing to back up)."""

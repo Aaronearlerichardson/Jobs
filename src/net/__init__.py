@@ -7,3 +7,5 @@
     ddg.py       DuckDuckGo search
     util.py      small shared helpers (worker counts, id and date norms)
 """
+
+from __future__ import annotations

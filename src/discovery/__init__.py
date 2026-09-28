@@ -16,6 +16,8 @@ and the sourcing modules use resolve/. See src/discovery/resolve for why
 that ordering is load-bearing.
 """
 
+from __future__ import annotations
+
 from .apply import apply_to_store
 from .bciwiki import bciwiki_seed_candidates
 from .pipeline import (

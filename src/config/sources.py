@@ -9,6 +9,8 @@ by your keywords), so they ship ON with sensible defaults. USAJOBS and
 Getro are OFF: one needs credentials, the other names a place.
 """
 
+from __future__ import annotations
+
 from .profile import PROFILE
 
 _src = PROFILE.sources

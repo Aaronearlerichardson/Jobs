@@ -11,13 +11,17 @@ requests sent and read. Its own I/O is never used
 (tests/test_invariants.py).
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextvars
 import logging
 import ssl
 import sys
 import time
+from collections.abc import Iterable, Mapping
 from datetime import timedelta
+from typing import Any, cast
 
 import aiohttp
 import requests
@@ -61,12 +65,6 @@ PLAIN_HEADERS = {**HEADERS, "User-Agent": PLAIN_USER_AGENT}
 # own; discovery probes still pass PROBE_TIMEOUT.
 DEFAULT_TIMEOUT = FETCH_TIMEOUT
 
-#: The headers under every request's own: a bare requests session's, and
-#: the crawler's (the same with HEADERS on top).
-_BARE_HEADERS = default_headers()
-_CRAWLER_HEADERS = merge_setting(HEADERS, _BARE_HEADERS,
-                                 dict_class=CaseInsensitiveDict)
-
 #: requests.Session's redirect limit.
 MAX_REDIRECTS = 30
 
@@ -81,7 +79,7 @@ Unreachable = requests.ConnectionError
 #  One request                                                                #
 # --------------------------------------------------------------------------- #
 
-def _open_session():
+def _open_session() -> aiohttp.ClientSession:
     """A run's aiohttp session, closed as the run ends.
 
     Notes:
@@ -110,7 +108,7 @@ def _open_session():
 _session = runstate.per_run(_open_session)
 
 
-def _timeout(t):
+def _timeout(t: float | tuple[float, float] | None) -> aiohttp.ClientTimeout:
     """aiohttp's timeout for requests' `timeout=`: a (connect, read) pair,
     one number for both, or None for DEFAULT_TIMEOUT.
 
@@ -126,11 +124,13 @@ def _timeout(t):
                                  sock_connect=connect, sock_read=read)
 
 
-def _prepare(method, url, polite=True, headers=None, params=None, data=None,
-             json=None):
+def _prepare(method: str, url: str, polite: bool = True,
+             headers: Mapping[str, str | None] | None = None,
+             params: Mapping[str, Any] | None = None, data: Any = None,
+             json: Any = None) -> requests.PreparedRequest:
     """The request requests would send: the URL with its params encoded,
     the body, and `headers` over the session's own (a bare requests
-    session's, with HEADERS on top when `polite`).
+    session's, with HEADERS on top when `polite`: the crawler's).
 
     >>> p = _prepare("get", "https://A.example/a b", params={"q": "x y"})
     >>> p.method, p.url
@@ -144,31 +144,36 @@ def _prepare(method, url, polite=True, headers=None, params=None, data=None,
     >>> h["User-Agent"] == USER_AGENT, "Accept" in h
     (True, False)
     """
+    bare = default_headers()
     p = requests.PreparedRequest()
     p.prepare(method=method, url=url, params=params or {}, data=data or {},
               json=json,
-              headers=merge_setting(headers,
-                                    _CRAWLER_HEADERS if polite else _BARE_HEADERS,
-                                    dict_class=CaseInsensitiveDict))
+              headers=merge_setting(
+                  headers,
+                  merge_setting(HEADERS, bare, dict_class=CaseInsensitiveDict)
+                  if polite else bare,
+                  dict_class=CaseInsensitiveDict))
     return p
 
 
-def _headers(raw):
+def _headers(raw: Iterable[tuple[bytes, bytes]]) -> CaseInsensitiveDict:
     """A reply's raw header pairs as requests reads them: latin-1, a
     repeated name's values joined by ", " under its first spelling.
 
     >>> list(_headers([(b"Set-Cookie", b"a=1"), (b"set-cookie", b"b=2")]).items())
     [('Set-Cookie', 'a=1, b=2')]
     """
-    joined = {}
-    for k, v in raw:
-        k, v = k.decode("latin-1"), v.decode("latin-1")
+    joined: dict[str, tuple[str, str]] = {}
+    for kb, vb in raw:
+        k, v = kb.decode("latin-1"), vb.decode("latin-1")
         got = joined.get(k.lower())
         joined[k.lower()] = (got[0], f"{got[1]}, {v}") if got else (k, v)
     return CaseInsensitiveDict(dict(joined.values()))
 
 
-def _reply(req, status, reason, raw_headers, content, elapsed=0.0):
+def _reply(req: requests.PreparedRequest, status: int, reason: str | None,
+           raw_headers: Iterable[tuple[bytes, bytes]], content: bytes,
+           elapsed: float = 0.0) -> requests.Response:
     """The requests.Response to `req`, built as requests builds it, so
     `.text`, `.json()` and `raise_for_status()` are requests' own: text
     with no charset reads as ISO-8859-1.
@@ -179,7 +184,8 @@ def _reply(req, status, reason, raw_headers, content, elapsed=0.0):
     ('https://a.example/', 'ISO-8859-1', 'Ã©')
     """
     r = requests.Response()
-    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req
+    # requests types reason and url as str: aiohttp's reason may be None.
+    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req  # type: ignore[assignment]
     r.headers = _headers(raw_headers)
     r.encoding = get_encoding_from_headers(r.headers)
     r._content, r._content_consumed = content, True
@@ -187,21 +193,8 @@ def _reply(req, status, reason, raw_headers, content, elapsed=0.0):
     return r
 
 
-#: aiohttp's failures, most specific first, and the requests class each
-#: is raised as.
-_ERRORS = (
-    (aiohttp.ConnectionTimeoutError, requests.ConnectTimeout),
-    (aiohttp.ServerTimeoutError, requests.ReadTimeout),
-    (aiohttp.ClientSSLError, requests.exceptions.SSLError),
-    (aiohttp.NonHttpUrlClientError, requests.exceptions.InvalidSchema),
-    (aiohttp.InvalidURL, requests.exceptions.InvalidURL),
-    (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
-    (TimeoutError, requests.Timeout),
-    ((OSError, aiohttp.ClientError), requests.ConnectionError),
-)
-
-
-def _raised(e, req=None, handshaking=False):
+def _raised(e: BaseException, req: requests.PreparedRequest | None = None,
+            handshaking: bool = False) -> requests.RequestException:
     """The requests exception for aiohttp's `e`, carrying `e`.
 
     >>> _raised(aiohttp.SocketTimeoutError("read timed out"))
@@ -218,19 +211,31 @@ def _raised(e, req=None, handshaking=False):
     """
     if handshaking and isinstance(e, aiohttp.ConnectionTimeoutError):
         return requests.ReadTimeout(e, request=req)
-    return next(cls for kind, cls in _ERRORS if isinstance(e, kind))(e, request=req)
+    # aiohttp's failures, most specific first, and the requests class each
+    # is raised as.
+    errors = (
+        (aiohttp.ConnectionTimeoutError, requests.ConnectTimeout),
+        (aiohttp.ServerTimeoutError, requests.ReadTimeout),
+        (aiohttp.ClientSSLError, requests.exceptions.SSLError),
+        (aiohttp.NonHttpUrlClientError, requests.exceptions.InvalidSchema),
+        (aiohttp.InvalidURL, requests.exceptions.InvalidURL),
+        (aiohttp.ClientPayloadError, requests.exceptions.ChunkedEncodingError),
+        (TimeoutError, requests.Timeout),
+        ((OSError, aiohttp.ClientError), requests.ConnectionError),
+    )
+    return next(cls for kind, cls in errors if isinstance(e, kind))(e, request=req)
 
 
 #: Each hop's [handshake begun]: _Handshake sets it, in the context of the
 #: task that made the connection.
-_HANDSHAKING = contextvars.ContextVar("handshaking")
+_HANDSHAKING: contextvars.ContextVar[list[bool]] = contextvars.ContextVar("handshaking")
 
 
 class _Handshake(ssl.SSLObject):
     """The session's TLS object. Its handshake beginning means the TCP
     connection was made, which it notes for _raised."""
 
-    def do_handshake(self):
+    def do_handshake(self) -> None:
         began = _HANDSHAKING.get(None)
         if began:
             began[0] = True
@@ -244,18 +249,17 @@ class _Redirects(SessionRedirectMixin):
     max_redirects, trust_env, cookies = MAX_REDIRECTS, False, RequestsCookieJar()
 
 
-_REDIRECTS = _Redirects()
-
-
-async def _hop(req, timeout):
+async def _hop(req: requests.PreparedRequest, timeout: aiohttp.ClientTimeout) -> requests.Response:
     """The requests.Response to the prepared `req`, redirects unfollowed."""
+    method, url = cast(str, req.method), cast(str, req.url)     # prepare() set both
     body = req.body.encode("latin-1") if isinstance(req.body, str) else req.body
     began = [False]
     _HANDSHAKING.set(began)
     t0 = time.monotonic()
     try:
-        async with _session().request(req.method, URL(req.url, encoded=True),
-                                      headers=req.headers, data=body,
+        async with _session().request(method, URL(url, encoded=True),
+                                      headers=req.headers,  # type: ignore[arg-type]  # str values
+                                      data=body,
                                       allow_redirects=False,
                                       timeout=timeout) as resp:
             elapsed = time.monotonic() - t0
@@ -266,8 +270,9 @@ async def _hop(req, timeout):
                   elapsed)
 
 
-async def _exchange(method, url, polite=True, timeout=None,
-                    allow_redirects=True, **kw):
+async def _exchange(method: str, url: str, polite: bool = True,
+                    timeout: float | tuple[float, float] | None = None,
+                    allow_redirects: bool = True, **kw: Any) -> requests.Response:
     """The requests.Response requests would return for one request (its
     keywords: headers, params, data, json), redirects followed by
     requests' rules, MAX_REDIRECTS at most
@@ -275,7 +280,8 @@ async def _exchange(method, url, polite=True, timeout=None,
     origin it has not been on yet waits that origin's turn first, as a
     first request to it would (tests/test_robots.py::
     test_a_redirect_into_a_shared_host_waits_its_turn)."""
-    req, hops, limit = _prepare(method, url, polite, **kw), [], _timeout(timeout)
+    req, limit = _prepare(method, url, polite, **kw), _timeout(timeout)
+    hops: list[requests.Response] = []
     r = await _hop(req, limit)
     origins = {origin_of(url)}
     while allow_redirects and r.is_redirect:
@@ -283,17 +289,19 @@ async def _exchange(method, url, polite=True, timeout=None,
             raise requests.TooManyRedirects(
                 f"Exceeded {MAX_REDIRECTS} redirects.", response=r)
         hops.append(r)
-        req = next(_REDIRECTS.resolve_redirects(r, req, yield_requests=True))
-        if polite and origin_of(req.url) not in origins:
-            origins.add(origin_of(req.url))
+        req = cast(requests.PreparedRequest,       # what yield_requests yields
+                   next(_Redirects().resolve_redirects(r, req, yield_requests=True)))
+        url = cast(str, req.url)
+        if polite and origin_of(url) not in origins:
+            origins.add(origin_of(url))
             from .robots import CACHE       # robots.py imports this module
-            await CACHE().wait_turn(req.url)
+            await CACHE().wait_turn(url)
         r = await _hop(req, limit)
     r.history = hops
     return r
 
 
-async def send(method, url, *, polite=True, **kw):
+async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requests.Response:
     """The requests.Response for one request, taking requests' keywords
     (headers, params, data, json, timeout, allow_redirects).
 
@@ -335,10 +343,10 @@ class HostLimiter:
     calls queued behind it on that origin
     (tests/test_robots.py::test_crawl_delay_spaces_one_origin_only)."""
 
-    def __init__(self):
-        self._origins = {}      # origin -> [asyncio.Lock, next turn (monotonic)]
+    def __init__(self) -> None:
+        self._origins: dict[str, list[Any]] = {}   # origin -> [asyncio.Lock, next turn (monotonic)]
 
-    async def wait(self, url, gap):
+    async def wait(self, url: str, gap: float) -> None:
         """Wait for url's origin's turn, then book the next `gap` on."""
         slot = self._origins.setdefault(origin_of(url), [asyncio.Lock(), 0.0])
         async with slot[0]:
@@ -353,7 +361,8 @@ class HostLimiter:
 LIMITER = HostLimiter()
 
 
-async def request(method, url, label=None, **kw):
+async def request(method: str, url: str, label: str | None = None, **kw: Any
+                  ) -> tuple[int | None, requests.Response | None, str | Exception | None]:
     """(status, response, error) for one polite request, HEADERS under the
     call's own.
 
@@ -372,28 +381,32 @@ async def request(method, url, label=None, **kw):
     return r.status_code, r, None
 
 
-def _json_of(status, r, err, label):
+def _json_of(status: int | None, r: requests.Response | None, err: str | Exception | None,
+             label: str | None) -> tuple[int | None, Any, str | Exception | None]:
     """request_json's answer from request's: "empty response" and
     "non-JSON response" are errors too."""
     if err:
         return status, None, err
-    if not r.content.strip():
+    reply = cast(requests.Response, r)      # there is one when there is no error
+    if not reply.content.strip():
         return status, None, failed(label, "empty response")
     try:
-        return status, r.json(), None
+        return status, reply.json(), None
     except ValueError:
         return status, None, failed(label, "non-JSON response")
 
 
-async def request_json(method, url, label=None, **kw):
+async def request_json(method: str, url: str, label: str | None = None, **kw: Any
+                       ) -> tuple[int | None, Any, str | Exception | None]:
     """(status, payload, error) for one JSON request: `request`'s, plus
     "empty response" and "non-JSON response" as errors. The JSON is
     decoded off the loop, its failure counted here (`_account`)."""
     _account()
-    return await asyncio.to_thread(_json_of, *await request(method, url, label, **kw), label)
+    status, r, err = await request(method, url, label, **kw)
+    return await asyncio.to_thread(_json_of, status, r, err, label)
 
 
-async def get_json(url, label, default=None, **kw):
+async def get_json(url: str, label: str | None, default: Any = None, **kw: Any) -> Any:
     """The endpoint's JSON, or `default` -- reported (`request_json`'s
     reasons), never raised.
 
@@ -424,7 +437,7 @@ async def get_json(url, label, default=None, **kw):
 #  Fetch accounting                                                           #
 # --------------------------------------------------------------------------- #
 
-def failed(label, err):
+def failed[E](label: str | None, err: E) -> E:
     """`err`, reported through `fetch_failed` when there is a `label`:
     the one call for a path whose label is optional (a quiet probe passes
     none). Call `fetch_failed` directly where a failure is always news."""
@@ -438,15 +451,18 @@ class _Account:
 
     __slots__ = ("n", "last", "capped", "total")
 
-    def __init__(self):
-        self.n, self.last, self.capped, self.total = 0, None, False, None
+    def __init__(self) -> None:
+        self.n = 0
+        self.last: str | None = None
+        self.capped = False
+        self.total: int | None = None
 
 
 #: The current fetch attempt's accounting: per task.
-_ACCOUNT = contextvars.ContextVar("fetch_account")
+_ACCOUNT: contextvars.ContextVar[_Account] = contextvars.ContextVar("fetch_account")
 
 
-def _account():
+def _account() -> _Account:
     """This context's accounting, made on first use. A holder, not values:
     an asyncio.to_thread worker runs in a copy of its task's context, and
     still counts here."""
@@ -457,7 +473,7 @@ def _account():
     return acct
 
 
-def fetch_failed(label, err, indent=4):
+def fetch_failed(label: str, err: object, indent: int = 4) -> list[Any]:
     """Report one failed fetch, count it, and hand back [].
 
     The line goes out as ONE write, so another thread cannot splice into
@@ -486,12 +502,12 @@ def fetch_failed(label, err, indent=4):
     return []
 
 
-def fetch_failures():
+def fetch_failures() -> int:
     """Fetch failures reported in this context since the last reset."""
     return _account().n
 
 
-def reset_fetch_failures():
+def reset_fetch_failures() -> None:
     """Start this context's fetch accounting from zero: the failure count,
     the last-failure message, and the capped marker. One call per fetch
     attempt, where it runs (crawl.harvest.harvest_board,
@@ -499,7 +515,7 @@ def reset_fetch_failures():
     _ACCOUNT.set(_Account())
 
 
-def note_capped(total=None):
+def note_capped(total: int | None = None) -> None:
     """Record that this context's snapshot was truncated: the board lists
     more than the pull returned. `total` is the board size the API
     reported, None when it reported none.
@@ -522,7 +538,7 @@ def note_capped(total=None):
     acct.capped, acct.total = True, total
 
 
-def snapshot_info():
+def snapshot_info() -> dict[str, Any]:
     """This context's fetch accounting since the last reset, as the callers
     record it: the failure count, whether the snapshot is INCOMPLETE (a
     fetch failed partway) or CAPPED (truncated without an error), and the
@@ -569,20 +585,20 @@ class HostBreaker:
     False
     """
 
-    def __init__(self, ttl, trips=1):
+    def __init__(self, ttl: float, trips: int = 1) -> None:
         self.ttl, self.trips = ttl, trips
-        self._hits = {}     # host -> (last refusal, refusals in a row)
+        self._hits: dict[str, tuple[float, int]] = {}  # host -> (last refusal, refusals in a row)
 
-    def trip(self, url):
+    def trip(self, url: str) -> None:
         host, now = host_of(url), time.time()
         if host:
             last, n = self._hits.get(host, (0.0, 0))
             self._hits[host] = (now, n + 1 if now - last < self.ttl else 1)
 
-    def dead(self, url):
+    def dead(self, url: str) -> bool:
         host = host_of(url)
         hit = self._hits.get(host)
         if hit and time.time() - hit[0] >= self.ttl:
             del self._hits[host]
             return False
-        return bool(hit) and hit[1] >= self.trips
+        return hit is not None and hit[1] >= self.trips

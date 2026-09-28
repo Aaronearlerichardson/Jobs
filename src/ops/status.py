@@ -1,11 +1,16 @@
 """Open/closed reconciliation of stored job rows: the board-snapshot status
 sync and the closed-URL probe."""
 
+from __future__ import annotations
+
 import asyncio
 import itertools
 import re
+import sqlite3
 from collections import Counter, defaultdict
+from collections.abc import Mapping
 from datetime import datetime, timedelta
+from typing import Any
 
 from src import config
 from src import store
@@ -25,7 +30,8 @@ from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
 _SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
 
 
-def _sync_skip_reason(company, jobs, err, snapshot=None):
+def _sync_skip_reason(company: dict[str, Any], jobs: list[dict[str, Any]] | None, err: object,
+                      snapshot: dict[str, Any] | None = None) -> str | None:
     """Why this company's board cannot be reconciled, or None when it can.
     `snapshot` is fetch_all's net.http.snapshot_info() for the board: an
     INCOMPLETE one (a page failed partway) is a fetch error too.
@@ -50,7 +56,7 @@ def _sync_skip_reason(company, jobs, err, snapshot=None):
     return None
 
 
-def _sync_skip_note(skipped):
+def _sync_skip_note(skipped: dict[str, int]) -> str:
     """The footer's skipped-board clause, or "" when nothing was skipped.
 
     >>> _sync_skip_note({"fetch error": 6, "empty board": 1, "no roster id": 1})
@@ -69,7 +75,7 @@ def _sync_skip_note(skipped):
     return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
 
 
-async def sync_status_all(top_n=15, t=None):
+async def sync_status_all(top_n: int = 15, t: dict[str, Any] | None = None) -> tuple[int, int]:
     """Status-only reconciliation: re-fetch every active company's board
     (same scoping as the crawl — locality unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
@@ -138,9 +144,7 @@ async def sync_status_all(top_n=15, t=None):
 # How stale an OPEN row at a board-dead company must be before this closes
 # it outright, with no URL probe at all: the company's OWN board fetch has
 # already failed since (store.miss_family(miss_reason) == this family), a
-# stronger signal than any one dead URL. A default kept as a module constant
-# beside the query that reads it -- the precedent is harvest.py's own
-# CLOSED_PROBE_STALE_DAYS/CLOSED_PROBE_LIMIT beside its one call site.
+# stronger signal than any one dead URL.
 DEAD_BOARD_CLOSE_DAYS = 14
 
 # Consecutive UNVERIFIABLE closure probes (jobs.probe_streak) after which
@@ -156,12 +160,7 @@ DEAD_BOARD_CLOSE_DAYS = 14
 # streak (store.record_probe_outcome, touch_job, sync_job_statuses).
 CLOSED_PROBE_GIVE_UP = 10
 
-#: A quoted page phrase is per-row detail, not a reason of its own -- one
-#: tally bucket per KIND of answer.
-_PROBE_DETAIL_RE = re.compile(r"'[^']*'")
-
-
-def _probe_label(url):
+def _probe_label(url: str | None) -> str:
     """The bucket one probe outcome is reported under: the ATS family the
     probe recognized, else the URL's own host (which is what distinguishes
     the bot-gated aggregators and the self-hosted boards from each other).
@@ -179,7 +178,8 @@ def _probe_label(url):
     return re.sub(r"^https?://", "", url or "").split("/")[0].lower() or "?"
 
 
-def _probe_tally_lines(counts, reasons):
+def _probe_tally_lines(counts: Mapping[str, Counter[str]],
+                       reasons: Mapping[str, Counter[str]]) -> list[str]:
     """The per-family outcome lines for a probe pass's summary, so the next
     audit reads "icims: 17 closed [icims api HTTP 410 x17]" instead of one
     undifferentiated "36 unverifiable". Sorted by how much of the pass each
@@ -193,7 +193,7 @@ def _probe_tally_lines(counts, reasons):
         lever            12 live, 3 closed [lever api: posting live x12]
         www.linkedin.com 2 unverifiable [bot-gated aggregator host x2]
     """
-    out = []
+    out: list[str] = []
     for label in sorted(counts, key=lambda k: (-sum(counts[k].values()), k)):
         got = ", ".join(f"{counts[label][k]} {k}" for k in
                         ("live", "closed", "unverifiable") if counts[label][k])
@@ -203,7 +203,7 @@ def _probe_tally_lines(counts, reasons):
     return out
 
 
-def _dead_board_open_rows(conn, days):
+def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str, Any]]:
     """OPEN rows at a company whose CURRENT miss_reason is in the
     'board-dead' family (store.miss_family) and whose last board-verified
     sighting (last_seen, or first_seen for a row a board never re-confirmed)
@@ -274,7 +274,8 @@ def _dead_board_open_rows(conn, days):
             if store.miss_family(r["miss_reason"]) == _DEAD_BOARD_FAMILY]
 
 
-async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
+async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
+                            t: dict[str, Any] | None = None, db: store.Writer | None = None) -> int:
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer
@@ -404,7 +405,7 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
               + (f", {n_queued - len(rows)} left for later passes"
                  if n_queued > len(rows) else "") + "...")
 
-        async def _probe(r):
+        async def _probe(r: dict[str, Any]) -> tuple[bool | None, str | None]:
             # A probe that RAISES is not a failure to report and skip, it
             # is an unverifiable row -- the third outcome this op counts.
             # So it is caught here rather than left to fan_out, which would
@@ -419,10 +420,11 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
 
         now = datetime.now()
         n_closed = n_live = n_unknown = n_parked = 0
-        counts, reasons = defaultdict(Counter), defaultdict(Counter)
+        counts: defaultdict[str, Counter[str]] = defaultdict(Counter)
+        reasons: defaultdict[str, Counter[str]] = defaultdict(Counter)
         # An abandoned probe is never yielded, so it closes nothing and
         # records no outcome: the row waits for the next pass as it was.
-        abandoned = []
+        abandoned: list[dict[str, Any]] = []
         async for r, (is_open, reason) in fan_out(
                 rows, _probe,
                 lambda r: f"probe {r['company_name']}: {(r['title'] or '')[:40]}",
@@ -430,7 +432,9 @@ async def check_closed_jobs(limit=None, stale_days=2, t=None, db=None):
                 on_abandon=abandoned.append, key=lambda r: r["origin"]):
             label = f"{(r['company_name'] or '?')[:24]:24} {(r['title'] or '')[:38]:38}"
             bucket = _probe_label(r["url"])
-            reasons[bucket][_PROBE_DETAIL_RE.sub("...", reason or "?")] += 1
+            # A quoted page phrase is per-row detail, not a reason of its
+            # own -- one tally bucket per KIND of answer.
+            reasons[bucket][re.sub(r"'[^']*'", "...", reason or "?")] += 1
             if is_open is False:
                 await db.run(store.set_job_status, r["job_id"], "closed")
                 n_closed += 1

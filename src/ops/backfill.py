@@ -1,7 +1,12 @@
 """Description backfill: the missing JD text of stored rows, from each
 company's own board."""
 
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timedelta
+from typing import Any
 
 from src import store
 from src.ats.board import company as company_fetch
@@ -10,8 +15,10 @@ from src.ops.maintenance import (_t, board_index, board_match,
                                  group_by_company, track_writer)
 
 
-def stale_body_rows(conn, where, columns="job_id, title, url", min_len=200,
-                    retry_days=3, limit=None, label="description(s)"):
+def stale_body_rows(conn: sqlite3.Connection, where: str,
+                    columns: str = "job_id, title, url", min_len: int = 200,
+                    retry_days: int = 3, limit: int | None = None,
+                    label: str = "description(s)") -> list[dict[str, Any]]:
     """Stored rows with no usable body yet, minus the ones a recent attempt
     already failed on, and the header line saying so.
 
@@ -44,7 +51,7 @@ def stale_body_rows(conn, where, columns="job_id, title, url", min_len=200,
     return rows
 
 
-def save_body(conn, job_id, text):
+def save_body(conn: sqlite3.Connection, job_id: str, text: str | None) -> bool:
     """Keep a fetched body, or stamp the failure. True when a body landed.
 
     The stamp is not optional bookkeeping: an unstamped failure is
@@ -60,8 +67,9 @@ def save_body(conn, job_id, text):
     return True
 
 
-async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
-                                      t=None, retry_days=3):
+async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = None,
+                                      min_len: int = 200, t: dict[str, Any] | None = None,
+                                      retry_days: int = 3) -> int:
     """One-shot: fill in full JD text for stored jobs missing it (any
     company-linked row whose description is shorter than min_len chars —
     the default matches src.claude.fit.MIN_DESC_CHARS), via each company's
@@ -101,7 +109,8 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
                             min_len=min_len, retry_days=retry_days,
                             limit=limit,
                             label="description(s) via company board(s)")
-        groups, boardless = [], []
+        groups: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        boardless: list[dict[str, Any]] = []
         for cid, rs in group_by_company(rows).items():
             company = await db.run(store.get_company, cid)
             if not company or not company.get("ats"):
@@ -114,7 +123,7 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
         if boardless:
             await db.batch(_save_bodies, [(r["job_id"], None) for r in boardless])
 
-        async def _bodies(group):
+        async def _bodies(group: tuple[dict[str, Any], list[dict[str, Any]]]) -> list[tuple[str, str | None]]:
             """One company's fetching: the batched board pull for the common
             case (one fetch per company), then per-job-URL hydration for the
             rows that pull didn't cover. Boards we can't pull simply yield
@@ -122,7 +131,7 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
             way. Returns [(job_id, description_or_None)] to write."""
             company, rs = group
             index = await board_index(company)
-            out = []
+            out: list[tuple[str, str | None]] = []
             for r in rs:
                 match = await board_match(index, r["title"])
                 desc = match.get("description") if match else None
@@ -148,6 +157,6 @@ async def backfill_board_descriptions(max_workers=8, limit=None, min_len=200,
     return n
 
 
-def _save_bodies(conn, bodies):
+def _save_bodies(conn: sqlite3.Connection, bodies: Iterable[tuple[str, str | None]]) -> int:
     """save_body over (job_id, text) pairs; how many bodies landed."""
     return sum(save_body(conn, job_id, text) for job_id, text in bodies)

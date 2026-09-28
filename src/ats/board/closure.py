@@ -14,11 +14,14 @@ a bot gate -- is "unverifiable", because a caller acts on a False by
 closing the posting.
 """
 
+from __future__ import annotations
+
 import asyncio
 import functools
 import logging
 import re
 import time
+from typing import Any, cast
 
 from src import config, runstate
 from src.net import http
@@ -29,24 +32,11 @@ from .jsonld import extract_jsonld, is_jobposting
 
 _log = logging.getLogger(__name__)
 
-# Standard "this posting is gone" notices across ATS templates. Curated and
-# phrase-anchored (never a bare "closed"/"expired") so an open JD that merely
-# mentions e.g. "closed-loop systems" can't trip it.
-_CLOSED_TEXT_RE = re.compile("|".join((
-    r"no longer (open|available|active|posted|accepting applications)",
-    r"(position|role|job|posting|vacancy|requisition) (has been|is|was) "
-    r"(filled|closed|cancell?ed|removed)",
-    r"(job|position|posting|vacancy) (has |is )?expired",
-    r"not currently accepting applications",
-    r"this (job|position|posting) is (closed|inactive|unavailable)",
-    r"job (posting )?not found",
-)), re.I)
-
 # Job aggregators bot-gate anonymous GETs (authwalls/999s): a probe there
 # says nothing about the posting, so report "unverifiable", never "closed".
 _GATED_HOST_RE = config.hosts_re(config.AGGREGATOR_HOSTS)
 
-def probe_family(url):
+def probe_family(url: str | None) -> str:
     """The ATS family a stored job URL belongs to: what probe_job_open
     dispatches on, and the bucket ops.check_closed_jobs reports its
     outcomes under. "" when nothing recognizes the URL (self-hosted
@@ -75,7 +65,7 @@ def probe_family(url):
     return board.name if board else ""
 
 
-def probe_origin(url):
+def probe_origin(url: str) -> str:
     """The origin probe_job_open asks first about `url`: its platform's
     endpoint's, else the posting page's own.
 
@@ -97,7 +87,7 @@ _DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=config.BOARD_M
                                                  trips=3))
 
 
-async def probe_job_open(url, job_id=None):
+async def probe_job_open(url: str | None, job_id: str | None = None) -> tuple[bool | None, str]:
     """Best-effort liveness check of one job's own detail URL.
 
     Returns (is_open, reason): True = positively live, False = positively
@@ -134,7 +124,7 @@ async def probe_job_open(url, job_id=None):
     clean = clean_url(url)
     if clean != url:
         _log.debug("probe url had embedded whitespace: %s", clean)
-        url = clean
+        url = cast(str, clean)
     if _GATED_HOST_RE.search(url):
         return None, "bot-gated aggregator host"
 
@@ -163,11 +153,29 @@ async def probe_job_open(url, job_id=None):
     return await asyncio.to_thread(_page_verdict, r, url, fallback)
 
 
-def _page_verdict(r, url, fallback):
+def _page_verdict(r: Any, url: str, fallback: str) -> tuple[bool | None, str]:
     """probe_job_open's verdict on a posting page `r` that answered 200: a
-    closed notice, else its JSON-LD JobPosting, else `fallback`."""
+    closed notice, else its JSON-LD JobPosting, else `fallback`. The
+    notices are curated and phrase-anchored, never a bare "closed" or
+    "expired", so a live posting mentioning "closed-loop" cannot trip one.
+
+    >>> from types import SimpleNamespace as Page
+    >>> _page_verdict(Page(text="This position is no longer available"), "https://x.test/j", "")
+    (False, "page says 'no longer available'")
+    >>> _page_verdict(Page(text="develop closed-loop neurostimulation"), "https://x.test/j", "")
+    (None, 'no closed signal')
+    """
     html = r.text[:200_000]
-    m = _CLOSED_TEXT_RE.search(html)
+    # Standard "this posting is gone" notices across ATS templates.
+    m = re.search("|".join((
+        r"no longer (open|available|active|posted|accepting applications)",
+        r"(position|role|job|posting|vacancy|requisition) (has been|is|was) "
+        r"(filled|closed|cancell?ed|removed)",
+        r"(job|position|posting|vacancy) (has |is )?expired",
+        r"not currently accepting applications",
+        r"this (job|position|posting) is (closed|inactive|unavailable)",
+        r"job (posting )?not found",
+    )), html, re.I)
     if m:
         return False, f"page says {m.group(0)[:50]!r}"
     try:

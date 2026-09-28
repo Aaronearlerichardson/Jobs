@@ -19,7 +19,11 @@ src/ats/board/company, discovery/local_sourcing, the runner, the
 harvest triage pass and the webapp all delegate here.
 """
 
+from __future__ import annotations
+
 import re
+from collections.abc import Iterable
+from typing import Any, Protocol
 
 from src import config
 from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, first_hit,
@@ -43,11 +47,11 @@ _NC_TOKEN_RE = re.compile(
 # Stricter "<place>, ST" address form — a company-HQ/office signal that holds
 # even when a company has zero current openings. Built from every place term
 # followed (within a few chars) by a configured state suffix.
-_PLACES = [re.escape(t) for t in (_WB + _SUB)]
 _SUFFIX = [re.escape(s) for s in config.LOCALITY_STATE_SUFFIX if s]
 NC_HQ_RE = re.compile(
-    (rf"\b(?:{'|'.join(_PLACES)})\b[\s,.\-]{{0,4}}(?:{'|'.join(_SUFFIX)})\b"
-     if _PLACES and _SUFFIX else r"(?!x)x"),
+    (rf"\b(?:{'|'.join(re.escape(t) for t in _WB + _SUB)})\b"
+     rf"[\s,.\-]{{0,4}}(?:{'|'.join(_SUFFIX)})\b"
+     if (_WB or _SUB) and _SUFFIX else r"(?!x)x"),
     re.I,
 )
 
@@ -119,27 +123,21 @@ _OTHER_STATE_ABBR_RE = re.compile(
 # or containing the word "Washington".
 _OWN_STATE_RE = re.compile(rf"\b(?:{'|'.join(_SUFFIX)})\b" if _SUFFIX else r"(?!x)x", re.I)
 
-_SEGMENT_SPLIT_RE = re.compile(r"[;|]")
-
 # _NC_TOKEN_RE's terms lowercased, for _names_place's case-sensitive scan.
 _SUB_LOW = tuple(t.lower() for t in _SUB)
 _WB_LOW_RE = re.compile(
     r"\b(?:" + "|".join(re.escape(t.lower()) for t in _WB) + r")\b"
     if _WB else r"(?!x)x")
 _ASCII_TERMS = all(t.isascii() for t in _WB + _SUB)
-# The only non-ASCII characters re.I folds onto an ASCII character: dotted
-# and dotless i, long s, Kelvin sign. U+0130 is also the one character
-# whose lower() is longer than itself.
-_FOLDS_ONTO_ASCII = re.compile("[\u0130\u0131\u017f\u212a]")
 
 
-def _names_place(text):
+def _names_place(text: str) -> bool:
     """bool(_NC_TOKEN_RE.search(text)): whether any configured place term
     occurs in `text`, case-insensitively, word tokens on boundaries.
     tests/test_locality.py pins the agreement, fold characters included.
 
     Notes:
-        With ASCII terms and none of the _FOLDS_ONTO_ASCII characters in
+        With ASCII terms and none of the fold characters in
         `text`, a re.I match is exactly a case-sensitive match on
         text.lower(): lower() keeps every other character's length and
         word-ness, and no other character folds onto ASCII (checked over
@@ -147,14 +145,17 @@ def _names_place(text):
         substring term plus a small boundary regex, 5-8x faster than the
         re.I alternation; geo_mode runs it on every harvested row.
     """
-    if not _ASCII_TERMS or _FOLDS_ONTO_ASCII.search(text):
+    # The fold characters: the only non-ASCII characters re.I folds onto an
+    # ASCII character (dotted and dotless i, long s, Kelvin sign). U+0130 is
+    # also the one character whose lower() is longer than itself.
+    if not _ASCII_TERMS or re.search("[\u0130\u0131\u017f\u212a]", text):
         return _NC_TOKEN_RE.search(text) is not None
     low = text.lower()
     return (any(t in low for t in _SUB_LOW)
             or _WB_LOW_RE.search(low) is not None)
 
 
-def _segment_is_local(segment):
+def _segment_is_local(segment: str) -> bool:
     """Whether one ";"/"|"-separated location SEGMENT counts as local (see
     is_nc). Naming the configured state directly (NC_HQ_RE's place+suffix
     pairing, or the bare suffix itself) always wins outright; short of
@@ -171,6 +172,12 @@ def _segment_is_local(segment):
     return True
 
 
+class LocationRE(Protocol):
+    """What judges a LOCATION string local: a compiled regex, or NC_RE."""
+
+    def search(self, text: str, /) -> object: ...
+
+
 class _LocalLocationRE:
     """NC_RE: the configured-locality test for a LOCATION string, shaped
     like a compiled regex so it drops in wherever one is expected (every
@@ -185,10 +192,10 @@ class _LocalLocationRE:
     (True, True)
     """
 
-    def search(self, text):
+    def search(self, text: str | None) -> re.Match[str] | None:
         text = text or ""
         pos = 0
-        for seg in _SEGMENT_SPLIT_RE.split(text):
+        for seg in re.split(r"[;|]", text):
             if _segment_is_local(seg):
                 return _NC_TOKEN_RE.search(text, pos, pos + len(seg))
             pos += len(seg) + 1         # every separator is one character
@@ -198,7 +205,7 @@ class _LocalLocationRE:
 NC_RE = _LocalLocationRE()
 
 
-def is_nc(text):
+def is_nc(text: str | None) -> bool:
     """True if `text` names a configured-local location (profile [locality]).
 
     Judged per ";"/"|" segment (see _segment_is_local): one local segment
@@ -269,7 +276,7 @@ LOCATION_SNIPPET_RE = re.compile(
 _NO_PLACE = "See posting"
 
 
-def location_snippet(text, default=_NO_PLACE):
+def location_snippet(text: str | None, default: str = _NO_PLACE) -> str:
     """The first location-looking phrase in `text`, or `default`: a
     configured place (or "remote") plus the Capitalized words and digit
     runs that follow it, stopping at a month name or the first lowercase
@@ -287,12 +294,7 @@ def location_snippet(text, default=_NO_PLACE):
     return m.group(0).strip(" ,-") if m else default
 
 
-# Workday's "<N> Locations" listing text for a multi-site req; the real
-# list comes with the detail JSON (board.company.hydrate_description).
-N_LOCATIONS_RE = re.compile(r"^\s*\d+\s+locations?\s*$", re.I)
-
-
-def location_unknown(location):
+def location_unknown(location: str | None) -> bool:
     """True when `location` names no place at all: blank, location_snippet's
     own placeholder ("See posting", any case), or a Workday board's
     "<N> Location(s)" listing text -- three spellings of the same fact, that
@@ -310,7 +312,10 @@ def location_unknown(location):
     False
     """
     loc = (location or "").strip().lower()
-    return loc in ("", _NO_PLACE.lower()) or bool(N_LOCATIONS_RE.match(loc))
+    # Workday's "<N> Locations" listing text for a multi-site req; the real
+    # list comes with the detail JSON (board.company.hydrate_description).
+    return (loc in ("", _NO_PLACE.lower())
+            or bool(re.match(r"^\s*\d+\s+locations?\s*$", loc, re.I)))
 
 
 # --------------------------------------------------------------------------- #
@@ -440,14 +445,14 @@ _DEFAULT_HARD_NEGATIONS = (
 _HARD_NEGATIONS = tuple(getattr(config, "REMOTE_HARD_NEGATIONS", None) or _DEFAULT_HARD_NEGATIONS)
 
 
-def _has_token(text, tokens):
+def _has_token(text: str, tokens: Iterable[str]) -> str | None:
     """The first of `tokens` found in `text`, or None. Short codes ("wfh",
     "us", "uk") match on word boundaries so they cannot fire inside other
     words; phrases and longer words are substrings (filters.SHORT_REMOTE)."""
     return first_hit(tokens, text, SHORT_REMOTE)
 
 
-def remote_signal(location, description=""):
+def remote_signal(location: str | None, description: str | None = "") -> str | None:
     """Return the phrase that marks this posting remote-eligible, or None.
 
     Returned phrase is handy for the precision sanity-check sample output.
@@ -470,7 +475,7 @@ def remote_signal(location, description=""):
     return None
 
 
-def remote_signal_for(job):
+def remote_signal_for(job: dict[str, Any]) -> str | None:
     """Job-dict-aware remote signal.
 
     Prefers a structured hint stamped by the fetcher (JSON-LD
@@ -520,7 +525,7 @@ _NON_US_REGION_RE = re.compile(
     "|".join(rf"\b{re.escape(t)}\b" for t in _NON_US_REGIONS) or r"(?!x)x", re.I)
 
 
-def us_eligible(location):
+def us_eligible(location: str | None) -> bool:
     """True unless the location names a non-US region with no US marker."""
     loc = (location or "").lower()
     if not loc:
@@ -535,7 +540,7 @@ def us_eligible(location):
 #  The verdict the crawl actually asks for                                     #
 # --------------------------------------------------------------------------- #
 
-def geo_mode(location, description=""):
+def geo_mode(location: str | None, description: str | None = "") -> str | None:
     """Classify a posting's geography: "onsite" (configured locality),
     "remote", or None (neither). Onsite wins when a posting is both local
     and remote-friendly — a "Remote; Durham, NC" multi-location posting is

@@ -28,25 +28,32 @@ and returns the callable the engine keeps, so a row costs no spec
 interpretation.
 """
 
+from __future__ import annotations
+
 import functools
 import html
 import re
 import time
+from collections.abc import Callable
+from typing import Any, Literal, overload
 from urllib.parse import unquote
 
 from src.match.locality import MONTH_ABBRS, location_snippet
 from src.net.util import (LOC_TEXT_RE, clean_field, host_of, norm_posted_date,
                           origin_of, stable_id, text_from_html)
 
+#: A field spec read once (`reader`): (entry, ctx) -> the value.
+Reader = Callable[[Any, dict[str, Any]], Any]
 
-def _text(v):
+
+def _text(v: Any) -> str:
     """A payload value as markup text: a list's items joined, a dict none."""
     if isinstance(v, list):
         return " ".join(str(x) for x in v)
     return "" if isinstance(v, dict) else str(v)
 
 
-def _after(text, marker):
+def _after(text: str, marker: str) -> str:
     """`text` from just past the first whole-word `marker`, or all of it
     when that leaves nothing (a page's chrome ahead of its body).
 
@@ -57,7 +64,7 @@ def _after(text, marker):
     return body or text
 
 
-def _ymd(v):
+def _ymd(v: Any) -> str | None:
     """A YYYYMMDD value as an ISO date; None for zeros or anything else.
 
     >>> _ymd("20260921"), _ymd(20260921), _ymd("00000000"), _ymd("")
@@ -67,7 +74,7 @@ def _ymd(v):
     return f"{m[1]}-{m[2]}-{m[3]}" if m and m[1] != "0000" else None
 
 
-def _colon_location(raw):
+def _colon_location(raw: Any) -> str:
     """A colon-delimited, broadest-first location ("US:NC:Morrisville") as
     a readable one, a two-letter state kept beside its city.
 
@@ -83,12 +90,12 @@ def _colon_location(raw):
     return ", ".join(x for x in (", ".join(parts), state, country) if x)
 
 
-def _host(v):
+def _host(v: Any) -> str:
     """A URL's host, or `v` itself when it is a bare host."""
     return host_of(v) if "://" in str(v) else str(v)
 
 
-def _host_part(v):
+def _host_part(v: Any) -> str:
     """The host in `v`, a URL or a bare host (with or without a path),
     lowercased; "" when it names none.
 
@@ -101,17 +108,7 @@ def _host_part(v):
     return m.group(1).lower() if m else ""
 
 
-def _host_key(v):
-    """A URL's host, or a bare host, as one id-safe token: the whole host,
-    since tenants on their own domains share a first label.
-
-    >>> _host_key("careers.dukehealth.org"), _host_key("https://jobs.ncsu.edu/x")
-    ('careers_dukehealth_org', 'jobs_ncsu_edu')
-    """
-    return re.sub(r"[^a-z0-9]+", "_", _host(v).lower()).strip("_")
-
-
-def _group(v, regex):
+def _group(v: Any, regex: str) -> str | None:
     """The first group of `regex`'s first match in `v`; None when none.
 
     >>> _group("/job/US-NC-Durham/Eng_R1", "^/job/([^/]+)/"), _group("/x", "^/job/([^/]+)/")
@@ -121,7 +118,7 @@ def _group(v, regex):
     return m.group(1) if m else None
 
 
-def _int(v):
+def _int(v: Any) -> int | None:
     """A count written with thousands separators as an int; None otherwise.
 
     >>> _int("1,621"), _int(" 25 "), _int("n/a")
@@ -131,31 +128,7 @@ def _int(v):
     return int(s) if s.isdigit() else None
 
 
-def _url_key(v, n):
-    """The last `n` characters of `v` lowercased, each run of anything but
-    letters and digits one "-".
-
-    >>> _url_key("https://x.org/Careers/Data_Engineer", "21")
-    'careers-data-engineer'
-    """
-    return re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):]
-
-
-def _alnum_tail(v, n):
-    """The last `n` lowercase letters and digits of `v`, all else dropped.
-
-    >>> _alnum_tail("https://careers.example.edu", "16")
-    'areersexampleedu'
-    """
-    return re.sub(r"[^a-z0-9]+", "", str(v).lower())[-int(n):]
-
-
-#: A posting date glued onto a location cell, and whatever follows it.
-_DATE_TAIL_RE = re.compile(
-    rf"\s+(?:{'|'.join(MONTH_ABBRS)})[a-z]*\.?\s+\d{{1,2}},\s*\d{{4}}\b.*$", re.I)
-
-
-def _cut_date_tail(v):
+def _cut_date_tail(v: Any) -> str:
     """The place, with a glued-on posting date and whatever follows it (a
     theme's repeated title/location) cut off.
 
@@ -164,10 +137,11 @@ def _cut_date_tail(v):
     >>> _cut_date_tail("remote, IT Aug 26, 2026 7637 Europe, remote, I"), _cut_date_tail("Durham, NC")
     ('remote, IT', 'Durham, NC')
     """
-    return _DATE_TAIL_RE.sub("", str(v)).strip(" ,-")
+    date_tail = rf"\s+(?:{'|'.join(MONTH_ABBRS)})[a-z]*\.?\s+\d{{1,2}},\s*\d{{4}}\b.*$"
+    return re.sub(date_tail, "", str(v), flags=re.I).strip(" ,-")
 
 
-def _strip_labels(v):
+def _strip_labels(v: Any) -> str:
     r"""An anchor's text with the screen-reader label ahead of its title
     ("Requisition Title", or a bare "Title" on its own line) dropped and
     the whitespace collapsed. A bare "Title" is a label only when a line
@@ -187,7 +161,7 @@ def _strip_labels(v):
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _loc_text(v):
+def _loc_text(v: Any) -> str | None:
     """The first "City, ST"-shaped phrase in `v` (net.util.LOC_TEXT_RE), or
     None.
 
@@ -198,7 +172,7 @@ def _loc_text(v):
     return m.group(0).strip() if m else None
 
 
-TRANSFORMS = {
+TRANSFORMS: dict[str, Callable[..., Any]] = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
     # is unescaped: stripped first, the tags come back as TEXT.
@@ -208,7 +182,9 @@ TRANSFORMS = {
     "after_marker": _after,
     "before": lambda v, marker: str(v).split(marker, 1)[0].strip(),
     "colon_location": _colon_location,
-    "host_key": _host_key,
+    # The whole host as one id-safe token: tenants on their own domains
+    # share a first label.
+    "host_key": lambda v: re.sub(r"[^a-z0-9]+", "_", _host(v).lower()).strip("_"),
     "host_label": lambda v: _host(v).split(".", 1)[0],
     "host": _host_part,
     "origin": lambda v: origin_of(str(v)),
@@ -222,23 +198,24 @@ TRANSFORMS = {
     "rstrip_slash": lambda v: str(v).rstrip("/"),
     "one_line": clean_field,
     "int": _int,
-    "alnum_tail": _alnum_tail,
+    "alnum_tail": lambda v, n: re.sub(r"[^a-z0-9]+", "", str(v).lower())[-int(n):],
     "snippet": location_snippet,
     "place": lambda v: location_snippet(v, ""),
     "loc_text": _loc_text,
     "cut_date_tail": _cut_date_tail,
     "strip_labels": _strip_labels,
-    "url_key": _url_key,
+    # The last n characters lowercased, each run of anything but letters
+    # and digits one "-".
+    "url_key": lambda v, n: re.sub(r"[^a-z0-9]+", "-", str(v).lower())[-int(n):],
     # A stable id for an entry the listing gives none: never hash(),
     # which Python salts per process.
     "stable_id": stable_id,
 }
 
 _TOKEN_RE = re.compile(r"\{([A-Za-z0-9_.\[\]]+)(?::(\d+))?(?:\|([a-z_]+))?\}")
-_STEP_RE = re.compile(r"^(.*?)(?:\[(\d*)\])?$")
 
 
-def merge_locations(primary, extras):
+def merge_locations(primary: str | None, extras: list[Any] | None) -> str:
     """One location string carrying every location a posting names: the
     primary field first, then any secondary office/location not already
     present in it.
@@ -265,7 +242,7 @@ def merge_locations(primary, extras):
     return loc
 
 
-def path(obj, p):
+def path(obj: Any, p: str) -> Any:
     """The value at dotted path `p`; a "[]" step maps over a list, "[n]"
     takes its nth item.
 
@@ -278,49 +255,55 @@ def path(obj, p):
     return _getter(p)(obj)
 
 
-def _identity(obj):
-    return obj
-
-
 @functools.cache
-def _getter(p):
+def _getter(p: str) -> Callable[[Any], Any]:
     """`path` for one `p`, parsed once: a callable obj -> value."""
     if p == "":
-        return _identity
-    steps = [_STEP_RE.match(s).groups() for s in p.split(".")]
-    if all(index is None for _key, index in steps):
-        keys = tuple(key for key, _index in steps)
+        return lambda obj: obj
+    # The pattern matches any one-line step: never None.
+    split = [re.match(r"^(.*?)(?:\[(\d*)\])?$", s).groups()  # type: ignore[union-attr]
+             for s in p.split(".")]
+    if all(index is None for _key, index in split):
+        keys = tuple(key for key, _index in split)
 
-        def chain(obj):
+        def chain(obj: Any) -> Any:
             for k in keys:
                 obj = obj.get(k) if isinstance(obj, dict) else None
             return obj
         return chain
-    mapped = any(index == "" for _key, index in steps)
-    steps = [(key, index if index in (None, "") else int(index)) for key, index in steps]
+    mapped = any(index == "" for _key, index in split)
+    steps = [(key, index if index in (None, "") else int(index)) for key, index in split]
 
-    def walk(obj):
+    def walk(obj: Any) -> Any:
         cur = [obj]
         for key, index in steps:
-            nxt = []
+            nxt: list[Any] = []
             for c in cur:
                 v = c.get(key) if isinstance(c, dict) else None
                 if index is None:
                     nxt.append(v)
-                elif index == "":
-                    nxt.extend(v if isinstance(v, list) else [])
-                else:
+                elif isinstance(index, int):
                     nxt.append(v[index] if isinstance(v, list) and index < len(v) else None)
+                else:
+                    nxt.extend(v if isinstance(v, list) else [])
             cur = nxt
         return cur if mapped else (cur[0] if cur else None)
     return walk
 
 
-def _flat(v):
+def _flat(v: Any) -> list[Any]:
     return [x for item in v for x in _flat(item)] if isinstance(v, list) else [v]
 
 
-def fmt(template, lookup, strict=False):
+@overload
+def fmt(template: str, lookup: Callable[[str], Any], strict: Literal[False] = False) -> str: ...
+
+
+@overload
+def fmt(template: str, lookup: Callable[[str], Any], strict: bool) -> str | None: ...
+
+
+def fmt(template: str, lookup: Callable[[str], Any], strict: bool = False) -> str | None:
     """`template` with each "{name}" / "{name:n}" token filled by `lookup`;
     None when `strict` and a token is empty.
 
@@ -347,10 +330,11 @@ def fmt(template, lookup, strict=False):
 
 
 @functools.cache
-def _template(template):
+def _template(template: str) -> tuple[tuple[str, str | None, int | None, str | None], ...]:
     """`template` parsed once: (literal, token name, n, transform) per
     token, the text after the last as a (literal, None, None, None)."""
-    parts, at = [], 0
+    parts: list[tuple[str, str | None, int | None, str | None]] = []
+    at = 0
     for m in _TOKEN_RE.finditer(template):
         parts.append((template[at:m.start()], m.group(1),
                       int(m.group(2)) if m.group(2) else None, m.group(3)))
@@ -360,7 +344,7 @@ def _template(template):
 
 
 @functools.cache
-def _transform(name):
+def _transform(name: str) -> Callable[[Any], Any]:
     """The transform `name` ("t", or "t:arg" passing it an argument) as a
     callable, looked up in TRANSFORMS when called."""
     t, _, arg = name.partition(":")
@@ -369,7 +353,8 @@ def _transform(name):
     return lambda v: TRANSFORMS[t](v)
 
 
-def value(spec, entry, ctx=None, strict=False):
+def value(spec: Any, entry: Any, ctx: dict[str, Any] | None = None,
+          strict: bool = False) -> Any:
     """The value `spec` names in `entry`. `ctx` holds the handle parts and
     any "_" fields already computed, which "format" templates read first.
 
@@ -391,6 +376,9 @@ def value(spec, entry, ctx=None, strict=False):
     True
     >>> value({"of": "html", "transform": "unescape_html_text"}, e)
     'Hi'
+    >>> [value({"of": "u", "transform": t}, {"u": "https://Jobs.NCSU.edu/Careers/Data_Engineer"})
+    ...  for t in ("host_key", "url_key:21", "alnum_tail:16")]
+    ['jobs_ncsu_edu', 'careers-data-engineer', 'eersdataengineer']
     >>> value({"of": "missing", "default": "Unknown"}, e)
     'Unknown'
     >>> value({"each": "xs", "do": {"join": ["c", "s"], "sep": ", "}, "skip": {"truthy": "h"}},
@@ -403,27 +391,23 @@ def value(spec, entry, ctx=None, strict=False):
     return reader(spec, strict)(entry, ctx or {})
 
 
-def _none(entry, ctx):
-    return None
-
-
-def reader(spec, strict=False):
+def reader(spec: Any, strict: bool = False) -> Reader:
     """Field spec `spec` read once: a callable (entry, ctx) -> the value
     `value` would give. The engine builds one per spec field when a board
     is built, so a row costs no spec interpretation."""
     if spec is None:
-        return _none
+        return lambda entry, ctx: None
     if isinstance(spec, str):
         return _path_reader(spec)
     body = _operator(spec, strict)
     when = _condition(spec["when"]) if "when" in spec else None
-    other = reader(spec.get("else")) if when else None
+    other = reader(spec.get("else"))
     transform = _transform(spec["transform"]) if spec.get("transform") else None
     has_default, default = "default" in spec, spec.get("default")
     if when is None and transform is None and not has_default:
         return body
 
-    def read(entry, ctx):
+    def read(entry: Any, ctx: dict[str, Any]) -> Any:
         v = body(entry, ctx) if when is None or when(entry, ctx) else other(entry, ctx)
         if transform is not None and v not in (None, ""):
             v = transform(v)
@@ -434,7 +418,7 @@ def reader(spec, strict=False):
 
 
 @functools.cache
-def _path_reader(p):
+def _path_reader(p: str) -> Reader:
     """A path spec's reader: an internal "_" field from ctx, else `path`."""
     get = _getter(p)
     if p.startswith("_"):
@@ -442,13 +426,13 @@ def _path_reader(p):
     return lambda entry, ctx: get(entry)
 
 
-def _operator(spec, strict):
+def _operator(spec: dict[str, Any], strict: bool) -> Reader:
     """The reader of a dict spec's operator (`of` by default), without its
     modifiers."""
     if "first" in spec:
         subs = [reader(s) for s in spec["first"]]
 
-        def first(entry, ctx):
+        def first(entry: Any, ctx: dict[str, Any]) -> Any:
             for f in subs:
                 x = f(entry, ctx)
                 if x and not isinstance(x, dict):
@@ -458,7 +442,7 @@ def _operator(spec, strict):
     if "join" in spec:
         subs, sep, cap = [reader(s) for s in spec["join"]], spec.get("sep", " "), spec.get("max")
 
-        def join(entry, ctx):
+        def join(entry: Any, ctx: dict[str, Any]) -> str:
             parts = [s for s in (str(p).strip() for p in _flat([f(entry, ctx) for f in subs])
                                  if p and not isinstance(p, dict)) if s]
             return sep.join(parts[:cap])
@@ -467,7 +451,7 @@ def _operator(spec, strict):
         items_of, do = _getter(spec["each"]), reader(spec.get("do", ""))
         skip = _condition(spec["skip"]) if spec.get("skip") else None
 
-        def each(entry, ctx):
+        def each(entry: Any, ctx: dict[str, Any]) -> list[Any]:
             items = items_of(entry)
             return [do(i, ctx) for i in (items if isinstance(items, list) else [])
                     if not (skip and isinstance(i, dict) and skip(i, ctx))]
@@ -480,7 +464,7 @@ def _operator(spec, strict):
         getters = {name: _getter(name) for _lit, name, _n, _t in _template(template)
                    if name is not None}
 
-        def form(entry, ctx):
+        def form(entry: Any, ctx: dict[str, Any]) -> str | None:
             return fmt(template, lambda k: ctx[k] if ctx and k in ctx else getters[k](entry),
                        strict)
         return form
@@ -490,12 +474,7 @@ def _operator(spec, strict):
     return reader(spec.get("of"))
 
 
-_OPERATORS = {"first", "join", "each", "merge", "format", "const", "of"}
-_MODIFIERS = {"sep", "max", "do", "skip", "when", "else", "transform", "default"}
-_CONDITIONS = {"any", "all", "truthy", "falsy", "eq", "contains", "past"}
-
-
-def check(spec):
+def check(spec: Any) -> None:
     """Raise ValueError when the grammar cannot read field spec `spec`.
 
     >>> check({"of": "content", "transform": "html_text"})
@@ -508,8 +487,10 @@ def check(spec):
         return
     if not isinstance(spec, dict):
         raise ValueError(f"field spec {spec!r} is not a path or a dict")
-    ops = set(spec) & _OPERATORS
-    if len(ops) > 1 or set(spec) - _OPERATORS - _MODIFIERS:
+    operators = {"first", "join", "each", "merge", "format", "const", "of"}
+    modifiers = {"sep", "max", "do", "skip", "when", "else", "transform", "default"}
+    ops = set(spec) & operators
+    if len(ops) > 1 or set(spec) - operators - modifiers:
         raise ValueError(f"bad field spec keys {sorted(spec)}")
     if spec.get("transform") and spec["transform"].partition(":")[0] not in TRANSFORMS:
         raise ValueError(f"unknown transform {spec['transform']!r}")
@@ -528,7 +509,7 @@ def check(spec):
         _check_cond(spec["when"])
 
 
-def check_template(template):
+def check_template(template: str) -> None:
     """Raise ValueError when a "{x|t}" token in `template` names an
     unknown transform.
 
@@ -542,8 +523,9 @@ def check_template(template):
             raise ValueError(f"unknown transform {m.group(3)!r}")
 
 
-def _check_cond(cond):
-    if not isinstance(cond, dict) or len(cond) != 1 or set(cond) - _CONDITIONS:
+def _check_cond(cond: Any) -> None:
+    conditions = {"any", "all", "truthy", "falsy", "eq", "contains", "past"}
+    if not isinstance(cond, dict) or len(cond) != 1 or set(cond) - conditions:
         raise ValueError(f"bad condition {cond!r}")
     (op, arg), = cond.items()
     if op in ("any", "all"):
@@ -555,7 +537,7 @@ def _check_cond(cond):
         check(arg)
 
 
-def holds(cond, entry, ctx=None):
+def holds(cond: dict[str, Any], entry: Any, ctx: dict[str, Any] | None = None) -> bool:
     """Whether condition `cond` holds for `entry`. `eq` compares strings
     case-insensitively and anything else by type and value; `contains`
     searches a list's items joined, for a needle that is literal or, as
@@ -576,10 +558,7 @@ def holds(cond, entry, ctx=None):
     return _condition(cond)(entry, ctx or {})
 
 
-_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-
-
-def _condition(cond):
+def _condition(cond: dict[str, Any]) -> Callable[[Any, dict[str, Any]], bool]:
     """Condition `cond` read once: a callable (entry, ctx) -> `holds`."""
     (op, arg), = cond.items()
     if op in ("any", "all"):
@@ -592,9 +571,9 @@ def _condition(cond):
         if op == "falsy":
             return lambda entry, ctx: not f(entry, ctx)
 
-        def past(entry, ctx):
+        def past(entry: Any, ctx: dict[str, Any]) -> bool:
             v = str(f(entry, ctx) or "")
-            return bool(_ISO_DATE_RE.match(v)) and v[:10] < time.strftime("%Y-%m-%d")
+            return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
         return past
     f = reader(arg[0])
     if op == "eq":
@@ -602,12 +581,12 @@ def _condition(cond):
         if isinstance(want, str):
             low = want.lower()
 
-            def eq_text(entry, ctx):
+            def eq_text(entry: Any, ctx: dict[str, Any]) -> bool:
                 v = f(entry, ctx)
                 return v is not None and str(v).lower() == low
             return eq_text
 
-        def eq(entry, ctx):
+        def eq(entry: Any, ctx: dict[str, Any]) -> bool:
             v = f(entry, ctx)
             return type(v) is type(want) and v == want
         return eq
@@ -616,7 +595,7 @@ def _condition(cond):
         of_needle = reader(needle[1:]) if needle.startswith("$") else None
         low = needle.lower()
 
-        def contains(entry, ctx):
+        def contains(entry: Any, ctx: dict[str, Any]) -> bool:
             v = f(entry, ctx)
             n = str(of_needle(entry, ctx) or "").lower() if of_needle else low
             hay = " ".join(str(x) for x in _flat(v) if x) if isinstance(v, list) else str(v or "")

@@ -10,22 +10,21 @@ WeWorkRemotely feeds:
     https://weworkremotely.com/categories/remote-full-stack-programming-jobs.rss
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
+from collections.abc import Callable
+from typing import Any
+
+from lxml import etree
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import named, node_text, parse_markup, stable_id, strip_html
 
-# WWR titles take either shape:
-#   "Company Name: Role Title"            (current convention)
-#   "Role Title at Company Name (Region)" (older posts)
-# Some titles also embed sub-detail behind pipes ("Role | Region | Remote").
-_WWR_COLON_RE = re.compile(r"^([^:]+?):\s*(.+)$")
-_WWR_AT_RE    = re.compile(r"^(.*?)\s+at\s+(.*?)(?:\s*\(([^)]+)\))?\s*$", re.I)
 
-
-def _parse_title(title):
+def _parse_title(title: str | None) -> tuple[str, str, str]:
     """
     Return (role, company, region) - any piece may be empty.
 
@@ -33,12 +32,16 @@ def _parse_title(title):
     falls back to 'Role at Company (Region)', then returns the raw
     title as role.
     """
+    # WWR titles take either shape:
+    #   "Company Name: Role Title"            (current convention)
+    #   "Role Title at Company Name (Region)" (older posts)
+    # Some titles also embed sub-detail behind pipes ("Role | Region | Remote").
     t = (title or "").strip()
     if not t:
         return "", "", ""
 
     # Colon-style: "Company Name: Role Title | Region | Remote"
-    m = _WWR_COLON_RE.match(t)
+    m = re.match(r"^([^:]+?):\s*(.+)$", t)
     if m:
         company = m.group(1).strip()
         tail    = m.group(2).strip()
@@ -52,14 +55,14 @@ def _parse_title(title):
             return role, company, region
 
     # Fallback: "Role Title at Company (Region)"
-    m = _WWR_AT_RE.match(t)
+    m = re.match(r"^(.*?)\s+at\s+(.*?)(?:\s*\(([^)]+)\))?\s*$", t, re.I)
     if m:
         return m.group(1).strip(), m.group(2).strip(), (m.group(3) or "").strip()
 
     return t, "", ""
 
 
-def _find(item, name):
+def _find(item: etree._Element, name: str) -> tuple[etree._Element | None, str]:
     """(element, its text) for `item`'s first descendant named `name` in any
     namespace; (None, "") when it has none.
 
@@ -72,8 +75,9 @@ def _find(item, name):
     return (el, node_text(el, "", strip=False)) if el is not None else (None, "")
 
 
-async def fetch_rss(source_label, url, default_location="Remote", max_items=200,
-                    remote_board=False, gate=None):
+async def fetch_rss(source_label: str, url: str, default_location: str = "Remote",
+                    max_items: int = 200, remote_board: bool = False,
+                    gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """
     Pull an RSS/Atom feed, yield relevant jobs, the feed read off the loop.
 
@@ -92,7 +96,8 @@ async def fetch_rss(source_label, url, default_location="Remote", max_items=200,
                                    max_items, remote_board, gate)
 
 
-def _jobs(feed, source_label, url, default_location, max_items, remote_board, gate):
+def _jobs(feed: bytes, source_label: str, url: str, default_location: str, max_items: int,
+          remote_board: bool, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
     """The feed body `feed` as fetch_rss's job dicts."""
     root = parse_markup(feed, xml=True, url=url)
     items = named(root, "item") or named(root, "entry")
@@ -125,7 +130,7 @@ def _jobs(feed, source_label, url, default_location, max_items, remote_board, ga
         if gate is not None and not gate(role, desc):
             continue
 
-        job = {
+        job: dict[str, Any] = {
             "id":          f"rss_{source_label.replace(' ', '_')}_{stable_id(guid)}",
             "company":     company or source_label,
             "title":       role,

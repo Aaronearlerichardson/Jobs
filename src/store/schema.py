@@ -6,11 +6,17 @@ functions that read and write rows are in src.store, which re-exports
 everything below so callers keep saying ``store.connect``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextvars
 import sqlite3
 import threading
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from types import TracebackType
+from typing import Any, Concatenate, Literal, cast
 
 from src import config
 from src import tags
@@ -97,7 +103,7 @@ CREATE INDEX IF NOT EXISTS ix_jobs_triage  ON jobs(triage_status);
 
 # Columns added after a table's first release: additive, idempotent
 # migrations so existing DBs (e.g. an old local_tech.db) upgrade in place.
-_MIGRATIONS = {
+_MIGRATIONS: dict[str, dict[str, str]] = {
     "companies": {
         "tags": "TEXT",
         # No DEFAULT, unlike _SCHEMA's fresh-DB declaration: ADD COLUMN with a
@@ -204,7 +210,7 @@ _MIGRATIONS = {
 # ones were named for one user's search ("neural" anchors, "nc" for the local
 # region). new -> old; _ensure_columns copies old values across before the
 # old column is dropped, so no history is lost on an existing DB.
-_RENAMED_COLUMNS = {
+_RENAMED_COLUMNS: dict[str, dict[str, str]] = {
     "jobs":      {"anchor_signal": "neural_signal"},
     "companies": {"local_job_count": "nc_job_count"},
 }
@@ -214,13 +220,13 @@ _RENAMED_COLUMNS = {
 # mission/tech_bar_score became company-level after unification and
 # hq_location was never populated — all three were 100% NULL. The last two
 # are the _RENAMED_COLUMNS sources, dropped only after their copy runs.
-_DROPPED_COLUMNS = {
+_DROPPED_COLUMNS: dict[str, tuple[str, ...]] = {
     "jobs": ("mission", "tech_bar_score", "neural_signal"),
     "companies": ("hq_location", "nc_job_count"),
 }
 
 
-def _ensure_columns(conn):
+def _ensure_columns(conn: sqlite3.Connection) -> None:
     # Concurrency-tolerant: the web UI opens several connections to the same
     # DB at once (one per API request), and on a DB this process hasn't
     # migrated yet they all read PRAGMA table_info before any ALTER lands —
@@ -244,9 +250,9 @@ def _ensure_columns(conn):
             if new in existing and old in existing:
                 conn.execute(f"UPDATE {table} SET {new}={old} "
                              f"WHERE {new} IS NULL AND {old} IS NOT NULL")
-    for table, cols in _DROPPED_COLUMNS.items():
+    for table, dropped in _DROPPED_COLUMNS.items():
         existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-        for col in cols:
+        for col in dropped:
             if col in existing:
                 try:
                     conn.execute(f"ALTER TABLE {table} DROP COLUMN {col}")
@@ -256,7 +262,7 @@ def _ensure_columns(conn):
     conn.commit()
 
 
-def _migrate_tags(conn):
+def _migrate_tags(conn: sqlite3.Connection) -> None:
     """Rewrite retired company scope-tag tokens in place (src/tags.py).
 
     The tags started out named after one user's search ('nc_local', 'neural')
@@ -285,7 +291,7 @@ def _migrate_tags(conn):
 BUSY_TIMEOUT_S = 30.0
 
 
-def connect(path=None):
+def connect(path: str | Path | None = None) -> sqlite3.Connection:
     """Open the store: schema applied, migrations run, WAL journaling on.
 
     WAL matters because several PROCESSES share this file (the web UI, the
@@ -323,10 +329,10 @@ def connect(path=None):
 # Connections currently inside a batch() block: their per-row writers skip
 # the commit and the block commits once at the end. Keyed by id() because
 # sqlite3.Connection accepts no attributes.
-_BATCHING = set()
+_BATCHING: set[int] = set()
 
 
-def _commit(conn):
+def _commit(conn: sqlite3.Connection) -> None:
     """Commit unless the caller is batching (see batch)."""
     if id(conn) not in _BATCHING:
         conn.commit()
@@ -344,11 +350,12 @@ class sql:
 
     __slots__ = ("expr", "args")
 
-    def __init__(self, expr, *args):
+    def __init__(self, expr: str, *args: Any) -> None:
         self.expr, self.args = expr, args
 
 
-def apply_update(conn, table, id_col, id_val, fields):
+def apply_update(conn: sqlite3.Connection, table: str, id_col: str, id_val: Any,
+                 fields: Mapping[str, Any]) -> int:
     """Write just the columns `fields` names on one row; return rows changed.
 
     Five writers -- the crawl-outcome stamp, the harvest stamp, the triage
@@ -388,7 +395,8 @@ def apply_update(conn, table, id_col, id_val, fields):
         Commits through `_commit`, so a caller inside a batch() block joins
         that transaction instead of ending it early.
     """
-    sets, args = [], []
+    sets: list[str] = []
+    args: list[Any] = []
     for col, val in fields.items():
         if isinstance(val, sql):
             sets.append(f"{col}={val.expr}")
@@ -451,15 +459,16 @@ class batch:
         starving the web UI's own writes while it runs.
     """
 
-    def __init__(self, conn):
+    def __init__(self, conn: sqlite3.Connection) -> None:
         self.conn = conn
 
-    def __enter__(self):
+    def __enter__(self) -> sqlite3.Connection:
         _WRITE_LOCK.acquire()
         _BATCHING.add(id(self.conn))
         return self.conn
 
-    def __exit__(self, exc_type, exc, tb):
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
+                 tb: TracebackType | None) -> Literal[False]:
         _BATCHING.discard(id(self.conn))
         try:
             if exc_type is None:
@@ -498,17 +507,22 @@ class Writer:
         on the busy timeout; other processes keep their own connections.
     """
 
-    def __init__(self, path=None):
+    #: The block's call queue and its drainer, made as the block opens.
+    _queue: asyncio.Queue[tuple[asyncio.Future[Any], Callable[..., Any],
+                                Callable[[], Any]] | None]
+    _drainer: asyncio.Task[None]
+
+    def __init__(self, path: str | Path | sqlite3.Connection | None = None) -> None:
         self.path = path
         self._thread = ThreadPoolExecutor(1, thread_name_prefix="store")
         self._conn = path if isinstance(path, sqlite3.Connection) else None
-        self._queue = self._drainer = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Writer:
         loop = asyncio.get_running_loop()
         try:
             if self._conn is None:
-                self._conn = await loop.run_in_executor(self._thread, connect, self.path)
+                self._conn = await loop.run_in_executor(     # a path: not a Connection
+                    self._thread, connect, cast("str | Path | None", self.path))
         except BaseException:
             self._thread.shutdown(wait=False)
             raise
@@ -516,30 +530,34 @@ class Writer:
         self._drainer = asyncio.create_task(self._drain())
         return self
 
-    async def __aexit__(self, *exc):
+    async def __aexit__(self, *exc: object) -> None:
         self._queue.put_nowait(None)
         try:
             await self._drainer
             if self._conn is not self.path:
-                await asyncio.get_running_loop().run_in_executor(self._thread, self._conn.close)
+                await asyncio.get_running_loop().run_in_executor(
+                    self._thread, cast("sqlite3.Connection", self._conn).close)
         finally:
             self._thread.shutdown(wait=False)
 
-    def run(self, fn, *args, **kw):
+    def run[**P, T](self, fn: Callable[Concatenate[sqlite3.Connection, P], T],
+                    *args: P.args, **kw: P.kwargs) -> Coroutine[Any, Any, T]:
         """`fn(conn, *args, **kw)` on the store's thread (a coroutine)."""
         return self._ask(False, fn, args, kw)
 
-    def batch(self, fn, *args, **kw):
+    def batch[**P, T](self, fn: Callable[Concatenate[sqlite3.Connection, P], T],
+                      *args: P.args, **kw: P.kwargs) -> Coroutine[Any, Any, T]:
         """`run`, inside one `batch` transaction."""
         return self._ask(True, fn, args, kw)
 
-    async def _ask(self, whole, fn, args, kw):
-        asked = asyncio.get_running_loop().create_future()
+    async def _ask[T](self, whole: bool, fn: Callable[..., T], args: tuple[Any, ...],
+                      kw: dict[str, Any]) -> T:
+        asked: asyncio.Future[T] = asyncio.get_running_loop().create_future()
 
-        def call():
+        def call() -> T:
             if not whole:
                 return fn(self._conn, *args, **kw)
-            with batch(self._conn):
+            with batch(cast(sqlite3.Connection, self._conn)):     # open in the block
                 got = fn(self._conn, *args, **kw)
                 # A read of the asker's state, no more: its cancel lands
                 # before the commit (rolled back) or after it (kept).
@@ -549,7 +567,7 @@ class Writer:
         self._queue.put_nowait((asked, contextvars.copy_context().run, call))
         return await asked
 
-    async def _drain(self):
+    async def _drain(self) -> None:
         """Run the queued calls on the store's thread, one at a time, until
         the None that ends the block."""
         loop = asyncio.get_running_loop()
@@ -567,7 +585,12 @@ class Writer:
                     asked.set_result(got)
 
 
-def dedup_groups(conn, table, id_col, groups, rank, describe, merge=None):
+def dedup_groups(conn: sqlite3.Connection, table: str, id_col: str,
+                 groups: Mapping[Any, list[dict[str, Any]]],
+                 rank: Callable[[dict[str, Any]], Any],
+                 describe: Callable[[dict[str, Any], list[dict[str, Any]]], str],
+                 merge: Callable[[dict[str, Any], list[dict[str, Any]]], object] | None = None
+                 ) -> int:
     """Keep one row per group, delete the rest, say so. Returns rows deleted.
 
     The two dedup passes (companies that turned out to share a board, jobs

@@ -55,12 +55,16 @@ Crawl-methodology keys, every one overridable in the track's own table:
                       (weekly) retry -- see store.record_crawl_outcome
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 from .paths import DATA_DIR
 from .profile import PROFILE, PROFILE_PATH
-from .profile_schema import ENGINE_ALIASES, parse
+from .profile_schema import ENGINE_ALIASES, Track, parse
 
 
-def _runtime(tid, t):
+def _runtime(tid: str, t: Track) -> dict[str, Any]:
     """A validated Track as the runtime dict every reader indexes."""
     d = t.model_dump(exclude={"db"})
     d.update(id=tid, label=t.label or tid,
@@ -69,7 +73,7 @@ def _runtime(tid, t):
     return d
 
 
-def _build_ui_tracks(raw):
+def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     """A [tracks] table (or None -> the built-in pair) as runtime track
     dicts, validated like a profile's.
 
@@ -95,7 +99,7 @@ def _build_ui_tracks(raw):
             for tid, t in parse({"tracks": raw or {}}).tracks.items()}
 
 
-def default_track_id(tracks):
+def default_track_id(tracks: dict[str, dict[str, Any]]) -> str | None:
     """The id of the track flagged `default`, else the first one, else
     None for an empty table.
 
@@ -114,7 +118,7 @@ UI_TRACKS = {tid: _runtime(tid, t) for tid, t in PROFILE.tracks.items()}
 DEFAULT_TRACK = default_track_id(UI_TRACKS)
 
 
-def track_for_engine(engine):
+def track_for_engine(engine: str) -> dict[str, Any]:
     """The configured track to use when an engine-level entry point is
     invoked without naming a track: the default-flagged track with that
     engine, else the first. Legacy engine names resolve too.

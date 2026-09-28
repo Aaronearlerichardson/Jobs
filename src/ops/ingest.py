@@ -1,5 +1,11 @@
 """External and hand-picked postings into a track's store: the ingest
-behind capture.py and the NLx feed, and the manual add."""
+behind capture.py and the NLx feed, the manual add, and the one-company
+crawl that pulls the added company's other postings."""
+
+from __future__ import annotations
+
+import sqlite3
+from typing import Any, cast
 
 from src import store
 from src import tags
@@ -7,13 +13,14 @@ from src.ats import coords
 from src.ats.board import company as company_fetch
 from src.match import gates
 from src.match.locality import NC_RE, geo_mode
+from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.ops.maintenance import (_mission_trusted, _scored_row, _t,
-                                 board_index, board_match, crawl_company,
+from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
+                                 _whole_board, board_index, board_match,
                                  group_by_company, track_writer)
 
 
-async def _hydrate_missing_descriptions(db, jobs):
+async def _hydrate_missing_descriptions(db: store.Writer, jobs: list[dict[str, Any]]) -> None:
     """Backfill empty descriptions on jobs linked to a company with a
     resolvable board, batched so each board is fetched once no matter how
     many of its jobs need hydrating."""
@@ -37,12 +44,14 @@ async def _hydrate_missing_descriptions(db, jobs):
                   f"{company['name']}'s {company['ats']} board")
 
 
-def _admitted(conn, jobs, source, curated, t):
+def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str, curated: bool,
+              t: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
     gates, each kept job carrying its company link (`_company_id`); a job
     already stored is touched instead."""
     import hashlib
-    kept, n_nonlocal = [], 0
+    kept: list[dict[str, Any]] = []
+    n_nonlocal = 0
     for j in jobs:
         if not j.get("id"):
             key = (j.get("url") or "") + (j.get("title") or "") + (j.get("company") or "")
@@ -84,8 +93,8 @@ def _admitted(conn, jobs, source, curated, t):
     return kept, n_nonlocal
 
 
-async def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=False,
-                               t=None):
+async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed", max_workers: int = 6,
+                               curated: bool = False, t: dict[str, Any] | None = None) -> int:
     """Ingest external job dicts into the track's jobs table with resume-fit
     scores. Each dict: {id?, title, company, url, location, description?}.
     Applies the same exclude + technical-title gate as the crawl. For
@@ -117,8 +126,46 @@ async def ingest_external_jobs(jobs, source="indeed", max_workers=6, curated=Fal
         return scored
 
 
-async def add_manual_job(url, title, company, location, description="",
-                         pull_board=True, max_workers=6, t=None):
+async def crawl_company(db: store.Writer, company: dict[str, Any], max_workers: int = 6,
+                        t: dict[str, Any] | None = None) -> tuple[int, int, int]:
+    """Fetch ONE store company's locality-scoped board (whole board for
+    watched/sweep-tagged companies), apply the track's filters, resume-fit-
+    score the new postings, and store them on `db` (a store.Writer).
+    Returns (n_fetched, n_kept, n_new). Used by the manual-add flow to pull
+    a company's other jobs once it's in the roster."""
+    t = _t(t)
+    loc_re = None if _whole_board(company,
+                                  t.get("remote_mission_floor")) else NC_RE
+    try:
+        jobs = await company_fetch.fetch_company(company, loc_re)
+    except Exception as e:
+        fetch_failed(f"fetch error for {company['name']}", e)
+        return (0, 0, 0)
+    # A successful non-empty snapshot is the authority on what this company
+    # currently lists: close stored rows that vanished, revive returners.
+    if jobs and company.get("id"):
+        await db.run(store.sync_job_statuses, company["id"], jobs, track=t["track"])
+    kept = [j for j in jobs if await _keep_job(company, j, t)]
+    fresh = await db.run(lambda conn: [j for j in kept
+                                       if not store.job_exists(conn, j["id"])])
+    n_new = 0
+    async for row in fan_out(fresh, lambda j: _score_job(company, j, t["track"]),
+                             "scoring", max_workers):
+        # Kept separate from the scoring failure fan_out reports: a store
+        # write that fails is not a scoring problem, and lumping the two
+        # together is what hid the write-lock starvation in harvest.py for
+        # a day (every locked write read as an unreachable board).
+        try:
+            await db.run(store.upsert_job, row)
+            n_new += 1
+        except Exception as e:
+            print(f"    [!] store error: {e}")
+    return (len(jobs), len(kept), n_new)
+
+
+async def add_manual_job(url: str, title: str, company: str, location: str,
+                         description: str = "", pull_board: bool = True,
+                         max_workers: int = 6, t: dict[str, Any] | None = None) -> dict[str, Any]:
     """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
     company's board resolves — pull its OTHER in-scope jobs too.
 
@@ -171,7 +218,8 @@ async def add_manual_job(url, title, company, location, description="",
         # could register/crawl one of them and file the job under the other.
         existing = await db.run(lambda conn: store.get_company(
             conn, store.company_id_by_name(conn, name)))
-        board, miss = None, None
+        board: dict[str, Any] | None = None
+        miss: str | None = None
         if not existing or not existing.get("ats"):
             print(f"  resolving board for {name!r}...")
             # A hit carrying a reason ("no-local-jobs") is a live, readable
@@ -198,7 +246,8 @@ async def add_manual_job(url, title, company, location, description="",
             print(f"    company recorded as a miss [{miss}] — board unresolved "
                   f"(gated / unknown ATS)")
         else:
-            print(f"    company already in roster (ats={existing.get('ats')})")
+            print(f"    company already in roster "
+                  f"(ats={cast(dict[str, Any], existing).get('ats')})")
 
     # 2) The single job — curated (skip exclude/technical), geo gate still on.
     print(f"  adding job: {title!r} @ {name} [{location}]")
@@ -214,7 +263,7 @@ async def add_manual_job(url, title, company, location, description="",
         row = await db.run(lambda conn: store.get_company(
             conn, store.company_id_by_name(conn, name)))
         has_board = bool(row and row.get("ats"))
-        if pull_board and has_board:
+        if pull_board and row and row.get("ats"):
             _, _, n_other = await crawl_company(db, row, max_workers, t=t)
             print(f"    pulled {n_other} other in-scope job(s) from {name}'s board")
 

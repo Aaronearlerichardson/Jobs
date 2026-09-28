@@ -25,11 +25,16 @@ store's reason CODES as strings; persisting them is the caller's job
 lives here and they live one level up.
 """
 
+from __future__ import annotations
+
+from typing import Any, cast
+
 from src import config
 from src.ats import coords
 from src.ats.board import board_for
+from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
-from src.match.locality import NC_RE
+from src.match.locality import NC_RE, LocationRE
 from src.net import http
 
 from .identity import foreign_board
@@ -37,7 +42,8 @@ from .probes import probe_company
 from .websearch_board import websearch_board
 
 
-async def read_board(comp, loc_re=None):
+async def read_board(comp: dict[str, Any],
+                     loc_re: LocationRE | None = None) -> list[dict[str, Any]] | None:
     """A resolved board's postings (`company.fetch_company`'s `validate`
     pull over its store columns `comp`), or None when the fetch failed
     and read nothing.
@@ -59,7 +65,7 @@ async def read_board(comp, loc_re=None):
     return rows if board and board.gone(http.snapshot_info()["last_error"]) else None
 
 
-async def read_local(comp):
+async def read_local(comp: dict[str, Any]) -> tuple[list[dict[str, Any]], int, str | None]:
     """(local postings, board total, miss reason) for a detected board:
     its postings in your [locality] (`read_board` with NC_RE); when there
     are none, why, in src.store.MISS_REASONS words. The read failed:
@@ -77,13 +83,13 @@ async def read_local(comp):
         return [], 0, f"fetch-error:unreadable-{ats}"
     board = board_for(ats)
     handle = board.handle(comp) if board and http.fetch_failures() == before else None
-    ok, n = await board.alive(handle) if handle else (True, 0)
+    ok, n = await cast(Board, board).alive(handle) if handle else (True, 0)
     if n > 0:
         return [], n, "no-local-jobs"
     return [], 0, f"board-dead:{ats}" if ok else f"fetch-error:unreadable-{ats}"
 
 
-async def _validate_board(comp):
+async def _validate_board(comp: dict[str, Any]) -> tuple[int, int] | None:
     """(total, nc) live posting counts of a resolved board from its cheap
     reads, as `probe_company` counts a guess: `Board.alive` (the listing's
     own total where it reports one) and `Board.local_count`. None when the
@@ -92,7 +98,9 @@ async def _validate_board(comp):
     the caller: what rejects a slug guess landing on an empty or
     nonexistent board."""
     board = board_for(comp.get("ats"))
-    handle = board.handle(comp) if board else None
+    if not board:
+        return 0, 0
+    handle = board.handle(comp)
     if not handle:
         return 0, 0
     ok, total = await board.alive(handle, f"{board.name} {handle}")
@@ -101,7 +109,7 @@ async def _validate_board(comp):
     return total, await board.local_count(handle, NC_RE) if total else 0
 
 
-async def _url_board(name, careers_url):
+async def _url_board(name: str, careers_url: str) -> tuple[str, Any, str] | None:
     """(ats, handle, careers_url) of the fetchable board `careers_url`
     itself names (`signatures.detect` on the URL), or None; a board that
     is another employer's (`identity.foreign_board`, as in every other
@@ -112,7 +120,8 @@ async def _url_board(name, careers_url):
     return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
 
 
-async def resolve_board_sniff_first(name, careers_url="", websearch=True):
+async def resolve_board_sniff_first(name: str, careers_url: str = "",
+                                    websearch: bool = True) -> dict[str, Any] | None:
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
 
@@ -138,13 +147,14 @@ async def resolve_board_sniff_first(name, careers_url="", websearch=True):
     return (await _resolve(name, careers_url, websearch))[0]
 
 
-async def _resolve(name, careers_url="", websearch=True):
+async def _resolve(name: str, careers_url: str = "", websearch: bool = True
+                   ) -> tuple[dict[str, Any] | None, str | None]:
     """resolve_board_sniff_first's hit, and the ats of the first board it
     detected but could not read (`read_board`), else None."""
     from .sniffer import sniff_ats
     unread = []
 
-    async def _mk(ats, slug, curl, via):
+    async def _mk(ats: str, slug: Any, curl: str | None, via: str) -> dict[str, Any] | None:
         counts = await _validate_board(coords.columns(ats, slug, curl))
         if counts is None:
             unread.append(ats)
@@ -155,7 +165,7 @@ async def _resolve(name, careers_url="", websearch=True):
         return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
                 "count": total, "nc": nc, "via": via}
 
-    def _out(hit):
+    def _out(hit: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
         return hit, (unread[0] if unread and not hit else None)
 
     # 0) A careers_url on a vendor's host names its board outright; the
@@ -208,7 +218,7 @@ async def _resolve(name, careers_url="", websearch=True):
     return _out(fallback)
 
 
-async def classify_miss(name, careers_url=""):
+async def classify_miss(name: str, careers_url: str = "") -> str:
     """Second look at a name that would not resolve: which src.store
     MISS_REASONS code explains it.
 
@@ -250,7 +260,8 @@ async def classify_miss(name, careers_url=""):
     return f"board-dead:{ats}"
 
 
-async def resolve_or_miss(name, careers_url=""):
+async def resolve_or_miss(name: str, careers_url: str = ""
+                          ) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve a company NAME to a crawlable board, or say why it failed.
 
     Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
@@ -278,7 +289,8 @@ async def resolve_or_miss(name, careers_url=""):
     return hit, None
 
 
-async def resolved(name, careers_url=""):
+async def resolved(name: str, careers_url: str = ""
+                   ) -> tuple[dict[str, Any] | None, str | None]:
     """`resolve_or_miss`'s (hit, reason), with a RAISE reported and turned
     into a miss reason of the same shape.
 

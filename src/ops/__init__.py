@@ -14,3 +14,5 @@ default local-engine track), so any front end can run it on any track.
     roster.py       the composite targets: open a track's store, call one
                     thing, report what it did
 """
+
+from __future__ import annotations

@@ -7,7 +7,10 @@ Workday probe, pipeline slug variants, snowball harvester and store dedup
 all used to carry their own copy of these, each with its own stopword set.
 """
 
+from __future__ import annotations
+
 import re
+from collections.abc import Iterable
 
 # Corporate suffixes stripped when guessing a domain or slug from a name: the
 # domain rarely carries them (redhat.com, not redhatinc.com), and ATS slugs
@@ -21,32 +24,8 @@ COMPANY_SUFFIXES = frozenset({
     "health", "holdings",
 })
 
-# Generic single words that collide with an unrelated DOMAIN when a
-# multi-word name is truncated to one of them: "galaxy.com" for "Galaxy
-# Diagnostics" is a fintech. Read only by risky_domain_tokens now -- the
-# matching slug rule is gone, because slug_guesses never emits a bare first
-# word in the first place ("Bio-Signal Technologies" -> "signal" used to hit
-# an unrelated Lever board).
-GENERIC_WORDS = frozenset({
-    "signal", "neuro", "neural", "brain", "medical", "health", "data",
-    "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
-    "bci", "ai", "research", "digital", "care", "vision", "sense",
-})
 
-# A "(...)" or "[...]" group, the closing bracket optional so an unbalanced
-# one still comes off ("Acme (Series A").
-_PAREN_RE = re.compile(r"\s*[\(\[][^)\]]*[\)\]]?")
-_NONALNUM_RE = re.compile(r"[^a-z0-9]")
-_WORD_RE = re.compile(r"[a-z0-9]+")
-# Word-boundary match so "biosciences" does not eat "bio"; the optional dot
-# takes "Inc." with it.
-_SUFFIX_RE = re.compile(
-    r"\b(?:" + "|".join(sorted(COMPANY_SUFFIXES)) + r")\b\.?",
-    re.IGNORECASE,
-)
-
-
-def strip_parentheticals(name):
+def strip_parentheticals(name: str | None) -> str:
     """`name` without any (...) or [...] group, an unbalanced one included.
 
     >>> strip_parentheticals("Acme Corp (NC office)")
@@ -56,10 +35,11 @@ def strip_parentheticals(name):
     >>> strip_parentheticals(None)
     ''
     """
-    return _PAREN_RE.sub("", name or "")
+    # The closing bracket is optional so an unbalanced group still comes off.
+    return re.sub(r"\s*[\(\[][^)\]]*[\)\]]?", "", name or "")
 
 
-def name_key(name):
+def name_key(name: str | None) -> str:
     """Comparison key: lowercase, everything but [a-z0-9] dropped, so one
     company under any spelling or punctuation keys the same.
 
@@ -75,7 +55,7 @@ def name_key(name):
         the same key (core and config cannot import discovery), so a name
         blocked or rejected under any spelling stays recognised here.
     """
-    return _NONALNUM_RE.sub("", (name or "").lower())
+    return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
 # The roster `source` of rows named from their board's slug and nothing
@@ -84,7 +64,7 @@ def name_key(name):
 SLUG_NAME_SOURCE = "ats_dork"
 
 
-def name_is_own_slug(name, slug):
+def name_is_own_slug(name: str | None, slug: str | None) -> bool:
     """True when `name` is nothing but its own board's slug/tenant, spelled
     out -- a roster row named "Xyz" after its Workday tenant "xyz" rather
     than the employer's real name, which a name taken from the URL leaves
@@ -128,7 +108,7 @@ def name_is_own_slug(name, slug):
     return bool(key and slug and key == name_key(slug))
 
 
-def name_words(name):
+def name_words(name: str | None) -> list[str]:
     """The lowercase alphanumeric words of `name`, parentheticals dropped.
 
     >>> name_words("Bio-Signal Technologies, Inc. (Durham)")
@@ -136,10 +116,10 @@ def name_words(name):
     >>> name_words(None)
     []
     """
-    return _WORD_RE.findall(strip_parentheticals(name).lower())
+    return re.findall(r"[a-z0-9]+", strip_parentheticals(name).lower())
 
 
-def strip_suffixes(name):
+def strip_suffixes(name: str | None) -> str:
     """`name` without parentheticals or corporate suffix words.
 
     >>> strip_suffixes("Corcept Therapeutics (NC office)")
@@ -169,72 +149,15 @@ def strip_suffixes(name):
         far more often the head word than the full name, and slug_guesses
         keeps the unstripped form as a candidate anyway.
     """
-    s = _SUFFIX_RE.sub("", strip_parentheticals(name))
+    # Word-boundary match so "biosciences" does not eat "bio"; the optional
+    # dot takes "Inc." with it.
+    s = re.sub(r"\b(?:" + "|".join(sorted(COMPANY_SUFFIXES)) + r")\b\.?", "",
+               strip_parentheticals(name), flags=re.IGNORECASE)
     s = re.sub(r"[,\.]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
 
 
-# --- junk-name screen -------------------------------------------------------
-# Words that, alone, name a job-posting section or a category rather than an
-# employer. A pasted posting yields "Required Qualifications", "Proficiency
-# in SQL." and "Oncology" as readily as it yields the employer, and each one
-# that reaches resolution costs a careers-page sniff (a dozen guessed URLs),
-# two web searches and a mission call (2026-09-01 add-names, 2026-09-02
-# reresolve logs).
-_JUNK_SECTION_WORDS = frozenset({
-    "qualifications", "qualification", "requirements", "requirement",
-    "responsibilities", "responsibility", "proficiency", "proficient",
-    "experience", "skills", "skill", "benefits", "salary", "compensation",
-    "preferred", "required", "results", "result", "title", "summary",
-    "description", "overview", "about", "apply", "applicants", "duties",
-    "education", "degree", "years", "location", "remote", "hybrid",
-    "onsite", "on-site", "position", "positions", "role", "roles", "job",
-    "jobs", "career", "careers", "posted", "ago", "full-time", "part-time",
-})
-# Category nouns a name may consist of ENTIRELY without naming anyone:
-# "Oncology", "Medical Devices", "Health Care Services".
-_JUNK_CATEGORY_WORDS = frozenset({
-    "oncology", "medical", "devices", "device", "health", "healthcare",
-    "care", "services", "service", "biotech", "biotechnology", "pharma",
-    "pharmaceutical", "pharmaceuticals", "software", "engineering",
-    "research", "clinical", "data", "analytics", "technology",
-    "technologies", "university", "hospital", "laboratory", "laboratories",
-    "science", "sciences", "life", "solutions", "consulting", "staffing",
-    "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
-    "group", "team", "company", "companies", "industry", "industries",
-})
-# A single generic word describing a LISTING's own disposition, never an
-# employer's name: a scraped roster entry that kept only a status column
-# ("Retired") reads exactly like this, the same one-word-is-the-whole-name
-# shape as _JUNK_CATEGORY_WORDS, kept apart so the reason names what it saw.
-_JUNK_STATUS_WORDS = frozenset({
-    "retired", "archived", "inactive", "expired", "discontinued",
-    "disabled", "deprecated", "closed",
-})
-_JUNK_LOCATION_RE = re.compile(
-    r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
-    re.IGNORECASE)
-# A count glued to what it counts, or to a match grade: LinkedIn chrome
-# ("1 benefit", "8 benefits", "25Low Match", "3 days ago") that the
-# 2026-09-22 reresolve spent full resolve cycles on. "Day" alone is not
-# chrome ("3 Day Blinds"), so only "days ago" counts.
-_JUNK_PREFIX_RE = re.compile(
-    r"^\s*\d+\+?\s*(?:results?|jobs?|benefits?|match(?:es)?|days?\s+ago|"
-    r"(?:low|medium|high|good|strong)\s+match)\b",
-    re.IGNORECASE)
-# "2nd", "12": a stray list index or ordinal. Digits WITH letters are
-# names ("3M", "23andMe", "Q2"), so only a bare number is rejected.
-_NUMBER_ONLY_RE = re.compile(r"^\d+(?:st|nd|rd|th)?$", re.IGNORECASE)
-# A person's name with credential suffixes (", MSHR, PHR"): a recruiter's
-# byline off a pasted posting. Two or more are required, since one is a
-# legal form or a state ("Acme, LLC", "Durham, NC").
-_CREDENTIALS_RE = re.compile(r"(?:,\s*[A-Z]{2,5}){2,}\s*$")
-_TRAILING_NUMBER_RE = re.compile(r"^(.*\S)\s+\d{1,2}$")
-_LEGAL_ABBREV_RE = re.compile(
-    r"\b(?:inc|co|corp|ltd|llc|plc|sa|ag|gmbh|bv|nv|jr|sr)\.$", re.IGNORECASE)
-
-
-def junk_name_reason(name):
+def junk_name_reason(name: str | None) -> str:
     """Why `name` is not an employer, or '' when it may be one.
 
     A screen, not a verdict: it rejects only the shapes that a pasted job
@@ -318,47 +241,93 @@ def junk_name_reason(name):
     ...     "10x Genomics", "Acme, LLC")]
     ['', '', '', '', '']
     """
+    # Why a pasted name gets screened at all: a pasted posting yields
+    # "Required Qualifications", "Proficiency in SQL." and "Oncology" as
+    # readily as it yields the employer, and each one that reaches
+    # resolution costs a careers-page sniff (a dozen guessed URLs), two web
+    # searches and a mission call (2026-09-01 add-names, 2026-09-02
+    # reresolve logs).
     s = (name or "").strip()
     if not s:
         return "empty"
-    if _JUNK_PREFIX_RE.match(s):
+    # A count glued to what it counts, or to a match grade: LinkedIn chrome
+    # ("1 benefit", "8 benefits", "25Low Match", "3 days ago") that the
+    # 2026-09-22 reresolve spent full resolve cycles on. "Day" alone is not
+    # chrome ("3 Day Blinds"), so only "days ago" counts.
+    if re.match(r"^\s*\d+\+?\s*(?:results?|jobs?|benefits?|match(?:es)?|days?\s+ago|"
+                r"(?:low|medium|high|good|strong)\s+match)\b", s, re.IGNORECASE):
         return "listing-chrome"
-    if _NUMBER_ONLY_RE.match(s):
+    # "2nd", "12": a stray list index or ordinal. Digits WITH letters are
+    # names ("3M", "23andMe", "Q2"), so only a bare number is rejected.
+    if re.match(r"^\d+(?:st|nd|rd|th)?$", s, re.IGNORECASE):
         return "number-only"
-    if _CREDENTIALS_RE.search(s):
+    # A person's name with credential suffixes (", MSHR, PHR"): a
+    # recruiter's byline off a pasted posting. Two or more are required,
+    # since one is a legal form or a state ("Acme, LLC", "Durham, NC").
+    if re.search(r"(?:,\s*[A-Z]{2,5}){2,}\s*$", s):
         return "person-credentials"
-    if _JUNK_LOCATION_RE.search(s):
+    if re.search(r"\barea\b|\(on-?site|\(remote|\(hybrid|\bmetropolitan\b|\bcounty\b",
+                 s, re.IGNORECASE):
         return "location-string"
     words = name_words(s)
     if not words or (len(s) < 2):
         return "too-short"
     if len(words) > 7:
         return "too-long"
-    if s[-1] in ".:;,!?" and not _LEGAL_ABBREV_RE.search(s):
+    # Words that, alone, name a job-posting section rather than an employer.
+    section = {
+        "qualifications", "qualification", "requirements", "requirement",
+        "responsibilities", "responsibility", "proficiency", "proficient",
+        "experience", "skills", "skill", "benefits", "salary", "compensation",
+        "preferred", "required", "results", "result", "title", "summary",
+        "description", "overview", "about", "apply", "applicants", "duties",
+        "education", "degree", "years", "location", "remote", "hybrid",
+        "onsite", "on-site", "position", "positions", "role", "roles", "job",
+        "jobs", "career", "careers", "posted", "ago", "full-time", "part-time",
+    }
+    if s[-1] in ".:;,!?" and not re.search(
+            r"\b(?:inc|co|corp|ltd|llc|plc|sa|ag|gmbh|bv|nv|jr|sr)\.$", s, re.IGNORECASE):
         # A trailing period belongs to a legal abbreviation ("Cala Health,
         # Inc.") or to a sentence; any other end punctuation to a sentence.
-        if s[-1] == "." and any(w in _JUNK_SECTION_WORDS for w in words):
+        if s[-1] == "." and any(w in section for w in words):
             return "section-heading"
         return "sentence-fragment"
-    if all(w in _JUNK_SECTION_WORDS or w in {"in", "with", "and", "or", "of", "the", "a", "to"}
+    if all(w in section or w in {"in", "with", "and", "or", "of", "the", "a", "to"}
            for w in words):
         return "section-heading"
-    if words[0] in _JUNK_SECTION_WORDS and len(words) >= 2 and words[1] in (
-            _JUNK_SECTION_WORDS | {"in", "with", "of"}):
+    if words[0] in section and len(words) >= 2 and words[1] in (
+            section | {"in", "with", "of"}):
         return "section-heading"
-    if all(w in _JUNK_CATEGORY_WORDS for w in words):
+    # Category nouns a name may consist of ENTIRELY without naming anyone:
+    # "Oncology", "Medical Devices", "Health Care Services".
+    if all(w in {
+            "oncology", "medical", "devices", "device", "health", "healthcare",
+            "care", "services", "service", "biotech", "biotechnology", "pharma",
+            "pharmaceutical", "pharmaceuticals", "software", "engineering",
+            "research", "clinical", "data", "analytics", "technology",
+            "technologies", "university", "hospital", "laboratory", "laboratories",
+            "science", "sciences", "life", "solutions", "consulting", "staffing",
+            "recruiting", "diagnostics", "therapeutics", "and", "of", "the",
+            "group", "team", "company", "companies", "industry", "industries",
+            } for w in words):
         return "category-only"
-    if all(w in _JUNK_STATUS_WORDS for w in words):
+    # A single generic word describing a LISTING's own disposition, never an
+    # employer's name: a scraped roster entry that kept only a status column
+    # ("Retired") reads exactly like this, the same one-word-is-the-whole-name
+    # shape as a category, kept apart so the reason names what it saw.
+    if all(w in {"retired", "archived", "inactive", "expired", "discontinued",
+                 "disabled", "deprecated", "closed"} for w in words):
         return "status-only"
-    m = _TRAILING_NUMBER_RE.match(s)
+    m = re.match(r"^(.*\S)\s+\d{1,2}$", s)
     if m and len(words) >= 2 and not re.search(r"\d", m.group(1)) \
             and m.group(1).split()[-1].lower() not in {"studio", "area", "channel", "route", "no", "number"}:
         return "numbered-duplicate"
     return ""
 
 
-def _dedupe(items):
-    out, seen = [], set()
+def _dedupe(items: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
     for t in items:
         if t and t not in seen:
             seen.add(t)
@@ -366,7 +335,7 @@ def _dedupe(items):
     return out
 
 
-def domain_tokens(name):
+def domain_tokens(name: str | None) -> list[str]:
     """Likely domain tokens for `name`, best first: the full joined name,
     then the suffix-stripped joined form, then the bare first word.
 
@@ -391,11 +360,11 @@ def domain_tokens(name):
     return _dedupe(["".join(words), "".join(kept), kept[0] if kept else words[0]])
 
 
-def risky_domain_tokens(name):
+def risky_domain_tokens(name: str | None) -> set[str]:
     """The domain_tokens(name) that are a TRUNCATED guess at a multi-word
-    company's domain: the bare first word, or a generic word from
-    GENERIC_WORDS. A hit reached only through one of these has no post-hoc
-    job count to sanity-check it against, so the fetched page has to
+    company's domain: the bare first word, or a generic word. A hit
+    reached only through one of these has no post-hoc job count to
+    sanity-check it against, so the fetched page has to
     corroborate the company name (see src.discovery.resolve.identity._corroborates) first.
 
     >>> sorted(risky_domain_tokens("Galaxy Diagnostics"))
@@ -423,11 +392,19 @@ def risky_domain_tokens(name):
     if len(words) < 2:
         return set()
     full = "".join(words)
+    # Generic single words that collide with an unrelated DOMAIN when a
+    # multi-word name is truncated to one of them: "galaxy.com" for "Galaxy
+    # Diagnostics" is a fintech. (slug_guesses never emits a bare first word:
+    # "Bio-Signal Technologies" -> "signal" used to hit an unrelated Lever
+    # board.)
     return {t for t in domain_tokens(name)
-            if t != full and (t == words[0] or t in GENERIC_WORDS)}
+            if t != full and (t == words[0] or t in {
+                "signal", "neuro", "neural", "brain", "medical", "health", "data",
+                "bio", "tech", "labs", "lab", "systems", "smart", "micro", "nano",
+                "bci", "ai", "research", "digital", "care", "vision", "sense"})}
 
 
-def slug_guesses(name):
+def slug_guesses(name: str | None) -> list[str]:
     """ATS-slug guesses for `name`, in probe order: joined, hyphenated, and
     suffix-stripped-joined.
 

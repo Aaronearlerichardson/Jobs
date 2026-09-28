@@ -11,21 +11,21 @@ Use it two ways:
   await fetch_jsonld_page(company, url)
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
+from collections.abc import Callable
+from typing import Any
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import norm_posted_date as _norm_posted
 from src.net.util import jsonld_scripts, parse_markup, stable_id, text_from_html
 
-_JOB_URL_HINTS = re.compile(
-    r"/(jobs?|careers?|positions?|openings?|vacancies|listings?)/", re.I
-)
 
-
-def extract_jsonld(html, url=""):
+def extract_jsonld(html: str, url: str = "") -> list[Any]:
     """Find every <script type=application/ld+json> block in the page at
     `url`; return parsed objects, a list's items and an @graph's members
     each one; a trailing comma is forgiven.
@@ -34,7 +34,7 @@ def extract_jsonld(html, url=""):
     ...                ' "title": "Chemist",}]}</script>')
     [{'@type': 'JobPosting', 'title': 'Chemist'}]
     """
-    out = []
+    out: list[Any] = []
     for script in jsonld_scripts(parse_markup(html, url=url)):
         txt = script.text
         if not txt:
@@ -57,7 +57,7 @@ def extract_jsonld(html, url=""):
     return out
 
 
-def is_jobposting(obj):
+def is_jobposting(obj: Any) -> bool:
     if not isinstance(obj, dict):
         return False
     t = obj.get("@type")
@@ -66,7 +66,7 @@ def is_jobposting(obj):
     return "JobPosting" in str(t or "")
 
 
-def _one_location(loc):
+def _one_location(loc: Any) -> str:
     """One jobLocation entry -> display string ('' when unreadable)."""
     if not isinstance(loc, dict):
         return str(loc or "").strip()
@@ -83,7 +83,7 @@ def _one_location(loc):
     return ""
 
 
-def _normalize_location(jp):
+def _normalize_location(jp: dict[str, Any]) -> str:
     # Multi-location postings list several jobLocation entries; taking only
     # the first hid every secondary site (a "Remote"-first posting with a
     # Durham office read as just "Remote"). Join them all.
@@ -105,11 +105,7 @@ def _normalize_location(jp):
     return "Unknown"
 
 
-def _normalize_description(jp):
-    return text_from_html(jp.get("description", "") or "")
-
-
-def read_posting(jp, page_url=""):
+def read_posting(jp: dict[str, Any], page_url: str = "") -> dict[str, Any]:
     """A JobPosting's values, plain: `title`, `url` (the posting's own, else
     `page_url`), `location` ("" when it names none), `description` (text),
     `posted_at` (as written), `key` (its identifier, else a stable id of
@@ -131,7 +127,7 @@ def read_posting(jp, page_url=""):
         "title": str(jp.get("title") or jp.get("name") or "").strip(),
         "url": str(job_url) if job_url else page_url,
         "location": "" if location == "Unknown" else location,
-        "description": _normalize_description(jp),
+        "description": text_from_html(jp.get("description", "") or ""),
         "posted_at": jp.get("datePosted"),
         "key": str(identifier or stable_id(str(job_url))),
         # Structured remote signal: schema.org marks remote roles explicitly.
@@ -139,12 +135,12 @@ def read_posting(jp, page_url=""):
     }
 
 
-def postings(html, page_url=""):
+def postings(html: str, page_url: str = "") -> list[dict[str, Any]]:
     """Every JobPosting on a page, as `read_posting` records."""
     return [read_posting(o, page_url) for o in extract_jsonld(html, page_url) if is_jobposting(o)]
 
 
-def _job_from_posting(jp, company_name, source_url):
+def _job_from_posting(jp: dict[str, Any], company_name: str, source_url: str) -> dict[str, Any]:
     p = read_posting(jp, source_url)
     job = {
         "id":          f"jsonld_{company_name.replace(' ', '_')}_{p['key']}",
@@ -160,7 +156,9 @@ def _job_from_posting(jp, company_name, source_url):
     return job
 
 
-async def fetch_jsonld_page(company_name, page_url, gate=None, timeout=None):
+async def fetch_jsonld_page(company_name: str, page_url: str,
+                            gate: Callable[..., bool] | None = None,
+                            timeout: tuple[float, float] | None = None) -> list[dict[str, Any]]:
     """Fetch ONE URL; extract JobPosting records from its JSON-LD, read off
     the loop."""
     try:

@@ -10,9 +10,13 @@ scanning probes and the web-search resolver, so it depends on nothing in
 this package.
 """
 
+from __future__ import annotations
+
 import asyncio
 import re
 import sys
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from src import config, runstate
 from src.ats.board import BOARDS
@@ -36,7 +40,7 @@ from src.net.http import HEADERS
 # corroborate against the page content before it's trusted.
 
 
-def _risky_token_in_url(url, name):
+def _risky_token_in_url(url: str, name: str) -> str:
     """The risky domain token (names.risky_domain_tokens) `url`'s host
     was built from, or "" if the host isn't one of those — including when
     it's ALSO reachable via a safe (full/suffix-stripped) token, since the
@@ -63,7 +67,7 @@ def _risky_token_in_url(url, name):
     return ""
 
 
-def _corroborates(text, name, skip_token=""):
+def _corroborates(text: str | None, name: str | None, skip_token: str = "") -> bool:
     """True if `text` actually mentions `name` beyond the (possibly
     generic/truncated) domain token that reached it — the check a
     risky-token hit (see _risky_token_in_url) must pass before it's
@@ -93,25 +97,18 @@ def _corroborates(text, name, skip_token=""):
     return any(w in blob for w in words)
 
 
-# Tokens that appear in a handle's parts for structural reasons and say
-# nothing about WHOSE board it is.
-_BOARD_GENERIC = {"jobs", "job", "careers", "career", "external", "site",
-                  "portal", "search", "global", "en", "us", "www", "com"}
-_NAME_GENERIC = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
-                 "the", "and", "of", "gmbh", "ag", "sa"}
-
 # (name, ats, board) whose foreign-board verdict was already printed this
 # run; the verdicts themselves are the process's, in src.claude.
-_FOREIGN_ANNOUNCED = runstate.per_run(set)
+_FOREIGN_ANNOUNCED: Callable[[], set[tuple[str, str, str]]] = runstate.per_run(set)
 
 
-def _words(parts):
+def _words(parts: Sequence[Any]) -> list[str]:
     """A handle's parts that can name an employer: the numeric ones (a
     server pod) dropped."""
     return [str(p) for p in parts if p is not None and not str(p).isdigit()]
 
 
-def _affinity(name, parts):
+def _affinity(name: str, parts: Sequence[Any]) -> bool:
     """True if a detected handle's `parts` share an identity token with the
     company name: any part, either direction, or a 4+-char shared prefix
     (tenants abbreviate: 'vhr-unither').
@@ -132,11 +129,17 @@ def _affinity(name, parts):
     >>> _affinity("Merck & Co.", ("msd", 5, "SearchJobs"))
     False
     """
+    # Tokens that appear in a handle's parts for structural reasons and say
+    # nothing about WHOSE board it is.
+    board_generic = {"jobs", "job", "careers", "career", "external", "site",
+                     "portal", "search", "global", "en", "us", "www", "com"}
+    name_generic = {"inc", "llc", "ltd", "plc", "corp", "corporation", "co",
+                    "the", "and", "of", "gmbh", "ag", "sa"}
     board = " ".join(re.sub(r'([a-z])([A-Z])', r'\1 \2', w) for w in _words(parts))
     board_toks = [t for t in re.findall(r"[a-z0-9]+", board.lower())
-                  if len(t) >= 3 and t not in _BOARD_GENERIC]
+                  if len(t) >= 3 and t not in board_generic]
     name_words = [w for w in re.findall(r"[a-z0-9]+", (name or "").lower())
-                  if w not in _NAME_GENERIC]
+                  if w not in name_generic]
     squashed_name = "".join(name_words)
     squashed_board = "".join(board_toks)
     for bt in board_toks:
@@ -152,7 +155,7 @@ def _affinity(name, parts):
     return False
 
 
-async def foreign_board(name, ats, handle):
+async def foreign_board(name: str, ats: str, handle: Any) -> bool:
     """True when `handle`, a board of `ats` detected for `name`, should NOT
     be attributed to it: `ats`'s spec says a board can be a parent
     company's (`discovery.shared`), the handle's parts share no identity
@@ -219,7 +222,7 @@ async def foreign_board(name, ats, handle):
 # candidate_pages makes structural.
 
 
-def corroborated(url, name, text):
+def corroborated(url: str, name: str, text: str | None) -> bool:
     """False when `url` reaches `name`'s page only through a risky domain
     token and the page does nothing to back that up.
 
@@ -233,7 +236,8 @@ def corroborated(url, name, text):
     return not risky or _corroborates(text, name, risky)
 
 
-async def candidate_responses(name, careers_url="", **kw):
+async def candidate_responses(name: str, careers_url: str = "", **kw: Any
+                              ) -> list[tuple[str, Any]]:
     """`name`'s candidate URLs paired with what each one answered, in
     candidate-priority order. `None` where a URL did not answer at all.
     `kw` goes to `candidate_urls` (patterns, cap).
@@ -257,7 +261,8 @@ async def candidate_responses(name, careers_url="", **kw):
     return [(u, responses.get(u)) for u in urls]
 
 
-async def candidate_pages(name, careers_url="", **kw):
+async def candidate_pages(name: str, careers_url: str = "", **kw: Any
+                          ) -> list[Any]:
     """The responses from `name`'s candidate URLs, best first, with the
     ones that did not answer and the ones that do not corroborate (judged
     off the loop) already dropped. `kw` goes to `candidate_urls`
@@ -285,7 +290,8 @@ async def candidate_pages(name, careers_url="", **kw):
 # island inside that module before they moved here.
 
 
-def _hq_match_beyond_brand(text, name, hq_re=None):
+def _hq_match_beyond_brand(text: str | None, name: str,
+                           hq_re: re.Pattern[str] | None = None) -> bool:
     r"""True if `text` carries a "<place>, ST" match whose place is NOT just
     the company's own name: a match whose place tokens all appear in the
     company name is brand text, and a match on any OTHER configured place
@@ -321,7 +327,8 @@ def _hq_match_beyond_brand(text, name, hq_re=None):
     return False
 
 
-async def nc_hq_signal(name, careers_url="", board_jobs=None):
+async def nc_hq_signal(name: str, careers_url: str = "",
+                       board_jobs: list[dict[str, Any]] | None = None) -> bool:
     """
     True if the company has a verifiable NC presence — used to TRACK local
     companies that currently have no NC openings. Checks the board's job

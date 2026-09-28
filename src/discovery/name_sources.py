@@ -30,16 +30,6 @@ _MAJORS_KEYS = {name_key(m) for m in MAJORS}
 NAME_BLOCKLIST = config.DISCOVERY_NAME_BLOCKLIST
 
 
-# Non-company noise seen in `/company/<slug>/` harvesting: image placeholders,
-# nav/facet labels, listicle fragments — dropped before probing. Matches as a
-# PREFIX (`\b`) because it comes from Title-Cased `/company/<slug>/` fragments
-# that are never followed by more real words ("Company Types", "Careers").
-_NAME_NOISE_RE = re.compile(
-    r"^(fallback[\s-]?image|compan(y|ies)|directory|home|built in|search|menu|"
-    r"about|contact|careers?|jobs?|privacy|terms|cookie|login|register|"
-    r"company[\s_-]?types?|facility[\s_-]?types?|availability|operator|opt)\b",
-    re.I)
-
 # Site chrome seen in a PASTED LinkedIn/Indeed/Glassdoor page (nav bar items,
 # sidebar CTAs, notification badges). Same idea as `_NAME_NOISE_RE` above —
 # extended for the paste surface rather than a parallel filter — but matches
@@ -113,7 +103,7 @@ _AGGREGATOR_BRANDS = {
 }
 
 
-def _is_nav_noise(name):
+def _is_nav_noise(name: str | None) -> bool:
     """True if `name` is a pasted-page chrome line (nav item, CTA,
     notification badge) — the check behind the paste parser's
     `_clean_candidate()`. Also covers two slug/label shapes, shared with
@@ -154,27 +144,35 @@ def _is_nav_noise(name):
                 or re.fullmatch(r"[a-z]+(?: [a-z]+)*", n))
 
 
-def _looks_like_company(name):
+def _looks_like_company(name: str | None) -> bool:
+    # Non-company noise seen in `/company/<slug>/` harvesting: image
+    # placeholders, nav/facet labels, listicle fragments — dropped before
+    # probing. Matches as a PREFIX (`\b`) because it comes from
+    # Title-Cased `/company/<slug>/` fragments that are never followed by
+    # more real words ("Company Types", "Careers").
+    name_noise_re = re.compile(
+        r"^(fallback[\s-]?image|compan(y|ies)|directory|home|built in|search|menu|"
+        r"about|contact|careers?|jobs?|privacy|terms|cookie|login|register|"
+        r"company[\s_-]?types?|facility[\s_-]?types?|availability|operator|opt)\b",
+        re.I)
     n = (name or "").strip()
     if not (2 < len(n) < 45) or not re.search(r"[A-Za-z]", n):
         return False
-    if _NAME_NOISE_RE.match(n) or _is_nav_noise(n):
+    if name_noise_re.match(n) or _is_nav_noise(n):
         return False   # facet-slug noise, nav/CTA chrome, or a snake_case name
     if re.search(r"\b(jobs|startups?|startup week|ecosystem|degrees?)\b", n, re.I):
         return False   # listicle/region phrases, not employers
     return True
 
 
-# On a directory/listicle page, an employer is a `/company/<slug>/` link.
-_COMPANY_SLUG_RE = re.compile(r"/company/([a-z0-9][a-z0-9\-]{2,58})/?", re.I)
-_STOP_SLUGS = {"research-triangle-park"}
-
-
-def _names_from_html(html):
+def _names_from_html(html: str | None) -> set[str]:
+    # On a directory/listicle page, an employer is a `/company/<slug>/` link.
+    company_slug_re = re.compile(r"/company/([a-z0-9][a-z0-9\-]{2,58})/?", re.I)
+    stop_slugs = {"research-triangle-park"}
     out = set()
-    for slug in _COMPANY_SLUG_RE.findall(html or ""):
+    for slug in company_slug_re.findall(html or ""):
         s = slug.lower()
-        if s in _STOP_SLUGS or "fallback-image" in s:
+        if s in stop_slugs or "fallback-image" in s:
             continue
         # Crunchbase-style duplicate slugs carry a single-digit suffix
         # ("genomics-plc-1"), which title-cases into a bogus "Genomics Plc 1"
@@ -185,7 +183,9 @@ def _names_from_html(html):
     return {n for n in out if _looks_like_company(n)}
 
 
-async def scrape_directory_names(url, timeout=config.FETCH_TIMEOUT):
+async def scrape_directory_names(
+        url: str,
+        timeout: float | tuple[float, float] | None = config.FETCH_TIMEOUT) -> list[str]:
     """Employer names from a directory page's `/company/<slug>/` links — works
     for any site with that shape (RTP.org, Built In, chamber directories).
     Server-rendered only; JS-loaded facets are out of scope. The page is
@@ -199,7 +199,8 @@ async def scrape_directory_names(url, timeout=config.FETCH_TIMEOUT):
     return sorted(await asyncio.to_thread(lambda: _names_from_html(r.text)))
 
 
-async def harvest_search_names(queries, per_query=12, fetch_dirs=10):
+async def harvest_search_names(queries: list[str], per_query: int = 12,
+                               fetch_dirs: int = 10) -> list[str]:
     """The main recall lever: web-search each query, then scrape the directory/
     listicle results (Built In, Growjo, Crunchbase, ...) for `/company/<slug>/`
     employer links. Every name is probed downstream, so residual noise just
@@ -220,10 +221,10 @@ async def harvest_search_names(queries, per_query=12, fetch_dirs=10):
     names = set()
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
-            r = await http.send("GET", u, timeout=config.FETCH_TIMEOUT, headers=HEADERS)
+            resp = await http.send("GET", u, timeout=config.FETCH_TIMEOUT, headers=HEADERS)
         except Exception:
             continue
-        names |= await asyncio.to_thread(lambda: _names_from_html(r.text))
+        names |= await asyncio.to_thread(lambda: _names_from_html(resp.text))
     return sorted(names)
 
 
@@ -233,7 +234,7 @@ class CompanyNames(Reply):
     companies: list[str]
 
 
-async def brainstorm_company_names(n=None):
+async def brainstorm_company_names(n: int | None = None) -> list[str]:
     """One LLM call listing REAL employers matching the profile's region +
     domain — a stage-1 name source reaching companies that directory sites
     never list (private CROs, hospital-system tech arms, spinouts).
@@ -271,7 +272,7 @@ async def brainstorm_company_names(n=None):
     return names
 
 
-async def gather_names(extra=None):
+async def gather_names(extra: list[str] | None = None) -> list[str]:
     """Union of all name sources, de-duplicated case-insensitively:
     profile seeds + majors + configured directory scrapes + web-search
     harvesting + an LLM region/domain brainstorm + any explicit `extra`."""

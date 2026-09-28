@@ -9,3 +9,5 @@ The top of the src/ import graph: the targets live in src/crawl, src/ops
 and src/discovery, and only src/web and the root entry scripts import this
 package, so the harvester never loads it.
 """
+
+from __future__ import annotations

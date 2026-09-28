@@ -10,11 +10,15 @@ memo, DNS verdict cache and bounded page memo, and `_fetch_all`, the
 concurrent fetch that consults them.
 """
 
+from __future__ import annotations
+
 import asyncio
 import functools
 import logging
 import socket
 import time
+from collections.abc import Callable
+from typing import Any
 
 from src import config, runstate
 from src.config import PROBE_TIMEOUT
@@ -56,12 +60,12 @@ _URL_PATTERNS = [
 ]
 ROOT_PATTERNS = [p for p in _URL_PATTERNS if p == ("www.{tok}.com", "/")]
 
-# Cap on speculative GETs per name. A miss pays every one of them.
-_URL_CAP = 12
 
-
-def candidate_urls(name, careers_url="", patterns=_URL_PATTERNS, cap=_URL_CAP):
-    """Careers-page URLs to fetch for `name`, best first, `cap` at most.
+def candidate_urls(name: str, careers_url: str = "",
+                   patterns: list[tuple[str, str]] = _URL_PATTERNS,
+                   cap: int = 12) -> list[str]:
+    """Careers-page URLs to fetch for `name`, best first, `cap` at most:
+    each is a speculative GET, and a miss pays every one of them.
 
     >>> for u in candidate_urls("Merakris Therapeutics")[:4]:
     ...     print(u)
@@ -143,10 +147,11 @@ _DEAD_HOSTS = runstate.per_run(functools.partial(HostBreaker, ttl=_DEAD_HOST_TTL
 # intertek.com, and a 403ing infosys.com in the 2026-09-01 add-names runs).
 # Same URL, same run, same answer: hand back the first one. Bounded (see
 # _memo_put) so a long discovery run can't hoard page bodies.
-_PAGE_MEMO = runstate.per_run(dict)
+_PAGE_MEMO: Callable[[], dict[str, tuple[float, Any]]] = \
+    runstate.per_run(dict)
 
 
-def _memo_get(url):
+def _memo_get(url: str) -> tuple[bool, Any]:
     memo = _PAGE_MEMO()
     hit = memo.get(url)
     if hit is None:
@@ -157,7 +162,7 @@ def _memo_get(url):
     return True, hit[1]
 
 
-def _memo_put(url, resp):
+def _memo_put(url: str, resp: Any) -> None:
     """Remember `url`'s outcome: 512 URLs at most, the oldest dropped
     first, and no body over 2 MB."""
     if resp is not None and len(resp.content or b"") > 2 * 1024 * 1024:
@@ -168,7 +173,9 @@ def _memo_put(url, resp):
     memo[url] = (time.time(), resp)
 
 
-async def _fetch_page(url, timeout=PROBE_TIMEOUT):
+async def _fetch_page(url: str,
+                      timeout: float | tuple[float, float] = PROBE_TIMEOUT
+                      ) -> Any:
     """GET one careers-page candidate. Short timeout: most are speculative
     domain/path guesses that 404 or don't resolve; a real careers page
     answers fast. Returns the Response on 200 with real content (its text
@@ -205,10 +212,10 @@ async def _fetch_page(url, timeout=PROBE_TIMEOUT):
 # refusing or timing out (VPN plus a second adapter, 2026-09-02 reresolve:
 # 32 names abandoned by the stall watchdog at once, 2 of 50 resolved), that
 # was minutes per name. Resolve each host ONCE, bounded, before any GET.
-_DNS_CACHE = runstate.per_run(dict)
+_DNS_CACHE: Callable[[], dict[str, tuple[float, bool]]] = runstate.per_run(dict)
 
 
-async def _drop_unresolvable(urls, timeout=4.0):
+async def _drop_unresolvable(urls: list[str], timeout: float = 4.0) -> list[str]:
     """`urls` minus every one whose host is known dead or fails a bounded
     DNS lookup. Distinct hosts are resolved concurrently, 8 at a time, each
     lookup off the loop and each once per run: a failure marks the host
@@ -223,28 +230,28 @@ async def _drop_unresolvable(urls, timeout=4.0):
         during a loop stall counts as done when the timeout is read. A
         task hop between them (loop.getaddrinfo in its own task) lost
         that race: 4-16 hosts per syn150 run were wrongly "silent"."""
-    hosts = {}
+    hosts: dict[str, list[str]] = {}
     for u in urls:
         h = host_of(u)
         if h:
             hosts.setdefault(h, []).append(u)
     dead, verdicts = _DEAD_HOSTS(), _DNS_CACHE()
 
-    def known(h):
-        return verdicts.get(h) and time.time() - verdicts[h][0] < _DEAD_HOST_TTL
+    def known(h: str) -> bool:
+        return bool(verdicts.get(h) and time.time() - verdicts[h][0] < _DEAD_HOST_TTL)
 
     todo = [h for h in hosts if not dead.dead(f"https://{h}/") and not known(h)]
     slow = set()
     if todo:
         loop, slots = asyncio.get_running_loop(), asyncio.Semaphore(8)
 
-        def record(h, ok):
+        def record(h: str, ok: bool) -> None:
             verdicts[h] = (time.time(), ok)
             if not ok:
                 dead.trip(f"https://{h}/")
                 _log.debug("skip host %s: does not resolve", h)
 
-        def lookup(h):
+        def lookup(h: str) -> None:
             try:
                 socket.getaddrinfo(h, 443, proto=socket.IPPROTO_TCP)
                 ok = True
@@ -252,7 +259,7 @@ async def _drop_unresolvable(urls, timeout=4.0):
                 ok = False
             loop.call_soon_threadsafe(record, h, ok)
 
-        async def resolve(h):
+        async def resolve(h: str) -> None:
             async with slots:
                 if not known(h):
                     await asyncio.to_thread(lookup, h)
@@ -267,7 +274,7 @@ async def _drop_unresolvable(urls, timeout=4.0):
             if host_of(u) not in slow and not dead.dead(u)]
 
 
-async def _fetch_all(urls):
+async def _fetch_all(urls: list[str]) -> dict[str, Any]:
     """Fetch candidates concurrently (a miss otherwise pays ~12 sequential
     GETs — the dominant per-candidate latency in a bulk run); results are
     evaluated in priority order regardless of completion order. Every
@@ -286,7 +293,7 @@ async def _fetch_all(urls):
         return out
     slots = asyncio.Semaphore(8)
 
-    async def fetch(url):
+    async def fetch(url: str) -> Any:
         async with slots:
             return await _fetch_page(url)
 

@@ -33,25 +33,21 @@ Notes:
     deliberately no headless-browser path here.
 """
 
+from __future__ import annotations
+
 import asyncio
 import json
 import re
 from collections import deque
+from collections.abc import Callable
+from typing import Any
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import host_of, norm_posted_date, strip_html, text_from_html
 
-_JOB_PATH_RE = re.compile(r"/companies/([^/?#]+)/jobs/(\d+)(?:-([^/?#]*))?")
-_NEXT_DATA_RE = re.compile(
-    r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S)
-_LOC_RE = re.compile(r"<loc>\s*([^<]+?)\s*</loc>")
-_URL_BLOCK_RE = re.compile(r"<url>(.*?)</url>", re.S)
-_LASTMOD_RE = re.compile(r"<lastmod>\s*([^<]+?)\s*</lastmod>")
-_SITEMAP_BLOCK_RE = re.compile(r"<sitemap>(.*?)</sitemap>", re.S)
 
-
-def board_host(board_url):
+def board_host(board_url: str | None) -> str:
     """The board's hostname, lowercased — the ``getro:<host>`` provenance
     tag and the name the crawl reports the source under.
 
@@ -70,7 +66,7 @@ def board_host(board_url):
     return host_of(value)
 
 
-def board_origin(board_url):
+def board_origin(board_url: str | None) -> str:
     """``https://<host>`` for the board, whichever page of it was given.
 
     >>> board_origin("https://jobs.example.org/companies/acme/jobs/1-x")
@@ -82,7 +78,7 @@ def board_origin(board_url):
     return f"https://{host}" if host else ""
 
 
-def title_from_slug(slug):
+def title_from_slug(slug: str | None) -> str:
     """The words of a job URL's title slug, as the relevance filter reads
     them. The slug is the only title the sitemap carries.
 
@@ -96,7 +92,7 @@ def title_from_slug(slug):
     return re.sub(r"[-_]+", " ", slug or "").strip()
 
 
-def parse_sitemap(xml, origin=""):
+def parse_sitemap(xml: str | None, origin: str = "") -> tuple[list[dict[str, str]], list[str]]:
     """(job entries, child sitemap URLs) from one sitemap document.
 
     Job entries are dicts ``{url, id, org_slug, title_guess, lastmod}``;
@@ -114,21 +110,22 @@ def parse_sitemap(xml, origin=""):
     ...               '</sitemap></sitemapindex>')
     ([], ['https://b.org/s1.xml'])
     """
+    loc = r"<loc>\s*([^<]+?)\s*</loc>"
     children = []
-    for block in _SITEMAP_BLOCK_RE.findall(xml or ""):
-        m = _LOC_RE.search(block)
+    for block in re.findall(r"<sitemap>(.*?)</sitemap>", xml or "", re.S):
+        m = re.search(loc, block)
         if m:
             children.append(m.group(1))
     jobs = []
-    for block in _URL_BLOCK_RE.findall(xml or ""):
-        m = _LOC_RE.search(block)
+    for block in re.findall(r"<url>(.*?)</url>", xml or "", re.S):
+        m = re.search(loc, block)
         if not m:
             continue
         url = m.group(1)
-        pm = _JOB_PATH_RE.search(url)
+        pm = re.search(r"/companies/([^/?#]+)/jobs/(\d+)(?:-([^/?#]*))?", url)
         if not pm:
             continue
-        lm = _LASTMOD_RE.search(block)
+        lm = re.search(r"<lastmod>\s*([^<]+?)\s*</lastmod>", block)
         jobs.append({
             "url":         url,
             "id":          pm.group(2),
@@ -139,9 +136,9 @@ def parse_sitemap(xml, origin=""):
     return jobs, children
 
 
-def _current_job(page_html):
+def _current_job(page_html: str | None) -> dict[str, Any] | None:
     """The ``currentJob`` record embedded in a job page, or None."""
-    m = _NEXT_DATA_RE.search(page_html or "")
+    m = re.search(r'<script[^>]+id="__NEXT_DATA__"[^>]*>(.*?)</script>', page_html or "", re.S)
     if not m:
         return None
     try:
@@ -153,7 +150,8 @@ def _current_job(page_html):
     return job if isinstance(job, dict) else None
 
 
-def parse_job_page(page_html, board_url, page_url=""):
+def parse_job_page(page_html: str | None, board_url: str,
+                   page_url: str = "") -> dict[str, Any] | None:
     """One server-rendered job page as a crawler job dict, or None.
 
     The job's ``url`` is the employer's OWN posting (the apply link), not
@@ -176,7 +174,8 @@ def parse_job_page(page_html, board_url, page_url=""):
     if (job.get("status") not in (None, "active")
             or job.get("closedAt") or job.get("deactivatedAt")):
         return None
-    org = job.get("organization") if isinstance(job.get("organization"), dict) else {}
+    org = job.get("organization")
+    org = org if isinstance(org, dict) else {}
     locations = list(dict.fromkeys(
         n for n in (strip_html(loc.get("name") if isinstance(loc, dict) else loc)
                     for loc in job.get("locations") or []) if n))
@@ -201,11 +200,12 @@ def parse_job_page(page_html, board_url, page_url=""):
     }
 
 
-async def _fetch_sitemap(origin, label):
+async def _fetch_sitemap(origin: str, label: str) -> list[dict[str, str]]:
     """Every job entry the board's sitemap (or sitemap index) lists, each
     sitemap read once and parsed off the loop. An index is followed one
     level, eight children at most."""
-    entries, seen = [], set()
+    entries: list[dict[str, str]] = []
+    seen: set[str] = set()
     queue = deque([f"{origin}/sitemap.xml"])
     queued = set(queue)
     fetched = 0
@@ -230,7 +230,8 @@ async def _fetch_sitemap(origin, label):
     return entries
 
 
-async def fetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=None):
+async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: float = 0.3,
+                          gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
     """Relevant postings from one Getro board, as crawler job dicts.
 
     Sitemap first; then, newest first, one page fetch per posting whose
@@ -252,7 +253,8 @@ async def fetch_getro_all(board_url, max_details=150, detail_delay=0.3, gate=Non
         return []
     entries.sort(key=lambda e: e["lastmod"], reverse=True)
 
-    jobs, fetched = [], 0
+    jobs: list[dict[str, Any]] = []
+    fetched = 0
     for e in entries:
         if gate is not None and not gate(e["title_guess"]):
             continue

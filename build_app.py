@@ -70,6 +70,8 @@ binary compiles cleanly and then dies on `import sqlite3` with
 libcrypto, ...) never made it in (JobHarvester.exe, 2026-09-10).
 """
 
+from __future__ import annotations
+
 import subprocess
 import sys
 from pathlib import Path
@@ -85,7 +87,7 @@ TARGETS = {
 }
 
 
-def target():
+def target() -> str:
     """The --target NAME from argv (default 'ui')."""
     argv = sys.argv[1:]
     for i, a in enumerate(argv):
@@ -96,12 +98,10 @@ def target():
     return "ui"
 
 
-def output_name(name=None):
+def output_name(name: str | None = None) -> str:
     entry, win, other = TARGETS[name or target()]
     return win if sys.platform == "win32" else other
 
-
-OUTPUT_NAME = output_name()
 
 # One sentence per target for the Windows "Details" tab. Nuitka makes
 # --file-description mandatory on Windows and defaults it to the bare
@@ -116,7 +116,7 @@ DESCRIPTIONS = {
 UNKNOWN_VERSION = "0.0.0.0"
 
 
-def parse_describe(text):
+def parse_describe(text: str) -> str:
     """A 4-number Windows version from `git describe --tags --long` output.
 
     The first three components come from the tag (padded with zeros when
@@ -146,8 +146,9 @@ def parse_describe(text):
     return ".".join(nums + ["0"] * (3 - len(nums)) + [parts[1]])
 
 
-def version():
+def version() -> str:
     """parse_describe() of the working tree, or UNKNOWN_VERSION off-repo."""
+    out: subprocess.CompletedProcess[str] | None
     try:
         out = subprocess.run(["git", "describe", "--tags", "--long"],
                              cwd=ROOT, capture_output=True, text=True)
@@ -260,7 +261,7 @@ HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp"]
 HARVEST_SKIP = HARVEST_FORBID + HARVEST_LAZY
 
 
-def build_command(name=None):
+def build_command(name: str | None = None) -> list[str]:
     name = name or target()
     entry = TARGETS[name][0]
     cmd = [sys.executable, "-m", "nuitka", entry,
@@ -365,7 +366,7 @@ def build_command(name=None):
     return cmd
 
 
-def output_dir():
+def output_dir() -> Path:
     """The --output-dir= the caller passed through to Nuitka, or ROOT.
 
     Nuitka writes the binary wherever that flag says, so the success check
@@ -378,7 +379,7 @@ def output_dir():
     return ROOT
 
 
-def main():
+def main() -> int:
     cmd = build_command()
     if "--check" in sys.argv:
         print(" ".join(cmd))
@@ -396,7 +397,7 @@ def main():
     # output-dir, but the script previously expected it in webapp.dist/
     # (which --standalone creates). With --onefile it is ROOT, or wherever
     # --output-dir= sent it.
-    out = output_dir() / OUTPUT_NAME
+    out = output_dir() / output_name()
     if rc == 0 and out.exists():
         print(f"\nBuild OK: {out}")
     else:
