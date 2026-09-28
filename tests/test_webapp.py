@@ -87,7 +87,7 @@ class TestApi:
         assert tracks
         for t in tracks:
             assert {"id", "label", "engine", "min_fit_default",
-                    "willing_to_move_default", "ops"} <= set(t)
+                    "willing_to_move_default", "verify_floor", "ops"} <= set(t)
 
     def test_tracks_expose_the_remote_mission_floor(self, client):
         # The SPA's remote rule needs the same number the server ranks with.

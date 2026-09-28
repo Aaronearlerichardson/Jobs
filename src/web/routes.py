@@ -212,6 +212,7 @@ def api_tracks() -> ResponseReturnValue:
          "willing_to_move_default": t["willing_to_move_default"],
          "remote_requires_watch": t["remote_requires_watch"],
          "remote_mission_floor": t["remote_mission_floor"],
+         "verify_floor": t["verify_floor"],
          "default": t["id"] == config.DEFAULT_TRACK,
          "ops": sorted(n for n, o in OPS.items()
                        if o.get("engine") in (None, t["engine"]))}

@@ -1028,9 +1028,9 @@ function wireChipFields(root) {
     });
   });
 }
-const numField = (path, label, val) =>
+const numField = (path, label, val, dflt) =>
   `<label>${esc(label)}<input type="number" min="0" max="1" step="0.01"
-     data-num="${esc(path)}" value="${val ?? ""}"></label>`;
+     data-num="${esc(path)}" value="${val ?? ""}" placeholder="${dflt ?? ""}"></label>`;
 const chkField = (path, label, val) =>
   `<label class="loc"><input type="checkbox" data-chk="${esc(path)}" ${val ? "checked" : ""}> ${esc(label)}</label>`;
 const txtField = (path, label, val) =>
@@ -1112,10 +1112,12 @@ function renderSettings() {
   for (const [tid, t] of Object.entries(c.tracks || {})) {
     if (!isTable(t)) continue;
     g.scoring.push(settingsCard(`Track — ${t.label || tid}`,
-      `Runs the ${t.engine || "local"} crawl over ${t.db || "?"}. Rename it or change its starting filters here; sources and gates live in the raw editor.`,
+      `Runs the ${t.engine || "local"} crawl over ${t.db || "?"}. Rename it or change its starting filters and deep-verify floor here; sources and gates live in the raw editor.`,
       txtField(`tracks.${tid}.label`, "name shown in the header", t.label) +
-      `<div class="numgrid">${numField(`tracks.${tid}.min_fit_default`, "opening min-fit filter", t.min_fit_default)}</div>
-       <div class="fieldhelp">Where the Jobs tab's filters start when you switch to this track.</div>
+      `<div class="numgrid">${numField(`tracks.${tid}.min_fit_default`, "opening min-fit filter", t.min_fit_default)}
+       ${numField(`tracks.${tid}.verify_floor`, "deep-verify floor", t.verify_floor,
+                  state.tracks.find(x => x.id === tid)?.verify_floor)}</div>
+       <div class="fieldhelp">Where the Jobs tab's filters start when you switch to this track. The deep-verify floor is the lowest fit score Deep-verify re-scores outside the top ranks; blank keeps the value shown.</div>
        <div class="row">${chkField(`tracks.${tid}.willing_to_move_default`, "show relocation jobs by default", t.willing_to_move_default)}
        ${chkField(`tracks.${tid}.remote_requires_watch`, "only show remote jobs at watched companies", t.remote_requires_watch)}</div>`));
   }

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # thinking off (or effort down) for these small structured-JSON calls.
     claude_model: str = "claude-sonnet-5"
     # Deep-verify pass over ranking finalists only (~15-30 calls a run).
-    claude_verify_model: str = "claude-opus-5"
+    claude_verify_model: str = "claude-opus-5-5"
     # CLAUDE_PROMPT_CACHE=0 disables prompt caching; CLAUDE_CACHE_TTL=1h
     # buys the 1-hour cache; CLAUDE_USAGE_SUMMARY=0 silences the exit line.
     claude_prompt_cache: bool = True
