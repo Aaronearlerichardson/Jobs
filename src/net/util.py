@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 from cssselect import HTMLTranslator
 from lxml import etree
+from yarl import URL
 
 from src import config
 
@@ -436,8 +437,8 @@ def host_of(url: str | None) -> str:
 
 
 def origin_of(url: str | None) -> str:
-    """`url`'s `scheme://netloc`, host case and port kept; "" when it
-    names no host.
+    """`url`'s `scheme://netloc`, host case and port kept, to build URLs
+    on (`origin_key` is the one to key by); "" when it names no host.
 
     >>> origin_of("https://Jobs.Example.com:8443/careers?x=1")
     'https://Jobs.Example.com:8443'
@@ -449,6 +450,22 @@ def origin_of(url: str | None) -> str:
     except ValueError:
         return ""
     return f"{p.scheme}://{p.netloc}" if p.scheme and p.netloc else ""
+
+
+def origin_key(url: str | None) -> str:
+    """`url`'s origin as one key, however it is spelled (yarl's
+    `URL.origin`): host lower-cased, credentials and the scheme's default
+    port dropped; "" when it names no host or a bad port.
+
+    >>> origin_key("HTTPS://u@CSS-X.Example.COM:443/sso"), origin_key("http://[::1]:8443/")
+    ('https://css-x.example.com', 'http://[::1]:8443')
+    >>> origin_key("careers/jobs"), origin_key("http://h:x/"), origin_key(None)
+    ('', '', '')
+    """
+    try:
+        return str(URL(url or "").origin())
+    except ValueError:
+        return ""
 
 
 def stable_id(*parts: object) -> str:

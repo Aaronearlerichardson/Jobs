@@ -64,7 +64,7 @@ from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
-                          hashed_cache_path, json_cache_get, json_cache_put, origin_of)
+                          hashed_cache_path, json_cache_get, json_cache_put, origin_key)
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
@@ -357,8 +357,8 @@ class Board:
         return parts
 
     def origin(self, company: dict[str, Any] | None = None, url: str | None = None) -> str:
-        """The origin a store row's listing is read from, or the listing of
-        the board a posting `url` of this platform names; "" where the row
+        """The origin_key a store row's listing is read from, or the listing
+        of the board a posting `url` of this platform names; "" where the row
         alone does not name it (an empty column, or a `handle.try` or
         `handle.follow` part not settled yet that the origin holds).
 
@@ -373,7 +373,7 @@ class Board:
             return ""
         parts = self._parts(handle)
         # The unsettled parts filled two ways: an origin they move is unknown.
-        a, b = (origin_of(fields.fmt(self.listing_spec.url, lambda k: parts.get(k) or fill))
+        a, b = (origin_key(fields.fmt(self.listing_spec.url, lambda k: parts.get(k) or fill))
                 for fill in "ab")
         return a if a == b else ""
 

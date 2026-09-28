@@ -26,7 +26,7 @@ from typing import Any, cast
 from src import config, runstate
 from src.net import http
 from src.net.http import HEADERS, HostBreaker, Unreachable
-from src.net.util import clean_url, origin_of
+from src.net.util import clean_url, origin_key
 from .engine import board_for_url
 from .jsonld import extract_jsonld, is_jobposting
 
@@ -66,8 +66,8 @@ def probe_family(url: str | None) -> str:
 
 
 def probe_origin(url: str) -> str:
-    """The origin probe_job_open asks first about `url`: its platform's
-    endpoint's, else the posting page's own.
+    """The origin probe_job_open asks first about `url`, as its
+    origin_key: its platform's endpoint's, else the posting page's own.
 
     >>> probe_origin("https://boards.greenhouse.io/acme/jobs/42")
     'https://boards-api.greenhouse.io'
@@ -75,7 +75,7 @@ def probe_origin(url: str) -> str:
     'https://careers-acme.icims.com'
     """
     board = board_for_url(url)
-    return (board and board.spec.via != "page" and board.origin(url=url)) or origin_of(url)
+    return (board and board.spec.via != "page" and board.origin(url=url)) or origin_key(url)
 
 
 # A job-detail host that refuses connections refuses every row on it: the

@@ -59,7 +59,7 @@ from urllib.robotparser import RobotFileParser
 
 from src import config, runstate
 from . import http
-from .util import host_of, origin_of
+from .util import host_of, origin_key
 
 
 # --------------------------------------------------------------------------- #
@@ -290,7 +290,7 @@ class RobotsCache:
         return _HostRules(parser=parser, group=group, sitemaps=sitemaps)
 
     async def _rules(self, url: str) -> _HostRules | None:
-        origin = origin_of(url)
+        origin = origin_key(url)
         if not origin:
             return None
         # One fetch per origin, even when requests arrive together. A sniff

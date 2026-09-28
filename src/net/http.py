@@ -35,7 +35,7 @@ from yarl import URL
 
 from src import runstate
 from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
-from src.net.util import host_of, origin_of
+from src.net.util import host_of, origin_key
 
 # File-only request trace (src/session_log.py installs the handler; there
 # is no console handler, so this never reaches the terminal). One record
@@ -295,7 +295,7 @@ async def _exchange(method: str, url: str, polite: bool = True,
     req, limit = _prepare(method, url, polite, **kw), _timeout(timeout)
     hops: list[requests.Response] = []
     r = await _hop(req, limit)
-    origins = {origin_of(url)}
+    origins = {origin_key(url)}
     while allow_redirects and r.is_redirect:
         if len(hops) >= MAX_REDIRECTS:
             raise requests.TooManyRedirects(
@@ -304,8 +304,8 @@ async def _exchange(method: str, url: str, polite: bool = True,
         req = cast(requests.PreparedRequest,       # what yield_requests yields
                    next(_Redirects().resolve_redirects(r, req, yield_requests=True)))
         url = cast(str, req.url)
-        if polite and origin_of(url) not in origins:
-            origins.add(origin_of(url))
+        if polite and (origin := origin_key(url)) not in origins:
+            origins.add(origin)
             from .robots import CACHE       # robots.py imports this module
             await CACHE().wait_turn(url)
         r = await _hop(req, limit)
@@ -360,7 +360,7 @@ class HostLimiter:
 
     async def wait(self, url: str, gap: float) -> None:
         """Wait for url's origin's turn, then book the next `gap` on."""
-        slot = self._origins.setdefault(origin_of(url), [asyncio.Lock(), 0.0])
+        slot = self._origins.setdefault(origin_key(url), [asyncio.Lock(), 0.0])
         async with slot[0]:
             await asyncio.sleep(slot[1] - time.monotonic())
             slot[1] = time.monotonic() + gap
