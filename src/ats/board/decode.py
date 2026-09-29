@@ -19,7 +19,7 @@ from .spec import (AtomDecoder, Decoder, Detail, HtmlDecoder, JsonInHtmlDecoder,
 
 
 def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | HtmlDecoder, text: str,
-           parts: dict[str, Any], url: str, area: re.Pattern[str] | None = None,
+           parts: dict[str, str], url: str, area: re.Pattern[str] | None = None,
            hop: bool = True) -> Any:
     """A non-JSON response body (to `url`) as data; None when it holds
     none. Raises ValueError when embedded JSON will not parse. `area` and
@@ -99,7 +99,7 @@ def _xml_record(el: etree._Element, skip: str | None = None) -> dict[str, Any]:
     return out
 
 
-def elements(dec: HtmlDecoder, tree: etree._Element, parts: dict[str, Any],
+def elements(dec: HtmlDecoder, tree: etree._Element, parts: dict[str, str],
              url: str) -> list[dict[str, Any]]:
     """One entry per element the html decoder's `select` finds (a CSS
     template over the handle `parts`, or a list tried in order until one

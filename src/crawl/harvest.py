@@ -571,7 +571,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     docstring for why (this pass needs a per-board progress stall and a
     "not started" count).
     """
-    summary: dict[str, Any] = {"boards": 0, "ok": 0, "err": 0, "abandoned": 0, "dead": 0,
+    summary: dict[str, float] = {"boards": 0, "ok": 0, "err": 0, "abandoned": 0, "dead": 0,
                                "fetched": 0, "new": 0, "hydrated": 0, "closed": 0,
                                "reopened": 0, "retired": 0, "secs": 0.0}
     async with store.Writer(db_path) as db:
@@ -658,7 +658,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     return summary
 
 
-def _report(c: dict[str, Any], s: dict[str, Any], summary: dict[str, Any]) -> None:
+def _report(c: dict[str, Any], s: dict[str, Any], summary: dict[str, float]) -> None:
     """One finished board's status line, its stats added to `summary`."""
     done = summary["ok"] + summary["err"] + 1
     if s["err"]:

@@ -484,7 +484,7 @@ def _hydrate_order(survivors: dict[str, tuple[dict[str, Any], dict[str, Any], st
     return key
 
 
-async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]], summary: dict[str, Any],
+async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]], summary: dict[str, float],
                    stamp: datetime, hydrate_fn: Callable[[dict[str, Any], list[dict[str, Any]]], Awaitable[dict[str, Any]]],
                    cutoff: str) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
@@ -581,7 +581,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survi
 
 async def _body_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]],
                       tracks: list[dict[str, Any]], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]],
-                      summary: dict[str, Any], n_free: int, waiting: dict[str, str],
+                      summary: dict[str, float], n_free: int, waiting: dict[str, str],
                       cutoff: str) -> dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
 
@@ -625,7 +625,7 @@ def _print_waiting(rows: list[tuple[dict[str, Any], dict[str, Any]]], reasons: d
         print(f"    ... and {extra} more")
 
 
-async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]], summary: dict[str, Any], score_cap: int, fit: bool,
+async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
                  max_workers: int) -> tuple[dict[str, FitResult], set[str]]:
     """Phase 4: the only paid step, best companies first, under the cap.
 
@@ -663,7 +663,7 @@ async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str
 
 def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]], final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]],
                     scores: dict[str, FitResult], over_cap: set[str], tracks: list[dict[str, Any]],
-                    summary: dict[str, Any], stamp: datetime) -> None:
+                    summary: dict[str, float], stamp: datetime) -> None:
     """Phase 5: every verdict, inside the caller's one batch.
 
     A survivor the scorer could not reach (no key, breaker tripped) is
@@ -721,7 +721,7 @@ def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str,
         summary["surfaced" if status == OK else status] += 1
 
 
-def _print_summary(summary: dict[str, Any], bar: str) -> None:
+def _print_summary(summary: dict[str, float], bar: str) -> None:
     """The funnel, as one line per pass, for whoever reads the session log.
 
     A row the scorer skips for a short body (fit.MIN_DESC_CHARS) is still
@@ -787,7 +787,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[dict[str, Any]
               f"- {datetime.now():%Y-%m-%d %H:%M}")
         print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
               f"{', '.join(t['id'] for t in tracks)}\n{bar}\n")
-        summary: dict[str, Any] = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
+        summary: dict[str, float] = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
                                  "hydrated": 0, "scored": 0, "surfaced": 0, "left": 0,
                                  "skip_score": 0, "secs": 0.0}
         if not rows or not tracks:

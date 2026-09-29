@@ -284,7 +284,7 @@ def _row_mapper(fs: dict[str, Any],
                                            "posted_at", "remote_hint", "department"))
     free = fields.reader(free) if free else None
 
-    def row(parts: dict[str, Any], entry: Any) -> dict[str, Any]:
+    def row(parts: dict[str, str], entry: Any) -> dict[str, Any]:
         ctx = dict(parts)
         for k, f in internal:
             ctx[k] = f(entry, ctx)
@@ -350,7 +350,7 @@ class Board:
         vals = [str(company.get(c) or "") for c in self._columns]
         return self._sep.join(vals) if all(vals) else None
 
-    def _parts(self, handle: str) -> dict[str, Any]:
+    def _parts(self, handle: str) -> dict[str, str]:
         parts = dict(zip(self._part_names, str(handle).split(self._sep)))
         if self._hspec.try_ or self._hspec.follow:
             parts.update(_VARIANTS().get((self.name, str(handle)), {}))
@@ -433,7 +433,7 @@ class Board:
 
     # --- requests ----------------------------------------------------------
 
-    async def _fetch(self, req: Listing | Detail, parts: dict[str, Any],
+    async def _fetch(self, req: Listing | Detail, parts: dict[str, str],
                      vals: dict[str, Any] | None = None, label: str | None = None,
                      timeout: tuple[float, float] | None = None, url: str | None = None,
                      hop: bool = True) -> tuple[int | None, Any, str | Exception | None]:
@@ -474,7 +474,7 @@ class Board:
             payload = await asyncio.to_thread(decode.unwrap, payload, dec.values)
         return status, payload, err
 
-    async def _follow(self, handle: str, parts: dict[str, Any], label: str | None = None,
+    async def _follow(self, handle: str, parts: dict[str, str], label: str | None = None,
                       timeout: tuple[float, float] | None = None) -> str | Exception | None:
         """Settle into `parts` each `handle.follow` part not yet known for
         `handle`: the URL its template redirects to, query and trailing "/"
@@ -513,7 +513,7 @@ class Board:
             return parts, None, None, err
         return await self._ask(req, handle, parts, vals, label, timeout, url)
 
-    async def _ask(self, req: Listing | Detail, handle: str, parts: dict[str, Any],
+    async def _ask(self, req: Listing | Detail, handle: str, parts: dict[str, str],
                    vals: dict[str, Any] | None = None, label: str | None = None,
                    timeout: tuple[float, float] | None = None, url: str | None = None
                    ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
@@ -537,7 +537,7 @@ class Board:
         return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS().get(key, {})}
 
     async def _settle(self, key: tuple[str, str], tries: dict[str, tuple[str, ...]],
-                      req: Listing | Detail, parts: dict[str, Any],
+                      req: Listing | Detail, parts: dict[str, str],
                       vals: dict[str, Any] | None, label: str | None, timeout: tuple[float, float] | None,
                       url: str | None
                       ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
@@ -617,7 +617,7 @@ class Board:
                 timeout, url)
             return parts, payload, err
 
-        def rows_of(parts: dict[str, Any], payload: Any) -> tuple[int, list[dict[str, Any]]]:
+        def rows_of(parts: dict[str, str], payload: Any) -> tuple[int, list[dict[str, Any]]]:
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
         return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
