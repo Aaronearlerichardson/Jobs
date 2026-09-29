@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-from conftest import answer, company_row as _company, iso_days_ago, make_board_fn
+from conftest import answer, company_row as _company, iso_days_ago, make_board_fn, track_with
 
 from src import tags
 from src import store
@@ -50,18 +50,20 @@ def _row(conn, jid):
 def tracks(local_track, sweep_track):
     """A location-scoped track and a core-anchored sweep track, with the
     profile-dependent knobs pinned so the assertions hold on any profile."""
-    local = {**local_track, "id": "t_local", "track": LOCAL,
-             "sources": {**local_track["sources"], "store": True},
-             "store_tag": None, "geo_gate": True, "require_core_anchor": False,
-             "exclude_gate": False, "min_mission": 0.2,
-             "remote_mission_floor": 0.85, "digest_min_fit": 0.4,
-             "keyword_mode": "extend"}
-    sweep = {**sweep_track, "id": "t_sweep", "track": SWEEP,
-             "sources": {**sweep_track["sources"], "store": True},
-             "store_tag": tags.SWEEP, "geo_gate": False,
-             "require_core_anchor": True, "exclude_gate": False,
-             "min_mission": None, "digest_min_fit": 0.4,
-             "keyword_mode": "extend"}
+    local = local_track.model_copy(update={
+        "id": "t_local", "track": LOCAL,
+        "sources": local_track.sources.model_copy(update={"store": True}),
+        "store_tag": None, "geo_gate": True, "require_core_anchor": False,
+        "exclude_gate": False, "min_mission": 0.2,
+        "remote_mission_floor": 0.85, "digest_min_fit": 0.4,
+        "keyword_mode": "extend"})
+    sweep = sweep_track.model_copy(update={
+        "id": "t_sweep", "track": SWEEP,
+        "sources": sweep_track.sources.model_copy(update={"store": True}),
+        "store_tag": tags.SWEEP, "geo_gate": False,
+        "require_core_anchor": True, "exclude_gate": False,
+        "min_mission": None, "digest_min_fit": 0.4,
+        "keyword_mode": "extend"})
     return [local, sweep]
 
 
@@ -173,7 +175,7 @@ async def test_clinical_service_title_excluded_before_hydration(
     is spared and scored as usual."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    local_on = [dict(tracks[0], exclude_gate=True), tracks[1]]
+    local_on = [tracks[0].model_copy(update={"exclude_gate": True}), tracks[1]]
     c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
     _harvested(conn, c, "clin", "CT Technologist", local_addr)
     _harvested(conn, c, "rsrch", "Research Technician", local_addr)
@@ -709,9 +711,9 @@ async def test_harvest_pass_ends_with_triage_then_digests(tmp_path, monkeypatch)
     monkeypatch.setattr(triage, "run", answer(lambda **kw: seen.append(kw)
                         or order.append("triage") or {"pending": 0}))
     monkeypatch.setattr(triage, "roster_tracks",
-                        lambda: [{"track": LOCAL}, {"track": SWEEP}])
+                        lambda: [track_with(track=LOCAL), track_with(track=SWEEP)])
     monkeypatch.setattr(harvest, "rewrite_digest",
-                        lambda conn, t, **kw: order.append(t["track"]))
+                        lambda conn, t, **kw: order.append(t.track))
     fake_board = make_board_fn(fetched=1, new=1)
 
     s = await harvest.run(db_path=db, max_workers=1, board_fn=fake_board,

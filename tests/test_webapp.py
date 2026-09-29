@@ -351,7 +351,7 @@ class TestApplyBandFields:
         store.upsert_job(conn, {
             "job_id": "b1", "company_id": cid, "company_name": "Acme",
             "title": "Imaging Scientist", "url": "https://acme.io/b1",
-            "location": local_addr, "track": t["track"],
+            "location": local_addr, "track": t.track,
             "resume_fit_score": 0.54})
         conn.close()
         rows = json.loads(client.get("/api/jobs").data)
@@ -379,7 +379,7 @@ class TestCollapsedJobFields:
             store.upsert_job(conn, {
                 "job_id": jid, "company_id": cid, "company_name": "Acme",
                 "title": "Data Engineer", "url": f"https://acme.io/{jid}",
-                "location": local_addr, "track": t["track"],
+                "location": local_addr, "track": t.track,
                 "resume_fit_score": fit})
         conn.close()
         rows = json.loads(client.get("/api/jobs").data)
@@ -414,11 +414,12 @@ class TestRemoteAdmissionFields:
                                 "title": "Research Engineer",
                                 "url": "https://acme.io/1",
                                 "location": "Remote - US", "geo_mode": "remote",
-                                "track": t["track"],
+                                "track": t.track,
                                 "resume_fit_score": self.FIT})
         conn.commit()
         conn.close()
-        monkeypatch.setitem(t, "remote_mission_floor", floor)
+        monkeypatch.setitem(config.UI_TRACKS, t.id,
+                            t.model_copy(update={"remote_mission_floor": floor}))
         return cid
 
     def _job(self, client):

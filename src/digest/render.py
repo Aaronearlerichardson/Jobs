@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src.match import locality
 from src.rows import CompanyRow
 
@@ -62,8 +62,8 @@ def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _tag(t: TrackDict) -> str:
-    return f"[{t['label'].upper()}]"
+def _tag(t: RuntimeTrack) -> str:
+    return f"[{t.label.upper()}]"
 
 
 def apply_band_rows(ranked: list[dict[str, Any]] | None,
@@ -92,12 +92,12 @@ def apply_band_rows(ranked: list[dict[str, Any]] | None,
     return picked[:limit]
 
 
-def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: TrackDict,
+def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: RuntimeTrack,
                     new_since: str | None = None) -> list[dict[str, Any]]:
     """The ranked rows first seen on or after `new_since` (default today)
     that score at least the track's `digest_min_fit`.
 
-    >>> t = {"digest_min_fit": 0.4}
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
     >>> rows = [{"job_id": "a", "first_seen": "2026-09-01",
     ...          "resume_fit_score": 0.7},
     ...         {"job_id": "b", "first_seen": "2026-08-30",
@@ -134,7 +134,7 @@ def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: TrackDict,
         email is an interruption, so it gets a stricter bar.
     """
     since = (new_since or _today())[:10]
-    floor = float(t.get("digest_min_fit") or 0.0)
+    floor = float(t.digest_min_fit or 0.0)
     fresh: list[dict[str, Any]] = []
     for j in ranked or []:
         if (j.get("first_seen") or "")[:10] < since:
@@ -296,7 +296,7 @@ def _watch_section(watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]]
 # --------------------------------------------------------------------------- #
 
 def write_ranked_digest(
-        ranked: list[dict[str, Any]], t: TrackDict,
+        ranked: list[dict[str, Any]], t: RuntimeTrack,
         watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None,
         followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
@@ -375,14 +375,14 @@ def write_ranked_digest(
                numeric={"Fit", "Combined", "Age"})))
 
     md, _ = _render(f"{_tag(t)} Job Digest — {today}", sections)
-    path = _digest_path(report_dir, f"{t['id']}_{today}.md")
+    path = _digest_path(report_dir, f"{t.id}_{today}.md")
     path.write_text(md, encoding="utf-8")
     print(f"  digest -> {path}")
     return path
 
 
 def send_ranked_digest(
-        ranked: list[dict[str, Any]], t: TrackDict,
+        ranked: list[dict[str, Any]], t: RuntimeTrack,
         watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
         followups: list[dict[str, Any]] | None = None) -> bool:
@@ -436,7 +436,7 @@ def send_ranked_digest(
         sections.append((_APPLY_BAND, _band_intro(), _list(rows)))
     if hits:
         sections.append(_watch_section(hits))
-    floor = float(t.get("digest_min_fit") or 0.0)
+    floor = float(t.digest_min_fit or 0.0)
     n_md, n_html = _bold(f"{len(fresh)} new job(s)")
     rows = [_cells([_fit(j.get("resume_fit_score")), age_tag(j, today),
                     j.get("company_name"), _link(j), j.get("location"),
@@ -458,7 +458,7 @@ def send_ranked_digest(
     return False
 
 
-def toast(t: TrackDict, count: int, path: str | Path) -> bool:
+def toast(t: RuntimeTrack, count: int, path: str | Path) -> bool:
     """Raise a Windows desktop toast for a just-sent digest. True only when
     one was actually shown.
 
@@ -470,7 +470,7 @@ def toast(t: TrackDict, count: int, path: str | Path) -> bool:
         The email is the contract and the toast is a convenience, so every
         failure here is swallowed rather than surfaced.
     """
-    if not t.get("notify") or not count:
+    if not t.notify or not count:
         return False
     try:
         from winotify import Notification
@@ -512,18 +512,18 @@ def _matches_sections(matches: list[dict[str, Any]], tag: str
 
 
 def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
-                         t: TrackDict) -> Path:
+                         t: RuntimeTrack) -> Path:
     """Flat surfaced-postings digest for a sweep track, written under
     `report_dir` (default config.REPORT_DIR); returns the path."""
     today, tag = _today(), _tag(t)
     md, _ = _render(f"{tag} Job Alert - {today}",
                     _matches_sections(matches, tag))
-    path = _digest_path(report_dir, f"{t['id']}_matches_{today}.md")
+    path = _digest_path(report_dir, f"{t.id}_matches_{today}.md")
     path.write_text(md, encoding="utf-8")
     return path
 
 
-def send_matches_digest(matches: list[dict[str, Any]], t: TrackDict,
+def send_matches_digest(matches: list[dict[str, Any]], t: RuntimeTrack,
                         cfg: object = None) -> bool:
     """Email the matches digest — the same table `write_matches_digest`
     writes. True when a message went out; a no-op without matches. `cfg`

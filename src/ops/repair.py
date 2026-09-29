@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
@@ -299,7 +299,7 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
 
 async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                            max_workers: int = 6, days: int | None = None,
-                           names: Iterable[str] | None = None, t: TrackDict | None = None,
+                           names: Iterable[str] | None = None, t: RuntimeTrack | None = None,
                            families: Iterable[str] | None = RERESOLVE_FAMILIES,
                            commit: bool = True) -> list[CompanyRow]:
     """Retry the roster rows that died at resolution; queue every hit for
@@ -523,7 +523,7 @@ def _slug_named_boards(conn: sqlite3.Connection) -> list[CompanyRow]:
     return rows
 
 
-async def rename_slug_boards(db: store.Writer | None = None, t: TrackDict | None = None,
+async def rename_slug_boards(db: store.Writer | None = None, t: RuntimeTrack | None = None,
                              commit: bool = False, limit: int | None = None
                              ) -> list[tuple[int, str, str]]:
     """PREVIEW (default) or APPLY a rename of every active, dork-sourced

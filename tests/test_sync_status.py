@@ -46,7 +46,7 @@ class TestSyncStatusReportsSkippedBoards:
             "job_id": "gh_good_1", "company_id": cid,
             "company_name": "Good Co", "title": "Data Engineer",
             "url": "https://good.example/jobs/1", "location": "Durham, NC",
-            "track": local_track["track"]})
+            "track": local_track.track})
         conn.close()
 
         roster = [
@@ -65,7 +65,7 @@ class TestSyncStatusReportsSkippedBoards:
                    "Silent Co": ([], None),
                    "Idless Co": (listed, None)}
         self._wire(monkeypatch, roster, answers)
-        await ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t=local_track.model_copy(update={"db_path": dbp}))
         return capsys.readouterr().out
 
     async def test_each_skipped_board_gets_its_own_warning_line(
@@ -102,14 +102,14 @@ class TestSyncStatusReportsSkippedBoards:
             "job_id": "lv_broken_1", "company_id": cid,
             "company_name": "Broken Co", "title": "Data Engineer",
             "url": "https://broken.example/jobs/1", "location": "Durham, NC",
-            "track": local_track["track"]})
+            "track": local_track.track})
         conn.close()
 
         roster = [{"id": cid, "name": "Broken Co", "ats": "lever",
                    "slug": "broken"}]
         self._wire(monkeypatch, roster,
                    {"Broken Co": ([], RuntimeError("HTTP 500"))})
-        await ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t=local_track.model_copy(update={"db_path": dbp}))
 
         conn = store.connect(dbp)
         status = conn.execute("SELECT COALESCE(status,'open') FROM jobs "
@@ -134,7 +134,7 @@ class TestSyncStatusReportsSkippedBoards:
                 "job_id": f"gh_part_{n}", "company_id": cid,
                 "company_name": "Partial Co", "title": f"Data Engineer {n}",
                 "url": f"https://part.example/jobs/{n}",
-                "location": "Durham, NC", "track": local_track["track"]})
+                "location": "Durham, NC", "track": local_track.track})
         conn.close()
 
         listed = [{"id": "gh_part_1", "title": "Data Engineer 1",
@@ -143,7 +143,7 @@ class TestSyncStatusReportsSkippedBoards:
                    [{"id": cid, "name": "Partial Co", "ats": "greenhouse",
                      "slug": "part"}],
                    {"Partial Co": (listed, None, {"incomplete": True})})
-        await ops.sync_status_all(t={**local_track, "db_path": dbp})
+        await ops.sync_status_all(t=local_track.model_copy(update={"db_path": dbp}))
 
         conn = store.connect(dbp)
         statuses = dict(conn.execute(

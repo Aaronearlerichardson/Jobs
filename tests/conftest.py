@@ -177,6 +177,11 @@ def cfg():
     return _config
 
 
+def track_with(**update):
+    """The local track with `update` applied (model_copy does not validate)."""
+    return _runner.track_for_engine("local").model_copy(update=update)
+
+
 @pytest.fixture(scope="session")
 def local_track():
     return _runner.track_for_engine("local")
@@ -381,8 +386,9 @@ def wired_db_path(tmp_path, monkeypatch):
     """
     db_path = tmp_path / "wired.db"
     monkeypatch.setattr(_config, "STORE_DB_PATH", db_path)
-    monkeypatch.setitem(_config.UI_TRACKS[_config.DEFAULT_TRACK],
-                        "db_path", db_path)
+    default = _config.UI_TRACKS[_config.DEFAULT_TRACK]
+    monkeypatch.setitem(_config.UI_TRACKS, _config.DEFAULT_TRACK,
+                        default.model_copy(update={"db_path": db_path}))
     return db_path
 
 

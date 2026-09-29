@@ -43,7 +43,7 @@ from types import ModuleType
 from typing import Any, NamedTuple, cast
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src.config.profile_schema import TrackKeywords
 from src import store
 from src import tags
@@ -63,16 +63,16 @@ from src.rows import CompanyRow
 track_for_engine = config.track_for_engine
 
 
-def apply_keyword_focus(cfg: Any, t: TrackDict) -> None:
+def apply_keyword_focus(cfg: Any, t: RuntimeTrack) -> None:
     """Point the shared keyword filter at this track's focus. Mutates the
     live list objects in place so filters.is_relevant (which imported them
     at load time) sees the change without a re-import. "extend" adds the
     track's [keywords.<id>] terms to the global tiers (deduped); "replace"
     swaps them in wholesale (and rebuilds the flat INCLUDE view, matching
     the legacy replace semantics). Empty track lists never blank a tier."""
-    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t["id"]) or TrackKeywords()
+    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t.id) or TrackKeywords()
     core, dom, skill = list(kw.core), list(kw.domain), list(kw.skill)
-    if t["keyword_mode"] == "replace":
+    if t.keyword_mode == "replace":
         if core:
             cfg.CORE_KEYWORDS[:] = core
         if dom:
@@ -87,7 +87,7 @@ def apply_keyword_focus(cfg: Any, t: TrackDict) -> None:
                          (cfg.SKILL_KEYWORDS, skill)):
             have = {k.lower() for k in dst}
             dst.extend(k for k in add if k.lower() not in have)
-    cfg.ACCEPT_REMOTE = t["accept_remote"]
+    cfg.ACCEPT_REMOTE = t.accept_remote
 
 
 def core_anchor(title: str, description: str = "") -> str | None:
@@ -101,7 +101,7 @@ def core_anchor(title: str, description: str = "") -> str | None:
                      SHORT_KEYWORD)
 
 
-async def build_sources(cfg: ModuleType, t: TrackDict,
+async def build_sources(cfg: ModuleType, t: RuntimeTrack,
                         include_websearch: bool | None = None) -> list[dict[str, Any]]:
     """Assemble the track's source specs from its `sources` config table.
     Returns a list of dicts {name, platform, thunk, company}: `thunk()` is
@@ -114,8 +114,8 @@ async def build_sources(cfg: ModuleType, t: TrackDict,
     from src.ops import maintenance as ops
     from src.ats.board import company as company_fetch
 
-    src = t["sources"]
-    use_ws = src["websearch"] if include_websearch is None else include_websearch
+    src = t.sources
+    use_ws = src.websearch if include_websearch is None else include_websearch
     specs: list[dict[str, Any]] = []
     used: set[tuple[str, str]] = set()
 
@@ -130,7 +130,7 @@ async def build_sources(cfg: ModuleType, t: TrackDict,
                       "thunk": thunk, "company": company})
 
     # 1) Priority targets ([discovery] priority_companies), starred.
-    if src["priority_companies"]:
+    if src.priority_companies:
         for name, ats, slug in getattr(cfg, "DISCOVERY_PRIORITY_COMPANIES", []):
             thunk = sweep(ats, name, slug)
             if not thunk:
@@ -139,22 +139,22 @@ async def build_sources(cfg: ModuleType, t: TrackDict,
             add(name, ats + "*", thunk, key=(ats, str(slug)))
 
     # 2) Company store (this track's own DB, optionally tag-scoped).
-    if src["store"]:
+    if src.store:
         try:
-            async with store.Writer(t["db_path"]) as db:
+            async with store.Writer(t.db_path) as db:
                 # Not every active row: dormant companies (never-productive,
                 # or high-volume off-mission boards) only come round again on
                 # their weekly slot — see store.record_crawl_outcome.
-                rows = await db.run(store.crawlable_companies, tag=t["store_tag"])
+                rows = await db.run(store.crawlable_companies, tag=t.store_tag)
         except Exception as e:
             print(f"  [!] company store unavailable ({e})")
             rows = []
-        if src["location_scoped"]:
+        if src.location_scoped:
             # Full per-company board fetch through the locality filter —
             # whole-board (no filter) for watched/sweep-tagged companies and
             # for core-mission ones at the track's remote_mission_floor,
             # whose out-of-area rows the geo gate handles downstream.
-            floor = t.get("remote_mission_floor")
+            floor = t.remote_mission_floor
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
                     (lambda cc=c: company_fetch.fetch_company(
@@ -169,7 +169,7 @@ async def build_sources(cfg: ModuleType, t: TrackDict,
     # 3) Forums + aggregator feeds (remote-native boards). Like the ATS
     # registry, the crawl injects the keyword gate here; the fetchers are
     # ungated on their own.
-    if src["aggregators"]:
+    if src.aggregators:
         from src.ats.feeds.discourse import fetch_discourse
         from src.ats.feeds.hnhiring import fetch_hnhiring
         from src.ats.feeds.remoteok import fetch_remoteok
@@ -261,10 +261,10 @@ def _diversify(matches: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     return picked
 
 
-def _cost_guard_trips(t: TrackDict, n_to_score: int, confirm_cost: bool) -> bool:
+def _cost_guard_trips(t: RuntimeTrack, n_to_score: int, confirm_cost: bool) -> bool:
     """True (and prints the budget banner) when scoring n_to_score postings
     would blow the track's cost_guard without an explicit confirmation."""
-    guard = t["cost_guard"]
+    guard = t.cost_guard
     if not guard or n_to_score <= guard or confirm_cost:
         return False
     # Rough per-posting cost: ~700 input tokens (cached system prompt) +
@@ -300,7 +300,7 @@ class Collected(NamedTuple):
 
 
 async def _gate_company_board(
-        db: store.Writer, t: TrackDict, c: CompanyRow, jobs: list[dict[str, Any]], commit: bool,
+        db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[dict[str, Any]], commit: bool,
         snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
@@ -322,7 +322,7 @@ async def _gate_company_board(
     snapshot = snapshot or {}
     if jobs and c.get("id") and commit and not snapshot.get("incomplete"):
         n_reopened, n_closed = await db.run(
-            store.sync_job_statuses, c["id"], jobs, track=t["track"],
+            store.sync_job_statuses, c["id"], jobs, track=t.track,
             capped=snapshot.get("capped", False))
     # Reuse bodies the background harvester already fetched, so the gates
     # and the scorer below do not pay a detail GET for a posting whose
@@ -335,7 +335,7 @@ async def _gate_company_board(
 
     kept: list[dict[str, Any]] = []
     for j in jobs:
-        if t["require_core_anchor"] and not core_anchor(
+        if t.require_core_anchor and not core_anchor(
                 j.get("title", ""), j.get("description", "")):
             continue
         if not await ops._keep_job(c, j, t):
@@ -345,7 +345,7 @@ async def _gate_company_board(
     return kept, fresh, watch_hits, n_reopened, n_closed
 
 
-def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: CompanyRow, jobs: list[dict[str, Any]],
+def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow, jobs: list[dict[str, Any]],
                        kept: list[dict[str, Any]], commit: bool
                        ) -> tuple[list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
@@ -365,9 +365,9 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: CompanyRow, jo
             if (store.crawl_seen(conn, j["id"]) and j["id"] not in fresh_ids) \
                     or not us_eligible(j.get("location") or "") \
                     or not gates.is_technical_role(j.get("title", ""), t) \
-                    or (t["exclude_gate"] and gates.exclude_reason(
+                    or (t.exclude_gate and gates.exclude_reason(
                         j.get("title", ""), j.get("description", ""),
-                        allow_defense=True, track_id=t["id"])):
+                        allow_defense=True, track_id=t.id)):
                 continue
             in_pipeline = j["id"] in fresh_ids
             watch_hits.append((c, j, in_pipeline))
@@ -376,7 +376,7 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: CompanyRow, jo
                     "job_id": j["id"], "company_id": c["id"],
                     "company_name": c["name"], "title": j.get("title"),
                     "url": j.get("url"), "location": j.get("location"),
-                    "track": t["track"],
+                    "track": t.track,
                     "geo_mode": geo_mode(j.get("location", ""),
                                          j.get("description", "")),
                     "posted_at": j.get("posted_at"),
@@ -385,7 +385,7 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: CompanyRow, jo
     return fresh, watch_hits
 
 
-def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[str, Any]],
+def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[dict[str, Any]],
                       seen_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
     """One sweep source's jobs through the gates: anchor + title (+ engine
     excludes), remote signal stamped (or geo-gated when configured),
@@ -402,7 +402,7 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[s
     for job in jobs:
         title = job.get("title", "")
         nsig = None
-        if t["require_core_anchor"]:
+        if t.require_core_anchor:
             nsig = core_anchor(title, job.get("description", ""))
             if not nsig:
                 continue
@@ -410,10 +410,10 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[s
         if not gates.is_technical_role(title, t):
             continue
         tech_here += 1
-        if t["exclude_gate"] and gates.exclude_reason(
-                title, job.get("description", ""), track_id=t["id"]):
+        if t.exclude_gate and gates.exclude_reason(
+                title, job.get("description", ""), track_id=t.id):
             continue
-        if t["geo_gate"] and geo_mode(
+        if t.geo_gate and geo_mode(
                 job.get("location", ""), job.get("description", "")) is None:
             continue
         sig = remote_signal_for(job)
@@ -422,7 +422,7 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[s
         if jid in seen_ids:
             continue
         seen_ids.add(jid)
-        job["track_tag"] = f"[{t['label'].upper()}]"
+        job["track_tag"] = f"[{t.label.upper()}]"
         job["remote_eligible"] = bool(sig)
         if sig is not None:
             job["remote_signal"] = sig
@@ -434,7 +434,7 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[s
     return out, anchor_here, tech_here, surfaced
 
 
-async def _gate_sources(db: store.Writer, t: TrackDict, specs: list[dict[str, Any]],
+async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str, Any]],
                         fetched: list[tuple[Any, Any, Any]], commit: bool) -> Collected:
     """Every fetched source through its gates, in SOURCE order, on `db`
     (the crawl's store.Writer).
@@ -460,8 +460,8 @@ async def _gate_sources(db: store.Writer, t: TrackDict, specs: list[dict[str, An
             # a company that keeps serving jobs is alive even when none of
             # them survive the filters.
             await db.run(store.record_crawl_outcome, c["id"], len(jobs or []), err,
-                         dormant_after=t["dormant_after"],
-                         dormant_days=t["dormant_days"])
+                         dormant_after=t.dormant_after,
+                         dormant_days=t.dormant_days)
             # A fetcher reports a 404 and returns [] rather than raising, so
             # the error is usually the snapshot's, not `err`. `c` is the
             # pre-crawl row: a streak already on it is the earlier empty.
@@ -500,7 +500,7 @@ async def _gate_sources(db: store.Writer, t: TrackDict, specs: list[dict[str, An
                      n_closed, n_reopened, n_seen)
 
 
-async def _score_and_persist(db: store.Writer, t: TrackDict, got: Collected, resume: str | None,
+async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, resume: str | None,
                              *, fit: bool, commit: bool, guard_tripped: bool,
                              max_workers: int) -> int:
     """Score what the gates kept and write it. Returns the number scored.
@@ -517,7 +517,7 @@ async def _score_and_persist(db: store.Writer, t: TrackDict, got: Collected, res
         print(f"\n  scoring {len(got.to_score)} new job(s) against resume "
               f"({got.n_seen} already scored)...")
         async for row in fan_out(got.to_score,
-                                 lambda cj: ops._score_job(cj[0], cj[1], t["track"]),
+                                 lambda cj: ops._score_job(cj[0], cj[1], t.track),
                                  "scoring", max_workers):
             # Kept separate from the scoring failure fan_out reports: a
             # store write that fails is not a scoring problem.
@@ -540,7 +540,7 @@ async def _score_and_persist(db: store.Writer, t: TrackDict, got: Collected, res
                 "job_id": j["id"], "company_id": c["id"],
                 "company_name": c["name"], "title": j.get("title"),
                 "url": j.get("url"), "location": j.get("location"),
-                "track": t["track"],
+                "track": t.track,
                 "geo_mode": geo_mode(j.get("location", ""),
                                      j.get("description", "")) or "onsite",
                 "posted_at": j.get("posted_at"),
@@ -576,7 +576,7 @@ async def _score_and_persist(db: store.Writer, t: TrackDict, got: Collected, res
                 "job_id": job["id"], "company_id": job.get("company_id"),
                 "company_name": job.get("company"), "title": job.get("title"),
                 "url": job.get("url"), "location": job.get("location"),
-                "track": t["track"],
+                "track": t.track,
                 "remote_eligible": job.get("remote_eligible"),
                 "remote_signal": job.get("remote_signal"),
                 "anchor_signal": job.get("anchor_signal"),
@@ -602,7 +602,7 @@ def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -
         print(f"  {label:<46} {n_f:>5} {g1:>5} {kept_n:>5} {new_n:>5}{tail}")
 
 
-async def _report_ranked(db: store.Writer, t: TrackDict, got: Collected, scored: int, *,
+async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scored: int, *,
                          send: bool, top_n: int, bar: str) -> list[dict[str, Any]]:
     """Write (and maybe email) the ranked digest for a company-linked crawl,
     print the watch section and the top N, and return the ranked list.
@@ -626,7 +626,7 @@ async def _report_ranked(db: store.Writer, t: TrackDict, got: Collected, scored:
                                     len(digest.new_ranked_rows(ranked, t)),
                                     digest_path)
     else:
-        print(f"  (email suppressed — enable [tracks.{t['id']}].email "
+        print(f"  (email suppressed — enable [tracks.{t.id}].email "
               f"or pass --send)")
     if got.watch_hits:
         print(f"\n  {bar}\n  WATCHED COMPANIES - NEW POSTINGS THIS RUN\n  {bar}")
@@ -652,7 +652,7 @@ async def _report_ranked(db: store.Writer, t: TrackDict, got: Collected, scored:
     return ranked
 
 
-async def _report_matches(matches: list[dict[str, Any]], t: TrackDict, *, send: bool, samples: int,
+async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, send: bool, samples: int,
                           bar: str) -> None:
     """The sweep side: a diversified sample for a precision eyeball, then
     the matches digest."""
@@ -685,7 +685,7 @@ async def _report_matches(matches: list[dict[str, Any]], t: TrackDict, *, send: 
         print("  (email suppressed — enable [tracks.*].email or --send)")
 
 
-async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
+async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
                     send: bool | None = None, verify: bool | None = None,
                     websearch: bool | None = None, confirm_cost: bool = False,
                     max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]]:
@@ -693,7 +693,7 @@ async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
 
     Every methodology switch reads the track config; the keyword args only
     OVERRIDE it for this run (None = use the config): `send` overrides
-    t["email"], `verify` (bool) overrides t["verify_top"] (True -> top_n,
+    t.email, `verify` (bool) overrides t.verify_top (True -> top_n,
     False -> skip), `websearch` overrides sources.websearch. `fit=False`
     skips resume scoring; `commit=False` is the legacy sweep preview (no
     DB writes). Returns the ranked list (company-linked crawls) or the
@@ -706,9 +706,9 @@ async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
     """
     from src.ops import scoring
 
-    engine = t["engine"]
-    send = t["email"] if send is None else send
-    verify_n = (t["verify_top"] if verify is None
+    engine = t.engine
+    send = t.email if send is None else send
+    verify_n = (t.verify_top if verify is None
                 else (top_n if verify else 0))
 
     resume = await asyncio.to_thread(resume_text) if fit else None
@@ -719,18 +719,18 @@ async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
     apply_keyword_focus(config, t)
     specs = await build_sources(config, t, include_websearch=websearch)
     sources = [(s["name"], s["platform"], s["thunk"]) for s in specs]
-    async with store.Writer(t["db_path"]) as db:
+    async with store.Writer(t.db_path) as db:
 
         bar = "=" * 70
         gates_desc: list[str] = []
-        if t["require_core_anchor"]:
+        if t.require_core_anchor:
             gates_desc.append("core-anchor")
         gates_desc.append("technical-title")
-        gates_desc.append("geo" if t["geo_gate"] else "remote-stamped")
-        print(f"\n{bar}\n  [{t['label'].upper()}] crawl - "
+        gates_desc.append("geo" if t.geo_gate else "remote-stamped")
+        print(f"\n{bar}\n  [{t.label.upper()}] crawl - "
               f"{datetime.now():%Y-%m-%d %H:%M}")
-        print(f"  engine={engine} keywords={t['keyword_mode']} "
-              f"sources={sum(1 for v in t['sources'].values() if v)} families "
+        print(f"  engine={engine} keywords={t.keyword_mode} "
+              f"sources={sum(1 for _, v in t.sources if v)} families "
               f"({len(sources)} feeds) gates={'+'.join(gates_desc)}")
         mode = "COMMIT (DB writes)" if commit else "PREVIEW (no DB writes)"
         print(f"  Mode: {mode}" + (" + EMAIL" if send else "") + f"\n{bar}\n")
@@ -757,10 +757,10 @@ async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
                                           guard_tripped=guard_tripped,
                                           max_workers=max_workers)
 
-        linked = t["sources"]["store"] and t["sources"]["location_scoped"]
+        linked = t.sources.store and t.sources.location_scoped
         if resume and commit and linked and not guard_tripped:
             scored += await scoring.self_heal_unscored(
-                db, resume, track=t["track"], max_workers=max_workers)
+                db, resume, track=t.track, max_workers=max_workers)
         if verify_n and resume and commit and not guard_tripped:
             await scoring.verify_top(top_n=verify_n,
                                      max_workers=max(2, max_workers // 2),

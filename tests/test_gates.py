@@ -15,13 +15,13 @@ import src.match.gates as gates
 def exclude_local(local_track):
     def _exc(title, description="", **kw):
         return gates.exclude_reason(title, description,
-                                    track_id=local_track["id"], **kw)
+                                    track_id=local_track.id, **kw)
     return _exc
 
 
 @pytest.fixture
 def tables(local_track):
-    return gates._exclude_tables(local_track["id"])
+    return gates._exclude_tables(local_track.id)
 
 
 class TestExcludeGate:
@@ -206,9 +206,9 @@ class TestSiliconTitleTokens:
     def test_the_loaded_profile_spares_the_device_vocabulary(self, local_track,
                                                              title):
         if not gates.exclude_reason("Senior ASIC Design Engineer",
-                                    track_id=local_track["id"]):
+                                    track_id=local_track.id):
             pytest.skip("profile configures no silicon title tokens")
-        assert gates.exclude_reason(title, track_id=local_track["id"]) is None
+        assert gates.exclude_reason(title, track_id=local_track.id) is None
 
 
 class TestTechnicalTitle:
@@ -229,7 +229,7 @@ class TestTechnicalTitle:
     def test_tracks_can_differ(self, local_track):
         """Engines share a broad default, but a track can override it — the
         gate reads the track's own regex, never a module-level constant."""
-        narrow = dict(local_track, tech_title_regex=r"\bbaker\b")
+        narrow = local_track.model_copy(update={"tech_title_regex": r"\bbaker\b"})
         assert gates.is_technical_role("Sourdough Baker", narrow)
         assert not gates.is_technical_role("Data Engineer", narrow)
         assert gates.is_technical_role("Data Engineer", local_track)
@@ -273,7 +273,7 @@ class TestFieldOccupationTitles:
             if not gates.is_technical_role(field, t):
                 continue
             for occ in occupations:
-                assert gates.is_technical_role(occ, t), f"{t['id']}: {occ}"
+                assert gates.is_technical_role(occ, t), f"{t.id}: {occ}"
 
     @pytest.mark.parametrize("title", [
         "Registered Nurse", "Patient Access Representative",

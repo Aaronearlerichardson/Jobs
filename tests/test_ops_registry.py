@@ -118,7 +118,7 @@ class TestWebView:
         await web.OPS["check-closed"]["fn"]({
             "stale_days": "3", "limit": "", "track": config.DEFAULT_TRACK})
         assert seen["stale_days"] == 3 and seen["limit"] is None
-        assert seen["t"]["id"] == config.DEFAULT_TRACK
+        assert seen["t"].id == config.DEFAULT_TRACK
 
 
 def _args(**given):

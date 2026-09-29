@@ -10,7 +10,7 @@ last `retry_days` days.
 
 import asyncio
 
-from conftest import answer
+from conftest import answer, track_with
 
 import src.store as store
 from src.ops import backfill as ops
@@ -37,7 +37,7 @@ class TestBackfillRetryThrottle:
         # The board no longer lists the job, and its detail page is gone too.
         monkeypatch.setattr(company_fetch, "fetch_company", answer([]))
         monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
-        t = {"db_path": dbp}
+        t = track_with(db_path=dbp)
 
         assert await ops.backfill_board_descriptions(t=t) == 0
         out = capsys.readouterr().out
@@ -75,7 +75,7 @@ class TestBackfillRetryThrottle:
             "url": "https://boardless.io/1", "location": "Durham, NC",
             "track": "local-tech"})
         conn.close()
-        t = {"db_path": dbp}
+        t = track_with(db_path=dbp)
 
         await ops.backfill_board_descriptions(t=t)
         assert "backfilling 1 description(s)" in capsys.readouterr().out
@@ -94,7 +94,7 @@ class TestBackfillRetryThrottle:
             company_fetch, "hydrate_description",
             answer(lambda stub, company=None: stub.__setitem__("description",
                                                                "A real JD body.")))
-        assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 1
+        assert await ops.backfill_board_descriptions(t=track_with(db_path=dbp)) == 1
         conn = store.connect(dbp)
         row = conn.execute("SELECT description, desc_checked_at FROM jobs "
                            "WHERE job_id='gh_acme_gone'").fetchone()
@@ -153,7 +153,7 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
             return real_fan_out(items, fn, label, max_workers, **kw)
 
         monkeypatch.setattr(ops, "fan_out", _spy)
-        assert await ops.backfill_board_descriptions(t={"db_path": dbp},
+        assert await ops.backfill_board_descriptions(t=track_with(db_path=dbp),
                                                max_workers=5) == 3
         assert seen["max_workers"] == 5, "max_workers must reach the pool"
         assert sorted(c["name"] for c, _rows in seen["items"]) == sorted(names), \
@@ -175,7 +175,7 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
 
         monkeypatch.setattr(company_fetch, "fetch_company", _fetch)
         monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
-        assert await ops.backfill_board_descriptions(t={"db_path": dbp},
+        assert await ops.backfill_board_descriptions(t=track_with(db_path=dbp),
                                                max_workers=3) == 3
 
     async def test_every_row_is_still_written_and_counted(
@@ -188,7 +188,7 @@ class TestBoardBackfillFetchesCompaniesConcurrently:
         monkeypatch.setattr(company_fetch, "fetch_company", answer(self._board))
         monkeypatch.setattr(company_fetch, "hydrate_description", answer(None))
 
-        assert await ops.backfill_board_descriptions(t={"db_path": dbp}) == 2
+        assert await ops.backfill_board_descriptions(t=track_with(db_path=dbp)) == 2
         out = capsys.readouterr().out
         assert "Acme" in out and "Beacon" in out
         assert "1 stale ->  1 matched" in out

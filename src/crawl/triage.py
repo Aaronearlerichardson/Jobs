@@ -85,7 +85,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
@@ -140,21 +140,21 @@ DEFAULT_WORKERS = harvest.DEFAULT_WORKERS
 #  Which tracks read the roster                                                #
 # --------------------------------------------------------------------------- #
 
-def roster_tracks(tracks: Iterable[TrackDict] | None = None) -> list[TrackDict]:
+def roster_tracks(tracks: Iterable[RuntimeTrack] | None = None) -> list[RuntimeTrack]:
     """The configured tracks whose sources include the company store --
     the ones a harvested row can surface into."""
     return [t for t in (tracks or config.UI_TRACKS.values())
-            if t["sources"].get("store")]
+            if t.sources.store]
 
 
-def _track_applies(t: TrackDict, company: CompanyRow) -> bool:
+def _track_applies(t: RuntimeTrack, company: CompanyRow) -> bool:
     """A tag-scoped track (store_tag) only reads companies carrying it."""
-    tag = t.get("store_tag")
+    tag = t.store_tag
     return not tag or tags.has(company.get("tags"), tag)
 
 
 @contextmanager
-def _keyword_focus(t: TrackDict) -> Iterator[None]:
+def _keyword_focus(t: RuntimeTrack) -> Iterator[None]:
     """apply_keyword_focus for the duration of a block, then put the shared
     lists back (config.keyword_snapshot / restore_keywords)."""
     saved = config.keyword_snapshot()
@@ -221,12 +221,12 @@ async def ensure_mission(db: store.Writer, company: CompanyRow,
     return tier, score
 
 
-def mission_verdict(company: CompanyRow, t: TrackDict) -> str:
+def mission_verdict(company: CompanyRow, t: RuntimeTrack) -> str:
     """OK, or 'mission' when the whole company is out for track `t`:
     an inactive mission tier (multi-division exempt), or a known effective
     mission under the track's min_mission. Unknown never drops.
 
-    >>> t = {"min_mission": 0.2}
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), min_mission=0.2)
     >>> mission_verdict({"name": "A", "mission_tier": "other",
     ...                  "mission_score": 0.05}, t)
     'mission'
@@ -238,7 +238,7 @@ def mission_verdict(company: CompanyRow, t: TrackDict) -> str:
     tier, score = company.get("mission_tier"), company.get("mission_score")
     if not is_active_mission(tier, name):
         return "mission"
-    floor = t.get("min_mission")
+    floor = t.min_mission
     if floor is None or score is None:
         return OK
     if config.is_multi_division(name):
@@ -259,7 +259,7 @@ def _detail_stale(row: dict[str, Any], cutoff: str) -> bool:
     return bool(checked) and checked < cutoff
 
 
-def _geo_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, has_body: bool, cutoff: str) -> str:
+def _geo_verdict(company: CompanyRow, job: dict[str, Any], t: RuntimeTrack, has_body: bool, cutoff: str) -> str:
     """Geography on the location FIELD (see the module docstring, gate 4):
     local passes anywhere; remote passes at a watched or mission-trusted
     company. An UNKNOWN location (location_unknown) defers while a detail
@@ -277,7 +277,7 @@ def _geo_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, has_bod
     """
     loc = job.get("location") or ""
     desc = job.get("description") or ""
-    floor = t.get("remote_mission_floor")
+    floor = t.remote_mission_floor
     trusted = tags.has(company, tags.WATCH) or ops._mission_trusted(company, floor)
     if is_nc(loc):
         return OK
@@ -294,7 +294,7 @@ def _geo_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, has_bod
     return "geo"
 
 
-def row_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, cutoff: str) -> str:
+def row_verdict(company: CompanyRow, job: dict[str, Any], t: RuntimeTrack, cutoff: str) -> str:
     """Gates 2-6 for one row on one track, on the text the row has NOW.
     Returns OK, a gate name, or DEFER (undecidable without a body). The
     caller has already applied the track's keyword focus. `cutoff` is the
@@ -307,18 +307,18 @@ def row_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, cutoff: 
     if not gates.is_technical_role(title, t):
         return "title"
     deferred = False
-    if t["require_core_anchor"] and not core_anchor(title, desc):
+    if t.require_core_anchor and not core_anchor(title, desc):
         if has_body:
             return "anchor"
         deferred = True
-    if t["geo_gate"]:
+    if t.geo_gate:
         v = _geo_verdict(company, job, t, has_body, cutoff)
         if v == "geo":
             return "geo"
         deferred = deferred or v == DEFER
-    if t["exclude_gate"] and gates.exclude_reason(
+    if t.exclude_gate and gates.exclude_reason(
             title, desc, allow_defense=tags.has(company, tags.WATCH),
-            track_id=t["id"]):
+            track_id=t.id):
         return "exclude"
     if config.is_multi_division(company.get("name")):
         if not has_body:
@@ -329,7 +329,7 @@ def row_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, cutoff: 
     return DEFER if deferred else OK
 
 
-async def judge(db: store.Writer, company: CompanyRow, jobs: list[dict[str, Any]], tracks: list[TrackDict],
+async def judge(db: store.Writer, company: CompanyRow, jobs: list[dict[str, Any]], tracks: list[RuntimeTrack],
                 mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
                 *, cutoff: str) -> dict[str, dict[str, str]]:
     """Gates 1-6 for one company's rows against every applicable track.
@@ -349,11 +349,11 @@ async def judge(db: store.Writer, company: CompanyRow, jobs: list[dict[str, Any]
             mv = mission_verdict(company, t)
             if mv != OK:
                 for j in jobs:
-                    out[j["job_id"]][t["track"]] = mv
+                    out[j["job_id"]][t.track] = mv
                 continue
             with _keyword_focus(t):
                 for j in jobs:
-                    out[j["job_id"]][t["track"]] = row_verdict(company, j, t, cutoff)
+                    out[j["job_id"]][t.track] = row_verdict(company, j, t, cutoff)
         return out
     return await asyncio.to_thread(gate)
 
@@ -425,7 +425,7 @@ def _by_company(conn: sqlite3.Connection, rows: list[dict[str, Any]]
 
 
 async def _judged(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[dict[str, Any]]],
-                  tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+                  tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
                   ) -> AsyncIterator[tuple[CompanyRow, dict[str, Any], str, str, list[str]]]:
     """Yield (company, row, status, detail, surfaced) for every grouped row.
 
@@ -442,7 +442,7 @@ async def _judged(db: store.Writer, companies: dict[Any, CompanyRow], groups: di
 
 
 async def _free_gates(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[dict[str, Any]]],
-                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+                      tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
                       ) -> tuple[dict[str, tuple[str, str, CompanyRow, dict[str, Any]]], dict[str, tuple[CompanyRow, dict[str, Any], str]]]:
     """Phase 1: the free gates, on the text the rows already have.
 
@@ -599,7 +599,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
 
 
 async def _body_gates(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]],
-                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]],
+                      tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]],
                       summary: dict[str, float], n_free: int, waiting: dict[str, str],
                       cutoff: str) -> dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
@@ -681,7 +681,7 @@ async def _score(final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], s
 
 
 def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]], final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]],
-                    scores: dict[str, FitResult], over_cap: set[str], tracks: list[TrackDict],
+                    scores: dict[str, FitResult], over_cap: set[str], tracks: list[RuntimeTrack],
                     summary: dict[str, float], stamp: datetime) -> None:
     """Phase 5: every verdict, inside the caller's one batch.
 
@@ -720,8 +720,8 @@ def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str,
             summary["left"] += 1
             continue
         res = scores.get(jid)
-        floors = [t["digest_min_fit"] for t in tracks
-                  if t["track"] in surfaced]
+        floors = [t.digest_min_fit for t in tracks
+                  if t.track in surfaced]
         status = OK
         if res is not None and res.score is not None and floors and res.score < min(floors):
             status = "fit"
@@ -763,7 +763,7 @@ def _print_summary(summary: dict[str, float], bar: str) -> None:
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
 
 
-async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | None = None,
+async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] | None = None,
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
@@ -805,7 +805,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | N
         print(f"\n{bar}\n  [TRIAGE] harvested rows -> gates -> hydrate -> score "
               f"- {datetime.now():%Y-%m-%d %H:%M}")
         print(f"  {len(rows)} pending row(s), {len(tracks)} track(s): "
-              f"{', '.join(t['id'] for t in tracks)}\n{bar}\n")
+              f"{', '.join(t.id for t in tracks)}\n{bar}\n")
         summary: dict[str, float] = {"pending": len(rows), **{g: 0 for g in store.TRIAGE_GATES},
                                  "hydrated": 0, "scored": 0, "surfaced": 0, "left": 0,
                                  "skip_score": 0, "secs": 0.0}
@@ -877,7 +877,7 @@ def _passed_tracks(detail: str | None) -> set[str]:
     return {k for k, v in pairs if v == OK}
 
 
-def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[TrackDict] | None = None
+def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | None = None
                     ) -> dict[str, dict[str, Any]]:
     """{job_id: {"reason", "company_name", "title", "location"}} for every
     open triaged row whose verdict the current geo rules would change.
@@ -904,8 +904,8 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[TrackDict] | None
     >>> store.record_triage(conn, "a", "geo", "t=geo")
     >>> store.record_triage(conn, "b", "ok", "t=ok", tracks=["t"])
     >>> store.record_triage(conn, "c", "ok", "t=ok;s=ok", tracks=["t", "s"])
-    >>> tracks = [{"track": "t", "geo_gate": True, "sources": {"store": True}},
-    ...           {"track": "s", "geo_gate": False, "sources": {"store": True}}]
+    >>> tracks = [RuntimeTrack(id="t", db_path=Path("t.db"), track="t", geo_gate=True),
+    ...           RuntimeTrack(id="s", db_path=Path("s.db"), track="s", geo_gate=False)]
     >>> {jid: v["reason"] for jid, v in requeue_reasons(conn, tracks).items()}
     {'a': 'geo:unknown-location', 'b': 'geo:non-local'}
 
@@ -916,7 +916,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[TrackDict] | None
         whose location is unknown passed on the body rule, which has not
         changed, so it is not selected either.
     """
-    gated = {t["track"] for t in roster_tracks(tracks) if t["geo_gate"]}
+    gated = {t.track for t in roster_tracks(tracks) if t.geo_gate}
     out: dict[str, dict[str, Any]] = {}
 
     def add(r: sqlite3.Row, reason: str) -> None:
@@ -944,7 +944,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[TrackDict] | None
 
 
 async def requeue_rows(db_path: str | Path | None = None, apply: bool = False,
-                       sample: int = 10, tracks: Iterable[TrackDict] | None = None
+                       sample: int = 10, tracks: Iterable[RuntimeTrack] | None = None
                        ) -> dict[str, Any]:
     """Report (the default) or apply a re-queue of rows `requeue_reasons`
     flags -- the CLI/registry surface (run_scraper.py --triage --requeue

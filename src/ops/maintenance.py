@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import digest
 from src import store
 from src import tags
@@ -33,12 +33,12 @@ if TYPE_CHECKING:
     from sqlite3 import Connection
 
 
-def _t(t: TrackDict | None) -> TrackDict:
+def _t(t: RuntimeTrack | None) -> RuntimeTrack:
     return t if t is not None else config.track_for_engine("local")
 
 
 @contextmanager
-def track_store(t: TrackDict | None = None, conn: sqlite3.Connection | None = None
+def track_store(t: RuntimeTrack | None = None, conn: sqlite3.Connection | None = None
                 ) -> Iterator[sqlite3.Connection]:
     """The track's store, closed on the way out however the block ends --
     or `conn` itself, left open, when the caller already holds one (the
@@ -59,7 +59,7 @@ def track_store(t: TrackDict | None = None, conn: sqlite3.Connection | None = No
     if conn is not None:
         yield conn
         return
-    conn = store.connect(_t(t)["db_path"])
+    conn = store.connect(_t(t).db_path)
     try:
         yield conn
     finally:
@@ -67,7 +67,7 @@ def track_store(t: TrackDict | None = None, conn: sqlite3.Connection | None = No
 
 
 @asynccontextmanager
-async def track_writer(t: TrackDict | None = None, db: store.Writer | Connection | None = None
+async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connection | None = None
                        ) -> AsyncIterator[store.Writer]:
     """`track_store` for async code: the track's store on a store.Writer
     for the block -- or `db` itself when the caller already holds a Writer
@@ -82,7 +82,7 @@ async def track_writer(t: TrackDict | None = None, db: store.Writer | Connection
     if isinstance(db, store.Writer):
         yield db
         return
-    async with store.Writer(_t(t)["db_path"] if db is None else db) as w:
+    async with store.Writer(_t(t).db_path if db is None else db) as w:
         yield w
 
 
@@ -135,17 +135,17 @@ async def board_match(index: dict[str, dict[str, Any]], title: str | None) -> di
     return match if match.get("description") else None
 
 
-def _ranked(conn: sqlite3.Connection, t: TrackDict, limit: int | None = None) -> list[dict[str, Any]]:
+def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None) -> list[dict[str, Any]]:
     """The track's ranked view — same knobs the crawl digest uses."""
     return store.ranked_jobs(
-        conn, track=t["track"],
-        location_re=(NC_RE if t["geo_gate"] else None),
-        rank_by=t["rank_by"], allow_geo_modes={"remote"},
-        min_mission=t["min_mission"],
-        remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
+        conn, track=t.track,
+        location_re=(NC_RE if t.geo_gate else None),
+        rank_by=t.rank_by, allow_geo_modes={"remote"},
+        min_mission=t.min_mission,
+        remote_mission_floor=t.remote_mission_floor, limit=limit)
 
 
-def _write_digest(conn: sqlite3.Connection, t: TrackDict,
+def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
                   watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] | None = None
                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
@@ -164,7 +164,7 @@ def _write_digest(conn: sqlite3.Connection, t: TrackDict,
     return ranked, pipeline, followups, path
 
 
-def rewrite_digest(conn: sqlite3.Connection, t: TrackDict, top_n: int = 15,
+def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
                    heading: str = "") -> list[dict[str, Any]]:
     """Rewrite the track's ranked digest from the store as it stands now,
     and print the top `top_n` of it. Returns the ranked list.
@@ -257,7 +257,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company: CompanyRow, job: dict[str, Any], t: TrackDict) -> bool:
+async def _keep_job(company: CompanyRow, job: dict[str, Any], t: RuntimeTrack) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -278,12 +278,12 @@ async def _keep_job(company: CompanyRow, job: dict[str, Any], t: TrackDict) -> b
         if not is_relevant(title, job.get("description", ""),
                            watch_titles=tags.has(company, tags.WATCH)):
             return False
-    if t["exclude_gate"] and gates.exclude_reason(
+    if t.exclude_gate and gates.exclude_reason(
             title, job.get("description", ""),
-            allow_defense=tags.has(company, tags.WATCH), track_id=t["id"]):
+            allow_defense=tags.has(company, tags.WATCH), track_id=t.id):
         return False
-    floor = t.get("remote_mission_floor")
-    if t["geo_gate"] and _whole_board(company, floor):
+    floor = t.remote_mission_floor
+    if t.geo_gate and _whole_board(company, floor):
         # Whole-board companies are fetched with no location restriction,
         # which lets their remote and onsite-elsewhere reqs through the
         # fetch. Gate here:

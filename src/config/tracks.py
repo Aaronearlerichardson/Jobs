@@ -7,7 +7,7 @@ filter defaults that flip on switch (src/web/routes.py), plus the crawl
 methodology src/crawl/runner.py runs it with. The schema, the per-engine
 defaults and the built-in pair live in src/config/profile_schema.py
 (Track, ENGINE_DEFAULTS, DEFAULT_TRACKS); this module turns validated
-tracks into the runtime dicts. Code keys off the ENGINE a track resolves
+tracks into RuntimeTracks. Code keys off the ENGINE a track resolves
 to, never off the user-chosen track id.
 
 Crawl-methodology keys, every one overridable in the track's own table:
@@ -57,68 +57,37 @@ Crawl-methodology keys, every one overridable in the track's own table:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any
+
+from pydantic import ConfigDict
 
 from .paths import DATA_DIR
 from .profile import PROFILE, PROFILE_PATH
 from .profile_schema import ENGINE_ALIASES, Track, parse
 
 
-class TrackSourcesDict(TypedDict):
-    store: bool
-    priority_companies: bool
-    aggregators: bool
-    websearch: bool
-    location_scoped: bool
-
-
-class TrackDict(TypedDict):
-    """A track as every runtime reader indexes it (see _runtime): the
-    validated Track's fields, minus `db`, plus id, label, track and db_path.
-    tests/test_config.py pins these names to the model's."""
+class RuntimeTrack(Track):
+    """A configured track as the runtime holds it (see _runtime): the
+    validated Track, plus its id and DB path, with a blank `label` and
+    `track` resolved from the id. Frozen, and `model_copy(update=)` does not
+    validate."""
+    model_config = ConfigDict(frozen=True)
     id: str
-    label: str
-    track: str
     db_path: Path
-    engine: str
-    rank_by: Literal["fit", "combined"]
-    min_mission: float | None
-    min_fit_default: float
-    willing_to_move_default: bool
-    remote_requires_watch: bool
-    default: bool
-    keyword_mode: Literal["extend", "replace"]
-    accept_remote: bool
-    sources: TrackSourcesDict
-    store_tag: str | None
-    require_core_anchor: bool
-    geo_gate: bool
-    remote_mission_floor: float | None
-    verify_top: int
-    verify_floor: float
-    cost_guard: int
-    email: bool
-    digest_min_fit: float
-    notify: bool
-    exclude_gate: bool
-    dormant_after: int
-    dormant_days: int
-    tech_title_regex: str
 
 
-def _runtime(tid: str, t: Track) -> TrackDict:
-    """A validated Track as the runtime dict every reader indexes."""
-    d = t.model_dump(exclude={"db"})
-    d.update(id=tid, label=t.label or tid,
-             track=t.track or tid.replace("_", "-"),
-             db_path=DATA_DIR / (t.db or f"{tid}.db"))
-    return cast(TrackDict, d)     # the pydantic boundary: the fields above are its
+def _runtime(tid: str, t: Track) -> RuntimeTrack:
+    """A validated Track as the RuntimeTrack every reader takes."""
+    return RuntimeTrack(**{**t.model_dump(), "id": tid, "label": t.label or tid,
+                           "track": t.track or tid.replace("_", "-"),
+                           "db_path": DATA_DIR / (t.db or f"{tid}.db")})
 
 
-def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, TrackDict]:
-    """A [tracks] table (or None -> the built-in pair) as runtime track
-    dicts, validated like a profile's.
+def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, RuntimeTrack]:
+    """A [tracks] table (or None -> the built-in pair) as RuntimeTracks,
+    validated like a profile's.
 
     A track's engine fills every methodology key it leaves out (a blank
     string counts as left out); retired engine names resolve; the id
@@ -127,11 +96,11 @@ def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, TrackDict]:
     >>> t = _build_ui_tracks({"my_track": {
     ...     "engine": "neural", "verify_top": 3, "store_tag": "",
     ...     "sources": {"websearch": False}}})["my_track"]
-    >>> t["engine"], t["keyword_mode"], t["store_tag"], t["verify_top"]
+    >>> t.engine, t.keyword_mode, t.store_tag, t.verify_top
     ('sweep', 'replace', 'sweep', 3)
-    >>> t["label"], t["track"], t["db_path"].name
+    >>> t.label, t.track, t.db_path.name
     ('my_track', 'my-track', 'my_track.db')
-    >>> sorted(k for k, on in t["sources"].items() if on)
+    >>> sorted(k for k, on in t.sources if on)
     ['aggregators', 'priority_companies', 'store']
 
     Notes:
@@ -142,18 +111,18 @@ def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, TrackDict]:
             for tid, t in parse({"tracks": raw or {}}).tracks.items()}
 
 
-def default_track_id(tracks: dict[str, TrackDict]) -> str | None:
+def default_track_id(tracks: Mapping[str, Track]) -> str | None:
     """The id of the track flagged `default`, else the first one, else
     None for an empty table.
 
-    >>> default_track_id({"a": {"default": False}, "b": {"default": True}})
+    >>> default_track_id({"a": Track(), "b": Track(default=True)})
     'b'
-    >>> default_track_id({"a": {"default": False}})
+    >>> default_track_id({"a": Track()})
     'a'
     >>> default_track_id({}) is None
     True
     """
-    return next((tid for tid, t in tracks.items() if t["default"]),
+    return next((tid for tid, t in tracks.items() if t.default),
                 next(iter(tracks), None))
 
 
@@ -161,7 +130,7 @@ UI_TRACKS = {tid: _runtime(tid, t) for tid, t in PROFILE.tracks.items()}
 DEFAULT_TRACK = default_track_id(UI_TRACKS)
 
 
-def track_for_engine(engine: str) -> TrackDict:
+def track_for_engine(engine: str) -> RuntimeTrack:
     """The configured track to use when an engine-level entry point is
     invoked without naming a track: the default-flagged track with that
     engine, else the first. Legacy engine names resolve too.
@@ -173,8 +142,8 @@ def track_for_engine(engine: str) -> TrackDict:
     here; it was never a crawl function.
     """
     engine = ENGINE_ALIASES.get(engine, engine)
-    cands = [t for t in UI_TRACKS.values() if t["engine"] == engine]
+    cands = [t for t in UI_TRACKS.values() if t.engine == engine]
     if not cands:
         raise SystemExit(f"no [tracks.*] entry with engine={engine!r} "
                          f"in {PROFILE_PATH}")
-    return next((t for t in cands if t["default"]), cands[0])
+    return next((t for t in cands if t.default), cands[0])

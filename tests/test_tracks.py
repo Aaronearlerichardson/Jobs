@@ -19,45 +19,41 @@ class TestTrackConfig:
         assert len(cfg.UI_TRACKS) >= 1
         assert cfg.DEFAULT_TRACK in cfg.UI_TRACKS
 
-    def test_the_track_type_names_exactly_the_runtime_keys(self, cfg):
-        # TrackDict is written out by hand (mypy cannot read a pydantic
-        # model's fields); this is what keeps it honest.
-        from src.config.tracks import TrackDict, TrackSourcesDict
-        for t in cfg.UI_TRACKS.values():
-            assert set(t) == set(TrackDict.__annotations__)
-            assert set(t["sources"]) == set(TrackSourcesDict.__annotations__)
+    def test_a_runtime_track_is_frozen(self, local_track):
+        with pytest.raises(ValidationError):
+            local_track.geo_gate = False
 
     def test_every_track_points_at_a_db(self, cfg):
-        assert all(t["db_path"].name.endswith(".db")
+        assert all(t.db_path.name.endswith(".db")
                    for t in cfg.UI_TRACKS.values())
 
     def test_fallback_synthesizes_when_section_absent(self, cfg):
         fallback = cfg._build_ui_tracks(None)
         assert len(fallback) == 2
-        assert any(t["default"] for t in fallback.values())
+        assert any(t.default for t in fallback.values())
 
     def test_methodology_keys_are_parsed(self, local_track):
-        assert all(k in local_track for k in
+        assert all(hasattr(local_track, k) for k in
                    ("keyword_mode", "sources", "store_tag", "require_core_anchor",
                     "geo_gate", "verify_top", "verify_floor", "cost_guard",
                     "email", "exclude_gate", "tech_title_regex",
                     "dormant_after", "dormant_days"))
 
     def test_verify_floor_defaults_and_is_overridable(self, cfg):
-        assert cfg.UI_TRACKS[cfg.DEFAULT_TRACK]["verify_floor"] == 0.25
+        assert cfg.UI_TRACKS[cfg.DEFAULT_TRACK].verify_floor == 0.25
         built = cfg._build_ui_tracks({"t": {"verify_floor": 0.4}})
-        assert built["t"]["verify_floor"] == 0.4
+        assert built["t"].verify_floor == 0.4
 
     def test_engine_defaults_differ(self, local_track, sweep_track):
-        assert local_track["keyword_mode"] == "extend"
-        assert sweep_track["keyword_mode"] == "replace"
-        assert local_track["geo_gate"] and not sweep_track["geo_gate"]
-        assert sweep_track["require_core_anchor"]
-        assert not local_track["require_core_anchor"]
+        assert local_track.keyword_mode == "extend"
+        assert sweep_track.keyword_mode == "replace"
+        assert local_track.geo_gate and not sweep_track.geo_gate
+        assert sweep_track.require_core_anchor
+        assert not local_track.require_core_anchor
 
     def test_track_for_engine_resolves_both(self, local_track, sweep_track):
-        assert local_track["engine"] == "local"
-        assert sweep_track["engine"] == "sweep"
+        assert local_track.engine == "local"
+        assert sweep_track.engine == "sweep"
 
     def test_a_track_built_directly_gets_its_engines_defaults(self):
         t = Track(engine="sweep")
@@ -90,7 +86,7 @@ class TestRemoteAdmissionGates:
                 "url": "https://acme.io/1", "description": ""}
 
     def _track(self, local_track, floor=0.85):
-        return {**local_track, "remote_mission_floor": floor}
+        return local_track.model_copy(update={"remote_mission_floor": floor})
 
     def test_conglomerates_never_qualify_by_score(self, cfg, monkeypatch):
         monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
@@ -152,7 +148,7 @@ class TestKeywordFocus:
     def test_replace_swaps_tiers_and_enables_remote(self, cfg, sweep_track,
                                                     pristine_keywords):
         runner.apply_keyword_focus(cfg, sweep_track)
-        kw = cfg.KEYWORDS_BY_TRACK.get(sweep_track["id"])
+        kw = cfg.KEYWORDS_BY_TRACK.get(sweep_track.id)
         track_core = list(kw.core) if kw else []
         assert cfg.ACCEPT_REMOTE is True
         if track_core:
@@ -254,7 +250,7 @@ class TestSourceAssembly:
                      ((datetime.now() + timedelta(days=7)).isoformat(), cid))
         conn.commit()
         conn.close()
-        t = {**local_track, "db_path": db_path, "store_tag": None}
+        t = local_track.model_copy(update={"db_path": db_path, "store_tag": None})
         names = {s["name"] for s in await runner.build_sources(cfg, t)}
         assert "Awake" in names and "Asleep" not in names
 

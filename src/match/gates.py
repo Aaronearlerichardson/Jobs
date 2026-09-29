@@ -4,7 +4,7 @@ The last two pieces of track behavior that used to live as code in the track
 modules — the technical-title regex and the exclude tables — resolved
 per-track from configuration instead:
 
-  * `is_technical_role(title, t)` compiles `t["tech_title_regex"]`
+  * `is_technical_role(title, t)` compiles `t.tech_title_regex`
     (profile.toml [tracks.*], engine defaults in
     src/config/profile_schema.py): the cheap positive gate that keeps
     nurses/sales/admin titles away from any LLM scoring spend.
@@ -34,7 +34,7 @@ import re
 from functools import lru_cache
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src.config.profile_schema import TrackExclude
 from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
                                scrub_boilerplate, token_in)
@@ -45,9 +45,9 @@ def _title_re(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.I)
 
 
-def is_technical_role(title: str | None, t: TrackDict) -> bool:
+def is_technical_role(title: str | None, t: RuntimeTrack) -> bool:
     """Cheap positive title gate for track `t` (a config.UI_TRACKS entry)."""
-    return bool(_title_re(t["tech_title_regex"]).search(title or ""))
+    return bool(_title_re(t.tech_title_regex).search(title or ""))
 
 
 @lru_cache(maxsize=32)

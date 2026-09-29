@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import store
 from src.ats.board import closure
 from src.ats.board import company as company_fetch
@@ -76,7 +76,7 @@ def _sync_skip_note(skipped: dict[str, int]) -> str:
     return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
 
 
-async def sync_status_all(top_n: int = 15, t: TrackDict | None = None) -> tuple[int, int]:
+async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Status-only reconciliation: re-fetch every active company's board
     (same scoping as the crawl — locality unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
@@ -94,12 +94,12 @@ async def sync_status_all(top_n: int = 15, t: TrackDict | None = None) -> tuple[
     instead of trusting one page-capped pull."""
     t = _t(t)
     async with track_writer(t) as db:
-        companies = await db.run(store.crawlable_companies, tag=t["store_tag"])
+        companies = await db.run(store.crawlable_companies, tag=t.store_tag)
         print(f"  reconciling statuses across {len(companies)} active compan(ies)...")
-        loc = NC_RE if t["sources"]["location_scoped"] else None
+        loc = NC_RE if t.sources.location_scoped else None
         sources = [(c["name"], c["ats"] or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if (_whole_board(cc, t.get("remote_mission_floor"))
+                        cc, None if (_whole_board(cc, t.remote_mission_floor)
                                      or loc is None) else loc)))
                    for c in companies]
         fetched = await fetch_all(sources)
@@ -126,7 +126,7 @@ async def sync_status_all(top_n: int = 15, t: TrackDict | None = None) -> tuple[
                       f"not reconciled ({why}){detail}")
                 continue
             n_re, n_cl = await db.run(
-                store.sync_job_statuses, c["id"], jobs, track=t["track"],
+                store.sync_job_statuses, c["id"], jobs, track=t.track,
                 capped=(snapshot or {}).get("capped", False))
             n_boards += 1
             n_closed += n_cl
@@ -275,7 +275,7 @@ def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str,
 
 
 async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
-                            t: TrackDict | None = None, db: store.Writer | None = None) -> int:
+                            t: RuntimeTrack | None = None, db: store.Writer | None = None) -> int:
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer

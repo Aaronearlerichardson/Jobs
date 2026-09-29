@@ -9,7 +9,7 @@ import threading
 import pytest
 
 from conftest import (answer, company_row as _company, fake_response, make_board_fn,
-                      no_pacing)
+                      no_pacing, track_with)
 
 from src import config, runstate, store
 from src.claude import api as claude_api
@@ -859,7 +859,7 @@ async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
     from src.crawl import runner
     c = _company(db, "Acme")
     store.upsert_job(db, {"job_id": "gh_acme_old", "company_id": c["id"],
-                          "title": "Still open", "track": local_track["track"]})
+                          "title": "Still open", "track": local_track.track})
     async with store.Writer(db) as w:
         *_, n_reopened, n_closed = await runner._gate_company_board(
             w, local_track, c, [_job(1)], commit=True, snapshot=snapshot)
@@ -905,9 +905,9 @@ async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
               "url": "https://x.test/j/1", "location": "Durham, NC",
               "description": "", "ats": "greenhouse"}]
     t = next(iter(config.UI_TRACKS.values()))
-    t = {**t, "db_path": db, "sources": {**t["sources"]},
-         "email": False, "verify_top": 0, "require_core_anchor": False,
-         "exclude_gate": False, "geo_gate": False, "cost_guard": 0}
+    t = t.model_copy(update={
+        "db_path": db, "email": False, "verify_top": 0, "require_core_anchor": False,
+        "exclude_gate": False, "geo_gate": False, "cost_guard": 0})
     monkeypatch.setattr(runner, "build_sources", answer(
         lambda cfg, tt, include_websearch=None: [
             {"name": "Acme", "platform": "greenhouse", "company": c,
@@ -935,7 +935,7 @@ async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     conn = store.connect(db)
     row = conn.execute("SELECT * FROM jobs WHERE job_id='gh_acme_1'").fetchone()
     assert row["resume_fit_score"] == 0.7
-    assert t["track"] in store.track_set(row["track"])
+    assert t.track in store.track_set(row["track"])
     assert not hydrated, "stored description should have been reused"
 
 
@@ -960,7 +960,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
                                    or {"pending": 0}))
         monkeypatch.setattr(
             "src.crawl.triage.roster_tracks",
-            lambda: [{"track": "local-tech", "verify_top": verify_top}])
+            lambda: [track_with(track="local-tech", verify_top=verify_top)])
         monkeypatch.setattr(harvest, "verify_top",
                             answer(lambda **kw: order.append(("verify", kw))))
         monkeypatch.setattr(harvest, "check_closed_jobs",
@@ -980,7 +980,7 @@ class TestHarvestPassRunsVerifyAndClosedProbe:
         assert self._kinds(order) == ["triage", "verify", "closed", "digest"]
         verify_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "verify")
-        assert verify_kw["t"]["track"] == "local-tech"
+        assert verify_kw["t"].track == "local-tech"
         closed_kw = next(o[1] for o in order if isinstance(o, tuple)
                          and o[0] == "closed")
         assert (closed_kw["limit"], closed_kw["stale_days"]) == (

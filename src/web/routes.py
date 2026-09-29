@@ -21,7 +21,7 @@ from src import store
 from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
-from src.config import TrackDict, profile_edit
+from src.config import RuntimeTrack, profile_edit
 from src.validation import Text, error_lines
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
@@ -55,7 +55,7 @@ def _body[M: BaseModel](model: type[M]) -> M:
         abort(make_response(_invalid(error_lines(e))))
 
 
-def _track(tid: str | None = None) -> TrackDict:
+def _track(tid: str | None = None) -> RuntimeTrack:
     """Resolve the request's track config ([tracks.*] in profile.toml) from
     ?track=<id>, else `tid` (a JSON body's "track"). Unknown ids fall back
     to the default track rather than erroring: a stale localStorage value
@@ -90,11 +90,11 @@ def api_run(name: str) -> ResponseReturnValue:
     args = _body(op["params"])
     track_cfg = _track(args.track)
     need = op.get("engine")
-    if need is not None and need != track_cfg["engine"]:
+    if need is not None and need != track_cfg.engine:
         return jsonify(error=f"{name!r} needs the {need!r} engine - the "
-                             f"{track_cfg['label']} track runs "
-                             f"{track_cfg['engine']!r}"), 409
-    args = args.model_copy(update={"track": track_cfg["id"]})
+                             f"{track_cfg.label} track runs "
+                             f"{track_cfg.engine!r}"), 409
+    args = args.model_copy(update={"track": track_cfg.id})
     # submit() claims the slot on the web UI's loop, one request at a time,
     # so two requests in the same instant can't both start an operation:
     # the loser is queued, not run.
@@ -195,12 +195,12 @@ def api_jobs() -> ResponseReturnValue:
         # rule). The digest/CLI callers of ranked_jobs keep their own geo
         # gates — this is a UI-only widening.
         rows = store.ranked_jobs(
-            conn, track=t["track"], location_re=None,
-            rank_by=t["rank_by"], min_mission=t["min_mission"],
+            conn, track=t.track, location_re=None,
+            rank_by=t.rank_by, min_mission=t.min_mission,
             include_closed=request.args.get("closed") == "1",
             include_dispositioned=request.args.get("dispositioned") == "1")
     today = _today()
-    floor = t.get("remote_mission_floor")
+    floor = t.remote_mission_floor
     return jsonify([_job_json(r, today, i + 1, remote_floor=floor)
                     for i, r in enumerate(rows)])
 
@@ -208,15 +208,15 @@ def api_jobs() -> ResponseReturnValue:
 @app.get("/api/tracks")
 def api_tracks() -> ResponseReturnValue:
     return jsonify([
-        {"id": t["id"], "label": t["label"], "engine": t["engine"],
-         "min_fit_default": t["min_fit_default"],
-         "willing_to_move_default": t["willing_to_move_default"],
-         "remote_requires_watch": t["remote_requires_watch"],
-         "remote_mission_floor": t["remote_mission_floor"],
-         "verify_floor": t["verify_floor"],
-         "default": t["id"] == config.DEFAULT_TRACK,
+        {"id": t.id, "label": t.label, "engine": t.engine,
+         "min_fit_default": t.min_fit_default,
+         "willing_to_move_default": t.willing_to_move_default,
+         "remote_requires_watch": t.remote_requires_watch,
+         "remote_mission_floor": t.remote_mission_floor,
+         "verify_floor": t.verify_floor,
+         "default": t.id == config.DEFAULT_TRACK,
          "ops": sorted(n for n, o in OPS.items()
-                       if o.get("engine") in (None, t["engine"]))}
+                       if o.get("engine") in (None, t.engine))}
         for t in config.UI_TRACKS.values()
     ])
 
@@ -271,14 +271,14 @@ def api_pipeline_fields(job_id: str) -> ResponseReturnValue:
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job=_job_json(
-        cast(dict[str, Any], row), _today(), remote_floor=t.get("remote_mission_floor")))
+        cast(dict[str, Any], row), _today(), remote_floor=t.remote_mission_floor))
 
 
 @app.get("/api/pipeline")
 def api_pipeline() -> ResponseReturnValue:
     t = _track()
     today = _today()
-    floor = t.get("remote_mission_floor")
+    floor = t.remote_mission_floor
     with track_store(t) as conn:
         rows = [_job_json(r, today, remote_floor=floor)
                 for r in store.get_pipeline(conn)]
@@ -629,12 +629,12 @@ def api_stats() -> ResponseReturnValue:
             "api_key": have_api_key(),
             "screen_model": config.CLAUDE_MODEL,
             "verify_model": config.CLAUDE_VERIFY_MODEL,
-            "db": str(t["db_path"]),
+            "db": str(t.db_path),
             # Where the Settings tab writes. Shown in the header because the
             # two can diverge (a per-user data dir vs. a profile beside the
             # code).
             "profile": str(config.PROFILE_PATH),
-            "track": t["id"],
+            "track": t.id,
             "boot_id": BOOT_ID,
         }
     return jsonify(stats)

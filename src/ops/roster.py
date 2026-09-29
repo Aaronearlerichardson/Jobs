@@ -15,11 +15,11 @@ op reached a different store depending on which front end asked for it.
 
 from __future__ import annotations
 
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from typing import Any
 
 
-def dedup(t: TrackDict | None = None) -> tuple[int, int]:
+def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Merge duplicate company rows pointing at one board, then duplicate
     job rows. Returns (companies merged, jobs dropped)."""
     from src import store
@@ -32,7 +32,7 @@ def dedup(t: TrackDict | None = None) -> tuple[int, int]:
     return n, n_jobs
 
 
-async def prune(offmission: bool = False, t: TrackDict | None = None) -> tuple[int, int]:
+async def prune(offmission: bool = False, t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Deactivate companies whose ATS board is dead, and optionally the
     off-mission ones. Returns (dead deactivated, off-mission deactivated)."""
     from src.ops.maintenance import track_writer
@@ -45,7 +45,7 @@ async def prune(offmission: bool = False, t: TrackDict | None = None) -> tuple[i
     return n_dead, n_off
 
 
-def backfill_axes(t: TrackDict | None = None) -> int:
+def backfill_axes(t: RuntimeTrack | None = None) -> int:
     """Populate the per-axis fit columns from fit_reason (offline)."""
     from src import store
     from src.ops.maintenance import track_store
@@ -53,7 +53,7 @@ def backfill_axes(t: TrackDict | None = None) -> int:
         return store.backfill_axis_columns(conn)
 
 
-async def ingest_nlx(companies: list[str] | None, t: TrackDict | None = None) -> int:
+async def ingest_nlx(companies: list[str] | None, t: RuntimeTrack | None = None) -> int:
     """Pull postings for bot-gated employers from the federal NLx feed and
     run them through the standard ingest. `companies` is a list of
     employer names. Returns the number of new jobs ingested."""

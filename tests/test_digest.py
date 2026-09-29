@@ -28,10 +28,7 @@ YESTERDAY = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 def track(local_track):
     """The local track with a known digest floor, so the assertions do not
     depend on whichever profile is loaded."""
-    t = dict(local_track)
-    t["digest_min_fit"] = 0.4
-    t["notify"] = False
-    return t
+    return local_track.model_copy(update={"digest_min_fit": 0.4, "notify": False})
 
 
 @pytest.fixture
@@ -184,7 +181,7 @@ class TestSendRankedDigest:
         assert digest.send_ranked_digest(ranked, track) is True
         subject, plain, html = sent[0]
         assert "1 new match(es)" in subject
-        assert track["label"].upper() in subject
+        assert track.label.upper() in subject
         assert "Role fresh" in plain and "Role fresh" in html
         assert "Role stale" not in plain
         assert "Role weak" not in plain
@@ -255,7 +252,7 @@ class TestToast:
         assert digest.toast(track, 3, "x.md") is False
 
     def test_no_toast_without_new_rows(self, track):
-        assert digest.toast({**track, "notify": True}, 0, "x.md") is False
+        assert digest.toast(track.model_copy(update={"notify": True}), 0, "x.md") is False
 
     def test_missing_package_degrades_silently(self, track, monkeypatch):
         import builtins
@@ -267,20 +264,20 @@ class TestToast:
             return real_import(name, *a, **k)
 
         monkeypatch.setattr(builtins, "__import__", _blocked)
-        assert digest.toast({**track, "notify": True}, 3, "x.md") is False
+        assert digest.toast(track.model_copy(update={"notify": True}), 3, "x.md") is False
 
 
 class TestTrackKeys:
     def test_engine_defaults_expose_the_digest_keys(self, cfg):
         for t in cfg.UI_TRACKS.values():
-            assert isinstance(t["digest_min_fit"], float)
-            assert isinstance(t["notify"], bool)
+            assert isinstance(t.digest_min_fit, float)
+            assert isinstance(t.notify, bool)
 
     def test_profile_can_override_the_floor(self, cfg):
         built = cfg._build_ui_tracks(
             {"x": {"engine": "local", "digest_min_fit": 0.75, "notify": True}})
-        assert built["x"]["digest_min_fit"] == 0.75
-        assert built["x"]["notify"] is True
+        assert built["x"].digest_min_fit == 0.75
+        assert built["x"].notify is True
 
 
 # --------------------------------------------------------------------------- #
@@ -316,7 +313,7 @@ def golden_clock(monkeypatch):
 
 @pytest.fixture
 def golden_track(track):
-    return dict(track, id="golden", label="Golden")
+    return track.model_copy(update={"id": "golden", "label": "Golden"})
 
 
 def golden_inputs(hometown):
@@ -443,12 +440,12 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
 
     @staticmethod
     def _text(report_dir, t):
-        [path] = report_dir.glob(f"{t['id']}_*.md")
+        [path] = report_dir.glob(f"{t.id}_*.md")
         return path.read_text(encoding="utf-8")
 
     def test_rewrite_digest_writes_the_triage_section(
             self, db, company, add_job, local_track, report_dir, capsys):
-        job_id = add_job("gh_acme_1", fit=0.9, track=local_track["track"])
+        job_id = add_job("gh_acme_1", fit=0.9, track=local_track.track)
         store.record_triage(db, job_id, "ok", "local-tech=ok")
         store.upsert_job(db, {"job_id": "gh_acme_2", "title": "Dropped"})
         store.record_triage(db, "gh_acme_2", "geo", "local-tech=geo")
@@ -468,8 +465,8 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
 
     async def test_the_crawl_report_goes_through_the_same_writer(
             self, db, company, add_job, local_track, report_dir):
-        job_id = add_job("gh_acme_1", fit=0.9, track=local_track["track"])
-        add_job("gh_acme_2", fit=0.4, track=local_track["track"])
+        job_id = add_job("gh_acme_1", fit=0.9, track=local_track.track)
+        add_job("gh_acme_2", fit=0.4, track=local_track.track)
         store.record_triage(db, job_id, "ok", "local-tech=ok")
         watch_hits = [({"name": "Acme"},
                        {"title": "Watched Role", "url": "https://acme.io/w",

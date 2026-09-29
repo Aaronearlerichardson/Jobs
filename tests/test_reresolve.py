@@ -15,7 +15,7 @@ import re
 
 import pytest
 
-from conftest import answer, fake_response, iso_days_ago
+from conftest import answer, fake_response, iso_days_ago, track_with
 
 import src.store as store
 from src import tags
@@ -110,7 +110,7 @@ class TestReresolveWrites:
     narrow on purpose: board coordinates, a mission score, active=0 and the
     pending-review tag — nothing else."""
 
-    T = {"db_path": None}
+    T = track_with(db_path=None)
 
     def _wire(self, monkeypatch, result):
         monkeypatch.setattr(resolve_board, "resolve_or_miss", answer(result))
@@ -287,14 +287,14 @@ class TestManualAddUsesTheSharedResolver:
                                   "careers_url": "https://emmes.com/careers",
                                   "count": 40, "nc": 4, "via": "sniff"}, None),
                    seen)
-        t = {"db_path": tmp_path / "t.db"}
+        t = track_with(db_path=tmp_path / "t.db")
 
         out = await ingest.add_manual_job("https://emmes.com/jobs/1", "Data Engineer",
                                  "Emmes", "Durham, NC", t=t)
 
         assert seen == ["Emmes"]
         assert out["board"] is True
-        conn = store.connect(t["db_path"])
+        conn = store.connect(t.db_path)
         row = dict(conn.execute(
             "SELECT * FROM companies WHERE name='Emmes'").fetchone())
         conn.close()
@@ -306,20 +306,20 @@ class TestManualAddUsesTheSharedResolver:
         seen = []
         self._wire(monkeypatch, (None, "no-board-found:domain-unreachable"),
                    seen)
-        t = {"db_path": tmp_path / "t.db"}
+        t = track_with(db_path=tmp_path / "t.db")
 
         out = await ingest.add_manual_job("https://axoft.com/jobs/1", "Data Engineer",
                                  "Axoft", "Durham, NC", t=t)
 
         assert out["board"] is False
-        conn = store.connect(t["db_path"])
+        conn = store.connect(t.db_path)
         row = dict(conn.execute(
             "SELECT * FROM companies WHERE name='Axoft'").fetchone())
         conn.close()
         assert row["miss_reason"] == "no-board-found:domain-unreachable"
         assert row["active"] == 0
         # Which is exactly what a later re-resolution pass selects on.
-        conn = store.connect(t["db_path"])
+        conn = store.connect(t.db_path)
         assert [c["name"] for c in repair._reresolve_candidates(conn)] == ["Axoft"]
         conn.close()
 

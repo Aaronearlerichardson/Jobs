@@ -113,8 +113,8 @@ def select_candidates(conn: sqlite3.Connection,
 
 def _floor_for_row(row: dict[str, Any]) -> float:
     tracks = store.track_set(row.get("track"))
-    floors = [t["digest_min_fit"] for t in config.UI_TRACKS.values()
-              if t["track"] in tracks]
+    floors = [t.digest_min_fit for t in config.UI_TRACKS.values()
+              if t.track in tracks]
     return min(floors) if floors else DIGEST_MIN_FIT_FALLBACK
 
 

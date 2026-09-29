@@ -7,7 +7,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, NamedTuple, cast
 
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
@@ -56,7 +56,7 @@ async def _hydrate_missing_descriptions(db: store.Writer, kept: list[_Admitted])
 
 
 def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str, curated: bool,
-              t: TrackDict) -> tuple[list[_Admitted], int]:
+              t: RuntimeTrack) -> tuple[list[_Admitted], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
     gates; a job already stored is touched instead."""
     import hashlib
@@ -68,7 +68,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
             j["id"] = f"{source}_{hashlib.md5(key.encode()).hexdigest()[:12]}"
         company_id = store.company_id_by_name(conn, j.get("company"))
         company_row = store.get_company(conn, company_id) if company_id else None
-        if t["geo_gate"]:
+        if t.geo_gate:
             # Location-scoped track: gate ingested jobs on the same locality
             # filter the live crawl applies inside its fetchers, with one
             # relaxation -- a posting from a company the ranking trusts with
@@ -79,7 +79,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
             is_local = bool(NC_RE.search(loc))
             trusted = (tags.has(company_row, tags.WATCH)
                        or _mission_trusted(company_row,
-                                           t.get("remote_mission_floor")))
+                                           t.remote_mission_floor))
             is_remote_trusted = (
                 trusted
                 and geo_mode(loc, j.get("description", "")) == "remote")
@@ -87,9 +87,9 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
                 n_nonlocal += 1
                 continue
         if not curated:
-            if t["exclude_gate"] and gates.exclude_reason(
+            if t.exclude_gate and gates.exclude_reason(
                     j.get("title", ""), j.get("description", ""),
-                    track_id=t["id"]):
+                    track_id=t.id):
                 continue
             if not gates.is_technical_role(j.get("title", ""), t):
                 continue
@@ -103,7 +103,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
 
 
 async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed", max_workers: int = 6,
-                               curated: bool = False, t: TrackDict | None = None) -> int:
+                               curated: bool = False, t: RuntimeTrack | None = None) -> int:
     """Ingest external job dicts into the track's jobs table with resume-fit
     scores. Each dict: {id?, title, company, url, location, description?}.
     Applies the same exclude + technical-title gate as the crawl. For
@@ -123,7 +123,7 @@ async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed
         async for row in fan_out(
                 kept, lambda a: _scored_row(a.job, company_id=a.company_id,
                                             company_name=a.job.get("company"),
-                                            track=t["track"], status="open"),
+                                            track=t.track, status="open"),
                 "ingest scoring", max_workers):
             try:
                 await db.run(store.upsert_job, row)
@@ -136,7 +136,7 @@ async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed
 
 
 async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int = 6,
-                        t: TrackDict | None = None) -> tuple[int, int, int]:
+                        t: RuntimeTrack | None = None) -> tuple[int, int, int]:
     """Fetch ONE store company's locality-scoped board (whole board for
     watched/sweep-tagged companies), apply the track's filters, resume-fit-
     score the new postings, and store them on `db` (a store.Writer).
@@ -144,7 +144,7 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
     a company's other jobs once it's in the roster."""
     t = _t(t)
     loc_re = None if _whole_board(company,
-                                  t.get("remote_mission_floor")) else NC_RE
+                                  t.remote_mission_floor) else NC_RE
     try:
         jobs = await company_fetch.fetch_company(company, loc_re)
     except Exception as e:
@@ -153,12 +153,12 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
     # A successful non-empty snapshot is the authority on what this company
     # currently lists: close stored rows that vanished, revive returners.
     if jobs and company.get("id"):
-        await db.run(store.sync_job_statuses, company["id"], jobs, track=t["track"])
+        await db.run(store.sync_job_statuses, company["id"], jobs, track=t.track)
     kept = [j for j in jobs if await _keep_job(company, j, t)]
     fresh = await db.run(lambda conn: [j for j in kept
                                        if not store.job_exists(conn, j["id"])])
     n_new = 0
-    async for row in fan_out(fresh, lambda j: _score_job(company, j, t["track"]),
+    async for row in fan_out(fresh, lambda j: _score_job(company, j, t.track),
                              "scoring", max_workers):
         # Kept separate from the scoring failure fan_out reports: a store
         # write that fails is not a scoring problem, and lumping the two
@@ -174,7 +174,7 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
 
 async def add_manual_job(url: str, title: str, company: str, location: str,
                          description: str = "", pull_board: bool = True,
-                         max_workers: int = 6, t: TrackDict | None = None) -> dict[str, Any]:
+                         max_workers: int = 6, t: RuntimeTrack | None = None) -> dict[str, Any]:
     """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
     company's board resolves — pull its OTHER in-scope jobs too.
 

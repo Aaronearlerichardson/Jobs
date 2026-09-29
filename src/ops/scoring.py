@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from src import config
-from src.config import TrackDict
+from src.config import RuntimeTrack
 from src import store
 from src.ats.board import board_for_url
 from src.ats.board import company as company_fetch
@@ -197,7 +197,7 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
 
 
 async def rescore_all(max_workers: int = 6, track: str | None = None,
-                      described_only: bool = False, t: TrackDict | None = None) -> int:
+                      described_only: bool = False, t: RuntimeTrack | None = None) -> int:
     """Re-run resume-fit scoring over every stored job in the track's DB
     (all jobs.track values unless `track` names one). Use after changing the
     resume or the scoring prompt — the normal crawl only scores jobs it
@@ -285,7 +285,7 @@ async def _live_jd(row: dict[str, Any]) -> str:
     return text if text and len(text) >= len(text_from_html(stored)) else stored
 
 
-def _verify_floor_candidates(conn: sqlite3.Connection, t: TrackDict, floor: float,
+def _verify_floor_candidates(conn: sqlite3.Connection, t: RuntimeTrack, floor: float,
                              exclude_ids: Collection[str] = ()) -> list[dict[str, Any]]:
     """Track `t`'s open triage_status='fit' rows screened at or above
     `floor`, located locally (NC_RE) or stored remote_eligible, best screen
@@ -301,8 +301,9 @@ def _verify_floor_candidates(conn: sqlite3.Connection, t: TrackDict, floor: floa
     ...                             "track": "local-tech", "location": "Elsewhere",
     ...                             "resume_fit_score": 0.3})
     >>> store.record_triage(conn, "j2", "fit", "local-tech=ok")
-    >>> [r["job_id"] for r in _verify_floor_candidates(
-    ...     conn, {"track": "local-tech"}, 0.25)]
+    >>> from pathlib import Path
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), track="local-tech")
+    >>> [r["job_id"] for r in _verify_floor_candidates(conn, t, 0.25)]
     ['j1']
 
     Notes:
@@ -312,7 +313,7 @@ def _verify_floor_candidates(conn: sqlite3.Connection, t: TrackDict, floor: floa
         ranking's remote_admitted trust rule: this chooses where verify
         calls go, it does not admit rows to the ranking.
     """
-    conds, args = store.open_in_track_clause(t["track"])
+    conds, args = store.open_in_track_clause(t.track)
     conds += ["triage_status = 'fit'", "resume_fit_score >= ?"]
     args.append(floor)
     rows = [dict(r) for r in conn.execute(
@@ -338,7 +339,7 @@ _GIVEN_UP: set[str] = set()
 
 
 async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
-                     db: store.Writer | None = None, t: TrackDict | None = None,
+                     db: store.Writer | None = None, t: RuntimeTrack | None = None,
                      force: bool = False) -> int:
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
     each of the current top `top_n` jobs (past rank VERIFY_HEAD, only those
@@ -407,7 +408,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                       f"run ({down})")
                 break
             ranked = await db.run(_ranked, t, limit=top_n)
-            floor = t["verify_floor"]
+            floor = t.verify_floor
             stale_all = [(i, r) for i, r in enumerate(ranked) if _stale(r)]
             stale_top = [r for i, r in stale_all
                          if force or i < VERIFY_HEAD
@@ -426,7 +427,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
             todo = stale_top + candidates
             if not todo:
                 if rnd == 0:
-                    print(f"  deep-verify [{t['track']}]: nothing new in the "
+                    print(f"  deep-verify [{t.track}]: nothing new in the "
                           f"top {top_n} or at/above {floor:.2f} for {current}")
                 break
             print(f"  deep-verifying {len(stale_top)} of the top {len(ranked)}"
@@ -479,10 +480,10 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                     # triage_status='fit' -- its corrected score is still
                     # recorded above either way.
                     if (r.get("triage_status") == "fit"
-                            and res.score >= t["digest_min_fit"]):
+                            and res.score >= t.digest_min_fit):
                         await db.run(store.record_triage, r["job_id"], store.TRIAGE_OK,
                                      r.get("triage_detail") or "",
-                                     tracks=[t["track"]])
+                                     tracks=[t.track])
                     old = r.get("resume_fit_score")
                     move = (f"{old:.2f} -> {res.score:.2f}"
                             if isinstance(old, float) else f"?    -> {res.score:.2f}")
@@ -522,7 +523,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
         return n_done
 
 
-async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: TrackDict | None = None,
+async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: RuntimeTrack | None = None,
                          force: bool = False) -> int:
     """Standalone verify: deep-verify the current top N in the store (no
     crawl), then rewrite the digest and print the corrected top. `force`

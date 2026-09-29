@@ -117,14 +117,14 @@ class OpParams(BaseModel):
 
     _blank_is_absent = model_validator(mode="before")(drop_blank)
 
-    def kwargs(self, track: dict[str, Any] | None) -> dict[str, Any]:
+    def kwargs(self, track: config.RuntimeTrack | None) -> dict[str, Any]:
         """The target's keyword arguments, with `track` (a track config or
         None) passed as `track_kw` says."""
         out = self.model_dump(exclude={"track"})
         if self.track_kw == "t":
             out["t"] = track
         elif self.track_kw == "db_path":
-            out["db_path"] = track["db_path"] if track else None
+            out["db_path"] = track.db_path if track else None
         return out
 
 

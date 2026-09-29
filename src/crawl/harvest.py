@@ -738,14 +738,14 @@ async def _triage(db_path: str | Path, max_workers: int,
                   f"{down or 'no ANTHROPIC_API_KEY configured'}")
         else:
             for t in tracks:
-                if t.get("verify_top"):
-                    await verify_top(top_n=t["verify_top"],
+                if t.verify_top:
+                    await verify_top(top_n=t.verify_top,
                                      max_workers=max(2, max_workers // 2),
                                      db=db, t=t)
         await check_closed_jobs(limit=CLOSED_PROBE_LIMIT,
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         for t in tracks:
             await db.run(rewrite_digest, t, top_n=5,
-                         heading=f"\n  [{t['track']}] digest rewritten:")
+                         heading=f"\n  [{t.track}] digest rewritten:")
     report_cache_stats()
     return result

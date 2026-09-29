@@ -28,6 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 from src import config, runstate
+from src.config import RuntimeTrack
 from src.dispatch import registry
 
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
@@ -38,13 +39,13 @@ except Exception:
     pass
 
 
-def _resolve_track(name: str) -> dict[str, Any]:
+def _resolve_track(name: str) -> RuntimeTrack:
     """A configured track by its id, or by its jobs.track value."""
     t = config.UI_TRACKS.get(name)
     if t:
         return t
     for t in config.UI_TRACKS.values():
-        if t["track"] == name:
+        if t.track == name:
             return t
     raise SystemExit(f"  [!] unknown track {name!r}; configured: "
                      f"{', '.join(config.UI_TRACKS)}")
@@ -56,17 +57,17 @@ def _op(name: str, params: Callable[[argparse.Namespace], dict[str, Any]]
     `params(args)` draws off the parsed arguments, against the --track
     selection (None = the op's own default-track rule): the process's one
     run (src/runstate.py)."""
-    def run(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
+    def run(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
         runstate.run(registry.invoke(name, params(args), track=t))
     return run
 
 
-def _store(t: dict[str, Any] | None) -> sqlite3.Connection:
+def _store(t: RuntimeTrack | None) -> sqlite3.Connection:
     from src import store
-    return store.connect(t["db_path"] if t else None)
+    return store.connect(t.db_path if t else None)
 
 
-def _cmd_watch(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
+def _cmd_watch(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     name = args.watch or args.unwatch
     conn = _store(t)
@@ -80,7 +81,7 @@ def _cmd_watch(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
         print(f"  {verb} {name}  (tags: {tags or 'none'})")
 
 
-def _cmd_mark(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
+def _cmd_mark(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     disp, ref = args.mark
     conn = _store(t)
@@ -97,7 +98,7 @@ def _cmd_mark(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
         print(f"    why: {args.why}")
 
 
-def _cmd_pipeline(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
+def _cmd_pipeline(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     conn = _store(t)
     rows = store.get_pipeline(conn)
@@ -113,7 +114,7 @@ def _cmd_pipeline(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
               f"{p['company_name']}{note}")
 
 
-def _cmd_companies_io(args: argparse.Namespace, t: dict[str, Any] | None) -> None:
+def _cmd_companies_io(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from pydantic import ValidationError
     from src import store
     from src.validation import error_lines

@@ -146,6 +146,7 @@ functions. Expect casts at those boundaries.
 `ranked_jobs`, `dedup_jobs`, `rekey_jobs`, `dedup_companies` and
 `company_by_board` moved to SQL/window functions; numbered `.sql` migrations
 with `PRAGMA user_version`; `open_jobs` and `company_open_stats` views plus
-partial indexes; `JobIn`/`FitColumns` and `TrackDict` types. Each conversion was
+partial indexes; `JobIn`/`FitColumns` and `TrackDict` types (`TrackDict` has since been
+replaced by `config.tracks.RuntimeTrack`). Each conversion was
 checked against the old implementation on randomized data; that harness is the
 pattern to follow here.

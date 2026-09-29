@@ -60,10 +60,10 @@ class TestExclusion:
 
     @pytest.fixture
     def defense_track(self, local_track):
-        tables = gates._exclude_tables(local_track["id"])
+        tables = gates._exclude_tables(local_track.id)
         if not (tables["defense_strong"] or tables["defense_weak"]):
             pytest.skip("track configures no defense terms")
-        return local_track["id"]
+        return local_track.id
 
     def test_rf_radar_context_is_bounded(self, defense_track):
         assert gates.exclude_reason(
