@@ -21,15 +21,15 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Unpack, cast
 
-from pydantic import ConfigDict, Field, TypeAdapter, create_model
+from pydantic import ConfigDict, TypeAdapter, ValidationError
 
 from src import config
-from src.rows import CompanyRow, HandleColumn
+from src.rows import CompanyIn, CompanyRow, HandleColumn
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
@@ -43,8 +43,8 @@ def as_company(row: sqlite3.Row) -> CompanyRow:
 #  Companies                                                                   #
 # --------------------------------------------------------------------------- #
 
-def upsert_company(conn: sqlite3.Connection, c: Mapping[str, Any]) -> int | None:
-    """Insert or update a company by name. `c` is a dict of column->value.
+def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
+    """Insert or update a company by name. `company` is a dict of column->value.
 
     `tags` merge instead of overwrite: a company discovered by the local
     sourcing pass ("nc_local") and later by BCI discovery ("neural") keeps
@@ -70,7 +70,8 @@ def upsert_company(conn: sqlite3.Connection, c: Mapping[str, Any]) -> int | None
     ...              "WHERE name='Zeta'").fetchone()[:]
     (None, None)
     """
-    c = {**c, "last_probed": c.get("last_probed") or datetime.now().isoformat()}
+    c: dict[str, Any] = {**company, "last_probed": company.get("last_probed")
+                         or datetime.now().isoformat()}
     c.setdefault("created_at", datetime.now().isoformat())
     # Drop None-valued keys: an upsert must never erase an existing value
     # (e.g. a failed/keyless mission-scoring pass writing mission_score=None
@@ -82,11 +83,7 @@ def upsert_company(conn: sqlite3.Connection, c: Mapping[str, Any]) -> int | None
         merged = set(t for t in old["tags"].split(",") if t)
         merged |= set(t for t in (c.get("tags") or "").split(",") if t)
         c["tags"] = ",".join(sorted(merged))
-    cols = [k for k in ("name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
-                        "careers_url", "local_job_count", "total_job_count", "mission_tier",
-                        "mission_score", "mission_reason", "tags", "source", "active",
-                        "last_probed", "notes", "created_at", "miss_reason", "miss_at")
-            if k in c]
+    cols = [k for k in CompanyIn.__annotations__ if k in c]
     placeholders = ", ".join("?" for _ in cols)
     # created_at is written on INSERT but never overwritten on UPDATE: it is
     # the row's birth stamp, so a re-probe of a known company must leave it
@@ -150,7 +147,8 @@ def miss_family(reason: str | None) -> str:
     return (reason or "").split(":", 1)[0]
 
 
-def record_miss(conn: sqlite3.Connection, name: str, reason: str, **fields: Any) -> bool:
+def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
+                **fields: Unpack[CompanyIn]) -> bool:
     """Record that `name` failed to become a crawlable company, and why.
 
     The row is always written inactive, so it is invisible to every crawl
@@ -581,20 +579,21 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Upsert companies from an export_companies JSON file (idempotent;
     tags merge, existing mission scores survive None fields).
 
-    Every row must be an object with a non-empty `name` and only columns
-    the companies table has; otherwise pydantic.ValidationError names each
-    bad row path and nothing is written. Columns an upsert never writes
-    (id, the crawl schedule) are accepted and ignored.
+    Every row must be an object with a non-empty `name`, only columns the
+    companies table has, and a value each column's type accepts (`"5"` and
+    `5.0` load as 5; `5.5` does not); otherwise pydantic.ValidationError
+    names each bad row path and nothing is written. Columns an upsert never
+    writes (id, the crawl schedule) are accepted and ignored. Enforced by
+    tests/test_store.py::TestImportCompanies.
     """
-    known = {r[1] for r in conn.execute("PRAGMA table_info(companies)")}
-    known.discard("name")
-    fields: dict[str, Any] = {"name": (str, Field(min_length=1)),
-                              **dict.fromkeys(sorted(known), (Any, None))}
-    row = create_model("CompanyRow", __config__=ConfigDict(extra="forbid"), **fields)
     with open(path, "rb") as f:
-        rows = TypeAdapter(list[row]).validate_json(f.read())
-    for r in rows:
-        upsert_company(conn, r.model_dump(exclude_unset=True))
+        rows = TypeAdapter(list[CompanyRow], config=ConfigDict(extra="forbid")
+                           ).validate_json(f.read())
+    if unnamed := [{"type": "missing", "loc": (i, "name"), "input": row}
+                   for i, row in enumerate(rows) if "name" not in row]:
+        raise ValidationError.from_exception_data("companies", cast(Any, unnamed))
+    for row in rows:
+        upsert_company(conn, row)
     return len(rows)
 
 

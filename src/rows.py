@@ -4,7 +4,7 @@ and for the resolver hit that becomes a company row.
 A misspelled key in a row headed for upsert_job used to store nothing and
 say nothing (`j.get("resume_fit_scor")` reads as None). These TypedDicts let
 mypy check every place that builds one, and tests/test_store.py checks the
-field names against the tables themselves.
+field names and column types against the tables themselves.
 
 A leaf module, like src/tags.py: the store, the scorer and the crawl all
 import it, so it imports nothing of theirs.
@@ -12,7 +12,9 @@ import it, so it imports nothing of theirs.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict, final
+from typing import Annotated, Any, Literal, TypedDict, final
+
+from annotated_types import MinLen
 
 
 class FitColumns(TypedDict, total=False):
@@ -47,10 +49,10 @@ class JobIn(FitColumns, total=False):
     harvested_at: str | None
 
 
-class CompanyRow(TypedDict, total=False):
-    """A stored companies row, as the store's readers return it."""
-    id: int
-    name: str
+class CompanyIn(TypedDict, total=False):
+    """The companies columns upsert_company writes; a missing key leaves what
+    is stored."""
+    name: Annotated[str, MinLen(1)]
     ats: str | None
     slug: str | None
     wd_tenant: str | None
@@ -70,6 +72,12 @@ class CompanyRow(TypedDict, total=False):
     created_at: str | None
     miss_reason: str | None
     miss_at: str | None
+
+
+class CompanyRow(CompanyIn, total=False):
+    """A stored companies row, as the store's readers return it: what is
+    written, plus the id and the crawl schedule."""
+    id: int
     crawl_state: str | None
     empty_streak: int | None
     last_crawled_at: str | None

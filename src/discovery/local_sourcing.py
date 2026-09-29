@@ -42,7 +42,7 @@ from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import BoardHit, CompanyRow
+from src.rows import BoardHit, CompanyIn, CompanyRow
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
@@ -848,8 +848,8 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             # "not health/bio/science" — no reason to keep crawling it).
             # Watched companies are exempt: the watch tag is the user
             # deliberately keeping an off-mission employer crawled (Covar).
-            update = {"name": c["name"], "mission_tier": tier,
-                      "mission_score": score, "mission_reason": reason}
+            update: CompanyIn = {"name": c["name"], "mission_tier": tier,
+                                 "mission_score": score, "mission_reason": reason}
             revived = False
             if (tier is not None and tier not in ACTIVE_MISSION_TIERS
                     and not config.is_multi_division(c["name"])
@@ -892,7 +892,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
     return n
 
 
-def _miss_row(m: BoardHit) -> dict[str, Any]:
+def _miss_row(m: BoardHit) -> CompanyIn:
     """The record_miss(**fields) payload for a discover_local miss dict:
     whatever board coordinates the attempt DID establish, so a retry starts
     from them instead of re-deriving them.
@@ -906,14 +906,13 @@ def _miss_row(m: BoardHit) -> dict[str, Any]:
     ...            "reason": "no-local-jobs"})["wd_tenant"]
     't'
     """
-    row: dict[str, Any] = {"source": "local_sourcing"}
+    row: CompanyIn = {"source": "local_sourcing"}
     ats = m.get("ats")
     if not ats:
         return row
     row["ats"] = ats
     if m.get("slug"):
-        row.update((k, v) for k, v in coords.columns(ats, m["slug"]).items()
-                   if v is not None)
+        row.update(coords.columns(ats, m["slug"]))
     if m.get("careers_url"):
         row["careers_url"] = m["careers_url"]
     if m.get("count"):

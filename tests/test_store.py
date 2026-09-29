@@ -1,13 +1,15 @@
 """The SQLite store: schema, company/job upserts, the open/closed
 lifecycle, dispositions, crawl dormancy, and track membership."""
 
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import get_args
+from typing import get_args, get_type_hints
 
 import pytest
+from pydantic import ValidationError
 
 from conftest import iso_days_ago
 
@@ -15,8 +17,13 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
-from src.rows import CompanyRow, FitColumns, HandleColumn, JobIn
+from src.rows import CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn
 from src.store.migrate import MIGRATIONS_DIR, migrate
+
+
+def _held_types(hint):
+    """The classes an annotation admits, `None` aside."""
+    return [t for t in get_args(hint) or (hint,) if t is not type(None)]
 
 
 class TestSchema:
@@ -86,7 +93,16 @@ class TestSchema:
     def test_the_company_row_model_is_exactly_the_companies_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
         assert set(CompanyRow.__annotations__) == cols
+        assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
         assert set(get_args(HandleColumn)) <= cols
+
+    @pytest.mark.parametrize("table, model", [("companies", CompanyRow), ("jobs", JobIn)])
+    def test_a_row_model_types_each_column_as_the_table_declares_it(self, db, table, model):
+        declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
+        affinity = {"INTEGER": int, "TEXT": str, "REAL": float}
+        for col, hint in get_type_hints(model).items():
+            assert all(issubclass(t, affinity[declared[col]]) for t in _held_types(hint)), \
+                f"{table}.{col} is {declared[col]}, the model says {hint}"
 
     def test_the_fit_columns_are_what_the_scorer_produces(self):
         from src.claude import fit
@@ -177,6 +193,59 @@ class TestCompanies:
         assert tags.has(row, tags.WATCH) and ops._whole_board(row)
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
         assert store.set_company_tag(db, "Nope", "watch") is None
+
+
+class TestUpsertColumns:
+    def test_upsert_stores_every_column_the_input_model_names(self, db):
+        sample = {int: 3, float: 0.5, str: "x"}
+        row = {col: sample[_held_types(hint)[0]]
+               for col, hint in get_type_hints(CompanyIn).items()}
+        store.upsert_company(db, row)
+        stored = dict(db.execute("SELECT * FROM companies").fetchone())
+        # an `ats` clears the miss pair (see upsert_company), so it is not compared
+        assert {c: v for c, v in row.items()
+                if c not in ("miss_reason", "miss_at")}.items() <= stored.items()
+
+
+class TestImportCompanies:
+    @staticmethod
+    def _load(conn, tmp_path, rows):
+        path = tmp_path / "roster.json"
+        path.write_text(json.dumps(rows), encoding="utf-8")
+        return store.import_companies(conn, path)
+
+    def test_an_export_loads_into_another_store(self, db, tmp_path):
+        store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
+                                  "tags": "watch", "mission_score": 1})
+        store.export_companies(db, tmp_path / "out.json")
+        other = store.connect(":memory:")
+        assert store.import_companies(other, tmp_path / "out.json") == 1
+        assert other.execute("SELECT name, ats, slug, tags, mission_score FROM companies"
+                             ).fetchone()[:] == ("Acme", "lever", "acme", "watch", 1.0)
+
+    @pytest.mark.parametrize("row, loc, kind", [
+        ({"ats": "lever"}, "name", "missing"),
+        ({"name": ""}, "name", "string_too_short"),
+        ({"name": "B", "bogus": 1}, "bogus", "extra_forbidden"),
+        ({"name": "B", "wd_pod": 5.5}, "wd_pod", "int_from_float"),
+        ({"name": "B", "notes": 123}, "notes", "string_type"),
+    ])
+    def test_a_bad_row_is_named_and_nothing_is_written(self, db, tmp_path, row, loc, kind):
+        with pytest.raises(ValidationError) as err:
+            self._load(db, tmp_path, [{"name": "Good"}, row])
+        assert [(e["loc"], e["type"]) for e in err.value.errors()] == [((1, loc), kind)]
+        assert db.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
+
+    def test_numeric_strings_and_whole_floats_load_as_integers(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "wd_pod": "5", "local_job_count": 5.0}])
+        assert db.execute("SELECT wd_pod, local_job_count FROM companies"
+                          ).fetchone()[:] == (5, 5)
+
+    def test_the_id_and_the_crawl_schedule_are_accepted_and_ignored(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "id": 99, "crawl_state": "dormant",
+                                   "empty_streak": 4}])
+        assert db.execute("SELECT id, crawl_state, empty_streak FROM companies"
+                          ).fetchone()[:] == (1, None, None)
 
 
 class TestDormancy:
