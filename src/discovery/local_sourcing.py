@@ -560,7 +560,7 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit
         upsert_company(conn, {"name": name,
                               "local_job_count": hit.get("nc") or 0,
                               "total_job_count": hit.get("count")})
-        return True, (kept, kept["active"], False)
+        return True, (kept, kept["active"] or 0, False)
     key = board_key(row)
     alt = ("/".join(str(p) for p in key[1:]) if key
            else row.get("careers_url") or "?")
@@ -905,6 +905,13 @@ def _miss_row(m: BoardHit) -> CompanyIn:
     >>> _miss_row({"name": "X", "ats": "workday", "slug": ("t", 5, "s"),
     ...            "reason": "no-local-jobs"})["wd_tenant"]
     't'
+
+    Only what was established is carried, never a NULL that could overwrite
+    a stored coordinate:
+
+    >>> None in _miss_row({"name": "X", "ats": "workday", "slug": ("t", 5, "s"),
+    ...                    "reason": "no-local-jobs"}).values()
+    False
     """
     row: CompanyIn = {"source": "local_sourcing"}
     ats = m.get("ats")
@@ -912,7 +919,8 @@ def _miss_row(m: BoardHit) -> CompanyIn:
         return row
     row["ats"] = ats
     if m.get("slug"):
-        row.update(coords.columns(ats, m["slug"]))
+        row.update(cast(CompanyIn, {k: v for k, v in coords.columns(ats, m["slug"]).items()
+                                    if v is not None}))
     if m.get("careers_url"):
         row["careers_url"] = m["careers_url"]
     if m.get("count"):
@@ -1003,7 +1011,7 @@ async def resolve_leads(max_workers: int = 8,
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
     print(f"\n  {len(resolved_rows)} board(s) resolved, "
           f"{queued} awaiting review, "
-          f"{sum(r['active'] for r in resolved_rows)} activated, "
+          f"{sum(r['active'] or 0 for r in resolved_rows)} activated, "
           f"{len(leads) - len(resolved_rows)} miss(es).")
     if probe_only:
         print(f"  [verify] {len(probe_only)} resolved by name-guess, not the "

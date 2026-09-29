@@ -26,6 +26,12 @@ def _held_types(hint):
     return [t for t in get_args(hint) or (hint,) if t is not type(None)]
 
 
+def _sample_row(model):
+    """One value of each column's type: a row that sets every key `model` names."""
+    sample = {int: 3, float: 0.5, str: "x", bool: True}
+    return {col: sample[_held_types(hint)[0]] for col, hint in get_type_hints(model).items()}
+
+
 class TestSchema:
     def test_companies_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
@@ -198,9 +204,7 @@ class TestCompanies:
 
 class TestUpsertColumns:
     def test_upsert_stores_every_column_the_input_model_names(self, db):
-        sample = {int: 3, float: 0.5, str: "x"}
-        row = {col: sample[_held_types(hint)[0]]
-               for col, hint in get_type_hints(CompanyIn).items()}
+        row = _sample_row(CompanyIn)
         store.upsert_company(db, row)
         stored = dict(db.execute("SELECT * FROM companies").fetchone())
         # an `ats` clears the miss pair (see upsert_company), so it is not compared
@@ -214,7 +218,6 @@ class TestStoredTypes:
     writers store what the models say. This audits what OUR writers store;
     a store written by older code is not covered."""
 
-    SAMPLE = {int: 3, float: 0.5, str: "x", bool: True}
     STORAGE = {"INTEGER": "integer", "TEXT": "text", "REAL": "real"}
 
     def _audit(self, db, table, model):
@@ -223,12 +226,8 @@ class TestStoredTypes:
             held = {r[0] for r in db.execute(f"SELECT DISTINCT typeof({col}) FROM {table}")}
             assert held <= {self.STORAGE[declared[col]], "null"}, (table, col, held)
 
-    def _sample(self, model):
-        return {col: self.SAMPLE[_held_types(hint)[0]]
-                for col, hint in get_type_hints(model).items()}
-
     def test_the_company_writers_store_each_column_as_declared(self, db):
-        cid = store.upsert_company(db, self._sample(CompanyIn))
+        cid = store.upsert_company(db, _sample_row(CompanyIn))
         store.record_crawl_outcome(db, cid, 2)
         store.mark_harvested(db, cid, 2)
         store.record_miss(db, "Missed", "no-board-found")
@@ -237,7 +236,7 @@ class TestStoredTypes:
         self._audit(db, "companies", CompanyRow)
 
     def test_the_job_writer_stores_each_column_as_declared(self, db):
-        assert store.upsert_job(db, self._sample(JobIn))
+        assert store.upsert_job(db, _sample_row(JobIn))
         self._audit(db, "jobs", JobIn)
 
 
@@ -258,17 +257,27 @@ class TestImportCompanies:
                              ).fetchone()[:] == ("Acme", "lever", "acme", "watch", 1.0)
 
     @pytest.mark.parametrize("row, loc, kind", [
-        ({"ats": "lever"}, "name", "missing"),
-        ({"name": ""}, "name", "string_too_short"),
-        ({"name": "B", "bogus": 1}, "bogus", "extra_forbidden"),
-        ({"name": "B", "wd_pod": 5.5}, "wd_pod", "int_from_float"),
-        ({"name": "B", "notes": 123}, "notes", "string_type"),
+        ({"ats": "lever"}, (1,), "value_error"),
+        ({"name": ""}, (1, "name"), "string_too_short"),
+        ({"name": "B", "bogus": 1}, (1, "bogus"), "extra_forbidden"),
+        ({"name": "B", "wd_pod": 5.5}, (1, "wd_pod"), "int_from_float"),
+        ({"name": "B", "notes": 123}, (1, "notes"), "string_type"),
     ])
     def test_a_bad_row_is_named_and_nothing_is_written(self, db, tmp_path, row, loc, kind):
         with pytest.raises(ValidationError) as err:
             self._load(db, tmp_path, [{"name": "Good"}, row])
-        assert [(e["loc"], e["type"]) for e in err.value.errors()] == [((1, loc), kind)]
+        assert [(e["loc"], e["type"]) for e in err.value.errors()] == [(loc, kind)]
         assert db.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
+
+    def test_every_bad_row_is_listed_at_once(self, db, tmp_path):
+        with pytest.raises(ValidationError) as err:
+            self._load(db, tmp_path, [{"name": "A"}, {"ats": "lever"},
+                                      {"name": "B", "bogus": 1}])
+        assert [e["loc"] for e in err.value.errors()] == [(1,), (2, "bogus")]
+
+    def test_a_null_active_loads_as_the_column_default(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "A", "active": None}])
+        assert db.execute("SELECT active FROM companies").fetchone()[0] == 1
 
     def test_numeric_strings_and_whole_floats_load_as_integers(self, db, tmp_path):
         self._load(db, tmp_path, [{"name": "A", "wd_pod": "5", "local_job_count": 5.0}])

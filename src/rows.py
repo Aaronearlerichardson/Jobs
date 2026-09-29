@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from annotated_types import MinLen
+from pydantic import Field
 from typing_extensions import ReadOnly, TypedDict
 
 
@@ -55,7 +55,7 @@ class JobIn(FitColumns, total=False):
 class CompanyIn(TypedDict, total=False):
     """The companies columns upsert_company writes; a missing key leaves what
     is stored."""
-    name: Annotated[str, MinLen(1)]
+    name: Annotated[str, Field(min_length=1)]
     ats: str | None
     slug: str | None
     wd_tenant: str | None
@@ -69,7 +69,7 @@ class CompanyIn(TypedDict, total=False):
     mission_reason: str | None
     tags: str | None
     source: str | None
-    active: int
+    active: int | None
     last_probed: str | None
     notes: str | None
     created_at: str | None

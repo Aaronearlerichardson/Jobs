@@ -24,9 +24,9 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Unpack, cast
+from typing import Annotated, Any, Unpack, cast
 
-from pydantic import ConfigDict, TypeAdapter, ValidationError
+from pydantic import AfterValidator, ConfigDict, TypeAdapter
 
 from src import config
 from src.rows import CompanyIn, CompanyRow, HandleColumn
@@ -575,6 +575,13 @@ def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     return len(rows)
 
 
+def _named(row: CompanyRow) -> CompanyRow:
+    """The row, or a ValueError when it names no company."""
+    if "name" not in row:
+        raise ValueError("name is required")
+    return row
+
+
 def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Upsert companies from an export_companies JSON file (idempotent;
     tags merge, existing mission scores survive None fields).
@@ -587,11 +594,8 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     tests/test_store.py::TestImportCompanies.
     """
     with open(path, "rb") as f:
-        rows = TypeAdapter(list[CompanyRow], config=ConfigDict(extra="forbid")
-                           ).validate_json(f.read())
-    if unnamed := [{"type": "missing", "loc": (i, "name"), "input": row}
-                   for i, row in enumerate(rows) if "name" not in row]:
-        raise ValidationError.from_exception_data("companies", cast(Any, unnamed))
+        rows = TypeAdapter(list[Annotated[CompanyRow, AfterValidator(_named)]],
+                           config=ConfigDict(extra="forbid")).validate_json(f.read())
     for row in rows:
         upsert_company(conn, row)
     return len(rows)

@@ -205,3 +205,19 @@ class TestDiscoverDispatch:
             ("score-missions", {"rescore": True}),
             ("dork", {}),
         ]
+
+
+class TestDbOverride:
+    def test_a_track_and_a_db_together_point_the_track_at_the_db(
+            self, monkeypatch, tmp_path, local_track):
+        from src import session_log
+        from src.config import bootstrap
+        seen = []
+        monkeypatch.setattr(bootstrap, "ensure_profile", lambda: None)
+        monkeypatch.setattr(session_log, "start", lambda argv: None)
+        monkeypatch.setattr(config, "STORE_DB_PATH", config.STORE_DB_PATH)  # main() rebinds it
+        monkeypatch.setattr(run_scraper, "_COMMANDS",
+                            [("pipeline", lambda args, t: seen.append(t))])
+        run_scraper.main(["--track", local_track.id, "--db", str(tmp_path / "x.db"),
+                          "--pipeline"])
+        assert [(t.id, t.db_path) for t in seen] == [(local_track.id, tmp_path / "x.db")]

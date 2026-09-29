@@ -373,7 +373,7 @@ def client():
 def wired_db_path(tmp_path, monkeypatch):
     """A throwaway store, wired into BOTH places the code looks one up.
 
-    A route opens `UI_TRACKS[track]["db_path"]` (ops.maintenance.track_store);
+    A route opens `UI_TRACKS[track].db_path` (ops.maintenance.track_store);
     everything that runs outside a request — discovery's preview_names,
     capture's ingest, harvest/triage's own defaults — falls back to
     `config.STORE_DB_PATH`. Seven helpers across two files wired one or both

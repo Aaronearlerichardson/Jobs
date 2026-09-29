@@ -52,7 +52,7 @@ def _resolve_track(name: str) -> RuntimeTrack:
 
 
 def _op(name: str, params: Callable[[argparse.Namespace], dict[str, Any]]
-        ) -> Callable[[argparse.Namespace, dict[str, Any] | None], None]:
+        ) -> Callable[[argparse.Namespace, RuntimeTrack | None], None]:
     """A command handler that runs registry op `name` with the params
     `params(args)` draws off the parsed arguments, against the --track
     selection (None = the op's own default-track rule): the process's one
@@ -303,7 +303,7 @@ def main(argv: list[str] | None = None) -> None:
         from pathlib import Path
         config.STORE_DB_PATH = Path(args.db)
         if t is not None:
-            t = dict(t, db_path=Path(args.db))
+            t = t.model_copy(update={"db_path": Path(args.db)})
 
     try:
         # ── one-shot store / roster / maintenance commands ──────────────

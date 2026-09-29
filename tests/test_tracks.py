@@ -19,9 +19,11 @@ class TestTrackConfig:
         assert len(cfg.UI_TRACKS) >= 1
         assert cfg.DEFAULT_TRACK in cfg.UI_TRACKS
 
-    def test_a_runtime_track_is_frozen(self, local_track):
+    def test_a_runtime_track_is_frozen_through_its_sources(self, local_track):
         with pytest.raises(ValidationError):
             local_track.geo_gate = False
+        with pytest.raises(ValidationError):
+            local_track.sources.store = False
 
     def test_every_track_points_at_a_db(self, cfg):
         assert all(t.db_path.name.endswith(".db")

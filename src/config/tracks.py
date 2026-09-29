@@ -61,7 +61,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from pydantic import ConfigDict
+from pydantic import ConfigDict, model_validator
 
 from .paths import DATA_DIR
 from .profile import PROFILE, PROFILE_PATH
@@ -72,17 +72,28 @@ class RuntimeTrack(Track):
     """A configured track as the runtime holds it (see _runtime): the
     validated Track, plus its id and DB path, with a blank `label` and
     `track` resolved from the id. Frozen, and `model_copy(update=)` does not
-    validate."""
+    validate.
+
+    >>> t = RuntimeTrack(id="my_track", db_path=Path("my_track.db"))
+    >>> t.label, t.track
+    ('my_track', 'my-track')
+    """
     model_config = ConfigDict(frozen=True)
     id: str
     db_path: Path
 
+    @model_validator(mode="before")
+    @classmethod
+    def _named_by_id(cls, data: Any) -> Any:
+        if not isinstance(data, dict) or not isinstance(tid := data.get("id"), str):
+            return data
+        return {**data, "label": data.get("label") or tid,
+                "track": data.get("track") or tid.replace("_", "-")}
+
 
 def _runtime(tid: str, t: Track) -> RuntimeTrack:
     """A validated Track as the RuntimeTrack every reader takes."""
-    return RuntimeTrack(**{**t.model_dump(), "id": tid, "label": t.label or tid,
-                           "track": t.track or tid.replace("_", "-"),
-                           "db_path": DATA_DIR / (t.db or f"{tid}.db")})
+    return RuntimeTrack(**t.model_dump(), id=tid, db_path=DATA_DIR / (t.db or f"{tid}.db"))
 
 
 def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, RuntimeTrack]:

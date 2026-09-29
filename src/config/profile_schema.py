@@ -102,6 +102,7 @@ class Locations(_Table):
 # --- [tracks.<id>] ----------------------------------------------------------
 
 class TrackSources(_Table):
+    model_config = ConfigDict(frozen=True)
     store: bool = True
     priority_companies: bool = False
     aggregators: bool = False
@@ -202,10 +203,9 @@ class Track(Methodology):
             return data
         data = {k: v for k, v in data.items()
                 if k == "db" or not (isinstance(v, str) and not v.strip())}
-        engine = data.get("engine", "local")
-        eng = (ENGINE_DEFAULTS.get(ENGINE_ALIASES.get(engine, engine))
-               if isinstance(engine, str) else None)
-        if eng is None:               # the engine field reports it
+        try:
+            eng = ENGINE_DEFAULTS[_engine(data.get("engine", "local"))]
+        except (ValueError, TypeError, KeyError):   # the engine field reports it
             return data
         fill = {n: getattr(eng, n) for n in Methodology.model_fields if n not in data}
         if isinstance(mine := data.get("sources"), (dict, TrackSources)):
