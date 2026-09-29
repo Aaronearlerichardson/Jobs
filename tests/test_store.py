@@ -406,6 +406,14 @@ class TestRanking:
         assert store.ranked_jobs(db, track="local-tech")
 
 
+    def test_rows_omit_the_description_unless_asked(self, db, company, add_job):
+        add_job("gh_acme_1", fit=0.5, description="a long body")
+        (lean,) = store.ranked_jobs(db, track="local-tech")
+        (full,) = store.ranked_jobs(db, track="local-tech", with_description=True)
+        assert "description" not in lean and full["description"] == "a long body"
+        assert {k: v for k, v in full.items() if k != "description"} == lean
+
+
 class TestCollapse:
     """ranked_jobs(collapse=True) (the default) folds postings that are the
     SAME opening at the SAME employer -- same company, same normalised

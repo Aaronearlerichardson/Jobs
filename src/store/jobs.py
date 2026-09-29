@@ -845,7 +845,7 @@ WITH pool AS (
 ){collapse}, picked AS (
   SELECT * FROM {source} ORDER BY {order} {limit}
 )
-SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags,
+SELECT {columns}, c.mission_tier, c.mission_score, c.tags AS company_tags,
        p.combined_score{extra}
 FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies c ON j.company_id = c.id
 ORDER BY {final_order}"""
@@ -887,7 +887,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
                 min_mission: float | None = None,
                 remote_mission_floor: float | None = None, include_closed: bool = False,
                 include_dispositioned: bool = False,
-                collapse: bool = True) -> list[dict[str, Any]]:
+                collapse: bool = True, with_description: bool = False) -> list[dict[str, Any]]:
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -944,6 +944,12 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
     the raw, one-row-per-posting list — e.g. an audit that needs to see
     every requisition a group folded together.
 
+    Rows carry every `jobs` column except `description`, which is kilobytes
+    per row and which no ranking consumer reads (the digest, the web UI and
+    the crawl report show fit, title, company and location): loading it for
+    40k rows was most of the unlimited call's cost. `with_description=True`
+    brings it back.
+
     Notes:
         A generic title ("Research Technician II") collapses across
         DIFFERENT labs at the SAME employer, because the key has no notion
@@ -989,7 +995,9 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         collapse=_COLLAPSE_SQL.format(order=order()) if collapse else "",
         source="ranked WHERE _rn = 1" if collapse else "scored",
         extra=", p.dup_count, p._dup_ids, p._dup_urls" if collapse else "",
-        limit="LIMIT ?" if limit else "")
+        limit="LIMIT ?" if limit else "",
+        columns=", ".join(f"j.{r['name']}" for r in conn.execute("PRAGMA table_info(jobs)")
+                          if with_description or r["name"] != "description"))
     if limit:
         args.append(int(limit))
     rows = [dict(r) for r in conn.execute(q, args)]
