@@ -3,6 +3,7 @@ changed."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any, cast
 
@@ -53,37 +54,48 @@ def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
             f"SELECT id, job_id, company_id, url, title FROM jobs "
             f"WHERE company_id IN ({ph}) ORDER BY id", tuple(companies))] if companies else []
         buckets: dict[str, list[tuple[str, str | None]]] = {b: [] for b in rekey_buckets}
-        plan: list[tuple[str, dict[str, Any], str | None, dict[str, Any] | None]] = []
-        claimed: dict[str | None, dict[str, Any]] = {}
+        new_ids: dict[int, str | None] = {}
         for r in rows:
             handle = board.handle(companies[r["company_id"]])
-            new_id = board.row_id(handle, r["url"]) if handle else None
-            holder = claimed.get(new_id) or (new_id and conn.execute(
-                "SELECT id, job_id, company_id, url, title FROM jobs WHERE job_id=?",
-                (new_id,)).fetchone())
-            holder = dict(holder) if holder else None
-            if not new_id:
-                kind = "unresolvable"
-            elif new_id == r["job_id"]:
-                kind = "unchanged"
-            elif holder is None:
-                kind, claimed[new_id] = "rekey", r
-            elif holder["company_id"] != r["company_id"]:
-                kind = "cross-tenant"
-            else:
-                kind = "merge" if store.same_posting(holder, r) else "conflict"
-            buckets[kind].append((r["job_id"], new_id))
-            if kind in ("rekey", "merge"):
-                plan.append((kind, r, new_id, holder))
+            new_ids[r["id"]] = board.row_id(handle, r["url"]) if handle else None
+        # The board spec derives each row's new id (Python); which bucket it
+        # lands in is one query. A row's HOLDER is the stored row that
+        # already has the new id, else the first row of this batch to claim
+        # it (which is the one that becomes a "rekey").
+        verdicts = conn.execute("""
+            WITH plan AS (
+              SELECT r.id, r.job_id, r.company_id, r.url, r.title, p.new_id, d.id AS did
+              FROM (SELECT json_extract(value, '$[0]') AS id,
+                           json_extract(value, '$[1]') AS new_id
+                    FROM json_each(?)) p
+              JOIN jobs r ON r.id = p.id
+              LEFT JOIN jobs d ON d.job_id = p.new_id
+            ), claimed AS (
+              SELECT *, FIRST_VALUE(id) OVER first_claim AS claimant FROM plan
+              WINDOW first_claim AS (PARTITION BY new_id, did IS NULL ORDER BY id)
+            )
+            SELECT c.id, c.job_id, h.id AS holder,
+                   CASE WHEN c.new_id IS NULL THEN 'unresolvable'
+                        WHEN c.new_id = c.job_id THEN 'unchanged'
+                        WHEN h.id IS NULL THEN 'rekey'
+                        WHEN h.company_id IS NOT c.company_id THEN 'cross-tenant'
+                        WHEN same_posting(h.url, h.title, c.url, c.title) THEN 'merge'
+                        ELSE 'conflict' END AS kind
+            FROM claimed c
+            LEFT JOIN jobs h ON h.id = COALESCE(c.did, NULLIF(c.claimant, c.id))
+            ORDER BY c.id""",
+            (json.dumps([[i, n or None] for i, n in new_ids.items()]),)).fetchall()
+        for v in verdicts:
+            buckets[v["kind"]].append((v["job_id"], new_ids[v["id"]]))
+        plan = [(v["kind"], v["id"], v["holder"], new_ids[v["id"]])
+                for v in verdicts if v["kind"] in ("rekey", "merge")]
         if commit:
             with store.batch(conn):
-                for kind, r, new_id, holder in plan:
+                for kind, row_id, holder, new_id in plan:
                     if kind == "rekey":
-                        conn.execute("UPDATE jobs SET job_id=? WHERE id=?", (new_id, r["id"]))
+                        conn.execute("UPDATE jobs SET job_id=? WHERE id=?", (new_id, row_id))
                     else:
-                        # a "merge" always has its holder
-                        store.merge_jobs(conn, [cast(dict[str, Any], holder)["id"], r["id"]],
-                                         cast(str, new_id))
+                        store.merge_jobs(conn, [holder, row_id], cast(str, new_id))
     print(f"  {ats}: {len(rows)} stored row(s) under {len(companies)} compan(ies)")
     for b in rekey_buckets:
         print(f"    {b:13} {len(buckets[b])}")

@@ -510,6 +510,7 @@ def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
 
 
+@sql_function("norm_url", 1)
 def _norm_url(u: str | None) -> str:
     """Scheme/query/fragment/trailing-slash-insensitive URL key."""
     u = (u or "").strip().lower()
@@ -1045,6 +1046,13 @@ def same_posting(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return all(key) and key == _posting_key(b)
 
 
+@sql_function("same_posting", 4)
+def _same_posting_cols(url_a: str | None, title_a: str | None,
+                       url_b: str | None, title_b: str | None) -> bool:
+    """same_posting over a query's columns, for the SQL that groups rows."""
+    return same_posting({"url": url_a, "title": title_a}, {"url": url_b, "title": title_b})
+
+
 def _posting_key(r: dict[str, Any]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
     return _norm_url(r.get("url")), _norm_title(r.get("title"))
@@ -1122,18 +1130,31 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
         `?hub=9&in_iframe=1`). The dry run without the requisition guard
         would have merged three Butterfly Network pairs.
     """
-    from collections import defaultdict
-    groups: defaultdict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
-    for r in map(dict, conn.execute(
-            "SELECT job_id, company_id, url, title, disposition, status, "
-            "first_seen FROM jobs WHERE company_id IS NOT NULL "
-            "AND url IS NOT NULL AND url != ''")):
-        key = (r["company_id"], *_posting_key(r), r["job_id"].rsplit("_", 1)[-1])
-        if key[1] and key[2]:
-            groups[key].append(r)
+    # The group is (company, posting key, requisition tail): the tail is the
+    # id after its last "_" (the whole id when it has none), taken by
+    # stripping the id's non-"_" characters off its right end. Members come
+    # back best-first (_survivor_first's order), groups in first-row order.
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for r in conn.execute("""
+            WITH keyed AS (
+              SELECT id, job_id, title, disposition, status, first_seen, company_id,
+                     norm_url(url) AS u, norm_title(title) AS t,
+                     substr(job_id, length(rtrim(job_id, replace(job_id, '_', ''))) + 1) AS tail
+              FROM jobs WHERE company_id IS NOT NULL AND url IS NOT NULL AND url != ''
+            ), ranked AS (
+              SELECT *, ROW_NUMBER() OVER ordered AS rn, COUNT(*) OVER same AS n,
+                     MIN(id) OVER same AS g
+              FROM keyed WHERE u != '' AND t != ''
+              WINDOW same AS (PARTITION BY company_id, u, t, tail),
+                     ordered AS (same ORDER BY disposition IS NULL,
+                                 COALESCE(NULLIF(status, ''), 'open') != 'open',
+                                 COALESCE(first_seen, ''), id)
+            )
+            SELECT * FROM ranked WHERE n > 1 ORDER BY g, rn"""):
+        groups.setdefault(r["g"], []).append(dict(r))
 
     return dedup_groups(
-        conn, "jobs", "job_id", groups, rank=_survivor_first,
+        conn, "jobs", "job_id", groups, rank=lambda r: r["rn"],
         describe=lambda keep, losers: (
             f"{(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
             f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}"))

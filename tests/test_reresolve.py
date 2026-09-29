@@ -583,6 +583,18 @@ class TestRekeyJobs:
             "cross-tenant": 1, "unresolvable": 1}
         assert self._ids(db) == before
 
+    def test_two_rows_claiming_one_free_id_rekey_once_then_merge(self, db):
+        # Neither row's new id is stored yet: the first claims it (rekey),
+        # the second finds the first as its holder (same posting: merge).
+        a = store.upsert_company(db, {"name": "A", "ats": "phenom", "slug": "careers.a.org"})
+        self._job(db, a, "phenom_9", self.A + "9", "T9")
+        self._job(db, a, "phenom_9b", self.A + "9/", "t9")
+        db.commit()
+        assert rekey.rekey_jobs("phenom", commit=True, conn=db) == {
+            "unchanged": 0, "rekey": 1, "merge": 1, "conflict": 0,
+            "cross-tenant": 0, "unresolvable": 0}
+        assert self._ids(db) == ["phenom_careers_a_org_9"]
+
     def test_apply_rekeys_and_merges_one_posting_into_one_row(self, db, rows):
         rekey.rekey_jobs("phenom", commit=True, conn=db)
         assert self._ids(db) == sorted([
