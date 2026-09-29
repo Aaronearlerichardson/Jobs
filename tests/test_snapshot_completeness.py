@@ -86,15 +86,20 @@ class TestWorkdaySnapshot:
         (2000, 2000, True),     # rows == the reported total, AT the ceiling
         (2000, None, True),     # no total: the rows alone reach the ceiling
         (1995, 1995, False),    # a board under the ceiling is complete
+        (2000, 2891, True),     # a bigger total, served only to the ceiling
+        (2891, 2891, False),    # served whole past the ceiling, total and all
+        (2891, 2000, False),    # served past a total reported at the ceiling
     ])
     async def test_the_ceiling_caps_a_window_of_the_board(self, cxs, n, total, capped):
         """The API reports a bigger board as 2000 and serves 2000 rows, so
-        at the ceiling rows and total AGREE and would read as complete.
+        at the ceiling rows and total AGREE and would read as complete. A
+        tenant that serves past it is read whole.
 
         Notes:
             2026-09-18: Abbott and NVIDIA each fetched exactly 2000 rows at
             a reported total of 2000, untagged, and 70 and 10 live reqs
-            were closed.
+            were closed. 2026-09-29: ThermoFisher served all 2891 and read
+            as capped, so none of its closed reqs ever closed.
         """
         cxs(_postings(n), totals=(total, 0))
         assert len(await board_for("workday").whole_board(WD)) == n
@@ -291,15 +296,22 @@ class TestEnginePagers:
         info = http.snapshot_info()
         assert info["capped"] and info["capped_total"] is None
 
-    async def test_a_short_page_short_of_the_total_reads_on(self, offset_board):
-        """A server may serve fewer rows than asked (two Phenom tenants
-        serve 10 whatever the size): the total, not the page, says when the
-        board ends."""
-        calls = offset_board({0: [0, 1], 5: [5, 6]}, total=7)
-        rows = await _engine("offset", size=5, pages=9, total="total").listing("h", "t h")
-        assert [r["id"] for r in rows] == ["t_0", "t_1", "t_5", "t_6"]
-        assert [c.params["o"] for c in calls] == [0, 5, 10]
-        assert http.snapshot_info()["capped_total"] == 7
+    @pytest.mark.parametrize("kind,extra,offsets", [
+        ("offset", {}, [0, 2, 4, 6]),
+        ("overlap", {"step": 3, "why": _SHIFTS}, [0, 1, 2, 3, 4, 5]),
+    ])
+    async def test_a_short_first_page_short_of_the_total_steps_by_what_it_served(
+            self, serve, monkeypatch, kind, extra, offsets):
+        """A server may serve fewer rows than asked (three Phenom tenants
+        serve 10 whatever the size; a 250-row overlap step read 20 of ~300
+        rows, 2026-09-29): the walk steps by the served page, an overlap
+        keeping its share of it, and reads the whole board."""
+        no_pacing(monkeypatch)
+        calls = _sized_by_server(serve, 7, per_page=2, total=7)
+        rows = await _engine(kind, size=6, pages=9, total="total", **extra).listing("h", "t h")
+        assert sorted(r["id"] for r in rows) == [f"t_{i}" for i in range(7)]
+        assert [c.params["o"] for c in calls] == offsets
+        assert not http.snapshot_info()["capped"]
 
     async def test_a_failed_later_page_is_counted_not_capped(self, offset_board):
         offset_board({0: [0, 1], 2: [2, 3]}, total=4, fail_from=2)

@@ -24,7 +24,7 @@ from src.ats.board import company as company_fetch
 from src.claude.fit import score_resume_fit
 from src.match import gates
 from src.match.filters import is_relevant
-from src.match.locality import NC_RE, geo_mode
+from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
 from src.net.http import fetch_failed
 
 if TYPE_CHECKING:
@@ -177,7 +177,7 @@ def rewrite_digest(conn: sqlite3.Connection, t: dict[str, Any], top_n: int = 15,
     for j in ranked[:top_n]:
         fit = j["resume_fit_score"]
         fs = f"{fit:.2f}" if isinstance(fit, float) else "n/a"
-        print(f"  fit={fs} [{j.get('geo_mode','?')}] {(j['title'] or '')[:52]}"
+        print(f"  fit={fs} [{geo_label(j)}] {(j['title'] or '')[:52]}"
               f"  -  {j['company_name']}")
     return ranked
 
@@ -285,7 +285,8 @@ async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: dict[str, A
         # Whole-board companies are fetched with no location restriction,
         # which lets their remote and onsite-elsewhere reqs through the
         # fetch. Gate here:
-        #   watched / core-mission -> local-onsite or explicitly-remote is
+        #   watched / core-mission -> local-onsite or explicitly-remote (and
+        #              US-eligible: "Canada, Remote" is not remote for us) is
         #              scored (the watch tag is human-curated, the mission
         #              floor is a judged score, and ranked_jobs admits both
         #              kinds of remote into the local list);
@@ -294,7 +295,7 @@ async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: dict[str, A
         #              collisions flooded the ranking with remote junk).
         gm = geo_mode(job.get("location", ""), job.get("description", ""))
         if tags.has(company, tags.WATCH) or _mission_trusted(company, floor):
-            if gm is None:
+            if gm is None or (gm == "remote" and not us_eligible(job.get("location", ""))):
                 return False
         elif gm != "onsite":
             return False

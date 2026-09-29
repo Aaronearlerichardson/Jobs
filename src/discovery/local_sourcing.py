@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -53,14 +53,16 @@ from .resolve.websearch_board import websearch_board
 # --------------------------------------------------------------------------- #
 
 
-def _boardless(names: list[str], hits: list[dict[str, Any]]) -> list[str]:
-    """The names with no LOCAL board yet.
+def _boardless(names: list[str], hits: Iterable[dict[str, Any]],
+               skip: Collection[str] = frozenset()) -> list[str]:
+    """The names with no LOCAL board yet, less the name keys in `skip`
+    (the roster's working boards, _productive_keys).
 
     Only an nc>0 hit counts as found: a junk 0-NC slug collision must not
     stop a later pass from looking for the real employer. Asked before
     each of the three fallback passes.
     """
-    have = {name_key(h["name"]) for h in hits if h["nc"] > 0}
+    have = {name_key(h["name"]) for h in hits if h["nc"] > 0} | set(skip)
     return [n for n in names if name_key(n) not in have]
 
 
@@ -131,14 +133,15 @@ async def _probe_pass(names: list[str], max_workers: int) -> list[dict[str, Any]
         "probe", max_workers) if h]
 
 
-async def _js_scan_pass(hits: list[dict[str, Any]], max_workers: int) -> None:
+async def _js_scan_pass(hits: list[dict[str, Any]], max_workers: int,
+                        skip: Collection[str] = frozenset()) -> None:
     """Re-probe the MAJORS that got no board, with a headless browser
     (probes.JsScanProbePool).
 
     Big employers often have React/SPA careers pages whose board link only
     appears after JS runs, so the static probe misses them entirely.
     """
-    missed = _boardless(MAJORS, hits)
+    missed = _boardless(MAJORS, hits, skip)
     import importlib.util
     if importlib.util.find_spec("playwright.async_api") is None:
         if missed:
@@ -312,7 +315,7 @@ def _report_discovery(hits: list[dict[str, Any]], confirmed: list[dict[str, Any]
 async def discover_local(extra_names: list[str] | None = None, max_workers: int = 12,
                          js_majors: bool = True, sniff: bool = True,
                          websearch: bool = True, websearch_cap: int | None = None,
-                         websearch_retry_days: int = 14
+                         websearch_retry_days: int = 14, tracked: Collection[str] = frozenset()
                          ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
     """
     Gather names + probe each. Returns (confirmed, checked, misses) where
@@ -329,7 +332,9 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
       4. _websearch_pass   search the web for one, capped (``websearch``)
 
     then _reduce_hits accounts for every candidate exactly once and
-    _report_discovery prints the scoreboard.
+    _report_discovery prints the scoreboard. A name whose key is in
+    `tracked` (the roster's working boards) gets the cheap probe only:
+    no fallback pass re-resolves it and a miss is never filed for it.
 
     Notes:
         The misses used to be printed and dropped, so a name that failed
@@ -346,15 +351,20 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
     names = await gather_names(extra_names)
     misses: list[dict[str, Any]] = []
     hits = await _probe_pass(names, max_workers)
+    todo = [n for n in names if name_key(n) not in tracked]
+    if len(todo) < len(names):
+        print(f"  {len(names) - len(todo)} candidate(s) already on the roster with a "
+              f"working board: probed only, not re-resolved")
     if js_majors:
-        await _js_scan_pass(hits, max_workers)
+        await _js_scan_pass(hits, max_workers, tracked)
     if sniff:
-        await _sniff_pass(names, hits, misses, max_workers)
+        await _sniff_pass(todo, hits, misses, max_workers)
     if websearch:
-        await _websearch_pass(names, hits, misses, max_workers, websearch_cap,
+        await _websearch_pass(todo, hits, misses, max_workers, websearch_cap,
                               websearch_retry_days)
 
-    hits, confirmed, dropped, misses = _reduce_hits(names, hits, misses)
+    hits, confirmed, dropped, misses = _reduce_hits(todo, hits, misses)
+    misses = [m for m in misses if name_key(m["name"]) not in tracked]
     _report_discovery(hits, confirmed, dropped, misses)
     return confirmed, names, misses
 
@@ -403,12 +413,17 @@ async def mission_context(board: dict[str, Any]) -> str:
 def _board_already_tracked(conn: sqlite3.Connection,
                            row: dict[str, Any]) -> dict[str, Any] | None:
     """store.company_by_board, minus a same-name match: that is the
-    ordinary re-probe/update path, which the caller may upsert."""
+    ordinary re-probe/update path, which the caller may upsert.
+
+    Notes:
+        Same NAME, not same name_key: the upsert keys on the exact name, so
+        "Alpaca Health" on the board the roster spells "Alpacahealth"
+        passed here and landed as a second, pending row on one board
+        (2026-09-29).
+    """
     from src.store import company_by_board
     existing = company_by_board(conn, row)
-    if not existing:
-        return None
-    if name_key(existing.get("name")) == name_key(row.get("name")):
+    if not existing or existing.get("name") == row.get("name"):
         return None
     return existing
 
@@ -418,18 +433,29 @@ def _report_dup_board(name: str, existing: dict[str, Any]) -> None:
           f"as '{existing.get('name')}' - already tracked, not added")
 
 
+#: An active roster row that has produced jobs: a nonzero total, or a
+#: non-empty crawl in the last 14 days (the one parameter).
+_PRODUCTIVE = ("COALESCE(active, 0) AND (COALESCE(total_job_count, 0) > 0 "
+               "OR COALESCE(last_nonempty_at, '') >= ?)")
+
+
+def _since_productive() -> str:
+    return (datetime.now() - timedelta(days=14)).isoformat()
+
+
 def _productive_row(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
-    """The roster row named `name` if it is active and has produced jobs (a
-    nonzero total, or a non-empty crawl in the last 14 days), else None."""
-    row = conn.execute("SELECT * FROM companies WHERE name=?",
-                       (name,)).fetchone()
-    if not row or not row["active"]:
-        return None
-    since = (datetime.now() - timedelta(days=14)).isoformat()
-    if ((row["total_job_count"] or 0) > 0
-            or (row["last_nonempty_at"] or "") >= since):
-        return dict(row)
-    return None
+    """The roster row named `name` if it is productive (_PRODUCTIVE), else
+    None."""
+    row = conn.execute(f"SELECT * FROM companies WHERE name=? AND {_PRODUCTIVE}",
+                       (name, _since_productive())).fetchone()
+    return dict(row) if row else None
+
+
+def _productive_keys(conn: sqlite3.Connection) -> frozenset[str]:
+    """The name keys of every productive roster row: discover_local's
+    `tracked`."""
+    return frozenset(name_key(r[0]) for r in conn.execute(
+        f"SELECT name FROM companies WHERE {_PRODUCTIVE}", (_since_productive(),)))
 
 
 async def _score_hit(hit: dict[str, Any]) -> tuple[str | None, float | None, str]:
@@ -583,6 +609,14 @@ def _write_candidate(conn: sqlite3.Connection, hit: dict[str, Any],
     return row, active, pending
 
 
+def _print_scored(name: str, row: dict[str, Any], flag: str) -> None:
+    """One populate_companies line: `row`'s mission verdict and `flag`."""
+    score = row.get("mission_score")
+    ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
+    print(f"    {name:30} {str(row.get('mission_tier')):20} {ss}  [{flag}]  "
+          f"({row.get('mission_reason')})")
+
+
 async def populate_companies(extra_names: list[str] | None = None,
                              include_missions: list[str] | None = None,
                              dork: bool = True) -> list[dict[str, Any]]:
@@ -607,7 +641,9 @@ async def populate_companies(extra_names: list[str] | None = None,
 
     Returns the list of company dicts written by the name-based pass.
     """
-    confirmed, _, misses = await discover_local(extra_names)
+    async with store.Writer() as db:
+        tracked = await db.run(_productive_keys)
+    confirmed, _, misses = await discover_local(extra_names, tracked=tracked)
     async with store.Writer() as db:
         written = []
 
@@ -621,13 +657,25 @@ async def populate_companies(extra_names: list[str] | None = None,
             print(f"\n  recorded {n_miss} miss(es) (of {len(misses)} not "
                   f"confirmed); store now holds: "
                   + ", ".join(f"{fam}={n}" for fam, n in counts))
-        print(f"\n  scoring mission for {len(confirmed)} NC-local compan(ies)...")
+        # A board the roster already settles (a duplicate, a working row
+        # kept) costs no mission call: until 2026-09-29 every confirmed hit
+        # was scored first, 45 of 49 calls on boards already tracked.
+        todo = []
+        for h in confirmed:
+            settled, result = await db.run(_settled_board, h)
+            if not settled:
+                todo.append(h)
+            elif result:
+                written.append(dict(result[0]))
+                _print_scored(h["name"], result[0], "tracked")
+        print(f"\n  scoring mission for {len(todo)} NC-local compan(ies) "
+              f"not already on the roster...")
 
         # The title fetch (1 GET) + mission call (1 LLM request) per company are
         # pure network I/O -- the historical serial tail of the pass. Run them
         # concurrently, under the stall watchdog; output is completion-ordered.
         async for h, scored in fan_out(
-                confirmed, _score_hit, lambda h: h["name"], 8, with_item=True,
+                todo, _score_hit, lambda h: h["name"], 8, with_item=True,
                 on_error=lambda h, e: print(
                     f"    [!] mission scoring failed for {h['name']!r}: {e}"),
                 stall_s=RESOLVE_STALL_S):
@@ -638,11 +686,8 @@ async def populate_companies(extra_names: list[str] | None = None,
                 continue
             row, active, pending = result
             written.append(dict(row))
-            tier, score, reason = scored
-            flag = ("PENDING REVIEW" if pending
-                    else "active" if active else "INACTIVE(other)")
-            ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
-            print(f"    {h['name']:30} {str(tier):20} {ss}  [{flag}]  ({reason})")
+            _print_scored(h["name"], row, "PENDING REVIEW" if pending
+                          else "active" if active else "INACTIVE(other)")
 
     if dork:
         print("\n  ATS-dork sweep (search-indexed board URLs)...")

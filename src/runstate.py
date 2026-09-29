@@ -25,7 +25,10 @@ import asyncio
 import contextvars
 import inspect
 from collections.abc import Awaitable, Callable
+import logging
 from typing import Any, cast
+
+_log = logging.getLogger(__name__)
 
 #: The current run. Tests set a fresh one per test (tests/conftest.py).
 RUN: contextvars.ContextVar[Run] = contextvars.ContextVar("run")
@@ -52,6 +55,9 @@ class Run:
 
     async def __aenter__(self) -> Run:
         self._token = RUN.set(self)
+        loop = asyncio.get_running_loop()
+        if loop.get_exception_handler() is None:
+            loop.set_exception_handler(_quiet_resets)
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -95,6 +101,30 @@ class Run:
             if self.exits:
                 await self._unwind()
         return first
+
+
+def _quiet_resets(loop: asyncio.AbstractEventLoop, context: dict[str, Any]) -> None:
+    """The run loop's exception handler: a ConnectionResetError goes to the
+    DEBUG log, anything else to asyncio's own handler.
+
+    >>> class Loop:
+    ...     def default_exception_handler(self, context):
+    ...         print("handled:", context["message"])
+    >>> _quiet_resets(Loop(), {"message": "reset", "exception": ConnectionResetError()})
+    >>> _quiet_resets(Loop(), {"message": "boom", "exception": ValueError()})
+    handled: boom
+
+    Notes:
+        Windows' Proactor loop reports a peer resetting a socket as its
+        transport closes from _call_connection_lost (WinError 10054), an
+        ERROR with a traceback in the session log although nothing failed
+        (2026-09-29 harvest). A reset during a request reaches the awaiting
+        code, never this handler.
+    """
+    if isinstance(context.get("exception"), ConnectionResetError):
+        _log.debug("connection reset as a transport closed: %s", context.get("message"))
+        return
+    loop.default_exception_handler(context)
 
 
 def run[T](main: Awaitable[T]) -> T:

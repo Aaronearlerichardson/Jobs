@@ -160,7 +160,10 @@ async def walk(spec: Listing,
     steps by it where that page reports the board's total, else by one row
     less: pages overlap by a row, so the last page of a board of two or
     more postings is always short, and a server wrapping back past its end
-    does not read as capped.
+    does not read as capped. An offset or overlap pager whose first page
+    serves fewer rows than asked, short of the board's total, steps by
+    the served count: the server caps its pages (three Phenom tenants
+    serve 10 whatever the size, and a 250-row step read 20 of ~300 rows).
 
     A later page's failure ends the walk with the rows so far (reported,
     so the snapshot reads incomplete). The walk ends at a page listing no
@@ -172,9 +175,10 @@ async def walk(spec: Listing,
     posting or a cursor refused by `next_url`) with no total proving it
     complete; when it holds fewer rows than the total, unless `scoped` (a
     scope's total counts rows the pull drops); and when rows or total
-    reach the `ceiling`. The capped total is the larger of total and rows,
-    unknown on a scoped pull short of the ceiling. A `cheap` walk notes
-    nothing."""
+    reach the `ceiling`, unless the walk read past it (this board's server
+    serves more; a total above it is the board's own). The capped total
+    is the larger of total and rows, unknown on a scoped pull short of the
+    ceiling. A `cheap` walk notes nothing."""
     pager = spec.pager
     size = step = size or page_size(pager)
     learn = not size and pager is not None and pager.kind == "offset"
@@ -191,7 +195,7 @@ async def walk(spec: Listing,
             return (None, None) if n == 0 else (rows, total)
         if n == 0 and pager and pager.total:
             total = total_of(pager, payload)
-            size_known = None if total is not None and ceiling and total >= ceiling else total
+            size_known = None if total is not None and ceiling and total == ceiling else total
         n_entries, listed = await asyncio.to_thread(rows_of, parts, payload)
         if learn:
             n_entries = len({r["id"] for r in listed if r["id"] is not None})
@@ -201,6 +205,11 @@ async def walk(spec: Listing,
                 pages = page_cap(pager, budget, step) if widen and pager else pages
         elif n == 0 and widen and pager and not size:
             pages = page_cap(pager, budget, len({r["id"] for r in listed if r["id"] is not None}))
+        elif n == 0 and pager and pager.kind in ("offset", "overlap") \
+                and 0 < n_entries < min(size, size_known or 0):
+            size = step = n_entries
+            stride = pager.offset(1, step) - pager.offset(0, step)
+            pages = page_cap(pager, budget, stride) if widen else pages
         new = await asyncio.to_thread(_fresh, listed, seen)
         rows += new
         if not pager:
@@ -221,7 +230,7 @@ async def walk(spec: Listing,
             break
         await asyncio.sleep(config.PAGE_DELAY_S)
         n += 1
-    at_ceiling = bool(ceiling and max(total or 0, len(rows)) >= ceiling)
+    at_ceiling = bool(ceiling and len(rows) <= ceiling <= max(total or 0, len(rows)))
     complete = size_known is not None and len(rows) >= size_known
     short = size_known is not None and len(rows) < size_known and not scoped
     if not cheap and ((capped and not complete) or short or at_ceiling):

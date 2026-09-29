@@ -283,7 +283,9 @@ class OverlapPager(_Pager):
         return self.step
 
     def offset(self, n: int, size: int) -> int:
-        return n * self.step
+        """Steps `step` in `size` rows: a server serving pages smaller than
+        asked keeps the same overlap."""
+        return n * max(1, size * self.step // self.size)
 
 
 class PagePager(_Pager):

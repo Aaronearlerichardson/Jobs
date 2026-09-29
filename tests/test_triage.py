@@ -200,6 +200,10 @@ async def test_geo_drop_before_hydration_unless_trusted(tmp_path, tracks, stubs,
     _harvested(conn, plain, "far", "Data Engineer", elsewhere)
     _harvested(conn, plain, "rem", "Data Engineer", "Remote - US")
     _harvested(conn, watched, "wrem", "Data Engineer", "Remote - US")
+    # Watched, but remote somewhere a US applicant cannot take (2026-09-29:
+    # five such rows reached the scorer).
+    _harvested(conn, watched, "wca", "Data Engineer", "Canada, Remote; Canada, Toronto")
+    _harvested(conn, watched, "wuae", "Data Engineer", "UAE, Dubai; UAE, Remote")
     _harvested(conn, plain, "nloc", "Data Engineer", "2 Locations")
     _harvested(conn, plain, "body", "Data Engineer", elsewhere,
                description=f"Our HQ is in {local_addr}. " * 10)
@@ -218,6 +222,7 @@ async def test_geo_drop_before_hydration_unless_trusted(tmp_path, tracks, stubs,
     assert _row(conn, "rem")["triage_status"] == "geo"      # onsite only
     assert _row(conn, "wrem")["triage_status"] == "ok"      # watch admits remote
     assert _row(conn, "wrem")["remote_eligible"] == 1
+    assert _row(conn, "wca")["triage_status"] == _row(conn, "wuae")["triage_status"] == "geo"
     # The Workday placeholder waits for the detail page, which (stubbed
     # here) does not name a local place: judged geo after the body arrives.
     assert _row(conn, "nloc")["triage_status"] == "geo"

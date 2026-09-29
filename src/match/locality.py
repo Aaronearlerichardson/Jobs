@@ -22,7 +22,7 @@ harvest triage pass and the webapp all delegate here.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 from src import config
@@ -511,7 +511,10 @@ _DEFAULT_NON_US_REGIONS = (
     "ireland", "australia", "new zealand", "germany", "france", "spain",
     "poland", "portugal", "netherlands", "ukraine", "romania", "czech",
     "brazil", "argentina", "mexico", "colombia", "vietnam", "indonesia",
-    "china", "japan", "singapore",
+    "china", "japan", "singapore", "gb", "uae", "united arab emirates", "dubai",
+    "israel", "switzerland", "sweden", "denmark", "norway", "finland", "belgium",
+    "austria", "italy", "hungary", "slovakia", "serbia", "korea", "taiwan",
+    "malaysia", "saudi", "qatar", "costa rica",
 )
 _NON_US_REGIONS = tuple(getattr(config, "REMOTE_NON_US_REGIONS", None) or _DEFAULT_NON_US_REGIONS)
 
@@ -555,3 +558,13 @@ def geo_mode(location: str | None, description: str | None = "") -> str | None:
     if remote_signal(location, description):
         return "remote"
     return None
+
+
+def geo_label(row: Mapping[str, Any]) -> str:
+    """A row's stored geo_mode as printed: "elsewhere" for neither local nor
+    remote (None), "?" when the row carries none.
+
+    >>> geo_label({"geo_mode": "remote"}), geo_label({"geo_mode": None}), geo_label({})
+    ('remote', 'elsewhere', '?')
+    """
+    return row.get("geo_mode") or ("elsewhere" if "geo_mode" in row else "?")

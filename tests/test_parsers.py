@@ -897,6 +897,57 @@ class TestDiscoverLocalWebsearchPass:
 
         assert calls == ["Beta"]
 
+    async def test_a_tracked_name_is_probed_only_and_never_a_miss(self, monkeypatch):
+        """A name the roster already boards (`tracked`) gets the cheap probe
+        but no fallback pass, and no miss is filed against it (2026-09-29:
+        half of a 6.5-minute JS pass went on employers already crawled)."""
+        from src.match.names import name_key
+        self._patch_common(monkeypatch, ["Tracked Co", "Fresh Co"])
+        calls = []
+        monkeypatch.setattr(
+            local_sourcing, "websearch_board",
+            answer(lambda name, max_results=8: calls.append(name)))
+
+        _, _, misses = await local_sourcing.discover_local(
+            max_workers=2, js_majors=False, sniff=False, websearch=True,
+            websearch_cap=10, tracked=frozenset({name_key("Tracked Co")}))
+
+        assert calls == ["Fresh Co"]
+        assert [m["name"] for m in misses] == ["Fresh Co"]
+
+
+class TestPopulateScoresOnlyWhatTheRosterDoesNotSettle:
+    """populate_companies' mission call runs only for a hit the roster does
+    not already settle (_settled_board): on 2026-09-29, 45 of 49 calls went
+    on boards already tracked, each printed with a fresh verdict the row
+    never took."""
+
+    async def test_a_tracked_board_costs_no_mission_call(self, monkeypatch, db):
+        import src.store as store
+        keep_store_open(monkeypatch, db)
+        store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
+                                  "active": 1, "total_job_count": 5,
+                                  "mission_tier": "adjacent", "mission_score": 0.5})
+        hits = [{"name": n, "ats": "lever", "slug": n.lower(), "nc": 2, "count": 9}
+                for n in ("Acme", "Newco")]
+        seen = {}
+
+        async def discover(extra_names=None, tracked=frozenset()):
+            seen["tracked"] = tracked
+            return hits, [], []
+        monkeypatch.setattr(local_sourcing, "discover_local", discover)
+        asked = []
+        monkeypatch.setattr(local_sourcing, "_score_hit", answer(
+            lambda h: asked.append(h["name"]) or ("adjacent", 0.5, "stub")))
+
+        written = await local_sourcing.populate_companies(dork=False)
+
+        assert asked == ["Newco"]
+        assert seen["tracked"] == {"acme"}
+        assert sorted(r["name"] for r in written) == ["Acme", "Newco"]
+        acme = next(c for c in store.get_companies(db) if c["name"] == "Acme")
+        assert (acme["local_job_count"], acme["total_job_count"]) == (2, 9)
+
 
 class TestPastedNamePreview:
     """Step one of the two-step paste flow: the names are shown, with what
@@ -1126,6 +1177,19 @@ class TestScoreAndUpsert:
         assert asked == [], "the duplicate check must run before the LLM call"
         assert [c["name"] for c in store.get_companies(db, active_only=False)] \
             == ["Alpaca"]
+
+    async def test_the_same_name_spelled_otherwise_is_a_duplicate(self, monkeypatch, db):
+        """name_key("Alpaca Health") == name_key("Alpacahealth"), but the
+        upsert keys on the exact name: the hit landed as a second, pending
+        row on the same board (2026-09-29)."""
+        import src.store as store
+        store.upsert_company(db, {"name": "Alpacahealth", "ats": "lever",
+                                  "slug": "alpaca", "active": 1})
+        asked = self._wire(monkeypatch)
+        assert await self._upsert(db, self._HIT, source="local_sourcing") is None
+        assert asked == []
+        assert [c["name"] for c in store.get_companies(db, active_only=False)] \
+            == ["Alpacahealth"]
 
     async def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
         asked = self._wire(monkeypatch)

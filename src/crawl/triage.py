@@ -98,7 +98,7 @@ from src.crawl.runner import apply_keyword_focus, core_anchor
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
-                                remote_signal, remote_signal_for)
+                                remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
 from src.net.util import clean_field
 from src.ops import maintenance as ops
@@ -262,7 +262,7 @@ def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any]
     trusted = tags.has(company, tags.WATCH) or ops._mission_trusted(company, floor)
     if is_nc(loc):
         return OK
-    if trusted and (remote_signal(loc) or job.get("remote_hint")):
+    if trusted and (remote_signal(loc) or job.get("remote_hint")) and us_eligible(loc):
         return OK
     if not location_unknown(loc):
         return "geo"

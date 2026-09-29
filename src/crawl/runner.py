@@ -48,7 +48,7 @@ from src import tags
 from src.ats.registry import iter_store_sources, sweep
 from src.claude.resume import resume_text
 from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
-from src.match.locality import NC_RE, remote_signal_for, us_eligible
+from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
 
@@ -635,7 +635,7 @@ async def _report_ranked(db: store.Writer, t: dict[str, Any], got: Collected, sc
     for j in ranked[:top_n]:
         fs = (f"{j['resume_fit_score']:.2f}"
               if isinstance(j.get("resume_fit_score"), float) else "n/a")
-        print(f"  fit={fs} [{j.get('geo_mode', '?')}] "
+        print(f"  fit={fs} [{geo_label(j)}] "
               f"[{digest.age_tag(j)}] {(j['title'] or '')[:48]}")
         print(f"        {j['company_name']} "
               f"({j.get('mission_tier') or '?'})  -  "
