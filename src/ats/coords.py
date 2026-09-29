@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Unpack
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
-from src.rows import BoardHit, CompanyRow, HandleColumn
+from src.rows import BoardCoords, CompanyRow, HandleColumn
 from .board import BOARDS
 from .board.spec import Handle
 
@@ -95,7 +95,7 @@ def slug_text(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None) -
     return slug or None
 
 
-def board_slug(company: BoardHit | CompanyRow) -> Any:
+def board_slug(company: BoardCoords) -> Any:
     """The one string that names this board on its own host, independent of
     which coordinate column carries it: the first of its handle's columns
     (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
@@ -149,7 +149,7 @@ def slug_named(company: CompanyRow) -> bool:
             and name_is_own_slug(company.get("name"), board_slug(company)))
 
 
-def from_hit(hit: BoardHit | CompanyRow, **extra: Unpack[CompanyRow]) -> CompanyRow:
+def from_hit(hit: BoardCoords, **extra: Unpack[CompanyRow]) -> CompanyRow:
     """The same, from a resolver's hit dict ({ats, slug, careers_url, ...}).
 
     >>> hit = {"ats": "workday", "slug": ("acme", 5, "Ext"),
@@ -167,7 +167,7 @@ def from_hit(hit: BoardHit | CompanyRow, **extra: Unpack[CompanyRow]) -> Company
     return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"), **extra)
 
 
-def board_context(board: BoardHit | CompanyRow) -> str:
+def board_context(board: BoardCoords) -> str:
     """A board's address, worded for the mission scorer to read when no
     posting could be sampled from it (the caller prefers real titles).
     `board` is a resolver hit or a store row. '' when it has no address at

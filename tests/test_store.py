@@ -17,7 +17,7 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
-from src.rows import CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn
+from src.rows import BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn
 from src.store.migrate import MIGRATIONS_DIR, migrate
 
 
@@ -95,6 +95,7 @@ class TestSchema:
         assert set(CompanyRow.__annotations__) == cols
         assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
         assert set(get_args(HandleColumn)) <= cols
+        assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
 
     @pytest.mark.parametrize("table, model", [("companies", CompanyRow), ("jobs", JobIn)])
     def test_a_row_model_types_each_column_as_the_table_declares_it(self, db, table, model):

@@ -12,9 +12,10 @@ import it, so it imports nothing of theirs.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, TypedDict, final
+from typing import Annotated, Any, Literal
 
 from annotated_types import MinLen
+from typing_extensions import ReadOnly, TypedDict
 
 
 class FitColumns(TypedDict, total=False):
@@ -49,6 +50,8 @@ class JobIn(FitColumns, total=False):
     harvested_at: str | None
 
 
+# Open, unlike BoardHit: a stored CompanyRow flows into upsert_company, and a
+# closed CompanyIn would refuse the row's extra keys.
 class CompanyIn(TypedDict, total=False):
     """The companies columns upsert_company writes; a missing key leaves what
     is stored."""
@@ -86,9 +89,8 @@ class CompanyRow(CompanyIn, total=False):
     last_harvested_at: str | None
 
 
-# `final`, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.
-@final
-class BoardHit(TypedDict, total=False):
+# Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.
+class BoardHit(TypedDict, total=False, closed=True):
     """A resolver's answer for one board: its coordinates and what reading it found."""
     name: str
     ats: str
@@ -102,6 +104,17 @@ class BoardHit(TypedDict, total=False):
     validated: bool
     confirmed: bool
     elapsed: float
+
+
+class BoardCoords(TypedDict, total=False):
+    """The board coordinates a hit and a store row both carry, for a function
+    that reads only these and takes either."""
+    ats: ReadOnly[str | None]
+    slug: ReadOnly[str | tuple[Any, ...] | None]
+    wd_tenant: ReadOnly[str | None]
+    wd_pod: ReadOnly[int | None]
+    wd_site: ReadOnly[str | None]
+    careers_url: ReadOnly[str | None]
 
 
 #: The companies columns a board's handle can be spelled in (`handle.columns`
