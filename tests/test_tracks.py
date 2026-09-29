@@ -4,11 +4,13 @@ keyword focus, and source assembly through the one crawl pipeline."""
 from datetime import datetime, timedelta
 
 import pytest
+from pydantic import ValidationError
 
 import src.store as store
 import src.ops.maintenance as ops
 import src.crawl.runner as runner
 from src import tags
+from src.config.profile_schema import Track, parse
 from tests.test_triage import _PLAIN_ENG_BODY
 
 
@@ -56,6 +58,21 @@ class TestTrackConfig:
     def test_track_for_engine_resolves_both(self, local_track, sweep_track):
         assert local_track["engine"] == "local"
         assert sweep_track["engine"] == "sweep"
+
+    def test_a_track_built_directly_gets_its_engines_defaults(self):
+        t = Track(engine="sweep")
+        assert (t.keyword_mode, t.geo_gate, t.verify_top) == ("replace", False, 0)
+        assert t == parse({"tracks": {"x": {"engine": "sweep"}}}).tracks["x"]
+
+    def test_a_key_the_track_sets_beats_its_engine_and_sources_merge(self):
+        t = Track(engine="neural", verify_top=7, sources={"store": False})
+        assert (t.engine, t.verify_top) == ("sweep", 7)
+        assert (t.sources.store, t.sources.websearch) == (False, True)
+
+    def test_an_unknown_engine_is_reported_on_the_engine_key(self):
+        with pytest.raises(ValidationError) as err:
+            Track(engine="bogus")
+        assert [e["loc"] for e in err.value.errors()] == [("engine",)]
 
 
 class TestRemoteAdmissionGates:

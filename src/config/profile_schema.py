@@ -197,22 +197,21 @@ class Track(Methodology):
 
     @model_validator(mode="before")
     @classmethod
-    def _blank_is_unset(cls, data: Any) -> Any:
+    def _resolve(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        return {k: v for k, v in data.items()
+        data = {k: v for k, v in data.items()
                 if k == "db" or not (isinstance(v, str) and not v.strip())}
-
-    @model_validator(mode="after")
-    def _engine_fills_the_rest(self) -> Track:
-        eng = ENGINE_DEFAULTS[self.engine]
-        fill = {n: getattr(eng, n) for n in Methodology.model_fields
-                if n not in self.model_fields_set}
-        if "sources" in self.model_fields_set:
-            mine = self.sources
-            fill["sources"] = eng.sources.model_copy(
-                update=mine.model_dump(include=mine.model_fields_set))
-        return self.model_copy(update=fill)
+        engine = data.get("engine", "local")
+        eng = (ENGINE_DEFAULTS.get(ENGINE_ALIASES.get(engine, engine))
+               if isinstance(engine, str) else None)
+        if eng is None:               # the engine field reports it
+            return data
+        fill = {n: getattr(eng, n) for n in Methodology.model_fields if n not in data}
+        if isinstance(mine := data.get("sources"), (dict, TrackSources)):
+            mine = mine if isinstance(mine, dict) else mine.model_dump(exclude_unset=True)
+            fill["sources"] = {**eng.sources.model_dump(), **mine}
+        return {**data, **fill}
 
 
 #: The built-in pair used when a profile has no [tracks] section.
