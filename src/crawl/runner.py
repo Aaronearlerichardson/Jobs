@@ -52,6 +52,7 @@ from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
+from src.rows import CompanyRow
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
@@ -121,7 +122,7 @@ async def build_sources(cfg: ModuleType, t: TrackDict,
 
     # A thunk may carry what it closes over as a defaulted parameter.
     def add(name: str, platform: str, thunk: Callable[..., Awaitable[Any]],
-            company: dict[str, Any] | None = None, key: tuple[str, str] | None = None) -> None:
+            company: CompanyRow | None = None, key: tuple[str, str] | None = None) -> None:
         k = key or (platform, name.lower())
         if k in used:
             return
@@ -290,9 +291,9 @@ class Collected(NamedTuple):
     phase hands the rest; naming it is what let the others become
     functions.
     """
-    to_score: list[tuple[dict[str, Any], dict[str, Any]]]     # (company, job) -- fresh company-linked rows to score
+    to_score: list[tuple[CompanyRow, dict[str, Any]]]     # (company, job) -- fresh company-linked rows to score
     matches: list[dict[str, Any]]      # sweep rows surfaced (fetcher dict shape)
-    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]]   # (company, job, in_pipeline) at watched companies
+    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]]   # (company, job, in_pipeline) at watched companies
     funnel: list[tuple[str, int, int, int, int, str]]   # per-source summary rows, in source order
     n_closed: int
     n_reopened: int
@@ -300,9 +301,9 @@ class Collected(NamedTuple):
 
 
 async def _gate_company_board(
-        db: store.Writer, t: TrackDict, c: dict[str, Any], jobs: list[dict[str, Any]], commit: bool,
+        db: store.Writer, t: TrackDict, c: CompanyRow, jobs: list[dict[str, Any]], commit: bool,
         snapshot: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]], int, int]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
     store.Writer).
 
@@ -345,16 +346,16 @@ async def _gate_company_board(
     return kept, fresh, watch_hits, n_reopened, n_closed
 
 
-def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: dict[str, Any], jobs: list[dict[str, Any]],
+def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: CompanyRow, jobs: list[dict[str, Any]],
                        kept: list[dict[str, Any]], commit: bool
-                       ) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]]]:
+                       ) -> tuple[list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
     has handled, and the watch section's hits among `jobs`."""
     from src.match import gates
     from src.match.locality import geo_mode
 
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
-    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] = []
     if tags.has(c, tags.WATCH):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
@@ -445,9 +446,9 @@ async def _gate_sources(db: store.Writer, t: TrackDict, specs: list[dict[str, An
     """
     from src.crawl.harvest import bury_404_board
 
-    to_score: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    to_score: list[tuple[CompanyRow, dict[str, Any]]] = []
     matches: list[dict[str, Any]] = []
-    watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
+    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] = []
     funnel: list[tuple[str, int, int, int, int, str]] = []
     seen_ids: set[str] = set()
     n_closed = n_reopened = n_seen = 0

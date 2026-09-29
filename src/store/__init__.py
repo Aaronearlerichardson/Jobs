@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from .companies import (  # noqa: F401
     CAPTURE_ATS, MISS_REASONS, _OFFMISSION_MIN_JOBS, _offmission_volume,
-    board_key, company_by_board,
+    as_company, board_key, company_by_board,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
     HARVEST_DEAD_AFTER_DAYS, get_company, harvestable_companies,

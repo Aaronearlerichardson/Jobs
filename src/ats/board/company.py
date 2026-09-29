@@ -30,6 +30,7 @@ from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.net.util import clean_field, first, node_text, parse_markup
+from src.rows import CompanyRow
 from . import jsonld
 from .engine import Board, board_for, board_for_url
 
@@ -67,7 +68,7 @@ def needs_detail(job: dict[str, Any]) -> bool:
 
 
 async def hydrate_description(job: dict[str, Any],
-                              company: dict[str, Any] | None = None) -> dict[str, Any]:
+                              company: CompanyRow | None = None) -> dict[str, Any]:
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
     store row, names its board), else from the posting's own page.
@@ -186,7 +187,7 @@ def title_from_url_slug(url: str | None) -> str:
 
 # --- dispatch ------------------------------------------------------------------ #
 
-async def fetch_company(company: dict[str, Any], loc_re: LocationRE | None = None,
+async def fetch_company(company: CompanyRow, loc_re: LocationRE | None = None,
                         validate: bool = False) -> list[dict[str, Any]]:
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`); [] for a platform no spec fetches.
@@ -200,7 +201,7 @@ async def fetch_company(company: dict[str, Any], loc_re: LocationRE | None = Non
     return await board.whole_board(company, loc_re, validate) if board else []
 
 
-def board_origin(company: dict[str, Any]) -> str | None:
+def board_origin(company: CompanyRow) -> str | None:
     """The host a store row's board is read from, which one walk visits
     at a time (the harvest pull, triage's hydration): its engine's
     `origin`, else its ATS name (an origin not settled yet, or no engine).
@@ -216,7 +217,7 @@ def board_origin(company: dict[str, Any]) -> str | None:
 
 # --- title sampling ------------------------------------------------------------ #
 
-async def sample_titles(company: dict[str, Any], n: int = 6) -> list[str]:
+async def sample_titles(company: CompanyRow, n: int = 6) -> list[str]:
     """Up to `n` distinct posting titles from a store row's board, in board
     order: what the mission scorer is shown of an employer it has only a
     name for. [] when the board is unreadable, empty, or of an ATS with no

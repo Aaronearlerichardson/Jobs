@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -42,6 +42,7 @@ from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
+from src.rows import CompanyRow
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
@@ -372,7 +373,7 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
 #  Sampling and store writes (populate / add_board / resolve_leads)           #
 
 
-async def _sample_titles(hit: dict[str, Any], n: int = 6) -> list[str]:
+async def _sample_titles(hit: Mapping[str, Any], n: int = 6) -> list[str]:
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
@@ -386,11 +387,11 @@ async def _sample_titles(hit: dict[str, Any], n: int = 6) -> list[str]:
         mission-scored with no titles at all.
     """
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
-    board = hit if "wd_tenant" in hit else coords.from_hit(hit)
+    board = cast(CompanyRow, hit) if "wd_tenant" in hit else coords.from_hit(hit)
     return await company_fetch.sample_titles(board, n)
 
 
-async def mission_context(board: dict[str, Any]) -> str:
+async def mission_context(board: Mapping[str, Any]) -> str:
     """The free-text context `src.claude.score_company_mission` is given for
     a resolved board or roster row (a hit or a store row): a few live posting
     titles, else the board's own address (coords.board_context) -- '' only
@@ -411,7 +412,7 @@ async def mission_context(board: dict[str, Any]) -> str:
 
 
 def _board_already_tracked(conn: sqlite3.Connection,
-                           row: dict[str, Any]) -> dict[str, Any] | None:
+                           row: CompanyRow) -> CompanyRow | None:
     """store.company_by_board, minus a same-name match: that is the
     ordinary re-probe/update path, which the caller may upsert.
 
@@ -428,7 +429,7 @@ def _board_already_tracked(conn: sqlite3.Connection,
     return existing
 
 
-def _report_dup_board(name: str, existing: dict[str, Any]) -> None:
+def _report_dup_board(name: str, existing: CompanyRow) -> None:
     print(f"    [dup]  {name[:30]:30} same {existing.get('ats') or '?'} board "
           f"as '{existing.get('name')}' - already tracked, not added")
 
@@ -443,12 +444,12 @@ def _since_productive() -> str:
     return (datetime.now() - timedelta(days=14)).isoformat()
 
 
-def _productive_row(conn: sqlite3.Connection, name: str) -> dict[str, Any] | None:
+def _productive_row(conn: sqlite3.Connection, name: str) -> CompanyRow | None:
     """The roster row named `name` if it is productive (_PRODUCTIVE), else
     None."""
     row = conn.execute(f"SELECT * FROM companies WHERE name=? AND {_PRODUCTIVE}",
                        (name, _since_productive())).fetchone()
-    return dict(row) if row else None
+    return store.as_company(row) if row else None
 
 
 def _productive_keys(conn: sqlite3.Connection) -> frozenset[str]:
@@ -469,8 +470,8 @@ async def score_and_upsert(db: store.Writer, hit: dict[str, Any], source: str,
                            include_missions: list[str] | None = None,
                            tags: str | None = None,
                            scored: tuple[str | None, float | None, str] | None = None,
-                           extra: dict[str, Any] | None = None
-                           ) -> tuple[dict[str, Any], int, bool] | None:
+                           extra: CompanyRow | None = None
+                           ) -> tuple[CompanyRow, int, bool] | None:
     """Mission-score a resolved board and write it to the store (`db`, a
     store.Writer) as a review candidate -- the one write path behind every
     automated add surface.
@@ -536,7 +537,7 @@ async def score_and_upsert(db: store.Writer, hit: dict[str, Any], source: str,
 
 
 def _settled_board(conn: sqlite3.Connection, hit: dict[str, Any]
-                   ) -> tuple[bool, tuple[dict[str, Any], int, bool] | None]:
+                   ) -> tuple[bool, tuple[CompanyRow, int, bool] | None]:
     """(True, score_and_upsert's answer) when the roster already settles
     `hit` without a score (a duplicate board, a productive row kept), else
     (False, None)."""
@@ -576,7 +577,7 @@ def _settled_board(conn: sqlite3.Connection, hit: dict[str, Any]
 def _write_candidate(conn: sqlite3.Connection, hit: dict[str, Any],
                      scored: tuple[str | None, float | None, str], source: str,
                      include_missions: list[str] | None, tags: str | None,
-                     extra: dict[str, Any] | None) -> tuple[dict[str, Any], int, bool]:
+                     extra: CompanyRow | None) -> tuple[CompanyRow, int, bool]:
     """score_and_upsert's write of a scored board (`scored`, its tier,
     score and reason); returns (row, active, pending)."""
     from src.claude.api import is_active_mission
@@ -609,7 +610,7 @@ def _write_candidate(conn: sqlite3.Connection, hit: dict[str, Any],
     return row, active, pending
 
 
-def _print_scored(name: str, row: dict[str, Any], flag: str) -> None:
+def _print_scored(name: str, row: CompanyRow, flag: str) -> None:
     """One populate_companies line: `row`'s mission verdict and `flag`."""
     score = row.get("mission_score")
     ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
@@ -746,10 +747,11 @@ async def add_board(name: str, url: str, capture: bool = False) -> dict[str, Any
 
     if capture:
         async with store.Writer() as db:
-            row = {"name": name, "ats": store.CAPTURE_ATS, "careers_url": url,
-                   "source": "manual", "active": 1,
-                   "notes": "capture-only board: browse it yourself and save "
-                            "pages with capture.py --watch"}
+            row: CompanyRow = {
+                "name": name, "ats": store.CAPTURE_ATS, "careers_url": url,
+                "source": "manual", "active": 1,
+                "notes": "capture-only board: browse it yourself and save "
+                         "pages with capture.py --watch"}
             dup = await db.run(_board_already_tracked, row)
             if dup:
                 _report_dup_board(name, dup)
@@ -832,7 +834,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             return 0
         print(f"  mission-scoring {len(cos)} compan(ies)...")
 
-        async def _one(c: dict[str, Any]) -> tuple[str | None, float | None, str]:
+        async def _one(c: CompanyRow) -> tuple[str | None, float | None, str]:
             return await score_company_mission(c["name"], await mission_context(c))
 
         n = 0
@@ -924,7 +926,7 @@ async def resolve_leads(max_workers: int = 8,
                         sources: tuple[str, ...] = ("page_capture", "linkedin_search",
                                                      "linkedin_company_search"),
                         all_leads: bool = False, limit: int | None = None,
-                        retry_days: int = 14) -> list[dict[str, Any]]:
+                        retry_days: int = 14) -> list[CompanyRow]:
     """Resolve boardless company leads (banked by capture.py from browsed
     LinkedIn/Indeed pages, or by manual adds) into crawlable boards and queue
     the hits for review. Careers-page SNIFF first (collision-safe), slug-probe
@@ -961,9 +963,9 @@ async def resolve_leads(max_workers: int = 8,
               f"fallback; every board validated by a live fetch)...")
 
         # Not `resolved`: that name is board.resolved(), which resolves each.
-        resolved_rows: list[dict[str, Any]] = []
+        resolved_rows: list[CompanyRow] = []
         probe_only: list[str] = []
-        stalled: list[dict[str, Any]] = []
+        stalled: list[CompanyRow] = []
 
         async for c, (hit, reason) in fan_out(
                 leads, lambda c: resolved(c["name"], c.get("careers_url") or ""),

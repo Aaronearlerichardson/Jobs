@@ -20,6 +20,7 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
 
 from src import config, validation
 from src.net.util import css, xpath
+from src.rows import HandleColumn
 from . import fields
 
 RowField = Literal["id", "title", "url", "location", "description", "posted_at",
@@ -141,8 +142,9 @@ class Accept(_Spec):
 
 class Handle(_Workaround):
     WORKAROUNDS = ("try_", "accept")
-    columns: tuple[Str, ...] = Field(config.DEFAULT_HANDLE_COLUMNS, min_length=1,
-                                     description="The store columns naming the board")
+    columns: tuple[HandleColumn, ...] = Field(
+        config.DEFAULT_HANDLE_COLUMNS, min_length=1,
+        description="The store columns naming the board")
     parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
                                                    "columns")
     sep: Str = Field("|", description="Joins the columns into one handle string")

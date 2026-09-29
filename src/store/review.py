@@ -16,10 +16,10 @@ from __future__ import annotations
 import re
 import sqlite3
 from datetime import datetime
-from typing import Any
 
 from src import config
 from src import tags
+from src.rows import CompanyRow
 from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
 
 
@@ -56,7 +56,7 @@ def _name_key(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def mark_pending(row: dict[str, Any]) -> dict[str, Any]:
+def mark_pending(row: CompanyRow) -> CompanyRow:
     """A company-row dict rewritten as a REVIEW CANDIDATE: inactive, and
     carrying the pending-review scope tag.
 
@@ -110,7 +110,7 @@ def is_confirmed_company(conn: sqlite3.Connection, name: str) -> bool:
     return bool(row and row["ats"] and not tags.has(row["tags"], tags.PENDING))
 
 
-def pending_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """The review queue: candidates an automated path resolved and nobody has
     ruled on yet, newest first.
 
@@ -136,7 +136,8 @@ def pending_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
         "id", "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
         "careers_url", "local_job_count", "total_job_count", "mission_tier",
         "mission_score", "mission_reason", "tags", "source", "created_at", "notes"))
-    return [dict(r) for r in conn.execute(
+    from .companies import as_company  # not at module level: see module doc
+    return [as_company(r) for r in conn.execute(
         f"SELECT {cols} FROM companies "
         "WHERE (',' || COALESCE(tags,'') || ',') LIKE ? "
         "ORDER BY created_at DESC, id DESC",
@@ -144,7 +145,7 @@ def pending_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def confirm_company(conn: sqlite3.Connection, cid: int,
-                    active: int | None = None) -> dict[str, Any] | None:
+                    active: int | None = None) -> CompanyRow | None:
     """Accept a review candidate onto the roster: the pending tag comes off
     and `active` is written as given (1 = crawl it, 0 = park it).
 

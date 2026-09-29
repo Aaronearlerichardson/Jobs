@@ -19,6 +19,7 @@ from src.ats.board import closure
 from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out, fetch_all
+from src.rows import CompanyRow
 from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
                                  group_by_company, rewrite_digest, track_writer)
 
@@ -30,7 +31,7 @@ from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
 _SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
 
 
-def _sync_skip_reason(company: dict[str, Any], jobs: list[dict[str, Any]] | None, err: object,
+def _sync_skip_reason(company: CompanyRow, jobs: list[dict[str, Any]] | None, err: object,
                       snapshot: dict[str, Any] | None = None) -> str | None:
     """Why this company's board cannot be reconciled, or None when it can.
     `snapshot` is fetch_all's net.http.snapshot_info() for the board: an

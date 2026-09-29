@@ -28,6 +28,7 @@ from typing import Any
 from src import config
 from src.config import TrackDict
 from src.match import locality
+from src.rows import CompanyRow
 
 # The mid-fit local band, half-open on the high side. The interviews to date
 # came from applications scored in this range at local onsite postings, not
@@ -279,7 +280,7 @@ def _band_intro(tail: str = "") -> str:
             f"not decided on, best fit first.{tail}")
 
 
-def _watch_section(watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]], intro: str | None = None
+def _watch_section(watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]], intro: str | None = None
                    ) -> tuple[str | None, object, tuple[str, str] | None]:
     rows = []
     for c, j, in_pipeline in watch_hits:
@@ -296,7 +297,7 @@ def _watch_section(watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bo
 
 def write_ranked_digest(
         ranked: list[dict[str, Any]], t: TrackDict,
-        watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
+        watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None,
         followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
         triage: dict[str, int] | None = None) -> Path:
@@ -382,7 +383,7 @@ def write_ranked_digest(
 
 def send_ranked_digest(
         ranked: list[dict[str, Any]], t: TrackDict,
-        watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
+        watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
         followups: list[dict[str, Any]] | None = None) -> bool:
     """Email a store-crawl track's new ranked rows. True when a message

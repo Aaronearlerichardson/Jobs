@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, cast
+from typing import cast
 
 from src.config import TrackDict
 from src import store
@@ -48,7 +48,7 @@ def rekey_jobs(ats: str, commit: bool = False, t: TrackDict | None = None,
         print(f"  [!] no board spec reads {ats!r} rows")
         return {}
     with track_store(t, conn) as conn:
-        companies = {r["id"]: dict(r) for r in conn.execute(
+        companies = {r["id"]: store.as_company(r) for r in conn.execute(
             "SELECT * FROM companies WHERE ats=?", (ats,))}
         ph = ",".join("?" for _ in companies)
         rows = [dict(r) for r in conn.execute(

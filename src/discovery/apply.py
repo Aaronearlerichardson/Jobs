@@ -24,6 +24,7 @@ from src.ats.board import board_for
 from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
+from src.rows import CompanyRow
 
 if TYPE_CHECKING:
     import sqlite3
@@ -154,7 +155,7 @@ async def apply_to_store(result: dict[str, Any], dry_run: bool = False) -> list[
 # Getro-specific except the `source` prefix, which is now an argument.
 
 
-def _coords_from_urls(urls: Iterable[str | None]) -> dict[str, Any] | None:
+def _coords_from_urls(urls: Iterable[str | None]) -> CompanyRow | None:
     """Roster-shaped board coordinates for the employer, read off its
     apply links, or None when none of them names a known ATS."""
     for url in urls:
@@ -232,10 +233,10 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
         careers_url = ((coords or {}).get("careers_url")
                        or (f"https://{emp['domain']}" if emp.get("domain")
                            else None))
-        candidate = {"name": name, "careers_url": careers_url,
-                     "source": via,
-                     "notes": f"employer on the {emp.get('board')} board; "
-                              f"{len(group)} relevant posting(s)"}
+        candidate: CompanyRow = {"name": name, "careers_url": careers_url,
+                                 "source": via,
+                                 "notes": f"employer on the {emp.get('board')} board; "
+                                          f"{len(group)} relevant posting(s)"}
         if coords:
             candidate.update(coords)
             candidate["careers_url"] = careers_url

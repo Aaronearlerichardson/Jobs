@@ -10,7 +10,8 @@ run_scraper.py --import-companies roster.json.
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import Any
+
+from src.rows import CompanyRow
 
 # _self: the config PACKAGE, which is what callers monkeypatch.
 # profile.py defines it; two identical copies is one too many for
@@ -202,7 +203,7 @@ def is_active_mission(tier: str | None, name: str | None,
 HARVEST_OFFMISSION_HOURS = _pol.harvest_offmission_hours
 
 
-def offmission_inactive(c: dict[str, Any]) -> str:
+def offmission_inactive(c: CompanyRow) -> str:
     """What the harvester (src.crawl.harvest.plan) does with an inactive
     board off the mission: "stopped", left out, when it was mission-scored
     into a tier the profile marks inactive (is_active_mission's answer,

@@ -16,14 +16,16 @@ store calls it.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Unpack
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
+from src.rows import CompanyRow, HandleColumn
 from .board import BOARDS
 from .board.spec import Handle
 
 
-def _handle(ats: str | None) -> tuple[tuple[str, ...], str]:
+def _handle(ats: str | None) -> tuple[tuple[HandleColumn, ...], str]:
     """(columns, sep) of `ats`'s handle (`spec.Handle`; default the slug)."""
     board = BOARDS.get(ats) if ats else None
     h = board.spec.handle if board else Handle()
@@ -31,8 +33,7 @@ def _handle(ats: str | None) -> tuple[tuple[str, ...], str]:
 
 
 def columns(ats: str, slug: str | tuple[Any, ...] | list[Any] | None = None,
-            careers_url: str | None = None, name: str | None = None,
-            **extra: Any) -> dict[str, Any]:
+            careers_url: str | None = None, /, **extra: Unpack[CompanyRow]) -> CompanyRow:
     """One board's coordinates as store company columns: a handle spanning
     several columns (its spec's `handle.columns`) fills them from its parts,
     a tuple or a `sep`-joined string; any other goes in `slug`.
@@ -69,13 +70,13 @@ def columns(ats: str, slug: str | tuple[Any, ...] | list[Any] | None = None,
     """
     cols, sep = _handle(ats)
     multi = len(cols) > 1
-    out: dict[str, Any] = {"ats": ats, "slug": None if multi else (slug or None),
-                           "wd_tenant": None, "wd_pod": None, "wd_site": None,
-                           "careers_url": careers_url}
+    out: CompanyRow = {"ats": ats, "slug": None if multi else slug_text(ats, slug),
+                       "wd_tenant": None, "wd_pod": None, "wd_site": None,
+                       "careers_url": careers_url}
     if multi:
-        out.update(zip(cols, slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)))
-    if name is not None:
-        out["name"] = name
+        parts = slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)
+        for col, part in zip(cols, parts):
+            out[col] = part
     out.update(extra)
     return out
 
@@ -95,7 +96,7 @@ def slug_text(ats: str, slug: str | tuple[Any, ...] | list[Any] | None) -> str |
     return slug or None
 
 
-def board_slug(company: dict[str, Any]) -> Any:
+def board_slug(company: Mapping[str, Any]) -> Any:
     """The one string that names this board on its own host, independent of
     which coordinate column carries it: the first of its handle's columns
     (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
@@ -114,7 +115,7 @@ def board_slug(company: dict[str, Any]) -> Any:
     return (first != "careers_url" and company.get(first)) or company.get("slug") or ""
 
 
-def slug_named(company: dict[str, Any]) -> bool:
+def slug_named(company: CompanyRow) -> bool:
     """True when a roster row is named after nothing but its own board
     slug/tenant AND was named from that slug in the first place -- the one
     rule behind the HARVEST SUMMARY's "still named after their own
@@ -149,7 +150,7 @@ def slug_named(company: dict[str, Any]) -> bool:
             and name_is_own_slug(company.get("name"), board_slug(company)))
 
 
-def from_hit(hit: dict[str, Any], name: str | None = None, **extra: Any) -> dict[str, Any]:
+def from_hit(hit: Mapping[str, Any], **extra: Unpack[CompanyRow]) -> CompanyRow:
     """The same, from a resolver's hit dict ({ats, slug, careers_url, ...}).
 
     >>> hit = {"ats": "workday", "slug": ("acme", 5, "Ext"),
@@ -164,11 +165,10 @@ def from_hit(hit: dict[str, Any], name: str | None = None, **extra: Any) -> dict
     >>> "nc" in row
     False
     """
-    return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"),
-                   name=name, **extra)
+    return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"), **extra)
 
 
-def board_context(board: dict[str, Any]) -> str:
+def board_context(board: Mapping[str, Any]) -> str:
     """A board's address, worded for the mission scorer to read when no
     posting could be sampled from it (the caller prefers real titles).
     `board` is a resolver hit or a store row. '' when it has no address at

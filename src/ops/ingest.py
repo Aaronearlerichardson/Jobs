@@ -16,14 +16,16 @@ from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
+from src.rows import CompanyRow
 from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
                                  track_writer)
 
 
 class _Admitted(NamedTuple):
-    """A job that passed ingest's gates, and the roster company id its name
-    resolves to (None when it is not in the roster)."""
+    """A job that passed ingest's gates with the roster company id its name
+    resolves to (None: not in the roster). Exercised by tests/test_capture.py::
+    test_ingest_links_jobs_to_their_company_and_hydrates_per_board."""
     job: dict[str, Any]
     company_id: int | None
 
@@ -133,7 +135,7 @@ async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed
         return scored
 
 
-async def crawl_company(db: store.Writer, company: dict[str, Any], max_workers: int = 6,
+async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int = 6,
                         t: TrackDict | None = None) -> tuple[int, int, int]:
     """Fetch ONE store company's locality-scoped board (whole board for
     watched/sweep-tagged companies), apply the track's filters, resume-fit-
@@ -254,7 +256,7 @@ async def add_manual_job(url: str, title: str, company: str, location: str,
                   f"(gated / unknown ATS)")
         else:
             print(f"    company already in roster "
-                  f"(ats={cast(dict[str, Any], existing).get('ats')})")
+                  f"(ats={cast(CompanyRow, existing).get('ats')})")
 
     # 2) The single job — curated (skip exclude/technical), geo gate still on.
     print(f"  adding job: {title!r} @ {name} [{location}]")

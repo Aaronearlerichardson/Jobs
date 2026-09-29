@@ -23,6 +23,8 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from src.rows import HandleColumn
+
 BOARDS: dict[str, dict[str, Any]] = {
     "greenhouse": {
         "detect": [{"host": "greenhouse.io",
@@ -1011,7 +1013,7 @@ CAREERS_PAGE_ATS = "custom"
 
 #: The store columns naming a board whose spec sets no `handle.columns`:
 #: the default of src.ats.board.spec.Handle, and the store's.
-DEFAULT_HANDLE_COLUMNS = ("slug",)
+DEFAULT_HANDLE_COLUMNS: tuple[HandleColumn, ...] = ("slug",)
 
 #: Job aggregators: hosts listing other employers' postings. A careers page
 #: never names one as its own board, and they bot-gate anonymous reads, so

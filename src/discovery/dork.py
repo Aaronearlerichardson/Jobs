@@ -185,9 +185,7 @@ def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
 
 def _existing_boards(conn: sqlite3.Connection) -> set[Any]:
     """The roster's boards, as `store.board_key` names them."""
-    rows = conn.execute("SELECT ats, slug, wd_tenant, wd_pod, wd_site, careers_url "
-                        "FROM companies").fetchall()
-    return {k for k in (store.board_key(dict(r)) for r in rows) if k}
+    return {k for k in map(store.board_key, store.get_companies(conn, active_only=False)) if k}
 
 
 async def harvest_urls(urls: Iterable[str], verbose: bool = True) -> tuple[int, int]:

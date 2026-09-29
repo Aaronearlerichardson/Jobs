@@ -5,6 +5,7 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -14,7 +15,7 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
-from src.rows import FitColumns, JobIn
+from src.rows import CompanyRow, FitColumns, HandleColumn, JobIn
 from src.store.migrate import MIGRATIONS_DIR, migrate
 
 
@@ -81,6 +82,11 @@ class TestSchema:
     def test_the_job_input_model_names_only_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert set(JobIn.__annotations__) <= cols
+
+    def test_the_company_row_model_is_exactly_the_companies_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
+        assert set(CompanyRow.__annotations__) == cols
+        assert set(get_args(HandleColumn)) <= cols
 
     def test_the_fit_columns_are_what_the_scorer_produces(self):
         from src.claude import fit

@@ -27,6 +27,7 @@ from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
 from src.ops.maintenance import track_store
+from src.rows import CompanyRow
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart
 
@@ -390,7 +391,7 @@ def api_confirm(cid: int) -> ResponseReturnValue:
         # The activation verdict is decided here and handed to the store, so
         # the persistence layer never has to reach into the Claude module.
         active = is_active_mission(pending.get("mission_tier"), pending["name"])
-        row = cast(dict[str, Any], store.confirm_company(conn, cid, active=active))
+        row = cast(CompanyRow, store.confirm_company(conn, cid, active=active))
     return jsonify(ok=True, name=row["name"], active=bool(row["active"]))
 
 

@@ -12,6 +12,7 @@ from src.config import TrackDict
 from src import store
 from src.ats.board import company as company_fetch
 from src.net.parallel import fan_out
+from src.rows import CompanyRow
 from src.ops.maintenance import (_t, board_index, board_match,
                                  group_by_company, track_writer)
 
@@ -109,7 +110,7 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                             min_len=min_len, retry_days=retry_days,
                             limit=limit,
                             label="description(s) via company board(s)")
-        groups: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        groups: list[tuple[CompanyRow, list[dict[str, Any]]]] = []
         boardless: list[dict[str, Any]] = []
         for cid, rs in group_by_company(rows).items():
             company = await db.run(store.get_company, cid)
@@ -119,11 +120,11 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                 # while never even printing a company line.
                 boardless.extend(rs)
                 continue
-            groups.append((dict(company), rs))
+            groups.append((company, rs))
         if boardless:
             await db.batch(_save_bodies, [(r["job_id"], None) for r in boardless])
 
-        async def _bodies(group: tuple[dict[str, Any], list[dict[str, Any]]]) -> list[tuple[str, str | None]]:
+        async def _bodies(group: tuple[CompanyRow, list[dict[str, Any]]]) -> list[tuple[str, str | None]]:
             """One company's fetching: the batched board pull for the common
             case (one fetch per company), then per-job-URL hydration for the
             rows that pull didn't cover. Boards we can't pull simply yield

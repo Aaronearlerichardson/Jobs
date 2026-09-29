@@ -29,10 +29,11 @@ from typing import Any
 
 from src import tags
 from src.match.filters import is_relevant
+from src.rows import CompanyRow
 from .board import board_for
 
 
-def seed_tag_for(ats: str) -> str | None:
+def seed_tag_for(ats: str | None) -> str | None:
     """The tag a newly found `ats` board seeds: SWEEP where its spec sets
     `sweep`, else LOCAL; None for a platform no spec fetches."""
     board = board_for(ats)
@@ -51,7 +52,7 @@ def sweep(ats: str, name: str,
     return (lambda: board.jobs(handle, name, gate=is_relevant)) if board else None
 
 
-def iter_store_sources(companies: Iterable[dict[str, Any]]) -> Iterator[
+def iter_store_sources(companies: Iterable[CompanyRow]) -> Iterator[
         tuple[str, str, str, Callable[[], Awaitable[list[dict[str, Any]]]] | None]]:
     """Yield (ats, name, handle, thunk) for the store rows on a platform
     the lightweight sweep pulls whole (its spec's `sweep`) that name a

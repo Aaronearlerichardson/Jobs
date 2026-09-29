@@ -27,7 +27,7 @@ from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
 from src.net.http import fetch_failed
-from src.rows import JobIn
+from src.rows import CompanyRow, JobIn
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -103,7 +103,7 @@ def group_by_company(rows: Iterable[dict[str, Any]], key: str = "company_id") ->
     return out
 
 
-async def board_index(company: dict[str, Any]) -> dict[str, dict[str, Any]]:
+async def board_index(company: CompanyRow) -> dict[str, dict[str, Any]]:
     """One company's whole board, indexed by normalised title.
 
     Empty when the board cannot be pulled -- which is the same outcome as a
@@ -146,7 +146,7 @@ def _ranked(conn: sqlite3.Connection, t: TrackDict, limit: int | None = None) ->
 
 
 def _write_digest(conn: sqlite3.Connection, t: TrackDict,
-                  watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] | None = None
+                  watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] | None = None
                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
     triage funnel included. Returns (ranked, pipeline, followups,
@@ -189,7 +189,7 @@ def rewrite_digest(conn: sqlite3.Connection, t: TrackDict, top_n: int = 15,
 #  Tag checks are tags.has(company, tags.WATCH) etc.                           #
 # --------------------------------------------------------------------------- #
 
-def _mission_trusted(company: dict[str, Any] | None, floor: float | None) -> bool:
+def _mission_trusted(company: CompanyRow | None, floor: float | None) -> bool:
     """True if a store company row earns watch-grade remote treatment on its
     mission score alone: `floor` (the track's `remote_mission_floor`,
     None = off) or better.
@@ -217,7 +217,7 @@ def _mission_trusted(company: dict[str, Any] | None, floor: float | None) -> boo
          "mission_score": company.get("mission_score")}, floor)
 
 
-def _whole_board(company: dict[str, Any], mission_floor: float | None = None) -> bool:
+def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> bool:
     """Whether a company's ENTIRE board is fetched, with no location filter.
 
     Either scope tag qualifies on its own — a sweep board is cheap to pull
@@ -257,7 +257,7 @@ def _whole_board(company: dict[str, Any], mission_floor: float | None = None) ->
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: TrackDict) -> bool:
+async def _keep_job(company: CompanyRow, job: dict[str, Any], t: TrackDict) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -337,7 +337,7 @@ async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_na
     return row
 
 
-async def _score_job(company: dict[str, Any], job: dict[str, Any], track: str) -> JobIn:
+async def _score_job(company: CompanyRow, job: dict[str, Any], track: str) -> JobIn:
     await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)

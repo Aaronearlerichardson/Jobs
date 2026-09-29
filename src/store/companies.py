@@ -21,23 +21,29 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from pydantic import ConfigDict, Field, TypeAdapter, create_model
 
 from src import config
+from src.rows import CompanyRow, HandleColumn
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
+
+
+def as_company(row: sqlite3.Row) -> CompanyRow:
+    """A companies row (any of its columns) as a CompanyRow."""
+    return cast(CompanyRow, dict(row))
 
 
 # --------------------------------------------------------------------------- #
 #  Companies                                                                   #
 # --------------------------------------------------------------------------- #
 
-def upsert_company(conn: sqlite3.Connection, c: dict[str, Any]) -> int | None:
+def upsert_company(conn: sqlite3.Connection, c: Mapping[str, Any]) -> int | None:
     """Insert or update a company by name. `c` is a dict of column->value.
 
     `tags` merge instead of overwrite: a company discovered by the local
@@ -310,7 +316,7 @@ def _board_prefix(path: str) -> str:
     return f"/{seg}" if seg else ""
 
 
-def company_by_host(conn: sqlite3.Connection, url: str | None) -> dict[str, Any] | None:
+def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | None:
     """The roster company whose careers_url (or URL-shaped slug) claims the
     host of `url`, or None. The manual capture path asks this so a page the
     person saved from an employer's own careers site lands under that
@@ -367,7 +373,7 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> dict[str, Any]
     return None
 
 
-def _board_columns(ats: str) -> tuple[str, ...]:
+def _board_columns(ats: str) -> tuple[HandleColumn, ...]:
     """The columns naming an ATS's board: config.BOARDS `handle.columns`,
     default the slug; a capture-only board is named by its careers_url."""
     return (("careers_url",) if ats == CAPTURE_ATS
@@ -375,7 +381,7 @@ def _board_columns(ats: str) -> tuple[str, ...]:
                 "columns", config.DEFAULT_HANDLE_COLUMNS))
 
 
-def board_key(r: dict[str, Any]) -> tuple[Any, ...] | None:
+def board_key(r: CompanyRow) -> tuple[Any, ...] | None:
     """The identity of a company row's BOARD, independent of its name:
     (ats, *the values of the columns its spec's handle names), a
     careers_url lowercased with no trailing "/". None when the row has no
@@ -443,11 +449,11 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     [('A', 'a.org')]
     """
 
-    rows = [dict(r) for r in
+    rows = [as_company(r) for r in
             conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
-    by_board: defaultdict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
-    by_host: defaultdict[str, list[tuple[dict[str, Any], str]]] = defaultdict(list)
-    by_domain: defaultdict[str, list[tuple[dict[str, Any], str]]] = defaultdict(list)
+    by_board: defaultdict[tuple[Any, ...], list[CompanyRow]] = defaultdict(list)
+    by_host: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
+    by_domain: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
     for c in rows:
         key = board_key(c)
         if key is not None:
@@ -466,7 +472,7 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
             "by_host": by_host, "by_domain": by_domain}
 
 
-def company_by_board(conn: sqlite3.Connection, row: dict[str, Any]) -> dict[str, Any] | None:
+def company_by_board(conn: sqlite3.Connection, row: CompanyRow) -> CompanyRow | None:
     """The existing company row whose board matches `row`'s (see board_key),
     or None. Discovery asks it before inserting, because a name the roster
     spells differently passes the name-keyed already-tracked check and
@@ -486,11 +492,9 @@ def company_by_board(conn: sqlite3.Connection, row: dict[str, Any]) -> dict[str,
     # board_key then confirms, so the identity rule stays in one place.
     plain = [(c, v) for c, v in zip(_board_columns(key[0]), key[1:]) if c != "careers_url"]
     where = " AND ".join(["ats = ?", *(f"{c} IS ?" for c, _ in plain)])
-    for c in conn.execute(f"SELECT * FROM companies WHERE {where} ORDER BY id",
-                          [key[0], *(v for _, v in plain)]):
-        if board_key(dict(c)) == key:
-            return dict(c)
-    return None
+    rows = conn.execute(f"SELECT * FROM companies WHERE {where} ORDER BY id",
+                        [key[0], *(v for _, v in plain)])
+    return next((c for c in map(as_company, rows) if board_key(c) == key), None)
 
 
 def dedup_companies(conn: sqlite3.Connection) -> int:
@@ -615,12 +619,12 @@ def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
 # merging needs a query builder, not a lookup.
 
-def get_company(conn: sqlite3.Connection, company_id: int | None) -> dict[str, Any] | None:
+def get_company(conn: sqlite3.Connection, company_id: int | None) -> CompanyRow | None:
     """One company row by id, or None."""
     if not company_id:
         return None
     row = conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
-    return dict(row) if row else None
+    return as_company(row) if row else None
 
 
 def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None:
@@ -637,7 +641,7 @@ def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None
 
 def get_companies(conn: sqlite3.Connection, active_only: bool = True,
                   missions: Collection[str] | None = None,
-                  tag: str | None = None) -> list[dict[str, Any]]:
+                  tag: str | None = None) -> list[CompanyRow]:
     """Companies, optionally filtered by mission tier(s) and/or scope tag."""
     q = "SELECT * FROM companies"
     conds: list[str] = []
@@ -654,7 +658,7 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
     if conds:
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY mission_score DESC, local_job_count DESC"
-    return [dict(r) for r in conn.execute(q, args).fetchall()]
+    return [as_company(r) for r in conn.execute(q, args).fetchall()]
 
 
 # --------------------------------------------------------------------------- #
@@ -765,7 +769,7 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     return state
 
 
-def _is_crawlable(company: dict[str, Any], now: str | None = None) -> bool:
+def _is_crawlable(company: CompanyRow, now: str | None = None) -> bool:
     """Does this company row come up for a crawl right now? A NULL
     crawl_state reads as 'active' (rows that predate the column), a dormant
     row only once its next_crawl_at has passed, an 'off' row never."""
@@ -778,7 +782,7 @@ def _is_crawlable(company: dict[str, Any], now: str | None = None) -> bool:
     return False
 
 
-def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> list[dict[str, Any]]:
+def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> list[CompanyRow]:
     """The active companies due for a crawl: everything except the dormant
     rows whose weekly slot has not come round yet. What build_sources and
     sync_status_all fetch, in place of every active row.
@@ -807,7 +811,7 @@ def crawlable_companies(conn: sqlite3.Connection, tag: str | None = None) -> lis
             if c.get("ats") != CAPTURE_ATS and _is_crawlable(c, now)]
 
 
-def harvestable_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def harvestable_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """Every company with a fetchable board, for the background harvester:
     active or not, dormant or not, any tag, any mission score. Skipped only
     when there is no board to fetch (capture rows, no ATS, a dead-board or
@@ -836,7 +840,7 @@ def harvestable_companies(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     # know what a company name is; that much they genuinely share.
     from .review import _name_key, blocked_name_keys
     blocked = blocked_name_keys(conn)
-    out: list[dict[str, Any]] = []
+    out: list[CompanyRow] = []
     for c in get_companies(conn, active_only=False):
         ats = c.get("ats")
         if not ats or ats == CAPTURE_ATS:

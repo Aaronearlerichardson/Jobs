@@ -102,6 +102,7 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
 from src.net.util import clean_field
+from src.rows import CompanyRow
 from src.ops import maintenance as ops
 
 _log = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ def roster_tracks(tracks: Iterable[TrackDict] | None = None) -> list[TrackDict]:
             if t["sources"].get("store")]
 
 
-def _track_applies(t: TrackDict, company: dict[str, Any]) -> bool:
+def _track_applies(t: TrackDict, company: CompanyRow) -> bool:
     """A tag-scoped track (store_tag) only reads companies carrying it."""
     tag = t.get("store_tag")
     return not tag or tags.has(company.get("tags"), tag)
@@ -172,7 +173,12 @@ def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
                    ) -> Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]:
     """`scorer` that answers a company name once and reads as no verdict
     (None, None, None) after: a failed attempt counts, and both of a pass's
-    gate phases share it. Names are the roster's unique key."""
+    gate phases share it. Exercised end to end by tests/test_triage.py::
+    test_an_unanswered_mission_score_is_not_retried_within_a_pass.
+
+    Notes:
+        A name stands for one company: companies.name is UNIQUE.
+    """
     asked: set[str] = set()
 
     async def once(name: str, context: str) -> tuple[Any, Any, Any]:
@@ -183,7 +189,7 @@ def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
     return once
 
 
-async def ensure_mission(db: store.Writer, company: dict[str, Any],
+async def ensure_mission(db: store.Writer, company: CompanyRow,
                          titles: Iterable[str | None] = (),
                          scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission
                          ) -> tuple[str | None, float | None]:
@@ -215,7 +221,7 @@ async def ensure_mission(db: store.Writer, company: dict[str, Any],
     return tier, score
 
 
-def mission_verdict(company: dict[str, Any], t: TrackDict) -> str:
+def mission_verdict(company: CompanyRow, t: TrackDict) -> str:
     """OK, or 'mission' when the whole company is out for track `t`:
     an inactive mission tier (multi-division exempt), or a known effective
     mission under the track's min_mission. Unknown never drops.
@@ -253,7 +259,7 @@ def _detail_stale(row: dict[str, Any], cutoff: str) -> bool:
     return bool(checked) and checked < cutoff
 
 
-def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, has_body: bool, cutoff: str) -> str:
+def _geo_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, has_body: bool, cutoff: str) -> str:
     """Geography on the location FIELD (see the module docstring, gate 4):
     local passes anywhere; remote passes at a watched or mission-trusted
     company. An UNKNOWN location (location_unknown) defers while a detail
@@ -288,7 +294,7 @@ def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, has
     return "geo"
 
 
-def row_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, cutoff: str) -> str:
+def row_verdict(company: CompanyRow, job: dict[str, Any], t: TrackDict, cutoff: str) -> str:
     """Gates 2-6 for one row on one track, on the text the row has NOW.
     Returns OK, a gate name, or DEFER (undecidable without a body). The
     caller has already applied the track's keyword focus. `cutoff` is the
@@ -323,7 +329,7 @@ def row_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, cuto
     return DEFER if deferred else OK
 
 
-async def judge(db: store.Writer, company: dict[str, Any], jobs: list[dict[str, Any]], tracks: list[TrackDict],
+async def judge(db: store.Writer, company: CompanyRow, jobs: list[dict[str, Any]], tracks: list[TrackDict],
                 mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
                 *, cutoff: str) -> dict[str, dict[str, str]]:
     """Gates 1-6 for one company's rows against every applicable track.
@@ -381,7 +387,7 @@ def summarize(verdicts: dict[str, str]) -> tuple[str, str, list[str]]:
 #  Hydration (survivors only) and scoring                                     #
 # --------------------------------------------------------------------------- #
 
-def _fetcher_shape(row: dict[str, Any], company: dict[str, Any]) -> dict[str, Any]:
+def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> dict[str, Any]:
     """A stored row as the job dict board.company.hydrate_description
     expects (`harvest.hydrate_rows` passes it the roster row, which names the
     board)."""
@@ -392,7 +398,7 @@ def _fetcher_shape(row: dict[str, Any], company: dict[str, Any]) -> dict[str, An
             "ats": company.get("ats"), "_row": row}
 
 
-async def hydrate_company(company: dict[str, Any], jobs: list[dict[str, Any]], delay: float | None = None,
+async def hydrate_company(company: CompanyRow, jobs: list[dict[str, Any]], delay: float | None = None,
                           backoff_s: float = MISS_BACKOFF_S) -> dict[str, Any]:
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats."""
@@ -406,7 +412,7 @@ async def hydrate_company(company: dict[str, Any], jobs: list[dict[str, Any]], d
 # --------------------------------------------------------------------------- #
 
 def _by_company(conn: sqlite3.Connection, rows: list[dict[str, Any]]
-                ) -> tuple[dict[Any, list[dict[str, Any]]], dict[Any, dict[str, Any] | None]]:
+                ) -> tuple[dict[Any, list[dict[str, Any]]], dict[Any, CompanyRow | None]]:
     """Rows grouped by company, plus the roster row for each.
 
     Both gate phases work per company, not per row: the mission gate is a
@@ -418,9 +424,9 @@ def _by_company(conn: sqlite3.Connection, rows: list[dict[str, Any]]
     return groups, {cid: store.get_company(conn, cid) for cid in groups}
 
 
-async def _judged(db: store.Writer, companies: dict[Any, dict[str, Any]], groups: dict[Any, list[dict[str, Any]]],
+async def _judged(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[dict[str, Any]]],
                   tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
-                  ) -> AsyncIterator[tuple[dict[str, Any], dict[str, Any], str, str, list[str]]]:
+                  ) -> AsyncIterator[tuple[CompanyRow, dict[str, Any], str, str, list[str]]]:
     """Yield (company, row, status, detail, surfaced) for every grouped row.
 
     The two gate phases differ only in what they DO with a verdict -- the
@@ -435,9 +441,9 @@ async def _judged(db: store.Writer, companies: dict[Any, dict[str, Any]], groups
             yield c, r, status, detail, surfaced
 
 
-async def _free_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], groups: dict[Any, list[dict[str, Any]]],
+async def _free_gates(db: store.Writer, companies: dict[Any, CompanyRow], groups: dict[Any, list[dict[str, Any]]],
                       tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
-                      ) -> tuple[dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]], dict[str, tuple[dict[str, Any], dict[str, Any], str]]]:
+                      ) -> tuple[dict[str, tuple[str, str, CompanyRow, dict[str, Any]]], dict[str, tuple[CompanyRow, dict[str, Any], str]]]:
     """Phase 1: the free gates, on the text the rows already have.
 
     Returns (decided, survivors). A survivor is OK on some track, or
@@ -446,8 +452,8 @@ async def _free_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], gr
     _geo_verdict uses to give up on an unresolvable location and
     decide the row right here instead of deferring it into phase 2.
     """
-    decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]] = {}
-    survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]] = {}
+    decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]] = {}
+    survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]] = {}
     async for c, r, status, detail, _ in _judged(db, companies, groups, tracks,
                                                  mission_scorer, cutoff):
         if status in (OK, DEFER):
@@ -458,7 +464,7 @@ async def _free_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], gr
     return decided, survivors
 
 
-def _hydrate_order(survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]]) -> Callable[[dict[str, Any]], tuple[bool, bool]]:
+def _hydrate_order(survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]]) -> Callable[[dict[str, Any]], tuple[bool, bool]]:
     """Sort key for one board's hydration batch: rows some track has already
     decided OK first, then rows whose TITLE alone already reads relevant
     (match.filters.is_relevant), then the rest.
@@ -497,8 +503,8 @@ def _hydrate_order(survivors: dict[str, tuple[dict[str, Any], dict[str, Any], st
     return key
 
 
-async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]], summary: dict[str, float],
-                   stamp: datetime, hydrate_fn: Callable[[dict[str, Any], list[dict[str, Any]]], Awaitable[dict[str, Any]]],
+async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]], summary: dict[str, float],
+                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[dict[str, Any]]], Awaitable[dict[str, Any]]],
                    cutoff: str) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
@@ -592,10 +598,10 @@ async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survi
     return waiting
 
 
-async def _body_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]],
-                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]],
+async def _body_gates(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]],
+                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]],
                       summary: dict[str, float], n_free: int, waiting: dict[str, str],
-                      cutoff: str) -> dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]]:
+                      cutoff: str) -> dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
 
     Returns the rows to score. A survivor still without a body -- DEFER,
@@ -603,8 +609,8 @@ async def _body_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], su
     pass rather than entering a track unscorable. `waiting` is _hydrate's
     {job_id: reason}, printed (capped) against the rows that end up here.
     """
-    final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]] = {}
-    left_rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]] = {}
+    left_rows: list[tuple[CompanyRow, dict[str, Any]]] = []
     # The survivor rows carry company_id themselves, so the same grouping
     # helper works here without rebuilding the (company, row) pairs.
     groups = ops.group_by_company([r for _, r, _ in survivors.values()])
@@ -624,7 +630,7 @@ async def _body_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], su
     return final
 
 
-def _print_waiting(rows: list[tuple[dict[str, Any], dict[str, Any]]], reasons: dict[str, str]) -> None:
+def _print_waiting(rows: list[tuple[CompanyRow, dict[str, Any]]], reasons: dict[str, str]) -> None:
     """Name every row left "still waiting on a body" and why, capped at
     _WAITING_CAP so a whole-board pass doesn't flood the log. `reasons`
     is _hydrate's {job_id: reason}; a row missing from it was never even
@@ -638,7 +644,7 @@ def _print_waiting(rows: list[tuple[dict[str, Any], dict[str, Any]]], reasons: d
         print(f"    ... and {extra} more")
 
 
-async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
+async def _score(final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]], summary: dict[str, float], score_cap: int, fit: bool,
                  max_workers: int) -> tuple[dict[str, FitResult], set[str]]:
     """Phase 4: the only paid step, best companies first, under the cap.
 
@@ -674,7 +680,7 @@ async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str
     return scores, over_cap
 
 
-def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]], final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]],
+def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]], final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]],
                     scores: dict[str, FitResult], over_cap: set[str], tracks: list[TrackDict],
                     summary: dict[str, float], stamp: datetime) -> None:
     """Phase 5: every verdict, inside the caller's one batch.
@@ -761,7 +767,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | N
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
-              hydrate_fn: Callable[[dict[str, Any], list[dict[str, Any]]], Awaitable[dict[str, Any]]] = hydrate_company,
+              hydrate_fn: Callable[[CompanyRow, list[dict[str, Any]]], Awaitable[dict[str, Any]]] = hydrate_company,
               now: datetime | None = None, requeue: bool = False,
               requeue_apply: bool = False) -> dict[str, Any]:
     """Triage every pending row in the store. Returns the summary dict
@@ -815,7 +821,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | N
         # returning None for one is not handled specially anywhere else
         # either, so this cast matches _by_company's real contract rather
         # than adding new None-handling behaviour here.
-        companies = cast(dict[Any, dict[str, Any]], companies_or_none)
+        companies = cast(dict[Any, CompanyRow], companies_or_none)
         mission_scorer = _once_per_pass(mission_scorer)
         decided, survivors = await _free_gates(db, companies, groups, tracks,
                                                mission_scorer, cutoff)

@@ -71,7 +71,7 @@ from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
 from src.net.util import worker_count
-from src.rows import JobIn
+from src.rows import CompanyRow, JobIn
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
 from src.ops.status import check_closed_jobs
@@ -123,7 +123,7 @@ def deferred_note(stats: dict[str, Any]) -> str:
 def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
          names: Iterable[str] | None = None, min_age_hours: float | None = None,
          limit: int | None = None, now: datetime | None = None,
-         stats: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+         stats: dict[str, Any] | None = None) -> list[CompanyRow]:
     """The boards this run will pull, in run order.
 
     `only` restricts to a set of ATS names, `names` to company names
@@ -244,7 +244,7 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
         ).isoformat()
     cutoff = (now - timedelta(hours=min_age_hours)).isoformat()
     want = {n.strip().lower() for n in names or [] if n.strip()}
-    rows: list[dict[str, Any]] = []
+    rows: list[CompanyRow] = []
     offmission_skipped = offmission_stopped = 0
     for c in store.harvestable_companies(conn):
         if only and c.get("ats") not in only:
@@ -279,7 +279,7 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 #  One board                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _row(job: dict[str, Any], company: dict[str, Any], stamp: str) -> JobIn:
+def _row(job: dict[str, Any], company: CompanyRow, stamp: str) -> JobIn:
     """The store row for one harvested posting: identity, body, dates -- no
     track, no score."""
     desc = (job.get("description") or "")[:config.MAX_DESC_CHARS]
@@ -305,7 +305,7 @@ def _soft_failed(stats: dict[str, Any]) -> bool:
     return not stats.get("fetched") and bool(stats.get("fetch_errors"))
 
 
-def bury_404_board(conn: sqlite3.Connection, company: dict[str, Any],
+def bury_404_board(conn: sqlite3.Connection, company: CompanyRow,
                    error: str | None) -> str | None:
     """Mark `company` 'board-dead:<ats>' and deactivate it when `error`
     proves its board gone (`Board.gone`); the caller has already seen the
@@ -325,7 +325,7 @@ def bury_404_board(conn: sqlite3.Connection, company: dict[str, Any],
     return reason
 
 
-async def harvest_board(company: dict[str, Any], db: store.Writer, hydrate: bool = False,
+async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = False,
                         delay: float | None = None, now: datetime | None = None,
                         backoff_s: float = MISS_BACKOFF_S,
                         progress: Callable[[], object] = lambda: None) -> dict[str, Any]:
@@ -404,7 +404,7 @@ async def harvest_board(company: dict[str, Any], db: store.Writer, hydrate: bool
 
 
 def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
-                 rows: list[tuple[JobIn, bool]], company: dict[str, Any],
+                 rows: list[tuple[JobIn, bool]], company: CompanyRow,
                  stats: dict[str, Any], stamp_dt: datetime) -> str | None:
     """One board's snapshot written, inside the caller's store.batch (ONE
     transaction, which is the whole point: a board is one lock
@@ -444,7 +444,7 @@ def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
     return promoted
 
 
-async def hydrate_rows(jobs: list[dict[str, Any]], company: dict[str, Any],
+async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
                        stats: dict[str, Any], delay: float | None = None,
                        backoff_s: float = MISS_BACKOFF_S,
                        progress: Callable[[], object] = lambda: None) -> None:
@@ -584,7 +584,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                 summary["retired"] = len(await db.run(store.retire_stopped))
             except Exception as e:              # noqa: BLE001 - the next pass retries
                 print(f"  [!] stopped boards' postings left open: {type(e).__name__}: {e}")
-        hosts: dict[str, list[dict[str, Any]]] = {}
+        hosts: dict[str, list[CompanyRow]] = {}
         for c in boards:
             hosts.setdefault(cast(str, company_fetch.board_origin(c)), []).append(c)
         summary["boards"] = len(boards)
@@ -601,9 +601,9 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
             return summary
 
         t_start = time.monotonic()
-        running: dict[int, dict[str, Any]] = {}    # id(company) -> company, mid-walk
+        running: dict[int, CompanyRow] = {}    # id(company) -> company, mid-walk
 
-        async def walk(group: list[dict[str, Any]]) -> None:
+        async def walk(group: list[CompanyRow]) -> None:
             loop = asyncio.get_running_loop()
             for c in group:
                 running[id(c)] = c
@@ -658,7 +658,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
     return summary
 
 
-def _report(c: dict[str, Any], s: dict[str, Any], summary: dict[str, float]) -> None:
+def _report(c: CompanyRow, s: dict[str, Any], summary: dict[str, float]) -> None:
     """One finished board's status line, its stats added to `summary`."""
     done = summary["ok"] + summary["err"] + 1
     if s["err"]:

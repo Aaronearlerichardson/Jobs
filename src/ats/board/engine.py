@@ -65,6 +65,7 @@ from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put, origin_key)
+from src.rows import CompanyRow
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
@@ -345,7 +346,7 @@ class Board:
 
     # --- handles and URLs --------------------------------------------------
 
-    def handle(self, company: dict[str, Any]) -> str | None:
+    def handle(self, company: CompanyRow) -> str | None:
         """The handle string for a store row, or None when a column is empty."""
         vals = [str(company.get(c) or "") for c in self._columns]
         return self._sep.join(vals) if all(vals) else None
@@ -356,7 +357,7 @@ class Board:
             parts.update(_VARIANTS().get((self.name, str(handle)), {}))
         return parts
 
-    def origin(self, company: dict[str, Any] | None = None, url: str | None = None) -> str:
+    def origin(self, company: CompanyRow | None = None, url: str | None = None) -> str:
         """The origin_key a store row's listing is read from, or the listing
         of the board a posting `url` of this platform names; "" where the row
         alone does not name it (an empty column, or a `handle.try` or
@@ -378,7 +379,7 @@ class Board:
         return a if a == b else ""
 
     def job_ref(self, url: str | None,
-                company: dict[str, Any] | None = None) -> dict[str, Any] | None:
+                company: CompanyRow | None = None) -> dict[str, Any] | None:
         """The named parts a stored posting URL carries, or None when the
         URL is not this platform's. A store row of this platform
         (`company`) supplies its own handle parts in place of the URL's."""
@@ -781,7 +782,7 @@ class Board:
             await asyncio.sleep(config.PAGE_DELAY_S)
 
     async def _locate(self, url: str | None, report: bool = False,
-                      company: dict[str, Any] | None = None
+                      company: CompanyRow | None = None
                       ) -> tuple[str, dict[str, Any] | None, dict[str, Reader], dict[str, Any]]:
         """(location, record, field readers, job_ref parts) for the posting
         `url` names: the location its detail gives ("" on a miss) and the
@@ -827,7 +828,7 @@ class Board:
                                 fetch_description=self._detail_rows(self.spec.eager),
                                 detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
-    async def whole_board(self, company: dict[str, Any], loc_re: LocationRE | None = None,
+    async def whole_board(self, company: CompanyRow, loc_re: LocationRE | None = None,
                           validate: bool = False) -> list[dict[str, Any]]:
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
@@ -968,7 +969,7 @@ class Board:
         return status, decode.record(payload, spec), err
 
     async def _posting(self, url: str | None, report: bool = False,
-                       company: dict[str, Any] | None = None
+                       company: CompanyRow | None = None
                        ) -> tuple[dict[str, Any] | None, dict[str, Reader], dict[str, Any]]:
         """(record, its field readers, the posting's `job_ref` parts) for
         the posting `url` names (with `company`), read live: the detail
@@ -1005,7 +1006,7 @@ class Board:
                 and self.owns_url(job.get("url")))
 
     async def hydrate(self, job: dict[str, Any],
-                      company: dict[str, Any] | None = None) -> dict[str, Any]:
+                      company: CompanyRow | None = None) -> dict[str, Any]:
         """Fill, in place, what `needs_detail` says `job` lacks (`_apply`),
         a new body capped at MAX_DESC_CHARS. A bodied row's location alone
         is read through `_locate` where the spec caches locations.
