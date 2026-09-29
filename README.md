@@ -836,7 +836,9 @@ misdiagnosis. The standard, with worked examples and the house style for
 awkward outputs, is **[docs/DOCSTRINGS.md](docs/DOCSTRINGS.md)**.
 `tests/test_invariants.py` carries the cross-module claims no single docstring
 can prove, including the mechanical half of the performance rules in
-**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**.
+**[docs/PERFORMANCE.md](docs/PERFORMANCE.md)**. What a reviewer checks when
+a phase of work is finished -- and the principles behind keeping changes
+from growing the code -- is **[docs/REVIEW.md](docs/REVIEW.md)**.
 
 The suite is **offline by contract** — no network, no LLM API, no writes to
 your real profile or store. Fixtures derive their inputs from whichever
