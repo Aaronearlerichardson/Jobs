@@ -207,6 +207,39 @@ class TestUpsertColumns:
                 if c not in ("miss_reason", "miss_at")}.items() <= stored.items()
 
 
+class TestStoredTypes:
+    """SQLite keeps whatever it is handed (a declared type is only an
+    affinity), so the casts behind CompanyRow and JobIn hold only while the
+    writers store what the models say. This audits what OUR writers store;
+    a store written by older code is not covered."""
+
+    SAMPLE = {int: 3, float: 0.5, str: "x", bool: True}
+    STORAGE = {"INTEGER": "integer", "TEXT": "text", "REAL": "real"}
+
+    def _audit(self, db, table, model):
+        declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
+        for col in get_type_hints(model):
+            held = {r[0] for r in db.execute(f"SELECT DISTINCT typeof({col}) FROM {table}")}
+            assert held <= {self.STORAGE[declared[col]], "null"}, (table, col, held)
+
+    def _sample(self, model):
+        return {col: self.SAMPLE[_held_types(hint)[0]]
+                for col, hint in get_type_hints(model).items()}
+
+    def test_the_company_writers_store_each_column_as_declared(self, db):
+        cid = store.upsert_company(db, self._sample(CompanyIn))
+        store.record_crawl_outcome(db, cid, 2)
+        store.mark_harvested(db, cid, 2)
+        store.record_miss(db, "Missed", "no-board-found")
+        store.record_crawl_outcome(db, store.upsert_company(db, {"name": "Parked"}), 0,
+                                   dormant_after=1)
+        self._audit(db, "companies", CompanyRow)
+
+    def test_the_job_writer_stores_each_column_as_declared(self, db):
+        assert store.upsert_job(db, self._sample(JobIn))
+        self._audit(db, "jobs", JobIn)
+
+
 class TestImportCompanies:
     @staticmethod
     def _load(conn, tmp_path, rows):
