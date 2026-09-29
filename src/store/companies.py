@@ -367,6 +367,14 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> dict[str, Any]
     return None
 
 
+def _board_columns(ats: str) -> tuple[str, ...]:
+    """The columns naming an ATS's board: config.BOARDS `handle.columns`,
+    default the slug; a capture-only board is named by its careers_url."""
+    return (("careers_url",) if ats == CAPTURE_ATS
+            else ((config.BOARDS.get(ats) or {}).get("handle") or {}).get(
+                "columns", config.DEFAULT_HANDLE_COLUMNS))
+
+
 def board_key(r: dict[str, Any]) -> tuple[Any, ...] | None:
     """The identity of a company row's BOARD, independent of its name:
     (ats, *the values of the columns its spec's handle names), a
@@ -393,11 +401,7 @@ def board_key(r: dict[str, Any]) -> tuple[Any, ...] | None:
     ats = r.get("ats")
     if not ats:
         return None
-    # The columns naming its board: config.BOARDS `handle.columns`, default
-    # the slug; a capture-only board is named by its careers_url.
-    cols = (("careers_url",) if ats == CAPTURE_ATS
-            else ((config.BOARDS.get(ats) or {}).get("handle") or {}).get(
-                "columns", config.DEFAULT_HANDLE_COLUMNS))
+    cols = _board_columns(ats)
     vals = [(r.get(c) or "").rstrip("/").lower() if c == "careers_url" else r.get(c)
             for c in cols]
     return (ats, *vals) if vals[0] else None
@@ -477,8 +481,16 @@ def company_by_board(conn: sqlite3.Connection, row: dict[str, Any]) -> dict[str,
     key = board_key(row)
     if key is None:
         return None
-    matches = _company_index(conn)["by_board"].get(key)
-    return matches[0] if matches else None
+    # SQL narrows to the rows sharing the ats and every plain handle column
+    # (careers_url is normalised by board_key, so it is left to the check);
+    # board_key then confirms, so the identity rule stays in one place.
+    plain = [(c, v) for c, v in zip(_board_columns(key[0]), key[1:]) if c != "careers_url"]
+    where = " AND ".join(["ats = ?", *(f"{c} IS ?" for c, _ in plain)])
+    for c in conn.execute(f"SELECT * FROM companies WHERE {where} ORDER BY id",
+                          [key[0], *(v for _, v in plain)]):
+        if board_key(dict(c)) == key:
+            return dict(c)
+    return None
 
 
 def dedup_companies(conn: sqlite3.Connection) -> int:
