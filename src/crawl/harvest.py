@@ -71,6 +71,7 @@ from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
 from src.net.util import worker_count
+from src.rows import JobIn
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
 from src.ops.status import check_closed_jobs
@@ -278,7 +279,7 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 #  One board                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _row(job: dict[str, Any], company: dict[str, Any], stamp: str) -> dict[str, Any]:
+def _row(job: dict[str, Any], company: dict[str, Any], stamp: str) -> JobIn:
     """The store row for one harvested posting: identity, body, dates -- no
     track, no score."""
     desc = (job.get("description") or "")[:config.MAX_DESC_CHARS]
@@ -403,7 +404,7 @@ async def harvest_board(company: dict[str, Any], db: store.Writer, hydrate: bool
 
 
 def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
-                 rows: list[tuple[dict[str, Any], bool]], company: dict[str, Any],
+                 rows: list[tuple[JobIn, bool]], company: dict[str, Any],
                  stats: dict[str, Any], stamp_dt: datetime) -> str | None:
     """One board's snapshot written, inside the caller's store.batch (ONE
     transaction, which is the whole point: a board is one lock

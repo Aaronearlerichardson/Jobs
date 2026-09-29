@@ -24,6 +24,7 @@ from typing import Any
 
 from src import config
 from src import tags
+from src.rows import FitColumns, JobIn
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
@@ -240,7 +241,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
 def record_triage(conn: sqlite3.Connection, job_id: str, status: str, detail: str, *,
                   tracks: Iterable[str] = (), description: str | None = None,
                   geo_mode: str | None = None, remote_signal: str | None = None,
-                  scores: dict[str, Any] | None = None, now: datetime | None = None) -> None:
+                  scores: FitColumns | None = None, now: datetime | None = None) -> None:
     """Write one row's triage verdict. `tracks` (the track labels the row
     surfaced into) MERGE into the stored set exactly as a crawl's label
     would, so crawl_seen reads the row as handled; `description` fills an
@@ -394,7 +395,7 @@ def triage_counts(conn: sqlite3.Connection, days: float | None = None) -> dict[s
         else len(order))}
 
 
-def upsert_job(conn: sqlite3.Connection, j: dict[str, Any], keep_location: bool = False) -> bool:
+def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) -> bool:
     """Insert or refresh a job. Returns True if it was new.
 
     `first_seen` stays stable across re-runs; scores refresh so the stored
@@ -708,11 +709,10 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
 
 
 # Fit columns written together by the rescore path (see update_job_scores).
-_SCORE_COLS = ("resume_fit_score", "fit_reason", "fit_gates", "fit_model",
-               "fit_domain", "fit_function", "fit_stack", "fit_seniority")
+_SCORE_COLS = tuple(FitColumns.__annotations__)
 
 
-def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: dict[str, Any]) -> None:
+def update_job_scores(conn: sqlite3.Connection, job_id: str, cols: FitColumns) -> None:
     """Overwrite only the fit columns for one job (used by rescore). `cols` is a
     FitResult.as_columns() dict; any missing key is written NULL, so passing an
     empty/partial dict clears a stale score (an unscorable row drops out of

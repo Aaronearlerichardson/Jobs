@@ -582,9 +582,11 @@ async def _score_and_persist(db: store.Writer, t: dict[str, Any], got: Collected
                 "posted_at": job.get("posted_at"),
                 "description": (job.get("description") or "")
                                [:config.MAX_DESC_CHARS],
-                **{k: job.get(k) for k in (
-                    "resume_fit_score", "fit_reason", "fit_gates", "fit_model",
-                    "fit_domain", "fit_function", "fit_stack", "fit_seniority")},
+                "resume_fit_score": job.get("resume_fit_score"),
+                "fit_reason": job.get("fit_reason"), "fit_gates": job.get("fit_gates"),
+                "fit_model": job.get("fit_model"), "fit_domain": job.get("fit_domain"),
+                "fit_function": job.get("fit_function"), "fit_stack": job.get("fit_stack"),
+                "fit_seniority": job.get("fit_seniority"),
             })
     return scored
 

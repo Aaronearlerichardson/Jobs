@@ -26,6 +26,7 @@ from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
 from src.net.http import fetch_failed
+from src.rows import JobIn
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -303,7 +304,7 @@ async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: dict[str, A
 
 
 async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_name: str | None,
-                      track: str, status: str | None = None) -> dict[str, Any]:
+                      track: str, status: str | None = None) -> JobIn:
     """Score one fetched posting and shape it into a jobs-table row.
 
     The crawl path and the external-ingest path build the same row and had
@@ -318,7 +319,7 @@ async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_na
     """
     res = await score_resume_fit(job["title"], job.get("description", ""),
                                  location=job.get("location") or "")
-    row: dict[str, Any] = {
+    row: JobIn = {
         "job_id": job["id"], "company_id": company_id,
         "company_name": company_name,
         "title": job.get("title"), "url": job.get("url"),
@@ -335,7 +336,7 @@ async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_na
     return row
 
 
-async def _score_job(company: dict[str, Any], job: dict[str, Any], track: str) -> dict[str, Any]:
+async def _score_job(company: dict[str, Any], job: dict[str, Any], track: str) -> JobIn:
     await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)

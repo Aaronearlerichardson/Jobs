@@ -45,6 +45,7 @@ from pydantic import BeforeValidator
 
 from src import runstate
 from src.claude.reply import Reply, Unit
+from src.rows import FitColumns
 from src.validation import OneOf
 
 config: Any
@@ -216,17 +217,19 @@ class FitResult:
         g = f" gate:{'+'.join(self.gates)}" if self.gates else ""
         return f"[{a}{g}] {self.reason}".strip()
 
-    def as_columns(self) -> dict[str, Any]:
+    def as_columns(self) -> FitColumns:
         """DB-ready fields: the scalar, the reason tag, the tripped gates, the
         scoring model, and one column per axis. Keys match the jobs-table
         columns added in __init__.py. Axes are None on an unscored result, so
         those columns clear."""
-        cols = {"resume_fit_score": self.score,
+        return {"resume_fit_score": self.score,
                 "fit_reason": self.summary(),
                 "fit_gates": ",".join(self.gates) or None,
-                "fit_model": self.model or None}
-        cols.update({f"fit_{a}": self.axes.get(a) for a in AXES})
-        return cols
+                "fit_model": self.model or None,
+                "fit_domain": self.axes.get("domain"),
+                "fit_function": self.axes.get("function"),
+                "fit_stack": self.axes.get("stack"),
+                "fit_seniority": self.axes.get("seniority")}
 
 
 # --------------------------------------------------------------------------- #

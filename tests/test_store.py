@@ -14,6 +14,7 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
+from src.rows import FitColumns, JobIn
 from src.store.migrate import MIGRATIONS_DIR, migrate
 
 
@@ -76,6 +77,16 @@ class TestSchema:
         assert conn.execute("PRAGMA user_version").fetchone()[0] >= 2
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")} \
             == {"open_jobs", "company_open_stats"}
+
+    def test_the_job_input_model_names_only_jobs_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+        assert set(JobIn.__annotations__) <= cols
+
+    def test_the_fit_columns_are_what_the_scorer_produces(self):
+        from src.claude import fit
+        assert set(FitColumns.__annotations__) == set(fit.FitResult(score=0.5).as_columns())
+        assert {"fit_" + a for a in fit.AXES} <= set(FitColumns.__annotations__)
+        assert store._SCORE_COLS == tuple(FitColumns.__annotations__)
 
     def test_migrating_a_current_store_changes_nothing(self, db):
         before = db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0]

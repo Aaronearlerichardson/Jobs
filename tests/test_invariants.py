@@ -798,7 +798,7 @@ def test_the_environment_is_read_only_through_config_settings():
 #: or inside a function, only units before its own. dispatch sits above crawl
 #: (two operations run crawl code) and below web, so the harvester, which
 #: imports crawl and nothing above it, never loads the operation table.
-LAYERS = ("validation", "tags", "config", "runstate", "match", "net", "session_log",
+LAYERS = ("validation", "tags", "rows", "config", "runstate", "match", "net", "session_log",
           "store", "claude", "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web")
 
 
