@@ -14,13 +14,11 @@ Never imports store/__init__ at load time (that module imports this one).
 
 from __future__ import annotations
 
-import contextvars
-import functools
 import json
 import math
 import re
 import sqlite3
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Collection, Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -825,23 +823,6 @@ def _effective_mission(company_name: str | None, mission: float | None) -> float
     return mission
 
 
-# The verdict function of the `location_re` the running ranked_jobs query
-# filters with, memoized for that query (a store repeats locations ~4x: 30,823
-# distinct over 119,411 rows). Not a compiled regex -- locality.NC_RE is a
-# segment-aware matcher -- so SQL cannot be handed a pattern; it calls back
-# into it instead. One fixed SQL function reads it (redefining a function per
-# call fails while another cursor is open on the connection), and it lives in
-# a ContextVar so concurrent callers on other threads or tasks never see it.
-_LOCATION_VERDICT: contextvars.ContextVar[Callable[[str | None], bool]] = (
-    contextvars.ContextVar("location_verdict"))
-
-
-@sql_function("location_ok", 1)
-def _location_ok(text: str | None) -> bool:
-    """True when the running query's location matcher accepts `text`."""
-    return _LOCATION_VERDICT.get()(text)
-
-
 # ranked_jobs' query, in layers over NARROW rows: a job's description is
 # kilobytes, and sorting/windowing 40k of them dragged every body through the
 # sorter. `pool` is every row that could still surface, with its company's
@@ -862,14 +843,12 @@ WITH pool AS (
   FROM pool
   WHERE {min_where}
 ){collapse}, picked AS (
-  SELECT *, ROW_NUMBER() OVER (ORDER BY {order}) AS _pos
-  FROM {source}
-  ORDER BY _pos {limit}
+  SELECT * FROM {source} ORDER BY {order} {limit}
 )
 SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags,
        p.combined_score{extra}
 FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies c ON j.company_id = c.id
-ORDER BY p._pos"""
+ORDER BY {final_order}"""
 # The collapse layer's partition is one "same opening at the same employer"
 # group: company_id when a row has one, else the name key (LinkedIn captures,
 # jsonld sweep hits and manual --add carry no company_id -- 4 of 119,411 rows
@@ -984,7 +963,12 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         track, alias="j", include_closed=include_closed,
         include_dispositioned=include_dispositioned)
     if location_re is not None:
-        geo = "location_ok(j.location)"
+        # NC_RE is a Python matcher, not a regex: judge each DISTINCT stored
+        # location once (~31k of 119k rows) and let SQL keep the accepted set.
+        accepted = [loc for (loc,) in conn.execute(
+            "SELECT DISTINCT COALESCE(location, '') FROM jobs") if location_re.search(loc)]
+        args.append(json.dumps(accepted))
+        geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
             geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
                     "remote_admitted(c.tags, j.company_name, c.mission_score, ?))")
@@ -996,39 +980,31 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
     # missing score sorts last via the -1 sentinel (all real scores are
     # >= 0), and id keeps ties in insertion order.
     primary = "resume_fit_score" if rank_by == "fit" else "combined_score"
-    order = ", ".join(f"COALESCE({k}, -1.0) DESC" for k in (
-        primary, "combined_score", "resume_fit_score", "mission_score")) + ", id"
+    keys = dict.fromkeys((primary, "combined_score", "resume_fit_score", "mission_score"))
+    def order(p: str = "") -> str:
+        return ", ".join(f"COALESCE({p}{k}, -1.0) DESC" for k in keys) + f", {p}id"
     q = _RANK_SQL.format(
-        pool_where=" AND ".join(conds) or "1", order=order,
+        pool_where=" AND ".join(conds) or "1", order=order(), final_order=order("p."),
         min_where="1" if min_mission is None else "(_mission IS NULL OR _mission >= ?)",
-        collapse=_COLLAPSE_SQL.format(order=order) if collapse else "",
+        collapse=_COLLAPSE_SQL.format(order=order()) if collapse else "",
         source="ranked WHERE _rn = 1" if collapse else "scored",
         extra=", p.dup_count, p._dup_ids, p._dup_urls" if collapse else "",
         limit="LIMIT ?" if limit else "")
     if limit:
         args.append(int(limit))
-    token = _LOCATION_VERDICT.set(functools.cache(
-        lambda text: location_re is not None and location_re.search(text or "") is not None))
-    try:
-        rows = [dict(r) for r in conn.execute(q, args)]
-    finally:
-        _LOCATION_VERDICT.reset(token)
-    for r in rows:
-        if collapse:
-            r["dup_job_ids"] = tuple(json.loads(r["_dup_ids"])[1:])
-            r["dup_urls"] = tuple(json.loads(r["_dup_urls"])[1:])
-        for k in ("_dup_ids", "_dup_urls"):
-            r.pop(k, None)
+    rows = [dict(r) for r in conn.execute(q, args)]
+    if collapse:
+        for r in rows:
+            r["dup_job_ids"] = tuple(json.loads(r.pop("_dup_ids"))[1:])
+            r["dup_urls"] = tuple(json.loads(r.pop("_dup_urls"))[1:])
     return rows
 
 
-def _survivor_first(r: dict[str, Any]) -> tuple[bool, bool, str]:
-    """dedup_jobs' sort key, survivor first: a dispositioned row, then an
-    open one, then the EARLIEST first_seen (ISO strings sort by time, and
-    a row with none sorts before every dated one)."""
-    return (r.get("disposition") is None,
-            (r.get("status") or "open") != "open",
-            r.get("first_seen") or "")
+# Which of several rows for one posting survives, best first: a dispositioned
+# row, then an open one, then the EARLIEST first_seen (ISO strings sort by
+# time, and a row with none sorts before every dated one), then the oldest row.
+_SURVIVOR_ORDER = """disposition IS NULL, COALESCE(NULLIF(status, ''), 'open') != 'open',
+                     COALESCE(first_seen, ''), id"""
 
 
 def same_posting(a: dict[str, Any], b: dict[str, Any]) -> bool:
@@ -1061,7 +1037,7 @@ def _posting_key(r: dict[str, Any]) -> tuple[str, str]:
 def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) -> int:
     """Fold the job rows `row_ids` (one posting stored under several ids)
     into one row named `job_id`; returns its row id. The survivor is
-    dedup_jobs' (_survivor_first) and keeps its values, `closed_at` with
+    dedup_jobs' (_SURVIVOR_ORDER) and keeps its values, `closed_at` with
     its status; a field it lacks comes from the others, `first_seen` is
     the earliest, `description` the longest and `track` every track; the
     others are deleted. Rows that are not one posting (same_posting)
@@ -1079,8 +1055,8 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
     [('new_x_7', 'a,b', 0.4, 'body')]
     """
     ph = ",".join("?" for _ in row_ids)
-    rows = sorted((dict(r) for r in conn.execute(
-        f"SELECT * FROM jobs WHERE id IN ({ph})", tuple(row_ids))), key=_survivor_first)
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM jobs WHERE id IN ({ph}) ORDER BY {_SURVIVOR_ORDER}", tuple(row_ids))]
     keep, losers = rows[0], rows[1:]
     if not all(same_posting(keep, l) for l in losers):
         raise ValueError(f"job rows {sorted(row_ids)} are not one posting")
@@ -1133,9 +1109,9 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
     # The group is (company, posting key, requisition tail): the tail is the
     # id after its last "_" (the whole id when it has none), taken by
     # stripping the id's non-"_" characters off its right end. Members come
-    # back best-first (_survivor_first's order), groups in first-row order.
+    # back best-first (_SURVIVOR_ORDER), groups in first-row order.
     groups: dict[int, list[dict[str, Any]]] = {}
-    for r in conn.execute("""
+    for r in conn.execute(f"""
             WITH keyed AS (
               SELECT id, job_id, title, disposition, status, first_seen, company_id,
                      norm_url(url) AS u, norm_title(title) AS t,
@@ -1146,11 +1122,9 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
                      MIN(id) OVER same AS g
               FROM keyed WHERE u != '' AND t != ''
               WINDOW same AS (PARTITION BY company_id, u, t, tail),
-                     ordered AS (same ORDER BY disposition IS NULL,
-                                 COALESCE(NULLIF(status, ''), 'open') != 'open',
-                                 COALESCE(first_seen, ''), id)
+                     ordered AS (same ORDER BY {_SURVIVOR_ORDER})
             )
-            SELECT * FROM ranked WHERE n > 1 ORDER BY g, rn"""):
+            SELECT job_id, title, g, rn FROM ranked WHERE n > 1 ORDER BY g, rn"""):
         groups.setdefault(r["g"], []).append(dict(r))
 
     return dedup_groups(

@@ -51,13 +51,13 @@ def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
             "SELECT * FROM companies WHERE ats=?", (ats,))}
         ph = ",".join("?" for _ in companies)
         rows = [dict(r) for r in conn.execute(
-            f"SELECT id, job_id, company_id, url, title FROM jobs "
+            f"SELECT id, job_id, company_id, url FROM jobs "
             f"WHERE company_id IN ({ph}) ORDER BY id", tuple(companies))] if companies else []
         buckets: dict[str, list[tuple[str, str | None]]] = {b: [] for b in rekey_buckets}
         new_ids: dict[int, str | None] = {}
         for r in rows:
             handle = board.handle(companies[r["company_id"]])
-            new_ids[r["id"]] = board.row_id(handle, r["url"]) if handle else None
+            new_ids[r["id"]] = (board.row_id(handle, r["url"]) if handle else None) or None
         # The board spec derives each row's new id (Python); which bucket it
         # lands in is one query. A row's HOLDER is the stored row that
         # already has the new id, else the first row of this batch to claim
@@ -74,7 +74,7 @@ def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
               SELECT *, FIRST_VALUE(id) OVER first_claim AS claimant FROM plan
               WINDOW first_claim AS (PARTITION BY new_id, did IS NULL ORDER BY id)
             )
-            SELECT c.id, c.job_id, h.id AS holder,
+            SELECT c.id, c.job_id, c.new_id, h.id AS holder,
                    CASE WHEN c.new_id IS NULL THEN 'unresolvable'
                         WHEN c.new_id = c.job_id THEN 'unchanged'
                         WHEN h.id IS NULL THEN 'rekey'
@@ -84,21 +84,21 @@ def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
             FROM claimed c
             LEFT JOIN jobs h ON h.id = COALESCE(c.did, NULLIF(c.claimant, c.id))
             ORDER BY c.id""",
-            (json.dumps([[i, n or None] for i, n in new_ids.items()]),)).fetchall()
-        for v in verdicts:
-            buckets[v["kind"]].append((v["job_id"], new_ids[v["id"]]))
+            (json.dumps([[i, n] for i, n in new_ids.items()]),)).fetchall()
         # A holder can have several rows merging into it, and merge_jobs may
         # delete the holder itself (its survivor is the best-ranked row, not
         # the holder), so each holder's rows go through ONE merge.
+        rekeys: list[tuple[str, int]] = []
         merges: dict[int, list[int]] = {}
         for v in verdicts:
-            if v["kind"] == "merge":
+            buckets[v["kind"]].append((v["job_id"], v["new_id"]))
+            if v["kind"] == "rekey":
+                rekeys.append((v["new_id"], v["id"]))
+            elif v["kind"] == "merge":
                 merges.setdefault(v["holder"], []).append(v["id"])
         if commit:
             with store.batch(conn):
-                conn.executemany("UPDATE jobs SET job_id=? WHERE id=?",
-                                 [(new_ids[v["id"]], v["id"]) for v in verdicts
-                                  if v["kind"] == "rekey"])
+                conn.executemany("UPDATE jobs SET job_id=? WHERE id=?", rekeys)
                 for holder, members in merges.items():
                     store.merge_jobs(conn, [holder, *members], cast(str, new_ids[members[0]]))
     print(f"  {ats}: {len(rows)} stored row(s) under {len(companies)} compan(ies)")

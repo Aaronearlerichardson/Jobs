@@ -89,8 +89,8 @@ def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[dict[str, Any]]:
         return rows
     want = _norm_url(ref)
     if want:
-        return [dict(r) for r in conn.execute("SELECT * FROM jobs").fetchall()
-                if _norm_url(r["url"]) == want]
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM jobs WHERE norm_url(url) = ?", (want,)).fetchall()]
     return []
 
 

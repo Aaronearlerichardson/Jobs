@@ -401,11 +401,8 @@ class TestRanking:
             def search(self, text):
                 raise RuntimeError("matcher failed")
         add_job("gh_acme_1", fit=0.5)
-        # SQLite reports a raising callback as OperationalError; the
-        # matcher's own message is not carried across.
-        with pytest.raises(sqlite3.OperationalError):
+        with pytest.raises(RuntimeError, match="matcher failed"):
             store.ranked_jobs(db, track="local-tech", location_re=Boom())
-        assert store.jobs._LOCATION_VERDICT.get(None) is None
         assert store.ranked_jobs(db, track="local-tech")
 
 

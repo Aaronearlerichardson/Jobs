@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -436,7 +437,6 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     >>> [(r["name"], h) for r, h in idx["by_domain"]["a.org"]]
     [('A', 'a.org')]
     """
-    from collections import defaultdict
 
     rows = [dict(r) for r in
             conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
