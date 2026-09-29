@@ -17,6 +17,7 @@ Never imports store/__init__ at load time (that module imports this one).
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections import defaultdict
@@ -486,36 +487,49 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
     ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
     those, so the crawl fetches one board several times. Jobs are re-pointed to
     the kept row and tags merge, so the merge is lossless. Returns rows merged."""
-    groups = _company_index(conn)["by_board"]
-    jobcount = {cid: n for cid, n in conn.execute(
-        "SELECT company_id, COUNT(*) FROM jobs GROUP BY company_id")}
-
-    def keep_first(r: dict[str, Any]) -> tuple[bool, int, int, int]:
-        # Survivor first: a scored row, then active, then most-referenced,
-        # then the shortest (most canonical) name.
-        return (r.get("mission_tier") is None, -(r.get("active") or 0),
-                -jobcount.get(r["id"], 0), len(r.get("name") or ""))
+    # The board key is config-driven Python (board_key); which row of a
+    # shared board survives, and whether any of them was active, is SQL:
+    # survivor first = a scored row, then active, then most-referenced, then
+    # the shortest (most canonical) name, then the oldest row.
+    shared = [[c["id"], json.dumps(key)]
+              for key, rows in _company_index(conn)["by_board"].items() if len(rows) > 1
+              for c in rows]
+    groups: dict[int, list[dict[str, Any]]] = {}
+    for r in conn.execute("""
+            WITH shared AS (
+              SELECT c.id, c.name, c.tags, c.active, c.mission_tier, k.board
+              FROM (SELECT json_extract(value, '$[0]') AS id,
+                           json_extract(value, '$[1]') AS board FROM json_each(?)) k
+              JOIN companies c ON c.id = k.id
+            )
+            SELECT s.*, MIN(s.id) OVER same AS g,
+                   ROW_NUMBER() OVER (same ORDER BY s.mission_tier IS NULL,
+                                      -COALESCE(s.active, 0), -COALESCE(n.jobs, 0),
+                                      length(COALESCE(s.name, '')), s.id) AS rn,
+                   MAX(COALESCE(s.active, 0)) OVER same != 0 AS any_active
+            FROM shared s
+            LEFT JOIN (SELECT company_id, COUNT(*) AS jobs FROM jobs GROUP BY company_id) n
+                   ON n.company_id = s.id
+            WINDOW same AS (PARTITION BY s.board)
+            ORDER BY g, rn""", (json.dumps(shared),)):
+        groups.setdefault(r["g"], []).append(dict(r))
 
     def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
-        tags = set(t for t in (keep.get("tags") or "").split(",") if t)
-        for l in losers:
-            tags |= set(t for t in (l.get("tags") or "").split(",") if t)
-            # Re-point the loser's jobs AND rename them: jobs.company_name
-            # is the denormalized display/grouping key (ranked_jobs groups
-            # and the digest prints by it), so a merge that only moved
-            # company_id left "Red Hat" and "Red Hat (IBM subsidiary, RTP
-            # HQ)" as two companies in every ranking after the 2026-09-01
-            # dedup, though both pointed at company 85.
-            conn.execute("UPDATE jobs SET company_id=?, company_name=? "
-                         "WHERE company_id=?",
-                         (keep["id"], keep["name"], l["id"]))
-        active = 1 if any(m.get("active") for m in [keep, *losers]) \
-            else (keep.get("active") or 0)
+        tags = {t for m in [keep, *losers] for t in (m.get("tags") or "").split(",") if t}
+        # Re-point the losers' jobs AND rename them: jobs.company_name
+        # is the denormalized display/grouping key (ranked_jobs groups
+        # and the digest prints by it), so a merge that only moved
+        # company_id left "Red Hat" and "Red Hat (IBM subsidiary, RTP
+        # HQ)" as two companies in every ranking after the 2026-09-01
+        # dedup, though both pointed at company 85.
+        conn.execute("UPDATE jobs SET company_id=?, company_name=? WHERE company_id IN "
+                     "(SELECT value FROM json_each(?))",
+                     (keep["id"], keep["name"], json.dumps([l["id"] for l in losers])))
         apply_update(conn, "companies", "id", keep["id"],
-                     {"tags": ",".join(sorted(tags)) or None, "active": active})
+                     {"tags": ",".join(sorted(tags)) or None, "active": keep["any_active"]})
 
     merged = dedup_groups(
-        conn, "companies", "id", groups, rank=keep_first, merge=carry_over,
+        conn, "companies", "id", groups, rank=lambda r: r["rn"], merge=carry_over,
         describe=lambda keep, losers: (
             f"{keep['name'][:30]:30} <- merged {len(losers)}: "
             + ", ".join(l["name"][:20] for l in losers)))
@@ -538,7 +552,6 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
 def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Dump the company roster to JSON — the shareable/bootstrap artifact
     that replaced config.py's seed lists. Secrets-free by construction."""
-    import json
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM companies ORDER BY name").fetchall()]
     for r in rows:
