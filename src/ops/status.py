@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from src import config
+from src.config import TrackDict
 from src import store
 from src.ats.board import closure
 from src.ats.board import company as company_fetch
@@ -74,7 +75,7 @@ def _sync_skip_note(skipped: dict[str, int]) -> str:
     return f", {sum(skipped.values())} skipped (" + ", ".join(parts) + ")"
 
 
-async def sync_status_all(top_n: int = 15, t: dict[str, Any] | None = None) -> tuple[int, int]:
+async def sync_status_all(top_n: int = 15, t: TrackDict | None = None) -> tuple[int, int]:
     """Status-only reconciliation: re-fetch every active company's board
     (same scoping as the crawl — locality unless whole-board), reconcile
     open/closed via sync_job_statuses, and rewrite today's digest from the
@@ -273,7 +274,7 @@ def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str,
 
 
 async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
-                            t: dict[str, Any] | None = None, db: store.Writer | None = None) -> int:
+                            t: TrackDict | None = None, db: store.Writer | None = None) -> int:
     """Probe the detail URLs of OPEN rows that no successful board fetch has
     vouched for in `stale_days` and close the ones that are positively dead
     (HTTP 404/410 from the ATS's own endpoint or the page, an ATS "no longer

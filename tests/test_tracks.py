@@ -17,6 +17,14 @@ class TestTrackConfig:
         assert len(cfg.UI_TRACKS) >= 1
         assert cfg.DEFAULT_TRACK in cfg.UI_TRACKS
 
+    def test_the_track_type_names_exactly_the_runtime_keys(self, cfg):
+        # TrackDict is written out by hand (mypy cannot read a pydantic
+        # model's fields); this is what keeps it honest.
+        from src.config.tracks import TrackDict, TrackSourcesDict
+        for t in cfg.UI_TRACKS.values():
+            assert set(t) == set(TrackDict.__annotations__)
+            assert set(t["sources"]) == set(TrackSourcesDict.__annotations__)
+
     def test_every_track_points_at_a_db(self, cfg):
         assert all(t["db_path"].name.endswith(".db")
                    for t in cfg.UI_TRACKS.values())

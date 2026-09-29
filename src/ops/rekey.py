@@ -7,12 +7,13 @@ import json
 import sqlite3
 from typing import Any, cast
 
+from src.config import TrackDict
 from src import store
 from src.ats.board import board_for
 from src.ops.maintenance import track_store
 
 
-def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
+def rekey_jobs(ats: str, commit: bool = False, t: TrackDict | None = None,
                conn: sqlite3.Connection | None = None) -> dict[str, int]:
     """PREVIEW (default) or APPLY moving every stored job under an `ats`
     company to the id that board's spec gives it now (`Board.row_id`: the

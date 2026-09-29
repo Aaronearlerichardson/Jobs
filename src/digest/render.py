@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from src import config
+from src.config import TrackDict
 from src.match import locality
 
 # The mid-fit local band, half-open on the high side. The interviews to date
@@ -60,7 +61,7 @@ def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
-def _tag(t: dict[str, Any]) -> str:
+def _tag(t: TrackDict) -> str:
     return f"[{t['label'].upper()}]"
 
 
@@ -90,7 +91,7 @@ def apply_band_rows(ranked: list[dict[str, Any]] | None,
     return picked[:limit]
 
 
-def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: dict[str, Any],
+def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: TrackDict,
                     new_since: str | None = None) -> list[dict[str, Any]]:
     """The ranked rows first seen on or after `new_since` (default today)
     that score at least the track's `digest_min_fit`.
@@ -294,7 +295,7 @@ def _watch_section(watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bo
 # --------------------------------------------------------------------------- #
 
 def write_ranked_digest(
-        ranked: list[dict[str, Any]], t: dict[str, Any],
+        ranked: list[dict[str, Any]], t: TrackDict,
         watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None,
         followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
@@ -380,7 +381,7 @@ def write_ranked_digest(
 
 
 def send_ranked_digest(
-        ranked: list[dict[str, Any]], t: dict[str, Any],
+        ranked: list[dict[str, Any]], t: TrackDict,
         watch_hits: Iterable[tuple[dict[str, Any], dict[str, Any], bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
         followups: list[dict[str, Any]] | None = None) -> bool:
@@ -456,7 +457,7 @@ def send_ranked_digest(
     return False
 
 
-def toast(t: dict[str, Any], count: int, path: str | Path) -> bool:
+def toast(t: TrackDict, count: int, path: str | Path) -> bool:
     """Raise a Windows desktop toast for a just-sent digest. True only when
     one was actually shown.
 
@@ -510,7 +511,7 @@ def _matches_sections(matches: list[dict[str, Any]], tag: str
 
 
 def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
-                         t: dict[str, Any]) -> Path:
+                         t: TrackDict) -> Path:
     """Flat surfaced-postings digest for a sweep track, written under
     `report_dir` (default config.REPORT_DIR); returns the path."""
     today, tag = _today(), _tag(t)
@@ -521,7 +522,7 @@ def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
     return path
 
 
-def send_matches_digest(matches: list[dict[str, Any]], t: dict[str, Any],
+def send_matches_digest(matches: list[dict[str, Any]], t: TrackDict,
                         cfg: object = None) -> bool:
     """Email the matches digest — the same table `write_matches_digest`
     writes. True when a message went out; a no-op without matches. `cfg`

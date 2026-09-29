@@ -85,6 +85,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from src import config
+from src.config import TrackDict
 from src import store
 from src import tags
 from src.ats import coords
@@ -138,21 +139,21 @@ DEFAULT_WORKERS = harvest.DEFAULT_WORKERS
 #  Which tracks read the roster                                                #
 # --------------------------------------------------------------------------- #
 
-def roster_tracks(tracks: Iterable[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+def roster_tracks(tracks: Iterable[TrackDict] | None = None) -> list[TrackDict]:
     """The configured tracks whose sources include the company store --
     the ones a harvested row can surface into."""
     return [t for t in (tracks or config.UI_TRACKS.values())
             if t["sources"].get("store")]
 
 
-def _track_applies(t: dict[str, Any], company: dict[str, Any]) -> bool:
+def _track_applies(t: TrackDict, company: dict[str, Any]) -> bool:
     """A tag-scoped track (store_tag) only reads companies carrying it."""
     tag = t.get("store_tag")
     return not tag or tags.has(company.get("tags"), tag)
 
 
 @contextmanager
-def _keyword_focus(t: dict[str, Any]) -> Iterator[None]:
+def _keyword_focus(t: TrackDict) -> Iterator[None]:
     """apply_keyword_focus for the duration of a block, then put the shared
     lists back (config.keyword_snapshot / restore_keywords)."""
     saved = config.keyword_snapshot()
@@ -202,7 +203,7 @@ async def ensure_mission(db: store.Writer, company: dict[str, Any],
     return tier, score
 
 
-def mission_verdict(company: dict[str, Any], t: dict[str, Any]) -> str:
+def mission_verdict(company: dict[str, Any], t: TrackDict) -> str:
     """OK, or 'mission' when the whole company is out for track `t`:
     an inactive mission tier (multi-division exempt), or a known effective
     mission under the track's min_mission. Unknown never drops.
@@ -240,7 +241,7 @@ def _detail_stale(row: dict[str, Any], cutoff: str) -> bool:
     return bool(checked) and checked < cutoff
 
 
-def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any], has_body: bool, cutoff: str) -> str:
+def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, has_body: bool, cutoff: str) -> str:
     """Geography on the location FIELD (see the module docstring, gate 4):
     local passes anywhere; remote passes at a watched or mission-trusted
     company. An UNKNOWN location (location_unknown) defers while a detail
@@ -275,7 +276,7 @@ def _geo_verdict(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any]
     return "geo"
 
 
-def row_verdict(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any], cutoff: str) -> str:
+def row_verdict(company: dict[str, Any], job: dict[str, Any], t: TrackDict, cutoff: str) -> str:
     """Gates 2-6 for one row on one track, on the text the row has NOW.
     Returns OK, a gate name, or DEFER (undecidable without a body). The
     caller has already applied the track's keyword focus. `cutoff` is the
@@ -310,7 +311,7 @@ def row_verdict(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any],
     return DEFER if deferred else OK
 
 
-async def judge(db: store.Writer, company: dict[str, Any], jobs: list[dict[str, Any]], tracks: list[dict[str, Any]],
+async def judge(db: store.Writer, company: dict[str, Any], jobs: list[dict[str, Any]], tracks: list[TrackDict],
                 mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
                 *, cutoff: str) -> dict[str, dict[str, str]]:
     """Gates 1-6 for one company's rows against every applicable track.
@@ -406,7 +407,7 @@ def _by_company(conn: sqlite3.Connection, rows: list[dict[str, Any]]
 
 
 async def _judged(db: store.Writer, companies: dict[Any, dict[str, Any]], groups: dict[Any, list[dict[str, Any]]],
-                  tracks: list[dict[str, Any]], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+                  tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
                   ) -> AsyncIterator[tuple[dict[str, Any], dict[str, Any], str, str, list[str]]]:
     """Yield (company, row, status, detail, surfaced) for every grouped row.
 
@@ -423,7 +424,7 @@ async def _judged(db: store.Writer, companies: dict[Any, dict[str, Any]], groups
 
 
 async def _free_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], groups: dict[Any, list[dict[str, Any]]],
-                      tracks: list[dict[str, Any]], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
+                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], cutoff: str
                       ) -> tuple[dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]], dict[str, tuple[dict[str, Any], dict[str, Any], str]]]:
     """Phase 1: the free gates, on the text the rows already have.
 
@@ -580,7 +581,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, dict[str, Any]], survi
 
 
 async def _body_gates(db: store.Writer, companies: dict[Any, dict[str, Any]], survivors: dict[str, tuple[dict[str, Any], dict[str, Any], str]],
-                      tracks: list[dict[str, Any]], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]],
+                      tracks: list[TrackDict], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]],
                       summary: dict[str, float], n_free: int, waiting: dict[str, str],
                       cutoff: str) -> dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
@@ -662,7 +663,7 @@ async def _score(final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str
 
 
 def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str, dict[str, Any], dict[str, Any]]], final: dict[str, tuple[dict[str, Any], dict[str, Any], list[str], str]],
-                    scores: dict[str, FitResult], over_cap: set[str], tracks: list[dict[str, Any]],
+                    scores: dict[str, FitResult], over_cap: set[str], tracks: list[TrackDict],
                     summary: dict[str, float], stamp: datetime) -> None:
     """Phase 5: every verdict, inside the caller's one batch.
 
@@ -704,7 +705,7 @@ def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str,
         floors = [t["digest_min_fit"] for t in tracks
                   if t["track"] in surfaced]
         status = OK
-        if res is not None and floors and res.score < min(floors):
+        if res is not None and res.score is not None and floors and res.score < min(floors):
             status = "fit"
         loc, desc = r.get("location") or "", r.get("description") or ""
         if res is not None:
@@ -744,7 +745,7 @@ def _print_summary(summary: dict[str, float], bar: str) -> None:
     print(f"  time:   {summary['secs'] / 60:.1f} min\n{bar}")
 
 
-async def run(db_path: str | Path | None = None, tracks: Iterable[dict[str, Any]] | None = None,
+async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | None = None,
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
@@ -857,7 +858,7 @@ def _passed_tracks(detail: str | None) -> set[str]:
     return {k for k, v in pairs if v == OK}
 
 
-def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[dict[str, Any]] | None = None
+def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[TrackDict] | None = None
                     ) -> dict[str, dict[str, Any]]:
     """{job_id: {"reason", "company_name", "title", "location"}} for every
     open triaged row whose verdict the current geo rules would change.
@@ -924,7 +925,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[dict[str, Any]] |
 
 
 async def requeue_rows(db_path: str | Path | None = None, apply: bool = False,
-                       sample: int = 10, tracks: Iterable[dict[str, Any]] | None = None
+                       sample: int = 10, tracks: Iterable[TrackDict] | None = None
                        ) -> dict[str, Any]:
     """Report (the default) or apply a re-queue of rows `requeue_reasons`
     flags -- the CLI/registry surface (run_scraper.py --triage --requeue

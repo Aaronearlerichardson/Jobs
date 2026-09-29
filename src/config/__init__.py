@@ -97,5 +97,5 @@ from .sources import (  # noqa: F401
 )
 from .tracks import (  # noqa: F401
     ENGINE_ALIASES, _build_ui_tracks,
-    UI_TRACKS, DEFAULT_TRACK, track_for_engine,
+    UI_TRACKS, DEFAULT_TRACK, track_for_engine, TrackDict,
 )

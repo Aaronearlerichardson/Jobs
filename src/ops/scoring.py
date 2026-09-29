@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from src import config
+from src.config import TrackDict
 from src import store
 from src.ats.board import board_for_url
 from src.ats.board import company as company_fetch
@@ -196,7 +197,7 @@ async def self_heal_unscored(db: store.Writer | Connection, resume: str, track: 
 
 
 async def rescore_all(max_workers: int = 6, track: str | None = None,
-                      described_only: bool = False, t: dict[str, Any] | None = None) -> int:
+                      described_only: bool = False, t: TrackDict | None = None) -> int:
     """Re-run resume-fit scoring over every stored job in the track's DB
     (all jobs.track values unless `track` names one). Use after changing the
     resume or the scoring prompt — the normal crawl only scores jobs it
@@ -284,7 +285,7 @@ async def _live_jd(row: dict[str, Any]) -> str:
     return text if text and len(text) >= len(text_from_html(stored)) else stored
 
 
-def _verify_floor_candidates(conn: sqlite3.Connection, t: dict[str, Any], floor: float,
+def _verify_floor_candidates(conn: sqlite3.Connection, t: TrackDict, floor: float,
                              exclude_ids: Collection[str] = ()) -> list[dict[str, Any]]:
     """Track `t`'s open triage_status='fit' rows screened at or above
     `floor`, located locally (NC_RE) or stored remote_eligible, best screen
@@ -337,7 +338,7 @@ _GIVEN_UP: set[str] = set()
 
 
 async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
-                     db: store.Writer | None = None, t: dict[str, Any] | None = None,
+                     db: store.Writer | None = None, t: TrackDict | None = None,
                      force: bool = False) -> int:
     """Deep-verify the ranking's FINALISTS before anyone acts on them: for
     each of the current top `top_n` jobs (past rank VERIFY_HEAD, only those
@@ -521,7 +522,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
         return n_done
 
 
-async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: dict[str, Any] | None = None,
+async def verify_top_cli(top_n: int = 15, max_workers: int = 4, t: TrackDict | None = None,
                          force: bool = False) -> int:
     """Standalone verify: deep-verify the current top N in the store (no
     crawl), then rewrite the digest and print the corrected top. `force`

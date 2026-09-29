@@ -43,6 +43,7 @@ from types import ModuleType
 from typing import Any, NamedTuple, cast
 
 from src import config
+from src.config import TrackDict
 from src import store
 from src import tags
 from src.ats.registry import iter_store_sources, sweep
@@ -60,7 +61,7 @@ from src.net.util import strip_html
 track_for_engine = config.track_for_engine
 
 
-def apply_keyword_focus(cfg: Any, t: dict[str, Any]) -> None:
+def apply_keyword_focus(cfg: Any, t: TrackDict) -> None:
     """Point the shared keyword filter at this track's focus. Mutates the
     live list objects in place so filters.is_relevant (which imported them
     at load time) sees the change without a re-import. "extend" adds the
@@ -100,7 +101,7 @@ def core_anchor(title: str, description: str = "") -> str | None:
                      SHORT_KEYWORD)
 
 
-async def build_sources(cfg: ModuleType, t: dict[str, Any],
+async def build_sources(cfg: ModuleType, t: TrackDict,
                         include_websearch: bool | None = None) -> list[dict[str, Any]]:
     """Assemble the track's source specs from its `sources` config table.
     Returns a list of dicts {name, platform, thunk, company}: `thunk()` is
@@ -260,7 +261,7 @@ def _diversify(matches: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
     return picked
 
 
-def _cost_guard_trips(t: dict[str, Any], n_to_score: int, confirm_cost: bool) -> bool:
+def _cost_guard_trips(t: TrackDict, n_to_score: int, confirm_cost: bool) -> bool:
     """True (and prints the budget banner) when scoring n_to_score postings
     would blow the track's cost_guard without an explicit confirmation."""
     guard = t["cost_guard"]
@@ -299,7 +300,7 @@ class Collected(NamedTuple):
 
 
 async def _gate_company_board(
-        db: store.Writer, t: dict[str, Any], c: dict[str, Any], jobs: list[dict[str, Any]], commit: bool,
+        db: store.Writer, t: TrackDict, c: dict[str, Any], jobs: list[dict[str, Any]], commit: bool,
         snapshot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
@@ -344,7 +345,7 @@ async def _gate_company_board(
     return kept, fresh, watch_hits, n_reopened, n_closed
 
 
-def _fresh_and_watched(conn: sqlite3.Connection, t: dict[str, Any], c: dict[str, Any], jobs: list[dict[str, Any]],
+def _fresh_and_watched(conn: sqlite3.Connection, t: TrackDict, c: dict[str, Any], jobs: list[dict[str, Any]],
                        kept: list[dict[str, Any]], commit: bool
                        ) -> tuple[list[dict[str, Any]], list[tuple[dict[str, Any], dict[str, Any], bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
@@ -384,7 +385,7 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: dict[str, Any], c: dict[str,
     return fresh, watch_hits
 
 
-def _gate_sweep_source(conn: sqlite3.Connection, t: dict[str, Any], jobs: list[dict[str, Any]],
+def _gate_sweep_source(conn: sqlite3.Connection, t: TrackDict, jobs: list[dict[str, Any]],
                       seen_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
     """One sweep source's jobs through the gates: anchor + title (+ engine
     excludes), remote signal stamped (or geo-gated when configured),
@@ -433,7 +434,7 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: dict[str, Any], jobs: list[d
     return out, anchor_here, tech_here, surfaced
 
 
-async def _gate_sources(db: store.Writer, t: dict[str, Any], specs: list[dict[str, Any]],
+async def _gate_sources(db: store.Writer, t: TrackDict, specs: list[dict[str, Any]],
                         fetched: list[tuple[Any, Any, Any]], commit: bool) -> Collected:
     """Every fetched source through its gates, in SOURCE order, on `db`
     (the crawl's store.Writer).
@@ -499,7 +500,7 @@ async def _gate_sources(db: store.Writer, t: dict[str, Any], specs: list[dict[st
                      n_closed, n_reopened, n_seen)
 
 
-async def _score_and_persist(db: store.Writer, t: dict[str, Any], got: Collected, resume: str | None,
+async def _score_and_persist(db: store.Writer, t: TrackDict, got: Collected, resume: str | None,
                              *, fit: bool, commit: bool, guard_tripped: bool,
                              max_workers: int) -> int:
     """Score what the gates kept and write it. Returns the number scored.
@@ -601,7 +602,7 @@ def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -
         print(f"  {label:<46} {n_f:>5} {g1:>5} {kept_n:>5} {new_n:>5}{tail}")
 
 
-async def _report_ranked(db: store.Writer, t: dict[str, Any], got: Collected, scored: int, *,
+async def _report_ranked(db: store.Writer, t: TrackDict, got: Collected, scored: int, *,
                          send: bool, top_n: int, bar: str) -> list[dict[str, Any]]:
     """Write (and maybe email) the ranked digest for a company-linked crawl,
     print the watch section and the top N, and return the ranked list.
@@ -651,7 +652,7 @@ async def _report_ranked(db: store.Writer, t: dict[str, Any], got: Collected, sc
     return ranked
 
 
-async def _report_matches(matches: list[dict[str, Any]], t: dict[str, Any], *, send: bool, samples: int,
+async def _report_matches(matches: list[dict[str, Any]], t: TrackDict, *, send: bool, samples: int,
                           bar: str) -> None:
     """The sweep side: a diversified sample for a precision eyeball, then
     the matches digest."""
@@ -684,7 +685,7 @@ async def _report_matches(matches: list[dict[str, Any]], t: dict[str, Any], *, s
         print("  (email suppressed — enable [tracks.*].email or --send)")
 
 
-async def run_track(t: dict[str, Any], *, fit: bool = True, commit: bool = True,
+async def run_track(t: TrackDict, *, fit: bool = True, commit: bool = True,
                     send: bool | None = None, verify: bool | None = None,
                     websearch: bool | None = None, confirm_cost: bool = False,
                     max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]]:

@@ -57,23 +57,66 @@ Crawl-methodology keys, every one overridable in the track's own table:
 
 from __future__ import annotations
 
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal, TypedDict, cast
 
 from .paths import DATA_DIR
 from .profile import PROFILE, PROFILE_PATH
 from .profile_schema import ENGINE_ALIASES, Track, parse
 
 
-def _runtime(tid: str, t: Track) -> dict[str, Any]:
+class TrackSourcesDict(TypedDict):
+    store: bool
+    priority_companies: bool
+    aggregators: bool
+    websearch: bool
+    location_scoped: bool
+
+
+class TrackDict(TypedDict):
+    """A track as every runtime reader indexes it (see _runtime): the
+    validated Track's fields, minus `db`, plus id, label, track and db_path.
+    tests/test_config.py pins these names to the model's."""
+    id: str
+    label: str
+    track: str
+    db_path: Path
+    engine: str
+    rank_by: Literal["fit", "combined"]
+    min_mission: float | None
+    min_fit_default: float
+    willing_to_move_default: bool
+    remote_requires_watch: bool
+    default: bool
+    keyword_mode: Literal["extend", "replace"]
+    accept_remote: bool
+    sources: TrackSourcesDict
+    store_tag: str | None
+    require_core_anchor: bool
+    geo_gate: bool
+    remote_mission_floor: float | None
+    verify_top: int
+    verify_floor: float
+    cost_guard: int
+    email: bool
+    digest_min_fit: float
+    notify: bool
+    exclude_gate: bool
+    dormant_after: int
+    dormant_days: int
+    tech_title_regex: str
+
+
+def _runtime(tid: str, t: Track) -> TrackDict:
     """A validated Track as the runtime dict every reader indexes."""
     d = t.model_dump(exclude={"db"})
     d.update(id=tid, label=t.label or tid,
              track=t.track or tid.replace("_", "-"),
              db_path=DATA_DIR / (t.db or f"{tid}.db"))
-    return d
+    return cast(TrackDict, d)     # the pydantic boundary: the fields above are its
 
 
-def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, TrackDict]:
     """A [tracks] table (or None -> the built-in pair) as runtime track
     dicts, validated like a profile's.
 
@@ -99,7 +142,7 @@ def _build_ui_tracks(raw: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
             for tid, t in parse({"tracks": raw or {}}).tracks.items()}
 
 
-def default_track_id(tracks: dict[str, dict[str, Any]]) -> str | None:
+def default_track_id(tracks: dict[str, TrackDict]) -> str | None:
     """The id of the track flagged `default`, else the first one, else
     None for an empty table.
 
@@ -118,7 +161,7 @@ UI_TRACKS = {tid: _runtime(tid, t) for tid, t in PROFILE.tracks.items()}
 DEFAULT_TRACK = default_track_id(UI_TRACKS)
 
 
-def track_for_engine(engine: str) -> dict[str, Any]:
+def track_for_engine(engine: str) -> TrackDict:
     """The configured track to use when an engine-level entry point is
     invoked without naming a track: the default-flagged track with that
     engine, else the first. Legacy engine names resolve too.

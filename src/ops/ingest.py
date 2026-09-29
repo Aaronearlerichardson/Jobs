@@ -7,6 +7,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, cast
 
+from src.config import TrackDict
 from src import store
 from src import tags
 from src.ats import coords
@@ -45,7 +46,7 @@ async def _hydrate_missing_descriptions(db: store.Writer, jobs: list[dict[str, A
 
 
 def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str, curated: bool,
-              t: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+              t: TrackDict) -> tuple[list[dict[str, Any]], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
     gates, each kept job carrying its company link (`_company_id`); a job
     already stored is touched instead."""
@@ -94,7 +95,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
 
 
 async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed", max_workers: int = 6,
-                               curated: bool = False, t: dict[str, Any] | None = None) -> int:
+                               curated: bool = False, t: TrackDict | None = None) -> int:
     """Ingest external job dicts into the track's jobs table with resume-fit
     scores. Each dict: {id?, title, company, url, location, description?}.
     Applies the same exclude + technical-title gate as the crawl. For
@@ -127,7 +128,7 @@ async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed
 
 
 async def crawl_company(db: store.Writer, company: dict[str, Any], max_workers: int = 6,
-                        t: dict[str, Any] | None = None) -> tuple[int, int, int]:
+                        t: TrackDict | None = None) -> tuple[int, int, int]:
     """Fetch ONE store company's locality-scoped board (whole board for
     watched/sweep-tagged companies), apply the track's filters, resume-fit-
     score the new postings, and store them on `db` (a store.Writer).
@@ -165,7 +166,7 @@ async def crawl_company(db: store.Writer, company: dict[str, Any], max_workers: 
 
 async def add_manual_job(url: str, title: str, company: str, location: str,
                          description: str = "", pull_board: bool = True,
-                         max_workers: int = 6, t: dict[str, Any] | None = None) -> dict[str, Any]:
+                         max_workers: int = 6, t: TrackDict | None = None) -> dict[str, Any]:
     """Add ONE hand-picked job, register/resolve its COMPANY, and — if that
     company's board resolves — pull its OTHER in-scope jobs too.
 

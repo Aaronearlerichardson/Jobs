@@ -35,6 +35,7 @@ from functools import lru_cache
 from typing import Any
 
 from src import config
+from src.config import TrackDict
 from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
                                scrub_boilerplate, token_in)
 
@@ -44,7 +45,7 @@ def _title_re(pattern: str) -> re.Pattern[str]:
     return re.compile(pattern, re.I)
 
 
-def is_technical_role(title: str | None, t: dict[str, Any]) -> bool:
+def is_technical_role(title: str | None, t: TrackDict) -> bool:
     """Cheap positive title gate for track `t` (a config.UI_TRACKS entry)."""
     return bool(_title_re(t["tech_title_regex"]).search(title or ""))
 

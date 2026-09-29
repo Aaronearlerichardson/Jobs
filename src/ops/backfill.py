@@ -8,6 +8,7 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
+from src.config import TrackDict
 from src import store
 from src.ats.board import company as company_fetch
 from src.net.parallel import fan_out
@@ -67,7 +68,7 @@ def save_body(conn: sqlite3.Connection, job_id: str, text: str | None) -> bool:
 
 
 async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = None,
-                                      min_len: int = 200, t: dict[str, Any] | None = None,
+                                      min_len: int = 200, t: TrackDict | None = None,
                                       retry_days: int = 3) -> int:
     """One-shot: fill in full JD text for stored jobs missing it (any
     company-linked row whose description is shorter than min_len chars —

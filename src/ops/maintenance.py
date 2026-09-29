@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src import config
+from src.config import TrackDict
 from src import digest
 from src import store
 from src import tags
@@ -32,12 +33,12 @@ if TYPE_CHECKING:
     from sqlite3 import Connection
 
 
-def _t(t: dict[str, Any] | None) -> dict[str, Any]:
+def _t(t: TrackDict | None) -> TrackDict:
     return t if t is not None else config.track_for_engine("local")
 
 
 @contextmanager
-def track_store(t: dict[str, Any] | None = None, conn: sqlite3.Connection | None = None
+def track_store(t: TrackDict | None = None, conn: sqlite3.Connection | None = None
                 ) -> Iterator[sqlite3.Connection]:
     """The track's store, closed on the way out however the block ends --
     or `conn` itself, left open, when the caller already holds one (the
@@ -66,7 +67,7 @@ def track_store(t: dict[str, Any] | None = None, conn: sqlite3.Connection | None
 
 
 @asynccontextmanager
-async def track_writer(t: dict[str, Any] | None = None, db: store.Writer | Connection | None = None
+async def track_writer(t: TrackDict | None = None, db: store.Writer | Connection | None = None
                        ) -> AsyncIterator[store.Writer]:
     """`track_store` for async code: the track's store on a store.Writer
     for the block -- or `db` itself when the caller already holds a Writer
@@ -134,7 +135,7 @@ async def board_match(index: dict[str, dict[str, Any]], title: str | None) -> di
     return match if match.get("description") else None
 
 
-def _ranked(conn: sqlite3.Connection, t: dict[str, Any], limit: int | None = None) -> list[dict[str, Any]]:
+def _ranked(conn: sqlite3.Connection, t: TrackDict, limit: int | None = None) -> list[dict[str, Any]]:
     """The track's ranked view — same knobs the crawl digest uses."""
     return store.ranked_jobs(
         conn, track=t["track"],
@@ -144,7 +145,7 @@ def _ranked(conn: sqlite3.Connection, t: dict[str, Any], limit: int | None = Non
         remote_mission_floor=t.get("remote_mission_floor"), limit=limit)
 
 
-def _write_digest(conn: sqlite3.Connection, t: dict[str, Any],
+def _write_digest(conn: sqlite3.Connection, t: TrackDict,
                   watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] | None = None
                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
@@ -163,7 +164,7 @@ def _write_digest(conn: sqlite3.Connection, t: dict[str, Any],
     return ranked, pipeline, followups, path
 
 
-def rewrite_digest(conn: sqlite3.Connection, t: dict[str, Any], top_n: int = 15,
+def rewrite_digest(conn: sqlite3.Connection, t: TrackDict, top_n: int = 15,
                    heading: str = "") -> list[dict[str, Any]]:
     """Rewrite the track's ranked digest from the store as it stands now,
     and print the top `top_n` of it. Returns the ranked list.
@@ -256,7 +257,7 @@ def _whole_board(company: dict[str, Any], mission_floor: float | None = None) ->
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: dict[str, Any]) -> bool:
+async def _keep_job(company: dict[str, Any], job: dict[str, Any], t: TrackDict) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""

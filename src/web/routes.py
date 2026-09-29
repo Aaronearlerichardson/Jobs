@@ -21,7 +21,7 @@ from src import store
 from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
-from src.config import profile_edit
+from src.config import TrackDict, profile_edit
 from src.validation import Text, error_lines
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
@@ -54,7 +54,7 @@ def _body[M: BaseModel](model: type[M]) -> M:
         abort(make_response(_invalid(error_lines(e))))
 
 
-def _track(tid: str | None = None) -> dict[str, Any]:
+def _track(tid: str | None = None) -> TrackDict:
     """Resolve the request's track config ([tracks.*] in profile.toml) from
     ?track=<id>, else `tid` (a JSON body's "track"). Unknown ids fall back
     to the default track rather than erroring: a stale localStorage value
