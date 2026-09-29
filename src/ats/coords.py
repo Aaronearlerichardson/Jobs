@@ -16,11 +16,10 @@ store calls it.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import Any, Unpack
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
-from src.rows import CompanyRow, HandleColumn
+from src.rows import BoardHit, CompanyRow, HandleColumn
 from .board import BOARDS
 from .board.spec import Handle
 
@@ -32,7 +31,7 @@ def _handle(ats: str | None) -> tuple[tuple[HandleColumn, ...], str]:
     return h.columns, h.sep
 
 
-def columns(ats: str, slug: str | tuple[Any, ...] | list[Any] | None = None,
+def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = None,
             careers_url: str | None = None, /, **extra: Unpack[CompanyRow]) -> CompanyRow:
     """One board's coordinates as store company columns: a handle spanning
     several columns (its spec's `handle.columns`) fills them from its parts,
@@ -81,7 +80,7 @@ def columns(ats: str, slug: str | tuple[Any, ...] | list[Any] | None = None,
     return out
 
 
-def slug_text(ats: str, slug: str | tuple[Any, ...] | list[Any] | None) -> str | None:
+def slug_text(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None) -> str | None:
     """A detection's handle as one string: a handle spanning several store
     columns (Workday's (tenant, pod, site)) joined with its spec's
     `handle.sep`, the plain slug for everything else, None for none.
@@ -96,7 +95,7 @@ def slug_text(ats: str, slug: str | tuple[Any, ...] | list[Any] | None) -> str |
     return slug or None
 
 
-def board_slug(company: Mapping[str, Any]) -> Any:
+def board_slug(company: BoardHit | CompanyRow) -> Any:
     """The one string that names this board on its own host, independent of
     which coordinate column carries it: the first of its handle's columns
     (Workday's `wd_tenant`), else the ordinary `slug`. '' for a
@@ -150,7 +149,7 @@ def slug_named(company: CompanyRow) -> bool:
             and name_is_own_slug(company.get("name"), board_slug(company)))
 
 
-def from_hit(hit: Mapping[str, Any], **extra: Unpack[CompanyRow]) -> CompanyRow:
+def from_hit(hit: BoardHit | CompanyRow, **extra: Unpack[CompanyRow]) -> CompanyRow:
     """The same, from a resolver's hit dict ({ats, slug, careers_url, ...}).
 
     >>> hit = {"ats": "workday", "slug": ("acme", 5, "Ext"),
@@ -168,7 +167,7 @@ def from_hit(hit: Mapping[str, Any], **extra: Unpack[CompanyRow]) -> CompanyRow:
     return columns(hit["ats"], hit.get("slug"), hit.get("careers_url"), **extra)
 
 
-def board_context(board: Mapping[str, Any]) -> str:
+def board_context(board: BoardHit | CompanyRow) -> str:
     """A board's address, worded for the mission scorer to read when no
     posting could be sampled from it (the caller prefers real titles).
     `board` is a resolver hit or a store row. '' when it has no address at

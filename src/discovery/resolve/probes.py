@@ -17,6 +17,7 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect
 from src.match.locality import NC_RE
 from src.match.names import slug_guesses
+from src.rows import BoardHit
 from .fetchpool import candidate_urls
 from .identity import candidate_pages, foreign_board
 
@@ -148,7 +149,7 @@ def _handle(ats: str, slug: Any) -> Any:
     return cast(Board, board_for(ats)).handle(coords.columns(ats, slug))
 
 
-async def _scan_meta(ats: str, handle: Any, source_url: str) -> dict[str, Any]:
+async def _scan_meta(ats: str, handle: Any, source_url: str) -> BoardHit:
     """probe_scan's answer for `ats`'s board `handle`, found at
     `source_url`: counted through its listing, `validated` when that
     answered."""
@@ -157,7 +158,7 @@ async def _scan_meta(ats: str, handle: Any, source_url: str) -> dict[str, Any]:
             "validated": ok, "source_url": source_url}
 
 
-async def probe_scan(name: str, careers_url: str = "") -> dict[str, Any] | None:
+async def probe_scan(name: str, careers_url: str = "") -> BoardHit | None:
     """
     The board of a SCANNED platform that `name`'s careers pages name
     (identity.candidate_pages, fetched through the per-run memo, each read
@@ -310,7 +311,7 @@ class JsScanProbePool:
 
     @classmethod
     async def _scrape(cls, page: Any, name: str,
-                      careers_url: str) -> tuple[dict[str, Any] | None, str]:
+                      careers_url: str) -> tuple[BoardHit | None, str]:
         """probe's answer from `page`, once it has one."""
         for url in candidate_urls(name, careers_url):
             hit = await cls._scan(page, url)
@@ -324,7 +325,7 @@ class JsScanProbePool:
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 
-    async def probe(self, name: str, careers_url: str = "") -> tuple[dict[str, Any] | None, str]:
+    async def probe(self, name: str, careers_url: str = "") -> tuple[BoardHit | None, str]:
         """
         (meta, outcome): meta is probe_scan()'s shape or None; outcome
         is "hit", "not validated", "no board link", "no browser",
@@ -412,7 +413,7 @@ async def nc_count(ats: str, slug: Any) -> int:
     return await cast(Board, board_for(ats)).local_count(_handle(ats, slug), NC_RE)
 
 
-async def probe_company(name: str, scan: bool = True) -> dict[str, Any] | None:
+async def probe_company(name: str, scan: bool = True) -> BoardHit | None:
     """
     Probe every platform whose spec sets ``guess`` (fast) then, only if
     ``scan``, the SCANNED platforms (probe_scan, the slow careers-page
@@ -420,7 +421,7 @@ async def probe_company(name: str, scan: bool = True) -> dict[str, Any] | None:
     slug collisions and enforces local relevance).
     Returns a hit dict with an ``nc`` count, or None.
     """
-    hit = None
+    hit: BoardHit | None = None
     for slug in slug_guesses(name):
         for ats in (b.name for b in BOARDS.values() if b.spec.guess):
             ok, count = await cast(Board, board_for(ats)).probe(slug)

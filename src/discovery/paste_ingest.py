@@ -25,6 +25,7 @@ from src import store
 from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
+from src.rows import BoardHit
 from .local_sourcing import score_and_upsert
 from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
 from .resolve.board import resolved
@@ -422,7 +423,7 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
 
 async def add_names(names: str | bytes | list[str], use_llm: bool = False,
                     max_workers: int = 6,
-                    include_missions: list[str] | None = None) -> list[dict[str, Any]]:
+                    include_missions: list[str] | None = None) -> list[BoardHit]:
     """Resolve company names to boards and queue the ones that verify.
 
     `names` is the list of names a person confirmed in the review step. A raw
@@ -465,7 +466,7 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
         if not fresh:
             return []
 
-        written: list[dict[str, Any]] = []
+        written: list[BoardHit] = []
         unresolved: list[tuple[str, str | None]] = []
         stalled: list[str] = []
 

@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Iterable
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -42,7 +42,7 @@ from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import CompanyRow
+from src.rows import BoardHit, CompanyRow
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
@@ -54,7 +54,7 @@ from .resolve.websearch_board import websearch_board
 # --------------------------------------------------------------------------- #
 
 
-def _boardless(names: list[str], hits: Iterable[dict[str, Any]],
+def _boardless(names: list[str], hits: Iterable[BoardHit],
                skip: Collection[str] = frozenset()) -> list[str]:
     """The names with no LOCAL board yet, less the name keys in `skip`
     (the roster's working boards, _productive_keys).
@@ -67,7 +67,7 @@ def _boardless(names: list[str], hits: Iterable[dict[str, Any]],
     return [n for n in names if name_key(n) not in have]
 
 
-async def _hit_from_detection(name: str, det: dict[str, Any]) -> dict[str, Any]:
+async def _hit_from_detection(name: str, det: dict[str, Any]) -> BoardHit:
     """A sniff/websearch DETECTION turned into a hit, by asking the board
     how many LOCAL jobs it actually holds.
 
@@ -77,22 +77,24 @@ async def _hit_from_detection(name: str, det: dict[str, Any]) -> dict[str, Any]:
     which handles a multi-column handle, a plain slug and a careers-URL-only
     custom board without a branch per caller.
 
-    The `reason` rides along and is popped by the caller when nc>0: a live
-    board with nothing local, a DEAD board and an unreadable one
-    (resolve.board.read_local) are each a different miss from a name
-    nothing could be found for.
+    A `reason` rides along only when nc == 0: a live board with nothing
+    local, a DEAD board and an unreadable one (resolve.board.read_local)
+    are each a different miss from a name nothing could be found for.
     """
     ats = det["ats"]
     slug = det.get("triple", det.get("slug"))
     jobs, total, reason = await read_local(coords.columns(ats, slug, det.get("careers_url")))
-    return {"name": name, "ats": ats, "slug": slug, "count": len(jobs) or total,
-            "nc": len(jobs), "careers_url": det.get("careers_url"), "reason": reason}
+    hit: BoardHit = {"name": name, "ats": ats, "slug": slug, "count": len(jobs) or total,
+                     "nc": len(jobs), "careers_url": det.get("careers_url")}
+    if reason:
+        hit["reason"] = reason
+    return hit
 
 
 async def _resolve_pass(todo: list[str],
-                        resolve_one: Callable[[str], Awaitable[dict[str, Any] | None]],
-                        tag: str, hits: list[dict[str, Any]],
-                        misses: list[dict[str, Any]], max_workers: int) -> None:
+                        resolve_one: Callable[[str], Awaitable[BoardHit | None]],
+                        tag: str, hits: list[BoardHit],
+                        misses: list[BoardHit], max_workers: int) -> None:
     """Run one fallback resolver over `todo`, appending to `hits` (nc>0) or
     `misses` (anything else), under the stall watchdog. A name whose
     resolution raises is reported and becomes a `fetch-error:<Exception>`
@@ -111,7 +113,6 @@ async def _resolve_pass(todo: list[str],
             on_abandon=lambda n: misses.append({"name": n,
                                                 "reason": "fetch-error:stalled"})):
         if h and h.get("nc"):
-            h.pop("reason", None)
             hits.append(h)
             # Widths chosen so both tags print one aligned table.
             print(f"    {tag} {h['name']:{35 - len(tag)}} {h['ats']:14} "
@@ -120,7 +121,7 @@ async def _resolve_pass(todo: list[str],
             misses.append(h)
 
 
-async def _probe_pass(names: list[str], max_workers: int) -> list[dict[str, Any]]:
+async def _probe_pass(names: list[str], max_workers: int) -> list[BoardHit]:
     """Name-guessed slug probes over every candidate. The cheap first pass:
     no page fetched, just the platforms' own APIs."""
     n_scan = sum(1 for n in names if name_key(n) in _MAJORS_KEYS)
@@ -134,7 +135,7 @@ async def _probe_pass(names: list[str], max_workers: int) -> list[dict[str, Any]
         "probe", max_workers) if h]
 
 
-async def _js_scan_pass(hits: list[dict[str, Any]], max_workers: int,
+async def _js_scan_pass(hits: list[BoardHit], max_workers: int,
                         skip: Collection[str] = frozenset()) -> None:
     """Re-probe the MAJORS that got no board, with a headless browser
     (probes.JsScanProbePool).
@@ -164,7 +165,7 @@ async def _js_scan_pass(hits: list[dict[str, Any]], max_workers: int,
           f"({k} parallel page(s))...")
     async with JsScanProbePool(k) as pool:
 
-        async def _js_one(name: str) -> dict[str, Any]:
+        async def _js_one(name: str) -> BoardHit:
             t0 = time.monotonic()
             meta, outcome = await pool.probe(name)
             if outcome == "hit" and meta is not None:
@@ -191,8 +192,8 @@ async def _js_scan_pass(hits: list[dict[str, Any]], max_workers: int,
                       f"{h['elapsed']:.0f}s")
 
 
-async def _sniff_pass(names: list[str], hits: list[dict[str, Any]],
-                      misses: list[dict[str, Any]], max_workers: int) -> None:
+async def _sniff_pass(names: list[str], hits: list[BoardHit],
+                      misses: list[BoardHit], max_workers: int) -> None:
     """Fetch each still-boardless name's careers page and read the ATS +
     exact slug off it. The main recall lever over the directory: it covers
     every hosted platform and finds slugs the name-guesser cannot."""
@@ -201,7 +202,7 @@ async def _sniff_pass(names: list[str], hits: list[dict[str, Any]],
     todo = _boardless(names, hits)
     print(f"  sniffing careers pages for {len(todo)} name(s) without a board...")
 
-    async def _sniff_one(n: str) -> dict[str, Any]:
+    async def _sniff_one(n: str) -> BoardHit:
         s = await sniff_ats(n)
         return await _hit_from_detection(n, s) if s else {
             "name": n, "reason": "no-board-found"}
@@ -209,8 +210,8 @@ async def _sniff_pass(names: list[str], hits: list[dict[str, Any]],
     await _resolve_pass(todo, _sniff_one, "[SNIFF]", hits, misses, max_workers)
 
 
-async def _websearch_pass(names: list[str], hits: list[dict[str, Any]],
-                          misses: list[dict[str, Any]], max_workers: int,
+async def _websearch_pass(names: list[str], hits: list[BoardHit],
+                          misses: list[BoardHit], max_workers: int,
                           cap: int | None, retry_days: int) -> None:
     """Search the web for a careers page, for names probe+sniff could not
     board. A measured 60-company gap study found 5 of 6 eventual
@@ -235,7 +236,7 @@ async def _websearch_pass(names: list[str], hits: list[dict[str, Any]],
         return
     t0 = time.time()
 
-    async def _websearch_one(n: str) -> dict[str, Any]:
+    async def _websearch_one(n: str) -> BoardHit:
         w = await websearch_board(n)
         return await _hit_from_detection(n, w) if w else {
             "name": n, "reason": "no-board-found"}
@@ -246,10 +247,9 @@ async def _websearch_pass(names: list[str], hits: list[dict[str, Any]],
           f"{len(todo)} name(s)")
 
 
-def _reduce_hits(names: list[str], hits: list[dict[str, Any]],
-                 pass_misses: list[dict[str, Any]]
-                 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]],
-                            list[dict[str, Any]], list[dict[str, Any]]]:
+def _reduce_hits(names: list[str], hits: list[BoardHit], pass_misses: list[BoardHit]
+                 ) -> tuple[list[BoardHit], list[BoardHit],
+                            list[BoardHit], list[BoardHit]]:
     """Everything the passes found, accounted for exactly once.
 
     Returns (hits, confirmed, dropped, misses). Every candidate that is
@@ -268,7 +268,7 @@ def _reduce_hits(names: list[str], hits: list[dict[str, Any]],
 
     # De-dup by resolved board (same slug/triple reached via different
     # names, e.g. "BioAgilytix" vs "BioAgilytix Labs"); keep the shorter.
-    by_board: dict[tuple[Any, str], dict[str, Any]] = {}
+    by_board: dict[tuple[Any, str], BoardHit] = {}
     for h in hits:
         key = (h["ats"], str(h["slug"]))
         if key not in by_board or len(h["name"]) < len(by_board[key]["name"]):
@@ -282,7 +282,7 @@ def _reduce_hits(names: list[str], hits: list[dict[str, Any]],
                        key=lambda h: h["nc"], reverse=True)
     dropped = sorted([h for h in hits if h["nc"] == 0],
                      key=lambda h: h["name"].lower())
-    misses = {}
+    misses: dict[str, BoardHit] = {}
     for h in dropped:
         misses[h["name"]] = {**h, "reason": "no-local-jobs"}
     for h in pass_misses:
@@ -296,9 +296,8 @@ def _reduce_hits(names: list[str], hits: list[dict[str, Any]],
                                             key=lambda m: m["name"].lower())
 
 
-def _report_discovery(hits: list[dict[str, Any]], confirmed: list[dict[str, Any]],
-                      dropped: list[dict[str, Any]],
-                      misses: list[dict[str, Any]]) -> None:
+def _report_discovery(hits: list[BoardHit], confirmed: list[BoardHit],
+                      dropped: list[BoardHit], misses: list[BoardHit]) -> None:
     """The pass's own scoreboard, printed for a human reading the log."""
     print(f"\n  live boards: {len(hits)}  |  NC-local confirmed: {len(confirmed)}  "
           f"|  dropped (no NC jobs): {len(dropped)}  "
@@ -317,7 +316,7 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
                          js_majors: bool = True, sniff: bool = True,
                          websearch: bool = True, websearch_cap: int | None = None,
                          websearch_retry_days: int = 14, tracked: Collection[str] = frozenset()
-                         ) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]]]:
+                         ) -> tuple[list[BoardHit], list[str], list[BoardHit]]:
     """
     Gather names + probe each. Returns (confirmed, checked, misses) where
     confirmed is a list of NC-local hit dicts and misses is one dict per
@@ -350,7 +349,7 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
         add_names, resolve_leads) work on tens of names and do classify.
     """
     names = await gather_names(extra_names)
-    misses: list[dict[str, Any]] = []
+    misses: list[BoardHit] = []
     hits = await _probe_pass(names, max_workers)
     todo = [n for n in names if name_key(n) not in tracked]
     if len(todo) < len(names):
@@ -373,7 +372,7 @@ async def discover_local(extra_names: list[str] | None = None, max_workers: int 
 #  Sampling and store writes (populate / add_board / resolve_leads)           #
 
 
-async def _sample_titles(hit: Mapping[str, Any], n: int = 6) -> list[str]:
+async def _sample_titles(hit: BoardHit | CompanyRow, n: int = 6) -> list[str]:
     """A few job titles from a confirmed board, for mission context. `hit`
     is a resolver hit or a store row.
 
@@ -387,11 +386,11 @@ async def _sample_titles(hit: Mapping[str, Any], n: int = 6) -> list[str]:
         mission-scored with no titles at all.
     """
     # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
-    board = cast(CompanyRow, hit) if "wd_tenant" in hit else coords.from_hit(hit)
+    board = hit if "wd_tenant" in hit else coords.from_hit(hit)
     return await company_fetch.sample_titles(board, n)
 
 
-async def mission_context(board: Mapping[str, Any]) -> str:
+async def mission_context(board: BoardHit | CompanyRow) -> str:
     """The free-text context `src.claude.score_company_mission` is given for
     a resolved board or roster row (a hit or a store row): a few live posting
     titles, else the board's own address (coords.board_context) -- '' only
@@ -459,14 +458,14 @@ def _productive_keys(conn: sqlite3.Connection) -> frozenset[str]:
         f"SELECT name FROM companies WHERE {_PRODUCTIVE}", (_since_productive(),)))
 
 
-async def _score_hit(hit: dict[str, Any]) -> tuple[str | None, float | None, str]:
+async def _score_hit(hit: BoardHit) -> tuple[str | None, float | None, str]:
     """(tier, score, reason) for a resolved board: its mission_context as
     the domain context for src.claude.score_company_mission."""
     from src.claude.api import score_company_mission
     return await score_company_mission(hit["name"], await mission_context(hit))
 
 
-async def score_and_upsert(db: store.Writer, hit: dict[str, Any], source: str,
+async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
                            include_missions: list[str] | None = None,
                            tags: str | None = None,
                            scored: tuple[str | None, float | None, str] | None = None,
@@ -536,7 +535,7 @@ async def score_and_upsert(db: store.Writer, hit: dict[str, Any], source: str,
                         source, include_missions, tags, extra)
 
 
-def _settled_board(conn: sqlite3.Connection, hit: dict[str, Any]
+def _settled_board(conn: sqlite3.Connection, hit: BoardHit
                    ) -> tuple[bool, tuple[CompanyRow, int, bool] | None]:
     """(True, score_and_upsert's answer) when the roster already settles
     `hit` without a score (a duplicate board, a productive row kept), else
@@ -574,7 +573,7 @@ def _settled_board(conn: sqlite3.Connection, hit: dict[str, Any]
     return True, None
 
 
-def _write_candidate(conn: sqlite3.Connection, hit: dict[str, Any],
+def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
                      scored: tuple[str | None, float | None, str], source: str,
                      include_missions: list[str] | None, tags: str | None,
                      extra: CompanyRow | None) -> tuple[CompanyRow, int, bool]:
@@ -893,7 +892,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
     return n
 
 
-def _miss_row(m: dict[str, Any]) -> dict[str, Any]:
+def _miss_row(m: BoardHit) -> dict[str, Any]:
     """The record_miss(**fields) payload for a discover_local miss dict:
     whatever board coordinates the attempt DID establish, so a retry starts
     from them instead of re-deriving them.

@@ -23,6 +23,7 @@ from src import config
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.signatures import detect, pack
+from src.rows import BoardHit
 from .fetchpool import ROOT_PATTERNS
 from .identity import (candidate_pages, candidate_responses, corroborated,
                        foreign_board)
@@ -114,11 +115,11 @@ async def _confirmed(ats: str, slug: Any, page_url: str,
     return tried[key]
 
 
-async def sniff_careers_ats(name: str, careers_url: str = "") -> dict[str, Any] | None:
+async def sniff_careers_ats(name: str, careers_url: str = "") -> BoardHit | None:
     """Pipeline style: prefer coordinates we can CONFIRM with a live count
     (`_confirmed`); otherwise surface the highest-priority detection as a
     lead."""
-    lead = None  # first (highest-priority) unconfirmable detection seen
+    lead: BoardHit | None = None  # first (highest-priority) unconfirmable detection seen
     tried: dict[Any, int | None] = {}
     for r in await candidate_pages(name, careers_url):
         hit = await asyncio.to_thread(lambda: detect(r.text, r.url))

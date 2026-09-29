@@ -36,7 +36,7 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
-from src.rows import CompanyRow
+from src.rows import BoardHit, CompanyRow
 from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import websearch_board
@@ -121,7 +121,7 @@ async def _url_board(name: str, careers_url: str) -> tuple[str, Any, str] | None
 
 
 async def resolve_board_sniff_first(name: str, careers_url: str = "",
-                                    websearch: bool = True) -> dict[str, Any] | None:
+                                    websearch: bool = True) -> BoardHit | None:
     """Resolve a company NAME -> crawlable board, careers-page SNIFF FIRST,
     slug-probe only as a fallback, and VALIDATE every hit with a live fetch.
 
@@ -148,13 +148,13 @@ async def resolve_board_sniff_first(name: str, careers_url: str = "",
 
 
 async def _resolve(name: str, careers_url: str = "", websearch: bool = True
-                   ) -> tuple[dict[str, Any] | None, str | None]:
+                   ) -> tuple[BoardHit | None, str | None]:
     """resolve_board_sniff_first's hit, and the ats of the first board it
     detected but could not read (`read_board`), else None."""
     from .sniffer import sniff_ats
     unread = []
 
-    async def _mk(ats: str, slug: Any, curl: str | None, via: str) -> dict[str, Any] | None:
+    async def _mk(ats: str, slug: Any, curl: str | None, via: str) -> BoardHit | None:
         counts = await _validate_board(coords.columns(ats, slug, curl))
         if counts is None:
             unread.append(ats)
@@ -165,7 +165,7 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
         return {"name": name, "ats": ats, "slug": slug, "careers_url": curl,
                 "count": total, "nc": nc, "via": via}
 
-    def _out(hit: dict[str, Any] | None) -> tuple[dict[str, Any] | None, str | None]:
+    def _out(hit: BoardHit | None) -> tuple[BoardHit | None, str | None]:
         return hit, (unread[0] if unread and not hit else None)
 
     # 0) A careers_url on a vendor's host names its board outright; the
@@ -261,7 +261,7 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
 
 
 async def resolve_or_miss(name: str, careers_url: str = ""
-                          ) -> tuple[dict[str, Any] | None, str | None]:
+                          ) -> tuple[BoardHit | None, str | None]:
     """Resolve a company NAME to a crawlable board, or say why it failed.
 
     Returns ``(hit, reason)``. A hit with no reason is usable; a reason with
@@ -290,7 +290,7 @@ async def resolve_or_miss(name: str, careers_url: str = ""
 
 
 async def resolved(name: str, careers_url: str = ""
-                   ) -> tuple[dict[str, Any] | None, str | None]:
+                   ) -> tuple[BoardHit | None, str | None]:
     """`resolve_or_miss`'s (hit, reason), with a RAISE reported and turned
     into a miss reason of the same shape.
 

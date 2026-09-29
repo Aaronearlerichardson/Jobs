@@ -16,7 +16,7 @@ from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.rows import CompanyRow
+from src.rows import BoardHit, CompanyRow
 from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
                                  track_writer)
@@ -227,7 +227,7 @@ async def add_manual_job(url: str, title: str, company: str, location: str,
         # could register/crawl one of them and file the job under the other.
         existing = await db.run(lambda conn: store.get_company(
             conn, store.company_id_by_name(conn, name)))
-        board: dict[str, Any] | None = None
+        board: BoardHit | None = None
         miss: str | None = None
         if not existing or not existing.get("ats"):
             print(f"  resolving board for {name!r}...")

@@ -24,7 +24,7 @@ from src.ats.board import board_for
 from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
-from src.rows import CompanyRow
+from src.rows import BoardHit, CompanyRow
 
 if TYPE_CHECKING:
     import sqlite3
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from .pipeline import Candidate
 
 
-def _candidate_hit(c: Candidate) -> dict[str, Any] | None:
+def _candidate_hit(c: Candidate) -> BoardHit | None:
     """A confirmed Candidate as the resolver-shaped hit dict the store write
     path takes, or None when its coordinates are malformed. A handle
     spanning several store columns ('t|p|s', Workday's) goes back to the
@@ -58,9 +58,9 @@ def _candidate_hit(c: Candidate) -> dict[str, Any] | None:
                      for p, k in zip(parts, kinds))
         if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in slug):
             return None
-    hit = {"name": c.name, "ats": c.ats, "slug": slug,
-           "careers_url": c.careers_url or None,
-           "count": c.job_count, "nc": c.nc}
+    hit: BoardHit = {"name": c.name, "ats": c.ats, "slug": slug,
+                     "careers_url": c.careers_url or None,
+                     "count": c.job_count, "nc": c.nc}
     # The same coordinates score_and_upsert will write, asked of the same
     # function company_by_board dedups on: no board, no row.
     return hit if store.board_key(coords.from_hit(hit)) else None

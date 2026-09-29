@@ -1,4 +1,5 @@
-"""Typed shapes for the rows the store is HANDED (jobs) and hands back (companies).
+"""Typed shapes for the rows the store is HANDED (jobs) and hands back (companies),
+and for the resolver hit that becomes a company row.
 
 A misspelled key in a row headed for upsert_job used to store nothing and
 say nothing (`j.get("resume_fit_scor")` reads as None). These TypedDicts let
@@ -11,7 +12,7 @@ import it, so it imports nothing of theirs.
 
 from __future__ import annotations
 
-from typing import Literal, TypedDict
+from typing import Any, Literal, TypedDict, final
 
 
 class FitColumns(TypedDict, total=False):
@@ -75,6 +76,24 @@ class CompanyRow(TypedDict, total=False):
     last_nonempty_at: str | None
     next_crawl_at: str | None
     last_harvested_at: str | None
+
+
+# `final`, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.
+@final
+class BoardHit(TypedDict, total=False):
+    """A resolver's answer for one board: its coordinates and what reading it found."""
+    name: str
+    ats: str
+    slug: str | tuple[Any, ...] | None      # a tuple where the handle spans columns
+    careers_url: str | None
+    count: int                              # postings on the board
+    nc: int                                 # of them, in your [locality]
+    via: str                                # how it was found (sniff, probe, ...)
+    reason: str                             # the miss code, when it is a miss
+    source_url: str                         # the page that named it
+    validated: bool
+    confirmed: bool
+    elapsed: float
 
 
 #: The companies columns a board's handle can be spelled in (`handle.columns`
