@@ -595,6 +595,18 @@ class TestRekeyJobs:
             "cross-tenant": 0, "unresolvable": 0}
         assert self._ids(db) == ["phenom_careers_a_org_9"]
 
+    def test_several_duplicates_of_an_already_rekeyed_row_merge_into_one(self, db):
+        # A harvest already stored the posting under its new id, and two
+        # older rows still name it. merge_jobs keeps the best-ranked row, not
+        # the holder, so merging the duplicates one at a time deleted the
+        # holder under the second merge and renamed onto a taken id.
+        a = store.upsert_company(db, {"name": "A", "ats": "phenom", "slug": "careers.a.org"})
+        for job_id in ("x0", "phenom_careers_a_org_3", "phenom_3"):
+            self._job(db, a, job_id, self.A + "3/", "U")
+        db.commit()
+        assert rekey.rekey_jobs("phenom", commit=True, conn=db)["merge"] == 2
+        assert self._ids(db) == ["phenom_careers_a_org_3"]
+
     def test_apply_rekeys_and_merges_one_posting_into_one_row(self, db, rows):
         rekey.rekey_jobs("phenom", commit=True, conn=db)
         assert self._ids(db) == sorted([

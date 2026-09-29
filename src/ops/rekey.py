@@ -87,15 +87,20 @@ def rekey_jobs(ats: str, commit: bool = False, t: dict[str, Any] | None = None,
             (json.dumps([[i, n or None] for i, n in new_ids.items()]),)).fetchall()
         for v in verdicts:
             buckets[v["kind"]].append((v["job_id"], new_ids[v["id"]]))
-        plan = [(v["kind"], v["id"], v["holder"], new_ids[v["id"]])
-                for v in verdicts if v["kind"] in ("rekey", "merge")]
+        # A holder can have several rows merging into it, and merge_jobs may
+        # delete the holder itself (its survivor is the best-ranked row, not
+        # the holder), so each holder's rows go through ONE merge.
+        merges: dict[int, list[int]] = {}
+        for v in verdicts:
+            if v["kind"] == "merge":
+                merges.setdefault(v["holder"], []).append(v["id"])
         if commit:
             with store.batch(conn):
-                for kind, row_id, holder, new_id in plan:
-                    if kind == "rekey":
-                        conn.execute("UPDATE jobs SET job_id=? WHERE id=?", (new_id, row_id))
-                    else:
-                        store.merge_jobs(conn, [holder, row_id], cast(str, new_id))
+                conn.executemany("UPDATE jobs SET job_id=? WHERE id=?",
+                                 [(new_ids[v["id"]], v["id"]) for v in verdicts
+                                  if v["kind"] == "rekey"])
+                for holder, members in merges.items():
+                    store.merge_jobs(conn, [holder, *members], cast(str, new_ids[members[0]]))
     print(f"  {ats}: {len(rows)} stored row(s) under {len(companies)} compan(ies)")
     for b in rekey_buckets:
         print(f"    {b:13} {len(buckets[b])}")
