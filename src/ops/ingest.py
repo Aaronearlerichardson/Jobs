@@ -5,7 +5,7 @@ crawl that pulls the added company's other postings."""
 from __future__ import annotations
 
 import sqlite3
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 from src.config import TrackDict
 from src import store
@@ -18,17 +18,25 @@ from src.net.http import fetch_failed
 from src.net.parallel import fan_out
 from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
-                                 group_by_company, track_writer)
+                                 track_writer)
 
 
-async def _hydrate_missing_descriptions(db: store.Writer, jobs: list[dict[str, Any]]) -> None:
+class _Admitted(NamedTuple):
+    """A job that passed ingest's gates, and the roster company id its name
+    resolves to (None when it is not in the roster)."""
+    job: dict[str, Any]
+    company_id: int | None
+
+
+async def _hydrate_missing_descriptions(db: store.Writer, kept: list[_Admitted]) -> None:
     """Backfill empty descriptions on jobs linked to a company with a
     resolvable board, batched so each board is fetched once no matter how
     many of its jobs need hydrating."""
-    need = [j for j in jobs if j.get("_company_id") and not (j.get("description") or "").strip()]
-    if not need:
-        return
-    for cid, js in group_by_company(need, "_company_id").items():
+    by_company: dict[int, list[dict[str, Any]]] = {}
+    for a in kept:
+        if a.company_id and not (a.job.get("description") or "").strip():
+            by_company.setdefault(a.company_id, []).append(a.job)
+    for cid, js in by_company.items():
         company = await db.run(store.get_company, cid)
         if not company or not company.get("ats"):
             continue
@@ -46,12 +54,11 @@ async def _hydrate_missing_descriptions(db: store.Writer, jobs: list[dict[str, A
 
 
 def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str, curated: bool,
-              t: TrackDict) -> tuple[list[dict[str, Any]], int]:
+              t: TrackDict) -> tuple[list[_Admitted], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
-    gates, each kept job carrying its company link (`_company_id`); a job
-    already stored is touched instead."""
+    gates; a job already stored is touched instead."""
     import hashlib
-    kept: list[dict[str, Any]] = []
+    kept: list[_Admitted] = []
     n_nonlocal = 0
     for j in jobs:
         if not j.get("id"):
@@ -89,8 +96,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
             # a closed row and reset its grace clock (no re-score).
             store.touch_job(conn, j["id"])
         else:
-            j["_company_id"] = company_id
-            kept.append(j)
+            kept.append(_Admitted(j, company_id))
     return kept, n_nonlocal
 
 
@@ -113,8 +119,8 @@ async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed
 
         scored = 0
         async for row in fan_out(
-                kept, lambda j: _scored_row(j, company_id=j.get("_company_id"),
-                                            company_name=j.get("company"),
+                kept, lambda a: _scored_row(a.job, company_id=a.company_id,
+                                            company_name=a.job.get("company"),
                                             track=t["track"], status="open"),
                 "ingest scoring", max_workers):
             try:

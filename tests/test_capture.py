@@ -13,6 +13,7 @@ from conftest import answer, fake_response
 import src.claude.fit as fit
 import src.store as store
 from src import tags
+from src.ops import ingest
 import src.ops.maintenance as ops
 from src.crawl.page_capture import parse_page
 
@@ -200,3 +201,36 @@ class TestAttribution:
                          capture=True) is None
         assert len(store.get_companies(roster, active_only=False)) == 1
         assert store.crawlable_companies(roster) == []
+
+
+async def test_ingest_links_jobs_to_their_company_and_hydrates_per_board(
+        roster, local_addr, monkeypatch):
+    """A new job is filed under the roster company its name resolves to, and
+    that link picks the bodyless jobs hydrated from a board: one fetch per
+    linked company, none for a company not in the roster."""
+    cid = store.upsert_company(roster, {"name": "Acme Dx", "ats": "greenhouse",
+                                        "slug": "acmedx"})
+    fetched = []
+
+    async def index(company):
+        fetched.append(company["name"])
+        return {}
+
+    monkeypatch.setattr(ingest, "board_index", index)
+    monkeypatch.setattr(ingest, "board_match",
+                        answer({"description": "from the board", "url": "https://acmedx.test/j"}))
+    jobs = [{"title": title, "company": company, "url": "", "location": local_addr, **extra}
+            for title, company, extra in [
+                ("Data Engineer", "Acme Dx", {}), ("Software Engineer", "Acme Dx", {}),
+                ("Analyst", "Acme Dx", {"description": "already here"}),
+                ("Data Engineer", "Stranger Labs", {})]]
+
+    assert await ingest.ingest_external_jobs(jobs, source="test", curated=True) == 4
+
+    assert fetched == ["Acme Dx"]
+    assert {(r["company_name"], r["title"]): (r["company_id"], r["description"] or "")
+            for r in roster.execute("SELECT * FROM jobs")} == {
+        ("Acme Dx", "Data Engineer"): (cid, "from the board"),
+        ("Acme Dx", "Software Engineer"): (cid, "from the board"),
+        ("Acme Dx", "Analyst"): (cid, "already here"),
+        ("Stranger Labs", "Data Engineer"): (None, "")}

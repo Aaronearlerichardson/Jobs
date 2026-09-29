@@ -168,6 +168,21 @@ def _keyword_focus(t: TrackDict) -> Iterator[None]:
 #  Gate 1: mission, once per company                                          #
 # --------------------------------------------------------------------------- #
 
+def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
+                   ) -> Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]:
+    """`scorer` that answers a company name once and reads as no verdict
+    (None, None, None) after: a failed attempt counts, and both of a pass's
+    gate phases share it. Names are the roster's unique key."""
+    asked: set[str] = set()
+
+    async def once(name: str, context: str) -> tuple[Any, Any, Any]:
+        if name in asked:
+            return None, None, None
+        asked.add(name)
+        return await scorer(name, context)
+    return once
+
+
 async def ensure_mission(db: store.Writer, company: dict[str, Any],
                          titles: Iterable[str | None] = (),
                          scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission
@@ -184,9 +199,6 @@ async def ensure_mission(db: store.Writer, company: dict[str, Any],
         return tier, score
     if config.is_multi_division(company.get("name")):
         return None, None                       # the gate ignores it anyway
-    if company.get("_mission_tried"):
-        return None, None                       # one attempt per pass
-    company["_mission_tried"] = True
     try:
         context = (" | ".join(t for t in titles if t)
                    or coords.board_context(company))
@@ -804,6 +816,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[TrackDict] | N
         # either, so this cast matches _by_company's real contract rather
         # than adding new None-handling behaviour here.
         companies = cast(dict[Any, dict[str, Any]], companies_or_none)
+        mission_scorer = _once_per_pass(mission_scorer)
         decided, survivors = await _free_gates(db, companies, groups, tracks,
                                                mission_scorer, cutoff)
         n_free = len(decided)

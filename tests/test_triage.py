@@ -260,6 +260,34 @@ async def test_mission_gate_scores_a_company_once_and_caches_it(tmp_path, tracks
     assert _row(conn, "c")["triage_status"] == "mission"
 
 
+@pytest.mark.parametrize("verdict", ["raises", "unavailable"])
+async def test_an_unanswered_mission_score_is_not_retried_within_a_pass(
+        tmp_path, tracks, stubs, local_addr, verdict):
+    """Gate 1 judges a company in the free-gate phase and again once its
+    survivors have bodies: one attempt covers both, whether the scorer raised
+    or had no verdict. The next pass asks afresh."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Unknown Co")
+    asked = []
+
+    async def scorer(name, context=""):
+        asked.append(name)
+        if verdict == "raises":
+            raise RuntimeError("no key")
+        return None, None, None
+
+    stubs["mission_fn"] = scorer
+    _harvested(conn, c, "a", "Data Engineer", local_addr)
+    await _run(db, tracks, stubs)
+    assert _row(conn, "a")["triage_status"] == "ok", "unknown mission never drops"
+    assert stubs["hydrate"] == ["a"], "the row went on to its body gates"
+    assert asked == ["Unknown Co"]
+    _harvested(conn, c, "b", "Data Engineer", local_addr)
+    await _run(db, tracks, stubs)
+    assert asked == ["Unknown Co", "Unknown Co"]
+
+
 async def test_multi_division_company_waits_for_the_body(tmp_path, tracks, stubs,
                                                          local_addr, monkeypatch):
     from src import config
