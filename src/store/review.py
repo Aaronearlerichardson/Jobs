@@ -20,7 +20,7 @@ from typing import Any
 
 from src import config
 from src import tags
-from .schema import _commit, connect  # noqa: F401  (connect: the doctests open stores)
+from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
 
 
 # --------------------------------------------------------------------------- #
@@ -38,6 +38,7 @@ from .schema import _commit, connect  # noqa: F401  (connect: the doctests open 
 # until a person confirms or rejects it.
 
 
+@sql_function("name_key", 1)
 def _name_key(name: str | None) -> str:
     """Normalized comparison key for a company name: [a-z0-9] only.
 

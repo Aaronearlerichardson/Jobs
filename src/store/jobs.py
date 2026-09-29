@@ -14,10 +14,13 @@ Never imports store/__init__ at load time (that module imports this one).
 
 from __future__ import annotations
 
+import contextvars
+import functools
+import json
 import math
 import re
 import sqlite3
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -26,9 +29,10 @@ from src import tags
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
-                     connect, dedup_groups, sql)
+                     connect, dedup_groups, sql, sql_function)
 
 
+@sql_function("combined_score", 2)
 def combined_score(fit: float | None, mission: float | None) -> float | None:
     """Geometric mean sqrt(fit * mission) of the resume-fit and company
     mission scores (both 0..1).
@@ -501,6 +505,7 @@ def upsert_job(conn: sqlite3.Connection, j: dict[str, Any], keep_location: bool 
 #  Job status sync, score columns, ranking                                     #
 # --------------------------------------------------------------------------- #
 
+@sql_function("norm_title", 1)
 def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
 
@@ -688,7 +693,7 @@ def retire_stopped(conn: sqlite3.Connection, now: datetime | None = None) -> lis
     >>> retire_stopped(conn), retire_stopped(conn)
     ([('seen', 1)], [])
     """
-    # Deferred, like _collapse_key's reach into review.py (see the module doc).
+    # Deferred, like companies.py's own reach into review.py (see the module doc).
     from .companies import harvestable_companies
     ids = [c["id"] for c in harvestable_companies(conn)
            if config.offmission_inactive(c) == "stopped"]
@@ -800,86 +805,100 @@ def remote_admitted(row: dict[str, Any], remote_mission_floor: float | None) -> 
     return mission is not None and mission >= remote_mission_floor
 
 
-def _collapse_key(r: dict[str, Any]) -> tuple[Any, str]:
-    """Group-by key for 'same opening at the same employer' in
-    ranked_jobs(collapse=True): (company key, normalised title), from
-    _norm_title and review._name_key rather than a second normaliser of
-    either.
+@sql_function("effective_mission", 2)
+def _effective_mission(company_name: str | None, mission: float | None) -> float | None:
+    """The mission score ranking uses for a job at `company_name`.
 
-    `company_id` is authoritative when a row has one. Rows with none —
-    LinkedIn captures, jsonld sweep hits, manual --add (see
-    sync_job_statuses) — fall back to the name key, and rows with neither
-    key off their own job_id, which never repeats, so a nameless row never
-    collides with every other nameless row:
+    A conglomerate's own mission score is ~0.05 (off-mission overall), but a
+    job here already passed the health keyword filter at crawl time -- so
+    rank it at the keyword-vetted floor, not the company's score, or its
+    combined rank would be sunk unfairly.
 
-    >>> _collapse_key({"company_id": 5, "company_name": "Acme",
-    ...                "title": "Data Engineer", "job_id": "x"})
-    (5, 'data engineer')
-    >>> _collapse_key({"company_id": None, "company_name": "Acme Inc.",
-    ...                "title": "Data  Engineer", "job_id": "x"})
-    ('name:acmeinc', 'data engineer')
-    >>> _collapse_key({"company_id": None, "company_name": "",
-    ...                "title": "Data Engineer", "job_id": "j1"})
-    ('job:j1', 'data engineer')
-
-    Notes:
-        4 of 119,411 rows in the 2026-09-17 live store had no company_id,
-        and none of them collapse either way.
+    >>> _effective_mission("No Such Conglomerate", 0.3)
+    0.3
+    >>> _effective_mission("No Such Conglomerate", None) is None
+    True
     """
-    # Deferred, like companies.py's own reach into review.py, so neither
-    # module depends on the other at load time (see review.py's header).
-    from .review import _name_key
-    cid = r.get("company_id")
-    company_key: Any
-    if cid is not None:
-        company_key = cid
-    else:
-        name = _name_key(r.get("company_name"))
-        company_key = f"name:{name}" if name else f"job:{r.get('job_id')}"
-    return (company_key, _norm_title(r.get("title")))
+    if config.is_multi_division(company_name):
+        return max(mission or 0.0, config.MULTI_DIVISION_MISSION_FLOOR)
+    return mission
 
 
-def _collapse_same_opening(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Collapse `rows` (already ranked best-first) to one row per
-    (company, normalised title) group: the survivor is the FIRST member of
-    each group, i.e. the best-ranked one, since `rows` arrives pre-sorted.
-    The survivor is stamped with `dup_count` (the group's total size,
-    including itself) and `dup_job_ids` / `dup_urls` (the OTHER members'
-    ids and urls, best-next-first) so a caller can say "(N similar
-    postings)" and link them. Nothing is deleted: this only reshapes what
-    one ranked_jobs() call returns — see dedup_jobs for the store-level
-    collapse of genuine duplicate rows, which this is not.
+# The verdict function of the `location_re` the running ranked_jobs query
+# filters with, memoized for that query (a store repeats locations ~4x: 30,823
+# distinct over 119,411 rows). Not a compiled regex -- locality.NC_RE is a
+# segment-aware matcher -- so SQL cannot be handed a pattern; it calls back
+# into it instead. One fixed SQL function reads it (redefining a function per
+# call fails while another cursor is open on the connection), and it lives in
+# a ContextVar so concurrent callers on other threads or tasks never see it.
+_LOCATION_VERDICT: contextvars.ContextVar[Callable[[str | None], bool]] = (
+    contextvars.ContextVar("location_verdict"))
 
-    >>> best = {"job_id": "b", "company_id": 1, "company_name": "Acme",
-    ...         "title": "Data Engineer", "url": "u/b"}
-    >>> worse = {"job_id": "w", "company_id": 1, "company_name": "Acme",
-    ...          "title": "data engineer", "url": "u/w"}
-    >>> other = {"job_id": "o", "company_id": 2, "company_name": "Beta",
-    ...          "title": "Data Engineer", "url": "u/o"}
-    >>> out = _collapse_same_opening([best, worse, other])
-    >>> [r["job_id"] for r in out]
-    ['b', 'o']
-    >>> out[0]["dup_count"], out[0]["dup_job_ids"], out[0]["dup_urls"]
-    (2, ('w',), ('u/w',))
-    >>> out[1]["dup_count"]
-    1
-    """
-    groups: dict[tuple[Any, str], list[dict[str, Any]]] = {}
-    order: list[tuple[Any, str]] = []
-    for r in rows:
-        key = _collapse_key(r)
-        if key not in groups:
-            groups[key] = []
-            order.append(key)
-        groups[key].append(r)
-    out: list[dict[str, Any]] = []
-    for key in order:
-        survivor, *losers = groups[key]
-        survivor["dup_count"] = len(losers) + 1
-        survivor["dup_job_ids"] = tuple(m.get("job_id") for m in losers)
-        survivor["dup_urls"] = tuple(m.get("url") for m in losers)
-        out.append(survivor)
-    return out
+
+@sql_function("location_ok", 1)
+def _location_ok(text: str | None) -> bool:
+    """True when the running query's location matcher accepts `text`."""
+    return _LOCATION_VERDICT.get()(text)
+
+
+# ranked_jobs' query, in layers over NARROW rows: a job's description is
+# kilobytes, and sorting/windowing 40k of them dragged every body through the
+# sorter. `pool` is every row that could still surface, with its company's
+# mission; `scored` adds the combined score and applies the mission floor;
+# `ranked` numbers each opening's rows best-first and, over the WHOLE group,
+# counts them and lists their ids and urls in that same order (the survivor,
+# row 1, leads both lists); `picked` is the survivors, in rank order, cut to
+# `limit`. Only those rows are joined back to `jobs` for their full columns.
+_RANK_SQL = """
+WITH pool AS (
+  SELECT j.id, j.job_id, j.url, j.company_id, j.company_name, j.title,
+         j.resume_fit_score, c.mission_score,
+         effective_mission(j.company_name, c.mission_score) AS _mission
+  FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
+  WHERE {pool_where}
+), scored AS (
+  SELECT *, combined_score(resume_fit_score, _mission) AS combined_score
+  FROM pool
+  WHERE {min_where}
+){collapse}, picked AS (
+  SELECT *, ROW_NUMBER() OVER (ORDER BY {order}) AS _pos
+  FROM {source}
+  ORDER BY _pos {limit}
+)
+SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags,
+       p.combined_score{extra}
+FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies c ON j.company_id = c.id
+ORDER BY p._pos"""
+# The collapse layer's partition is one "same opening at the same employer"
+# group: company_id when a row has one, else the name key (LinkedIn captures,
+# jsonld sweep hits and manual --add carry no company_id -- 4 of 119,411 rows
+# in the 2026-09-17 live store), else the row's own job_id, which never
+# repeats, so a nameless row never collides with every other nameless row.
+# Then the normalised title.
+_COLLAPSE_SQL = """
+, ranked AS (
+  SELECT *, ROW_NUMBER() OVER ordered AS _rn,
+         COUNT(*) OVER whole AS dup_count,
+         json_group_array(job_id) OVER whole AS _dup_ids,
+         json_group_array(url) OVER whole AS _dup_urls
+  FROM scored
+  WINDOW ordered AS (
+    PARTITION BY
+      CASE WHEN company_id IS NOT NULL THEN CAST(company_id AS TEXT)
+           WHEN name_key(company_name) != '' THEN 'name:' || name_key(company_name)
+           ELSE 'job:' || job_id END,
+      norm_title(title)
+    ORDER BY {order}),
+         whole AS (ordered ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+)"""
+
+
+@sql_function("remote_admitted", 4)
+def _remote_admitted_cols(company_tags: str | None, company_name: str | None,
+                          mission_score: float | None, floor: float | None) -> bool:
+    """remote_admitted over a query's columns, for ranked_jobs' geo clause."""
+    return remote_admitted({"company_tags": company_tags, "company_name": company_name,
+                            "mission_score": mission_score}, floor)
 
 
 def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
@@ -930,11 +949,11 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
     stays visible.
 
     `collapse=True` (the default) then folds rows that are the SAME opening
-    at the SAME employer — matched by _collapse_key, i.e. company_id (or a
+    at the SAME employer — matched by _COLLAPSE_SQL, i.e. company_id (or a
     name/job_id fallback) plus the normalised title — down to their
-    best-ranked survivor, stamped with dup_count/dup_job_ids/dup_urls (see
-    _collapse_same_opening). It runs AFTER every filter and the sort above,
-    so the kept row is the best-ranked one, and BEFORE `limit`, so
+    best-ranked survivor, stamped with dup_count/dup_job_ids/dup_urls. It
+    runs AFTER every filter and the sort above, so the kept row is the
+    best-ranked one, and BEFORE `limit`, so
     `limit=15` always returns 15 visibly-distinct rows rather than 15 raw
     rows that a caller then has to re-collapse and re-trim. These are
     DISTINCT requisitions with distinct URLs (often distinct scores) that
@@ -960,49 +979,45 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         442 open tracked rows in the 2026-09-17 store, 43 of them one
         university posting alone, which drowned the digest's and the web
         UI's top ranks in copies of the same opening."""
-    q = """
-      SELECT j.*, c.mission_tier, c.mission_score, c.tags AS company_tags
-      FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
-    """
     conds, args = open_in_track_clause(
         track, alias="j", include_closed=include_closed,
         include_dispositioned=include_dispositioned)
-    if conds:
-        q += " WHERE " + " AND ".join(conds)
-    rows = [dict(r) for r in conn.execute(q, args).fetchall()]
     if location_re is not None:
-        rows = [r for r in rows
-                if location_re.search(r.get("location") or "")
-                or (allow_geo_modes and r.get("geo_mode") in allow_geo_modes
-                    and remote_admitted(r, remote_mission_floor))]
-    def _effective_mission(r: dict[str, Any]) -> float | None:
-        # A conglomerate's own mission score is ~0.05 (off-mission overall),
-        # but a job here already passed the health keyword filter at crawl
-        # time — so rank it at the keyword-vetted floor, not the company's
-        # score, or its combined rank would be sunk unfairly.
-        mission = r.get("mission_score")
-        if config.is_multi_division(r.get("company_name")):
-            mission = max(mission or 0.0, config.MULTI_DIVISION_MISSION_FLOOR)
-        return mission
-
-    for r in rows:
-        r["combined_score"] = combined_score(r.get("resume_fit_score"),
-                                             _effective_mission(r))
+        geo = "location_ok(j.location)"
+        if allow_geo_modes:
+            geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
+                    "remote_admitted(c.tags, j.company_name, c.mission_score, ?))")
+            args += [json.dumps(sorted(allow_geo_modes)), remote_mission_floor]
+        conds.append(f"({geo})")
     if min_mission is not None:
-        rows = [r for r in rows
-                if (m := _effective_mission(r)) is None or m >= min_mission]
-    # Primary sort key per rank_by, then the other factors as tiebreaks; None
-    # sorts last via the -1 sentinel (all real scores are >= 0).
+        args.append(min_mission)
+    # Primary sort key per rank_by, then the other factors as tiebreaks; a
+    # missing score sorts last via the -1 sentinel (all real scores are
+    # >= 0), and id keeps ties in insertion order.
     primary = "resume_fit_score" if rank_by == "fit" else "combined_score"
-    def _k(r: dict[str, Any]) -> tuple[float, ...]:
-        vals = (r.get(primary), r.get("combined_score"),
-                r.get("resume_fit_score"), r.get("mission_score"))
-        return tuple(v if v is not None else -1.0 for v in vals)
-    rows.sort(key=_k, reverse=True)
-    if collapse:
-        rows = _collapse_same_opening(rows)
+    order = ", ".join(f"COALESCE({k}, -1.0) DESC" for k in (
+        primary, "combined_score", "resume_fit_score", "mission_score")) + ", id"
+    q = _RANK_SQL.format(
+        pool_where=" AND ".join(conds) or "1", order=order,
+        min_where="1" if min_mission is None else "(_mission IS NULL OR _mission >= ?)",
+        collapse=_COLLAPSE_SQL.format(order=order) if collapse else "",
+        source="ranked WHERE _rn = 1" if collapse else "scored",
+        extra=", p.dup_count, p._dup_ids, p._dup_urls" if collapse else "",
+        limit="LIMIT ?" if limit else "")
     if limit:
-        rows = rows[:int(limit)]
+        args.append(int(limit))
+    token = _LOCATION_VERDICT.set(functools.cache(
+        lambda text: location_re is not None and location_re.search(text or "") is not None))
+    try:
+        rows = [dict(r) for r in conn.execute(q, args)]
+    finally:
+        _LOCATION_VERDICT.reset(token)
+    for r in rows:
+        if collapse:
+            r["dup_job_ids"] = tuple(json.loads(r["_dup_ids"])[1:])
+            r["dup_urls"] = tuple(json.loads(r["_dup_urls"])[1:])
+        for k in ("_dup_ids", "_dup_urls"):
+            r.pop(k, None)
     return rows
 
 

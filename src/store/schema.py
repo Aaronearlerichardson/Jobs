@@ -291,6 +291,22 @@ def _migrate_tags(conn: sqlite3.Connection) -> None:
 BUSY_TIMEOUT_S = 30.0
 
 
+# Python functions the store's SQL calls by name (norm_title, name_key, ...).
+# A module declares one with @sql_function beside the Python rule it wraps,
+# so a rule lives in one place whether a row loop or a query applies it, and
+# connect() installs every one on each new connection.
+SQL_FUNCTIONS: dict[str, tuple[int, Callable[..., Any]]] = {}
+
+
+def sql_function[F: Callable[..., Any]](name: str, narg: int) -> Callable[[F], F]:
+    """Register `fn` as SQL function `name` (see SQL_FUNCTIONS); returns `fn`
+    unchanged, so Python callers keep using it directly."""
+    def register(fn: F) -> F:
+        SQL_FUNCTIONS[name] = (narg, fn)
+        return fn
+    return register
+
+
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
     """Open the store: schema applied, migrations run, WAL journaling on.
 
@@ -311,6 +327,8 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(path or config.STORE_DB_PATH,
                            timeout=BUSY_TIMEOUT_S, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    for name, (narg, fn) in SQL_FUNCTIONS.items():
+        conn.create_function(name, narg, fn, deterministic=True)
     try:
         conn.execute(f"PRAGMA busy_timeout={int(BUSY_TIMEOUT_S * 1000)}")
         conn.execute("PRAGMA journal_mode=WAL")

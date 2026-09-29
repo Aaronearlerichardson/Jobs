@@ -1,7 +1,10 @@
 """The SQLite store: schema, company/job upserts, the open/closed
 lifecycle, dispositions, crawl dormancy, and track membership."""
 
+import sqlite3
 from datetime import datetime, timedelta
+
+import pytest
 
 from conftest import iso_days_ago
 
@@ -370,11 +373,47 @@ class TestRanking:
         assert store.combined_score(0.5, None) is None
 
 
+    def test_combined_score_ranks_the_geometric_mean_not_the_fit_alone(
+            self, db, add_job):
+        # 0.9 fit at a 0.2-mission employer (0.42) ranks below 0.5/0.5 (0.50).
+        weak = store.upsert_company(db, {"name": "Weak", "mission_score": 0.2})
+        solid = store.upsert_company(db, {"name": "Solid", "mission_score": 0.5})
+        add_job("gh_weak", fit=0.9, company_id=weak, company_name="Weak")
+        add_job("gh_solid", fit=0.5, company_id=solid, company_name="Solid")
+        ids = lambda **kw: [r["job_id"] for r in store.ranked_jobs(
+            db, track="local-tech", **kw)]
+        assert ids() == ["gh_solid", "gh_weak"]
+        assert ids(rank_by="fit") == ["gh_weak", "gh_solid"]
+
+    def test_unscored_rows_sort_last_and_ties_keep_insertion_order(
+            self, db, company, add_job):
+        add_job("gh_acme_none")
+        add_job("gh_acme_a", fit=0.5)
+        add_job("gh_acme_b", fit=0.5)
+        add_job("gh_acme_top", fit=0.9)
+        ids = [r["job_id"] for r in store.ranked_jobs(db, track="local-tech")]
+        assert ids[-1] == "gh_acme_none"
+        assert ids.index("gh_acme_a") < ids.index("gh_acme_b")
+
+    def test_a_raising_location_matcher_fails_the_query_and_leaves_no_state(
+            self, db, add_job):
+        class Boom:
+            def search(self, text):
+                raise RuntimeError("matcher failed")
+        add_job("gh_acme_1", fit=0.5)
+        # SQLite reports a raising callback as OperationalError; the
+        # matcher's own message is not carried across.
+        with pytest.raises(sqlite3.OperationalError):
+            store.ranked_jobs(db, track="local-tech", location_re=Boom())
+        assert store.jobs._LOCATION_VERDICT.get(None) is None
+        assert store.ranked_jobs(db, track="local-tech")
+
+
 class TestCollapse:
     """ranked_jobs(collapse=True) (the default) folds postings that are the
     SAME opening at the SAME employer -- same company, same normalised
     title -- down to the best-scoring row, stamped with dup_count/
-    dup_job_ids/dup_urls (see store._collapse_same_opening). 133
+    dup_job_ids/dup_urls (see store.jobs._RANK_SQL). 133
     company+title groups covered 442 open tracked rows in the 2026-09-17
     store; nothing here deletes or merges a row, it only reshapes what one
     ranked_jobs() call returns."""
@@ -387,9 +426,10 @@ class TestCollapse:
         rows = store.ranked_jobs(db, track="local-tech")
         assert [r["job_id"] for r in rows] == ["gh_acme_2"]
         assert rows[0]["dup_count"] == 3
-        assert set(rows[0]["dup_job_ids"]) == {"gh_acme_1", "gh_acme_3"}
-        assert set(rows[0]["dup_urls"]) == {
-            "https://acme.io/gh_acme_1", "https://acme.io/gh_acme_3"}
+        # Best-next-first: 0.6 before 0.4.
+        assert rows[0]["dup_job_ids"] == ("gh_acme_3", "gh_acme_1")
+        assert rows[0]["dup_urls"] == (
+            "https://acme.io/gh_acme_3", "https://acme.io/gh_acme_1")
 
     def test_different_companies_same_title_never_collapse(
             self, db, company, add_job):
