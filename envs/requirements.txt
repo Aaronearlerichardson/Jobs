@@ -16,6 +16,8 @@ tomlkit>=0.12
 # Typed validation: board specs, profile.toml, Claude replies; env settings.
 pydantic>=2.12
 pydantic-settings>=2.11
+# MinLen in src/rows.py (pydantic requires it, so it is already installed).
+annotated-types>=0.6
 # closed TypedDicts and ReadOnly (src/rows.py); typing has them from 3.13/3.15.
 typing_extensions>=4.13
 

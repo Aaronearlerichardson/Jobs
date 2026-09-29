@@ -582,6 +582,10 @@ def _named(row: CompanyRow) -> CompanyRow:
     return row
 
 
+_IMPORT_ROWS = TypeAdapter(list[Annotated[CompanyRow, AfterValidator(_named)]],
+                           config=ConfigDict(extra="forbid"))
+
+
 def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Upsert companies from an export_companies JSON file (idempotent;
     tags merge, existing mission scores survive None fields).
@@ -594,8 +598,7 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     tests/test_store.py::TestImportCompanies.
     """
     with open(path, "rb") as f:
-        rows = TypeAdapter(list[Annotated[CompanyRow, AfterValidator(_named)]],
-                           config=ConfigDict(extra="forbid")).validate_json(f.read())
+        rows = _IMPORT_ROWS.validate_json(f.read())
     for row in rows:
         upsert_company(conn, row)
     return len(rows)

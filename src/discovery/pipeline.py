@@ -49,6 +49,10 @@ class Candidate:
     ats: str
     careers_url: str
     notes: str
+    # The model's guessed handle, which nothing probes any more -- the
+    # resolver derives its own from the name (match.names.slug_guesses) and
+    # prefers what the company's careers page actually says.
+    slug_guess: str | None = None
     # The RESOLVED handle, joined where it spans columns (coords.slug_text),
     # None for a self-hosted board keyed on its URL and while unconfirmed.
     slug: str | None = None
@@ -69,16 +73,17 @@ class Candidate:
 
 def candidate_from_dict(d: dict[str, Any]) -> Candidate:
     """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
-    a seed, or a directory name. The model's `slug_guess` is not carried:
-    the resolver derives its own handle, and `Candidate.slug` holds only
-    the one it resolved.
+    a seed, or a directory name. The model's `slug_guess` is kept as
+    given, apart from `slug`, the handle the resolver settles on.
 
     >>> c = candidate_from_dict({"name": "Acme", "ats": "unknown",
     ...                          "slug_guess": "acme", "careers_url": "", "notes": ""})
-    >>> c.slug is None, c.confirmed
-    (True, False)
+    >>> c.slug_guess, c.slug, c.confirmed
+    ('acme', None, False)
     """
-    return Candidate(**DiscoveredCompany.model_validate(d).model_dump(exclude={"slug_guess"}))
+    r = DiscoveredCompany.model_validate(d)
+    return Candidate(name=r.name, ats=r.ats, slug_guess=r.slug_guess,
+                     careers_url=r.careers_url, notes=r.notes)
 
 
 #: Why a confirmed board still deserves a human glance, keyed by HOW it was

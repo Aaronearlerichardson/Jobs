@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import Field
+from annotated_types import MinLen
 from typing_extensions import ReadOnly, TypedDict
 
 
@@ -50,12 +50,12 @@ class JobIn(FitColumns, total=False):
     harvested_at: str | None
 
 
-# Open, unlike BoardHit: a stored CompanyRow flows into upsert_company, and a
-# closed CompanyIn would refuse the row's extra keys.
+# Open, unlike BoardHit and CompanyRow: CompanyRow extends it, and a closed
+# base cannot be extended. CompanyRow is closed, so a row is assignable here.
 class CompanyIn(TypedDict, total=False):
     """The companies columns upsert_company writes; a missing key leaves what
     is stored."""
-    name: Annotated[str, Field(min_length=1)]
+    name: Annotated[str, MinLen(1)]
     ats: str | None
     slug: str | None
     wd_tenant: str | None
@@ -77,7 +77,7 @@ class CompanyIn(TypedDict, total=False):
     miss_at: str | None
 
 
-class CompanyRow(CompanyIn, total=False):
+class CompanyRow(CompanyIn, total=False, closed=True):
     """A stored companies row, as the store's readers return it: what is
     written, plus the id and the crawl schedule."""
     id: int
