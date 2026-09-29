@@ -1291,8 +1291,7 @@ class TestValidateCandidateResolutionOrder:
 
     @staticmethod
     def _candidate(name, ats="unknown"):
-        return pipeline.Candidate(name=name, ats=ats, slug_guess=None,
-                                  careers_url="", notes="")
+        return pipeline.Candidate(name=name, ats=ats, careers_url="", notes="")
 
     async def test_the_careers_page_beats_a_colliding_slug_probe(self, monkeypatch):
         """The company's own page names greenhouse/raya-health-inc; the
@@ -1310,7 +1309,7 @@ class TestValidateCandidateResolutionOrder:
 
         await pipeline.validate_candidate(c, delay=0)
 
-        assert (c.confirmed, c.ats, c.slug_guess) == (
+        assert (c.confirmed, c.ats, c.slug) == (
             True, "greenhouse", "raya-health-inc")
         assert c.via == "sniff"
 
@@ -1356,7 +1355,7 @@ class TestValidateCandidateResolutionOrder:
 
         await pipeline.validate_candidate(c, delay=0)
 
-        assert c.slug_guess == "dsupply|5|External"
+        assert c.slug == "dsupply|5|External"
         assert _candidate_hit(c)["slug"] == ("dsupply", 5, "External")
 
     async def test_an_unfetchable_ats_is_reported_as_a_lead(self, monkeypatch):
@@ -1404,7 +1403,7 @@ class TestApplyToStoreFetchability:
     @staticmethod
     def _candidate(name, ats, slug, careers_url, nc=3, count=8):
         return pipeline.Candidate(
-            name=name, ats=ats, slug_guess=slug, careers_url=careers_url,
+            name=name, ats=ats, slug=slug, careers_url=careers_url,
             notes="", confirmed=True, job_count=count, nc=nc, via="sniff")
 
     @staticmethod
@@ -1427,7 +1426,7 @@ class TestApplyToStoreFetchability:
         self._wire(monkeypatch, db)
         c = TestValidateCandidateResolutionOrder._candidate("Beta Custom")
         await pipeline.validate_candidate(c, delay=0)
-        assert (c.confirmed, c.ats, c.slug_guess) == (True, "custom", None)
+        assert (c.confirmed, c.ats, c.slug) == (True, "custom", None)
 
         lines = await self._apply(c)
 

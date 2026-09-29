@@ -47,14 +47,11 @@ _JS_PAGES = min(SETTINGS.js_pages, _DISCOVERY_WORKERS)
 class Candidate:
     name: str
     ats: str
-    # In: the model's guessed handle, which nothing probes any more -- the
-    # resolver derives its own from the name (match.names.slug_guesses) and
-    # prefers what the company's careers page actually says. Out: the
-    # RESOLVED handle, joined where it spans columns (coords.slug_text),
-    # None for a self-hosted board keyed on its URL.
-    slug_guess: str | None
     careers_url: str
     notes: str
+    # The RESOLVED handle, joined where it spans columns (coords.slug_text),
+    # None for a self-hosted board keyed on its URL and while unconfirmed.
+    slug: str | None = None
     confirmed: bool = False
     job_count: int = 0
     # Postings on the board that are in your [locality] — the resolver counts
@@ -72,8 +69,16 @@ class Candidate:
 
 def candidate_from_dict(d: dict[str, Any]) -> Candidate:
     """A Candidate from a discovery-shaped dict: an entry of Claude's reply,
-    a seed, or a directory name."""
-    return Candidate(**DiscoveredCompany.model_validate(d).model_dump())
+    a seed, or a directory name. The model's `slug_guess` is not carried:
+    the resolver derives its own handle, and `Candidate.slug` holds only
+    the one it resolved.
+
+    >>> c = candidate_from_dict({"name": "Acme", "ats": "unknown",
+    ...                          "slug_guess": "acme", "careers_url": "", "notes": ""})
+    >>> c.slug is None, c.confirmed
+    (True, False)
+    """
+    return Candidate(**DiscoveredCompany.model_validate(d).model_dump(exclude={"slug_guess"}))
 
 
 #: Why a confirmed board still deserves a human glance, keyed by HOW it was
@@ -153,13 +158,13 @@ async def validate_candidate(c: Candidate, delay: float = 0.3,
     if hit:
         c.confirmed   = True
         c.ats         = hit["ats"]
-        c.slug_guess  = coords.slug_text(hit["ats"], hit.get("slug"))
+        c.slug        = coords.slug_text(hit["ats"], hit.get("slug"))
         c.job_count   = hit.get("count") or 0
         c.nc          = hit.get("nc") or 0
         c.via         = hit.get("via") or ""
         c.careers_url = hit.get("careers_url") or c.careers_url
         c.tried_slugs.append(
-            f"[{c.via}:{c.ats} {c.slug_guess or c.careers_url or '?'}]")
+            f"[{c.via}:{c.ats} {c.slug or c.careers_url or '?'}]")
         _flag_for_verification(c, claimed_ats)
         return c
     c.tried_slugs.append(
@@ -191,11 +196,11 @@ async def validate_candidate(c: Candidate, delay: float = 0.3,
         if meta:
             c.confirmed  = True
             c.ats        = meta["ats"]
-            c.slug_guess = coords.slug_text(meta["ats"], meta["slug"])
+            c.slug       = coords.slug_text(meta["ats"], meta["slug"])
             c.job_count  = meta["count"]
             c.via        = "js"
             c.tried_slugs.append(
-                f"[{c.ats}:{c.slug_guess}"
+                f"[{c.ats}:{c.slug}"
                 + ("" if meta["validated"] else " ~unvalidated")
                 + "]"
             )
@@ -207,7 +212,7 @@ def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
     """
     Append seed candidates to Claude's output, deduping by normalized
     name. Claude's entry wins when both sources have the same company
-    (its ats/slug_guess may be more accurate than the seed's 'unknown').
+    (its ats may be more accurate than the seed's 'unknown').
     """
     seen = {strip_suffixes(c.get("name") or "").lower() for c in claude_raw}
     return list(claude_raw) + [
@@ -307,7 +312,7 @@ async def _validate_all(candidate_dicts: list[dict[str, Any]], use_js: bool = Tr
                 stall_s=RESOLVE_STALL_S):
             done += 1
             if cand.confirmed:
-                status, detail = "OK  ", f"  slug={cand.slug_guess!r}  ({cand.job_count} jobs)"
+                status, detail = "OK  ", f"  slug={cand.slug!r}  ({cand.job_count} jobs)"
             elif cand.ats_lead:
                 status, detail = "lead", f"  {cand.ats_lead}"
             else:
@@ -381,7 +386,7 @@ def write_discovery_report(result: dict[str, Any]) -> Path:
                     # A self-hosted board has no handle; its URL IS its
                     # coordinate (src.ats.coords).
                     f.write(f"| {c.name} | {ats_name} "
-                            f"| `{c.slug_guess or c.careers_url or '-'}` "
+                            f"| `{c.slug or c.careers_url or '-'}` "
                             f"| {c.job_count} | {verify_note(c)} |\n")
             f.write("\n")
 
@@ -434,7 +439,7 @@ def print_summary(result: dict[str, Any]) -> None:
         note = verify_note(c)
         tail = f"  [VERIFY: {note}]" if note else ""
         print(f"    + {c.name:<30} {c.ats:<10} "
-              f"slug='{c.slug_guess or c.careers_url or '-'}'  "
+              f"slug='{c.slug or c.careers_url or '-'}'  "
               f"({c.job_count} jobs){tail}")
     unconfirmed = [c for c in companies if not c.confirmed]
     if unconfirmed:

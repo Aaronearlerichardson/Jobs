@@ -48,7 +48,7 @@ def _candidate_hit(c: Candidate) -> BoardHit | None:
     that for a real careers page on no known platform).
     """
     # The handle: a string, or the tuple of a multi-column one.
-    slug: Any = (c.slug_guess or "").strip() or None
+    slug: Any = (c.slug or "").strip() or None
     board = board_for(c.ats)
     if board and board.multi_column:
         parts = (slug or "").split(board.spec.handle.sep)
@@ -107,7 +107,7 @@ async def apply_to_store(result: dict[str, Any], dry_run: bool = False) -> list[
                 continue
             hit = _candidate_hit(c)
             if hit is None:
-                summary.append(f"    [skip] {c.name}: malformed slug {c.slug_guess!r}")
+                summary.append(f"    [skip] {c.name}: malformed slug {c.slug!r}")
                 skipped += 1
                 continue
             if dry_run:
