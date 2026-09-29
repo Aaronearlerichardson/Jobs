@@ -100,6 +100,9 @@ class TestSchema:
         cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
         assert set(CompanyRow.__annotations__) == cols
         assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
+        writer, reader = get_type_hints(CompanyIn), get_type_hints(CompanyRow)
+        assert all(writer[k] == reader[k] for k in writer), "CompanyIn and CompanyRow disagree"
+        assert CompanyRow.__required_keys__ == set(CompanyRow.__annotations__)
         assert set(get_args(HandleColumn)) <= cols
         assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
 
@@ -200,6 +203,26 @@ class TestCompanies:
         assert tags.has(row, tags.WATCH) and ops._whole_board(row)
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
         assert store.set_company_tag(db, "Nope", "watch") is None
+
+
+class TestCompanyReaders:
+    def test_every_reader_of_company_rows_returns_every_column(self, db):
+        """CompanyRow is total (a subscript is checked), so each reader that
+        returns one must select every column."""
+        cid = store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
+                                        "active": 1, "local_job_count": 2,
+                                        "total_job_count": 4})
+        store.upsert_company(db, store.mark_pending({"name": "Queued", "ats": "lever",
+                                                     "slug": "queued"}))
+        every = set(CompanyRow.__annotations__)
+        readers = {"get_company": [store.get_company(db, cid)],
+                   "get_companies": store.get_companies(db, active_only=False),
+                   "pending_companies": store.pending_companies(db),
+                   "crawlable_companies": store.crawlable_companies(db),
+                   "harvestable_companies": store.harvestable_companies(db)}
+        assert all(rows for rows in readers.values()), readers
+        assert {(name, frozenset(r)) for name, rows in readers.items() for r in rows} \
+            == {(name, frozenset(every)) for name in readers}
 
 
 class TestUpsertColumns:

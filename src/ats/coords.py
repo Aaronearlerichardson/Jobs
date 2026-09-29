@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any, Unpack
 
 from src.match.names import SLUG_NAME_SOURCE, name_is_own_slug
-from src.rows import BoardCoords, CompanyRow, HandleColumn
+from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .board import BOARDS
 from .board.spec import Handle
 
@@ -32,7 +32,7 @@ def _handle(ats: str | None) -> tuple[tuple[HandleColumn, ...], str]:
 
 
 def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = None,
-            careers_url: str | None = None, /, **extra: Unpack[CompanyRow]) -> CompanyRow:
+            careers_url: str | None = None, /, **extra: Unpack[CompanyIn]) -> CompanyIn:
     """One board's coordinates as store company columns: a handle spanning
     several columns (its spec's `handle.columns`) fills them from its parts,
     a tuple or a `sep`-joined string; any other goes in `slug`.
@@ -69,7 +69,7 @@ def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = No
     """
     cols, sep = _handle(ats)
     multi = len(cols) > 1
-    out: CompanyRow = {"ats": ats, "slug": None if multi else slug_text(ats, slug),
+    out: CompanyIn = {"ats": ats, "slug": None if multi else slug_text(ats, slug),
                        "wd_tenant": None, "wd_pod": None, "wd_site": None,
                        "careers_url": careers_url}
     if multi:
@@ -149,7 +149,7 @@ def slug_named(company: CompanyRow) -> bool:
             and name_is_own_slug(company.get("name"), board_slug(company)))
 
 
-def from_hit(hit: BoardCoords, **extra: Unpack[CompanyRow]) -> CompanyRow:
+def from_hit(hit: BoardCoords, **extra: Unpack[CompanyIn]) -> CompanyIn:
     """The same, from a resolver's hit dict ({ats, slug, careers_url, ...}).
 
     >>> hit = {"ats": "workday", "slug": ("acme", 5, "Ext"),

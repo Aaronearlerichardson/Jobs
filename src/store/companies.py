@@ -26,16 +26,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Unpack, cast
 
-from pydantic import AfterValidator, ConfigDict, TypeAdapter
+from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 
 from src import config
-from src.rows import CompanyIn, CompanyRow, HandleColumn
+from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
 
 def as_company(row: sqlite3.Row) -> CompanyRow:
-    """A companies row (any of its columns) as a CompanyRow."""
+    """A `SELECT *` companies row as a CompanyRow: every column, which the
+    total type promises."""
     return cast(CompanyRow, dict(row))
 
 
@@ -379,7 +380,7 @@ def _board_columns(ats: str) -> tuple[HandleColumn, ...]:
                 "columns", config.DEFAULT_HANDLE_COLUMNS))
 
 
-def board_key(r: CompanyRow) -> tuple[Any, ...] | None:
+def board_key(r: BoardCoords) -> tuple[Any, ...] | None:
     """The identity of a company row's BOARD, independent of its name:
     (ats, *the values of the columns its spec's handle names), a
     careers_url lowercased with no trailing "/". None when the row has no
@@ -470,7 +471,7 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
             "by_host": by_host, "by_domain": by_domain}
 
 
-def company_by_board(conn: sqlite3.Connection, row: CompanyRow) -> CompanyRow | None:
+def company_by_board(conn: sqlite3.Connection, row: BoardCoords) -> CompanyRow | None:
     """The existing company row whose board matches `row`'s (see board_key),
     or None. Discovery asks it before inserting, because a name the roster
     spells differently passes the name-keyed already-tracked check and
@@ -575,14 +576,21 @@ def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     return len(rows)
 
 
-def _named(row: CompanyRow) -> CompanyRow:
+def _unwritten(row: Any) -> Any:
+    """The row without the columns an upsert never writes (id, the crawl
+    schedule); anything else it holds is left for validation to judge."""
+    skip = CompanyRow.__annotations__.keys() - CompanyIn.__annotations__.keys()
+    return {k: v for k, v in row.items() if k not in skip} if isinstance(row, dict) else row
+
+
+def _named(row: CompanyIn) -> CompanyIn:
     """The row, or a ValueError when it names no company."""
     if "name" not in row:
         raise ValueError("name is required")
     return row
 
 
-_IMPORT_ROWS = TypeAdapter(list[Annotated[CompanyRow, AfterValidator(_named)]],
+_IMPORT_ROWS = TypeAdapter(list[Annotated[CompanyIn, BeforeValidator(_unwritten), AfterValidator(_named)]],
                            config=ConfigDict(extra="forbid"))
 
 

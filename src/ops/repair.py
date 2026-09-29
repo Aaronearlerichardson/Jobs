@@ -16,7 +16,7 @@ from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.board.engine import Board
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import CompanyRow
+from src.rows import CompanyIn, CompanyRow
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
 
 if TYPE_CHECKING:
@@ -301,7 +301,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                            max_workers: int = 6, days: int | None = None,
                            names: Iterable[str] | None = None, t: RuntimeTrack | None = None,
                            families: Iterable[str] | None = RERESOLVE_FAMILIES,
-                           commit: bool = True) -> list[CompanyRow]:
+                           commit: bool = True) -> list[CompanyIn]:
     """Retry the roster rows that died at resolution; queue every hit for
     human review. Returns the rows written.
 
@@ -384,7 +384,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         # is the point of the family), so `was` falls back to naming the
         # family for the [miss]/[pending] print lines below.
         was = {r["name"]: (r["miss_reason"] or SILENT_FAMILY) for r in rows}
-        written: list[CompanyRow] = []
+        written: list[CompanyIn] = []
         still: list[tuple[str, str]] = []
         dups: list[str] = []
         stalled: list[CompanyRow] = []
@@ -445,7 +445,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         return written
 
 
-def _retarget(conn: sqlite3.Connection, name: str, row: CompanyRow) -> None:
+def _retarget(conn: sqlite3.Connection, name: str, row: CompanyIn) -> None:
     """Point the company `name` at the board `row` names. upsert_company
     drops None values so it can never erase a stored one -- which would
     leave the dead board's slug beside a new Workday triple -- so the
@@ -515,7 +515,7 @@ def _slug_named_boards(conn: sqlite3.Connection) -> list[CompanyRow]:
     atses = sorted(b.name for b in BOARDS.values() if b.spec.employer)
     ph = ",".join("?" for _ in atses)
     rows = [store.as_company(r) for r in conn.execute(
-        f"SELECT id, name, ats, slug, source, total_job_count FROM companies "
+        f"SELECT * FROM companies "
         f"WHERE COALESCE(active,0)=1 AND ats IN ({ph})",
         tuple(atses)).fetchall()]
     rows = [r for r in rows if coords.slug_named(r)]

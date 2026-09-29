@@ -36,13 +36,13 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
-from src.rows import BoardHit, CompanyRow
+from src.rows import BoardCoords, BoardHit
 from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import websearch_board
 
 
-async def read_board(comp: CompanyRow,
+async def read_board(comp: BoardCoords,
                      loc_re: LocationRE | None = None) -> list[dict[str, Any]] | None:
     """A resolved board's postings (`company.fetch_company`'s `validate`
     pull over its store columns `comp`), or None when the fetch failed
@@ -65,7 +65,7 @@ async def read_board(comp: CompanyRow,
     return rows if board and board.gone(http.snapshot_info()["last_error"]) else None
 
 
-async def read_local(comp: CompanyRow) -> tuple[list[dict[str, Any]], int, str | None]:
+async def read_local(comp: BoardCoords) -> tuple[list[dict[str, Any]], int, str | None]:
     """(local postings, board total, miss reason) for a detected board:
     its postings in your [locality] (`read_board` with NC_RE); when there
     are none, why, in src.store.MISS_REASONS words. The read failed:
@@ -89,7 +89,7 @@ async def read_local(comp: CompanyRow) -> tuple[list[dict[str, Any]], int, str |
     return [], 0, f"board-dead:{ats}" if ok else f"fetch-error:unreadable-{ats}"
 
 
-async def _validate_board(comp: CompanyRow) -> tuple[int, int] | None:
+async def _validate_board(comp: BoardCoords) -> tuple[int, int] | None:
     """(total, nc) live posting counts of a resolved board from its cheap
     reads, as `probe_company` counts a guess: `Board.alive` (the listing's
     own total where it reports one) and `Board.local_count`. None when the

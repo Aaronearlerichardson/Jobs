@@ -50,11 +50,10 @@ class JobIn(FitColumns, total=False):
     harvested_at: str | None
 
 
-# Open, unlike BoardHit and CompanyRow: CompanyRow extends it, and a closed
-# base cannot be extended. CompanyRow is closed, so a row is assignable here.
-class CompanyIn(TypedDict, total=False):
-    """The companies columns upsert_company writes; a missing key leaves what
-    is stored."""
+class CompanyIn(TypedDict, total=False, closed=True):
+    """The companies columns upsert_company writes, and the shape a builder
+    of a partial row (coords.columns) returns: a missing key leaves what is
+    stored."""
     name: Annotated[str, MinLen(1)]
     ats: str | None
     slug: str | None
@@ -77,10 +76,33 @@ class CompanyIn(TypedDict, total=False):
     miss_at: str | None
 
 
-class CompanyRow(CompanyIn, total=False, closed=True):
-    """A stored companies row, as the store's readers return it: what is
-    written, plus the id and the crawl schedule."""
+class CompanyRow(TypedDict, closed=True):
+    """A stored companies row, as `SELECT *` returns it: every column, so
+    a subscript is checked. Its columns are declared a second time, apart
+    from CompanyIn (a TypedDict cannot make an inherited optional key
+    required); tests/test_store.py checks both against the table and
+    against each other."""
     id: int
+    name: str
+    ats: str | None
+    slug: str | None
+    wd_tenant: str | None
+    wd_pod: int | None
+    wd_site: str | None
+    careers_url: str | None
+    local_job_count: int | None
+    total_job_count: int | None
+    mission_tier: str | None
+    mission_score: float | None
+    mission_reason: str | None
+    tags: str | None
+    source: str | None
+    active: int | None
+    last_probed: str | None
+    notes: str | None
+    created_at: str | None
+    miss_reason: str | None
+    miss_at: str | None
     crawl_state: str | None
     empty_streak: int | None
     last_crawled_at: str | None

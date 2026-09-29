@@ -19,7 +19,7 @@ from datetime import datetime
 
 from src import config
 from src import tags
-from src.rows import CompanyRow
+from src.rows import CompanyIn, CompanyRow
 from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
 
 
@@ -56,7 +56,7 @@ def _name_key(name: str | None) -> str:
     return re.sub(r"[^a-z0-9]", "", (name or "").lower())
 
 
-def mark_pending(row: CompanyRow) -> CompanyRow:
+def mark_pending(row: CompanyIn) -> CompanyIn:
     """A company-row dict rewritten as a REVIEW CANDIDATE: inactive, and
     carrying the pending-review scope tag.
 
@@ -130,15 +130,9 @@ def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     >>> [c["name"] for c in pending_companies(conn)]
     ['Second', 'First']
     """
-    # What the review UI shows per candidate: who it is, what board was
-    # found, how much it produces, and where the guess came from.
-    cols = ", ".join((
-        "id", "name", "ats", "slug", "wd_tenant", "wd_pod", "wd_site",
-        "careers_url", "local_job_count", "total_job_count", "mission_tier",
-        "mission_score", "mission_reason", "tags", "source", "created_at", "notes"))
     from .companies import as_company  # not at module level: see module doc
     return [as_company(r) for r in conn.execute(
-        f"SELECT {cols} FROM companies "
+        "SELECT * FROM companies "
         "WHERE (',' || COALESCE(tags,'') || ',') LIKE ? "
         "ORDER BY created_at DESC, id DESC",
         (f"%,{tags.PENDING},%",)).fetchall()]
