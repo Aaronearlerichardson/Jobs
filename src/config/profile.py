@@ -23,7 +23,7 @@ from types import ModuleType
 from typing import Any
 
 from .paths import APP_HOME, DATA_DIR, SCRIPT_DIR
-from .profile_schema import parse
+from .profile_schema import TrackExclude, TrackKeywords, parse
 from .secrets import SETTINGS
 
 
@@ -174,8 +174,8 @@ EXCLUDE_BOILERPLATE_PHRASES = list(PROFILE.exclude.boilerplate_phrases)
 # Per-track keyword/exclude overrides — [keywords.<track>] / [exclude.<track>]
 # tables. Tracks read their own sub-dict (e.g. KEYWORDS_BY_TRACK.get("local"))
 # instead of hardcoding their vocabulary; see src/crawl/runner.py.
-KEYWORDS_BY_TRACK = {k: v.model_dump() for k, v in (PROFILE.keywords.model_extra or {}).items()}
-EXCLUDE_BY_TRACK  = {k: v.model_dump() for k, v in (PROFILE.exclude.model_extra or {}).items()}
+KEYWORDS_BY_TRACK: dict[str, TrackKeywords] = {**PROFILE.keywords.__pydantic_extra__}
+EXCLUDE_BY_TRACK: dict[str, TrackExclude] = {**PROFILE.exclude.__pydantic_extra__}
 
 # Mutated at runtime: src/crawl/runner.py sets it to the crawling track's
 # `accept_remote` and src/dispatch/background.py restores it between operations. Read it
@@ -242,11 +242,11 @@ RESUME_PATH = _resolve_resume_path()
 
 # --- Fit rubric (src/claude/fit.py). weights/gate_penalty are complete
 #     dicts (the profile's entries over the schema defaults); domain_ladder is
-#     a list of {score, terms}; stack_* / region_terms are joined to text,
+#     a list of LadderRung(score, terms); stack_* / region_terms are joined to text,
 #     None when unset so fit.py derives them from the rest of the profile. ---
 FIT_WEIGHTS       = PROFILE.fit.weights.model_dump()
 FIT_GATE_PENALTY  = PROFILE.fit.gate_penalty.model_dump()
-FIT_DOMAIN_LADDER = [r.model_dump() for r in PROFILE.fit.domain_ladder] or None
+FIT_DOMAIN_LADDER = list(PROFILE.fit.domain_ladder) or None
 FIT_STACK_CORE    = ", ".join(PROFILE.fit.stack_core) or None
 FIT_STACK_ANTI    = ", ".join(PROFILE.fit.stack_anti) or None
 FIT_REGION        = ", ".join(PROFILE.fit.region_terms) or None
@@ -259,8 +259,8 @@ FIT_CLEARANCE_VERBS      = list(PROFILE.fit.clearance_verbs)
 FIT_CLEARANCE_QUALIFIERS = list(PROFILE.fit.clearance_qualifiers)
 
 # --- Mission taxonomy (employer-alignment ladder; src/claude/api.py) -------
-# Each tier: {"name", "desc", "band": [lo, hi], "active": bool}.
-MISSION_TIERS = [t.model_dump() for t in PROFILE.mission.tiers]
+# Each tier: MissionTier(name, desc, band=[lo, hi], active).
+MISSION_TIERS = list(PROFILE.mission.tiers)
 MISSION_BULLSEYE_REGEX = PROFILE.mission.bullseye_regex.strip()
 MISSION_BULLSEYE_TIER  = PROFILE.mission.bullseye_tier.strip()
 

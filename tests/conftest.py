@@ -51,6 +51,7 @@ if sys.platform == "win32":
     socket.socketpair = _loopback_pair
 
 from src import config as _config                           # noqa: E402
+from src.config.profile_schema import TrackExclude          # noqa: E402
 from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
@@ -263,7 +264,7 @@ def exclude_vocab(monkeypatch):
     import src.match.gates as gates
 
     def _configure(track_id, **tables):
-        monkeypatch.setitem(gates.config.EXCLUDE_BY_TRACK, track_id, tables)
+        monkeypatch.setitem(gates.config.EXCLUDE_BY_TRACK, track_id, TrackExclude(**tables))
         gates._exclude_tables.cache_clear()
         return track_id
 

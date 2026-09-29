@@ -70,7 +70,7 @@ def _parsed():
 # which buried whole discovery sweeps in inactive rows.
 
 #: Every tier name the loaded profile knows, plus the unavailable sentinel.
-ALL_TIERS = tuple(t["name"] for t in config.MISSION_TIERS) + (None,)
+ALL_TIERS = tuple(t.name for t in config.MISSION_TIERS) + (None,)
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ class TestActivationRule:
             assert is_active_mission(tier, "Nowhere Robotics") == 1
 
     def test_inactive_tier_is_inactive(self):
-        inactive = [t["name"] for t in config.MISSION_TIERS if not t["active"]]
+        inactive = [t.name for t in config.MISSION_TIERS if not t.active]
         assert inactive, "profile configures no inactive tier to test against"
         for tier in inactive:
             assert is_active_mission(tier, "Nowhere Robotics") == 0

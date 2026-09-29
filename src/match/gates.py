@@ -32,10 +32,10 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
-from typing import Any
 
 from src import config
 from src.config import TrackDict
+from src.config.profile_schema import TrackExclude
 from src.match.filters import (BOUNDED, SHORT_EXCLUDE, first_hit,
                                scrub_boilerplate, token_in)
 
@@ -54,16 +54,8 @@ def is_technical_role(title: str | None, t: TrackDict) -> bool:
 def _exclude_tables(track_id: str) -> dict[str, tuple[str, ...]]:
     """The [exclude.<track_id>] vocabulary, shaped for exclude_reason().
     Cached per track id — EXCLUDE_BY_TRACK is a load-time constant."""
-    exc = getattr(config, "EXCLUDE_BY_TRACK", {}).get(track_id, {}) or {}
-    return {
-        "role_phrases": tuple(exc.get("role_phrases", [])),
-        "title_tokens": tuple(exc.get("title_tokens", [])),
-        "defense_strong": tuple(exc.get("defense_strong", [])),
-        "defense_weak": tuple(exc.get("defense_weak", [])),
-        "nonclinical": tuple(exc.get("nonclinical", [])),
-        "clinical_titles": tuple(exc.get("clinical_titles", [])),
-        "clinical_markers": tuple(exc.get("clinical_markers", [])),
-    }
+    exc = getattr(config, "EXCLUDE_BY_TRACK", {}).get(track_id) or TrackExclude()
+    return {name: tuple(getattr(exc, name)) for name in TrackExclude.model_fields}
 
 
 def exclude_reason(title: str | None, description: str = "", allow_defense: bool = False, *,

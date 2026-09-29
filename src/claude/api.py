@@ -32,7 +32,7 @@ _CANDIDATE = config.CANDIDATE_SUMMARY or "A technical candidate seeking a target
 _AVOID = config.CANDIDATE_AVOID or ""
 
 # Mission tiers as loaded (highest alignment → lowest, last is the catch-all).
-_MISSION_TIERS = tuple(t["name"] for t in config.MISSION_TIERS) or ("other",)
+_MISSION_TIERS = tuple(t.name for t in config.MISSION_TIERS) or ("other",)
 
 # The activation rule and the tier set it reads live in src/config/policy.py
 # now, beside `is_multi_division`, which the rule calls. Nothing about
@@ -52,8 +52,8 @@ def _tier_bands() -> str:
     """`lo-hi = name: desc` score-band lines for the mission prompt."""
     out = []
     for t in config.MISSION_TIERS:
-        lo, hi = t["band"]
-        out.append(f"    * {lo:.2f}-{hi:.2f} = {t['name']}: {t['desc']}")
+        lo, hi = t.band
+        out.append(f"    * {lo:.2f}-{hi:.2f} = {t.name}: {t.desc}")
     return "\n".join(out)
 
 
@@ -542,7 +542,7 @@ async def score_company_mission(name: str,
     bullseye = config.MISSION_BULLSEYE_REGEX
     if bullseye and re.search(bullseye, name.lower(), re.I):
         return config.MISSION_BULLSEYE_TIER or None, 1.0, "bullseye: named target"
-    tiers = "\n".join(f'    "{t["name"]}" — {t["desc"]}' for t in config.MISSION_TIERS)
+    tiers = "\n".join(f'    "{t.name}" — {t.desc}' for t in config.MISSION_TIERS)
     system = f"""You score how well an EMPLOYER matches a specific candidate's ideal target, from 0.0 to 1.0. Given a company name + sample postings, judge the COMPANY (not one role).
 
 {_CANDIDATE}

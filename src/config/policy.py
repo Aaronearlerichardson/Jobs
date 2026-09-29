@@ -131,7 +131,7 @@ def is_multi_division(name: str | None) -> bool:
 
 # Mission tiers as loaded (highest alignment -> lowest, last is the
 # catch-all), and the subset a newly-sourced company is crawled for.
-ACTIVE_MISSION_TIERS = tuple(t["name"] for t in MISSION_TIERS if t["active"])
+ACTIVE_MISSION_TIERS = tuple(t.name for t in MISSION_TIERS if t.active)
 
 
 def is_active_mission(tier: str | None, name: str | None,

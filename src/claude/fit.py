@@ -172,7 +172,7 @@ def _derived_region() -> str:
 
 def _domain_ladder_text() -> str:
     ladder = _cfg("FIT_DOMAIN_LADDER", None)
-    rungs = ([(r.get("score"), ", ".join(r.get("terms", []))) for r in ladder]
+    rungs = ([(r.score, ", ".join(r.terms)) for r in ladder]
              if ladder else _derived_domain_ladder())
     return "; ".join(f"{txt} ~{score:.2f}" for score, txt in rungs)
 

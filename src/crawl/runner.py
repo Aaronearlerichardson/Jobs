@@ -44,6 +44,7 @@ from typing import Any, NamedTuple, cast
 
 from src import config
 from src.config import TrackDict
+from src.config.profile_schema import TrackKeywords
 from src import store
 from src import tags
 from src.ats.registry import iter_store_sources, sweep
@@ -69,10 +70,8 @@ def apply_keyword_focus(cfg: Any, t: TrackDict) -> None:
     track's [keywords.<id>] terms to the global tiers (deduped); "replace"
     swaps them in wholesale (and rebuilds the flat INCLUDE view, matching
     the legacy replace semantics). Empty track lists never blank a tier."""
-    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t["id"], {})
-    core = list(kw.get("core", []))
-    dom = list(kw.get("domain", []))
-    skill = list(kw.get("skill", []))
+    kw = getattr(cfg, "KEYWORDS_BY_TRACK", {}).get(t["id"]) or TrackKeywords()
+    core, dom, skill = list(kw.core), list(kw.domain), list(kw.skill)
     if t["keyword_mode"] == "replace":
         if core:
             cfg.CORE_KEYWORDS[:] = core

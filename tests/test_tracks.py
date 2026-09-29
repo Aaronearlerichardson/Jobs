@@ -152,8 +152,8 @@ class TestKeywordFocus:
     def test_replace_swaps_tiers_and_enables_remote(self, cfg, sweep_track,
                                                     pristine_keywords):
         runner.apply_keyword_focus(cfg, sweep_track)
-        track_core = list(cfg.KEYWORDS_BY_TRACK.get(sweep_track["id"], {})
-                          .get("core", []))
+        kw = cfg.KEYWORDS_BY_TRACK.get(sweep_track["id"])
+        track_core = list(kw.core) if kw else []
         assert cfg.ACCEPT_REMOTE is True
         if track_core:
             assert cfg.CORE_KEYWORDS == track_core
