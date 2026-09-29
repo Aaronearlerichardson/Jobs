@@ -222,11 +222,10 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     >>> [r["job_id"] for r in triage_pending(conn)]
     ['h1']
     """
-    q = ("SELECT j.*, c.name AS company_name_row FROM jobs j "
+    q = ("SELECT j.*, c.name AS company_name_row FROM open_jobs j "
          "JOIN companies c ON j.company_id = c.id "
          "WHERE j.triage_status IS NULL "
-         "AND COALESCE(j.track,'') = '' "
-         "AND COALESCE(j.status,'open') != 'closed'")
+         "AND COALESCE(j.track,'') = ''")
     args: list[Any] = []
     if company_id is not None:
         q += " AND j.company_id = ?"

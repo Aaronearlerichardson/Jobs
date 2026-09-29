@@ -263,9 +263,8 @@ def _dead_board_open_rows(conn: sqlite3.Connection, days: int) -> list[dict[str,
     cutoff = (datetime.now() - timedelta(days=days)).isoformat()
     rows = [dict(r) for r in conn.execute(
         "SELECT j.job_id, j.title, j.company_id, j.company_name, "
-        "c.miss_reason FROM jobs j JOIN companies c ON c.id = j.company_id "
-        "WHERE COALESCE(j.status,'open') != 'closed' "
-        "AND c.miss_reason IS NOT NULL "
+        "c.miss_reason FROM open_jobs j JOIN companies c ON c.id = j.company_id "
+        "WHERE c.miss_reason IS NOT NULL "
         "AND COALESCE(j.last_seen, j.first_seen, '') < ? "
         "ORDER BY j.company_name",
         (cutoff,)).fetchall()]
@@ -375,9 +374,8 @@ async def check_closed_jobs(limit: int | None = None, stale_days: int = 2,
     async with track_writer(t, db) as db:
         cutoff = (datetime.now() - timedelta(days=stale_days)).isoformat()
         rows = await db.run(lambda conn: [dict(r) for r in conn.execute(
-            "SELECT job_id, title, company_name, company_id, url FROM jobs "
-            "WHERE COALESCE(status,'open') != 'closed' "
-            "AND COALESCE(last_seen, first_seen, '') < ? "
+            "SELECT job_id, title, company_name, company_id, url FROM open_jobs "
+            "WHERE COALESCE(last_seen, first_seen, '') < ? "
             "AND COALESCE(probe_streak, 0) < ? "
             "ORDER BY COALESCE(desc_checked_at, ''), company_name",
             (cutoff, CLOSED_PROBE_GIVE_UP)).fetchall()])

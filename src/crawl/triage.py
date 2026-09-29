@@ -906,15 +906,14 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[dict[str, Any]] |
     located = [b.name for b in BOARDS.values() if b.fills_location]
     for r in conn.execute(
             "SELECT j.job_id, j.company_name, j.title, j.location "
-            "FROM jobs j JOIN companies c ON c.id = j.company_id "
-            f"WHERE j.triage_status='geo' AND c.ats IN ({','.join('?' * len(located))}) "
-            "AND COALESCE(j.status,'open') != 'closed'", located):
+            "FROM open_jobs j JOIN companies c ON c.id = j.company_id "
+            f"WHERE j.triage_status='geo' AND c.ats IN ({','.join('?' * len(located))})",
+            located):
         if location_unknown(r["location"]):
             add(r, "geo:unknown-location")
     for r in conn.execute(
             "SELECT job_id, company_name, title, location, triage_detail "
-            "FROM jobs WHERE triage_status IN ('ok','fit') "
-            "AND COALESCE(status,'open') != 'closed'"):
+            "FROM open_jobs WHERE triage_status IN ('ok','fit')"):
         loc = r["location"]
         passed = _passed_tracks(r["triage_detail"])
         if (location_unknown(loc) or is_nc(loc) or remote_signal(loc)

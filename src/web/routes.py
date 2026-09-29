@@ -302,9 +302,7 @@ def api_companies() -> ResponseReturnValue:
         # roster suggests watching a company that has already produced a
         # good-fit job, which is how a hand-maintained watch list grows.
         stats = {r[0]: (r[1], r[2]) for r in conn.execute(
-            "SELECT company_id, COUNT(*), MAX(resume_fit_score) FROM jobs "
-            "WHERE COALESCE(status,'open')!='closed' AND company_id IS NOT NULL "
-            "GROUP BY company_id").fetchall()}
+            "SELECT company_id, open_jobs, best_fit FROM company_open_stats").fetchall()}
     out = []
     for c in comps:
         tags = company_tags.parse(c.get("tags"))
@@ -593,12 +591,11 @@ def api_stats() -> ResponseReturnValue:
             return conn.execute(q, args).fetchone()[0]
 
         stats = {
-            "open": one("SELECT COUNT(*) FROM jobs WHERE COALESCE(status,'open')!='closed'"),
+            "open": one("SELECT COUNT(*) FROM open_jobs"),
             "closed": one("SELECT COUNT(*) FROM jobs WHERE status='closed'"),
-            "new_today": one("SELECT COUNT(*) FROM jobs WHERE substr(first_seen,1,10)=? "
-                             "AND COALESCE(status,'open')!='closed'", (today,)),
-            "dated": one("SELECT COUNT(posted_at) FROM jobs "
-                         "WHERE COALESCE(status,'open')!='closed'"),
+            "new_today": one("SELECT COUNT(*) FROM open_jobs WHERE substr(first_seen,1,10)=?",
+                             (today,)),
+            "dated": one("SELECT COUNT(posted_at) FROM open_jobs"),
             "pipeline": one("SELECT COUNT(*) FROM jobs "
                             "WHERE disposition IN ('applied','interviewing')"),
             "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),

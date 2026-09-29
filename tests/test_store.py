@@ -36,6 +36,47 @@ class TestSchema:
         build = (Path(__file__).parent.parent / "build_app.py").read_text(encoding="utf-8")
         assert '("src/store/migrations", "src/store/migrations")' in build
 
+    def test_open_jobs_reads_a_missing_status_as_open(self, db, company, add_job):
+        for job_id, status in (("gh_acme_open", "open"), ("gh_acme_closed", "closed"),
+                               ("gh_acme_null", None)):
+            add_job(job_id)
+            db.execute("UPDATE jobs SET status=? WHERE job_id=?", (status, job_id))
+        assert {r[0] for r in db.execute("SELECT job_id FROM open_jobs")} \
+            == {"gh_acme_open", "gh_acme_null"}
+
+    def test_company_open_stats_counts_open_rows_and_their_best_fit(
+            self, db, company, add_job):
+        add_job("gh_acme_1", fit=0.4)
+        add_job("gh_acme_2", fit=0.9)
+        add_job("gh_acme_3", fit=0.99)
+        store.set_job_status(db, "gh_acme_3", "closed")
+        assert tuple(db.execute("SELECT open_jobs, best_fit FROM company_open_stats "
+                                "WHERE company_id=?", (company,)).fetchone()) == (2, 0.9)
+
+    @pytest.mark.parametrize("query", [
+        "SELECT * FROM jobs WHERE disposition IS NOT NULL ORDER BY disposition_at DESC",
+        "SELECT * FROM jobs WHERE followup_at <= 'x' AND disposition IN ('applied')",
+        "SELECT company_id, open_jobs, best_fit FROM company_open_stats",
+        "SELECT job_id FROM open_jobs WHERE COALESCE(last_seen, first_seen, '') < 'x'",
+    ])
+    def test_the_open_and_disposition_reads_use_their_partial_indexes(self, db, query):
+        plan = " ".join(str(r[3]) for r in db.execute("EXPLAIN QUERY PLAN " + query))
+        assert "USING INDEX ix_jobs_" in plan, plan
+
+    def test_a_version_1_store_gains_the_views_and_indexes(self, tmp_path):
+        path = tmp_path / "v1.db"
+        conn = store.connect(path)
+        for stmt in ("DROP VIEW company_open_stats", "DROP VIEW open_jobs",
+                     "DROP INDEX ix_jobs_disposition", "DROP INDEX ix_jobs_open_company",
+                     "DROP INDEX ix_jobs_open_seen", "PRAGMA user_version = 1"):
+            conn.execute(stmt)
+        conn.commit()
+        conn.close()
+        conn = store.connect(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 2
+        assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")} \
+            == {"open_jobs", "company_open_stats"}
+
     def test_migrating_a_current_store_changes_nothing(self, db):
         before = db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0]
         migrate(db)

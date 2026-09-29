@@ -37,9 +37,8 @@ def stale_body_rows(conn: sqlite3.Connection, where: str,
     cutoff = ((datetime.now() - timedelta(days=retry_days)).isoformat()
               if retry_days else "9999")
     rows = [dict(r) for r in conn.execute(
-        f"SELECT {columns}, desc_checked_at FROM jobs "
+        f"SELECT {columns}, desc_checked_at FROM open_jobs "
         f"WHERE {where} "
-        "AND COALESCE(status,'open') != 'closed' "
         "AND length(COALESCE(description,'')) < ?", (min_len,)).fetchall()]
     recent = [r for r in rows if (r.get("desc_checked_at") or "") >= cutoff]
     rows = [r for r in rows if (r.get("desc_checked_at") or "") < cutoff]
