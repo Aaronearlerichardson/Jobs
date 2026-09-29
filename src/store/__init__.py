@@ -65,5 +65,5 @@ from .review import (  # noqa: F401
     blocked_name_keys,
 )
 from .schema import (  # noqa: F401  (re-exported: store.connect etc.)
-    BUSY_TIMEOUT_S, Writer, connect, batch, _ensure_columns,
+    BUSY_TIMEOUT_S, Writer, connect, batch,
 )

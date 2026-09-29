@@ -165,7 +165,8 @@ DATA_FILES = [
     ("src/web/templates/index.html", "src/web/templates/index.html"),
     ("profile.example.toml", "profile.example.toml"),
 ]
-DATA_DIRS = [("src/web/static", "src/web/static")]
+DATA_DIRS = [("src/web/static", "src/web/static"),
+            ("src/store/migrations", "src/store/migrations")]
 
 #: Our own entries in Nuitka's package-configuration format, for packages
 #: whose hidden dependencies its bundled config does not already describe.

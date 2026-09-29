@@ -1026,8 +1026,6 @@ async def test_a_blocked_loop_fails_the_test(loop_blocks):
 # with `global`). The allowlists name the exceptions.
 
 MODULE_LEVEL_NAME_ALLOW = {
-    ("src/store/schema.py", "_SCHEMA"): "declared table: the SQL DDL",
-    ("src/store/schema.py", "_INDEXES"): "declared table: the SQL DDL",
     ("src/store/jobs.py", "_RANK_SQL"): "declared query: ranked_jobs' SQL, layers named in its comment",
     ("src/store/jobs.py", "_COLLAPSE_SQL"): "declared query: ranked_jobs' collapse layer",
     ("src/discovery/name_sources.py", "_NAV_CHROME_RE"):

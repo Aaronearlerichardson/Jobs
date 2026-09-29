@@ -2,7 +2,9 @@
 lifecycle, dispositions, crawl dormancy, and track membership."""
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from pathlib import Path
 
 import pytest
 
@@ -12,6 +14,7 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
+from src.store.migrate import MIGRATIONS_DIR, migrate
 
 
 class TestSchema:
@@ -24,9 +27,62 @@ class TestSchema:
         assert {"resume_fit_score", "track", "remote_eligible",
                 "anchor_signal"} <= cols
 
-    def test_migrations_are_idempotent(self, db):
-        # A second connect() over the same schema must not raise.
-        store._ensure_columns(db)
+    def test_a_fresh_store_is_stamped_with_the_latest_migration(self, db):
+        latest = len(list(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")))
+        assert db.execute("PRAGMA user_version").fetchone()[0] == latest >= 1
+
+    def test_the_packaged_build_ships_the_migrations(self):
+        # The .sql files are data Nuitka cannot infer from imports.
+        build = (Path(__file__).parent.parent / "build_app.py").read_text(encoding="utf-8")
+        assert '("src/store/migrations", "src/store/migrations")' in build
+
+    def test_migrating_a_current_store_changes_nothing(self, db):
+        before = db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0]
+        migrate(db)
+        assert db.execute("SELECT group_concat(sql) FROM sqlite_master").fetchone()[0] == before
+
+    @staticmethod
+    def _unversioned_store(path):
+        """A store from before versioning: old column names, no crawl or
+        triage columns, no blocklist table."""
+        raw = sqlite3.connect(path)
+        raw.executescript("""
+            CREATE TABLE companies (id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,
+                ats TEXT, slug TEXT, nc_job_count INTEGER, hq_location TEXT, tags TEXT);
+            CREATE TABLE jobs (id INTEGER PRIMARY KEY, job_id TEXT UNIQUE NOT NULL,
+                company_id INTEGER, title TEXT, neural_signal TEXT, mission TEXT,
+                tech_bar_score REAL, status TEXT DEFAULT 'open');
+            INSERT INTO companies (name, ats, slug, nc_job_count, tags)
+                VALUES ('Acme', 'lever', 'acme', 7, 'nc_local,neural,watch');
+            INSERT INTO jobs (job_id, company_id, title, neural_signal, mission)
+                VALUES ('j1', 1, 'T', 'bci', 'x');""")
+        raw.commit()
+        raw.close()
+
+    def test_a_store_from_before_versioning_is_adopted_with_its_data(self, tmp_path):
+        path = tmp_path / "old.db"
+        self._unversioned_store(path)
+        conn = store.connect(path)
+        cols = lambda t: {r[1] for r in conn.execute(f"PRAGMA table_info({t})")}
+        assert {"local_job_count", "crawl_state", "last_harvested_at"} <= cols("companies")
+        assert not {"nc_job_count", "hq_location"} & cols("companies")
+        assert {"anchor_signal", "triage_status", "outcome_reason"} <= cols("jobs")
+        assert not {"neural_signal", "mission", "tech_bar_score"} & cols("jobs")
+        assert tuple(conn.execute("SELECT local_job_count, tags FROM companies").fetchone()) \
+            == (7, "local,sweep,watch")
+        assert conn.execute("SELECT anchor_signal FROM jobs").fetchone()[0] == "bci"
+        assert conn.execute("SELECT COUNT(*) FROM name_blocklist").fetchone()[0] == 0
+        assert {"ix_jobs_url", "ix_jobs_triage"} <= {
+            r[1] for r in conn.execute("PRAGMA index_list(jobs)")}
+        assert conn.execute("PRAGMA user_version").fetchone()[0] >= 1
+
+    def test_concurrent_first_opens_of_an_old_store_all_succeed(self, tmp_path):
+        path = tmp_path / "old.db"
+        self._unversioned_store(path)
+        with ThreadPoolExecutor(6) as pool:
+            conns = list(pool.map(lambda _: store.connect(path), range(6)))
+        assert {c.execute("PRAGMA user_version").fetchone()[0] for c in conns} \
+            == {len(list(MIGRATIONS_DIR.glob("[0-9][0-9][0-9][0-9]_*.sql")))}
 
     def test_url_lookup_is_indexed(self, db):
         """upsert_job probes `url` for every NEW row. Unindexed, that probe
