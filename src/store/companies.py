@@ -645,7 +645,9 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
 # still crawled, just weekly rather than every run.
 #
 # Two ways in, both reversible by the board itself:
-#   * empty streak -- `dormant_after` consecutive DAYS returning nothing;
+#   * empty streak -- `dormant_after` consecutive DAYS returning nothing,
+#     from a board with no open postings on file either (a location-scoped
+#     read of a big employer with nothing local is not an empty board);
 #   * off-mission volume -- >= 30 jobs stored and a best fit under 0.20.
 # Watched companies are exempt from both: the watch tag means "tell me the
 # moment anything opens here", which a weekly cadence would break.
@@ -688,7 +690,9 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
         several tracks (and a re-run after a crash) hit the same board on
         the same day, and three runs in one afternoon must not read as
         three empty days;
-      * `n_jobs > 0` resets the streak and wakes a dormant row;
+      * `n_jobs > 0` resets the streak and wakes a dormant row, and so do
+        open postings on file (the harvester's whole-board read): a board
+        serving jobs elsewhere is alive, whatever this track's scope kept;
       * either dormancy rule (streak, off-mission volume) parks the row at
         now + `dormant_days`.
 
@@ -708,7 +712,10 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     streak = row["empty_streak"] or 0
     sets: dict[str, Any] = {"last_crawled_at": stamp}
 
-    if n_jobs:
+    open_on_file = conn.execute(
+        "SELECT 1 FROM jobs WHERE company_id = ? AND COALESCE(status, 'open') = 'open' "
+        "LIMIT 1", (company_id,)).fetchone() is not None
+    if n_jobs or open_on_file:
         streak = 0
         sets["empty_streak"] = 0
         sets["last_nonempty_at"] = stamp

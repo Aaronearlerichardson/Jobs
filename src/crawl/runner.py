@@ -356,11 +356,13 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: dict[str, Any], c: dict[str,
     watch_hits: list[tuple[dict[str, Any], dict[str, Any], bool]] = []
     if tags.has(c, tags.WATCH):
         # Watch section: EVERY new technical, non-excluded posting at a
-        # watched company, any geography -- out-of-scope ones stored
-        # unscored so they aren't re-flagged next run.
+        # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
+        # were NVIDIA seats in Israel, India and Europe) -- out-of-scope
+        # ones stored unscored so they aren't re-flagged next run.
         fresh_ids = {f["id"] for f in fresh}
         for j in jobs:
             if (store.crawl_seen(conn, j["id"]) and j["id"] not in fresh_ids) \
+                    or not us_eligible(j.get("location") or "") \
                     or not gates.is_technical_role(j.get("title", ""), t) \
                     or (t["exclude_gate"] and gates.exclude_reason(
                         j.get("title", ""), j.get("description", ""),

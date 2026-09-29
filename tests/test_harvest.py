@@ -868,6 +868,20 @@ async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
                       ).fetchone()["status"] == ("closed" if closed else "open")
 
 
+def test_the_watch_section_lists_us_postings_only(db, local_track):
+    """A watched company's new postings are listed wherever in the US they
+    sit; a seat abroad is neither listed nor stored (2026-09-29: 20 of 29
+    hits were NVIDIA seats in Israel, India and Europe)."""
+    from src import tags
+    from src.crawl import runner
+    c = _company(db, "Acme", tags=tags.WATCH)
+    jobs = [{**_job(1), "title": "Data Engineer", "location": "US, CA, Santa Clara"},
+            {**_job(2), "title": "Data Engineer", "location": "Israel, Yokneam"}]
+    _, hits = runner._fresh_and_watched(db, local_track, c, jobs, [], commit=True)
+    assert [j["location"] for _, j, _ in hits] == ["US, CA, Santa Clara"]
+    assert store.job_exists(db, "gh_acme_1") and not store.job_exists(db, "gh_acme_2")
+
+
 # ── the crawl adopts harvested rows ─────────────────────────────────────────
 
 async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):

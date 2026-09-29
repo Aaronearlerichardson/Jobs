@@ -196,8 +196,11 @@ default = true
 #                              # company goes dormant: still crawled, but
 #                              # weekly instead of every run (a roster of 300
 #                              # had 181 companies that had never produced a
-#                              # single job). One non-empty fetch wakes it,
-#                              # and "watch"-tagged companies never sleep.
+#                              # single job). An empty day is one with nothing
+#                              # in this track's scope AND no open posting
+#                              # the harvester has on file for the board. One
+#                              # non-empty fetch wakes it, and "watch"-tagged
+#                              # companies never sleep.
 # dormant_days = 7             # how long a dormant company is skipped before
 #                              # its next retry
 # tech_title_regex = "..."     # the technical-title gate (case-insensitive

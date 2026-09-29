@@ -121,6 +121,17 @@ class TestDormancy:
         assert row["empty_streak"] == 0 and row["next_crawl_at"] is None
         assert row["last_nonempty_at"] is not None
 
+    def test_open_postings_elsewhere_keep_a_scoped_empty_board_awake(
+            self, db, company, add_job):
+        """A location-scoped read of a big employer with nothing local
+        returns nothing; the harvester's open rows say the board is alive
+        (2026-09-29: Microsoft and J&J kept going dormant)."""
+        add_job("gh_acme_1", location="Redmond, WA")
+        assert self._empty_days(db, company, 6) == "active"
+        assert self._state(db, company)["empty_streak"] == 0
+        db.execute("UPDATE jobs SET status='closed'")
+        assert self._empty_days(db, company, 4) == "dormant"
+
     def test_watched_company_never_sleeps(self, db, company):
         store.set_company_tag(db, "Acme", "watch")
         assert self._empty_days(db, company, 6) == "active"
