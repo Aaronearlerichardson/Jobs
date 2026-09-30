@@ -9,7 +9,9 @@ measured on a scratch copy of `src/`.
 (phase 1, `37ffcf6`). Storing None for `url` or `location` is not a problem
 (2.5). Phases 1 and 2 approved and done; phase 2 put `EngineRow` and
 `FillField` in `src/ats/board/spec.py` beside `RowField`, not in `rows.py`.
-Phase 3 (the fetched-job flow) and phase 4 (docs) are not started.
+Phase 3 (the fetched-job flow) is done as well; built, it needed no
+`Fillable` type: `Board._apply` takes `EngineRow | FetchedJob`. Phase 4 is
+left: a row for these types in REVIEW.md's Data shapes table.
 
 Checks on the tree at the first draft: `python -m mypy` 0 errors; `flake8 --select=F`
 clean; `python -m pytest` 1527 passed, 10 skipped, 0 failed (example profile;
@@ -302,16 +304,15 @@ the identity proof.
 |---|---|---|---|---|
 | 1 | dead keys (**done**) | remove `via` (getro + its assertion) and `job_id` (`_fetcher_shape`) | grep proof; AST diff shows only those two dict literals; suite; triage transcript unchanged | minimal; revert |
 | 2 | engine row (**done**) | `EngineRow` and `FillField` in `spec.py`; retype the engine and pager row chain (32 sites); `Rescue.fields` to `FillField`; `_apply` takes `EngineRow \| dict[str, Any]` until phase 3; names test; two more refused specs | mypy 0, 1528 passed, 101 of 102 files AST-identical (only `spec.py`, the new types). The AST diff cannot see the one deliberate runtime change, the pydantic field `Rescue.fields`, so the two refused specs pin it; four mutations caught | low; revert |
-| 3 | the fetched-job flow | `FetchedJob` (design A), `Employer`, `Fillable`; `_link` takes a `Mapping`; producers first, then `company`/`registry`/`harvest`, then runner and digest, then triage/ingest/backfill/`apply`; ends the phase-2 union | **measured on the prototype**: 143 sites, 26 files, 93 signatures, 24 scripted edits, 0 errors, 95 of 102 files AST-identical; the AST diff allow-list is the edit list in 2.2 (of which `via`, `job_id`, the two `or ""` writes and `board_jobs`' key order change output; decide the `or ""` pair, 2.5); then the local oracles named in the handoff (`run_track`, `triage.run`, `ingest_external_jobs`) old vs new | medium (size); one commit, revert; the AST diff makes review mechanical |
+| 3 | the fetched-job flow (**done**) | `FetchedJob` (design A) and `Employer` in `rows.py`; `_link` takes a `Mapping`; 102 sites in 24 files by script, plus hand edits in the engine, page_capture, runner, ingest and backfill; `_apply` takes `EngineRow \| FetchedJob`, which ends the phase-2 union; a names test | mypy 0, 1529 passed. 97 of 102 files AST-identical to the previous commit; the 5 that differ are exactly: `engine.py` (`out, fetched = [], 0` split for the annotation, `or ""` on `location`), `page_capture.py` (`update({...})`), `runner.py` (loop variable rename), `ingest.py` (`or ""` on `url`), `rows.py` (the types). The whole suite's `-s` transcript, compared as a multiset of lines, equals the previous commit's except for the three lines that count the new test (a run of `HEAD` against itself differs in 40 lines of concurrent print order). Three mutations of the names test caught | medium (size); one commit, revert |
 | 4 | tests and docs | names tests from 2.4; a row in REVIEW.md's Data shapes table | mutation-check each test | low |
 | 5 | (separate track) `JobRow` for stored rows | see 2.7 | typeof audit twin to `test_the_company_writers_store_each_column_as_declared` | medium |
 
 ### 2.7 Recommendation
 
 Adopt **design A with the B-lite split**: `EngineRow` (phase 2), then
-`FetchedJob`, `Employer` and `Fillable` (phase 3). First phase: phase 2 (with
-phase 1 first if the owner accepts removing `via`). Phase 2 is already proven
-annotation-only.
+`FetchedJob` and `Employer` (phase 3; `Fillable` proved unnecessary). Built as
+recommended: phases 1 to 3 are done.
 
 Why not A' (required core keys): on the real code it flagged nothing (no
 producer omits a core key) and cost four errors, so three more types or
