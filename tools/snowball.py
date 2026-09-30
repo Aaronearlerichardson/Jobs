@@ -37,7 +37,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -547,7 +547,7 @@ def _evidence_score(name: str | None, intro_postings: int, suffix_postings: int,
     score = intro_component + suffix_component
     if high_fit:
         score *= _HIGH_FIT_MULTIPLIER
-    return round(score, 2)
+    return cast(float, round(score, 2))
 
 
 def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -665,7 +665,7 @@ def harvest_from_store(conn: sqlite3.Connection, min_mentions: int = 2,
     ).fetchall()
 
     # name-key -> accumulated evidence
-    hits = defaultdict(lambda: {"display": None, "mentions": 0, "postings": set(),
+    hits: dict[str, dict[str, Any]] = defaultdict(lambda: {"display": None, "mentions": 0, "postings": set(),
                                 "intro_postings": set(), "suffix_postings": set(),
                                 "high_fit": False, "titles": []})
     for r in rows:

@@ -103,7 +103,9 @@ async def generate_keyword_report(delay: float = 0.5) -> Path:
     path = REPORT_DIR / f"keyword_expansion_{date_str}.md"
 
     existing_kw = {k.lower() for k in INCLUDE_KEYWORDS}
-    all_titles, all_keywords, all_sectors = {}, {}, {}
+    all_titles: dict[str, list[str]] = {}
+    all_keywords: dict[str, list[str]] = {}
+    all_sectors: dict[str, list[str]] = {}
 
     bar = "=" * 62
     print(f"\n{bar}")
@@ -177,9 +179,9 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     if args.location:
-        expanded = runstate.run(expand_location(args.location))
-        if expanded:
-            print_location_expansion(args.location, expanded)
+        located = runstate.run(expand_location(args.location))
+        if located:
+            print_location_expansion(args.location, located)
         return
     if args.keyword_report:
         runstate.run(generate_keyword_report())

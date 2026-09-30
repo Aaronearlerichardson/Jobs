@@ -43,7 +43,7 @@ def console_utf8() -> None:
     reconfigured (a pipe, a captured buffer under pytest) is left alone.
     """
     try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]  # only a TextIOWrapper has it
     except Exception:
         pass
 

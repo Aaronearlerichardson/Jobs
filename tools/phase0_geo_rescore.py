@@ -66,6 +66,7 @@ import random
 import sqlite3
 import sys
 import time
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -96,7 +97,7 @@ _SELECT_SQL = """
 """
 
 
-def _is_local_or_remote(location: str) -> bool:
+def _is_local_or_remote(location: str | None) -> bool:
     loc = location or ""
     return bool(NC_RE.search(loc)) or ("remote" in loc.lower())
 
@@ -232,7 +233,7 @@ async def run_pilot(n: int = 25, dry_run: bool = False, seed: int = 0
         conn.close()
 
 
-async def run_full(exclude_ids: tuple[str, ...] = (),
+async def run_full(exclude_ids: Collection[str] = (),
                    dry_run: bool = False) -> list[dict[str, Any]]:
     confirm_backup()
     confirm_api_key()

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import functools
 import io
 import json
 import re
@@ -44,7 +45,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, cast
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -59,6 +60,7 @@ from src.net import http                                     # noqa: E402
 from src.net.http import HEADERS                             # noqa: E402
 from src.net.robots import CACHE as ROBOTS         # noqa: E402
 from src.net.util import origin_of                # noqa: E402
+from src.rows import BoardCoords, FetchedJob      # noqa: E402
 
 OK, BLOCKED, BROKEN, ROBOTS_OFF, SKIPPED = (
     "ok", "blocked", "broken", "robots", "skipped")
@@ -228,8 +230,8 @@ class _TaskCapture:
         self._passthrough.flush()
 
 
-async def _run_fetcher(fn: Callable[..., Awaitable[list[dict[str, Any]] | None]],
-                       *a: Any, **kw: Any) -> tuple[list[dict[str, Any]], str, str]:
+async def _run_fetcher[T](fn: Callable[..., Awaitable[list[T] | None]],
+                          *a: Any, **kw: Any) -> tuple[list[T], str, str]:
     """Await a fetcher, capturing the diagnostics it prints. Returns
     (rows, note, exception_text).
 
@@ -257,11 +259,11 @@ async def probe_feeds() -> list[dict[str, Any]]:
                                fetch_remotive, fetch_rss)
 
     out = []
-    checks = [("remoteok", lambda: fetch_remoteok(max_jobs=50)),
+    checks: list[tuple[str, Callable[[], Awaitable[list[FetchedJob]]]]] = [
+              ("remoteok", lambda: fetch_remoteok(max_jobs=50)),
               ("remotive", lambda: fetch_remotive(max_jobs=50)),
               ("hn who-is-hiring", lambda: fetch_hnhiring(max_threads=1))]
-    checks += [(f"rss: {label}",
-                lambda u=url, l=loc: fetch_rss("probe", u, l, max_items=50))
+    checks += [(f"rss: {label}", functools.partial(fetch_rss, "probe", url, loc, max_items=50))
                for label, url, loc in config.RSS_FEEDS]
 
     for label, call in checks:
@@ -348,11 +350,11 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
         from src.ats.feeds.websearch import fetch_websearch
         for label, q in SEARCH_QUERIES[1:]:
             started = time.monotonic()
-            rows, note, exc = await _run_fetcher(
+            postings, note, exc = await _run_fetcher(
                 fetch_websearch, f"probe: {label}", q, max_results=5)
             blob = f"{note} {exc}"
-            if rows:
-                status, detail = OK, f"{len(rows)} postings parsed from results"
+            if postings:
+                status, detail = OK, f"{len(postings)} postings parsed from results"
             elif exc:
                 status, detail = BROKEN, exc[:110]
             else:
@@ -360,7 +362,7 @@ async def probe_search(deep: bool = False) -> list[dict[str, Any]]:
                 detail = (note[:110] or
                           "0 postings — no results, or none carried JSON-LD")
             out.append({"section": "search", "name": f"fetch_websearch: {label}",
-                        "status": status, "detail": detail, "rows": len(rows),
+                        "status": status, "detail": detail, "rows": len(postings),
                         "seconds": round(time.monotonic() - started, 1)})
             await asyncio.sleep(2.0)
     return out
@@ -469,8 +471,11 @@ async def probe_roster(limit: int | None = None, workers: int = 8) -> list[dict[
             return {"section": "roster", "name": row["name"], "ats": row["ats"],
                     "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
         started = time.monotonic()
-        jobs, note, exc = await _run_fetcher(
-            sweep(board.name, row["name"], board.handle(row) or ""))
+        fetcher = sweep(board.name, row["name"], board.handle(cast(BoardCoords, row)) or "")
+        if fetcher is None:
+            return {"section": "roster", "name": row["name"], "ats": row["ats"],
+                    "status": SKIPPED, "detail": "no fetcher", "seconds": 0.0}
+        jobs, note, exc = await _run_fetcher(fetcher)
         if jobs:
             status, detail = OK, f"{len(jobs)} postings"
         elif exc or note:
@@ -510,7 +515,7 @@ async def _probe_robots_all() -> list[dict[str, Any]]:
 
 
 #: key -> (title, the section's coroutine function, given the parsed args).
-SECTIONS = {
+SECTIONS: dict[str, tuple[str, Callable[[argparse.Namespace], Awaitable[list[dict[str, Any]]]]]] = {
     "robots": ("robots.txt policy", lambda a: _probe_robots_all()),
     "feeds":  ("Aggregator feeds", lambda a: probe_feeds()),
     "search": ("Web search", lambda a: probe_search(deep=a.deep)),
@@ -530,7 +535,7 @@ def print_section(title: str, results: list[dict[str, Any]]) -> None:
 
 
 def summarize(results: list[dict[str, Any]]) -> dict[str, int]:
-    counts = {}
+    counts: dict[str, int] = {}
     for r in results:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
     return counts

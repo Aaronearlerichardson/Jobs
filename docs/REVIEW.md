@@ -174,7 +174,10 @@ What a reviewer holds a new shape to:
   None`. `mypy` runs `strict` (bar `no_implicit_reexport`, which would want
   `__all__` in each facade) with `possibly-undefined` and `redundant-expr`
   on; the second is what reports a guard the types call unnecessary, which
-  is either dead code or a type that is too narrow. Check which.
+  is either dead code or a type that is too narrow. Check which. `tools/` is
+  checked too: after the typing phases it stood 45 errors behind `src/`
+  (a roster probe passing a plain dict where a board's coordinates are
+  read), because nothing ran mypy there.
 - **Convert a flow whole.** A `TypedDict` is not assignable to `dict[str,
   Any]`, so a producer and every function that receives its dicts change in
   one commit; a half-typed flow does not pass mypy. Such a phase is

@@ -66,6 +66,7 @@ STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": 
 async def check_board(board: Board) -> dict[str, Any]:
     """Probe one platform's canary board and classify the outcome."""
     canary = board.spec.canary
+    assert canary is not None, board.name
     ats, name, floor = board.name, canary.name, canary.min_jobs
     buf, started = io.StringIO(), time.monotonic()
     try:
@@ -113,7 +114,7 @@ def promotion_candidates(least: int = 3) -> list[tuple[str, Any, list[str]]]:
     """(path, value, platforms) for each key `least` or more specs set to
     one value other than its default: a default worth promoting. A union's
     `kind` picks a model, so it is left out."""
-    seen = {}
+    seen: dict[tuple[str, str], set[str]] = {}
     for board in BOARDS.values():
         for path, value, given in _leaves(board):
             if given and not path.endswith(".kind"):
