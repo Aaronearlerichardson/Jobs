@@ -11,7 +11,9 @@ measured on a scratch copy of `src/`.
 `FillField` in `src/ats/board/spec.py` beside `RowField`, not in `rows.py`.
 Phase 3 (the fetched-job flow) is done as well; built, it needed no
 `Fillable` type: `Board._apply` takes `EngineRow | FetchedJob`. Phase 4 is
-left: a row for these types in REVIEW.md's Data shapes table.
+done: REVIEW.md's Data shapes table and four reviewer rules from this work.
+The handoff this memo answers, `docs/handoff-fetched-job-typing.md`, is
+deleted, as it asked; "the handoff" below means that file.
 
 Checks on the tree at the first draft: `python -m mypy` 0 errors; `flake8 --select=F`
 clean; `python -m pytest` 1527 passed, 10 skipped, 0 failed (example profile;
@@ -305,7 +307,7 @@ the identity proof.
 | 1 | dead keys (**done**) | remove `via` (getro + its assertion) and `job_id` (`_fetcher_shape`) | grep proof; AST diff shows only those two dict literals; suite; triage transcript unchanged | minimal; revert |
 | 2 | engine row (**done**) | `EngineRow` and `FillField` in `spec.py`; retype the engine and pager row chain (32 sites); `Rescue.fields` to `FillField`; `_apply` takes `EngineRow \| dict[str, Any]` until phase 3; names test; two more refused specs | mypy 0, 1528 passed, 101 of 102 files AST-identical (only `spec.py`, the new types). The AST diff cannot see the one deliberate runtime change, the pydantic field `Rescue.fields`, so the two refused specs pin it; four mutations caught | low; revert |
 | 3 | the fetched-job flow (**done**) | `FetchedJob` (design A) and `Employer` in `rows.py`; `_link` takes a `Mapping`; 102 sites in 24 files by script, plus hand edits in the engine, page_capture, runner, ingest and backfill; `_apply` takes `EngineRow \| FetchedJob`, which ends the phase-2 union; a names test | mypy 0, 1529 passed. 97 of 102 files AST-identical to the previous commit; the 5 that differ are exactly: `engine.py` (`out, fetched = [], 0` split for the annotation, `or ""` on `location`), `page_capture.py` (`update({...})`), `runner.py` (loop variable rename), `ingest.py` (`or ""` on `url`), `rows.py` (the types). The whole suite's `-s` transcript, compared as a multiset of lines, equals the previous commit's except for the three lines that count the new test (a run of `HEAD` against itself differs in 40 lines of concurrent print order). Three mutations of the names test caught | medium (size); one commit, revert |
-| 4 | tests and docs | names tests from 2.4; a row in REVIEW.md's Data shapes table | mutation-check each test | low |
+| 4 | tests and docs (**done**) | names tests from 2.4 (in phases 2 and 3); REVIEW.md: the Data shapes table row, the names-test mention, the closed-type and whole-flow rules, and a NEAR-MISS note on the dataclass | the names tests were mutation-checked; docs only | low |
 | 5 | (separate track) `JobRow` for stored rows | see 2.7 | typeof audit twin to `test_the_company_writers_store_each_column_as_declared` | medium |
 
 ### 2.7 Recommendation

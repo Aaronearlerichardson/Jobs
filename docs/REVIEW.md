@@ -120,7 +120,7 @@ not by habit.
 |---|---|---|
 | input from outside: a file, the environment, an HTTP body, a Claude reply, board-spec config | a pydantic model, validated once at the edge | `config/profile_schema.py`, `config/secrets.py` (`Settings`), `ats/board/spec.py`, `claude/reply.py`, `web/routes.py` (`_Body`), `dispatch/registry.py` (`OpParams`) |
 | a validated model the program keeps using | that model, frozen, read by attribute | `RuntimeTrack` |
-| a SQL row or patch, or anything that must stay a dict (SQL parameters, `{**row}`, JSON, `**kwargs`) | a `TypedDict`; a missing key means "leave what is stored" | `src/rows.py`: `CompanyRow` (read), `CompanyIn` (write), `JobIn`, `FitColumns`, `BoardHit` |
+| a SQL row or patch, or anything that must stay a dict (SQL parameters, `{**row}`, JSON, `**kwargs`) | a `TypedDict`; a missing key means "leave what is stored" | `src/rows.py`: `CompanyRow` (read), `CompanyIn` (write), `JobIn`, `FitColumns`, `BoardHit`, `FetchedJob` and `Employer` (a fetcher's job); `ats/board/spec.py`: `EngineRow` (the board engine's row, before `board_jobs`) |
 | working state with behaviour, or a mutable pipeline object | a dataclass | `FitResult`, `Candidate` |
 | a pair or triple handed between two functions | a `NamedTuple` | `Collected`, `_Admitted` |
 
@@ -138,7 +138,12 @@ What a reviewer holds a new shape to:
   `tests/test_store.py`). `CompanyRow` is the accepted example of a
   deliberate second copy: it repeats `CompanyIn`'s columns because a
   `TypedDict` cannot make an inherited optional key required, and those
-  tests check both against the table and against each other.
+  tests check both against the table and against each other. The fetched
+  job and the engine row mirror the spec's row fields and `FitColumns`
+  instead of a table:
+  `test_the_fetched_job_names_the_row_fields_and_fit_columns` and
+  `test_the_engine_row_names_the_spec_row_fields`, in
+  `tests/test_boards_spec.py`, check their names.
 - **SQLite does not enforce declared column types**, so the one cast where a
   row leaves sqlite is honest only with an audit:
   `test_the_company_writers_store_each_column_as_declared`, and its jobs
@@ -151,7 +156,24 @@ What a reviewer holds a new shape to:
   comes back as `object`. On a `closed=True` one it comes back as `None`, so
   the typo surfaces where the value is used. `closed` and `ReadOnly` come
   from `typing_extensions`, since CI runs Python 3.12 to 3.14, and need mypy
-  2.3 or later.
+  2.3 or later. A closed `TypedDict` cannot be extended with new keys, and an open one
+  is not assignable to it, so `FitColumns` stays open (`JobIn` extends it) and the
+  one place a fit score updates a `FetchedJob` takes a `cast`.
+- **Convert a flow whole.** A `TypedDict` is not assignable to `dict[str,
+  Any]`, so a producer and every function that receives its dicts change in
+  one commit; a half-typed flow does not pass mypy. Such a phase is
+  annotation-only, and shown to be: parse the old and the new tree, strip
+  annotations, `cast(T, x)` and imports, and compare the ASTs (what still
+  differs is the edits meant), and compare the suite's `-s` output as a
+  multiset of lines (concurrent tasks print in a varying order).
+- **NEAR-MISS, DELIBERATE: the fetched job is a `TypedDict`, not a
+  dataclass**, though four stages stamp it in place. It is barely used as a
+  dict (no `{**job}`, no copy, no JSON dump, three `.items()` loops), so a
+  dataclass would work; but it means about 450 key accesses, a dozen
+  producers and 48 test literals rewritten, each a runtime change the AST
+  comparison above cannot prove identical, against none for the `TypedDict`.
+  Revisit if a bug appears that a required constructor argument would have
+  caught (docs/fetched-job-typing-design.md, 2.7).
 - **Speed does not decide.** Building a dict, a dataclass or a pydantic
   model took 0.1 to 8 microseconds an object in a local timing
   (2026-09-29), and the crawler is network-bound. Choose by the table, and
