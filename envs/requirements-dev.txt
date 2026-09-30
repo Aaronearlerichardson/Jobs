@@ -19,3 +19,5 @@ zstandard>=0.22.0
 # tools/scans.py wraps these three when named (`bandit`, `audit`, `deps`); the
 # other scans need nothing. Install by hand, not in CI:
 #   bandit  pip-audit  deptry
+# tools/mutants.py needs cosmic-ray, installed the same way.
+#   cosmic-ray

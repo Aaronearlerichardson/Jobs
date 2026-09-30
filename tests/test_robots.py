@@ -17,7 +17,7 @@ import aiohttp
 import pytest
 import requests
 
-from conftest import answer
+from conftest import answer, fake_response
 from src.net import http, robots
 
 
@@ -99,6 +99,61 @@ class TestRespectRobots:
         assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
         assert [url for _, url, _ in sent] == ["https://a.test/jobs"]
         assert waits == []
+
+
+class TestWhatAFetchedFileMeans:
+    """RFC 9309 s2.3.1 at the edge of each status range, the cache's expiry,
+    and the rest of what `allowed` and `sitemaps` promise. Found by mutating
+    net/robots.py (tools/mutants.py): none of it was pinned."""
+
+    BLANKET = "User-agent: *\nDisallow: /\n"
+
+    @pytest.fixture(autouse=True)
+    def _robots_on(self, monkeypatch):
+        from src import config
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
+
+    @pytest.mark.parametrize("status, allowed", [
+        (399, False), (400, True), (404, True), (499, True), (500, False), (599, False), (600, True)])
+    async def test_each_status_means_what_the_rfc_says(self, serve, status, allowed):
+        """A parsed answer obeys; a 4xx is no restriction; a 5xx is every path refused."""
+        serve(fake_response(text=self.BLANKET, status=status))
+        assert await robots.RobotsCache().allowed("https://a.test/jobs") is allowed
+
+    async def test_robots_txt_is_fetched_following_redirects(self, serve):
+        seen = {}
+        serve(lambda url, **kw: seen.update(kw) or fake_response(text=""))
+        await robots.RobotsCache()._fetch("https://example.com")
+        assert seen["allow_redirects"] is True
+
+    async def test_a_file_is_fetched_again_once_the_ttl_has_passed(self):
+        calls = []
+
+        async def fetch(origin):
+            calls.append(origin)
+            return robots._HostRules()
+
+        cache = robots.RobotsCache(ttl=0.3)
+        cache._fetch = fetch
+        await cache.allowed("https://a.test/x")
+        await cache.allowed("https://a.test/y")
+        assert len(calls) == 1
+        await asyncio.sleep(0.35)
+        await cache.allowed("https://a.test/z")
+        assert len(calls) == 2
+
+    async def test_an_error_while_matching_fails_open(self, monkeypatch):
+        cache = robots.RobotsCache()
+        monkeypatch.setattr(cache, "_fetch", answer(SimpleNamespace(allows=lambda url: 1 / 0)))
+        assert await cache.allowed("https://a.test/x") is True
+
+    async def test_sitemaps_are_the_ones_the_file_lists(self, serve):
+        serve(fake_response(text="User-agent: *\nDisallow: /x\nSitemap: https://a.test/s1.xml\n"
+                                 "Sitemap: https://a.test/s2.xml\n"))
+        cache = robots.RobotsCache()
+        assert await cache.sitemaps("https://a.test/jobs") == ["https://a.test/s1.xml", "https://a.test/s2.xml"]
+        serve(fake_response(text="", status=404))
+        assert await cache.sitemaps("https://b.test/jobs") == []
 
 
 class TestFetchDeduplication:

@@ -102,12 +102,20 @@ def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
     >>> _is_dns_failure(wrapped), _is_dns_failure(TimeoutError("timed out"))
     (True, False)
 
-    Depth-bounded, because an exception chain can be cyclic:
+    Depth-bounded, and proof against a cycle:
 
     >>> a, b = Exception("a"), Exception("b")
     >>> a.__cause__, b.__cause__ = b, a
     >>> _is_dns_failure(a)
     False
+    >>> def chain(links):
+    ...     exc = socket.gaierror(11001, "getaddrinfo failed")
+    ...     for _ in range(links):
+    ...         outer, outer.__cause__ = OSError("wrapped"), exc
+    ...         exc = outer
+    ...     return exc
+    >>> _is_dns_failure(chain(3)), _is_dns_failure(chain(9))
+    (True, False)
     """
     seen = set()
     while exc is not None and _depth > 0 and id(exc) not in seen:
@@ -274,6 +282,8 @@ class RobotsCache:
         False
         >>> RobotsCache.host_exempt("https://jobs.smartrecruiters.com/x")
         False
+        >>> RobotsCache.host_exempt("https://aa.smartrecruiters.com/x"), RobotsCache.host_exempt("")
+        (False, False)
         >>> config.ROBOTS_EXEMPT_HOSTS = _saved
         """
         host = host_of(url)
@@ -281,7 +291,7 @@ class RobotsCache:
             return False
         for entry in getattr(config, "ROBOTS_EXEMPT_HOSTS", ()):
             if entry.startswith("."):
-                if host.endswith(entry) and host != entry[1:]:
+                if host.endswith(entry):
                     return True
             elif host == entry:
                 return True

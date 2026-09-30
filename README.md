@@ -961,3 +961,4 @@ identically to a dead one.
 | `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |
 | `tools/entrydeps.py` | which `src/` modules each entry point reaches — what a compiled binary must contain, and what only one of them needs |
 | `tools/scans.py` | mechanical scans of the code base, each a number to decide by: what the tests patch, typing left open, SQL built from text, names nothing reads, complexity, coverage gaps; `bandit`, `audit`, `deps` wrap tools you install yourself (`python tools/scans.py --list`) |
+| `tools/mutants.py` | mutation testing of one module (`python tools/mutants.py src/net/robots.py`): changes it a line at a time, in a copy of the tree, and prints the changes no test noticed as diffs; needs `pip install cosmic-ray`, about three seconds a mutant |
