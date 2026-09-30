@@ -18,9 +18,10 @@ from typing import Any
 
 from src.net import http
 from src.net.util import strip_html
+from src.rows import FetchedJob
 
 
-async def fetch_remoteok(max_jobs: int = 500, gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+async def fetch_remoteok(max_jobs: int = 500, gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """
     Pull every active listing from RemoteOK, filter to the relevant ones
     (off the loop). Returns a list of job dicts in the standard crawler
@@ -30,9 +31,9 @@ async def fetch_remoteok(max_jobs: int = 500, gate: Callable[..., bool] | None =
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
 
-def _jobs(data: Any, max_jobs: int, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
+def _jobs(data: Any, max_jobs: int, gate: Callable[..., bool] | None) -> list[FetchedJob]:
     """The feed's payload `data` as fetch_remoteok's job dicts."""
-    jobs = []
+    jobs: list[FetchedJob] = []
     for entry in data[:max_jobs + 1]:           # +1 for metadata stub
         if not isinstance(entry, dict):
             continue

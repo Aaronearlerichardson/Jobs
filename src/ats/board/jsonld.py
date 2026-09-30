@@ -23,6 +23,7 @@ from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import jsonld_scripts, parse_markup, stable_id, text_from_html
 from src.net.util import norm_posted_date as _norm_posted
+from src.rows import FetchedJob
 
 
 def extract_jsonld(html: str, url: str = "") -> list[Any]:
@@ -140,9 +141,9 @@ def postings(html: str, page_url: str = "") -> list[dict[str, Any]]:
     return [read_posting(o, page_url) for o in extract_jsonld(html, page_url) if is_jobposting(o)]
 
 
-def _job_from_posting(jp: dict[str, Any], company_name: str, source_url: str) -> dict[str, Any]:
+def _job_from_posting(jp: dict[str, Any], company_name: str, source_url: str) -> FetchedJob:
     p = read_posting(jp, source_url)
-    job = {
+    job: FetchedJob = {
         "id":          f"jsonld_{company_name.replace(' ', '_')}_{p['key']}",
         "company":     company_name,
         "title":       p["title"],
@@ -158,7 +159,7 @@ def _job_from_posting(jp: dict[str, Any], company_name: str, source_url: str) ->
 
 async def fetch_jsonld_page(company_name: str, page_url: str,
                             gate: Callable[..., bool] | None = None,
-                            timeout: tuple[float, float] | None = None) -> list[dict[str, Any]]:
+                            timeout: tuple[float, float] | None = None) -> list[FetchedJob]:
     """Fetch ONE URL; extract JobPosting records from its JSON-LD, read off
     the loop."""
     try:

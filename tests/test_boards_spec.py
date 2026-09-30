@@ -16,6 +16,7 @@ from src import config, tags
 from src.ats import signatures
 from src.ats.board import BOARDS, spec
 from src.ats.registry import seed_tag_for
+from src.rows import FetchedJob, FitColumns
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -96,6 +97,15 @@ def test_the_engine_row_names_the_spec_row_fields():
     keys = set(spec.EngineRow.__annotations__)
     assert keys == (spec.ROW_FIELDS - {"department"}) | {"head", "_free"}
     assert set(get_args(spec.FillField)) <= keys
+
+
+def test_the_fetched_job_names_the_row_fields_and_fit_columns():
+    """A fetched job holds the spec's row fields but `department`, every fit
+    column a score stamps, and none of the engine row's own keys."""
+    keys = set(FetchedJob.__annotations__)
+    assert spec.ROW_FIELDS - {"department"} <= keys
+    assert set(FitColumns.__annotations__) <= keys
+    assert not {"head", "_free"} & keys
 
 
 def test_no_key_restates_its_default():

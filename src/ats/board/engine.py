@@ -65,7 +65,7 @@ from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
 from src.net.util import (cache_dir, clean_field, default_search_text,
                           hashed_cache_path, json_cache_get, json_cache_put, origin_key)
-from src.rows import BoardCoords
+from src.rows import BoardCoords, FetchedJob
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
@@ -88,7 +88,7 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
                      loc_re: LocationRE | None = None,
                      fetch_description: Callable[[EngineRow], Awaitable[str]] | None = None,
                      max_details: int = config.SWEEP_DETAILS,
-                     detail_delay: float = config.SWEEP_DETAIL_DELAY_S) -> list[dict[str, Any]]:
+                     detail_delay: float = config.SWEEP_DETAIL_DELAY_S) -> list[FetchedJob]:
     """Job dicts for the rows that pass `loc_re` and `gate` (see module doc).
 
     `await fetch_description(row)` is the ATS's detail call, when it has
@@ -149,7 +149,8 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
             desc = row.get("description") or ""
             yield row, head, desc, gate is None or gate(head), gate is None or gate(head, desc)
 
-    out, fetched = [], 0
+    out: list[FetchedJob] = []
+    fetched = 0
 
     async def hydrate(row: EngineRow) -> str | None:
         """The row's body from its detail; None with no detail call or
@@ -170,7 +171,8 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
             continue
         if not desc:
             desc = await hydrate(row) or desc
-        job: dict[str, Any] = {k: v for k, v in row.items() if not k.startswith("_")}
+        # A comprehension cannot build a TypedDict; the keys are the row's own.
+        job = cast(FetchedJob, {k: v for k, v in row.items() if not k.startswith("_")})
         job["company"] = company_name
         job["description"] = desc
         out.append(job)
@@ -181,8 +183,8 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
 #  The company-fetch shape                                                     #
 # --------------------------------------------------------------------------- #
 
-def adapt(jobs: Iterable[dict[str, Any]], ats: str,
-          loc_re: LocationRE | None = None) -> list[dict[str, Any]]:
+def adapt(jobs: Iterable[FetchedJob], ats: str,
+          loc_re: LocationRE | None = None) -> list[FetchedJob]:
     r"""Job dicts in the company-fetch shape: `ats` named, `company`
     dropped (the store row supplies it), the description capped at
     `config.MAX_DESC_CHARS`.
@@ -205,9 +207,10 @@ def adapt(jobs: Iterable[dict[str, Any]], ats: str,
         j["location"] = clean_field(j.get("location"))
         if not loc_ok(loc_re, j["location"]):
             continue
-        job: dict[str, Any] = {k: j[k] for k in ("id", "title", "url", "location",
+        # As in board_jobs: a comprehension cannot build a TypedDict.
+        job = cast(FetchedJob, {k: j[k] for k in ("id", "title", "url", "location",
                                                  "description", "posted_at", "remote_hint")
-                               if k in j}
+                               if k in j})
         job["description"] = (j.get("description") or "")[:config.MAX_DESC_CHARS]
         job["ats"] = ats
         out.append(job)
@@ -820,7 +823,7 @@ class Board:
 
     async def jobs(self, handle: str, company_name: str = "",
                    gate: Callable[..., bool] | None = None,
-                   loc_re: LocationRE | None = None) -> list[dict[str, Any]]:
+                   loc_re: LocationRE | None = None) -> list[FetchedJob]:
         """The sweep: `board_jobs` over the listing (`_pull`), screened by
         `gate`; an `eager` platform's detail reads fill the row as the
         whole-board pull's do."""
@@ -830,7 +833,7 @@ class Board:
                                 detail_delay=config.SWEEP_DETAIL_DELAY_S)
 
     async def whole_board(self, company: BoardCoords, loc_re: LocationRE | None = None,
-                          validate: bool = False) -> list[dict[str, Any]]:
+                          validate: bool = False) -> list[FetchedJob]:
         """The company-vetted pull: every row in `loc_re`'s area (`_pull`),
         adapted, each kept row filled from its detail (`_apply`) where the
         spec is `eager`. The walk reads up to `config.BOARD_MAX_ROWS`; a
@@ -997,7 +1000,7 @@ class Board:
         """Whether this platform's detail can name a posting's location."""
         return self.detail_spec is not None and self.detail_spec.location != "never"
 
-    def needs_detail(self, job: dict[str, Any]) -> bool:
+    def needs_detail(self, job: FetchedJob) -> bool:
         """Whether `hydrate` would fetch anything: no body yet, or a location
         the listing never resolved that this platform's detail can fill
         for the row's URL."""
@@ -1006,8 +1009,8 @@ class Board:
         return (self.fills_location and location_unknown(job.get("location"))
                 and self.owns_url(job.get("url")))
 
-    async def hydrate(self, job: dict[str, Any],
-                      company: BoardCoords | None = None) -> dict[str, Any]:
+    async def hydrate(self, job: FetchedJob,
+                      company: BoardCoords | None = None) -> FetchedJob:
         """Fill, in place, what `needs_detail` says `job` lacks (`_apply`),
         a new body capped at MAX_DESC_CHARS. A bodied row's location alone
         is read through `_locate` where the spec caches locations.
@@ -1016,7 +1019,7 @@ class Board:
             return job
         if job.get("description") and self._rescue_spec and self._rescue_spec.cache_days:
             job["location"] = ((await self._locate(job.get("url"), True, company))[0]
-                               or job.get("location"))
+                               or job.get("location") or "")
             return job
         rec, fs, ctx = await self._posting(job.get("url"), report=True, company=company)
         if rec:
@@ -1026,7 +1029,7 @@ class Board:
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
 
-    def _apply(self, job: EngineRow | dict[str, Any], rec: dict[str, Any], fs: dict[str, Reader],
+    def _apply(self, job: EngineRow | FetchedJob, rec: dict[str, Any], fs: dict[str, Reader],
                ctx: dict[str, Any]) -> None:
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",

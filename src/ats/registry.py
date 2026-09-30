@@ -25,11 +25,10 @@ Notes:
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Iterator
-from typing import Any
 
 from src import tags
 from src.match.filters import is_relevant
-from src.rows import CompanyRow
+from src.rows import CompanyRow, FetchedJob
 from .board import board_for
 
 
@@ -43,7 +42,7 @@ def seed_tag_for(ats: str | None) -> str | None:
 
 
 def sweep(ats: str, name: str,
-          handle: str) -> Callable[[], Awaitable[list[dict[str, Any]]]] | None:
+          handle: str) -> Callable[[], Awaitable[list[FetchedJob]]] | None:
     """The sweep's fetch for one board: a thunk whose coroutine pulls it
     through the profile's keyword gate (the engine itself is ungated; the
     company-vetted path, board/company.py, passes a location regex
@@ -53,7 +52,7 @@ def sweep(ats: str, name: str,
 
 
 def iter_store_sources(companies: Iterable[CompanyRow]) -> Iterator[
-        tuple[str, str, str, Callable[[], Awaitable[list[dict[str, Any]]]] | None]]:
+        tuple[str, str, str, Callable[[], Awaitable[list[FetchedJob]]] | None]]:
     """Yield (ats, name, handle, thunk) for the store rows on a platform
     the lightweight sweep pulls whole (its spec's `sweep`) that name a
     board."""

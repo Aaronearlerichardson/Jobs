@@ -71,7 +71,7 @@ from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
 from src.net.util import worker_count
-from src.rows import CompanyRow, JobIn
+from src.rows import CompanyRow, FetchedJob, JobIn
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
 from src.ops.status import check_closed_jobs
@@ -279,7 +279,7 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
 #  One board                                                                   #
 # --------------------------------------------------------------------------- #
 
-def _row(job: dict[str, Any], company: CompanyRow, stamp: str) -> JobIn:
+def _row(job: FetchedJob, company: CompanyRow, stamp: str) -> JobIn:
     """The store row for one harvested posting: identity, body, dates -- no
     track, no score."""
     desc = (job.get("description") or "")[:config.MAX_DESC_CHARS]
@@ -403,7 +403,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
     return stats
 
 
-def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
+def _write_board(conn: sqlite3.Connection, jobs: list[FetchedJob],
                  rows: list[tuple[JobIn, bool]], company: CompanyRow,
                  stats: dict[str, Any], stamp_dt: datetime) -> str | None:
     """One board's snapshot written, inside the caller's store.batch (ONE
@@ -444,7 +444,7 @@ def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
     return promoted
 
 
-async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
+async def hydrate_rows(jobs: list[FetchedJob], company: CompanyRow,
                        stats: dict[str, Any], delay: float | None = None,
                        backoff_s: float = MISS_BACKOFF_S,
                        progress: Callable[[], object] = lambda: None) -> list[str]:

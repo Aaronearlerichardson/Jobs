@@ -24,7 +24,7 @@ from typing import Any
 
 from src import config
 from src import tags
-from src.rows import FitColumns, JobIn
+from src.rows import FetchedJob, FitColumns, JobIn
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
@@ -531,7 +531,7 @@ def touch_job(conn: sqlite3.Connection, job_id: str) -> None:
 
 
 def sync_job_statuses(conn: sqlite3.Connection, company_id: int | None,
-                      fetched_jobs: list[dict[str, Any]], track: str | None = None,
+                      fetched_jobs: list[FetchedJob], track: str | None = None,
                       external_grace_days: float = 3, capped: bool = False,
                       now: datetime | None = None) -> tuple[int, int]:
     """Reconcile ONE company's stored jobs against a live board snapshot

@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
 
 from src.net import http
 from src.net.http import JSON_HEADERS
+from src.rows import FetchedJob
 
 
 async def fetch_discourse(display_name: str, base_url: str, category_id: int,
-                          gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                          gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     url = f"{base_url}/c/job-opportunities/{category_id}.json"
     data = await http.get_json(url, f"Discourse {display_name}", default={},
                                headers=JSON_HEADERS)
     topics = (data.get("topic_list") or {}).get("topics", []) if data else []
-    jobs = []
+    jobs: list[FetchedJob] = []
     for t in topics:
         if t.get("posts_count", 0) == 1 and t.get("reply_count", 0) == 0:
             continue

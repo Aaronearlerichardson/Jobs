@@ -12,7 +12,7 @@ from src.config import RuntimeTrack
 from src import store
 from src.ats.board import company as company_fetch
 from src.net.parallel import fan_out
-from src.rows import CompanyRow
+from src.rows import CompanyRow, FetchedJob
 from src.ops.maintenance import (_t, board_index, board_match,
                                  group_by_company, track_writer)
 
@@ -139,7 +139,7 @@ async def backfill_board_descriptions(max_workers: int = 8, limit: int | None = 
                 if not desc and r.get("url"):
                     # Board didn't cover this row — hydrate from the job's own
                     # detail page (JSON-LD / career-site markup).
-                    stub = {"title": r["title"], "url": r["url"],
+                    stub: FetchedJob = {"title": r["title"], "url": r["url"],
                             "ats": company.get("ats"), "description": ""}
                     await company_fetch.hydrate_description(stub, company)
                     desc = stub.get("description")

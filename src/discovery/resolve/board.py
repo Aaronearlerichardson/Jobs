@@ -36,14 +36,14 @@ from src.ats.board.engine import Board
 from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
-from src.rows import BoardCoords, BoardHit
+from src.rows import BoardCoords, BoardHit, FetchedJob
 from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import websearch_board
 
 
 async def read_board(comp: BoardCoords,
-                     loc_re: LocationRE | None = None) -> list[dict[str, Any]] | None:
+                     loc_re: LocationRE | None = None) -> list[FetchedJob] | None:
     """A resolved board's postings (`company.fetch_company`'s `validate`
     pull over its store columns `comp`), or None when the fetch failed
     and read nothing.
@@ -65,7 +65,7 @@ async def read_board(comp: BoardCoords,
     return rows if board and board.gone(http.snapshot_info()["last_error"]) else None
 
 
-async def read_local(comp: BoardCoords) -> tuple[list[dict[str, Any]], int, str | None]:
+async def read_local(comp: BoardCoords) -> tuple[list[FetchedJob], int, str | None]:
     """(local postings, board total, miss reason) for a detected board:
     its postings in your [locality] (`read_board` with NC_RE); when there
     are none, why, in src.store.MISS_REASONS words. The read failed:

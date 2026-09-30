@@ -102,7 +102,7 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
 from src.net.util import clean_field
-from src.rows import CompanyRow
+from src.rows import CompanyRow, FetchedJob
 from src.ops import maintenance as ops
 
 _log = logging.getLogger(__name__)
@@ -392,7 +392,7 @@ def summarize(verdicts: dict[str, str]) -> tuple[str, str, list[str]]:
 #  Hydration (survivors only) and scoring                                     #
 # --------------------------------------------------------------------------- #
 
-def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> dict[str, Any]:
+def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> FetchedJob:
     """A stored row as the job dict board.company.hydrate_description
     expects (`harvest.hydrate_rows` passes it the roster row, which names the
     board)."""
@@ -403,7 +403,7 @@ def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> dict[str, Any]:
             "ats": company.get("ats")}
 
 
-async def hydrate_company(company: CompanyRow, jobs: list[dict[str, Any]], delay: float | None = None,
+async def hydrate_company(company: CompanyRow, jobs: list[FetchedJob], delay: float | None = None,
                           backoff_s: float = MISS_BACKOFF_S) -> dict[str, Any]:
     """Fetch bodies for one company's survivors, serially, within the
     harvester's per-host tolerances. Returns the harvest-style stats, plus
@@ -472,7 +472,7 @@ async def _free_gates(db: store.Writer, companies: dict[Any, CompanyRow], groups
     return decided, survivors
 
 
-def _hydrate_order(survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]]) -> Callable[[dict[str, Any]], tuple[bool, bool]]:
+def _hydrate_order(survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]]) -> Callable[[FetchedJob], tuple[bool, bool]]:
     """Sort key for one board's hydration batch: rows some track has already
     decided OK first, then rows whose TITLE alone already reads relevant
     (match.filters.is_relevant), then the rest.
@@ -505,14 +505,14 @@ def _hydrate_order(survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]])
         Engineer", "Mask Design Engineer", "Memory Controller Verification
         Engineer".
     """
-    def key(job: dict[str, Any]) -> tuple[bool, bool]:
+    def key(job: FetchedJob) -> tuple[bool, bool]:
         return (survivors[job["id"]][2] != OK,
                 not is_relevant(job.get("title") or "", ""))
     return key
 
 
 async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]], summary: dict[str, float],
-                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[dict[str, Any]]], Awaitable[dict[str, Any]]],
+                   stamp: datetime, hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[dict[str, Any]]],
                    cutoff: str) -> dict[str, str]:
     """Phase 2: resolve every survivor company_fetch.needs_detail still
     flags -- a missing body, or a body already but a
@@ -539,7 +539,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
         time, which both capped the pass and let two companies on one
         shared host (a multi-tenant API) hydrate at once.
     """
-    todo: dict[Any, list[dict[str, Any]]] = {}
+    todo: dict[Any, list[FetchedJob]] = {}
     waiting: dict[str, str] = {}
     for jid, (c, r, status) in survivors.items():
         job = _fetcher_shape(r, c)
@@ -777,7 +777,7 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
               limit: int | None = None, max_workers: int = DEFAULT_WORKERS,
               score_cap: int = SCORE_CAP, fit: bool = True, hydrate: bool = True,
               mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]] = score_company_mission,
-              hydrate_fn: Callable[[CompanyRow, list[dict[str, Any]]], Awaitable[dict[str, Any]]] = hydrate_company,
+              hydrate_fn: Callable[[CompanyRow, list[FetchedJob]], Awaitable[dict[str, Any]]] = hydrate_company,
               now: datetime | None = None, requeue: bool = False,
               requeue_apply: bool = False) -> dict[str, Any]:
     """Triage every pending row in the store. Returns the summary dict

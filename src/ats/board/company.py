@@ -30,12 +30,12 @@ from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
 from src.net.util import clean_field, first, node_text, parse_markup
-from src.rows import BoardCoords
+from src.rows import BoardCoords, FetchedJob
 from . import jsonld
 from .engine import Board, board_for, board_for_url
 
 
-def _board_of(job: dict[str, Any]) -> Board | None:
+def _board_of(job: FetchedJob) -> Board | None:
     """The engine that reads `job`'s posting: its ATS's, when that one
     reads the URL; else the one whose `job_ref` does; else its ATS's."""
     board = board_for(job.get("ats"))
@@ -44,7 +44,7 @@ def _board_of(job: dict[str, Any]) -> Board | None:
     return board_for_url(job.get("url")) or board
 
 
-def needs_detail(job: dict[str, Any]) -> bool:
+def needs_detail(job: FetchedJob) -> bool:
     """True when hydrate_description would fetch anything for `job`: no
     body yet, or a body already but a location the listing never resolved
     that the posting's engine can fill (`Board.needs_detail`). Shared by
@@ -67,8 +67,8 @@ def needs_detail(job: dict[str, Any]) -> bool:
     return board.needs_detail(job) if board else not job.get("description")
 
 
-async def hydrate_description(job: dict[str, Any],
-                              company: BoardCoords | None = None) -> dict[str, Any]:
+async def hydrate_description(job: FetchedJob,
+                              company: BoardCoords | None = None) -> FetchedJob:
     """Fetch, in place, whatever `needs_detail` says `job` still lacks,
     through the posting's engine (`Board.hydrate`; `company`, the row's
     store row, names its board), else from the posting's own page.
@@ -188,7 +188,7 @@ def title_from_url_slug(url: str | None) -> str:
 # --- dispatch ------------------------------------------------------------------ #
 
 async def fetch_company(company: BoardCoords, loc_re: LocationRE | None = None,
-                        validate: bool = False) -> list[dict[str, Any]]:
+                        validate: bool = False) -> list[FetchedJob]:
     """A store row's board pulled through its platform's engine
     (`Board.whole_board`); [] for a platform no spec fetches.
 

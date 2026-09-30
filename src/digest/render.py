@@ -18,7 +18,7 @@ four public renderers compose.
 from __future__ import annotations
 
 import smtplib
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -28,7 +28,7 @@ from typing import Any
 from src import config
 from src.config import RuntimeTrack
 from src.match import locality
-from src.rows import CompanyRow
+from src.rows import CompanyRow, FetchedJob
 
 # The mid-fit local band, half-open on the high side. The interviews to date
 # came from applications scored in this range at local onsite postings, not
@@ -163,7 +163,7 @@ def _bold(text: object) -> tuple[str, str]:
     return f"**{text}**", f"<strong>{text}</strong>"
 
 
-def _link(j: dict[str, Any]) -> tuple[str, str]:
+def _link(j: Mapping[str, Any]) -> tuple[str, str]:
     """The posting's title linked to its URL, plus a "(N similar postings)"
     note when `j` is a ranked_jobs(collapse=True) survivor standing in for
     others (store.ranked_jobs' `dup_count` > 1) — the count includes the row
@@ -280,7 +280,7 @@ def _band_intro(tail: str = "") -> str:
             f"not decided on, best fit first.{tail}")
 
 
-def _watch_section(watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]], intro: str | None = None
+def _watch_section(watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]], intro: str | None = None
                    ) -> tuple[str | None, object, tuple[str, str] | None]:
     rows = []
     for c, j, in_pipeline in watch_hits:
@@ -297,7 +297,7 @@ def _watch_section(watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]]
 
 def write_ranked_digest(
         ranked: list[dict[str, Any]], t: RuntimeTrack,
-        watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
+        watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None,
         followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
         triage: dict[str, int] | None = None) -> Path:
@@ -383,7 +383,7 @@ def write_ranked_digest(
 
 def send_ranked_digest(
         ranked: list[dict[str, Any]], t: RuntimeTrack,
-        watch_hits: Iterable[tuple[CompanyRow, dict[str, Any], bool]] | None = None,
+        watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
         pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
         followups: list[dict[str, Any]] | None = None) -> bool:
     """Email a store-crawl track's new ranked rows. True when a message
@@ -491,7 +491,7 @@ def toast(t: RuntimeTrack, count: int, path: str | Path) -> bool:
 #  Matches digest (sweep tracks)
 # --------------------------------------------------------------------------- #
 
-def _matches_sections(matches: list[dict[str, Any]], tag: str
+def _matches_sections(matches: list[FetchedJob], tag: str
                       ) -> list[tuple[str | None, object, tuple[str, str] | None]]:
     if not matches:
         return [(None, "_No matching postings this run._", None)]
@@ -511,7 +511,7 @@ def _matches_sections(matches: list[dict[str, Any]], tag: str
              _table(cols, rows, numeric={"Fit"}))]
 
 
-def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
+def write_matches_digest(matches: list[FetchedJob], report_dir: Path | None,
                          t: RuntimeTrack) -> Path:
     """Flat surfaced-postings digest for a sweep track, written under
     `report_dir` (default config.REPORT_DIR); returns the path."""
@@ -523,7 +523,7 @@ def write_matches_digest(matches: list[dict[str, Any]], report_dir: Path | None,
     return path
 
 
-def send_matches_digest(matches: list[dict[str, Any]], t: RuntimeTrack,
+def send_matches_digest(matches: list[FetchedJob], t: RuntimeTrack,
                         cfg: object = None) -> bool:
     """Email the matches digest — the same table `write_matches_digest`
     writes. True when a message went out; a no-op without matches. `cfg`

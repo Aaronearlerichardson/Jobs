@@ -45,6 +45,7 @@ from typing import Any
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import host_of, norm_posted_date, strip_html, text_from_html
+from src.rows import FetchedJob
 
 
 def board_host(board_url: str | None) -> str:
@@ -151,7 +152,7 @@ def _current_job(page_html: str | None) -> dict[str, Any] | None:
 
 
 def parse_job_page(page_html: str | None, board_url: str,
-                   page_url: str = "") -> dict[str, Any] | None:
+                   page_url: str = "") -> FetchedJob | None:
     """One server-rendered job page as a crawler job dict, or None.
 
     The job's ``url`` is the employer's OWN posting (the apply link), not
@@ -230,7 +231,7 @@ async def _fetch_sitemap(origin: str, label: str) -> list[dict[str, str]]:
 
 
 async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: float = 0.3,
-                          gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                          gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """Relevant postings from one Getro board, as crawler job dicts.
 
     Sitemap first; then, newest first, one page fetch per posting whose
@@ -252,7 +253,7 @@ async def fetch_getro_all(board_url: str, max_details: int = 150, detail_delay: 
         return []
     entries.sort(key=lambda e: e["lastmod"], reverse=True)
 
-    jobs: list[dict[str, Any]] = []
+    jobs: list[FetchedJob] = []
     fetched = 0
     for e in entries:
         if gate is not None and not gate(e["title_guess"]):

@@ -1,5 +1,6 @@
 """Typed shapes for the rows the store is HANDED (jobs) and hands back (companies),
-and for the resolver hit that becomes a company row.
+for the fetched job that becomes a jobs row, and for the resolver hit that
+becomes a company row.
 
 A misspelled key in a row headed for upsert_job used to store nothing and
 say nothing (`j.get("resume_fit_scor")` reads as None). These TypedDicts let
@@ -48,6 +49,56 @@ class JobIn(FitColumns, total=False):
     posted_at: str | None
     status: str
     harvested_at: str | None
+
+
+class Employer(TypedDict, closed=True):
+    """The employer an aggregator board's posting names: what
+    `attribute_employers` needs to find, or queue, its roster row."""
+    name: str
+    domain: str
+    slug: str
+    board: str
+    page_url: str
+
+
+class FetchedJob(TypedDict, total=False, closed=True):
+    """A posting as a fetcher returns it, then as each later stage stamps it
+    in place. Its names are checked against ROW_FIELDS and FitColumns by
+    tests/test_boards_spec.py::test_the_fetched_job_names_the_row_fields_and_fit_columns.
+
+    Notes:
+        Nothing is required, because the shape differs by stage: a fetcher
+        sets `id`, `title`, `url`, `location` and `description` (a feed or
+        `board_jobs` adds `company`, `adapt` swaps it for `ats`), then
+        `attribute_employers` stamps `company_id`, the sweep gates
+        `track_tag` to `anchor_signal`, and a fit score the eight fit
+        columns. The board engine's own row, before `board_jobs`, is
+        `spec.EngineRow`.
+    """
+    id: str
+    title: str
+    url: str
+    location: str
+    description: str
+    posted_at: str | None
+    remote_hint: str
+    company: str
+    ats: str | None
+    company_url: str
+    _employer: Employer
+    company_id: int | None
+    track_tag: str
+    remote_eligible: bool
+    remote_signal: str
+    anchor_signal: str
+    resume_fit_score: float | None
+    fit_reason: str | None
+    fit_gates: str | None
+    fit_model: str | None
+    fit_domain: float | None
+    fit_function: float | None
+    fit_stack: float | None
+    fit_seniority: float | None
 
 
 class CompanyIn(TypedDict, total=False, closed=True):
@@ -142,3 +193,4 @@ class BoardCoords(TypedDict, total=False):
 #: The companies columns a board's handle can be spelled in (`handle.columns`
 #: of a config.BOARDS spec).
 HandleColumn = Literal["slug", "wd_tenant", "wd_pod", "wd_site", "careers_url"]
+

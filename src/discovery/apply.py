@@ -24,7 +24,7 @@ from src.ats.board import board_for
 from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
-from src.rows import BoardHit, CompanyIn
+from src.rows import BoardHit, CompanyIn, FetchedJob
 
 if TYPE_CHECKING:
     import sqlite3
@@ -167,8 +167,8 @@ def _coords_from_urls(urls: Iterable[str | None]) -> CompanyIn | None:
     return None
 
 
-def attribute_employers(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
-                        commit: bool = True, source: str = "getro") -> list[dict[str, Any]]:
+def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
+                        commit: bool = True, source: str = "getro") -> list[FetchedJob]:
     """Link each board-sourced job to its employer's roster row, queueing
     employers the roster lacks for review. Returns the jobs to keep.
 
@@ -195,7 +195,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
 
     See tests/test_fetcher_parsers.py::TestGetroAttribution.
     """
-    groups: dict[str, list[dict[str, Any]]] = {}
+    groups: dict[str, list[FetchedJob]] = {}
     for j in jobs:
         emp = j.get("_employer")
         if isinstance(emp, dict) and (emp.get("name") or emp.get("slug")):

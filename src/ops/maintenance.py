@@ -27,7 +27,7 @@ from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
 from src.net.http import fetch_failed
-from src.rows import CompanyRow, JobIn
+from src.rows import CompanyRow, FetchedJob, JobIn
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -103,7 +103,7 @@ def group_by_company(rows: Iterable[dict[str, Any]], key: str = "company_id") ->
     return out
 
 
-async def board_index(company: CompanyRow) -> dict[str, dict[str, Any]]:
+async def board_index(company: CompanyRow) -> dict[str, FetchedJob]:
     """One company's whole board, indexed by normalised title.
 
     Empty when the board cannot be pulled -- which is the same outcome as a
@@ -118,7 +118,7 @@ async def board_index(company: CompanyRow) -> dict[str, dict[str, Any]]:
     return {(b.get("title") or "").strip().lower(): b for b in board}
 
 
-async def board_match(index: dict[str, dict[str, Any]], title: str | None) -> dict[str, Any] | None:
+async def board_match(index: dict[str, FetchedJob], title: str | None) -> FetchedJob | None:
     """The board row for `title`, hydrated, or None when the board does not
     cover it (or covers it with no body).
 
@@ -146,7 +146,7 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None)
 
 
 def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
-                  watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] | None = None
+                  watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] | None = None
                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
     triage funnel included. Returns (ranked, pipeline, followups,
@@ -257,7 +257,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company: CompanyRow, job: dict[str, Any], t: RuntimeTrack) -> bool:
+async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -304,7 +304,7 @@ async def _keep_job(company: CompanyRow, job: dict[str, Any], t: RuntimeTrack) -
     return True
 
 
-async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_name: str | None,
+async def _scored_row(job: FetchedJob, *, company_id: int | None, company_name: str | None,
                       track: str, status: str | None = None) -> JobIn:
     """Score one fetched posting and shape it into a jobs-table row.
 
@@ -337,7 +337,7 @@ async def _scored_row(job: dict[str, Any], *, company_id: int | None, company_na
     return row
 
 
-async def _score_job(company: CompanyRow, job: dict[str, Any], track: str) -> JobIn:
+async def _score_job(company: CompanyRow, job: FetchedJob, track: str) -> JobIn:
     await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)

@@ -28,6 +28,7 @@ from typing import Any, Protocol
 from src import config
 from src.match.filters import (SHORT_PLACE, SHORT_REMOTE, first_hit,
                                token_pattern)
+from src.rows import FetchedJob
 
 # Word-boundary for short/ambiguous tokens (so "nc" doesn't hit "clinic",
 # "sf" doesn't hit "surf"); substring for distinctive multi-char names.
@@ -474,7 +475,7 @@ def remote_signal(location: str | None, description: str | None = "") -> str | N
     return None
 
 
-def remote_signal_for(job: dict[str, Any]) -> str | None:
+def remote_signal_for(job: FetchedJob) -> str | None:
     """Job-dict-aware remote signal.
 
     Prefers a structured hint stamped by the fetcher (JSON-LD

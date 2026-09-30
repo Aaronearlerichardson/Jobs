@@ -53,7 +53,7 @@ from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
-from src.rows import CompanyRow
+from src.rows import CompanyRow, FetchedJob
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
@@ -245,13 +245,13 @@ def _short(text: str, n: int) -> str:
     return text if len(text) <= n else text[: n - 1] + "..."
 
 
-def _diversify(matches: list[dict[str, Any]], n: int) -> list[dict[str, Any]]:
+def _diversify(matches: list[FetchedJob], n: int) -> list[FetchedJob]:
     """Up to n samples spread round-robin across companies so the precision
     sanity-check isn't dominated by one prolific employer."""
-    by_company: defaultdict[Any, deque[dict[str, Any]]] = defaultdict(deque)
+    by_company: defaultdict[Any, deque[FetchedJob]] = defaultdict(deque)
     for j in matches:
         by_company[j.get("company") or j.get("company_name")].append(j)
-    picked: list[dict[str, Any]] = []
+    picked: list[FetchedJob] = []
     while len(picked) < n and any(by_company.values()):
         for waiting in by_company.values():
             if waiting:
@@ -290,9 +290,9 @@ class Collected(NamedTuple):
     phase hands the rest; naming it is what let the others become
     functions.
     """
-    to_score: list[tuple[CompanyRow, dict[str, Any]]]     # (company, job) -- fresh company-linked rows to score
-    matches: list[dict[str, Any]]      # sweep rows surfaced (fetcher dict shape)
-    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]]   # (company, job, in_pipeline) at watched companies
+    to_score: list[tuple[CompanyRow, FetchedJob]]     # (company, job) -- fresh company-linked rows to score
+    matches: list[FetchedJob]      # sweep rows surfaced (fetcher dict shape)
+    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]]   # (company, job, in_pipeline) at watched companies
     funnel: list[tuple[str, int, int, int, int, str]]   # per-source summary rows, in source order
     n_closed: int
     n_reopened: int
@@ -301,9 +301,9 @@ class Collected(NamedTuple):
 
 
 async def _gate_company_board(
-        db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[dict[str, Any]], commit: bool,
+        db: store.Writer, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob], commit: bool,
         snapshot: dict[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]], int, int]:
+) -> tuple[list[FetchedJob], list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]], int, int]:
     """One store company's board through the gates, on `db` (the crawl's
     store.Writer).
 
@@ -334,7 +334,7 @@ async def _gate_company_board(
             if not j.get("description") and j["id"] in stored:
                 j["description"] = stored[j["id"]]
 
-    kept: list[dict[str, Any]] = []
+    kept: list[FetchedJob] = []
     for j in jobs:
         if t.require_core_anchor and not core_anchor(
                 j.get("title", ""), j.get("description", "")):
@@ -346,16 +346,16 @@ async def _gate_company_board(
     return kept, fresh, watch_hits, n_reopened, n_closed
 
 
-def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow, jobs: list[dict[str, Any]],
-                       kept: list[dict[str, Any]], commit: bool
-                       ) -> tuple[list[dict[str, Any]], list[tuple[CompanyRow, dict[str, Any], bool]]]:
+def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow, jobs: list[FetchedJob],
+                       kept: list[FetchedJob], commit: bool
+                       ) -> tuple[list[FetchedJob], list[tuple[CompanyRow, FetchedJob, bool]]]:
     """(fresh, watch_hits) for _gate_company_board: the `kept` rows no crawl
     has handled, and the watch section's hits among `jobs`."""
     from src.match import gates
     from src.match.locality import geo_mode
 
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
-    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] = []
+    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
     if tags.has(c, tags.WATCH):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
@@ -386,8 +386,8 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow,
     return fresh, watch_hits
 
 
-def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[dict[str, Any]],
-                      seen_ids: set[str], new_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
+def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[FetchedJob],
+                      seen_ids: set[str], new_ids: set[str]) -> tuple[list[FetchedJob], int, int, int]:
     """One sweep source's jobs through the gates: anchor + title (+ engine
     excludes), remote signal stamped (or geo-gated when configured),
     deduped across sources via `seen_ids` (mutated). `new_ids` (mutated)
@@ -401,7 +401,7 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[dic
     from src.match import gates
     from src.match.locality import geo_mode
 
-    out: list[dict[str, Any]] = []
+    out: list[FetchedJob] = []
     anchor_here = tech_here = surfaced = 0
     for job in jobs:
         title = job.get("title", "")
@@ -449,9 +449,9 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
     """
     from src.crawl.harvest import bury_404_board
 
-    to_score: list[tuple[CompanyRow, dict[str, Any]]] = []
-    matches: list[dict[str, Any]] = []
-    watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] = []
+    to_score: list[tuple[CompanyRow, FetchedJob]] = []
+    matches: list[FetchedJob] = []
+    watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
     funnel: list[tuple[str, int, int, int, int, str]] = []
     seen_ids: set[str] = set()
     new_ids: set[str] = set()
@@ -556,10 +556,11 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
         from src.claude.fit import score_resume_fit
         print(f"  scoring {len(got.matches)} match(es) against resume...")
 
-        async def _one(j: dict[str, Any]) -> None:
+        async def _one(j: FetchedJob) -> None:
             res = await score_resume_fit(j["title"], j.get("description", ""),
                                          location=j.get("location") or "")
-            j.update(res.as_columns())
+            # FitColumns is open (JobIn extends it); a closed job takes no open update.
+            j.update(cast(Any, res.as_columns()))
 
         # `ex.map` re-raised the first failure, so one unscorable posting
         # abandoned the scoring of every other match in the sweep.
@@ -642,22 +643,22 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
             print(f"          [{j.get('location') or '?'}]  ({note})")
             print(f"          {j.get('url')}")
     print(f"\n  {bar}\n  TOP {min(top_n, len(ranked))} BY RESUME FIT\n  {bar}")
-    for j in ranked[:top_n]:
-        fs = (f"{j['resume_fit_score']:.2f}"
-              if isinstance(j.get("resume_fit_score"), float) else "n/a")
-        print(f"  fit={fs} [{geo_label(j)}] "
-              f"[{digest.age_tag(j)}] {(j['title'] or '')[:48]}")
-        print(f"        {j['company_name']} "
-              f"({j.get('mission_tier') or '?'})  -  "
-              f"{j.get('fit_reason', '')}")
-        print(f"        {j['url']}")
+    for rj in ranked[:top_n]:
+        fs = (f"{rj['resume_fit_score']:.2f}"
+              if isinstance(rj.get("resume_fit_score"), float) else "n/a")
+        print(f"  fit={fs} [{geo_label(rj)}] "
+              f"[{digest.age_tag(rj)}] {(rj['title'] or '')[:48]}")
+        print(f"        {rj['company_name']} "
+              f"({rj.get('mission_tier') or '?'})  -  "
+              f"{rj.get('fit_reason', '')}")
+        print(f"        {rj['url']}")
     print(f"\n  {len(ranked)} open job(s) in ranking; {scored} newly "
           f"scored, {got.n_closed} marked closed, {got.n_reopened} reopened "
           f"this run.")
     return ranked
 
 
-async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, new_ids: set[str],
+async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids: set[str],
                           send: bool, samples: int, bar: str) -> None:
     """The sweep side: a diversified sample for a precision eyeball (each
     marked "(NEW)" when its id is in `new_ids`, else "(seen)"; see
@@ -695,7 +696,7 @@ async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, new
 async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
                     send: bool | None = None, verify: bool | None = None,
                     websearch: bool | None = None, confirm_cost: bool = False,
-                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]]:
+                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]] | list[FetchedJob]:
     """Run one crawl of track `t` (a config.UI_TRACKS entry).
 
     Every methodology switch reads the track config; the keyword args only
@@ -747,7 +748,7 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
 
         done_count = [0]
 
-        def _progress(name: str, platform: str, jobs: list[dict[str, Any]],
+        def _progress(name: str, platform: str, jobs: list[FetchedJob],
                       err: object) -> None:
             done_count[0] += 1
             status = f"fetch error: {err}" if err else f"{len(jobs)} relevant"

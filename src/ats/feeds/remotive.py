@@ -18,10 +18,11 @@ from typing import Any
 
 from src.net import http
 from src.net.util import strip_html
+from src.rows import FetchedJob
 
 
 async def fetch_remotive(category: str | None = None, max_jobs: int | None = None,
-                         gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                         gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """
     Pull Remotive's job feed; return relevant listings, read off the loop.
 
@@ -36,13 +37,13 @@ async def fetch_remotive(category: str | None = None, max_jobs: int | None = Non
     return await asyncio.to_thread(_jobs, data, max_jobs, gate)
 
 
-def _jobs(data: Any, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
+def _jobs(data: Any, max_jobs: int | None, gate: Callable[..., bool] | None) -> list[FetchedJob]:
     """The feed's payload `data` as fetch_remotive's job dicts."""
     entries = (data.get("jobs") or []) if isinstance(data, dict) else []
     if max_jobs is not None:
         entries = entries[:max_jobs]
 
-    jobs = []
+    jobs: list[FetchedJob] = []
     for entry in entries:
         jid      = entry.get("id")
         title    = entry.get("title") or ""

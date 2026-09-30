@@ -20,6 +20,7 @@ from typing import Any
 from src.match.names import strip_parentheticals
 from src.net import http
 from src.net.util import strip_html
+from src.rows import FetchedJob
 
 BASE = "https://hacker-news.firebaseio.com/v0"
 
@@ -151,7 +152,7 @@ async def _find_hiring_threads(submitted_ids: list[Any], max_threads: int = 2,
 
 
 async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 400,
-                         gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                         gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """
     Scan the latest N "Ask HN: Who is hiring?" threads, return top-level
     job comments (those passing `gate(role, text)` when a gate is given).
@@ -166,7 +167,7 @@ async def fetch_hnhiring(max_threads: int = 2, max_comments_per_thread: int = 40
         print("    [!] No 'Who is hiring?' threads found in latest submissions.")
         return []
 
-    jobs = []
+    jobs: list[FetchedJob] = []
     for thread in threads:
         tid       = thread.get("id")
         title     = thread.get("title", "")

@@ -15,13 +15,13 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
-from typing import Any
 
 from lxml import etree
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import named, node_text, parse_markup, stable_id, strip_html
+from src.rows import FetchedJob
 
 
 def _parse_title(title: str | None) -> tuple[str, str, str]:
@@ -77,7 +77,7 @@ def _find(item: etree._Element, name: str) -> tuple[etree._Element | None, str]:
 
 async def fetch_rss(source_label: str, url: str, default_location: str = "Remote",
                     max_items: int = 200, remote_board: bool = False,
-                    gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                    gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """
     Pull an RSS/Atom feed, yield relevant jobs, the feed read off the loop.
 
@@ -97,7 +97,7 @@ async def fetch_rss(source_label: str, url: str, default_location: str = "Remote
 
 
 def _jobs(feed: bytes, source_label: str, url: str, default_location: str, max_items: int,
-          remote_board: bool, gate: Callable[..., bool] | None) -> list[dict[str, Any]]:
+          remote_board: bool, gate: Callable[..., bool] | None) -> list[FetchedJob]:
     """The feed body `feed` as fetch_rss's job dicts."""
     root = parse_markup(feed, xml=True, url=url)
     items = named(root, "item") or named(root, "entry")
@@ -130,7 +130,7 @@ def _jobs(feed: bytes, source_label: str, url: str, default_location: str, max_i
         if gate is not None and not gate(role, desc):
             continue
 
-        job: dict[str, Any] = {
+        job: FetchedJob = {
             "id":          f"rss_{source_label.replace(' ', '_')}_{stable_id(guid)}",
             "company":     company or source_label,
             "title":       role,

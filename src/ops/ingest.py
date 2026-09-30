@@ -16,7 +16,7 @@ from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.rows import BoardHit, CompanyRow
+from src.rows import BoardHit, CompanyRow, FetchedJob
 from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
                                  track_writer)
@@ -26,7 +26,7 @@ class _Admitted(NamedTuple):
     """A job that passed ingest's gates with the roster company id its name
     resolves to (None: not in the roster). Exercised by tests/test_capture.py::
     test_ingest_links_jobs_to_their_company_and_hydrates_per_board."""
-    job: dict[str, Any]
+    job: FetchedJob
     company_id: int | None
 
 
@@ -37,7 +37,7 @@ async def _hydrate_missing_descriptions(db: store.Writer, kept: list[_Admitted])
     # NEAR-MISS, DELIBERATE: not ops.group_by_company. It indexes dict rows by
     # a string key; these are (job, company_id) pairs filtered on the way in,
     # and stamping company_id onto the job would be a hidden key again.
-    by_company: dict[int, list[dict[str, Any]]] = {}
+    by_company: dict[int, list[FetchedJob]] = {}
     for a in kept:
         if a.company_id and not (a.job.get("description") or "").strip():
             by_company.setdefault(a.company_id, []).append(a.job)
@@ -51,14 +51,14 @@ async def _hydrate_missing_descriptions(db: store.Writer, kept: list[_Admitted])
             match = await board_match(index, j.get("title"))
             if match is not None:
                 j["description"] = match["description"]
-                j["url"] = j.get("url") or match.get("url")
+                j["url"] = j.get("url") or match.get("url") or ""
                 n_hydrated += 1
         if n_hydrated:
             print(f"    hydrated {n_hydrated}/{len(js)} description(s) from "
                   f"{company['name']}'s {company['ats']} board")
 
 
-def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str, curated: bool,
+def _admitted(conn: sqlite3.Connection, jobs: list[FetchedJob], source: str, curated: bool,
               t: RuntimeTrack) -> tuple[list[_Admitted], int]:
     """(the jobs to score, how many the geo gate dropped): ingest_external_jobs'
     gates; a job already stored is touched instead."""
@@ -105,7 +105,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[dict[str, Any]], source: str,
     return kept, n_nonlocal
 
 
-async def ingest_external_jobs(jobs: list[dict[str, Any]], source: str = "indeed", max_workers: int = 6,
+async def ingest_external_jobs(jobs: list[FetchedJob], source: str = "indeed", max_workers: int = 6,
                                curated: bool = False, t: RuntimeTrack | None = None) -> int:
     """Ingest external job dicts into the track's jobs table with resume-fit
     scores. Each dict: {id?, title, company, url, location, description?}.

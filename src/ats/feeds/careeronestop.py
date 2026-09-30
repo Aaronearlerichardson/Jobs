@@ -32,6 +32,7 @@ from src import config
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import default_search_text, stable_id
+from src.rows import FetchedJob
 
 
 def _tokens(s: str | None) -> set[str]:
@@ -50,7 +51,7 @@ def _company_match(posted_company: str | None, queried_name: str) -> bool:
 
 
 async def fetch_nlx_company(name: str, location: str | None = None, days: int = 60,
-                            page_size: int = 50, max_pages: int = 6) -> list[dict[str, Any]]:
+                            page_size: int = 50, max_pages: int = 6) -> list[FetchedJob]:
     """All NLx postings for one employer in `location`. Returns normalized
     job dicts ({id, title, company, url, location, description}) ready for
     ingest_external_jobs; company is canonicalized to `name` so the store's
@@ -80,7 +81,7 @@ async def fetch_nlx_company(name: str, location: str | None = None, days: int = 
     uid, tok = creds
     hdr = {**HEADERS, "Authorization": f"Bearer {tok}", "Accept": "application/json"}
 
-    out: list[dict[str, Any]] = []
+    out: list[FetchedJob] = []
     seen: set[Any] = set()
     dropped = 0
     for page in range(max_pages):

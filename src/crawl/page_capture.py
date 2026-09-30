@@ -18,12 +18,13 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urljoin
 
 from src import config
 from src.net.util import (first, host_of, jsonld_scripts, links, node_text, parse_markup,
                           stable_id, strip_html, xpath)
+from src.rows import FetchedJob
 
 if TYPE_CHECKING:
     from lxml import etree
@@ -76,11 +77,11 @@ def _company_site(*urls: object) -> str:
 
 def _job(jid: str, title: str | None, company: str | None, url: str | None,
          location: str | None, description: str | None = "",
-         company_url: str = "") -> dict[str, Any] | None:
+         company_url: str = "") -> FetchedJob | None:
     title = (title or "").strip()
     if not title or not jid:
         return None
-    j: dict[str, Any] = {"id": jid, "title": title[:120],
+    j: FetchedJob = {"id": jid, "title": title[:120],
                          "company": (company or "").strip()[:80],
                          "url": url or "", "location": (location or "").strip()[:80],
                          "description": (description or "")[:config.MAX_DESC_CHARS]}
@@ -109,7 +110,7 @@ def _split_company_loc(text: str) -> tuple[str, str]:
     return company.strip(), location.strip()
 
 
-def parse_linkedin(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
+def parse_linkedin(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     """A LinkedIn page's jobs: its job anchors and guest cards, and a
     detail page's own posting.
 
@@ -198,8 +199,8 @@ def parse_linkedin(tree: etree._Element, page_url: str = "") -> list[dict[str, A
             if twin is not None:
                 # Same job seen as a bare anchor: keep its numeric id/url,
                 # take the rich fields from the title-tag parse.
-                twin.update(company=j["company"], location=j["location"],
-                            description=j["description"])
+                twin.update({"company": j["company"], "location": j["location"],
+                            "description": j["description"]})
             else:
                 jobs.append(j)
     return jobs
@@ -207,7 +208,7 @@ def parse_linkedin(tree: etree._Element, page_url: str = "") -> list[dict[str, A
 
 # ─── Indeed ──────────────────────────────────────────────────────────────
 
-def parse_indeed(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
+def parse_indeed(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     """An Indeed results page's job cards.
 
     >>> page = ('<div class="job_seen_beacon"><h2><a href="/viewjob?jk=ab12">Data Engineer</a></h2>'
@@ -250,7 +251,7 @@ def parse_indeed(tree: etree._Element, page_url: str = "") -> list[dict[str, Any
 # are dropped at ingest — as intended.)
 
 
-def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
+def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     """A metacareers page's job cards, and a detail page's own posting.
 
     >>> page = ('<div><a href="/profile/job_details/42/">Research Scientist</a>'
@@ -262,7 +263,7 @@ def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[dict[str
     meta_loc = re.compile(
         r"([A-Z][A-Za-z.\-]+(?:\s[A-Z][A-Za-z.\-]+)*,\s*[A-Z]{2}\b"
         r"|Remote(?:,\s*[A-Za-z .]+)?|Multiple Locations)")
-    jobs: list[dict[str, Any]] = []
+    jobs: list[FetchedJob] = []
     seen: set[str] = set()
     # Listing/search page: one card per job, each linking to a job_details URL.
     for a in xpath("//a[contains(@href, '/profile/job_details/')]")(tree):
@@ -306,9 +307,9 @@ def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[dict[str
         if j:
             twin = next((x for x in jobs if x["id"] == j["id"]), None)
             if twin:  # listing card + open detail: keep the richer fields
-                for k, v in j.items():
+                for k, v in j.items():      # k: any key of j, not a literal
                     if v and len(str(v)) > len(str(twin.get(k) or "")):
-                        twin[k] = v
+                        cast(dict[str, Any], twin)[k] = v
             else:
                 jobs.append(j)
     return jobs
@@ -316,7 +317,7 @@ def parse_metacareers(tree: etree._Element, page_url: str = "") -> list[dict[str
 
 # ─── Generic (JSON-LD + job-link sweep + job-card sweep) ─────────────────
 
-def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
+def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     """A page's schema.org JobPostings, the employer's own site kept as
     `company_url`.
 
@@ -428,9 +429,9 @@ def _card_location(a: etree._Element, title: str = "") -> str:
     return ""
 
 
-def parse_generic(tree: etree._Element, page_url: str = "") -> list[dict[str, Any]]:
+def parse_generic(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     from src.ats.board.custom import find_job_links
-    jobs: list[dict[str, Any]] = []
+    jobs: list[FetchedJob] = []
     seen: set[str] = set()
 
     def _emit(a: etree._Element, href: str, title: str) -> None:
@@ -493,7 +494,7 @@ def page_url(html: str, url: str = "") -> str:
     return _canonical_url(parse_markup(html))
 
 
-def parse_page(url: str, html: str) -> tuple[list[dict[str, Any]], str]:
+def parse_page(url: str, html: str) -> tuple[list[FetchedJob], str]:
     """Parse captured page HTML -> (jobs, source_label). Layered parsers;
     de-duplicated by job id, site-specific hits first. When `url` is empty
     (Ctrl+S saves carry none), the site is detected from the canonical URL
@@ -529,7 +530,7 @@ def parse_page(url: str, html: str) -> tuple[list[dict[str, Any]], str]:
             low = "indeed."
         elif first("//a[contains(@href, '/profile/job_details/')]", tree) is not None:
             low = "metacareers."
-    layers: list[Callable[[etree._Element, str], list[dict[str, Any]]]]
+    layers: list[Callable[[etree._Element, str], list[FetchedJob]]]
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
         # the same postings under synthetic ids.
@@ -541,7 +542,7 @@ def parse_page(url: str, html: str) -> tuple[list[dict[str, Any]], str]:
     else:
         layers, source = [parse_jsonld, parse_generic], "page"
 
-    by_id: dict[str, dict[str, Any]] = {}
+    by_id: dict[str, FetchedJob] = {}
     for layer in layers:
         try:
             found = layer(tree, url)
@@ -560,7 +561,7 @@ def parse_page(url: str, html: str) -> tuple[list[dict[str, Any]], str]:
             else:
                 # Same job seen twice (e.g. results card + open detail pane):
                 # merge, keeping the richer field from either.
-                for k, v in j.items():
+                for k, v in j.items():      # k: any key of j, not a literal
                     if v and len(str(v)) > len(str(prev.get(k) or "")):
-                        prev[k] = v
+                        cast(dict[str, Any], prev)[k] = v
     return list(by_id.values()), source

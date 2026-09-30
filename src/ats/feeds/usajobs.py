@@ -40,6 +40,7 @@ from src import config
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
 from src.net.util import norm_posted_date, strip_html
+from src.rows import FetchedJob
 
 
 def _salary_text(remuneration: Any) -> str:
@@ -135,7 +136,7 @@ def _describe(details: dict[str, Any], descriptor: dict[str, Any]) -> str:
     return " ".join(c for c in chunks if c).strip()
 
 
-def _parse_item(item: Any) -> dict[str, Any] | None:
+def _parse_item(item: Any) -> FetchedJob | None:
     """One ``SearchResultItem`` as a crawler job dict, or None if unusable.
 
     The id is namespaced by source, and the company is the hiring
@@ -211,7 +212,7 @@ def _parse_item(item: Any) -> dict[str, Any] | None:
     if department:
         body = f"{department}. {body}".strip()
 
-    job: dict[str, Any] = {
+    job: FetchedJob = {
         "id":          f"usajobs_{jid}",
         "company":     strip_html(descriptor.get("OrganizationName")) or "USAJOBS",
         "title":       title,
@@ -269,7 +270,7 @@ def _search_params(keyword: str | None, location: str | None, radius: int | None
 async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
                         radius: int | None = None, series: Sequence[str] | None = None,
                         results_per_page: int = 250, max_pages: int = 20,
-                        gate: Callable[..., bool] | None = None) -> list[dict[str, Any]]:
+                        gate: Callable[..., bool] | None = None) -> list[FetchedJob]:
     """Search USAJOBS and return the announcements passing `gate` as job
     dicts (all of them when `gate` is None), each page read off the loop.
 
@@ -301,7 +302,7 @@ async def fetch_usajobs(keyword: str | None = None, location: str | None = None,
                "Authorization-Key": key, "Accept": "application/json"}
     params = _search_params(keyword, location, radius, series, results_per_page)
 
-    jobs: list[dict[str, Any]] = []
+    jobs: list[FetchedJob] = []
     seen: set[str] = set()
     fetched, total = 0, None
     for page in range(1, int(max_pages) + 1):

@@ -24,6 +24,7 @@ from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net import http
 from src.net.http import HEADERS
+from src.rows import FetchedJob
 
 
 # ─── Truncated-domain corroboration ───────────────────────────────────────
@@ -328,7 +329,7 @@ def _hq_match_beyond_brand(text: str | None, name: str,
 
 
 async def nc_hq_signal(name: str, careers_url: str = "",
-                       board_jobs: list[dict[str, Any]] | None = None) -> bool:
+                       board_jobs: list[FetchedJob] | None = None) -> bool:
     """
     True if the company has a verifiable NC presence — used to TRACK local
     companies that currently have no NC openings. Checks the board's job
