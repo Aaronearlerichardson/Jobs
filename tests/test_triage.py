@@ -193,7 +193,7 @@ async def test_clinical_service_title_excluded_before_hydration(
 
 
 async def test_geo_drop_before_hydration_unless_trusted(tmp_path, tracks, stubs,
-                                                        elsewhere, local_addr):
+                                                        elsewhere, local_addr, non_us_vocab):
     db = tmp_path / "s.db"
     conn = store.connect(db)
     plain = _company(conn, "Plain", mission_tier="adjacent", mission_score=0.5)

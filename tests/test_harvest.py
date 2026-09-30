@@ -868,7 +868,7 @@ async def test_gate_company_board_guards_the_sync_by_snapshot(db, local_track,
                       ).fetchone()["status"] == ("closed" if closed else "open")
 
 
-def test_the_watch_section_lists_us_postings_only(db, local_track):
+def test_the_watch_section_lists_us_postings_only(db, local_track, non_us_vocab):
     """A watched company's new postings are listed wherever in the US they
     sit; a seat abroad is neither listed nor stored (2026-09-29: 20 of 29
     hits were NVIDIA seats in Israel, India and Europe)."""

@@ -97,7 +97,7 @@ class TestSegments:
         assert not locality.is_nc(f"{local_city}, {other_state[1]}")
         assert not locality.is_nc(f"US - {other_state[1]} - {local_city}")
 
-    def test_city_named_in_another_country_is_not_local(self, local_city):
+    def test_city_named_in_another_country_is_not_local(self, local_city, non_us_vocab):
         assert not locality.is_nc(f"UK - County {local_city} - Barnard Castle")
         assert not locality.is_nc(f"US, Blue Bell; Canada, {local_city}")
 

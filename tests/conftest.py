@@ -214,6 +214,26 @@ def elsewhere():
     pytest.skip("every candidate 'elsewhere' matches this profile's locality")
 
 
+@pytest.fixture
+def non_us_vocab(monkeypatch):
+    """The built-in US markers and non-US regions, whoever's profile is loaded.
+
+    A profile that lists its own `[locations] non_us_regions` REPLACES the
+    built-in list rather than adding to it, so a test that calls Israel or
+    the UAE "abroad" passes on the example profile and fails on one that
+    names other countries (2026-09-30: a watched company's Israeli and
+    Emirati seats were admitted, on a profile listing Canada but neither).
+    Patched where `us_eligible` and the geo gate read them.
+    """
+    import re
+
+    import src.match.locality as locality
+    monkeypatch.setattr(locality, "_US_MARKERS", locality._DEFAULT_US_MARKERS)
+    monkeypatch.setattr(locality, "_NON_US_REGIONS", locality._DEFAULT_NON_US_REGIONS)
+    monkeypatch.setattr(locality, "_NON_US_REGION_RE", re.compile(
+        "|".join(rf"\b{re.escape(t)}\b" for t in locality._DEFAULT_NON_US_REGIONS), re.I))
+
+
 #: What `pristine_keywords` promises to hand back. Spelled out here rather
 #: than read off the snapshot helpers' own tuples: the check below has to be
 #: independent of the code it checks, or it can only ever agree with it.
