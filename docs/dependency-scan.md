@@ -57,8 +57,59 @@ the async code lives by. It would also delete nothing: lxml is already the parse
 `parse_markup`, `xpath` and `css` (101 lines) would remain as the bs4 layer.
 The code also rejects soupsieve's `:-soup-contains` on purpose
 (`ats/board/spec.py`), and its `text_from_html` docstring records that eight of nine
-fetchers once used bs4's `get_text` before they were unified (no reason
-for dropping it is recorded).
+fetchers once used bs4's `get_text` before they were unified.
+
+### Second test: was bs4 used badly, and does using it well close the gap?
+
+The first table used bs4 the plain way. The objection is that the old code
+did not use it competently, so this reads the history and then repeats the
+measurement with bs4 configured as its documentation recommends.
+
+**What the old code did.** `git show 0c10887^:src/net/util.py` (the commit
+that removed bs4) shows `BeautifulSoup(markup, "xml" if xml else "lxml")`: the
+fast tree builder was already chosen, so `html.parser` was not the problem.
+It passed no `parse_only`. An earlier commit, `3e160fe`, had used
+`SoupStrainer("a")` on the board-detection path and measured 1.6 ms against
+2.9 ms for `html.parser`, but that compared bs4 with bs4 and never with lxml.
+The removal commit gives no timing.
+
+**The same work, five ways.** bs4 4.15.0 on lxml, `parse_only` wherever the
+task allows it, on the 27 fixtures, a 499 KB page and a 2 MB page. "Same
+output" means the result equals the lxml result on every page.
+
+| task (real call site) | bs4, full tree | bs4, `parse_only` | same output |
+|---|---|---|---|
+| T1 every `<a href>` with its text (board detection) | x8.6 / x10.2 / x11.9 | x4.5 / x4.3 / x4.1 | yes |
+| T2 anchors that sit in a nav element or a nav-named container (`find_job_links`) | x9.3 / x9.9 / x11.0 | x8.2 / x4.5 / x4.6 | **no with `parse_only`**: it drops the ancestors the test reads |
+| T3 `ld+json` script bodies (`parse_jsonld`) | x16.8 / x14.2 / x18.3 | x5.5 / x5.0 / x5.1 | yes |
+| T4 whole-page text (`text_from_html`) | x9.8 / x19.4 / x21.8 | no strainer possible | text differs on some fixtures |
+| T5 several reads per card (the spec engine's shape) | x6.3 / x9.2 / x4.9 | no strainer possible | yes |
+
+(Each cell is fixtures / 499 KB / 2 MB, as a multiple of the current lxml time.)
+
+Parsing is where the time goes, not querying. On the 499 KB page lxml parses
+in 8.7 ms; bs4 takes 124 ms for the full tree and 58.5 ms with `parse_only`;
+finding the anchors in an already-built bs4 tree takes 5.2 ms. A better query
+cannot recover it, and `parse_only` still calls Python for every element, so
+it removes tree building but not the callbacks. Where the work needs
+surrounding elements (T2, T4, T5) no strainer applies.
+
+The event-loop test again, 20 pages of 499 KB through 4 worker threads, T1
+work, two runs each: lxml took 0.29 to 0.31 s; bs4 with `parse_only` took
+10.8 to 11.1 s (about 36 times) and bs4 on the full tree took 15.0 to
+15.5 s (about 50 times). The worst loop gap was 41 to 42 ms for lxml, 59 to
+65 ms with `parse_only` and 133 to 150 ms for the full tree. (The first
+table's 12 to 15 ms for lxml came from a quieter run on the same shared
+machine; the order of the three is the same in both.)
+
+**Verdict unchanged.** The old code chose the right builder, and bs4 used
+well is still x4 to x5 slower where a strainer applies and x5 to x22 where it
+does not. It would also mean rewriting the XPath queries (`xpath(` is called 13 times
+outside doctests), which bs4 does not support. The only place the cost would not matter is
+`page_capture`, which parses a page the user saved by hand, but keeping a
+second tree API for it would cost more than it removes. To reopen this, the
+number to beat is T1 at x1.5 on the 499 KB page with output equal on every
+fixture.
 
 ## Verdicts
 
