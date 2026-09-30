@@ -1,8 +1,8 @@
 """The robots.txt cache and the polite transport around it (net.http).
 
 Offline: every case answers the request from the test (conftest.serve,
-conftest.wire). No host is contacted. The RFC 9309 matcher itself is
-pinned by src/net/robots.py's doctests.
+conftest.wire). No host is contacted. The RFC 9309 matching itself is
+pinned by the doctests of robots._HostRules.parse.
 """
 
 import asyncio
@@ -56,6 +56,49 @@ class TestExemptHosts:
     async def test_other_hosts_still_obey_their_robots(self, cache):
         assert not await cache.allowed("https://jobs.smartrecruiters.com/x")
         assert cache.fetched == ["https://jobs.smartrecruiters.com"]
+
+
+class TestRespectRobots:
+    """[policy] respect_robots is the switch, through net.http.send, the one
+    door every fetcher uses: on, a page under a host's Disallow is refused
+    and its Crawl-delay is waited; off, its robots.txt is not even fetched."""
+
+    PAGE = (200, [], b"<html>jobs</html>")
+
+    @pytest.fixture
+    def waits(self, monkeypatch):
+        """The Crawl-delay waits asked of the limiter, not slept."""
+        waits = []
+        monkeypatch.setattr(http.LIMITER, "wait",
+                            answer(lambda url, delay: waits.append((url, delay))))
+        return waits
+
+    @staticmethod
+    def respect(monkeypatch, on):
+        from src import config
+        monkeypatch.setattr(config, "RESPECT_ROBOTS", on, raising=False)
+
+    async def test_on_a_disallowed_page_is_refused_after_one_robots_fetch(self, wire, monkeypatch):
+        self.respect(monkeypatch, True)
+        sent = wire((200, [], b"User-agent: *\nDisallow: /\n"))
+        with pytest.raises(robots.RobotsDisallowed):
+            await http.send("GET", "https://a.test/jobs")
+        assert [url for _, url, _ in sent] == ["https://a.test/robots.txt"]
+
+    async def test_on_the_hosts_crawl_delay_is_waited(self, wire, monkeypatch, waits):
+        self.respect(monkeypatch, True)
+        sent = wire((200, [], b"User-agent: *\nCrawl-delay: 3\n"), self.PAGE)
+        assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
+        assert waits == [("https://a.test/jobs", 3.0)]
+        assert [url for _, url, _ in sent] == ["https://a.test/robots.txt", "https://a.test/jobs"]
+
+    async def test_off_the_same_page_is_fetched_with_no_robots_fetch_and_no_wait(
+            self, wire, monkeypatch, waits):
+        self.respect(monkeypatch, False)
+        sent = wire(self.PAGE)
+        assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
+        assert [url for _, url, _ in sent] == ["https://a.test/jobs"]
+        assert waits == []
 
 
 class TestFetchDeduplication:
@@ -190,7 +233,7 @@ class TestUnreachableHostReporting:
         wire(dns)
         rules = await robots.RobotsCache()._fetch("https://example.com")
         assert capsys.readouterr().out == ""
-        assert rules.group is None and not rules.disallow_all   # still fails open
+        assert rules.protego is None and not rules.disallow_all   # still fails open
 
     async def test_live_server_we_could_not_ask_is_announced(self, serve, capsys):
         _, out = await self._fetch_raising(
@@ -240,7 +283,7 @@ class TestFetchTimeout:
         """Giving up faster must not turn into giving up differently."""
         serve(requests.exceptions.ConnectTimeout("nope"))
         rules = await robots.RobotsCache()._fetch("https://example.com")
-        assert rules.group is None and not rules.disallow_all
+        assert rules.protego is None and not rules.disallow_all
         assert await robots.RobotsCache().allowed("https://example.com/careers") is True
 
 
@@ -453,4 +496,4 @@ class TestQuietSpeculativeProbes:
         serve(requests.exceptions.SSLError("handshake"))
         with robots.quiet():
             rules = await robots.CACHE()._fetch("https://red.io")
-        assert rules.group is None and not rules.disallow_all   # still fails open
+        assert rules.protego is None and not rules.disallow_all   # still fails open

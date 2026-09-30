@@ -26,159 +26,44 @@ The fetch timeout is split into (connect, read) — see ROBOTS_CONNECT_TIMEOUT
 in src/config/policy.py. Connect is short because dead name-guesses hang there; read is
 generous because a slow-but-real server is the case worth waiting for.
 
-Path matching is implemented here rather than taken from
-`urllib.robotparser`, whose matcher is `filename.startswith(rule.path)` with
-first-rule-in-file-order winning. That breaks RFC 9309 in both directions:
+Parsing and matching are `protego`'s, through `_HostRules.parse`, whose
+doctests pin the rules this module relies on: `*` and `$` in a path, the
+longest match winning with Allow breaking a tie, a user agent's repeated
+groups merging, and a product token matching at a word boundary.
 
-  * §2.2.3 requires `*` (any sequence) and `$` (end of match) — stdlib
-    treats both as literal characters. Hacker News publishes
-    `Allow: /*.json$` + `Disallow: /`, which is a deliberate carve-out for
-    exactly the API this crawler uses; stdlib reads it as "disallow
-    everything" and the HN source silently returned nothing on every crawl.
-  * §2.2.2 requires the MOST SPECIFIC (longest) match to win, with Allow
-    breaking ties. Stdlib takes the first match in file order, so a host
-    that writes `Disallow: /` before its `Allow:` carve-outs is over-blocked,
-    and — the direction that actually matters for politeness — wildcard
-    `Disallow:` patterns never match at all, so we would fetch paths the
-    host asked us to leave alone.
+`[policy] respect_robots = false` turns all of it off: `allowed` is then True
+for every URL, and neither it nor `wait_turn` fetches a robots.txt.
+`robots_exempt_hosts` does the same for the hosts it names.
 
-RobotFileParser is still used for `Crawl-delay` (its parsing of that is
-fine, and it is not part of the RFC's matching rules).
+Notes:
+    The path matching was hand-written here until 2026-09-30, because
+    `urllib.robotparser`'s is `filename.startswith(rule.path)` with the first
+    rule in file order winning. Stdlib treats `*` and `$` as literal
+    characters: Hacker News publishes `Allow: /*.json$` + `Disallow: /`, a
+    deliberate carve-out for the API this crawler uses, and stdlib read it as
+    "disallow everything", so the HN source silently returned nothing. And it
+    takes the first match in file order, so a host that writes `Disallow: /`
+    before its `Allow:` carve-outs was over-blocked, while wildcard
+    `Disallow:` patterns never matched at all. protego does both to the RFC
+    and adds no dependency of its own; the hand-written matcher agreed with
+    it on every decision from a differential run over well-formed files
+    (docs/dependency-scan.md) and departed from the RFC in two places, both
+    now fixed by the swap.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import re
 import socket
 import time
-from collections.abc import Iterable, Iterator
-from urllib.parse import urlparse
-from urllib.robotparser import RobotFileParser
+from collections.abc import Iterator
+
+from protego import Protego
 
 from src import config, runstate
 from . import http
 from .util import host_of, origin_key
-
-
-# --------------------------------------------------------------------------- #
-#  RFC 9309 §2.2 path matching                                                 #
-# --------------------------------------------------------------------------- #
-
-def _pattern_to_re(path: str) -> re.Pattern[str]:
-    """A robots.txt path pattern -> a compiled prefix regex.
-
-    `*` matches any sequence; a trailing `$` anchors the end of the URL path.
-    Everything else is literal. An empty pattern matches nothing (an empty
-    `Disallow:` means "no restriction", handled by the caller).
-
-    >>> [bool(_pattern_to_re(pat).match(path)) for pat, path in (
-    ...     ("/a.b", "/a.b"), ("/a.b", "/axb"), ("/a*b", "/axxxb"), ("/a*b", "/ab"),
-    ...     ("/p", "/prefix/deep"), ("/*?feed=", "/?feed=x"))]
-    [True, False, True, True, True, True]
-    >>> bool(_pattern_to_re("/x$").match("/x")), bool(_pattern_to_re("/x$").match("/x/y"))
-    (True, False)
-    """
-    anchored = path.endswith("$")
-    if anchored:
-        path = path[:-1]
-    body = "".join(".*" if ch == "*" else re.escape(ch) for ch in path)
-    return re.compile(body + ("$" if anchored else ""))
-
-
-class _Group:
-    """One `User-agent:` group's rules, in the order they were written."""
-
-    __slots__ = ("agents", "rules")
-
-    def __init__(self) -> None:
-        self.agents: list[str] = []
-        self.rules: list[tuple[int, bool, re.Pattern[str]]] = []  # (specificity, allow, pattern)
-
-    def add_rule(self, path: str, allow: bool) -> None:
-        # An empty `Disallow:` is the documented way to say "allow all" —
-        # it is not a rule, it is the absence of one.
-        if not path and not allow:
-            return
-        self.rules.append((len(path.rstrip("$")), allow, _pattern_to_re(path)))
-
-    def allows(self, path: str) -> bool:
-        """RFC 9309 §2.2.2: the longest matching pattern wins; Allow wins a
-        tie. No match at all means allowed.
-
-        Hacker News' carve-out (§2.2.3 wildcards) reopens its JSON API only:
-
-        >>> [hn] = parse_groups("User-agent: *\\nAllow: /*.json$\\nDisallow: /")
-        >>> hn.allows("/v0/item/38912345.json"), hn.allows("/v0/whatever")
-        (True, False)
-        >>> [g] = parse_groups("User-agent: *\\nDisallow: /\\nAllow: /api/\\n"
-        ...                    "Disallow: /api/internal/\\nDisallow: /a\\nAllow: /a")
-        >>> g.allows("/api/x"), g.allows("/api/internal/x"), g.allows("/a")
-        (True, False, True)
-        """
-        best_len, best_allow = -1, True
-        for length, allow, rx in self.rules:
-            if rx.match(path) and (length > best_len
-                                   or (length == best_len and allow)):
-                best_len, best_allow = length, allow
-        return best_allow
-
-
-def parse_groups(text: str | None) -> list[_Group]:
-    """robots.txt body -> [_Group]. Consecutive `User-agent:` lines share one
-    group, per §2.2.1; comments are dropped, and an empty `Disallow:` is no
-    rule at all.
-
-    >>> [g] = parse_groups("# hi\\n\\nUser-agent: a  # us\\nUser-agent: b\\n"
-    ...                    "Disallow: /x  # no\\nDisallow:")
-    >>> g.agents, len(g.rules), g.allows("/x")
-    (['a', 'b'], 1, False)
-    >>> parse_groups("# just a comment"), parse_groups(None)
-    ([], [])
-    """
-    groups: list[_Group] = []
-    current: _Group | None = None
-    expecting_agent = False
-    for raw in (text or "").splitlines():
-        line = raw.split("#", 1)[0].strip()
-        if not line or ":" not in line:
-            continue
-        field, _, value = line.partition(":")
-        field, value = field.strip().lower(), value.strip()
-        if field == "user-agent":
-            if current is None or not expecting_agent:
-                current = _Group()
-                groups.append(current)
-            current.agents.append(value.lower())
-            expecting_agent = True
-        elif field in ("allow", "disallow") and current is not None:
-            current.add_rule(value, field == "allow")
-            expecting_agent = False
-    return groups
-
-
-def _match_group(groups: list[_Group], user_agent: str | None) -> _Group | None:
-    """The group governing `user_agent`: the longest matching product token,
-    else the `*` group, else None (= unrestricted).
-
-    >>> groups = parse_groups("User-agent: Googlebot\\nAllow: /\\n\\nUser-agent: *\\nDisallow: /")
-    >>> [_match_group(groups, ua).allows("/x") for ua in ("Googlebot/2.1", "Chrome")]
-    [True, False]
-    >>> _match_group([], "Chrome") is None
-    True
-    """
-    ua = (user_agent or "").lower()
-    best: _Group | None = None
-    best_len = -1
-    wildcard: _Group | None = None
-    for g in groups:
-        for agent in g.agents:
-            if agent == "*":
-                wildcard = wildcard or g
-            elif agent and agent in ua and len(agent) > best_len:
-                best, best_len = g, len(agent)
-    return best or wildcard
 
 
 @contextlib.contextmanager
@@ -235,14 +120,84 @@ def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
 
 
 class _HostRules:
-    __slots__ = ("parser", "group", "disallow_all", "sitemaps")
+    """What one host's robots.txt asks of `user_agent`; no `protego` means it asks nothing."""
 
-    def __init__(self, parser: RobotFileParser | None = None, group: _Group | None = None,
-                 disallow_all: bool = False, sitemaps: Iterable[str] = ()) -> None:
-        self.parser = parser          # RobotFileParser: Crawl-delay only
-        self.group = group            # _Group: the RFC-compliant matcher
+    __slots__ = ("protego", "user_agent", "disallow_all")
+
+    def __init__(self, protego: Protego | None = None, user_agent: str = "",
+                 disallow_all: bool = False) -> None:
+        self.protego = protego
+        self.user_agent = user_agent
         self.disallow_all = disallow_all
-        self.sitemaps = list(sitemaps)
+
+    @classmethod
+    def parse(cls, text: str, user_agent: str) -> _HostRules:
+        """The rules in a robots.txt body, as `user_agent` reads them.
+
+        >>> ua = "Mozilla/5.0 (compatible; JobBot/1.0)"
+        >>> def ask(text, *paths):
+        ...     rules = _HostRules.parse(text, ua)
+        ...     return [rules.allows("https://x.test" + p) for p in paths]
+
+        `*` and a closing `$` are wildcards. Hacker News' carve-out reopens
+        its JSON API only:
+
+        >>> ask("User-agent: *\\nAllow: /*.json$\\nDisallow: /", "/v0/item/1.json", "/v0/other")
+        [True, False]
+
+        The longest matching rule wins, Allow winning a tie, and a query
+        string is part of what is matched:
+
+        >>> ask("User-agent: *\\nDisallow: /\\nAllow: /api/\\nDisallow: /api/internal/\\n"
+        ...     "Disallow: /a\\nAllow: /a", "/api/x", "/api/internal/x", "/a")
+        [True, False, True]
+        >>> ask("User-agent: *\\nDisallow: /*?feed=", "/?feed=x", "/x"), ask("User-agent: *\\nDisallow:", "/x")
+        ([False, True], [True])
+
+        A user agent's groups merge wherever they stand, and the product
+        token has to start a word: `bot` is not `JobBot`.
+
+        >>> ask("User-agent: jobbot\\nDisallow: /a\\n\\nUser-agent: *\\nDisallow: /c\\n\\n"
+        ...     "User-agent: jobbot\\nDisallow: /b", "/a", "/b", "/c")
+        [False, False, True]
+        >>> ask("User-agent: bot\\nDisallow: /", "/"), ask("User-agent: jobbot\\nDisallow: /", "/")
+        ([True], [False])
+
+        A `$` counts toward its rule's length, and a Crawl-delay line ends the
+        group it follows, so the next User-agent starts another:
+
+        >>> ask("User-agent: *\\nAllow: /x\\nDisallow: /x$", "/x", "/x/y")
+        [False, True]
+        >>> ask("User-agent: jobbot\\nCrawl-delay: 5\\nUser-agent: other\\nDisallow: /", "/")
+        [True]
+
+        Crawl-delay and the sitemaps come from the same group and file:
+
+        >>> r = _HostRules.parse("Sitemap: https://x.test/s.xml\\nUser-agent: *\\nCrawl-delay: 2", ua)
+        >>> r.crawl_delay, r.sitemaps
+        (2.0, ['https://x.test/s.xml'])
+        >>> _HostRules.parse("User-agent: *\\nCrawl-delay: soon", ua).crawl_delay is None
+        True
+        >>> _HostRules.parse("User-agent: *\\nCrawl-delay: 0.5", ua).crawl_delay
+        0.5
+        """
+        return cls(Protego.parse(text), user_agent)
+
+    def allows(self, url: str) -> bool:
+        """May `user_agent` fetch `url`?"""
+        if self.disallow_all:
+            return False
+        return self.protego is None or self.protego.can_fetch(url, self.user_agent)
+
+    @property
+    def crawl_delay(self) -> float | None:
+        """Seconds the host asks for between requests, or None."""
+        return self.protego.crawl_delay(self.user_agent) if self.protego else None
+
+    @property
+    def sitemaps(self) -> list[str]:
+        """Sitemap URLs the file lists."""
+        return list(self.protego.sitemaps) if self.protego else []
 
 
 class RobotsCache:
@@ -278,16 +233,10 @@ class RobotsCache:
             return _HostRules(disallow_all=True)
         if r.status_code >= 400:
             return _HostRules()                    # nothing to obey
-        parser = RobotFileParser()
         try:
-            parser.parse(r.text.splitlines())          # Crawl-delay only
-            group = _match_group(parse_groups(r.text), self.user_agent)
+            return _HostRules.parse(r.text, self.user_agent)
         except Exception:
             return _HostRules()
-        sitemaps = [ln.split(":", 1)[1].strip()
-                    for ln in r.text.splitlines()
-                    if ln.strip().lower().startswith("sitemap:")]
-        return _HostRules(parser=parser, group=group, sitemaps=sitemaps)
 
     async def _rules(self, url: str) -> _HostRules | None:
         origin = origin_key(url)
@@ -348,33 +297,21 @@ class RobotsCache:
         if self.host_exempt(url):
             return True
         rules = await self._rules(url)
-        if rules is None or rules.group is None:
-            return not (rules and rules.disallow_all)
         try:
-            p = urlparse(url)
-            path = p.path or "/"
-            if p.query:                       # rules can match the query too
-                path = f"{path}?{p.query}"
-            return rules.group.allows(path)
+            return rules is None or rules.allows(url)
         except Exception:
             return True
 
     async def crawl_delay(self, url: str) -> float | None:
         """Seconds this host asks us to wait between requests, or None."""
         rules = await self._rules(url)
-        if not rules or rules.parser is None:
-            return None
-        try:
-            d = rules.parser.crawl_delay(self.user_agent)
-            return float(d) if d is not None else None
-        except Exception:
-            return None
+        return rules.crawl_delay if rules else None
 
     async def sitemaps(self, url: str) -> list[str]:
         """Sitemap URLs the host advertises — a discovery hint, since this
         is exactly where sites publish them."""
         rules = await self._rules(url)
-        return list(rules.sitemaps) if rules else []
+        return rules.sitemaps if rules else []
 
     async def wait_turn(self, url: str) -> None:
         """Wait as long as this host's Crawl-delay requires (a turn on

@@ -118,7 +118,7 @@ size.
 
 | domain (lines by hand) | candidates checked | deletable | verdict |
 |---|---|---|---|
-| robots.txt (116) | **protego** | about 116 | **adopt**, see below |
+| robots.txt (116) | **protego** | about 116 | **adopted**, see below |
 | HTML parse (101) | beautifulsoup4, soupsieve, selectolax, parsel | 0 | reject: bs4 x14 to x26 slower and stalls the loop; selectolax is no faster and has no XPath (17 `xpath` references); parsel wraps lxml |
 | HTML to text (65) | html2text, inscriptis, trafilatura, markdownify | 0 | reject: html2text is GPL-3; inscriptis is x5 to x6 slower and differs on 19 of 27 fixtures (it adds bullets); trafilatura adds 11 packages |
 | Anthropic client (207) | anthropic | about 25 | reject: `import anthropic` costs 972 ms (aiohttp 226, pydantic 51), 8 new packages besides itself, 18 MB for the SDK alone, to replace a 20-line retry ladder; it would bypass `net.http.send`, the choke point robots, logging and the `serve` test fake share |
@@ -157,9 +157,39 @@ and it matches agents by substring where the RFC matches the product token.
 protego is x3 slower on parse plus 18 decisions (46 against 16 ms per 500
 files), which is 0.005 ms a file for something read once per host an hour.
 
-Adopting it changes behaviour for hosts with repeated groups, in the
-direction of the RFC. It needs its own phase and the `test_robots.py`
-cases run against it first.
+## Adopted
+
+`protego` 0.7.0 replaced the hand-written matcher and `RobotFileParser` in
+`net/robots.py`: 169 lines out and 106 in, most of them doctests. Two
+conditions were set for it:
+
+- **No further packages.** Its wheel lists no `Requires-Dist`; a clean venv
+  that installs it holds `Protego` and nothing else. Pure Python, BSD-3,
+  `py.typed`, Python 3.10 and up.
+- **Robots.txt stays optional.** The switch is not the parser's: `[policy]
+  respect_robots = false` (and `robots_exempt_hosts` per host) sits above
+  it. Off, `allowed` is True and no robots.txt is fetched or waited on;
+  `TestRespectRobots` runs both settings through `net.http.send` and fails
+  when either check in `robots.py` is removed.
+
+A second differential, end to end (`allowed`, `crawl_delay` and `sitemaps`
+for 6,000 random files and three user agents, the matcher as it was against
+the matcher as it is), found what the swap changes. Every difference traces
+to one of these; none was left unexplained:
+
+| what changes | share of the decisions where it applies |
+|---|---|
+| a user agent named in two groups: the groups now merge (RFC 9309 s2.2.1); before, only the first counted | 5.6% of decisions in those files |
+| an agent name must start a word of the user agent: `bot` no longer matches `googlebot` | 5.8% |
+| a Crawl-delay line ends its group, so the next `User-agent` starts another; before it joined the last one | 0.56% of decisions in files with a Crawl-delay |
+| a `$` counts toward a rule's length: `Disallow: /x$` now beats `Allow: /x` for `/x` | 36 of 89,140 (0.04%) in the rest |
+| Crawl-delay: fractional values (`0.5`) are honored (stdlib read only whole numbers); the delay comes from the same group as the rules, not the file's first matching entry | 1,291 of 6,750 comparisons in files with a `0.5`, malformed or negative delay |
+| sitemaps | 0 differences |
+
+The first two are the ones already found in the first run. On the well-formed
+files the two agreed on every decision. The crawler identifies itself with a
+Chrome user agent, so a group naming `chrome` or `mozilla` governs it, as
+before.
 
 ## Bug found on the way: the digest never escapes anything
 
