@@ -960,3 +960,4 @@ identically to a dead one.
 | `tools/check_boards.py` / `check_sources.py` | per-ATS canary; whole-crawl source health (robots/blocked/broken) |
 | `tools/expand.py` / `snowball.py` | report-only analysis CLIs: keyword/location expansion; third-party employer names mined from stored JDs |
 | `tools/entrydeps.py` | which `src/` modules each entry point reaches — what a compiled binary must contain, and what only one of them needs |
+| `tools/scans.py` | mechanical scans of the code base, each a number to decide by: what the tests patch, typing left open, SQL built from text, names nothing reads, complexity, coverage gaps; `bandit`, `audit`, `deps` wrap tools you install yourself (`python tools/scans.py --list`) |

@@ -121,10 +121,6 @@ def build_dork_queries(rotation: int = 0) -> list[str]:
     return [q for q in queries if loc_site and loc_site in q or _CORE and _CORE in q]
 
 
-# Module-level default (rotation 0) — unchanged shape from before rotation was
-# added, so existing callers that just want "the dork queries" keep working.
-DORK_QUERIES = build_dork_queries(0)
-
 def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
     """From a list of URLs, return de-duped [(ats, slug|triple)] board handles.
 

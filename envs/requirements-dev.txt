@@ -16,3 +16,6 @@ mypy>=2.3
 # bump could move it.
 nuitka>=4.2,<5
 zstandard>=0.22.0
+# tools/scans.py wraps these three when named (`bandit`, `audit`, `deps`); the
+# other scans need nothing. Install by hand, not in CI:
+#   bandit  pip-audit  deptry
