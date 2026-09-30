@@ -204,22 +204,17 @@ class TestAttribution:
 
 
 async def test_ingest_links_jobs_to_their_company_and_hydrates_per_board(
-        roster, local_addr, monkeypatch):
+        roster, local_addr, serve):
     """A new job is filed under the roster company its name resolves to, and
     that link picks the bodyless jobs hydrated from a board: one fetch per
     linked company, none for a company not in the roster."""
     cid = store.upsert_company(roster, {"name": "Acme Dx", "ats": "greenhouse",
                                         "slug": "acmedx"})
-    fetched = []
-
-    async def index(company):
-        fetched.append(company["name"])
-        return {}
-
-    monkeypatch.setattr(ingest, "board_index", index)
-    monkeypatch.setattr(ingest, "board_match",
-                        answer({"description": "from the board", "url": "https://acmedx.test/j"}))
-    jobs = [{"title": title, "company": company, "url": "", "location": local_addr, **extra}
+    requests = serve(fake_response({"jobs": [
+        {"id": n, "title": title, "absolute_url": f"https://acmedx.test/j{n}",
+         "content": "from the board", "location": {"name": local_addr}}
+        for n, title in enumerate(["Data Engineer", "Software Engineer"])]}))
+    jobs =[{"title": title, "company": company, "url": "", "location": local_addr, **extra}
             for title, company, extra in [
                 ("Data Engineer", "Acme Dx", {}), ("Software Engineer", "Acme Dx", {}),
                 ("Analyst", "Acme Dx", {"description": "already here"}),
@@ -227,7 +222,7 @@ async def test_ingest_links_jobs_to_their_company_and_hydrates_per_board(
 
     assert await ingest.ingest_external_jobs(jobs, source="test", curated=True) == 4
 
-    assert fetched == ["Acme Dx"]
+    assert len(requests) == 1 and "/acmedx/" in requests[0]
     assert {(r["company_name"], r["title"]): (r["company_id"], r["description"] or "")
             for r in roster.execute("SELECT * FROM jobs")} == {
         ("Acme Dx", "Data Engineer"): (cid, "from the board"),

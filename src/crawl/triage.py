@@ -178,6 +178,11 @@ def _once_per_pass(scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]]
 
     Notes:
         A name stands for one company: companies.name is UNIQUE.
+
+        NEAR-MISS, DELIBERATE: runstate.per_run(set) scopes this memo to a
+        Run, not to a call. Every entry point starts a Run per op, so the two
+        agree in production, but the test above runs triage.run twice in one
+        Run to pin "the next pass asks afresh", and fails under per_run.
     """
     asked: set[str] = set()
 
@@ -604,7 +609,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
 
 async def _body_gates(db: store.Writer, companies: dict[Any, CompanyRow], survivors: dict[str, tuple[CompanyRow, dict[str, Any], str]],
                       tracks: list[RuntimeTrack], mission_scorer: Callable[[str, str], Awaitable[tuple[Any, Any, Any]]], decided: dict[str, tuple[str, str, CompanyRow, dict[str, Any]]],
-                      summary: dict[str, float], n_free: int, waiting: dict[str, str],
+                      summary: dict[str, float], waiting: dict[str, str],
                       cutoff: str) -> dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]]:
     """Phase 3: the same gates again, now with bodies.
 
@@ -613,6 +618,7 @@ async def _body_gates(db: store.Writer, companies: dict[Any, CompanyRow], surviv
     pass rather than entering a track unscorable. `waiting` is _hydrate's
     {job_id: reason}, printed (capped) against the rows that end up here.
     """
+    n_free = len(decided)
     final: dict[str, tuple[CompanyRow, dict[str, Any], list[str], str]] = {}
     left_rows: list[tuple[CompanyRow, dict[str, Any]]] = []
     # The survivor rows carry company_id themselves, so the same grouping
@@ -829,13 +835,12 @@ async def run(db_path: str | Path | None = None, tracks: Iterable[RuntimeTrack] 
         mission_scorer = _once_per_pass(mission_scorer)
         decided, survivors = await _free_gates(db, companies, groups, tracks,
                                                mission_scorer, cutoff)
-        n_free = len(decided)
         waiting: dict[str, str] = {}
         if hydrate:
             waiting = await _hydrate(db, companies, survivors, summary, stamp,
                                      hydrate_fn, cutoff)
         final = await _body_gates(db, companies, survivors, tracks, mission_scorer,
-                                  decided, summary, n_free, waiting, cutoff)
+                                  decided, summary, waiting, cutoff)
         scores, over_cap = await _score(final, summary, score_cap, fit, max_workers)
         await db.batch(_write_verdicts, decided, final, scores, over_cap, tracks,
                        summary, stamp)

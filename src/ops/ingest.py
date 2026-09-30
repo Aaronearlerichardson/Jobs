@@ -34,6 +34,9 @@ async def _hydrate_missing_descriptions(db: store.Writer, kept: list[_Admitted])
     """Backfill empty descriptions on jobs linked to a company with a
     resolvable board, batched so each board is fetched once no matter how
     many of its jobs need hydrating."""
+    # NEAR-MISS, DELIBERATE: not ops.group_by_company. It indexes dict rows by
+    # a string key; these are (job, company_id) pairs filtered on the way in,
+    # and stamping company_id onto the job would be a hidden key again.
     by_company: dict[int, list[dict[str, Any]]] = {}
     for a in kept:
         if a.company_id and not (a.job.get("description") or "").strip():
