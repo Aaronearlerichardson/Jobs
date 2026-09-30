@@ -5,7 +5,13 @@ Session of 2026-09-30, branch `harvest` at `b10ab8a` (the checkout was at
 files (section 1). Task B changed no repo code: everything in section 2 was
 measured on a scratch copy of `src/`.
 
-Checks on the working tree: `python -m mypy` 0 errors; `flake8 --select=F`
+**Status (owner decisions, same day).** Remove `via` and `job_id`: done
+(phase 1, `37ffcf6`). Storing None for `url` or `location` is not a problem
+(2.5). Phases 1 and 2 approved and done; phase 2 put `EngineRow` and
+`FillField` in `src/ats/board/spec.py` beside `RowField`, not in `rows.py`.
+Phase 3 (the fetched-job flow) and phase 4 (docs) are not started.
+
+Checks on the tree at the first draft: `python -m mypy` 0 errors; `flake8 --select=F`
 clean; `python -m pytest` 1527 passed, 10 skipped, 0 failed (example profile;
 9 skips are "profile configures no silicon title tokens" and 1 is "no NC
 locality", which is why the handoff's local run read 1535 passed + 2
@@ -242,13 +248,16 @@ Friction TypedDict adds, each seen in the prototype:
 ### 2.4 Single source of truth
 
 `RowField` (a `Literal`) and a `TypedDict` cannot derive from each other under
-mypy. The copy that must stay is verified the way `CompanyRow` is: a names test
-in `tests/test_store.py`'s style asserting
-`set(EngineRow.__annotations__) == (ROW_FIELDS - {"department"}) | {"head",
-"_free"}`, that `FetchedJob` contains `ROW_FIELDS - {"department"}`, and that
-its fit keys equal `FitColumns`'. Narrowing `Detail.fields` to `FillField`
-also makes the spec loader reject a rescue naming `id`, `title`, `url` or
-`department`; neither of the two specs that set `fields` does.
+mypy. The copy that must stay is verified the way `CompanyRow` is, by a names
+test. Done for the engine row:
+`tests/test_boards_spec.py::test_the_engine_row_names_the_spec_row_fields`
+asserts `set(EngineRow.__annotations__) == (ROW_FIELDS - {"department"}) |
+{"head", "_free"}` and that `FillField` is a subset. Still to add in phase 4:
+that `FetchedJob` contains `ROW_FIELDS - {"department"}`, and that its fit
+keys equal `FitColumns`'. Narrowing `Rescue.fields` to `FillField` makes the
+spec loader reject a rescue naming `id`, `title`, `url` or `department`
+(pinned by two entries in `REFUSED`); neither of the two specs that set
+`fields` does.
 
 ### 2.5 Latent inconsistencies (reported, not fixed)
 
@@ -259,6 +268,14 @@ also makes the spec loader reject a rescue naming `id`, `title`, `url` or
   stores None if the job has no `location` key (the backfill stub has none).
   `ingest.py:54` `j["url"] = j.get("url") or match.get("url")` can store None
   the same way. Neither fires today; both are what a `str` type would flag.
+  **Not a problem** (checked): `jobs.url` and `jobs.location` are nullable
+  (`0001_baseline.sql`), every SQL read coalesces or filters NULL and `''` alike
+  (`store/jobs.py:466,974,1126`), `location_unknown(None)` is True as `""` is,
+  and triage reads `r.get("url") or ""`. The upsert overwrites a stored
+  location with NULL instead of `''`, which no reader tells apart. So in
+  phase 3 either declare the two keys `str` and add `or ""` at those two
+  writes (safe: nothing distinguishes the values), or declare `str | None`
+  and narrow at `company.py:86`; the first is smaller.
 - `runner.py:787` `run_track` returns stored rows on the company-linked path
   and sweep matches on the other: one signature, two shapes. `runner.py:645`
   reuses the loop variable `j` for a watch hit and then for a ranked row.
@@ -283,8 +300,8 @@ the identity proof.
 
 | # | phase (one worker) | scope | identity check | risk / rollback |
 |---|---|---|---|---|
-| 1 | dead keys | remove `via` (getro + its assertion) and `job_id` (`_fetcher_shape`) | grep proof; AST diff shows only those lines; suite | minimal; revert |
-| 2 | engine row | `EngineRow` and `FillField` in `rows.py`; retype the engine and pager row chain; `Detail.fields` to `FillField`; `_apply` takes `EngineRow \| dict[str, Any]` until phase 3; names test | **measured**: 32 sites in `engine.py` and `pager.py`, mypy 0, 1527 passed, 101 of 102 files AST-identical (only `rows.py` differs) | low; revert |
+| 1 | dead keys (**done**) | remove `via` (getro + its assertion) and `job_id` (`_fetcher_shape`) | grep proof; AST diff shows only those two dict literals; suite; triage transcript unchanged | minimal; revert |
+| 2 | engine row (**done**) | `EngineRow` and `FillField` in `spec.py`; retype the engine and pager row chain (32 sites); `Rescue.fields` to `FillField`; `_apply` takes `EngineRow \| dict[str, Any]` until phase 3; names test; two more refused specs | mypy 0, 1528 passed, 101 of 102 files AST-identical (only `spec.py`, the new types). The AST diff cannot see the one deliberate runtime change, the pydantic field `Rescue.fields`, so the two refused specs pin it; four mutations caught | low; revert |
 | 3 | the fetched-job flow | `FetchedJob` (design A), `Employer`, `Fillable`; `_link` takes a `Mapping`; producers first, then `company`/`registry`/`harvest`, then runner and digest, then triage/ingest/backfill/`apply`; ends the phase-2 union | **measured on the prototype**: 143 sites, 26 files, 93 signatures, 24 scripted edits, 0 errors, 95 of 102 files AST-identical; the AST diff allow-list is the edit list in 2.2 (of which `via`, `job_id`, the two `or ""` writes and `board_jobs`' key order change output; decide the `or ""` pair, 2.5); then the local oracles named in the handoff (`run_track`, `triage.run`, `ingest_external_jobs`) old vs new | medium (size); one commit, revert; the AST diff makes review mechanical |
 | 4 | tests and docs | names tests from 2.4; a row in REVIEW.md's Data shapes table | mutation-check each test | low |
 | 5 | (separate track) `JobRow` for stored rows | see 2.7 | typeof audit twin to `test_the_company_writers_store_each_column_as_declared` | medium |
