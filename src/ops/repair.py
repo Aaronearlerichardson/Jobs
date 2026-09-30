@@ -9,15 +9,15 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, cast
 
 from src import config
-from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.board.engine import Board
+from src.config import RuntimeTrack
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import CompanyIn, CompanyRow
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
+from src.rows import CompanyIn, CompanyRow
 
 if TYPE_CHECKING:
     from sqlite3 import Connection

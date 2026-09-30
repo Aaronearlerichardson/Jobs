@@ -15,6 +15,7 @@ from typing import Annotated, Any, Literal
 from pydantic import (AfterValidator, BaseModel, BeforeValidator,
                       ConfigDict, Field, ValidationError, ValidationInfo,
                       field_validator, model_validator)
+
 from src import tags
 from src.validation import Regex, error_lines
 

@@ -24,9 +24,9 @@ from typing import Any, cast
 
 from src import config
 from src import tags
-from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
 from src.match.locality import LocationRE
 from src.net.util import clean_url
+from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
 from .schema import (_commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql, sql_function)
 

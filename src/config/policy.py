@@ -12,7 +12,6 @@ from __future__ import annotations
 from collections.abc import Collection
 
 from src.rows import CompanyRow
-
 # _self: the config PACKAGE, which is what callers monkeypatch.
 # profile.py defines it; two identical copies is one too many for
 # a function whose whole job is naming one module.

@@ -42,11 +42,11 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
 
 from src import config
-from src.validation import drop_blank, error_lines
 from src.crawl import runner, triage
 from src.discovery import local_sourcing, paste_ingest
 from src.ops import (backfill, ingest, rekey, repair, roster, scoring,
                      status)
+from src.validation import drop_blank, error_lines
 
 #: "Not given": `invoke(track=UNSET)` resolves the track from params.
 UNSET = object()

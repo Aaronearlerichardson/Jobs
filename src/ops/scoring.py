@@ -11,12 +11,12 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from src import config
-from src.config import RuntimeTrack
 from src import store
 from src.ats.board import board_for_url
 from src.ats.board import company as company_fetch
 from src.claude.fit import UNSCORED_CAUSES, FitResult, score_resume_fit
 from src.claude.resume import resume_text
+from src.config import RuntimeTrack
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out
 from src.net.util import text_from_html

@@ -8,13 +8,13 @@ from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
-from src.config import RuntimeTrack
 from src import store
 from src.ats.board import company as company_fetch
+from src.config import RuntimeTrack
 from src.net.parallel import fan_out
-from src.rows import CompanyRow, FetchedJob
 from src.ops.maintenance import (_t, board_index, board_match,
                                  group_by_company, track_writer)
+from src.rows import CompanyRow, FetchedJob
 
 
 def stale_body_rows(conn: sqlite3.Connection, where: str,

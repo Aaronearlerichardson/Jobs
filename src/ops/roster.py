@@ -15,8 +15,9 @@ op reached a different store depending on which front end asked for it.
 
 from __future__ import annotations
 
-from src.config import RuntimeTrack
 from typing import Any
+
+from src.config import RuntimeTrack
 
 
 def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:

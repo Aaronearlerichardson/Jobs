@@ -23,12 +23,12 @@ from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import RuntimeTrack, profile_edit
-from src.validation import Text, error_lines
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
 from src.ops.maintenance import track_store
 from src.rows import CompanyRow, JobRow, RankedJob
+from src.validation import Text, error_lines
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart
 

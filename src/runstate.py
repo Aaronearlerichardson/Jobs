@@ -24,8 +24,8 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import inspect
-from collections.abc import Awaitable, Callable
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 _log = logging.getLogger(__name__)

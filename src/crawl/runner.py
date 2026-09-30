@@ -43,12 +43,12 @@ from types import ModuleType
 from typing import Any, NamedTuple, cast
 
 from src import config
-from src.config import RuntimeTrack
-from src.config.profile_schema import TrackKeywords
 from src import store
 from src import tags
 from src.ats.registry import iter_store_sources, sweep
 from src.claude.resume import resume_text
+from src.config import RuntimeTrack
+from src.config.profile_schema import TrackKeywords
 from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all

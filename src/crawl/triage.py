@@ -85,7 +85,6 @@ from pathlib import Path
 from typing import Any, cast
 
 from src import config
-from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
@@ -93,6 +92,7 @@ from src.ats.board import BOARDS
 from src.ats.board.company import board_origin, needs_detail
 from src.claude.api import is_active_mission, score_company_mission
 from src.claude.fit import MIN_DESC_CHARS, FitResult, score_resume_fit
+from src.config import RuntimeTrack
 from src.crawl import harvest
 from src.crawl.harvest import MISS_BACKOFF_S, hydrate_rows
 from src.crawl.runner import apply_keyword_focus, core_anchor
@@ -102,8 +102,8 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
                                 remote_signal, remote_signal_for, us_eligible)
 from src.net.parallel import fan_out
 from src.net.util import clean_field
-from src.rows import CompanyRow, FetchedJob, JobRow
 from src.ops import maintenance as ops
+from src.rows import CompanyRow, FetchedJob, JobRow
 
 _log = logging.getLogger(__name__)
 

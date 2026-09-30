@@ -17,12 +17,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from src import config
-from src.config import RuntimeTrack
 from src import digest
 from src import store
 from src import tags
 from src.ats.board import company as company_fetch
 from src.claude.fit import score_resume_fit
+from src.config import RuntimeTrack
 from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible

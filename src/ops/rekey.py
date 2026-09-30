@@ -7,9 +7,9 @@ import json
 import sqlite3
 from typing import cast
 
-from src.config import RuntimeTrack
 from src import store
 from src.ats.board import board_for
+from src.config import RuntimeTrack
 from src.ops.maintenance import track_store
 
 

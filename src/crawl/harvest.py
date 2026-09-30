@@ -71,10 +71,10 @@ from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
 from src.net.util import worker_count
-from src.rows import CompanyRow, FetchedJob, JobIn
 from src.ops.maintenance import rewrite_digest
 from src.ops.scoring import verify_top
 from src.ops.status import check_closed_jobs
+from src.rows import CompanyRow, FetchedJob, JobIn
 
 _log = logging.getLogger(__name__)
 

@@ -7,19 +7,19 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, NamedTuple, cast
 
-from src.config import RuntimeTrack
 from src import store
 from src import tags
 from src.ats import coords
 from src.ats.board import company as company_fetch
+from src.config import RuntimeTrack
 from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.rows import BoardHit, CompanyRow, FetchedJob
 from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
                                  track_writer)
+from src.rows import BoardHit, CompanyRow, FetchedJob
 
 
 class _Admitted(NamedTuple):
