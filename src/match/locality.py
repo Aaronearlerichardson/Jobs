@@ -498,11 +498,22 @@ def remote_signal_for(job: FetchedJob) -> str | None:
 # Unknown/ambiguous locations pass: better a stray non-US posting in the
 # digest than a real US-remote role silently dropped.
 
+def extend_vocab(builtin: tuple[str, ...], extra: Iterable[str] | None) -> tuple[str, ...]:
+    """`builtin` followed by what `extra` adds, lowercased and without repeats.
+
+    >>> extend_vocab(("us", "usa"), ["USA", " America ", "", "uk"])
+    ('us', 'usa', 'america', 'uk')
+    >>> extend_vocab(("us",), None), extend_vocab(("us",), [])
+    (('us',), ('us',))
+    """
+    return tuple(dict.fromkeys((*builtin, *(t.strip().lower() for t in extra or () if t.strip()))))
+
+
 _DEFAULT_US_MARKERS = (
     "us", "u.s", "usa", "united states", "america", "americas",
     "north america", "worldwide", "global", "anywhere", "world",
 )
-_US_MARKERS = tuple(getattr(config, "REMOTE_US_MARKERS", None) or _DEFAULT_US_MARKERS)
+_US_MARKERS = extend_vocab(_DEFAULT_US_MARKERS, getattr(config, "REMOTE_US_MARKERS", None))
 
 _DEFAULT_NON_US_REGIONS = (
     "philippines", "india", "pakistan", "bangladesh", "nigeria", "kenya",
@@ -516,7 +527,7 @@ _DEFAULT_NON_US_REGIONS = (
     "austria", "italy", "hungary", "slovakia", "serbia", "korea", "taiwan",
     "malaysia", "saudi", "qatar", "costa rica",
 )
-_NON_US_REGIONS = tuple(getattr(config, "REMOTE_NON_US_REGIONS", None) or _DEFAULT_NON_US_REGIONS)
+_NON_US_REGIONS = extend_vocab(_DEFAULT_NON_US_REGIONS, getattr(config, "REMOTE_NON_US_REGIONS", None))
 
 # A country/region name always on a word boundary -- unlike _has_token's
 # substring rule for this tuple's longer entries, which is fine when

@@ -97,7 +97,7 @@ class TestSegments:
         assert not locality.is_nc(f"{local_city}, {other_state[1]}")
         assert not locality.is_nc(f"US - {other_state[1]} - {local_city}")
 
-    def test_city_named_in_another_country_is_not_local(self, local_city, non_us_vocab):
+    def test_city_named_in_another_country_is_not_local(self, local_city):
         assert not locality.is_nc(f"UK - County {local_city} - Barnard Castle")
         assert not locality.is_nc(f"US, Blue Bell; Canada, {local_city}")
 
@@ -136,3 +136,43 @@ class TestSnippet:
             f"{local_city} is seeking two tenure-tr") == local_city
         assert locality.location_snippet(
             f"{local_city} School of Nursing is searching") == f"{local_city} School"
+
+
+class TestUsEligibilityVocabulary:
+    """[locations] us_markers and non_us_regions ADD to the built-in lists.
+
+    They replaced them until 2026-09-30, so a profile naming Canada alone
+    made Israeli and Emirati seats US-eligible again. The vocabulary is built
+    when `locality` is imported, so this reads it in a process started with
+    the profile.
+    """
+
+    @staticmethod
+    def ask(tmp_path, toml, *locations):
+        import os
+        import subprocess
+        import sys
+        profile = tmp_path / "profile.toml"
+        profile.write_text(toml, encoding="utf-8")
+        code = ("import sys; from src.match import locality as L; "
+                "print(*[L.us_eligible(x) for x in sys.argv[1:]])")
+        done = subprocess.run([sys.executable, "-c", code, *locations], capture_output=True, text=True,
+                              check=True, env={**os.environ, "JOBS_PROFILE": str(profile)})
+        return [word == "True" for word in done.stdout.split()]
+
+    def test_a_profiles_regions_join_the_built_in_ones(self, tmp_path):
+        toml = '[locations]\nnon_us_regions = ["Narnia", " Mordor "]\n'
+        assert self.ask(tmp_path, toml, "Israel, Yokneam", "UAE, Dubai", "Narnia, Cair Paravel",
+                        "Mordor", "Durham, NC", "Remote - US or Canada") == [
+            False, False, False, False, True, True]
+
+    def test_a_profiles_markers_join_the_built_in_ones(self, tmp_path):
+        toml = '[locations]\nus_markers = ["Gondor"]\n'
+        assert self.ask(tmp_path, toml, "Gondor or Canada", "Canada, Remote", "Worldwide or Europe",
+                        "Europe") == [True, False, True, False]
+
+    def test_what_the_loaded_profile_names_is_in_the_vocabulary(self):
+        from src import config
+        assert set(locality._DEFAULT_NON_US_REGIONS) <= set(locality._NON_US_REGIONS)
+        assert {t.strip().lower() for t in config.REMOTE_NON_US_REGIONS} <= set(locality._NON_US_REGIONS)
+        assert {t.strip().lower() for t in config.REMOTE_US_MARKERS} <= set(locality._US_MARKERS)
