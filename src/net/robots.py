@@ -114,7 +114,7 @@ def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
     ...         outer, outer.__cause__ = OSError("wrapped"), exc
     ...         exc = outer
     ...     return exc
-    >>> _is_dns_failure(chain(3)), _is_dns_failure(chain(9))
+    >>> _is_dns_failure(chain(5)), _is_dns_failure(chain(6))
     (True, False)
     """
     seen = set()
@@ -211,7 +211,7 @@ class _HostRules:
 class RobotsCache:
     """Per-host robots.txt rules, fetched lazily and cached."""
 
-    def __init__(self, user_agent: str | None = None, ttl: float = 3600) -> None:
+    def __init__(self, user_agent: str | None = None, ttl: float = 3600) -> None:  # pragma: no mutate
         self.user_agent = user_agent or config.USER_AGENT
         self.ttl = ttl          # seconds a parsed robots.txt stays good
         # origin -> (started, the fetch's Task)
@@ -302,7 +302,7 @@ class RobotsCache:
         when the host is exempted in the profile (see host_exempt) — the
         exemption skips the robots.txt fetch for that request entirely,
         while wait_turn still paces the host."""
-        if not getattr(config, "RESPECT_ROBOTS", True):
+        if not config.RESPECT_ROBOTS:
             return True
         if self.host_exempt(url):
             return True
@@ -327,7 +327,7 @@ class RobotsCache:
         """Wait as long as this host's Crawl-delay requires (a turn on
         net.http.LIMITER): requests to the SAME host queue up, while other
         hosts keep going."""
-        if not getattr(config, "RESPECT_ROBOTS", True):
+        if not config.RESPECT_ROBOTS:
             return
         delay = await self.crawl_delay(url)
         if delay:

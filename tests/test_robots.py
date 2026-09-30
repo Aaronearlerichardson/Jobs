@@ -142,6 +142,14 @@ class TestWhatAFetchedFileMeans:
         await cache.allowed("https://a.test/z")
         assert len(calls) == 2
 
+    async def test_a_file_that_cannot_be_parsed_fails_open(self, serve, monkeypatch):
+        def refuse(text):
+            raise ValueError("unparseable")
+        monkeypatch.setattr(robots.Protego, "parse", staticmethod(refuse))
+        serve(fake_response(text=self.BLANKET))
+        rules = await robots.RobotsCache()._fetch("https://a.test")
+        assert rules.protego is None and not rules.disallow_all
+
     async def test_an_error_while_matching_fails_open(self, monkeypatch):
         cache = robots.RobotsCache()
         monkeypatch.setattr(cache, "_fetch", answer(SimpleNamespace(allows=lambda url: 1 / 0)))
