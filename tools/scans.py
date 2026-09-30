@@ -399,9 +399,9 @@ def audit(repo: Repo) -> Iterator[str]:
 
 @scan(default=False)
 def deps(repo: Repo) -> Iterator[str]:
-    """deptry: declared but unused, imported but undeclared."""
+    """deptry: declared but unused, imported but undeclared (src/conftest.py is pytest's, not the app's)."""
     yield from run_tool(repo, "deptry", "src", "--known-first-party", "src",
-                        "--requirements-files", "envs/requirements.txt")
+                        "--extend-exclude", r"src/conftest\.py", "--requirements-files", "envs/requirements.txt")
 
 
 def main(argv: list[str] | None = None, root: Path = ROOT) -> int:
