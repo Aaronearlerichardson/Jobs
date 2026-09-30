@@ -55,6 +55,7 @@ from src.config.profile_schema import TrackExclude          # noqa: E402
 from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
+from src.conftest import _close_stores            # noqa: E402,F401  (autouse: see there)
 import src.crawl.runner as _runner                  # noqa: E402
 import src.claude.api as _claude                    # noqa: E402
 import src.ops.scoring as _scoring                  # noqa: E402

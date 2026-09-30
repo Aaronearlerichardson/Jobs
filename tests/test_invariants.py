@@ -798,8 +798,10 @@ def test_the_environment_is_read_only_through_config_settings():
 #: or inside a function, only units before its own. dispatch sits above crawl
 #: (two operations run crawl code) and below web, so the harvester, which
 #: imports crawl and nothing above it, never loads the operation table.
+#: conftest is pytest's, for the doctests here; nothing imports it but tests.
 LAYERS = ("validation", "tags", "rows", "config", "runstate", "match", "net", "session_log",
-          "store", "claude", "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web")
+          "store", "claude", "ats", "digest", "discovery", "ops", "crawl", "dispatch", "web",
+          "conftest")
 
 
 def _imported_units(rel, tree):
