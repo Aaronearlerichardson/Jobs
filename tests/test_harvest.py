@@ -939,6 +939,35 @@ async def test_runner_treats_harvested_rows_as_fresh(tmp_path, monkeypatch):
     assert not hydrated, "stored description should have been reused"
 
 
+async def test_sample_matches_label_a_job_new_only_if_the_store_lacked_it(
+        tmp_path, monkeypatch, capsys, sweep_track, pristine_keywords):
+    """The label is the store's answer when the job was gated: the crawl has
+    written every match by the time the samples print, so asking then would
+    call each one "(seen)"."""
+    from src.crawl import runner
+    db = tmp_path / "s.db"
+    store.upsert_job(store.connect(db), {"job_id": "feed_old", "title": "Old Role"})
+    t = sweep_track.model_copy(update={
+        "db_path": db, "email": False, "verify_top": 0, "require_core_anchor": False,
+        "exclude_gate": False, "geo_gate": False, "cost_guard": 0,
+        "sources": sweep_track.sources.model_copy(update={"store": False})})
+    feed = [{"id": f"feed_{n}", "title": f"{n.title()} Role", "company": n.title(),
+             "url": f"https://x.test/{n}", "location": "Remote"} for n in ("old", "new")]
+    monkeypatch.setattr(runner, "build_sources", answer([
+        {"name": "Feed", "platform": "feed", "company": None, "thunk": answer(feed)}]))
+    monkeypatch.setattr(gates, "is_technical_role", lambda title, tt: True)
+
+    await runner.run_track(t, fit=False, commit=True, send=False, verify=False,
+                           websearch=False)
+
+    out = capsys.readouterr().out
+
+    def label(title):
+        block = out.split(title)[1].split("url     :")[0]
+        return "NEW" if "(NEW)" in block else "seen" if "(seen)" in block else None
+    assert (label("Old Role"), label("New Role")) == ("seen", "NEW")
+
+
 # ── the pass runs verify + the closed-URL probe, before the digest ──────────
 
 class TestHarvestPassRunsVerifyAndClosedProbe:

@@ -329,10 +329,9 @@ def location_unknown(location: str | None) -> bool:
 # this job", and "remote" is one of the answers.
 #
 # Side-effect-free, like the rest of this module. The sweep runner
-# (src/crawl/runner.py) stamps `remote_signal` / `_us_eligible` on
-# its rows, and the webapp reads it. None of it touches the
-# locality gate above, so the onsite crawl path is undisturbed by
-# changes here.
+# (src/crawl/runner.py) stamps `remote_signal` on its rows, and the
+# webapp reads it. None of it touches the locality gate above, so the
+# onsite crawl path is undisturbed by changes here.
 #
 # Two precision rules keep false positives down -- these get
 # surfaced for human review before anyone emails anyone:

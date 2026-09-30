@@ -472,7 +472,8 @@ class TestEveryDigestWriterCarriesTheTriageFunnel:
                        {"title": "Watched Role", "url": "https://acme.io/w",
                         "location": "Durham, NC"}, False)]
         got = runner.Collected(to_score=[], matches=[], watch_hits=watch_hits,
-                               funnel=[], n_closed=0, n_reopened=0, n_seen=0)
+                               funnel=[], n_closed=0, n_reopened=0, n_seen=0,
+                               new_ids=set())
 
         async with store.Writer(db) as w:
             ranked = await runner._report_ranked(w, local_track, got, scored=0,

@@ -447,7 +447,7 @@ def _write_board(conn: sqlite3.Connection, jobs: list[dict[str, Any]],
 async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
                        stats: dict[str, Any], delay: float | None = None,
                        backoff_s: float = MISS_BACKOFF_S,
-                       progress: Callable[[], object] = lambda: None) -> None:
+                       progress: Callable[[], object] = lambda: None) -> list[str]:
     """Resolve every row in `jobs` that still needs a detail call
     (company_fetch.needs_detail: no body yet, or a body already but a
     location the listing never resolved), in place, within the host's
@@ -462,6 +462,9 @@ async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
     comes back empty counts as a miss for the breaker exactly like a
     failed body fetch -- needs_detail decides "resolved or not" either
     way, so the two cases share one counter.
+
+    Returns the ids of the rows it attempted; a row over the cap is not one
+    (tests/test_triage.py::test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap).
     """
     # Consecutive misses that mean the host has stopped answering (some
     # drop the connection outright once they decide you are a bot). The
@@ -477,9 +480,10 @@ async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
               f"cap is {cap}/run - the rest next run")
         todo = todo[:cap]
     streak = paused = 0
+    tried: list[str] = []
     for i, j in enumerate(todo):
         _log.debug("hydrate %s", j.get("url"))
-        j["_tried"] = True          # attempted (vs. left over the cap)
+        tried.append(j["id"])
         try:
             await company_fetch.hydrate_description(j, company)
         except Exception as e:                  # noqa: BLE001 - per row
@@ -506,6 +510,7 @@ async def hydrate_rows(jobs: list[dict[str, Any]], company: CompanyRow,
             await asyncio.sleep(delay)
     stats["unhydrated"] = await asyncio.to_thread(
         lambda: sum(1 for j in jobs if company_fetch.needs_detail(j)))
+    return tried
 
 
 # --------------------------------------------------------------------------- #

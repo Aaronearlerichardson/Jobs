@@ -395,15 +395,18 @@ def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> dict[str, Any]:
             "title": row.get("title") or "", "url": row.get("url") or "",
             "location": row.get("location") or "",
             "description": row.get("description") or "",
-            "ats": company.get("ats"), "_row": row}
+            "ats": company.get("ats")}
 
 
 async def hydrate_company(company: CompanyRow, jobs: list[dict[str, Any]], delay: float | None = None,
                           backoff_s: float = MISS_BACKOFF_S) -> dict[str, Any]:
     """Fetch bodies for one company's survivors, serially, within the
-    harvester's per-host tolerances. Returns the harvest-style stats."""
+    harvester's per-host tolerances. Returns the harvest-style stats, plus
+    `tried`: the ids of the rows a detail fetch was attempted on. Exercised
+    by tests/test_triage.py::
+    test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap."""
     stats: dict[str, Any] = {"hydrated": 0, "unhydrated": 0}
-    await hydrate_rows(jobs, company, stats, delay, backoff_s)
+    stats["tried"] = await hydrate_rows(jobs, company, stats, delay, backoff_s)
     return stats
 
 
@@ -569,6 +572,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
             with_item=True, budget_s=config.PASS_BUDGET_S,
             on_abandon=_abandoned, key=hosts.get):
         summary["hydrated"] += st.get("hydrated", 0)
+        tried = set(st["tried"])
         for j in todo[cid]:
             r = survivors[j["id"]][1]
             if j.get("description"):
@@ -586,7 +590,7 @@ async def _hydrate(db: store.Writer, companies: dict[Any, CompanyRow], survivors
                              r["location"])
             if not needs_detail(j):
                 continue                 # resolved (body, or just location)
-            if j.get("_tried"):
+            if j["id"] in tried:
                 await db.run(store.mark_desc_checked, j["id"], now=stamp)
                 waiting[j["id"]] = "fetch failed this pass"
             else:

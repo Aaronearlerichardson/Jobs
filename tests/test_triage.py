@@ -9,7 +9,7 @@ import pytest
 
 from conftest import answer, company_row as _company, iso_days_ago, make_board_fn, track_with
 
-from src import tags
+from src import config, tags
 from src import store
 from src.claude.fit import MIN_DESC_CHARS, FitResult
 from src.crawl import harvest, triage
@@ -80,11 +80,11 @@ def stubs(monkeypatch):
         n = 0
         for j in jobs:
             calls["hydrate"].append(j["id"])
-            j["_tried"] = True
             if "nobody" not in j["id"]:
                 j["description"] = "python sql pipelines " * 20
                 n += 1
-        return {"hydrated": n, "unhydrated": len(jobs) - n}
+        return {"hydrated": n, "unhydrated": len(jobs) - n,
+                "tried": [j["id"] for j in jobs]}
 
     async def score(title, description="", *, location="", max_tokens=300):
         calls["score"].append(title)
@@ -512,9 +512,9 @@ async def test_hydration_spends_the_board_budget_on_relevant_titles_first(
     async def hydrate(company, jobs, **kw):
         order.extend(j["id"] for j in jobs)
         for j in jobs:
-            j["_tried"] = True
             j["description"] = "python sql pipelines " * 20
-        return {"hydrated": len(jobs), "unhydrated": 0}
+        return {"hydrated": len(jobs), "unhydrated": 0,
+                "tried": [j["id"] for j in jobs]}
 
     await triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
                      hydrate_fn=hydrate, max_workers=2)
@@ -586,6 +586,27 @@ async def test_waiting_reason_names_a_failed_fetch_then_the_retry_window(
     await _run(db, tracks, stubs)
     out2 = capsys.readouterr().out
     assert "waiting: Acme | Data Engineer" in out2 and "retries after" in out2
+
+
+async def test_waiting_reason_tells_a_failed_fetch_from_a_row_over_the_cap(
+        tmp_path, tracks, stubs, local_addr, capsys, monkeypatch):
+    """The real hydrator names the rows it attempted (`tried`): with room
+    for one detail fetch, one row failed it and the other was never reached."""
+    db = tmp_path / "s.db"
+    conn = store.connect(db)
+    c = _company(conn, "Acme", mission_tier="core-mission", mission_score=0.9)
+    for jid in ("a", "b"):
+        _harvested(conn, c, jid, "Data Engineer", local_addr)
+    monkeypatch.setattr(config, "HYDRATE_CAP_PER_RUN", 1)
+    monkeypatch.setattr(config, "HYDRATE_DELAY_S", 0)
+    monkeypatch.setattr(harvest.company_fetch, "hydrate_description", answer(None))
+
+    await triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
+                     max_workers=2)
+
+    out = capsys.readouterr().out
+    assert out.count("| fetch failed this pass") == 1
+    assert out.count("| not reached this pass") == 1
 
 
 async def test_waiting_reason_names_a_row_with_no_url(tmp_path, tracks, stubs,
@@ -761,10 +782,10 @@ async def test_bodiless_workday_n_locations_resolves_before_geo_gate(
 
     async def hydrate(company, jobs, **kw):
         for j in jobs:
-            j["_tried"] = True
             j["description"] = "python sql pipelines " * 20
             j["location"] = local_addr if j["id"] == "near" else elsewhere
-        return {"hydrated": len(jobs), "unhydrated": 0}
+        return {"hydrated": len(jobs), "unhydrated": 0,
+                "tried": [j["id"] for j in jobs]}
 
     await triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
                      hydrate_fn=hydrate, max_workers=2)
@@ -788,9 +809,9 @@ async def test_bodied_workday_n_locations_resolves_via_cached_location_lookup(
 
     async def hydrate(company, jobs, **kw):
         for j in jobs:
-            j["_tried"] = True
             j["location"] = local_addr        # simulates a resolved lookup
-        return {"hydrated": 1, "unhydrated": 0}
+        return {"hydrated": 1, "unhydrated": 0,
+                "tried": [j["id"] for j in jobs]}
 
     await triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
                      hydrate_fn=hydrate, max_workers=2)
@@ -815,8 +836,9 @@ async def test_bodied_workday_location_lookup_failure_defers_then_expires(
     async def hydrate_fails(company, jobs, **kw):
         for j in jobs:
             calls.append(j["id"])
-            j["_tried"] = True          # the lookup ran; it resolved nothing
-        return {"hydrated": 0, "unhydrated": len(jobs)}
+        # The lookup ran (tried); it resolved nothing.
+        return {"hydrated": 0, "unhydrated": len(jobs),
+                "tried": [j["id"] for j in jobs]}
 
     await triage.run(db_path=db, tracks=tracks, mission_scorer=stubs["mission_fn"],
                      hydrate_fn=hydrate_fails, max_workers=2)

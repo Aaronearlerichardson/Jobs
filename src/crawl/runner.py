@@ -297,6 +297,7 @@ class Collected(NamedTuple):
     n_closed: int
     n_reopened: int
     n_seen: int
+    new_ids: set[str]                  # sweep match ids the store did not hold when gated: the "(NEW)" ones
 
 
 async def _gate_company_board(
@@ -386,10 +387,13 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow,
 
 
 def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[dict[str, Any]],
-                      seen_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
+                      seen_ids: set[str], new_ids: set[str]) -> tuple[list[dict[str, Any]], int, int, int]:
     """One sweep source's jobs through the gates: anchor + title (+ engine
     excludes), remote signal stamped (or geo-gated when configured),
-    deduped across sources via `seen_ids` (mutated).
+    deduped across sources via `seen_ids` (mutated). `new_ids` (mutated)
+    gets the surfaced ids the store did not hold yet: they are read here,
+    before the run writes any of them (tests/test_harvest.py::
+    test_sample_matches_label_a_job_new_only_if_the_store_lacked_it).
 
     Returns (surfaced_jobs, anchor_n, tech_n, surfaced_n). The jobs are
     stamped in place with the display/persist fields the digest reads.
@@ -428,8 +432,8 @@ def _gate_sweep_source(conn: sqlite3.Connection, t: RuntimeTrack, jobs: list[dic
             job["remote_signal"] = sig
         if nsig:
             job["anchor_signal"] = nsig
-        job["_new"] = not store.job_exists(conn, jid)
-        job["_us_eligible"] = us_eligible(job.get("location", ""))
+        if not store.job_exists(conn, jid):
+            new_ids.add(jid)
         out.append(job)
     return out, anchor_here, tech_here, surfaced
 
@@ -450,6 +454,7 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
     watch_hits: list[tuple[CompanyRow, dict[str, Any], bool]] = []
     funnel: list[tuple[str, int, int, int, int, str]] = []
     seen_ids: set[str] = set()
+    new_ids: set[str] = set()
     n_closed = n_reopened = n_seen = 0
 
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
@@ -484,7 +489,7 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
                            len(fresh), ""))
         else:
             surfaced_jobs, anchor_n, tech_n, surfaced_n = await db.run(
-                _gate_sweep_source, t, jobs, seen_ids)
+                _gate_sweep_source, t, jobs, seen_ids, new_ids)
             matches += surfaced_jobs
             funnel.append((label, len(jobs), anchor_n, tech_n, surfaced_n,
                            "priority" if spec["platform"].endswith("*") else ""))
@@ -497,7 +502,7 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
         matches = await db.run(attribute_employers, matches, commit=commit)
 
     return Collected(to_score, matches, watch_hits, funnel,
-                     n_closed, n_reopened, n_seen)
+                     n_closed, n_reopened, n_seen, new_ids)
 
 
 async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, resume: str | None,
@@ -652,10 +657,12 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
     return ranked
 
 
-async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, send: bool, samples: int,
-                          bar: str) -> None:
-    """The sweep side: a diversified sample for a precision eyeball, then
-    the matches digest."""
+async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, new_ids: set[str],
+                          send: bool, samples: int, bar: str) -> None:
+    """The sweep side: a diversified sample for a precision eyeball (each
+    marked "(NEW)" when its id is in `new_ids`, else "(seen)"; see
+    tests/test_harvest.py::test_sample_matches_label_a_job_new_only_if_the_store_lacked_it),
+    then the matches digest."""
     from src import digest
 
     n = max(0, samples)
@@ -673,7 +680,7 @@ async def _report_matches(matches: list[dict[str, Any]], t: RuntimeTrack, *, sen
             print(f"     fit     : {j['resume_fit_score']:.2f}  "
                   f"({j.get('fit_reason', '')})")
         print(f"     remote  : {j.get('remote_signal', '')}"
-              f"{'   (NEW)' if j.get('_new') else '   (seen)'}")
+              f"{'   (NEW)' if j['id'] in new_ids else '   (seen)'}")
         print(f"     url     : {j['url']}")
         if j.get("description"):
             print(f"     blurb   : {_short(j['description'], 160)}")
@@ -773,8 +780,8 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
             ranked = await _report_ranked(db, t, got, scored, send=send,
                                           top_n=top_n, bar=bar)
         if got.matches or not linked:
-            await _report_matches(got.matches, t, send=send, samples=samples,
-                                  bar=bar)
+            await _report_matches(got.matches, t, new_ids=got.new_ids, send=send,
+                                  samples=samples, bar=bar)
 
         print("")
     return ranked if ranked is not None else got.matches

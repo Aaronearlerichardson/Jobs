@@ -88,6 +88,10 @@ Also:
   and `conftest.serve`; per-run memos are reset by the autouse
   `_fresh_run` fixture);
 - docstring boilerplate that restates the signature;
+- a `model_dump()` of a validated model that is then cast to, or re-described
+  as, a hand-written dict type (see Data shapes);
+- a dict-shaped copy of a table or a model with no test that checks its
+  names and types;
 - a dead re-export in `store/__init__` or `config/__init__`;
 - an import that points up the layers;
 - a user-specific id, keyword or name in code (it belongs in `profile.toml`).
@@ -104,6 +108,57 @@ Also:
   `src/dispatch/registry.py` (a real function reference and an `OpParams`
   model).
 - Schedule math: `harvest.py::run_forever`, with a doctest.
+
+## Data shapes
+
+The rule: **validate once, at the edge; after that keep the most precise
+type you already have; write out a copy of a shape by hand only where a
+checker or a test verifies the copy.** Choose by where the data comes from,
+not by habit.
+
+| The data is | Use | Here |
+|---|---|---|
+| input from outside: a file, the environment, an HTTP body, a Claude reply, board-spec config | a pydantic model, validated once at the edge | `config/profile_schema.py`, `config/secrets.py` (`Settings`), `ats/board/spec.py`, `claude/reply.py`, `web/routes.py` (`_Body`), `dispatch/registry.py` (`OpParams`) |
+| a validated model the program keeps using | that model, frozen, read by attribute | `RuntimeTrack` |
+| a SQL row or patch, or anything that must stay a dict (SQL parameters, `{**row}`, JSON, `**kwargs`) | a `TypedDict`; a missing key means "leave what is stored" | `src/rows.py`: `CompanyRow` (read), `CompanyIn` (write), `JobIn`, `FitColumns`, `BoardHit` |
+| working state with behaviour, or a mutable pipeline object | a dataclass | `FitResult`, `Candidate` |
+| a pair or triple handed between two functions | a `NamedTuple` | `Collected`, `_Admitted` |
+
+What a reviewer holds a new shape to:
+
+- **No dump-and-copy.** `model_dump()` followed by a cast to a hand-written
+  `TypedDict` copies the model, and only a names test can keep the copy
+  honest. Keep the model. (`TrackDict` was this; `RuntimeTrack` replaced it.)
+- **Describe a column set once.** Derive lists from the type:
+  `upsert_company` writes exactly `CompanyIn`'s keys. A hand-kept list that
+  restates a type or a table is a second definition (principle 8).
+- **A hand-written mirror of a table needs a test on names and types**
+  (`test_the_company_row_model_is_exactly_the_companies_columns` and
+  `test_a_row_model_types_each_column_as_the_table_declares_it`, in
+  `tests/test_store.py`). `CompanyRow` is the accepted example of a
+  deliberate second copy: it repeats `CompanyIn`'s columns because a
+  `TypedDict` cannot make an inherited optional key required, and those
+  tests check both against the table and against each other.
+- **SQLite does not enforce declared column types**, so the one cast where a
+  row leaves sqlite is honest only with an audit:
+  `test_the_company_writers_store_each_column_as_declared`, and its jobs
+  twin, check what the writers actually store.
+- **A read-only parameter takes a read-only view, not `dict`.** A
+  `TypedDict` is not assignable to `dict[str, Any]`, only to a `Mapping`. A
+  function that takes either a hit or a row reads `BoardCoords`.
+- **Close record types.** mypy checks subscripts (`row["typo"]`) but not
+  `.get("typo")` on an open `TypedDict`: the typing spec allows it and it
+  comes back as `object`. On a `closed=True` one it comes back as `None`, so
+  the typo surfaces where the value is used. `closed` and `ReadOnly` come
+  from `typing_extensions`, since CI runs Python 3.12 to 3.14, and need mypy
+  2.3 or later.
+- **Speed does not decide.** Building a dict, a dataclass or a pydantic
+  model took 0.1 to 8 microseconds an object in a local timing
+  (2026-09-29), and the crawler is network-bound. Choose by the table, and
+  by a profile only if one shows a construction hot.
+- **No msgspec, attrs or code generator for this.** Each is a third
+  modelling library or a build step that costs more than a type-aware test
+  for two tables.
 
 ## Performance
 
@@ -148,3 +203,7 @@ first:
 - board specs stay JSON;
 - the mechanical performance rules, and no `assert` or `__debug__` in
   compiled code.
+
+Data shapes have their own tests in `tests/test_store.py`: the row
+`TypedDict`s name exactly their tables' columns with the declared types, and
+the writers store each column as declared.
