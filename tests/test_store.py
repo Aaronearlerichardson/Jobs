@@ -17,7 +17,8 @@ from src import config
 from src import tags
 import src.match.locality as locality
 import src.store as store
-from src.rows import BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn
+from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
+                      RankedJob)
 from src.store.migrate import MIGRATIONS_DIR, migrate
 
 
@@ -106,11 +107,23 @@ class TestSchema:
         assert set(get_args(HandleColumn)) <= cols
         assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
 
-    @pytest.mark.parametrize("table, model", [("companies", CompanyRow), ("jobs", JobIn)])
+    def test_the_job_row_models_are_the_jobs_columns(self, db):
+        cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
+        assert set(JobRow.__annotations__) == cols | {"remote_hint"}
+        joined = {"mission_tier", "mission_score", "company_tags", "combined_score",
+                  "dup_count", "dup_job_ids", "dup_urls"}
+        assert set(RankedJob.__annotations__) == cols | joined
+        row, ranked = get_type_hints(JobRow), get_type_hints(RankedJob)
+        assert all(ranked[c] == row[c] for c in cols), "RankedJob and JobRow disagree"
+
+    @pytest.mark.parametrize("table, model", [("companies", CompanyRow), ("jobs", JobIn),
+                                              ("jobs", JobRow)])
     def test_a_row_model_types_each_column_as_the_table_declares_it(self, db, table, model):
         declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
         affinity = {"INTEGER": int, "TEXT": str, "REAL": float}
         for col, hint in get_type_hints(model).items():
+            if col not in declared:      # JobRow's one key that is no column
+                continue
             assert all(issubclass(t, affinity[declared[col]]) for t in _held_types(hint)), \
                 f"{table}.{col} is {declared[col]}, the model says {hint}"
 
@@ -225,6 +238,40 @@ class TestCompanyReaders:
             == {(name, frozenset(every)) for name in readers}
 
 
+class TestJobReaders:
+    def test_every_reader_of_job_rows_returns_every_column(self, db, add_job):
+        """JobRow is total (a subscript is checked), so each reader that
+        returns one must select every column."""
+        add_job("gh_acme_1", track=None)
+        add_job("gh_acme_2")
+        store.set_disposition(db, "gh_acme_2", "applied")
+        store.update_pipeline_fields(db, "gh_acme_2", followup_at="2000-01-01")
+        readers = {
+            "triage_pending": store.triage_pending(db),
+            "get_pipeline": store.get_pipeline(db),
+            "followups_due": store.followups_due(db),
+            "set_disposition": [store.set_disposition(db, "gh_acme_1", "saved")[0]],
+            "update_pipeline_fields": [store.update_pipeline_fields(db, "gh_acme_1",
+                                                                    contact="x")[0]],
+            "_resolve_job": store.pipeline._resolve_job(db, "gh_acme_1")}
+        assert all(rows for rows in readers.values()), readers
+        every = set(JobRow.__annotations__) - {"remote_hint"}
+        assert {(name, frozenset(r)) for name, rows in readers.items() for r in rows} \
+            == {(name, frozenset(every)) for name in readers}
+
+    def test_ranked_jobs_returns_the_ranked_job_keys(self, db, add_job):
+        add_job("gh_acme_1", fit=0.5)
+        every, dup = set(RankedJob.__annotations__), {"dup_count", "dup_job_ids", "dup_urls"}
+        got = {"default": store.ranked_jobs(db),
+               "with a description": store.ranked_jobs(db, with_description=True),
+               "uncollapsed": store.ranked_jobs(db, collapse=False)}
+        assert all(rows for rows in got.values()), got
+        assert {name: {frozenset(r) for r in rows} for name, rows in got.items()} == {
+            "default": {frozenset(every - {"description"})},
+            "with a description": {frozenset(every)},
+            "uncollapsed": {frozenset(every - dup - {"description"})}}
+
+
 class TestUpsertColumns:
     def test_upsert_stores_every_column_the_input_model_names(self, db):
         row = _sample_row(CompanyIn)
@@ -246,6 +293,8 @@ class TestStoredTypes:
     def _audit(self, db, table, model):
         declared = {r[1]: r[2] for r in db.execute(f"PRAGMA table_info({table})")}
         for col in get_type_hints(model):
+            if col not in declared:
+                continue
             held = {r[0] for r in db.execute(f"SELECT DISTINCT typeof({col}) FROM {table}")}
             assert held <= {self.STORAGE[declared[col]], "null"}, (table, col, held)
 
@@ -258,9 +307,19 @@ class TestStoredTypes:
                                    dormant_after=1)
         self._audit(db, "companies", CompanyRow)
 
-    def test_the_job_writer_stores_each_column_as_declared(self, db):
-        assert store.upsert_job(db, _sample_row(JobIn))
+    def test_the_job_writers_store_each_column_as_declared(self, db):
+        cid = store.upsert_company(db, {"name": "Acme"})
+        assert store.upsert_job(db, {**_sample_row(JobIn), "job_id": "j1", "company_id": cid})
+        store.record_triage(db, "j1", "ok", "t=ok", tracks=["t"], description="d",
+                            geo_mode="onsite", scores=_sample_row(FitColumns))
+        store.set_disposition(db, "j1", "applied", note="n")
+        store.update_pipeline_fields(db, "j1", followup_at="2026-01-01", contact="c",
+                                     referral=True, outcome_reason="other")
+        store.mark_desc_checked(db, "j1")
+        store.record_probe_outcome(db, "j1", verified=False)
+        store.set_job_status(db, "j1", "closed")
         self._audit(db, "jobs", JobIn)
+        self._audit(db, "jobs", JobRow)
 
 
 class TestImportCompanies:

@@ -120,7 +120,7 @@ not by habit.
 |---|---|---|
 | input from outside: a file, the environment, an HTTP body, a Claude reply, board-spec config | a pydantic model, validated once at the edge | `config/profile_schema.py`, `config/secrets.py` (`Settings`), `ats/board/spec.py`, `claude/reply.py`, `web/routes.py` (`_Body`), `dispatch/registry.py` (`OpParams`) |
 | a validated model the program keeps using | that model, frozen, read by attribute | `RuntimeTrack` |
-| a SQL row or patch, or anything that must stay a dict (SQL parameters, `{**row}`, JSON, `**kwargs`) | a `TypedDict`; a missing key means "leave what is stored" | `src/rows.py`: `CompanyRow` (read), `CompanyIn` (write), `JobIn`, `FitColumns`, `BoardHit`, `FetchedJob` and `Employer` (a fetcher's job); `ats/board/spec.py`: `EngineRow` (the board engine's row, before `board_jobs`) |
+| a SQL row or patch, or anything that must stay a dict (SQL parameters, `{**row}`, JSON, `**kwargs`) | a `TypedDict`; a missing key means "leave what is stored" | `src/rows.py`: `CompanyRow` (read), `CompanyIn` (write), `JobRow` and `RankedJob` (read), `JobIn` (write), `FitColumns`, `BoardHit`, `FetchedJob` and `Employer` (a fetcher's job); `ats/board/spec.py`: `EngineRow` (the board engine's row, before `board_jobs`) |
 | working state with behaviour, or a mutable pipeline object | a dataclass | `FitResult`, `Candidate` |
 | a pair or triple handed between two functions | a `NamedTuple` | `Collected`, `_Admitted` |
 
@@ -138,7 +138,11 @@ What a reviewer holds a new shape to:
   `tests/test_store.py`). `CompanyRow` is the accepted example of a
   deliberate second copy: it repeats `CompanyIn`'s columns because a
   `TypedDict` cannot make an inherited optional key required, and those
-  tests check both against the table and against each other. The fetched
+  tests check both against the table and against each other. `JobRow` (the
+  table) and `RankedJob` (what `ranked_jobs` returns) are the same kind of
+  deliberate copy, since a closed type cannot be extended:
+  `test_the_job_row_models_are_the_jobs_columns` and `TestJobReaders` check
+  their names and each reader's keys. The fetched
   job and the engine row mirror the spec's row fields and `FitColumns`
   instead of a table:
   `test_the_fetched_job_names_the_row_fields_and_fit_columns` and
@@ -148,6 +152,11 @@ What a reviewer holds a new shape to:
   row leaves sqlite is honest only with an audit:
   `test_the_company_writers_store_each_column_as_declared`, and its jobs
   twin, check what the writers actually store.
+- **A projection is not a row.** A query that selects some columns
+  (`stale_body_rows`, the closure probe's rows, `dedup_jobs`' groups) returns
+  a plain dict; a function that takes a row or such a projection reads a
+  `Mapping` (`same_posting`, `age_tag`). `JobRow` promises every column, so
+  typing a projection as one makes a subscript that raises look checked.
 - **A read-only parameter takes a read-only view, not `dict`.** A
   `TypedDict` is not assignable to `dict[str, Any]`, only to a `Mapping`. A
   function that takes either a hit or a row reads `BoardCoords`.

@@ -28,7 +28,7 @@ from typing import Any
 from src import config
 from src.config import RuntimeTrack
 from src.match import locality
-from src.rows import CompanyRow, FetchedJob
+from src.rows import CompanyRow, FetchedJob, JobRow, RankedJob
 
 # The mid-fit local band, half-open on the high side. The interviews to date
 # came from applications scored in this range at local onsite postings, not
@@ -38,7 +38,7 @@ APPLY_BAND = (0.40, 0.70)
 APPLY_BAND_LIMIT = 10
 
 
-def age_tag(row: dict[str, Any], today: str | None = None) -> str:
+def age_tag(row: Mapping[str, Any], today: str | None = None) -> str:
     """Compact posting-age tag for console/digest rows: 'NEW' the day we
     first see it, else days since posted_at ('6d', '45d!' when stale — a
     45+-day-old posting is often a ghost req). '?' when no date is known.
@@ -66,8 +66,8 @@ def _tag(t: RuntimeTrack) -> str:
     return f"[{t.label.upper()}]"
 
 
-def apply_band_rows(ranked: list[dict[str, Any]] | None,
-                    limit: int = APPLY_BAND_LIMIT) -> list[dict[str, Any]]:
+def apply_band_rows(ranked: list[RankedJob] | None,
+                    limit: int = APPLY_BAND_LIMIT) -> list[RankedJob]:
     """The undecided open local rows scored inside APPLY_BAND, best fit
     first, at most `limit` of them.
 
@@ -78,7 +78,7 @@ def apply_band_rows(ranked: list[dict[str, Any]] | None,
     included). Enforced by tests/test_digest.py::TestApplyBand.
     """
     lo, hi = APPLY_BAND
-    picked: list[dict[str, Any]] = []
+    picked: list[RankedJob] = []
     for j in ranked or []:
         fit = j.get("resume_fit_score")
         if not isinstance(fit, (int, float)) or not (lo <= fit < hi):
@@ -88,12 +88,12 @@ def apply_band_rows(ranked: list[dict[str, Any]] | None,
         if not locality.NC_RE.search(j.get("location") or ""):
             continue
         picked.append(j)
-    picked.sort(key=lambda j: j["resume_fit_score"], reverse=True)
+    picked.sort(key=lambda j: j["resume_fit_score"] or 0.0, reverse=True)
     return picked[:limit]
 
 
-def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: RuntimeTrack,
-                    new_since: str | None = None) -> list[dict[str, Any]]:
+def new_ranked_rows(ranked: list[RankedJob] | None, t: RuntimeTrack,
+                    new_since: str | None = None) -> list[RankedJob]:
     """The ranked rows first seen on or after `new_since` (default today)
     that score at least the track's `digest_min_fit`.
 
@@ -135,7 +135,7 @@ def new_ranked_rows(ranked: list[dict[str, Any]] | None, t: RuntimeTrack,
     """
     since = (new_since or _today())[:10]
     floor = float(t.digest_min_fit or 0.0)
-    fresh: list[dict[str, Any]] = []
+    fresh: list[RankedJob] = []
     for j in ranked or []:
         if (j.get("first_seen") or "")[:10] < since:
             continue
@@ -296,10 +296,10 @@ def _watch_section(watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]], in
 # --------------------------------------------------------------------------- #
 
 def write_ranked_digest(
-        ranked: list[dict[str, Any]], t: RuntimeTrack,
+        ranked: list[RankedJob], t: RuntimeTrack,
         watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
-        pipeline: list[dict[str, Any]] | None = None,
-        followups: list[dict[str, Any]] | None = None, report_dir: Path | None = None,
+        pipeline: list[JobRow] | None = None,
+        followups: list[JobRow] | None = None, report_dir: Path | None = None,
         triage: dict[str, int] | None = None) -> Path:
     """Fit-ranked markdown digest for a store-crawl track: pipeline section,
     follow-ups due, apply band, watched-company section, then the full
@@ -382,10 +382,10 @@ def write_ranked_digest(
 
 
 def send_ranked_digest(
-        ranked: list[dict[str, Any]], t: RuntimeTrack,
+        ranked: list[RankedJob], t: RuntimeTrack,
         watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
-        pipeline: list[dict[str, Any]] | None = None, new_since: str | None = None,
-        followups: list[dict[str, Any]] | None = None) -> bool:
+        pipeline: list[JobRow] | None = None, new_since: str | None = None,
+        followups: list[JobRow] | None = None) -> bool:
     """Email a store-crawl track's new ranked rows. True when a message
     actually went out.
 

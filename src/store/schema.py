@@ -19,6 +19,7 @@ from types import TracebackType
 from typing import Any, Concatenate, Literal, cast
 
 from src import config
+from src.rows import JobRow
 from .migrate import migrate
 
 # How long a writer waits on another process's write lock before giving up.
@@ -332,6 +333,12 @@ class Writer:
             else:
                 if not asked.done():
                     asked.set_result(got)
+
+
+def as_job(row: sqlite3.Row) -> JobRow:
+    """A `SELECT *` jobs row as a JobRow: every column, which the total
+    type promises."""
+    return cast(JobRow, dict(row))
 
 
 def dedup_groups(conn: sqlite3.Connection, table: str, id_col: str,

@@ -11,7 +11,7 @@ ranking knobs from it.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -27,7 +27,7 @@ from src.match import gates
 from src.match.filters import is_relevant
 from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
 from src.net.http import fetch_failed
-from src.rows import CompanyRow, FetchedJob, JobIn
+from src.rows import CompanyRow, FetchedJob, JobIn, JobRow, RankedJob
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -86,7 +86,7 @@ async def track_writer(t: RuntimeTrack | None = None, db: store.Writer | Connect
         yield w
 
 
-def group_by_company(rows: Iterable[dict[str, Any]], key: str = "company_id") -> dict[Any, list[dict[str, Any]]]:
+def group_by_company[T: Mapping[str, Any]](rows: Iterable[T], key: str = "company_id") -> dict[Any, list[T]]:
     """`rows` bucketed by `key` (their company id by default), in
     first-seen order.
 
@@ -97,7 +97,7 @@ def group_by_company(rows: Iterable[dict[str, Any]], key: str = "company_id") ->
     Both backfill paths need this: a board with several stale rows must be
     fetched once, not once per row.
     """
-    out: dict[Any, list[dict[str, Any]]] = {}
+    out: dict[Any, list[T]] = {}
     for r in rows:
         out.setdefault(r[key], []).append(r)
     return out
@@ -135,7 +135,7 @@ async def board_match(index: dict[str, FetchedJob], title: str | None) -> Fetche
     return match if match.get("description") else None
 
 
-def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None) -> list[dict[str, Any]]:
+def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None) -> list[RankedJob]:
     """The track's ranked view — same knobs the crawl digest uses."""
     return store.ranked_jobs(
         conn, track=t.track,
@@ -147,7 +147,7 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None)
 
 def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
                   watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] | None = None
-                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], Path]:
+                  ) -> tuple[list[RankedJob], list[JobRow], list[JobRow], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
     triage funnel included. Returns (ranked, pipeline, followups,
     digest_path).
@@ -165,7 +165,7 @@ def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
 
 
 def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
-                   heading: str = "") -> list[dict[str, Any]]:
+                   heading: str = "") -> list[RankedJob]:
     """Rewrite the track's ranked digest from the store as it stands now,
     and print the top `top_n` of it. Returns the ranked list.
 

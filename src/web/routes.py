@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import re
+from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -27,7 +28,7 @@ from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
 from src.ops.maintenance import track_store
-from src.rows import CompanyRow
+from src.rows import CompanyRow, JobRow, RankedJob
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart
 
@@ -138,7 +139,7 @@ def api_run_status() -> ResponseReturnValue:
 #  Jobs / pipeline / companies / stats                                         #
 # --------------------------------------------------------------------------- #
 
-def _geo_tag(r: dict[str, Any]) -> str:
+def _geo_tag(r: Mapping[str, Any]) -> str:
     """Live geo bucket for a job row: "local" (configured locality),
     "remote", or "relocation" (onsite somewhere the user would have to move
     to). Derived at serve time from the location string — the stored
@@ -154,7 +155,7 @@ def _geo_tag(r: dict[str, Any]) -> str:
     return "relocation"
 
 
-def _job_json(r: dict[str, Any], today: str, rank: int | None = None,
+def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
               remote_floor: float | None = None) -> dict[str, Any]:
     fields = (
         "job_id", "title", "company_name", "url", "location", "geo_mode",
@@ -247,7 +248,7 @@ def api_disposition(job_id: str) -> ResponseReturnValue:
             note=p.note)
     if err:
         return jsonify(error=err), 400
-    return jsonify(ok=True, job_id=cast(dict[str, Any], row)["job_id"])
+    return jsonify(ok=True, job_id=cast(JobRow, row)["job_id"])
 
 
 class _Pipeline(_Body, store.PipelineFields):
@@ -271,7 +272,7 @@ def api_pipeline_fields(job_id: str) -> ResponseReturnValue:
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job=_job_json(
-        cast(dict[str, Any], row), _today(), remote_floor=t.remote_mission_floor))
+        cast(JobRow, row), _today(), remote_floor=t.remote_mission_floor))
 
 
 @app.get("/api/pipeline")

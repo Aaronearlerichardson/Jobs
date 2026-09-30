@@ -1,6 +1,6 @@
 """Typed shapes for the rows the store is HANDED (jobs) and hands back (companies),
-for the fetched job that becomes a jobs row, and for the resolver hit that
-becomes a company row.
+for the fetched job that becomes a jobs row, for the ranked and stored
+job rows read back, and for the resolver hit that becomes a company row.
 
 A misspelled key in a row headed for upsert_job used to store nothing and
 say nothing (`j.get("resume_fit_scor")` reads as None). These TypedDicts let
@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal
 
 from annotated_types import MinLen
-from typing_extensions import ReadOnly, TypedDict
+from typing_extensions import NotRequired, ReadOnly, TypedDict
 
 
 class FitColumns(TypedDict, total=False):
@@ -99,6 +99,115 @@ class FetchedJob(TypedDict, total=False, closed=True):
     fit_function: float | None
     fit_stack: float | None
     fit_seniority: float | None
+
+
+class JobRow(TypedDict, closed=True):
+    """A stored jobs row, as `SELECT *` returns it: every column, so a
+    subscript is checked. It is declared apart from `JobIn` (what
+    upsert_job takes) and `RankedJob`; tests/test_store.py checks all three
+    against the table.
+
+    Notes:
+        `remote_hint` is the one key that is not a column: triage's
+        hydration stamps the hint a detail gave onto the row for the rest of
+        its pass, and the geo gate reads it.
+    """
+    id: int
+    job_id: str
+    company_id: int | None
+    company_name: str | None
+    title: str | None
+    url: str | None
+    location: str | None
+    track: str | None
+    geo_mode: str | None
+    remote_eligible: int | None
+    remote_signal: str | None
+    anchor_signal: str | None
+    description: str | None
+    desc_checked_at: str | None
+    resume_fit_score: float | None
+    fit_reason: str | None
+    first_seen: str | None
+    last_seen: str | None
+    status: str | None
+    harvested_at: str | None
+    triage_status: str | None
+    triage_detail: str | None
+    triaged_at: str | None
+    fit_domain: float | None
+    fit_function: float | None
+    fit_stack: float | None
+    fit_seniority: float | None
+    fit_gates: str | None
+    fit_model: str | None
+    closed_at: str | None
+    posted_at: str | None
+    disposition: str | None
+    disposition_note: str | None
+    disposition_at: str | None
+    probe_streak: int | None
+    applied_at: str | None
+    followup_at: str | None
+    contact: str | None
+    referral: int | None
+    outcome_reason: str | None
+    remote_hint: NotRequired[str]
+
+
+class RankedJob(TypedDict, closed=True):
+    """A row of `ranked_jobs`: the jobs columns (`description` only with
+    `with_description`), the company's mission and tags, the combined score
+    and, once collapsed, the survivor's `dup_*` fields. Its keys are checked
+    by tests/test_store.py::TestJobReaders.test_ranked_jobs_returns_the_ranked_job_keys.
+    """
+    id: int
+    job_id: str
+    company_id: int | None
+    company_name: str | None
+    title: str | None
+    url: str | None
+    location: str | None
+    track: str | None
+    geo_mode: str | None
+    remote_eligible: int | None
+    remote_signal: str | None
+    anchor_signal: str | None
+    description: NotRequired[str | None]
+    desc_checked_at: str | None
+    resume_fit_score: float | None
+    fit_reason: str | None
+    first_seen: str | None
+    last_seen: str | None
+    status: str | None
+    harvested_at: str | None
+    triage_status: str | None
+    triage_detail: str | None
+    triaged_at: str | None
+    fit_domain: float | None
+    fit_function: float | None
+    fit_stack: float | None
+    fit_seniority: float | None
+    fit_gates: str | None
+    fit_model: str | None
+    closed_at: str | None
+    posted_at: str | None
+    disposition: str | None
+    disposition_note: str | None
+    disposition_at: str | None
+    probe_streak: int | None
+    applied_at: str | None
+    followup_at: str | None
+    contact: str | None
+    referral: int | None
+    outcome_reason: str | None
+    mission_tier: str | None
+    mission_score: float | None
+    company_tags: str | None
+    combined_score: float | None
+    dup_count: NotRequired[int]
+    dup_job_ids: NotRequired[tuple[str, ...]]
+    dup_urls: NotRequired[tuple[str | None, ...]]
 
 
 class CompanyIn(TypedDict, total=False, closed=True):

@@ -53,7 +53,7 @@ from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
-from src.rows import CompanyRow, FetchedJob
+from src.rows import CompanyRow, FetchedJob, RankedJob
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
@@ -609,7 +609,7 @@ def _print_funnel(funnel: list[tuple[str, int, int, int, int, str]], bar: str) -
 
 
 async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scored: int, *,
-                         send: bool, top_n: int, bar: str) -> list[dict[str, Any]]:
+                         send: bool, top_n: int, bar: str) -> list[RankedJob]:
     """Write (and maybe email) the ranked digest for a company-linked crawl,
     print the watch section and the top N, and return the ranked list.
 
@@ -696,7 +696,7 @@ async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids
 async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
                     send: bool | None = None, verify: bool | None = None,
                     websearch: bool | None = None, confirm_cost: bool = False,
-                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[dict[str, Any]] | list[FetchedJob]:
+                    max_workers: int = 6, top_n: int = 15, samples: int = 5) -> list[RankedJob] | list[FetchedJob]:
     """Run one crawl of track `t` (a config.UI_TRACKS entry).
 
     Every methodology switch reads the track config; the keyword args only
@@ -776,7 +776,7 @@ async def run_track(t: RuntimeTrack, *, fit: bool = True, commit: bool = True,
 
         _print_funnel(got.funnel, bar)
 
-        ranked: list[dict[str, Any]] | None = None
+        ranked: list[RankedJob] | None = None
         if linked:
             ranked = await _report_ranked(db, t, got, scored, send=send,
                                           top_n=top_n, bar=bar)

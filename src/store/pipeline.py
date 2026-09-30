@@ -19,8 +19,9 @@ from typing import Annotated, Any
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
 
+from src.rows import JobRow
 from src.validation import OneOf, Text, blank_is_none, error_lines
-from .schema import apply_update, sql
+from .schema import apply_update, as_job, sql
 
 # The user's recorded decision on a job. `saved` = shortlisted, still shown
 # in ranking; the rest leave the ranking: applied/interviewing move to the
@@ -73,7 +74,7 @@ def set_job_status(conn: sqlite3.Connection, job_id: str, status: str) -> None:
     })
 
 
-def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[dict[str, Any]]:
+def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[JobRow]:
     """Resolve a user-supplied job reference to rows: exact job_id first,
     then any job_id substring, then normalized URL. Returns a list of
     matching rows (ideally one; several = ambiguous; empty = no match) so
@@ -82,20 +83,20 @@ def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[dict[str, Any]]:
     from .jobs import _norm_url  # not at module level: see module doc
     row = conn.execute("SELECT * FROM jobs WHERE job_id=?", (ref,)).fetchone()
     if row:
-        return [dict(row)]
-    rows = [dict(r) for r in conn.execute(
+        return [as_job(row)]
+    rows = [as_job(r) for r in conn.execute(
         "SELECT * FROM jobs WHERE job_id LIKE ?", (f"%{ref}%",)).fetchall()]
     if rows:
         return rows
     want = _norm_url(ref)
     if want:
-        return [dict(r) for r in conn.execute(
+        return [as_job(r) for r in conn.execute(
             "SELECT * FROM jobs WHERE norm_url(url) = ?", (want,)).fetchall()]
     return []
 
 
 def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
-                    note: str | None = None) -> tuple[dict[str, Any] | None, str | None]:
+                    note: str | None = None) -> tuple[JobRow | None, str | None]:
     """Record the user's decision on one job. `ref` is a job_id, a unique
     job_id fragment, or the posting URL; `disposition` is one of
     DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
@@ -131,17 +132,17 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
     return row, None
 
 
-def get_pipeline(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def get_pipeline(conn: sqlite3.Connection) -> list[JobRow]:
     """Every job the user has dispositioned, newest decision first — the
     digest's pipeline section and the --pipeline CLI. Includes closed rows
     on purpose: 'posting closed after you applied' is a signal."""
-    return [dict(r) for r in conn.execute(
+    return [as_job(r) for r in conn.execute(
         "SELECT * FROM jobs WHERE disposition IS NOT NULL "
         "ORDER BY disposition_at DESC").fetchall()]
 
 
 def update_pipeline_fields(conn: sqlite3.Connection, job_id: str,
-                           **fields: Any) -> tuple[dict[str, Any] | None, str | None]:
+                           **fields: Any) -> tuple[JobRow | None, str | None]:
     """Write the given application-tracking columns (PipelineFields) on one
     job. Returns (row, error) like set_disposition: the updated job on
     success, otherwise a printable message with one 'field: problem' per
@@ -162,8 +163,8 @@ def update_pipeline_fields(conn: sqlite3.Connection, job_id: str,
                     (job_id,)).fetchone() is None:
         return None, f"no job matches {job_id!r}"
     apply_update(conn, "jobs", "job_id", job_id, sets)
-    return dict(conn.execute("SELECT * FROM jobs WHERE job_id=?",
-                             (job_id,)).fetchone()), None
+    return as_job(conn.execute("SELECT * FROM jobs WHERE job_id=?",
+                               (job_id,)).fetchone()), None
 
 
 def _fit_band(score: float | None) -> str:
@@ -240,7 +241,7 @@ def conversion_report(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return out
 
 
-def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[dict[str, Any]]:
+def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[JobRow]:
     """Live applications whose follow-up date has arrived, oldest first.
 
     A row qualifies when `followup_at` is set and not in the future and the
@@ -250,7 +251,7 @@ def followups_due(conn: sqlite3.Connection, today: str | None = None) -> list[di
     """
     today = today or datetime.now().strftime("%Y-%m-%d")
     ph = ",".join("?" for _ in LIVE_DISPOSITIONS)
-    return [dict(r) for r in conn.execute(
+    return [as_job(r) for r in conn.execute(
         f"SELECT * FROM jobs WHERE COALESCE(followup_at,'') != '' "
         f"AND followup_at <= ? AND disposition IN ({ph}) "
         f"ORDER BY followup_at", (today, *LIVE_DISPOSITIONS)).fetchall()]

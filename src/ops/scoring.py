@@ -21,6 +21,7 @@ from src.match.locality import NC_RE
 from src.net.parallel import fan_out
 from src.net.util import text_from_html
 from src.ops.maintenance import _ranked, _t, rewrite_digest, track_writer
+from src.rows import JobRow, RankedJob
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -255,7 +256,7 @@ async def rescore_all(max_workers: int = 6, track: str | None = None,
     return n
 
 
-async def _live_jd(row: dict[str, Any]) -> str:
+async def _live_jd(row: JobRow | RankedJob) -> str:
     """Freshest full JD text for one stored job row, preferring a live
     detail fetch (the platform's own detail endpoint through the board
     engine, then the generic JSON-LD/careers-page extractor)
@@ -286,7 +287,7 @@ async def _live_jd(row: dict[str, Any]) -> str:
 
 
 def _verify_floor_candidates(conn: sqlite3.Connection, t: RuntimeTrack, floor: float,
-                             exclude_ids: Collection[str] = ()) -> list[dict[str, Any]]:
+                             exclude_ids: Collection[str] = ()) -> list[JobRow]:
     """Track `t`'s open triage_status='fit' rows screened at or above
     `floor`, located locally (NC_RE) or stored remote_eligible, best screen
     score first, less `exclude_ids` (the top-N slice): the rows verify_top
@@ -316,7 +317,7 @@ def _verify_floor_candidates(conn: sqlite3.Connection, t: RuntimeTrack, floor: f
     conds, args = store.open_in_track_clause(t.track)
     conds += ["triage_status = 'fit'", "resume_fit_score >= ?"]
     args.append(floor)
-    rows = [dict(r) for r in conn.execute(
+    rows = [store.as_job(r) for r in conn.execute(
         "SELECT * FROM jobs WHERE " + " AND ".join(conds)
         + " ORDER BY resume_fit_score DESC", args).fetchall()]
     return [r for r in rows if r["job_id"] not in exclude_ids
@@ -388,7 +389,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
     current = verify_model()
     done_ids: set[str] = set()   # verified THIS run: never stale again, even under force
 
-    def _stale(r: dict[str, Any]) -> bool:
+    def _stale(r: JobRow | RankedJob) -> bool:
         if r["job_id"] in done_ids or (r["job_id"] in _GIVEN_UP and not force):
             return False
         if force or not is_deep_verified(r.get("fit_reason")):
@@ -418,7 +419,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                       f"{VERIFY_HEAD}-{len(ranked)} below the {floor:.2f} floor "
                       f"left unverified")
             remaining = top_n - len(stale_top)
-            candidates: list[dict[str, Any]] = []
+            candidates: list[JobRow] = []
             if remaining > 0:
                 seen_ids = {r["job_id"] for r in ranked}
                 floor_rows = await db.run(_verify_floor_candidates, t, floor,
@@ -438,7 +439,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
 
             started: set[str] = set()
 
-            async def _one(r: dict[str, Any]) -> tuple[dict[str, Any], str | None, FitResult]:
+            async def _one(r: JobRow | RankedJob) -> tuple[JobRow | RankedJob, str | None, FitResult]:
                 # The breaker can trip mid-round (2026-09-09: the crawl's FIRST
                 # verify call hit an exhausted credit balance). A row the API
                 # can no longer score doesn't need its live JD fetched.
@@ -449,12 +450,12 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                                               reason="api disabled")
                 started.add(r["job_id"])
                 text = await _live_jd(r)
-                return r, text, await verify_fit(r["title"], text,
+                return r, text, await verify_fit(r["title"] or "", text,
                                                  location=r.get("location") or "")
 
             n_scored = n_crushed = 0
             halted = None
-            abandoned: list[dict[str, Any]] = []
+            abandoned: list[JobRow | RankedJob] = []
             async with aclosing(fan_out(
                     todo, _one,
                     lambda r: f"verify {r['company_name']}: {(r['title'] or '')[:40]}",
@@ -468,7 +469,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                             # finalist. Leaving cancels the rows still
                             # running or queued.
                             break
-                        print(f"    [?] kept   {r['title'][:46]} - {res.reason}")
+                        print(f"    [?] kept   {(r['title'] or '')[:46]} - {res.reason}")
                         continue
                     await db.run(store.update_job_scores, r["job_id"], res.as_columns())
                     done_ids.add(r["job_id"])
@@ -490,7 +491,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                     flag = "  [DEMOTED]" if isinstance(old, float) and \
                         res.score < old - 0.15 else ""
                     reason = (res.reason or "").removeprefix(f"{DEEP_MARKER} ")[:90]
-                    print(f"    {move}, {r['company_name']}, {r['title'][:44]}, "
+                    print(f"    {move}, {r['company_name']}, {(r['title'] or '')[:44]}, "
                           f"{reason}{flag}")
                     n_done += 1
                     n_scored += 1

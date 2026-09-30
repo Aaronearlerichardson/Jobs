@@ -13,7 +13,8 @@ Phase 3 (the fetched-job flow) is done as well; built, it needed no
 `Fillable` type: `Board._apply` takes `EngineRow | FetchedJob`. Phase 4 is
 done: REVIEW.md's Data shapes table and four reviewer rules from this work.
 The handoff this memo answers, `docs/handoff-fetched-job-typing.md`, is
-deleted, as it asked; "the handoff" below means that file.
+deleted, as it asked; "the handoff" below means that file. The separate
+`JobRow` track (phase 5) is done too: section 4.
 
 Checks on the tree at the first draft: `python -m mypy` 0 errors; `flake8 --select=F`
 clean; `python -m pytest` 1527 passed, 10 skipped, 0 failed (example profile;
@@ -308,7 +309,7 @@ the identity proof.
 | 2 | engine row (**done**) | `EngineRow` and `FillField` in `spec.py`; retype the engine and pager row chain (32 sites); `Rescue.fields` to `FillField`; `_apply` takes `EngineRow \| dict[str, Any]` until phase 3; names test; two more refused specs | mypy 0, 1528 passed, 101 of 102 files AST-identical (only `spec.py`, the new types). The AST diff cannot see the one deliberate runtime change, the pydantic field `Rescue.fields`, so the two refused specs pin it; four mutations caught | low; revert |
 | 3 | the fetched-job flow (**done**) | `FetchedJob` (design A) and `Employer` in `rows.py`; `_link` takes a `Mapping`; 102 sites in 24 files by script, plus hand edits in the engine, page_capture, runner, ingest and backfill; `_apply` takes `EngineRow \| FetchedJob`, which ends the phase-2 union; a names test | mypy 0, 1529 passed. 97 of 102 files AST-identical to the previous commit; the 5 that differ are exactly: `engine.py` (`out, fetched = [], 0` split for the annotation, `or ""` on `location`), `page_capture.py` (`update({...})`), `runner.py` (loop variable rename), `ingest.py` (`or ""` on `url`), `rows.py` (the types). The whole suite's `-s` transcript, compared as a multiset of lines, equals the previous commit's except for the three lines that count the new test (a run of `HEAD` against itself differs in 40 lines of concurrent print order). Three mutations of the names test caught | medium (size); one commit, revert |
 | 4 | tests and docs (**done**) | names tests from 2.4 (in phases 2 and 3); REVIEW.md: the Data shapes table row, the names-test mention, the closed-type and whole-flow rules, and a NEAR-MISS note on the dataclass | the names tests were mutation-checked; docs only | low |
-| 5 | (separate track) `JobRow` for stored rows | see 2.7 | typeof audit twin to `test_the_company_writers_store_each_column_as_declared` | medium |
+| 5 | (separate track) `JobRow` for stored rows (**done**, section 4) | see 2.7 | typeof audit twin to `test_the_company_writers_store_each_column_as_declared` | medium |
 
 ### 2.7 Recommendation
 
@@ -358,3 +359,49 @@ dict is the other clear one.
 - D1's two scope claims: one wrong, one true but test-only (1).
 - The session's checkout was 39 commits behind `origin/harvest` (`a97c43d`
   against `b10ab8a`), and had neither the typing series nor `docs/REVIEW.md`.
+
+## 4. The `JobRow` track
+
+Same day, at the owner's request. `JobRow` (the table's 40 columns, closed,
+total) and `RankedJob` (what `ranked_jobs` returns) in `src/rows.py`;
+`store.as_job` is the one place a `SELECT *` jobs row leaves sqlite, as
+`as_company` is for companies. 68 sites in 8 files retyped; the stored-row
+bucket of 2.1 was a heuristic count, and the sites it over-counted turned
+out to be projections, stats or generic helpers, which stay as they were.
+
+What the work found:
+
+- **Two shapes, not one.** Ranked rows carry the company's mission and tags,
+  a combined score and, once collapsed, `dup_*` keys, and lack `description`
+  unless asked; a closed type cannot be extended, so `RankedJob` is a tested
+  copy (as `CompanyRow` is of `CompanyIn`). `verify_top` mixes both (ranked
+  rows plus floor candidates), so its helpers take `JobRow | RankedJob`.
+- **Projections are not rows.** `same_posting` is called with two-key dicts,
+  `dedup_jobs` groups four-column rows, and the backfill, closure-probe and
+  rescore selections pick columns; they stay dicts or a `Mapping`.
+- **A hidden key on stored rows.** `triage._hydrate` stamps `remote_hint`, not
+  a column, onto the stored row so the geo gate can read it later in the pass.
+  Existing behaviour, kept: `JobRow` declares it `NotRequired`, documented as
+  the one non-column key. Worth its own fix (a value returned by the phase
+  that owns it, principle 12) if the row is ever handed anywhere else.
+- **A dead alias, removed.** `triage_pending` joined `c.name AS
+  company_name_row`; nothing read it. Triage rows are now exactly `SELECT
+  j.*`.
+- **A nullable title, guarded.** `verify_top` passed and sliced `r["title"]`
+  in three places, nullable in the schema, so a NULL title would have raised
+  there; it now says `(r["title"] or "")`, as its neighbours already did.
+  `apply_band_rows`' sort key gets `or 0.0` (its guard already guarantees a
+  number, so that one changes nothing).
+- **`group_by_company` is generic** over its row type, so `list[JobRow]`
+  keeps its type through it.
+
+Checks: mypy 0, flake8 clean, 1533 passed (four new tests); 95 of 102 files
+AST-identical to the previous commit, the 7 others being the edits above; the
+whole suite's `-s` transcript equals the previous commit's as a multiset
+except the test count. The storage-class audit now covers every `JobRow`
+column, after every job writer. Six mutations were caught (a key added to
+`JobRow`, one dropped from `RankedJob`, a column mistyped, `triage_pending`
+selecting two columns, `ranked_jobs` ignoring `with_description`, and a
+writer storing text in an integer column); a first attempt at the last one,
+an integer into a text column, is invisible to any audit because SQLite
+coerces it.

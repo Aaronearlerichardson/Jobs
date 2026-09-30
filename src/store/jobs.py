@@ -18,16 +18,16 @@ import json
 import math
 import re
 import sqlite3
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from src import config
 from src import tags
-from src.rows import FetchedJob, FitColumns, JobIn
+from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
 from src.match.locality import LocationRE
 from src.net.util import clean_url
-from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
+from .schema import (_commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql, sql_function)
 
 
@@ -205,7 +205,7 @@ TRIAGE_OK = "ok"
 
 
 def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
-                   limit: int | None = None) -> list[dict[str, Any]]:
+                   limit: int | None = None) -> list[JobRow]:
     """Open, company-linked rows no crawl has adopted (no track label) and
     triage has not judged yet -- the harvester's unscored material. A row
     triage looked at but could not hydrate stays NULL, so it comes back
@@ -223,7 +223,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     >>> [r["job_id"] for r in triage_pending(conn)]
     ['h1']
     """
-    q = ("SELECT j.*, c.name AS company_name_row FROM open_jobs j "
+    q = ("SELECT j.* FROM open_jobs j "
          "JOIN companies c ON j.company_id = c.id "
          "WHERE j.triage_status IS NULL "
          "AND COALESCE(j.track,'') = ''")
@@ -235,7 +235,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     if limit:
         q += " LIMIT ?"
         args.append(int(limit))
-    return [dict(r) for r in conn.execute(q, args).fetchall()]
+    return [as_job(r) for r in conn.execute(q, args).fetchall()]
 
 
 def record_triage(conn: sqlite3.Connection, job_id: str, status: str, detail: str, *,
@@ -752,7 +752,7 @@ def backfill_axis_columns(conn: sqlite3.Connection) -> int:
     return n
 
 
-def remote_admitted(row: dict[str, Any], remote_mission_floor: float | None) -> bool:
+def remote_admitted(row: Mapping[str, Any], remote_mission_floor: float | None) -> bool:
     """Whether an out-of-area REMOTE `row` (a ranked_jobs row) is still
     worth showing in a location-scoped view.
 
@@ -886,7 +886,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
                 min_mission: float | None = None,
                 remote_mission_floor: float | None = None, include_closed: bool = False,
                 include_dispositioned: bool = False,
-                collapse: bool = True, with_description: bool = False) -> list[dict[str, Any]]:
+                collapse: bool = True, with_description: bool = False) -> list[RankedJob]:
     """Jobs joined to company mission. `rank_by="combined"` (default) sorts by
     sqrt(resume_fit * company_mission); `rank_by="fit"` sorts by the résumé-fit
     score alone. Use "fit" for a market where every company shares one mission
@@ -999,12 +999,12 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
                           if with_description or r["name"] != "description"))
     if limit:
         args.append(int(limit))
-    rows = [dict(r) for r in conn.execute(q, args)]
+    rows = [dict(r) for r in conn.execute(q, args)]     # RankedJob, once the dup_* keys are set
     if collapse:
         for r in rows:
             r["dup_job_ids"] = tuple(json.loads(r.pop("_dup_ids"))[1:])
             r["dup_urls"] = tuple(json.loads(r.pop("_dup_urls"))[1:])
-    return rows
+    return cast(list[RankedJob], rows)
 
 
 # Which of several rows for one posting survives, best first: a dispositioned
@@ -1014,7 +1014,7 @@ _SURVIVOR_ORDER = """disposition IS NULL, COALESCE(NULLIF(status, ''), 'open') !
                      COALESCE(first_seen, ''), id"""
 
 
-def same_posting(a: dict[str, Any], b: dict[str, Any]) -> bool:
+def same_posting(a: Mapping[str, Any], b: Mapping[str, Any]) -> bool:
     """Whether two job rows name one posting: the same URL modulo scheme,
     query and fragment (_norm_url), and the same normalized title.
 
@@ -1036,7 +1036,7 @@ def _same_posting_cols(url_a: str | None, title_a: str | None,
     return same_posting({"url": url_a, "title": title_a}, {"url": url_b, "title": title_b})
 
 
-def _posting_key(r: dict[str, Any]) -> tuple[str, str]:
+def _posting_key(r: Mapping[str, Any]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
     return _norm_url(r.get("url")), _norm_title(r.get("title"))
 
