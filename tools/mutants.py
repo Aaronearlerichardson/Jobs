@@ -17,7 +17,11 @@ Notes:
     About three seconds a mutant, one at a time: a 200-line module is ten
     minutes. cosmic-ray was chosen after mutmut, which assumes a `src/`
     directory that is not itself a package and stops at the first
-    `from src import config`.
+    `from src import config`. The tool runs the tests once on the module as
+    it is before it starts, because cosmic-ray's own baseline exits 0 when
+    the test command cannot even start, and its report then says "surviving
+    mutants: 0": on Windows the interpreter path lost its backslashes to
+    `shlex.split` and every mutant looked killed (2026-09-30).
 """
 
 from __future__ import annotations
@@ -25,7 +29,9 @@ from __future__ import annotations
 import argparse
 import ast
 import importlib.util
+import json
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -33,7 +39,7 @@ import sys
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 ROOT = Path(__file__).resolve().parent.parent
 IGNORE = shutil.ignore_patterns(".git", "__pycache__", "*.pyc", "data", ".venv", "venv*", "build",
@@ -52,22 +58,38 @@ def covering_tests(module: str, tests: Mapping[str, str]) -> list[str]:
     return sorted(name for name, text in tests.items() if word.search(text))
 
 
-def config(module: str, tests: Iterable[str], python: str = "python", timeout: float = 60.0) -> str:
-    """The cosmic-ray config that mutates `module` and runs `tests` and its doctests.
+def judging_command(module: str, tests: Iterable[str], python: str) -> str:
+    """The command that runs `tests` and the module's doctests, written for `shlex.split`.
 
-    >>> print(config("src/m.py", ["tests/test_m.py"]))
+    cosmic-ray splits it the POSIX way, which eats the backslashes of a
+    Windows interpreter path and the spaces of "Program Files":
+
+    >>> command = judging_command("src/m.py", ["tests/test_m.py"], r"C:\\Program Files\\Py\\python.exe")
+    >>> command
+    "'C:/Program Files/Py/python.exe' -m pytest -x -q -p no:cacheprovider tests/test_m.py src/m.py"
+    >>> shlex.split(command)[:3]
+    ['C:/Program Files/Py/python.exe', '-m', 'pytest']
+    """
+    files = " ".join(shlex.quote(name) for name in [*tests, module])
+    return f"{shlex.quote(PureWindowsPath(python).as_posix())} -m pytest -x -q -p no:cacheprovider {files}"
+
+
+def config(module: str, command: str, timeout: float = 60.0) -> str:
+    """The cosmic-ray config that mutates `module` and judges each change by `command`.
+
+    >>> print(config("src/m.py", "python -m pytest 't 1.py'"))
     [cosmic-ray]
     module-path = "src/m.py"
     timeout = 60.0
     excluded-modules = []
-    test-command = 'python -m pytest -x -q -p no:cacheprovider tests/test_m.py src/m.py'
+    test-command = "python -m pytest 't 1.py'"
     <BLANKLINE>
     [cosmic-ray.distributor]
     name = "local"
     """
     return "\n".join([
-        "[cosmic-ray]", f'module-path = "{module}"', f"timeout = {timeout}", "excluded-modules = []",
-        f"test-command = '{python} -m pytest -x -q -p no:cacheprovider {' '.join([*tests, module])}'",
+        "[cosmic-ray]", f"module-path = {json.dumps(module)}", f"timeout = {timeout}", "excluded-modules = []",
+        f"test-command = {json.dumps(command)}",
         "", "[cosmic-ray.distributor]", 'name = "local"'])
 
 
@@ -139,11 +161,20 @@ def run(root: Path, module: str, tests: list[str] | None = None, show_killed: bo
     with tempfile.TemporaryDirectory() as tmp:
         work = Path(tmp) / "tree"
         shutil.copytree(root, work, ignore=IGNORE)
-        (work / "mutants.toml").write_text(config(module, tests, python=sys.executable), encoding="utf-8")
+        command = judging_command(module, tests, sys.executable)
+        (work / "mutants.toml").write_text(config(module, command), encoding="utf-8")
+        try:
+            base = subprocess.run(shlex.split(command), cwd=work, capture_output=True, text=True, check=False)
+        except OSError as e:
+            yield f"the test command cannot start ({e}): {command}"
+            return
+        if base.returncode:
+            yield "the tests fail on the module as it is, so no change to it could be told apart:"
+            yield from (base.stdout + base.stderr).strip().splitlines()[-12:]
+            return
         steps = (("cosmic_ray.cli:main", "init", "mutants.toml", "session.sqlite"),
                  ("cosmic_ray.tools.filters.pragma_no_mutate:main", "session.sqlite"),
                  ("drop", "annotations"),
-                 ("cosmic_ray.cli:main", "baseline", "mutants.toml"),
                  ("cosmic_ray.cli:main", "exec", "mutants.toml", "session.sqlite"))
         for entry, *argv in steps:
             if entry == "drop":

@@ -8,6 +8,7 @@ skipped without it.
 from __future__ import annotations
 
 import re
+import sys
 
 import pytest
 
@@ -37,6 +38,23 @@ def test_a_change_no_test_notices_comes_back_as_a_diff(tmp_path, tested, survive
     assert lines[0] == "src/m.py: 1 test file(s): tests/test_m.py"
     assert (survivors > 0) is survives and ("+    return a - b" in lines) is survives
     assert not any("a > 0" in line for line in lines if line[:1] in "+-")   # `# pragma: no mutate`
+
+
+def test_a_test_command_that_cannot_start_is_reported_not_read_as_no_survivors(tmp_path, monkeypatch):
+    """cosmic-ray itself exits 0 and reports "surviving mutants: 0" for a command
+    that never ran (a Windows interpreter path through shlex, 2026-09-30)."""
+    plant(tmp_path, "add(2, 3) == 5")
+    monkeypatch.setattr(sys, "executable", "/nonexistent/python")
+    lines = list(mutants.run(tmp_path, "src/m.py"))
+    assert "cannot start" in lines[1]
+    assert not any("surviving mutants" in line for line in lines)
+
+
+def test_tests_that_fail_before_any_change_are_reported_not_read_as_no_survivors(tmp_path):
+    plant(tmp_path, "add(2, 3) == 6")
+    lines = list(mutants.run(tmp_path, "src/m.py"))
+    assert lines[1].startswith("the tests fail on the module as it is")
+    assert not any("surviving mutants" in line for line in lines)
 
 
 def test_main_names_a_missing_module_and_returns_zero(tmp_path, capsys):
