@@ -116,6 +116,8 @@ def _is_dns_failure(exc: BaseException | None, _depth: int = 6) -> bool:
     ...     return exc
     >>> _is_dns_failure(chain(5)), _is_dns_failure(chain(6))
     (True, False)
+    >>> [_is_dns_failure(chain(0), depth) for depth in (1, 0, -1)]
+    [True, False, False]
     """
     seen = set()
     while exc is not None and _depth > 0 and id(exc) not in seen:

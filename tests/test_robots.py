@@ -114,7 +114,8 @@ class TestWhatAFetchedFileMeans:
         monkeypatch.setattr(config, "RESPECT_ROBOTS", True, raising=False)
 
     @pytest.mark.parametrize("status, allowed", [
-        (399, False), (400, True), (404, True), (499, True), (500, False), (599, False), (600, True)])
+        (399, False), (400, True), (404, True), (499, True), (500, False), (599, False), (600, True),
+        (601, True), (999, True)])
     async def test_each_status_means_what_the_rfc_says(self, serve, status, allowed):
         """A parsed answer obeys; a 4xx is no restriction; a 5xx is every path refused."""
         serve(fake_response(text=self.BLANKET, status=status))
@@ -126,21 +127,24 @@ class TestWhatAFetchedFileMeans:
         await robots.RobotsCache()._fetch("https://example.com")
         assert seen["allow_redirects"] is True
 
-    async def test_a_file_is_fetched_again_once_the_ttl_has_passed(self):
-        calls = []
+    @pytest.mark.parametrize("elapsed, refetched", [
+        (0, False), (4.999, False),       # still good
+        (5.0, True), (5.001, True),       # the ttl reached, then passed
+        (10_000, True)])                  # long gone
+    async def test_a_file_is_fetched_again_once_its_ttl_has_passed(self, monkeypatch, elapsed, refetched):
+        now, calls = [10.0], []
+        monkeypatch.setattr(robots, "time", SimpleNamespace(monotonic=lambda: now[0]))
 
         async def fetch(origin):
             calls.append(origin)
             return robots._HostRules()
 
-        cache = robots.RobotsCache(ttl=0.3)
+        cache = robots.RobotsCache(ttl=5)
         cache._fetch = fetch
         await cache.allowed("https://a.test/x")
+        now[0] += elapsed
         await cache.allowed("https://a.test/y")
-        assert len(calls) == 1
-        await asyncio.sleep(0.35)
-        await cache.allowed("https://a.test/z")
-        assert len(calls) == 2
+        assert (len(calls) == 2) is refetched
 
     async def test_a_file_that_cannot_be_parsed_fails_open(self, serve, monkeypatch):
         def refuse(text):
