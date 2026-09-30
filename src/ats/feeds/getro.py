@@ -188,7 +188,6 @@ def parse_job_page(page_html: str | None, board_url: str,
         "location":    "; ".join(locations),
         "description": text_from_html(job.get("description")),
         "posted_at":   norm_posted_date(job.get("postedAt")),
-        "via":         f"getro:{host}",
         # What attribute_employers needs to find (or queue) the employer.
         "_employer": {
             "name":     strip_html(org.get("name")),

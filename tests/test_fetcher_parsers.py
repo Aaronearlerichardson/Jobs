@@ -627,7 +627,6 @@ class TestGetro:
         assert j["posted_at"] == "2026-08-28"
         assert "Python pipelines" in j["description"]
         assert "<" not in j["description"]
-        assert j["via"] == "getro:jobs.example-network.org"
         assert j["_employer"]["domain"] == "acme-analytics.example"
         assert j["_employer"]["slug"] == "acme-analytics"
 

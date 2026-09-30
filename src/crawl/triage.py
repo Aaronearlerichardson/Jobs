@@ -396,7 +396,7 @@ def _fetcher_shape(row: dict[str, Any], company: CompanyRow) -> dict[str, Any]:
     """A stored row as the job dict board.company.hydrate_description
     expects (`harvest.hydrate_rows` passes it the roster row, which names the
     board)."""
-    return {"id": row["job_id"], "job_id": row["job_id"],
+    return {"id": row["job_id"],
             "title": row.get("title") or "", "url": row.get("url") or "",
             "location": row.get("location") or "",
             "description": row.get("description") or "",
