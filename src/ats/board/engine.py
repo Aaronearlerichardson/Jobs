@@ -69,7 +69,8 @@ from src.rows import BoardCoords
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
-from .spec import ROW_FIELDS, Detail, Detect, Listing, Pager, Rule, Scope, parse
+from .spec import (ROW_FIELDS, Detail, Detect, EngineRow, FillField, Listing, Pager, Rule,
+                   Scope, parse)
 
 
 def loc_ok(loc_re: LocationRE | None, text: str | None) -> bool:
@@ -82,10 +83,10 @@ def loc_ok(loc_re: LocationRE | None, text: str | None) -> bool:
     return loc_re is None or bool(loc_re.search(text or ""))
 
 
-async def board_jobs(rows: Iterable[dict[str, Any] | None], company_name: str,
+async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
                      gate: Callable[..., bool] | None = None,
                      loc_re: LocationRE | None = None,
-                     fetch_description: Callable[[dict[str, Any]], Awaitable[str]] | None = None,
+                     fetch_description: Callable[[EngineRow], Awaitable[str]] | None = None,
                      max_details: int = config.SWEEP_DETAILS,
                      detail_delay: float = config.SWEEP_DETAIL_DELAY_S) -> list[dict[str, Any]]:
     """Job dicts for the rows that pass `loc_re` and `gate` (see module doc).
@@ -133,7 +134,7 @@ async def board_jobs(rows: Iterable[dict[str, Any] | None], company_name: str,
     >>> [(j["id"], j["title"], j["location"]) for j in jobs]
     [('4', 'Data Engineer', 'Durham, NC')]
     """
-    def screened() -> Iterator[tuple[dict[str, Any], str, str, bool, bool]]:
+    def screened() -> Iterator[tuple[EngineRow, str, str, bool, bool]]:
         for row in rows:
             if not row or not row.get("id"):
                 continue
@@ -150,7 +151,7 @@ async def board_jobs(rows: Iterable[dict[str, Any] | None], company_name: str,
 
     out, fetched = [], 0
 
-    async def hydrate(row: dict[str, Any]) -> str | None:
+    async def hydrate(row: EngineRow) -> str | None:
         """The row's body from its detail; None with no detail call or
         `max_details` spent."""
         nonlocal fetched
@@ -169,7 +170,7 @@ async def board_jobs(rows: Iterable[dict[str, Any] | None], company_name: str,
             continue
         if not desc:
             desc = await hydrate(row) or desc
-        job = {k: v for k, v in row.items() if not k.startswith("_")}
+        job: dict[str, Any] = {k: v for k, v in row.items() if not k.startswith("_")}
         job["company"] = company_name
         job["description"] = desc
         out.append(job)
@@ -273,7 +274,7 @@ def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, .
 
 
 def _row_mapper(fs: dict[str, Any],
-                free: Any = None) -> Callable[[dict[str, Any], Any], dict[str, Any]]:
+                free: Any = None) -> Callable[[dict[str, Any], Any], EngineRow]:
     """`fs` (a listing's `fields`) read once, as a callable
     (parts, entry) -> row: the "_" fields computed first, in order, into
     the context the others read; `id` strict; `posted_at` a date; `head`
@@ -285,12 +286,12 @@ def _row_mapper(fs: dict[str, Any],
                                            "posted_at", "remote_hint", "department"))
     free = fields.reader(free) if free else None
 
-    def row(parts: dict[str, str], entry: Any) -> dict[str, Any]:
+    def row(parts: dict[str, str], entry: Any) -> EngineRow:
         ctx = dict(parts)
         for k, f in internal:
             ctx[k] = f(entry, ctx)
         t = title(entry, ctx) or ""
-        r = {"id": rid(entry, ctx), "title": t, "url": url(entry, ctx) or "",
+        r: EngineRow = {"id": rid(entry, ctx), "title": t, "url": url(entry, ctx) or "",
              "location": location(entry, ctx) or "",
              "description": description(entry, ctx) or ""}
         when, why = fields.TRANSFORMS["date"](posted(entry, ctx)), hint(entry, ctx)
@@ -581,11 +582,11 @@ class Board:
                     size: int | None = None, pages: int | None = None,
                     vals: dict[str, Any] | None = None, scoped: bool = False,
                     first: bool | str = False, budget: int | None = None,
-                    located: bool = False) -> tuple[list[dict[str, Any]] | None, int | None]:
+                    located: bool = False) -> tuple[list[EngineRow] | None, int | None]:
         """(rows, total) from the first listing alternative whose walk
         (`_walk_listing`) yields a posting, else the last one's answer; only
         the first alternative's when `first`."""
-        got: tuple[list[dict[str, Any]] | None, int | None] = None, None
+        got: tuple[list[EngineRow] | None, int | None] = None, None
         for spec, row in list(zip(self._listings, self._rows))[:1 if first else None]:
             got = await self._walk_listing(spec, row, handle, label, cheap, size, pages, vals,
                                            scoped, budget, located)
@@ -594,12 +595,12 @@ class Board:
         return got
 
     async def _walk_listing(self, spec: Listing,
-                            row: Callable[[dict[str, Any], Any], dict[str, Any]], handle: str,
+                            row: Callable[[dict[str, Any], Any], EngineRow], handle: str,
                             label: str | None = None, cheap: bool = False,
                             size: int | None = None, pages: int | None = None,
                             vals: dict[str, Any] | None = None, scoped: bool = False,
                             budget: int | None = None, located: bool = False
-                            ) -> tuple[list[dict[str, Any]] | None, int | None]:
+                            ) -> tuple[list[EngineRow] | None, int | None]:
         """`pager.walk` over one listing `spec`, its entries mapped by `row`:
         (rows, total), (None, None) when the first request failed. `vals`
         fills named request values (`_NAMED`); `cheap` reads one page (or
@@ -618,13 +619,13 @@ class Board:
                 timeout, url)
             return parts, payload, err
 
-        def rows_of(parts: dict[str, str], payload: Any) -> tuple[int, list[dict[str, Any]]]:
+        def rows_of(parts: dict[str, str], payload: Any) -> tuple[int, list[EngineRow]]:
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
         return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
 
     async def listing(self, handle: str, label: str | None = None, cheap: bool = False,
-                      rescue_cap: int | None = None) -> list[dict[str, Any]]:
+                      rescue_cap: int | None = None) -> list[EngineRow]:
         """Every row on the board, mapped by the spec's fields and, where
         the rescue runs on every pull, filled from at most `rescue_cap`
         details (default the rescue's cap); [] when the listing failed
@@ -635,8 +636,8 @@ class Board:
             return rows
         return await self._rescue_all(rows, label, rescue_cap)
 
-    async def _rescue_all(self, rows: list[dict[str, Any]], label: str | None,
-                          cap: int | None = None) -> list[dict[str, Any]]:
+    async def _rescue_all(self, rows: list[EngineRow], label: str | None,
+                          cap: int | None = None) -> list[EngineRow]:
         """`rows` through an "always" rescue, unscoped; else unchanged."""
         if not self._always:
             return rows
@@ -646,7 +647,7 @@ class Board:
 
     async def _scope(self, handle: str, loc_re: LocationRE, sc: Scope,
                      timeout: tuple[float, float] | None = None
-                     ) -> tuple[dict[str, Any], str, int | None, list[dict[str, Any]]]:
+                     ) -> tuple[dict[str, Any], str, int | None, list[EngineRow]]:
         """(values, vouched, board_total, board_page) narrowing the listing
         to `loc_re` server-side: the facet values whose label `loc_re`
         matches, read off one unscoped first page (`vouched`: their labels
@@ -684,7 +685,7 @@ class Board:
         return {"$facets": {}, "$search_text": default_search_text()}, "", total, []
 
     async def _pull(self, handle: str, label: str, loc_re: LocationRE | None = None,
-                    budget: int | None = None) -> list[dict[str, Any]]:
+                    budget: int | None = None) -> list[EngineRow]:
         """The board's rows in `loc_re`'s area (all of them when None), the
         walk's page cap widened to cover `budget` rows where given. A
         facets `scope` narrows the listing server-side (the first
@@ -711,7 +712,7 @@ class Board:
         rows = (await self._walk(handle, label, vals={"$area": loc_re}, budget=budget))[0] or []
         return [r for r in await self._rescue_all(rows, label) if self._in_area(r, loc_re)]
 
-    def _in_area(self, row: dict[str, Any], loc_re: LocationRE | None) -> bool:
+    def _in_area(self, row: EngineRow, loc_re: LocationRE | None) -> bool:
         """Whether `row` passes `loc_re` (every row passes None): on its
         location, cleaned; one naming no place by the spec's `unlocated`
         rule ("drop" or "keep")."""
@@ -720,9 +721,9 @@ class Board:
             return loc_ok(loc_re, loc)
         return self.spec.unlocated == "keep"
 
-    async def _rescue(self, rows: list[dict[str, Any]], loc_re: LocationRE | None,
+    async def _rescue(self, rows: list[EngineRow], loc_re: LocationRE | None,
                       vouched: str | Literal[False], fetch: bool, label: str | None,
-                      cap: int | None = None) -> list[dict[str, Any]]:
+                      cap: int | None = None) -> list[EngineRow]:
         """The rows in `loc_re`'s area, each carrying the location that
         shows it: the listed one; else the rescue's free text (the listed
         one after it in parentheses); else, where `fetch` allows and the
@@ -765,7 +766,7 @@ class Board:
                   f"{'kept unexpanded' if vouched or loc_re is None else 'dropped'}")
         return out
 
-    async def _rescued(self, row: dict[str, Any], fill: tuple[str, ...]) -> None:
+    async def _rescued(self, row: EngineRow, fill: tuple[FillField, ...]) -> None:
         """Fill `row` in place from its posting's detail: each field in
         `fill` the detail names, the row's own kept where it names none.
         The location comes through `_locate`: a cached one costs no read
@@ -802,7 +803,7 @@ class Board:
     # --- the pulls ---------------------------------------------------------
 
     def _detail_rows(self, fill: bool = False
-                     ) -> Callable[[dict[str, Any]], Awaitable[str]] | None:
+                     ) -> Callable[[EngineRow], Awaitable[str]] | None:
         """board_jobs' detail callback: a row's body from its detail; with
         `fill`, the row also takes the detail's other fields (`_apply`)."""
         if not self.detail_spec:
@@ -810,7 +811,7 @@ class Board:
         if not fill:
             return lambda row: self.description_for(row.get("url"), report=True)
 
-        async def read(row: dict[str, Any]) -> str:
+        async def read(row: EngineRow) -> str:
             rec, fs, ctx = await self._posting(row.get("url"), True)
             if rec:
                 self._apply(row, rec, fs, ctx)
@@ -1025,7 +1026,7 @@ class Board:
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
 
-    def _apply(self, job: dict[str, Any], rec: dict[str, Any], fs: dict[str, Reader],
+    def _apply(self, job: EngineRow | dict[str, Any], rec: dict[str, Any], fs: dict[str, Reader],
                ctx: dict[str, Any]) -> None:
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",

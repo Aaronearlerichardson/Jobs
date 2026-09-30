@@ -8,6 +8,7 @@ runs over the recorded fixture pages.
 
 import ast
 from pathlib import Path
+from typing import get_args
 
 import pytest
 
@@ -65,6 +66,7 @@ REFUSED = [
     {**_listing(), "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
     {**_listing(), "detail": _D, "rescue": {"unknown": "x", "cap": 1, "why": _WHY}},
     _always(unknown="("), _always(cap="1"), _always(fields=["pay"]), _always(why=None),
+    _always(fields=["department"]), _always(fields=["title"]),
     {"closure": {"nope": 1}}, {"closure": {"via": "email"}}, {"closure": {"via": "detail"}},
     {**_pager(kind="offset", size=2), "closure": {"via": "listing"}},
     {"closure": {"unmatched": 7, "why": _WHY}}, {"closure": {"unmatched": "gone"}},
@@ -86,6 +88,14 @@ def test_the_schema_refuses_what_it_cannot_read():
     for i, raw in enumerate(REFUSED):
         with pytest.raises(ValueError, match=f"^case{i}: "):
             spec.parse(f"case{i}", raw)
+
+
+def test_the_engine_row_names_the_spec_row_fields():
+    """A row holds the spec's row fields but `department` (it goes into
+    `head`), plus `head` and `_free`; a rescue fills only some of them."""
+    keys = set(spec.EngineRow.__annotations__)
+    assert keys == (spec.ROW_FIELDS - {"department"}) | {"head", "_free"}
+    assert set(get_args(spec.FillField)) <= keys
 
 
 def test_no_key_restates_its_default():

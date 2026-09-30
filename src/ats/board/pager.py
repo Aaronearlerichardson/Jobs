@@ -17,7 +17,7 @@ from typing import Any
 from src import config
 from src.net.http import note_capped
 from . import fields
-from .spec import CursorPager, Listing, Pager
+from .spec import CursorPager, EngineRow, Listing, Pager
 
 
 def page_vals(pager: Pager | None, n: int, size: int) -> dict[str, Any]:
@@ -59,12 +59,12 @@ def total_of(pager: Pager | None, payload: Any) -> int | None:
     return t if isinstance(t, int) else None
 
 
-def postings(rows: list[dict[str, Any]] | None) -> bool:
+def postings(rows: list[EngineRow] | None) -> bool:
     """Whether `rows` hold a posting: a row with an id."""
     return any(r["id"] is not None for r in rows or [])
 
 
-def ended(pager: Pager, payload: Any, number: int, rows: list[dict[str, Any]],
+def ended(pager: Pager, payload: Any, number: int, rows: list[EngineRow],
           size_known: int | None, n_entries: int, size: int) -> bool:
     """Whether a page-counted walk stops after page `number`: at the page
     `declared` last (no declared page ends it); else once `rows` reach
@@ -87,8 +87,8 @@ def next_url(payload: Any, pager: CursorPager, home: str) -> str | None:
 
 
 def scope_failed(scoped_total: int | None, board_total: int | None, cap: int,
-                 rows: Sequence[dict[str, Any]] = (),
-                 board_page: Sequence[dict[str, Any]] = ()) -> bool:
+                 rows: Sequence[EngineRow] = (),
+                 board_page: Sequence[EngineRow] = ()) -> bool:
     """Whether a locality-scoped listing came back unnarrowed: as many
     postings as the whole board, or at least `cap` (the most the pull
     will read). With no scoped total: its `rows` open with every posting
@@ -118,7 +118,7 @@ def scope_failed(scoped_total: int | None, board_total: int | None, cap: int,
     return scoped_total >= cap
 
 
-def _fresh(listed: list[dict[str, Any]], seen: set[Any]) -> list[dict[str, Any]]:
+def _fresh(listed: list[EngineRow], seen: set[Any]) -> list[EngineRow]:
     """The rows of one page that are new: a row whose id an earlier page
     gave is dropped, as is one repeating a row of its own page verbatim
     (a page may list a posting once per location; two copies of one row
@@ -139,10 +139,10 @@ def _fresh(listed: list[dict[str, Any]], seen: set[Any]) -> list[dict[str, Any]]
 async def walk(spec: Listing,
                ask: Callable[[int, dict[str, Any], str | None],
                              Awaitable[tuple[dict[str, Any], Any, str | Exception | None]]],
-               rows_of: Callable[[dict[str, Any], Any], tuple[int, list[dict[str, Any]]]],
+               rows_of: Callable[[dict[str, Any], Any], tuple[int, list[EngineRow]]],
                size: int | None = None, pages: int | None = None, cheap: bool = False,
                scoped: bool = False,
-               budget: int | None = None) -> tuple[list[dict[str, Any]] | None, int | None]:
+               budget: int | None = None) -> tuple[list[EngineRow] | None, int | None]:
     """(rows, total) for one listing `spec`; (None, None) when the first
     request failed. `await ask(n, vals, url)` makes page `n`'s request
     with the named values `vals` (`page_vals`), or follows a cursor's
@@ -186,7 +186,7 @@ async def walk(spec: Listing,
     pages = 1 if not pager else pages or (1 if cheap else page_cap(pager, budget,
                                                                    size and pager.stride))
     ceiling = pager.ceiling if pager else None
-    rows: list[dict[str, Any]] = []
+    rows: list[EngineRow] = []
     seen: set[Any] = set()
     total, size_known, capped, url, n = None, None, False, None, 0
     while True:

@@ -17,6 +17,7 @@ from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Discriminator, Field, Strict, StringConstraints, Tag,
                       ValidationError, model_validator)
+from typing_extensions import TypedDict
 
 from src import config, validation
 from src.net.util import css, xpath
@@ -26,6 +27,30 @@ from . import fields
 RowField = Literal["id", "title", "url", "location", "description", "posted_at",
                    "remote_hint", "department"]
 ROW_FIELDS = set(get_args(RowField))
+#: The row fields a rescue's detail may fill (`Rescue.fields`).
+FillField = Literal["location", "description", "posted_at", "remote_hint"]
+
+
+class EngineRow(TypedDict, total=False, closed=True):
+    """A listing entry as a board's row mapper builds it, until `board_jobs`
+    turns it into a job. Its names are checked against `ROW_FIELDS` by
+    tests/test_boards_spec.py::test_the_engine_row_names_the_spec_row_fields.
+
+    Notes:
+        `department` is a row field the mapper reads and never stores: it
+        goes into `head`, the title the gates read, which `board_jobs` pops.
+        `_free` is the rescue's free text, dropped with every `_` key.
+    """
+    id: str
+    title: str
+    url: str
+    location: str
+    description: str
+    posted_at: str
+    remote_hint: str
+    head: str
+    _free: str
+
 
 def _css(v: str) -> str:
     """`v` once it compiles as CSS in cssselect's dialect, each {placeholder}
@@ -369,8 +394,8 @@ class Rescue(_Spec):
     cache_days: Annotated[Int, Field(ge=0)] = Field(0, description="Days a found location is "
                                                                    "cached; 0 none")
     free: Grammar = Field(None, description="Free text tried against the area first")
-    fields: tuple[RowField, ...] = Field(("location",), description="The row fields the "
-                                                                    "detail fills")
+    fields: tuple[FillField, ...] = Field(("location",), description="The row fields the "
+                                                                     "detail fills")
     why: Why = Field(description='Why the listing needs rescuing: "reason, YYYY-MM"')
 
 
