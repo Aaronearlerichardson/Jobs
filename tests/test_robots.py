@@ -58,6 +58,17 @@ class TestExemptHosts:
         assert cache.fetched == ["https://jobs.smartrecruiters.com"]
 
 
+def test_a_missing_protego_stops_the_program_at_start_with_the_fix():
+    """Not on the first request: that was 45 logged errors and a discovery run
+    that found nothing, in an environment that had not installed it yet."""
+    import subprocess
+    import sys
+    done = subprocess.run([sys.executable, "-c", "import sys; sys.modules['protego'] = None; import src.net"],
+                          capture_output=True, text=True, check=False)
+    assert done.returncode != 0
+    assert "pip install -r envs/requirements.txt" in done.stderr
+
+
 class TestRespectRobots:
     """[policy] respect_robots is the switch, through net.http.send, the one
     door every fetcher uses: on, a page under a host's Disallow is refused
