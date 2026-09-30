@@ -612,8 +612,9 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
             loop = asyncio.get_running_loop()
             for c in group:
                 running[id(c)] = c
+                stall = asyncio.timeout(stall_s)
                 try:
-                    async with asyncio.timeout(stall_s) as stall:
+                    async with stall:
                         s = await board_fn(
                             c, db, hydrate=hydrate,
                             progress=lambda: stall.reschedule(loop.time() + stall_s))

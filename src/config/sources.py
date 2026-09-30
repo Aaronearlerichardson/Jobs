@@ -24,7 +24,7 @@ DISCOURSE_BOARDS = [(b.label or b.url, b.url, b.category_id)
 # [tracks.*].sources.websearch) — [sources].websearch
 # ({ label, query, max_results }). DuckDuckGo text search; each result URL is
 # parsed for JSON-LD JobPosting.
-WEBSEARCH_QUERIES: list[tuple] = [
+WEBSEARCH_QUERIES: list[tuple[str, str, int]] = [
     ((q.label or q.query)[:60], q.query, q.max_results)
     for q in _src.websearch
 ]

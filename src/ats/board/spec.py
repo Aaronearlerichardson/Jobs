@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Annotated, Any, ClassVar, Literal, Self, Union, get_args
+from typing import Annotated, Any, ClassVar, Literal, Self, Union, cast, get_args
 
 from cssselect import SelectorError
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
@@ -41,7 +41,7 @@ class EngineRow(TypedDict, total=False, closed=True):
         goes into `head`, the title the gates read, which `board_jobs` pops.
         `_free` is the rescue's free text, dropped with every `_` key.
     """
-    id: str
+    id: str | None
     title: str
     url: str
     location: str
@@ -70,7 +70,7 @@ def _css(v: str) -> str:
     return v
 
 
-def _listed(v: list | str | dict) -> list:
+def _listed(v: list[Any] | str | dict[str, Any]) -> list[Any]:
     """A key taking one value or several: a lone value as a list of one."""
     return [v] if isinstance(v, (str, dict)) else v
 
@@ -244,7 +244,7 @@ class HtmlDecoder(_Decoder):
 def _decoder_kind(v: Any) -> str | None:
     """A decoder's `kind`: a dict naming none is JsonDecoder's default."""
     if isinstance(v, dict):
-        return v["kind"] if "kind" in v else JsonDecoder.model_fields["kind"].default
+        return cast(str | None, v["kind"] if "kind" in v else JsonDecoder.model_fields["kind"].default)
     return getattr(v, "kind", None)
 
 

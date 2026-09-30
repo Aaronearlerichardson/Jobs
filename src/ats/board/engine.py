@@ -929,7 +929,8 @@ class Board:
             _parts, _s, payload, err = await self._page(
                 listing, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, listing.decoder) or None
-        return await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
+        return cast(list[dict[str, Any]] | None,
+                    await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S))
 
     async def _member(self, ref: dict[str, Any], job_id: str | None = None
                       ) -> dict[str, Any] | None:

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from typing import cast
 
 from src import config
 from src.claude.reply import Reply
@@ -254,7 +255,7 @@ async def brainstorm_company_names(n: int | None = None) -> list[str]:
     key = f"brainstorm||{n}||{region}||{domain}"
     cached = await asyncio.to_thread(ddg.cache_get, key)
     if cached is not None:
-        return cached
+        return cast(list[str], cached)
     from src.claude.api import call_claude_json
     system = "You help maintain a job-search company roster."
     user = (

@@ -14,7 +14,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
-from typing import Any, overload
+from typing import Any, cast, overload
 from urllib.parse import urlsplit
 
 from cssselect import HTMLTranslator
@@ -261,7 +261,7 @@ def _html5lib() -> ModuleType:
     import html5lib
     from html5lib.constants import DataLossWarning
     warnings.filterwarnings("ignore", category=DataLossWarning)
-    return html5lib
+    return cast(ModuleType, html5lib)
 
 
 def xpath(expr: str) -> etree.XPath:
@@ -296,13 +296,13 @@ def first(expr: str, scope: etree._Element, **variables: Any) -> Any:
 
 def links(tree: etree._Element) -> list[etree._Element]:
     """Every <a> with an href in `tree`'s document."""
-    return xpath("//a[@href]")(tree)
+    return cast(list[etree._Element], xpath("//a[@href]")(tree))
 
 
 def jsonld_scripts(tree: etree._Element) -> list[etree._Element]:
     """Every schema.org JSON-LD block in `tree`'s document: its
     <script type="application/ld+json"> elements."""
-    return xpath("//script[@type='application/ld+json']")(tree)
+    return cast(list[etree._Element], xpath("//script[@type='application/ld+json']")(tree))
 
 
 def named(scope: etree._Element, name: str, one: bool = False) -> Any:

@@ -156,7 +156,7 @@ def _prepare(method: str, url: str, polite: bool = True,
     return p
 
 
-def _headers(raw: Iterable[tuple[bytes, bytes]]) -> CaseInsensitiveDict:
+def _headers(raw: Iterable[tuple[bytes, bytes]]) -> CaseInsensitiveDict[str]:
     """A reply's raw header pairs as requests reads them: latin-1, a
     repeated name's values joined by ", " under its first spelling.
 

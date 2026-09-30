@@ -39,7 +39,7 @@ import sqlite3
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from pydantic import BeforeValidator
 
@@ -903,7 +903,7 @@ def verify_model() -> str:
     else the screen model. Stored in jobs.fit_model by verify_fit so a
     later run can tell rows verified by THIS model from rows verified by
     an older one (or by nobody: fit_model is NULL on pre-column rows)."""
-    return _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", "")
+    return cast(str, _cfg("CLAUDE_VERIFY_MODEL", None) or _cfg("CLAUDE_MODEL", ""))
 
 
 # --------------------------------------------------------------------------- #

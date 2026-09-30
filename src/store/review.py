@@ -223,7 +223,7 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
                        (cid,)).fetchone()
     if not row:
         return None
-    name = row["name"]
+    name: str = row["name"]
     conn.execute("DELETE FROM jobs WHERE company_id=?", (cid,))
     conn.execute("DELETE FROM companies WHERE id=?", (cid,))
     _commit(conn)

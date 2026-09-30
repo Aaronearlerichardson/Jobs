@@ -423,7 +423,7 @@ async def call_claude_json[R: Reply](system_prompt: str, user_content: str,
                 await asyncio.sleep(min(delay, 60.0))
                 continue
             break
-        r.raise_for_status()
+        r.raise_for_status()  # type: ignore[possibly-undefined]  # the loop runs at least once
         data = r.json()
         usage = data.get("usage") or {}
         _record_usage(usage)

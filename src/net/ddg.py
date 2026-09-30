@@ -35,7 +35,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 from src import config, runstate
 from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
@@ -110,7 +110,7 @@ def _ddgs_class() -> type | None:
         pass
     try:
         from duckduckgo_search import DDGS as LegacyDDGS
-        return LegacyDDGS
+        return cast(type, LegacyDDGS)
     except ImportError:
         searches = _SEARCHES()
         if not searches.missing_announced:
@@ -357,7 +357,7 @@ async def search(query: str, max_results: int = 10, page: int = 1, budget: float
     cached = await asyncio.to_thread(cache_get, key)
     if cached is not None:
         _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
-        return cached
+        return cast(list[dict[str, Any]], cached)
     probe = _resolver_gate()
     if probe is None:
         _log.debug("ddg skipped, resolver breaker tripped: %s", query)

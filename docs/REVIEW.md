@@ -168,6 +168,13 @@ What a reviewer holds a new shape to:
   2.3 or later. A closed `TypedDict` cannot be extended with new keys, and an open one
   is not assignable to it, so `FitColumns` stays open (`JobIn` extends it) and the
   one place a fit score updates a `FetchedJob` takes a `cast`.
+- **A field a config-driven reader fills admits `None`.** `fields.reader`
+  returns `Any`, so nothing checked that a spec naming no `id` leaves it
+  `None`: `EngineRow.id` said `str` while every consumer tested `is not
+  None`. `mypy` runs `strict` (bar `no_implicit_reexport`, which would want
+  `__all__` in each facade) with `possibly-undefined` and `redundant-expr`
+  on; the second is what reports a guard the types call unnecessary, which
+  is either dead code or a type that is too narrow. Check which.
 - **Convert a flow whole.** A `TypedDict` is not assignable to `dict[str,
   Any]`, so a producer and every function that receives its dicts change in
   one commit; a half-typed flow does not pass mypy. Such a phase is

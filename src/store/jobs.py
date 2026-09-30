@@ -1084,7 +1084,7 @@ def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) 
             fill[col] = v
     conn.executemany("DELETE FROM jobs WHERE id=?", [(l["id"],) for l in losers])
     apply_update(conn, "jobs", "id", keep["id"], {**fill, "job_id": job_id})
-    return keep["id"]
+    return cast(int, keep["id"])
 
 
 def dedup_jobs(conn: sqlite3.Connection) -> int:

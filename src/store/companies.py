@@ -271,10 +271,10 @@ def roster_growth(conn: sqlite3.Connection, days: int = 7) -> int:
     1
     """
     cutoff = (datetime.now() - timedelta(days=int(days))).isoformat()
-    return conn.execute(
+    return cast(int, conn.execute(
         "SELECT COUNT(*) FROM companies "
         "WHERE created_at >= ? AND miss_reason IS NULL",
-        (cutoff,)).fetchone()[0]
+        (cutoff,)).fetchone()[0])
 
 
 # --------------------------------------------------------------------------- #
@@ -363,12 +363,12 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | N
     for c, cpath in idx["by_host"].get(host, ()):
         prefix = _board_prefix(cpath) if shared else ""
         if not prefix or path.lower().startswith(prefix.lower()):
-            return c
+            return cast(CompanyRow, c)
     if shared:
         return None
     for c, chost in idx["by_domain"].get(_domain(host), ()):
         if chost != host:
-            return c
+            return cast(CompanyRow, c)
     return None
 
 

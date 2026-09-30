@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urldefrag, urljoin
 
 from lxml import etree
@@ -111,7 +111,7 @@ def _openings_link(tree: etree._Element, page_url: str) -> str | None:
                      r"job-openings|openings|opportunities|positions|jobs)\b", href, re.I) \
                 or re.search(r"(current|open|view|see|all).{0,12}(opening|position|role|job)",
                              text, re.I):
-            return absu
+            return cast(str, absu)
     return None
 
 
@@ -214,7 +214,7 @@ async def custom_board_listing_url(page_url: str, html: str | None = None) -> st
     path = hashed_cache_path(cache_dir("board"), page_url)
     cached = await asyncio.to_thread(json_cache_get, path, config.BOARD_DETECT_CACHE_S)
     if cached is not None:
-        return cached.get("listing")
+        return cast(str | None, cached.get("listing"))
     tree = (await asyncio.to_thread(parse_markup, html, url=page_url)
             if html is not None else await _page_tree(page_url))
     if tree is None:

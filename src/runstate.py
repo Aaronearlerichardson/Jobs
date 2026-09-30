@@ -158,7 +158,7 @@ def per_run[T](make: Callable[[], T]) -> Callable[[], T]:
     def get() -> T:
         state = _current().state
         try:
-            return state[get]
+            return cast(T, state[get])
         except KeyError:
             state[get] = made = make()
             return made

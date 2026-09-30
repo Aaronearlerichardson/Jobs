@@ -213,7 +213,7 @@ async def validate_candidate(c: Candidate, delay: float = 0.3,
     return c
 
 
-def _merge_seeds(claude_raw: list[dict], seeds: list[dict]) -> list[dict]:
+def _merge_seeds(claude_raw: list[dict[str, Any]], seeds: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Append seed candidates to Claude's output, deduping by normalized
     name. Claude's entry wins when both sources have the same company

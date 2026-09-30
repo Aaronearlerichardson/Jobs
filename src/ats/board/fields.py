@@ -35,7 +35,7 @@ import html
 import re
 import time
 from collections.abc import Callable
-from typing import Any, Literal, overload
+from typing import Any, Literal, cast, overload
 from urllib.parse import unquote
 
 from src.match.locality import MONTH_ABBRS, location_snippet
@@ -445,7 +445,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
         def join(entry: Any, ctx: dict[str, Any]) -> str:
             parts = [s for s in (str(p).strip() for p in _flat([f(entry, ctx) for f in subs])
                                  if p and not isinstance(p, dict)) if s]
-            return sep.join(parts[:cap])
+            return cast(str, sep.join(parts[:cap]))
         return join
     if "each" in spec:
         items_of, do = _getter(spec["each"]), reader(spec.get("do", ""))

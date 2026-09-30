@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urljoin
 
 from lxml import etree
@@ -63,8 +63,8 @@ def record(payload: Any, detail: Detail) -> dict[str, Any] | None:
     paths, by default its decoder's first entry; None when there is none."""
     if not payload:
         return None
-    return first_path(payload, (detail.decoder.first,) if detail.record is None else detail.record,
-                      dict)
+    return cast(dict[str, Any] | None, first_path(
+        payload, (detail.decoder.first,) if detail.record is None else detail.record, dict))
 
 
 def _atom(text: str, url: str = "") -> list[dict[str, Any]]:
