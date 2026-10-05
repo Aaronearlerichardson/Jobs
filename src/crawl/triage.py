@@ -900,23 +900,33 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
       "geo:non-local"         an 'ok'/'fit' row whose location names a
                               place that fails is_nc and remote_signal,
                               and that passed only geo-gated tracks
-                              (`tracks`, default roster_tracks()).
+                              (`tracks`, default roster_tracks());
+      "geo:remote"            a 'geo' drop whose location reads remote and
+                              US-eligible at a company the geo gate trusts
+                              for remote (the watch list, or a mission at
+                              a gated track's remote_mission_floor): a
+                              rule that now reads such a location as
+                              remote (a bare "United States") frees it.
 
     >>> conn = store.connect(":memory:")
     >>> cid = store.upsert_company(conn, {"name": "Acme", "ats": "workday",
-    ...                                   "wd_tenant": "acme"})
+    ...                                   "wd_tenant": "acme", "mission_score": 0.9})
     >>> for jid, loc in [("a", "2 Locations"), ("b", "Ulaanbaatar, Mongolia"),
-    ...                  ("c", "Ulaanbaatar, Mongolia")]:
+    ...                  ("c", "Ulaanbaatar, Mongolia"), ("d", "United States"),
+    ...                  ("e", "Remote - Philippines")]:
     ...     _ = store.upsert_job(conn, {"job_id": jid, "company_id": cid,
     ...                                 "company_name": "Acme", "title": "T",
     ...                                 "location": loc})
     >>> store.record_triage(conn, "a", "geo", "t=geo")
     >>> store.record_triage(conn, "b", "ok", "t=ok", tracks=["t"])
     >>> store.record_triage(conn, "c", "ok", "t=ok;s=ok", tracks=["t", "s"])
-    >>> tracks = [RuntimeTrack(id="t", db_path=Path("t.db"), track="t", geo_gate=True),
+    >>> store.record_triage(conn, "d", "geo", "t=geo")
+    >>> store.record_triage(conn, "e", "geo", "t=geo")
+    >>> tracks = [RuntimeTrack(id="t", db_path=Path("t.db"), track="t", geo_gate=True,
+    ...                        remote_mission_floor=0.85),
     ...           RuntimeTrack(id="s", db_path=Path("s.db"), track="s", geo_gate=False)]
     >>> {jid: v["reason"] for jid, v in requeue_reasons(conn, tracks).items()}
-    {'a': 'geo:unknown-location', 'b': 'geo:non-local'}
+    {'a': 'geo:unknown-location', 'b': 'geo:non-local', 'd': 'geo:remote'}
 
     Notes:
         Row "c" keeps its labels: the non-geo track passed it on its own
@@ -949,6 +959,21 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
                 or not passed or not passed <= gated):
             continue
         add(r, "geo:non-local")
+    floors = [t.remote_mission_floor for t in roster_tracks(tracks) if t.geo_gate]
+    owners: dict[int, CompanyRow | None] = {}
+    for r in conn.execute(
+            "SELECT job_id, company_name, title, location, company_id "
+            "FROM open_jobs WHERE triage_status='geo'"):
+        loc = r["location"]
+        if location_unknown(loc) or is_nc(loc) or not (remote_signal(loc) and us_eligible(loc)):
+            continue
+        if r["company_id"] not in owners:
+            row = conn.execute("SELECT * FROM companies WHERE id=?", (r["company_id"],)).fetchone()
+            owners[r["company_id"]] = store.as_company(row) if row else None
+        owner = owners[r["company_id"]]
+        if owner and (tags.has(owner, tags.WATCH)
+                      or any(ops._mission_trusted(owner, f) for f in floors)):
+            add(r, "geo:remote")
     return out
 
 

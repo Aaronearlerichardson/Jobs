@@ -44,7 +44,7 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
 from src import config
 from src.crawl import runner, triage
 from src.discovery import local_sourcing, paste_ingest
-from src.ops import (backfill, ingest, rekey, repair, roster, scoring,
+from src.ops import (backfill, ingest, rekey, repair, restamp, roster, scoring,
                      status)
 from src.validation import drop_blank, error_lines
 
@@ -200,6 +200,11 @@ class RekeyJobs(Tracked):
     commit: bool = Field(False, validation_alias="apply")
 
 
+class RestampGeo(Tracked):
+    commit: bool = Field(False, validation_alias="apply")
+    undo: str = ""
+
+
 class Prune(Tracked):
     offmission: bool = False
 
@@ -318,6 +323,13 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "target": rekey.rekey_jobs,
         "params": RekeyJobs,
         "ui": False,      # a one-off migration after a spec's id rule changes
+    },
+    "restamp-geo": {
+        "label": "Restamp stored geo_mode",
+        "engine": None,
+        "target": restamp.restamp_geo,
+        "params": RestampGeo,
+        "ui": False,      # a one-off after the geo_mode rule changes
     },
     "prune": {
         "label": "Prune dead boards",

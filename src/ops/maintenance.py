@@ -135,14 +135,28 @@ async def board_match(index: dict[str, FetchedJob], title: str | None) -> Fetche
     return match if match.get("description") else None
 
 
-def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None) -> list[RankedJob]:
-    """The track's ranked view — same knobs the crawl digest uses."""
+def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
+            with_description: bool = False) -> list[RankedJob]:
+    """The track's ranked view — same knobs the crawl digest uses.
+    `with_description` is for deep verify, which falls back on the stored
+    body when the live page cannot be fetched.
+
+    >>> conn = store.connect(":memory:")
+    >>> _ = store.upsert_job(conn, {"job_id": "j1", "title": "T", "track": "local-tech",
+    ...                             "location": "Durham, NC", "description": "the body", "resume_fit_score": 0.5})
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), track="local-tech")
+    >>> "description" in _ranked(conn, t)[0]
+    False
+    >>> _ranked(conn, t, with_description=True)[0]["description"]
+    'the body'
+    """
     return store.ranked_jobs(
         conn, track=t.track,
         location_re=(NC_RE if t.geo_gate else None),
         rank_by=t.rank_by, allow_geo_modes={"remote"},
         min_mission=t.min_mission,
-        remote_mission_floor=t.remote_mission_floor, limit=limit)
+        remote_mission_floor=t.remote_mission_floor, limit=limit,
+        with_description=with_description)
 
 
 def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,

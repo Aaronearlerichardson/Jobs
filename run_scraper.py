@@ -165,6 +165,8 @@ _COMMANDS = [
         "workers": a.workers, "described_only": a.described_only})),
     ("rekey_jobs", _op("rekey-jobs", lambda a: {
         "ats": a.rekey_jobs, "apply": a.rekey_apply})),
+    ("restamp_geo", _op("restamp-geo", lambda a: {
+        "apply": a.restamp_apply, "undo": a.restamp_undo})),
 ]
 
 
@@ -244,6 +246,16 @@ def main(argv: list[str] | None = None) -> None:
                          "only with --rekey-apply")
     ap.add_argument("--rekey-apply", action="store_true",
                     help="With --rekey-jobs: re-key (or merge) the rows")
+    ap.add_argument("--restamp-geo", action="store_true",
+                    help="Report the open jobs whose stored geo_mode the "
+                         "current rule would change; writes only with "
+                         "--restamp-apply")
+    ap.add_argument("--restamp-apply", action="store_true",
+                    help="With --restamp-geo: save the old stamps to "
+                         "db_backups, then rewrite them")
+    ap.add_argument("--restamp-undo", metavar="FILE", default="",
+                    help="With --restamp-geo: restore the stamps in a "
+                         "restamp backup file (--restamp-apply to write)")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap rows processed (backfills / probes)")
     # ── roster / dispositions / store ───────────────────────────────────

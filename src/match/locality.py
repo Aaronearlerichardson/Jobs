@@ -456,6 +456,12 @@ def remote_signal(location: str | None, description: str | None = "") -> str | N
     """Return the phrase that marks this posting remote-eligible, or None.
 
     Returned phrase is handy for the precision sanity-check sample output.
+
+    >>> remote_signal("United States"), remote_signal("USA"), remote_signal("US")
+    ('location:nationwide', 'location:nationwide', 'location:nationwide')
+    >>> remote_signal("United States of America", "on-site only")
+    >>> remote_signal("Durham, NC, United States") is None
+    True
     """
     loc = (location or "").lower()
     body = (description or "").lower()
@@ -467,6 +473,10 @@ def remote_signal(location: str | None, description: str | None = "") -> str | N
     hit = _has_token(loc, _LOC_REMOTE_TOKENS)
     if hit:
         return f"location:{hit}"
+    # A field that is only the country: a nationwide posting, which an ATS
+    # files that way when no office is named (Lyra Health, Pedestal Health).
+    if re.fullmatch(r"\s*(?:united states(?: of america)?|u\.?s\.?a?\.?)\s*", loc):
+        return "location:nationwide"
 
     hit = _has_token(body, _BODY_REMOTE_PHRASES)
     if hit:
@@ -558,15 +568,33 @@ def geo_mode(location: str | None, description: str | None = "") -> str | None:
     """Classify a posting's geography: "onsite" (configured locality),
     "remote", or None (neither). Onsite wins when a posting is both local
     and remote-friendly — a "Remote; Durham, NC" multi-location posting is
-    LOCAL material, not a remote drop. Both the location FIELD and the body
-    text are checked against the raw place-token regex (profile
-    [locality]; not NC_RE's per-segment reading, which is for a location
-    field) so "hybrid from our Durham office" still counts as onsite.
-    Remote detection goes through `remote_signal` above (workforce-context
-    phrases, hard negations) rather than a bare token list."""
-    if _names_place(f"{location or ''} {description or ''}"):
+    LOCAL material, not a remote drop. The location FIELD is checked against
+    the raw place-token regex (profile [locality]; not NC_RE's per-segment
+    reading, which is for a location field). Remote detection goes through
+    `remote_signal` above (workforce-context phrases, hard negations) rather
+    than a bare token list. A location that names a place ("Alameda", "NY
+    office", "Oshkosh Medical Center") is read as that place: only the field
+    can make it onsite or remote, because a body's "distributed team" or
+    "Durham headquarters" boilerplate says nothing about where the seat is.
+    The body decides only when the field names no place (location_unknown),
+    so "hybrid from our Durham office" still counts as onsite there.
+
+    >>> geo_mode("Alameda", "We are a distributed team.")
+    >>> geo_mode("", "We are a distributed team.")
+    'remote'
+    >>> geo_mode("2 Locations", "Work from home is supported.")
+    'remote'
+    >>> geo_mode("Alameda; Remote", "")
+    'remote'
+    >>> geo_mode("Alameda", "Our Durham headquarters runs hybrid.")
+    >>> geo_mode("", "Hybrid from our Durham office.")
+    'onsite'
+    """
+    unknown = location_unknown(location)
+    if _names_place(location or "") or (unknown and _names_place(description or "")):
         return "onsite"
-    if remote_signal(location, description):
+    signal = remote_signal(location, description)
+    if signal and (signal.startswith("location:") or unknown):
         return "remote"
     return None
 

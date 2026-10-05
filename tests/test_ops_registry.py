@@ -130,7 +130,8 @@ def _args(**given):
                 prune_offmission=False, no_fit=False, preview=False,
                 send=False, no_verify=False, no_websearch=False,
                 confirm_cost=False, samples=5, requeue=False,
-                requeue_apply=False, rekey_apply=False)
+                requeue_apply=False, rekey_apply=False,
+                restamp_apply=False, restamp_undo="")
     base.update(given)
     return SimpleNamespace(**base)
 

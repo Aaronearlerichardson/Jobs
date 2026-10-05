@@ -388,9 +388,11 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
     t = _t(t)
     current = verify_model()
     done_ids: set[str] = set()   # verified THIS run: never stale again, even under force
+    unverifiable: set[str] = set()   # no body to read this run: not asked again each round
 
     def _stale(r: JobRow | RankedJob) -> bool:
-        if r["job_id"] in done_ids or (r["job_id"] in _GIVEN_UP and not force):
+        if (r["job_id"] in done_ids or r["job_id"] in unverifiable
+                or (r["job_id"] in _GIVEN_UP and not force)):
             return False
         if force or not is_deep_verified(r.get("fit_reason")):
             return True
@@ -408,7 +410,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                 print(f"  [!] deep verify skipped: Claude API disabled for this "
                       f"run ({down})")
                 break
-            ranked = await db.run(_ranked, t, limit=top_n)
+            ranked = await db.run(_ranked, t, limit=top_n, with_description=True)
             floor = t.verify_floor
             stale_all = [(i, r) for i, r in enumerate(ranked) if _stale(r)]
             stale_top = [r for i, r in stale_all
@@ -470,6 +472,7 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                             # running or queued.
                             break
                         print(f"    [?] kept   {(r['title'] or '')[:46]} - {res.reason}")
+                        unverifiable.add(r["job_id"])
                         continue
                     await db.run(store.update_job_scores, r["job_id"], res.as_columns())
                     done_ids.add(r["job_id"])
