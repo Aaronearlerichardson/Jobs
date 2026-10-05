@@ -18,14 +18,14 @@ four public renderers compose.
 from __future__ import annotations
 
 import smtplib
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Any
 
-from src import config
+from src import config, store
 from src.config import RuntimeTrack
 from src.match import locality
 from src.rows import CompanyRow, FetchedJob, JobRow, RankedJob
@@ -66,8 +66,9 @@ def _tag(t: RuntimeTrack) -> str:
     return f"[{t.label.upper()}]"
 
 
-def apply_band_rows(ranked: list[RankedJob] | None,
-                    limit: int = APPLY_BAND_LIMIT) -> list[RankedJob]:
+def apply_band_rows(ranked: list[RankedJob] | None, limit: int = APPLY_BAND_LIMIT,
+                    prior: Callable[[Mapping[str, Any]], store.Prior | None] | None = None
+                    ) -> list[RankedJob]:
     """The undecided open local rows scored inside APPLY_BAND, best fit
     first, at most `limit` of them.
 
@@ -76,6 +77,9 @@ def apply_band_rows(ranked: list[RankedJob] | None,
     serve time; remote and relocation rows stay out however well they
     score, and so does anything the user has already decided on (saved
     included). Enforced by tests/test_digest.py::TestApplyBand.
+
+    `prior` (store.prior_lookup over your pipeline) also drops a row that
+    repeats a role you already applied to, a repost or another level of it.
     """
     lo, hi = APPLY_BAND
     picked: list[RankedJob] = []
@@ -86,6 +90,8 @@ def apply_band_rows(ranked: list[RankedJob] | None,
         if (j.get("status") or "open") == "closed" or j.get("disposition"):
             continue
         if not locality.NC_RE.search(j.get("location") or ""):
+            continue
+        if prior and prior(j):
             continue
         picked.append(j)
     picked.sort(key=lambda j: j["resume_fit_score"] or 0.0, reverse=True)
@@ -274,6 +280,17 @@ _FOLLOWUPS = "Follow-ups due"
 _APPLY_BAND = "Apply band"
 
 
+def _repeat_note(j: Mapping[str, Any], prior: Callable[[Mapping[str, Any]], store.Prior | None]) -> str:
+    """The table cell for a ranked row's location, plus a note when the row
+    repeats an application of yours."""
+    p = prior(j)
+    loc = j.get("location") or ""
+    if not p:
+        return loc
+    what = "applied to this title" if p.kind == "repost" else f"sibling of {p.title}"
+    return f"{loc} (↻ {what} {p.when[5:]})"
+
+
 def _band_intro(tail: str = "") -> str:
     lo, hi = APPLY_BAND
     return (f"Open local postings scored {lo:.2f} to {hi:.2f} that you have "
@@ -333,7 +350,8 @@ def write_ranked_digest(
             "(set in the Pipeline tab).",
             _table(("Due", "Company", "Title", "Contact", "Disposition"),
                    rows)))
-    band = apply_band_rows(ranked)
+    seen_before = store.prior_lookup(pipeline or [])
+    band = apply_band_rows(ranked, prior=seen_before)
     if band:
         rows = [_cells([_fit(j["resume_fit_score"]), age_tag(j, today),
                         j.get("company_name"), _link(j), j.get("location")])
@@ -361,7 +379,7 @@ def write_ranked_digest(
     rows = [_cells([_fit(j.get("resume_fit_score")),
                     _fit(j.get("combined_score")), age_tag(j, today),
                     j.get("company_name"), j.get("mission_tier") or "?",
-                    _link(j), j.get("location"), j.get("fit_reason") or ""])
+                    _link(j), _repeat_note(j, seen_before), j.get("fit_reason") or ""])
             for j in ranked]
     sections.append((
         None,
@@ -429,7 +447,7 @@ def send_ranked_digest(
                                  (link[0] + who, link[1] + who),
                                  p.get("disposition")]))
         sections.append((_FOLLOWUPS, None, _list(rows)))
-    band = apply_band_rows(ranked)
+    band = apply_band_rows(ranked, prior=store.prior_lookup(pipeline or []))
     if band:
         rows = [_bullet([_fit(j["resume_fit_score"]), j.get("company_name"),
                          _link(j), j.get("location")]) for j in band]

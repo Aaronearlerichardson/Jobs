@@ -156,7 +156,8 @@ def _geo_tag(r: Mapping[str, Any]) -> str:
 
 
 def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
-              remote_floor: float | None = None) -> dict[str, Any]:
+              remote_floor: float | None = None,
+              prior: store.Prior | None = None) -> dict[str, Any]:
     fields = (
         "job_id", "title", "company_name", "url", "location", "geo_mode",
         "resume_fit_score", "combined_score", "mission_tier", "mission_score",
@@ -183,6 +184,8 @@ def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
     # The same rule ranked_jobs applies server-side, re-run per row because
     # /api/jobs deliberately ships everything and gates on the client.
     d["remote_ok"] = store.remote_admitted(r, remote_floor)
+    # An application of yours this posting repeats (store.prior_lookup).
+    d["prior"] = prior._asdict() if prior else None
     return d
 
 
@@ -200,9 +203,10 @@ def api_jobs() -> ResponseReturnValue:
             rank_by=t.rank_by, min_mission=t.min_mission,
             include_closed=request.args.get("closed") == "1",
             include_dispositioned=request.args.get("dispositioned") == "1")
+        prior = store.prior_lookup(store.get_pipeline(conn))
     today = _today()
     floor = t.remote_mission_floor
-    return jsonify([_job_json(r, today, i + 1, remote_floor=floor)
+    return jsonify([_job_json(r, today, i + 1, remote_floor=floor, prior=prior(r))
                     for i, r in enumerate(rows)])
 
 

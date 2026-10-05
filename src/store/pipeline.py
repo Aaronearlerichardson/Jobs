@@ -204,7 +204,7 @@ def title_keys(title: str | None) -> tuple[str, str]:
     >>> title_keys("Senior")
     ('senior', 'senior')
     """
-    text = re.sub(r"#\s*\d+|r-?\d+", " ", (title or "").lower())
+    text = re.sub(r"#\s*\d+|\br-?\d+\b", " ", (title or "").lower())
     words = [w for w in re.findall(r"[a-z0-9+]+", text) if not w.isdigit()]
     role = [w for w in words if w not in _LEVEL_WORDS]
     return " ".join(words), " ".join(role or words)
@@ -222,13 +222,13 @@ def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
     >>> look = prior_lookup([{"job_id": "a", "company_name": "Acme, Inc.",
     ...                       "title": "Algorithm Engineer", "disposition": "applied",
     ...                       "applied_at": "2026-08-21T10:00"}])
-    >>> look({"job_id": "b", "company_name": "ACME", "title": "Algorithm Engineer"})
+    >>> look({"job_id": "b", "company_name": "ACME inc", "title": "Algorithm Engineer"})
     Prior(kind='repost', title='Algorithm Engineer', disposition='applied', when='2026-08-21')
-    >>> look({"job_id": "c", "company_name": "Acme", "title": "Senior Algorithm Engineer II"}).kind
+    >>> look({"job_id": "c", "company_name": "Acme Inc", "title": "Senior Algorithm Engineer II"}).kind
     'sibling'
     >>> look({"job_id": "d", "company_name": "Other", "title": "Algorithm Engineer"}) is None
     True
-    >>> look({"job_id": "a", "company_name": "Acme", "title": "Algorithm Engineer"}) is None
+    >>> look({"job_id": "a", "company_name": "Acme Inc", "title": "Algorithm Engineer"}) is None
     True
     """
     by_company: dict[str, list[tuple[str, str, Mapping[str, Any]]]] = {}

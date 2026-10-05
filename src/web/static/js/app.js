@@ -89,6 +89,11 @@ function ageChip(age) {
   if (age === "?") return `<span class="chip">?</span>`;
   return `<span class="chip">${esc(age)}</span>`;
 }
+function priorChip(p) {
+  if (!p) return "";
+  const what = p.kind === "repost" ? "applied to this title" : `sibling of "${p.title}"`;
+  return `<span class="chip prior" title="${esc(p.disposition)} ${esc(p.when)}: ${esc(p.title)}">↻ ${esc(what)} ${esc(p.when.slice(5))}</span>`;
+}
 function cleanReason(r) { return (r || "").replace(/^\[[^\]]*\]\s*/, ""); }
 function geoChip(bucket) {
   if (bucket === "local")  return `<span class="chip geo-local">local</span>`;
@@ -139,6 +144,7 @@ function jobFilters(j) {
     const d = parseInt(j.age); if (!(j.age === "NEW" || (d >= 0 && d <= 7))) return false;
   }
   if (age === "stale" && !(j.age || "").endsWith("!")) return false;
+  if ($("#f-repeats").checked && j.prior) return false;
   if ($("#f-verified").checked && !j.verified) return false;
   if ($("#f-watched").checked && !watchedNames().has(j.company_name)) return false;
   return true;
@@ -170,6 +176,10 @@ function renderFilterSummary(shown) {
     const n = state.jobs.filter(j => !(j.resume_fit_score >= mf)).length;
     if (n) bits.push(`<b>${n}</b> below the ${mf} fit cutoff`);
   }
+  if ($("#f-repeats").checked) {
+    const n = state.jobs.filter(j => j.prior).length;
+    if (n) bits.push(`<b>${n}</b> repeat a role you applied to (<button data-fix="repeats">show them</button>)`);
+  }
   if (bandOn()) {
     const n = state.jobs.filter(j => !inApplyBand(j)).length;
     if (n) bits.push(`<b>${n}</b> outside the apply band`);
@@ -180,6 +190,7 @@ function renderFilterSummary(shown) {
   el.querySelectorAll("button[data-fix]").forEach(b => b.onclick = () => {
     if (b.dataset.fix === "move") $("#f-move").checked = true;
     if (b.dataset.fix === "remote") $("#f-geo").value = "remote";
+    if (b.dataset.fix === "repeats") $("#f-repeats").checked = false;
     renderJobs();
   });
 }
@@ -200,6 +211,7 @@ function renderJobs() {
       j.status === "closed" ? `<span class="chip closed">closed</span>` : "",
       j.disposition ? `<span class="chip disp">${esc(j.disposition)}</span>` : "",
       j.verified ? `<span class="chip ver">✓ verified</span>` : "",
+      priorChip(j.prior),
       gates,
     ].filter(Boolean).join(" ");
     const expanded = state.expanded === j.job_id ? renderDetail(j) : "";
@@ -1313,7 +1325,7 @@ $("#trackpick").addEventListener("change", async e => {
 });
 
 ["#f-search", "#f-fit", "#f-geo", "#f-move", "#f-age", "#f-verified", "#f-watched",
- "#f-band"]
+ "#f-band", "#f-repeats"]
   .forEach(s => $(s).addEventListener("input", renderJobs));
 ["#f-closed", "#f-disp"].forEach(s => $(s).addEventListener("change",
   async () => { await loadJobs(); renderJobs(); }));

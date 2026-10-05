@@ -126,6 +126,7 @@
   .chip.closed   { background: var(--critical); border-color: var(--critical); color: #fff; }
   .chip.disp     { border-color: var(--accent); color: var(--accent); }
   .chip.tier     { color: var(--muted); }
+  .chip.prior    { border-color: var(--serious); color: var(--serious); }
   .chip.ver      { color: var(--ink-2); }
 
   /* ------- row actions ------- */

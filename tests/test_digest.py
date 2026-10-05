@@ -107,6 +107,19 @@ class TestApplyBand:
         assert fits == sorted(fits, reverse=True)
         assert picked[0]["job_id"] == "j13"
 
+    def test_leaves_out_rows_that_repeat_an_application(self, hometown):
+        from src import store
+        ranked = [row("repost", fit=0.55, location=hometown),
+                  row("level", fit=0.50, location=hometown),
+                  row("fresh", fit=0.45, location=hometown)]
+        ranked[0].update(company_name="Acme", title="Algorithm Engineer")
+        ranked[1].update(company_name="Acme", title="Senior Algorithm Engineer")
+        ranked[2].update(company_name="Acme", title="Data Engineer")
+        look = store.prior_lookup([{"job_id": "done", "company_name": "Acme",
+                                    "title": "Algorithm Engineer",
+                                    "disposition": "applied"}])
+        assert [j["job_id"] for j in digest.apply_band_rows(ranked, prior=look)] == ["fresh"]
+
     def test_empty_input_is_fine(self, hometown):
         assert digest.apply_band_rows(None) == []
         assert digest.apply_band_rows([]) == []
