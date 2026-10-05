@@ -833,7 +833,7 @@ def _effective_mission(company_name: str | None, mission: float | None) -> float
 _RANK_SQL = """
 WITH pool AS (
   SELECT j.id, j.job_id, j.url, j.company_id, j.company_name, j.title,
-         j.resume_fit_score, c.mission_score,
+         j.resume_fit_score, c.mission_score, c.tags AS _tags,
          effective_mission(j.company_name, c.mission_score) AS _mission
   FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
   WHERE {pool_where}
@@ -853,7 +853,9 @@ ORDER BY {final_order}"""
 # jsonld sweep hits and manual --add carry no company_id -- 4 of 119,411 rows
 # in the 2026-09-17 live store), else the row's own job_id, which never
 # repeats, so a nameless row never collides with every other nameless row.
-# Then the normalised title.
+# Then the normalised title. A company whose tags carry `employer:<key>`
+# (tags.EMPLOYER) joins the group of every other row with that key first,
+# so two boards of one employer fold the same posting into one row.
 _COLLAPSE_SQL = """
 , ranked AS (
   SELECT *, ROW_NUMBER() OVER ordered AS _rn,
@@ -863,13 +865,20 @@ _COLLAPSE_SQL = """
   FROM scored
   WINDOW ordered AS (
     PARTITION BY
-      CASE WHEN company_id IS NOT NULL THEN CAST(company_id AS TEXT)
+      CASE WHEN employer_tag(_tags) != '' THEN 'employer:' || employer_tag(_tags)
+           WHEN company_id IS NOT NULL THEN CAST(company_id AS TEXT)
            WHEN name_key(company_name) != '' THEN 'name:' || name_key(company_name)
            ELSE 'job:' || job_id END,
       norm_title(title)
     ORDER BY {order}),
          whole AS (ordered ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 )"""
+
+
+@sql_function("employer_tag", 1)
+def _employer_tag(company_tags: str | None) -> str:
+    """tags.employer over a query's column, for ranked_jobs' collapse."""
+    return tags.employer(company_tags)
 
 
 @sql_function("remote_admitted", 4)

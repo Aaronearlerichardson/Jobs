@@ -537,6 +537,10 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
     the pass has unwound.
     """
     db_path = db_path or config.STORE_DB_PATH
+    async with store.Writer(db_path) as db:
+        merged = await db.run(store.dedup_companies)
+    if merged:
+        print(f"  merged {merged} duplicate company row(s) that shared a board")
     summary = await pull(db_path, only=only, names=names,
                          min_age_hours=min_age_hours, limit=limit,
                          hydrate=hydrate, max_hours=max_hours, board_fn=board_fn)

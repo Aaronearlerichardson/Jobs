@@ -754,6 +754,18 @@ class TestCollapse:
         ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
         assert ids == {"gh_acme_1", "gh_beta_1"}
 
+    def test_boards_tagged_one_employer_collapse_across_companies(
+            self, db, company, add_job):
+        beta = store.upsert_company(db, {"name": "Beta", "ats": "greenhouse",
+                                         "slug": "beta", "tags": "employer:acme"})
+        db.execute("UPDATE companies SET tags='employer:acme' WHERE id=?", (company,))
+        add_job("gh_acme_1", "Data Engineer", fit=0.5)
+        add_job("gh_beta_1", "Data Engineer", fit=0.9, company_id=beta,
+                company_name="Beta", url="https://beta.io/gh_beta_1")
+        rows = store.ranked_jobs(db, track="local-tech")
+        assert [r["job_id"] for r in rows] == ["gh_beta_1"]
+        assert rows[0]["dup_job_ids"] == ("gh_acme_1",)
+
     def test_whitespace_and_case_only_title_differences_collapse(
             self, db, company, add_job):
         add_job("gh_acme_1", "Data   Engineer", fit=0.5)

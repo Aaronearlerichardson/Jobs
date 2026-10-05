@@ -169,6 +169,8 @@ _COMMANDS = [
         "apply": a.restamp_apply, "undo": a.restamp_undo})),
     ("restamp_tiers", _op("restamp-tiers", lambda a: {
         "apply": a.restamp_apply, "undo": a.restamp_undo})),
+    ("link_employers", _op("link-employers", lambda a: {
+        "apply": a.restamp_apply, "undo": a.restamp_undo})),
 ]
 
 
@@ -256,11 +258,16 @@ def main(argv: list[str] | None = None) -> None:
                     help="Report the companies whose mission_tier is not the "
                          "tier their mission_score falls in; writes only with "
                          "--restamp-apply")
+    ap.add_argument("--link-employers", action="store_true",
+                    help="Report the companies that are boards of one employer "
+                         "(shared postings) and would get a shared employer: "
+                         "tag, so the ranking shows a posting once; writes "
+                         "only with --restamp-apply")
     ap.add_argument("--restamp-apply", action="store_true",
-                    help="With --restamp-geo/--restamp-tiers: save the old "
+                    help="With --restamp-geo/--restamp-tiers/--link-employers: save the old "
                          "stamps to db_backups, then rewrite them")
     ap.add_argument("--restamp-undo", metavar="FILE", default="",
-                    help="With --restamp-geo/--restamp-tiers: restore the "
+                    help="With --restamp-geo/--restamp-tiers/--link-employers: restore the "
                          "stamps in a restamp backup file (--restamp-apply "
                          "to write)")
     ap.add_argument("--limit", type=int, default=None,

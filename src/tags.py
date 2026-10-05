@@ -36,6 +36,13 @@ WATCH = "watch"
 # removes the row and blocklists the name. Never crawled while pending.
 PENDING = "pending-review"
 
+# "employer:<key>": this row's postings and every other row's carrying the
+# same key are one employer's (two boards of one company: a careers site on
+# Phenom and the Workday tenant behind it). The ranking folds the same
+# title across them into one row (store.ranked_jobs collapse); nothing else
+# reads it. Set by `run_scraper.py --link-employers`.
+EMPLOYER = "employer:"
+
 # Retired name -> current name. Read-side only: nothing writes these.
 ALIASES = {
     "nc_local": LOCAL,
@@ -119,6 +126,17 @@ def join(tags: Iterable[str | None]) -> str | None:
     True
     """
     return ",".join(sorted({canonical(t) for t in tags if t})) or None
+
+
+def employer(raw: str | None) -> str:
+    """The employer key a company's `tags` names, or "" when it names none.
+
+    >>> employer("local,employer:ppd,watch")
+    'ppd'
+    >>> employer("local"), employer(None)
+    ('', '')
+    """
+    return next((t[len(EMPLOYER):] for t in parse(raw) if t.startswith(EMPLOYER)), "")
 
 
 def has(raw: str | Mapping[str, Any] | None, tag: str) -> bool:

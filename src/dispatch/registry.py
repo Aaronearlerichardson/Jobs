@@ -205,6 +205,11 @@ class RestampGeo(Tracked):
     undo: str = ""
 
 
+class LinkEmployers(RestampGeo):
+    min_shared: int = 25
+    min_share: float = 0.25
+
+
 class Prune(Tracked):
     offmission: bool = False
 
@@ -337,6 +342,13 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "target": restamp.restamp_tiers,
         "params": RestampGeo,
         "ui": False,      # a one-off: tiers follow their scores
+    },
+    "link-employers": {
+        "label": "Link boards of one employer",
+        "engine": None,
+        "target": restamp.link_employers,
+        "params": LinkEmployers,
+        "ui": False,      # a one-off after a roster change; preview first
     },
     "prune": {
         "label": "Prune dead boards",
