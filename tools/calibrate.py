@@ -25,7 +25,6 @@ Read-only. `--rescore` makes one Claude call per decided job.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sqlite3
 import sys
 from collections.abc import Sequence
@@ -37,7 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config, store  # noqa: E402
+from src import config, runstate, store  # noqa: E402
 
 #: How a disposition groups: what you went after, and what you passed on.
 CLASS = {"applied": "pursued", "interviewing": "interviewed", "rejected": "pursued",
@@ -95,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         conn.close()
     thresholds = [float(x) for x in args.thresholds.split(",")]
-    new = asyncio.run(_rescore([r for r in rows if r["description"]])) if args.rescore else {}
+    new = runstate.run(_rescore([r for r in rows if r["description"]])) if args.rescore else {}
 
     print(f"\n  {len(rows)} decided job(s); digest_min_fit is {track.digest_min_fit:.2f}\n")
     print(f"  {'fit':>5} {'now':>5}  {'decision':12} {'company':24} title")

@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from src import config
+from src import digest
 from src import store
 from src.ats.board import board_for
 from src.ats.board import company as company_fetch
@@ -721,7 +722,9 @@ async def _triage(db_path: str | Path, max_workers: int,
     deep verify (ops.verify_top, within its verify_top), one closed-URL
     probe (ops.check_closed_jobs: CLOSED_PROBE_LIMIT open rows no board
     has vouched for in CLOSED_PROBE_STALE_DAYS), each roster track's
-    digest (no email), and the Claude spend footer for the pass's calls.
+    digest, an announcement of what surfaced since the pass began (an
+    email and/or a toast, per each track's `email` and `notify`), and the
+    Claude spend footer for the pass's calls.
     With no API key, or the breaker already tripped, the verify step is
     one printed line instead.
 
@@ -734,6 +737,7 @@ async def _triage(db_path: str | Path, max_workers: int,
         sits here so a dead API prints one line, not one per track.
     """
     from src.crawl import triage
+    since = datetime.now().isoformat()
     kw: dict[str, Any] = {"score_cap": score_cap} if score_cap is not None else {}
     result = await triage.run(db_path=db_path, max_workers=max_workers, **kw)
     async with store.Writer(db_path) as db:
@@ -751,7 +755,11 @@ async def _triage(db_path: str | Path, max_workers: int,
         await check_closed_jobs(limit=CLOSED_PROBE_LIMIT,
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
         for t in tracks:
-            await db.run(rewrite_digest, t, top_n=5,
-                         heading=f"\n  [{t.track}] digest rewritten:")
+            ranked = await db.run(rewrite_digest, t, top_n=5,
+                                  heading=f"\n  [{t.track}] digest rewritten:")
+            await asyncio.to_thread(
+                digest.announce, ranked, t, since,
+                pipeline=await db.run(store.get_pipeline),
+                followups=await db.run(store.followups_due))
     report_cache_stats()
     return result

@@ -23,7 +23,7 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from src import config, store
 from src.config import RuntimeTrack
@@ -99,9 +99,13 @@ def apply_band_rows(ranked: list[RankedJob] | None, limit: int = APPLY_BAND_LIMI
 
 
 def new_ranked_rows(ranked: list[RankedJob] | None, t: RuntimeTrack,
-                    new_since: str | None = None) -> list[RankedJob]:
-    """The ranked rows first seen on or after `new_since` (default today)
-    that score at least the track's `digest_min_fit`.
+                    new_since: str | None = None, by: str = "first_seen",
+                    prior: Callable[[Mapping[str, Any]], store.Prior | None] | None = None
+                    ) -> list[RankedJob]:
+    """The ranked rows whose `by` column (default `first_seen`; the harvest
+    pass uses `triaged_at`, when a row surfaced) is on or after `new_since`
+    (default today) that score at least the track's `digest_min_fit`, less
+    any that `prior` says repeat a role you applied to.
 
     >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
     >>> rows = [{"job_id": "a", "first_seen": "2026-09-01",
@@ -139,11 +143,13 @@ def new_ranked_rows(ranked: list[RankedJob] | None, t: RuntimeTrack,
         The written digest is the whole ranking and is fine to browse; the
         email is an interruption, so it gets a stricter bar.
     """
-    since = (new_since or _today())[:10]
+    since = new_since or _today()
     floor = float(t.digest_min_fit or 0.0)
     fresh: list[RankedJob] = []
     for j in ranked or []:
-        if (j.get("first_seen") or "")[:10] < since:
+        if (cast(str, j.get(by)) or "")[:len(since)] < since:
+            continue
+        if prior and prior(j):
             continue
         fit = j.get("resume_fit_score")
         if not isinstance(fit, (int, float)) or fit < floor:
@@ -403,9 +409,9 @@ def send_ranked_digest(
         ranked: list[RankedJob], t: RuntimeTrack,
         watch_hits: Iterable[tuple[CompanyRow, FetchedJob, bool]] | None = None,
         pipeline: list[JobRow] | None = None, new_since: str | None = None,
-        followups: list[JobRow] | None = None) -> bool:
-    """Email a store-crawl track's new ranked rows. True when a message
-    actually went out.
+        followups: list[JobRow] | None = None, by: str = "first_seen") -> bool:
+    """Email a store-crawl track's new ranked rows (`new_ranked_rows`, by
+    the `by` column). True when a message actually went out.
 
     The sections of `write_ranked_digest` in brief — pipeline rows closed
     since `new_since`, follow-ups due, the apply band, watched-company
@@ -420,7 +426,8 @@ def send_ranked_digest(
         rather than a page to visit. A daily alert that also fires on quiet
         days stops being read, which is what the silent path is for.
     """
-    fresh = new_ranked_rows(ranked, t, new_since)
+    seen_before = store.prior_lookup(pipeline or [])
+    fresh = new_ranked_rows(ranked, t, new_since, by, prior=seen_before)
     hits = list(watch_hits or [])
     since = (new_since or _today())[:10]
     closed = [p for p in (pipeline or [])
@@ -447,7 +454,7 @@ def send_ranked_digest(
                                  (link[0] + who, link[1] + who),
                                  p.get("disposition")]))
         sections.append((_FOLLOWUPS, None, _list(rows)))
-    band = apply_band_rows(ranked, prior=store.prior_lookup(pipeline or []))
+    band = apply_band_rows(ranked, prior=seen_before)
     if band:
         rows = [_bullet([_fit(j["resume_fit_score"]), j.get("company_name"),
                          _link(j), j.get("location")]) for j in band]
@@ -456,15 +463,16 @@ def send_ranked_digest(
         sections.append(_watch_section(hits))
     floor = float(t.digest_min_fit or 0.0)
     n_md, n_html = _bold(f"{len(fresh)} new job(s)")
+    verb = "first seen" if by == "first_seen" else "surfaced since"
     rows = [_cells([_fit(j.get("resume_fit_score")), age_tag(j, today),
                     j.get("company_name"), _link(j), j.get("location"),
                     j.get("fit_reason") or ""])
             for j in fresh]
     sections.append((
         None,
-        (f"{n_md} first seen {since}, resume fit >= {floor:.2f}, "
+        (f"{n_md} {verb} {since}, resume fit >= {floor:.2f}, "
          f"ranked by fit.",
-         f"{n_html} first seen {since}, resume fit &gt;= {floor:.2f}."),
+         f"{n_html} {verb} {since}, resume fit &gt;= {floor:.2f}."),
         _table(("Fit", "Age", "Company", "Title", "Location", "Why"), rows,
                numeric={"Fit", "Age"})))
 
@@ -476,7 +484,47 @@ def send_ranked_digest(
     return False
 
 
-def toast(t: RuntimeTrack, count: int, path: str | Path) -> bool:
+def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
+             pipeline: list[JobRow] | None = None,
+             followups: list[JobRow] | None = None) -> int:
+    """Tell you what surfaced into track `t`'s ranking since `since` (an
+    ISO time, compared with each row's `triaged_at`): the count, as an email
+    when the track sets `email` and a desktop toast when it sets `notify`.
+    Prints one line either way; the harvest pass calls this when it ends.
+
+    Rows that repeat a role you applied to (store.prior_lookup) and rows
+    under `digest_min_fit` do not count, so a quiet pass says nothing.
+
+    >>> t = RuntimeTrack(id="t", db_path=Path("t.db"), digest_min_fit=0.4)
+    >>> rows = [{"job_id": "a", "triaged_at": "2026-10-05T12:00:01", "resume_fit_score": 0.8},
+    ...         {"job_id": "b", "triaged_at": "2026-10-05T09:00:00", "resume_fit_score": 0.9}]
+    >>> announce(rows, t, "2026-10-05T12:00:00")
+      [T] 1 new match(es) since 2026-10-05T12:00:00 (set [tracks.t] email or notify to be told)
+    1
+    >>> announce([], t, "2026-10-05T12:00:00")
+    0
+    """
+    fresh = new_ranked_rows(ranked, t, since, "triaged_at",
+                            prior=store.prior_lookup(pipeline or []))
+    if not fresh:
+        return 0
+    how = []
+    if t.email and send_ranked_digest(ranked, t, pipeline=pipeline, new_since=since,
+                                      followups=followups, by="triaged_at"):
+        how.append("emailed")
+    if t.notify:
+        best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
+        lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "
+                f"{(best.get('title') or '')[:60]}")
+        if toast(t, len(fresh), _digest_path(None, f"{t.id}_{_today()}.md"), lead):
+            how.append("toast")
+    print(f"  {_tag(t)} {len(fresh)} new match(es) since {since}"
+          + (f" ({', '.join(how)})" if how else
+             f" (set [tracks.{t.id}] email or notify to be told)"))
+    return len(fresh)
+
+
+def toast(t: RuntimeTrack, count: int, path: str | Path, lead: str = "Open today's digest") -> bool:
     """Raise a Windows desktop toast for a just-sent digest. True only when
     one was actually shown.
 
@@ -497,7 +545,7 @@ def toast(t: RuntimeTrack, count: int, path: str | Path) -> bool:
     try:
         n = Notification(app_id="Job Crawler",
                          title=f"{_tag(t)} {count} new posting(s)",
-                         msg="Open today's digest")
+                         msg=lead)
         n.add_actions(label="Open digest", launch=str(path))
         n.show()
         return True
