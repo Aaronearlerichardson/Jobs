@@ -149,10 +149,10 @@ def new_ranked_rows(ranked: list[RankedJob] | None, t: RuntimeTrack,
     for j in ranked or []:
         if (cast(str, j.get(by)) or "")[:len(since)] < since:
             continue
-        if prior and prior(j):
-            continue
         fit = j.get("resume_fit_score")
         if not isinstance(fit, (int, float)) or fit < floor:
+            continue
+        if prior and prior(j):
             continue
         fresh.append(j)
     return fresh
@@ -273,6 +273,11 @@ def _html_doc(body: str, width: int) -> str:
             f"{body}</body></html>")
 
 
+def _ranked_digest_path(t: RuntimeTrack, report_dir: Path | None = None) -> Path:
+    """Today's ranked digest file for track `t`."""
+    return _digest_path(report_dir, f"{t.id}_{_today()}.md")
+
+
 def _digest_path(report_dir: Path | None, name: str) -> Path:
     """`name` under `report_dir` (default config.REPORT_DIR), creating it."""
     report_dir = report_dir or config.REPORT_DIR
@@ -291,10 +296,7 @@ def _repeat_note(j: Mapping[str, Any], prior: Callable[[Mapping[str, Any]], stor
     repeats an application of yours."""
     p = prior(j)
     loc = j.get("location") or ""
-    if not p:
-        return loc
-    what = "applied to this title" if p.kind == "repost" else f"sibling of {p.title}"
-    return f"{loc} (↻ {what} {p.when[5:]})"
+    return f"{loc} (↻ {p.label} {p.when[5:]})" if p else loc
 
 
 def _band_intro(tail: str = "") -> str:
@@ -399,7 +401,7 @@ def write_ranked_digest(
                numeric={"Fit", "Combined", "Age"})))
 
     md, _ = _render(f"{_tag(t)} Job Digest — {today}", sections)
-    path = _digest_path(report_dir, f"{t.id}_{today}.md")
+    path = _ranked_digest_path(t, report_dir)
     path.write_text(md, encoding="utf-8")
     print(f"  digest -> {path}")
     return path
@@ -512,12 +514,11 @@ def announce(ranked: list[RankedJob], t: RuntimeTrack, since: str, *,
     if t.email and send_ranked_digest(ranked, t, pipeline=pipeline, new_since=since,
                                       followups=followups, by="triaged_at"):
         how.append("emailed")
-    if t.notify:
-        best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
-        lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "
-                f"{(best.get('title') or '')[:60]}")
-        if toast(t, len(fresh), _digest_path(None, f"{t.id}_{_today()}.md"), lead):
-            how.append("toast")
+    best = max(fresh, key=lambda j: j.get("resume_fit_score") or 0.0)
+    lead = (f"{(best.get('resume_fit_score') or 0):.2f} {best.get('company_name')}: "
+            f"{(best.get('title') or '')[:60]}")
+    if toast(t, len(fresh), _ranked_digest_path(t), lead):
+        how.append("toast")
     print(f"  {_tag(t)} {len(fresh)} new match(es) since {since}"
           + (f" ({', '.join(how)})" if how else
              f" (set [tracks.{t.id}] email or notify to be told)"))

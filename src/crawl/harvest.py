@@ -761,9 +761,9 @@ async def _triage(db_path: str | Path, max_workers: int,
         for t in tracks:
             ranked = await db.run(rewrite_digest, t, top_n=5,
                                   heading=f"\n  [{t.track}] digest rewritten:")
-            await asyncio.to_thread(
-                digest.announce, ranked, t, since,
-                pipeline=await db.run(store.get_pipeline),
-                followups=await db.run(store.followups_due))
+            pipeline, followups = await db.run(
+                lambda conn: (store.get_pipeline(conn), store.followups_due(conn)))
+            await asyncio.to_thread(digest.announce, ranked, t, since,
+                                    pipeline=pipeline, followups=followups)
     report_cache_stats()
     return result

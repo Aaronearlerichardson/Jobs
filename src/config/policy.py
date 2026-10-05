@@ -141,10 +141,8 @@ def tier_for_score(score: float | None, tier: str | None = None) -> str | None:
     no score to read.
 
     The mission model names a tier and a score separately and does not
-    keep them in step (49 of 202 `core-mission` companies scored below that
-    band's floor on 2026-10-05: Eight Sleep at 0.5, Medtronic at 0.55, with
-    reasons that read "not neurotech"). The score is the finer judgment, it
-    is what ranking and remote trust read, so the tier follows it.
+    keep them in step. The score is the finer judgment, and ranking and
+    remote trust read it, so the tier follows it.
 
     >>> tier_for_score(1.0) == MISSION_TIERS[0].name
     True
@@ -156,6 +154,11 @@ def tier_for_score(score: float | None, tier: str | None = None) -> str | None:
     >>> mid = (bottom.band[1] + top.band[0]) / 2
     >>> tier_for_score(mid, top.name) == top.name
     True
+
+    Notes:
+        On 2026-10-05, 49 of 202 `core-mission` companies scored below
+        that band's floor (Eight Sleep 0.5, Medtronic 0.55), with reasons
+        that read "not neurotech".
     """
     if score is None:
         return tier

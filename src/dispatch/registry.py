@@ -200,12 +200,12 @@ class RekeyJobs(Tracked):
     commit: bool = Field(False, validation_alias="apply")
 
 
-class RestampGeo(Tracked):
+class Restamp(Tracked):
     commit: bool = Field(False, validation_alias="apply")
     undo: str = ""
 
 
-class LinkEmployers(RestampGeo):
+class LinkEmployers(Restamp):
     min_shared: int = 25
     min_share: float = 0.25
 
@@ -333,14 +333,14 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "label": "Restamp stored geo_mode",
         "engine": None,
         "target": restamp.restamp_geo,
-        "params": RestampGeo,
+        "params": Restamp,
         "ui": False,      # a one-off after the geo_mode rule changes
     },
     "restamp-tiers": {
         "label": "Restamp company mission tiers",
         "engine": None,
         "target": restamp.restamp_tiers,
-        "params": RestampGeo,
+        "params": Restamp,
         "ui": False,      # a one-off: tiers follow their scores
     },
     "link-employers": {

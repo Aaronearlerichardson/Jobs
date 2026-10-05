@@ -25,8 +25,10 @@ Read-only. `--rescore` makes one Claude call per decided job.
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
+from contextlib import aclosing
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -37,10 +39,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src import config, runstate, store  # noqa: E402
+from src.net.parallel import fan_out  # noqa: E402
 
 #: How a disposition groups: what you went after, and what you passed on.
-CLASS = {"applied": "pursued", "interviewing": "interviewed", "rejected": "pursued",
-         "dismissed": "dismissed"}
+CLASS = {"interviewing": "interviewed", "dismissed": "dismissed"}
 
 
 def sweep(scores: dict[str, list[float]], open_scores: Sequence[float],
@@ -63,17 +65,22 @@ def decided(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return [dict(r) for r in conn.execute(
         "SELECT job_id, company_name, title, location, description, resume_fit_score, "
         "fit_gates, fit_model, disposition, disposition_note "
-        "FROM jobs WHERE disposition IN ('applied','interviewing','rejected','dismissed') "
-        "ORDER BY resume_fit_score DESC")]
+        "FROM jobs WHERE disposition IN (SELECT value FROM json_each(?)) "
+        "ORDER BY resume_fit_score DESC",
+        (json.dumps(store.RANKING_EXCLUDED_DISPOSITIONS),))]
 
 
 async def _rescore(rows: Sequence[dict[str, Any]]) -> dict[str, float | None]:
     from src.claude.fit import score_resume_fit
+
+    async def one(r: dict[str, Any]) -> float | None:
+        return (await score_resume_fit(r["title"] or "", r["description"] or "",
+                                       location=r["location"] or "")).score
     out: dict[str, float | None] = {}
-    for r in rows:
-        res = await score_resume_fit(r["title"] or "", r["description"] or "",
-                                     location=r["location"] or "")
-        out[r["job_id"]] = res.score
+    async with aclosing(fan_out(rows, one, lambda r: f"rescore {r['company_name']}",
+                                with_item=True)) as got:
+        async for r, score in got:
+            out[r["job_id"]] = score
     return out
 
 
@@ -109,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     groups: dict[str, list[float]] = {}
     for r in rows:
         if r["resume_fit_score"] is not None:
-            groups.setdefault(CLASS[r["disposition"]], []).append(r["resume_fit_score"])
+            groups.setdefault(CLASS.get(r["disposition"], "pursued"), []).append(r["resume_fit_score"])
     print("\n  median fit: " + ", ".join(f"{k} {median(v):.2f} (n={len(v)})"
                                          for k, v in sorted(groups.items())))
     print(f"\n  {'at/above':>8} {'pursued':>8} {'interviewed':>12} {'dismissed':>10} "

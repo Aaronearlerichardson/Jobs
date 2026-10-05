@@ -833,7 +833,7 @@ def _effective_mission(company_name: str | None, mission: float | None) -> float
 _RANK_SQL = """
 WITH pool AS (
   SELECT j.id, j.job_id, j.url, j.company_id, j.company_name, j.title,
-         j.resume_fit_score, c.mission_score, c.tags AS _tags,
+         j.resume_fit_score, c.mission_score, employer_tag(c.tags) AS _employer,
          effective_mission(j.company_name, c.mission_score) AS _mission
   FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
   WHERE {pool_where}
@@ -865,7 +865,7 @@ _COLLAPSE_SQL = """
   FROM scored
   WINDOW ordered AS (
     PARTITION BY
-      CASE WHEN employer_tag(_tags) != '' THEN 'employer:' || employer_tag(_tags)
+      CASE WHEN _employer != '' THEN 'employer:' || _employer
            WHEN company_id IS NOT NULL THEN CAST(company_id AS TEXT)
            WHEN name_key(company_name) != '' THEN 'name:' || name_key(company_name)
            ELSE 'job:' || job_id END,

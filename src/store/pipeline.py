@@ -185,6 +185,17 @@ class Prior(NamedTuple):
     disposition: str
     when: str
 
+    @property
+    def label(self) -> str:
+        """How the badge says it.
+
+        >>> Prior("repost", "Data Engineer", "applied", "2026-08-21").label
+        'applied to this title'
+        >>> Prior("sibling", "Data Engineer", "applied", "2026-08-21").label
+        'sibling of Data Engineer'
+        """
+        return "applied to this title" if self.kind == "repost" else f"sibling of {self.title}"
+
 
 _LEVEL_WORDS = frozenset({"senior", "sr", "staff", "principal", "lead", "junior", "jr",
                           "associate", "i", "ii", "iii", "iv", "v", "level"})
@@ -241,9 +252,12 @@ def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
         return (p.get("applied_at") or p.get("disposition_at") or "")[:10]
 
     def look(job: Mapping[str, Any]) -> Prior | None:
+        rivals = by_company.get(name_key(job.get("company_name")))
+        if not rivals:
+            return None
         exact, role = title_keys(job.get("title"))
         best: tuple[int, str, Mapping[str, Any]] | None = None
-        for e, r, p in by_company.get(name_key(job.get("company_name")), ()):
+        for e, r, p in rivals:
             if p.get("job_id") == job.get("job_id") or role != r:
                 continue
             cand = (1 if e == exact else 0, when(p), p)

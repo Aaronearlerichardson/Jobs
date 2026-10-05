@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -58,14 +58,14 @@ def restamp_geo(commit: bool = False, undo: str = "", t: RuntimeTrack | None = N
         keep what triage stamped.
     """
     with track_store(t, conn) as conn:
-        def fresh() -> Iterable[tuple[Any, Any, Any, str]]:
+        def fresh() -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
             for r in conn.execute(
                     "SELECT job_id, company_name, title, location, description, geo_mode "
                     "FROM jobs WHERE closed_at IS NULL"):
-                yield (r["job_id"], r["geo_mode"], geo_mode(r["location"], r["description"]),
-                       f"{r['company_name'] or ''} | {(r['title'] or '')[:50]} | "
-                       f"{(r['location'] or '')[:50]}")
-        return _restamp(conn, commit, undo, ("jobs", "job_id", "geo_mode"), fresh())
+                yield r["job_id"], r["geo_mode"], geo_mode(r["location"], r["description"]), r
+        return _restamp(conn, commit, undo, ("jobs", "job_id", "geo_mode"), fresh(),
+                        lambda r: f"{r['company_name'] or ''} | {(r['title'] or '')[:50]} | "
+                                  f"{(r['location'] or '')[:50]}")
 
 
 def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None = None,
@@ -92,14 +92,37 @@ def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None =
         (api.score_company_mission); this brings the stored ones in line.
     """
     with track_store(t, conn) as conn:
-        def fresh() -> Iterable[tuple[Any, Any, Any, str]]:
+        def fresh() -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
             for r in conn.execute(
                     "SELECT id, name, mission_tier, mission_score FROM companies "
                     "WHERE mission_score IS NOT NULL"):
                 yield (r["id"], r["mission_tier"],
-                       config.tier_for_score(r["mission_score"], r["mission_tier"]),
-                       f"{r['name']} | score {r['mission_score']:.2f}")
-        return _restamp(conn, commit, undo, ("companies", "id", "mission_tier"), fresh())
+                       config.tier_for_score(r["mission_score"], r["mission_tier"]), r)
+        return _restamp(conn, commit, undo, ("companies", "id", "mission_tier"), fresh(),
+                        lambda r: f"{r['name']} | score {r['mission_score']:.2f}")
+
+
+def _employer_clusters(pairs: Iterable[tuple[int, int, int]], size: dict[int, int],
+                       min_share: float) -> list[list[int]]:
+    """Groups of company ids joined by (a, b, shared postings) `pairs` whose
+    shared count is at least `min_share` of the smaller board's `size`. Chains join.
+
+    >>> _employer_clusters([(1, 2, 30), (2, 3, 30), (4, 5, 1)], dict.fromkeys(range(1, 6), 40), 0.25)
+    [[1, 2, 3]]
+    """
+    parent: dict[int, int] = {}
+
+    def root(i: int) -> int:
+        while parent.setdefault(i, i) != i:
+            i = parent[i]
+        return i
+    for a, b, n in pairs:
+        if n >= min_share * min(size[a], size[b]):
+            parent[root(a)] = root(b)
+    groups: dict[int, list[int]] = defaultdict(list)
+    for i in sorted(parent):
+        groups[root(i)].append(i)
+    return list(groups.values())
 
 
 def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
@@ -112,10 +135,8 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
 
     Two companies are one employer when at least `min_shared` of their open
     postings share a title and location, and those are at least `min_share`
-    of the smaller board's open postings (2026-10-05: ThermoFisher and PPD
-    share 892, Novartis and Novartis Gene Therapies 436, Pfm and Precision
-    Medicine Group 128). Chains join. The key is the name of the cluster's
-    largest board, or a key a member already carries.
+    of the smaller board's open postings. The key is the name of the
+    cluster's largest board, or a key a member already carries.
 
     >>> conn = store.connect(":memory:")
     >>> for name in ("Acme", "Acme Labs"):
@@ -131,6 +152,13 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
         Acme Labs | employer:acme
       preview: nothing written.
     {'None -> employer:acme': 2}
+
+    Notes:
+        On 2026-10-05 this found exactly three pairs: ThermoFisher and PPD
+        (892 shared postings), Novartis and Novartis Gene Therapies (436),
+        Pfm and Precision Medicine Group (128). store.dedup_companies cannot
+        take this over: it merges rows of one board key, and these are
+        different boards (a Phenom careers site and a Workday tenant).
     """
     with track_store(t, conn) as conn:
         pairs = conn.execute("""
@@ -142,53 +170,45 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
             GROUP BY 1, 2 HAVING n >= ?""", (min_shared,)).fetchall()
         size = dict(conn.execute("SELECT company_id, COUNT(*) FROM open_jobs "
                                  "WHERE company_id IS NOT NULL GROUP BY company_id"))
-        parent: dict[int, int] = {}
-
-        def root(i: int) -> int:
-            while parent.setdefault(i, i) != i:
-                i = parent[i]
-            return i
-        for p in pairs:
-            if p["n"] >= min_share * min(size[p["x"]], size[p["y"]]):
-                parent[root(p["x"])] = root(p["y"])
-        members: dict[int, list[int]] = defaultdict(list)
-        for i in list(parent):
-            members[root(i)].append(i)
+        clusters = _employer_clusters([(p["x"], p["y"], p["n"]) for p in pairs], size, min_share)
         rows = {r["id"]: r for r in conn.execute(
             "SELECT id, name, tags FROM companies WHERE id IN (SELECT value FROM json_each(?))",
-            (json.dumps(sorted(parent)),))}
+            (json.dumps([i for ids in clusters for i in ids]),))}
 
-        def fresh() -> Iterable[tuple[Any, Any, Any, str]]:
-            for ids in members.values():
-                big = max(ids, key=lambda i: (size[i], -i))
-                key = next((tags.employer(rows[i]["tags"]) for i in ids
-                            if tags.employer(rows[i]["tags"])), "") or name_key(rows[big]["name"])
+        def fresh() -> Iterable[tuple[Any, Any, Any, tuple[str, str]]]:
+            for ids in clusters:
+                held = (tags.employer(rows[i]["tags"]) for i in ids)
+                key = next(filter(None, held), "") or name_key(
+                    rows[max(ids, key=lambda i: (size[i], -i))]["name"])
                 for i in sorted(ids, key=lambda i: (-size[i], i)):
                     old = rows[i]["tags"]
-                    new = tags.join({*tags.parse(old), f"{tags.EMPLOYER}{key}"})
-                    yield i, old, new, f"{rows[i]['name']} | {tags.EMPLOYER}{key}"
-        return _restamp(conn, commit, undo, ("companies", "id", "tags"), fresh())
+                    yield (i, old, tags.join({*tags.parse(old), f"{tags.EMPLOYER}{key}"}),
+                           (rows[i]["name"], key))
+        return _restamp(conn, commit, undo, ("companies", "id", "tags"), fresh(),
+                        lambda c: f"{c[0]} | {tags.EMPLOYER}{c[1]}")
 
 
 def _restamp(conn: sqlite3.Connection, commit: bool, undo: str, column: tuple[str, str, str],
-             fresh: Iterable[tuple[Any, Any, Any, str]]) -> dict[str, int]:
+             fresh: Iterable[tuple[Any, Any, Any, Any]],
+             describe: Callable[[Any], str]) -> dict[str, int]:
     """The shared preview/apply/undo over `column` = (table, key, column):
-    `fresh` yields (key, stored value, recomputed value, sample line)."""
+    `fresh` yields (key, stored value, recomputed value, context), and
+    `describe` turns a changed row's context into its sample line."""
     if undo:
         return _undo(conn, Path(undo), commit)
     table, key, col = column
-    changes: dict[str, list[tuple[Any, Any, Any, str]]] = defaultdict(list)
+    changes: dict[str, list[tuple[Any, Any, Any, Any]]] = defaultdict(list)
     n = 0
-    for k, old, new, sample in fresh:
+    for k, old, new, ctx in fresh:
         n += 1
         if new != old:
-            changes[f"{old} -> {new}"].append((k, old, new, sample))
+            changes[f"{old} -> {new}"].append((k, old, new, ctx))
     counts = {kind: len(rows) for kind, rows in changes.items()}
     print(f"  {n} row(s) read, {sum(counts.values())} would change")
     for kind, rows in sorted(changes.items(), key=lambda kv: -len(kv[1])):
         print(f"  {kind}  {len(rows)}")
-        for *_, sample in rows[:5]:
-            print(f"    {sample}")
+        for *_, ctx in rows[:5]:
+            print(f"    {describe(ctx)}")
     if commit and changes:
         moved = [(k, old, new) for rows in changes.values() for k, old, new, _ in rows]
         backup = _backup(column, [(k, old) for k, old, _ in moved])

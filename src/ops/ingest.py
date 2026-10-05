@@ -16,9 +16,9 @@ from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.ops.maintenance import (_keep_job, _mission_trusted, _score_job, _scored_row, _t,
+from src.ops.maintenance import (_keep_job, _score_job, _scored_row, _t,
                                  _whole_board, board_index, board_match,
-                                 track_writer)
+                                 remote_trusted, track_writer)
 from src.rows import BoardHit, CompanyRow, FetchedJob
 
 
@@ -80,9 +80,7 @@ def _admitted(conn: sqlite3.Connection, jobs: list[FetchedJob], source: str, cur
             # explicitly remote. Enforced even for curated adds.
             loc = j.get("location", "") or ""
             is_local = bool(NC_RE.search(loc))
-            trusted = (tags.has(company_row, tags.WATCH)
-                       or _mission_trusted(company_row,
-                                           t.remote_mission_floor))
+            trusted = remote_trusted(company_row, t.remote_mission_floor)
             is_remote_trusted = (
                 trusted
                 and geo_mode(loc, j.get("description", "")) == "remote")

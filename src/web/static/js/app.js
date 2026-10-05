@@ -91,8 +91,7 @@ function ageChip(age) {
 }
 function priorChip(p) {
   if (!p) return "";
-  const what = p.kind === "repost" ? "applied to this title" : `sibling of "${p.title}"`;
-  return `<span class="chip prior" title="${esc(p.disposition)} ${esc(p.when)}: ${esc(p.title)}">↻ ${esc(what)} ${esc(p.when.slice(5))}</span>`;
+  return `<span class="chip prior" title="${esc(p.disposition)} ${esc(p.when)}: ${esc(p.title)}">↻ ${esc(p.label)} ${esc(p.when.slice(5))}</span>`;
 }
 function cleanReason(r) { return (r || "").replace(/^\[[^\]]*\]\s*/, ""); }
 function geoChip(bucket) {

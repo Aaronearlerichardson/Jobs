@@ -283,7 +283,7 @@ def _geo_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, has_body: bo
     loc = job.get("location") or ""
     desc = job.get("description") or ""
     floor = t.remote_mission_floor
-    trusted = tags.has(company, tags.WATCH) or ops._mission_trusted(company, floor)
+    trusted = ops.remote_trusted(company, floor)
     if is_nc(loc):
         return OK
     if trusted and (remote_signal(loc) or job.get("remote_hint")) and us_eligible(loc):
@@ -960,20 +960,8 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
             continue
         add(r, "geo:non-local")
     floors = [t.remote_mission_floor for t in roster_tracks(tracks) if t.geo_gate]
-    owners: dict[int, CompanyRow | None] = {}
-    for r in conn.execute(
-            "SELECT job_id, company_name, title, location, company_id "
-            "FROM open_jobs WHERE triage_status='geo'"):
-        loc = r["location"]
-        if location_unknown(loc) or is_nc(loc) or not (remote_signal(loc) and us_eligible(loc)):
-            continue
-        if r["company_id"] not in owners:
-            row = conn.execute("SELECT * FROM companies WHERE id=?", (r["company_id"],)).fetchone()
-            owners[r["company_id"]] = store.as_company(row) if row else None
-        owner = owners[r["company_id"]]
-        if owner and (tags.has(owner, tags.WATCH)
-                      or any(ops._mission_trusted(owner, f) for f in floors)):
-            add(r, "geo:remote")
+    for r, _ in ops.remote_us_geo_drops(conn, floors, trusted=True):
+        add(r, "geo:remote")
     return out
 
 

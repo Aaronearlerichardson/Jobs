@@ -165,12 +165,9 @@ _COMMANDS = [
         "workers": a.workers, "described_only": a.described_only})),
     ("rekey_jobs", _op("rekey-jobs", lambda a: {
         "ats": a.rekey_jobs, "apply": a.rekey_apply})),
-    ("restamp_geo", _op("restamp-geo", lambda a: {
-        "apply": a.restamp_apply, "undo": a.restamp_undo})),
-    ("restamp_tiers", _op("restamp-tiers", lambda a: {
-        "apply": a.restamp_apply, "undo": a.restamp_undo})),
-    ("link_employers", _op("link-employers", lambda a: {
-        "apply": a.restamp_apply, "undo": a.restamp_undo})),
+    *((dest, _op(dest.replace("_", "-"), lambda a: {"apply": a.restamp_apply,
+                                                    "undo": a.restamp_undo}))
+      for dest in ("restamp_geo", "restamp_tiers", "link_employers")),
 ]
 
 

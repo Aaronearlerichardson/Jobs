@@ -1113,3 +1113,12 @@ class TestRunQueue:
         finally:
             conn.close()
         stub_ops.release("q-first")
+
+
+def test_the_dismiss_dialog_offers_exactly_the_stores_reasons():
+    # app.js keeps a hand copy of store.DISMISS_REASONS; this is its verifier.
+    from pathlib import Path
+    from src import store
+    js = (Path(web.__file__).parent / "static" / "js" / "app.js").read_text(encoding="utf-8")
+    block = re.search(r"const DISMISS_REASONS = \[(.*?)\];", js, re.S).group(1)
+    assert tuple(re.findall(r'\["(\w+)",', block)) == store.DISMISS_REASONS

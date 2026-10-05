@@ -25,7 +25,8 @@ from src.claude.fit import score_resume_fit
 from src.config import RuntimeTrack
 from src.match import gates
 from src.match.filters import is_relevant
-from src.match.locality import NC_RE, geo_label, geo_mode, us_eligible
+from src.match.locality import (NC_RE, geo_label, geo_mode, is_nc, location_unknown,
+                                remote_signal, us_eligible)
 from src.net.http import fetch_failed
 from src.rows import CompanyRow, FetchedJob, JobIn, JobRow, RankedJob
 
@@ -203,6 +204,33 @@ def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
 #  Tag checks are tags.has(company, tags.WATCH) etc.                           #
 # --------------------------------------------------------------------------- #
 
+def remote_trusted(company: CompanyRow | None, floor: float | None) -> bool:
+    """True if the geo gate admits a company's remote postings: it is on
+    the watch list, or `_mission_trusted` at `floor`."""
+    return tags.has(company, tags.WATCH) or _mission_trusted(company, floor)
+
+
+def remote_us_geo_drops(conn: sqlite3.Connection, floors: Iterable[float | None], *,
+                        trusted: bool) -> Iterator[tuple[sqlite3.Row, CompanyRow | None]]:
+    """(row, company) for every open row dropped at the geo gate whose
+    location reads remote and US-eligible, at the companies the gate trusts
+    for remote at any of `floors` (`remote_trusted`) when `trusted`, else at
+    the ones it does not. The company is checked first, once per company:
+    it rules out most of the table before any location regex runs."""
+    owners: dict[int | None, tuple[CompanyRow | None, bool]] = {}
+    for r in conn.execute("SELECT job_id, company_id, company_name, title, location "
+                          "FROM open_jobs WHERE triage_status='geo' AND disposition IS NULL"):
+        if r["company_id"] not in owners:
+            co = store.get_company(conn, r["company_id"])
+            owners[r["company_id"]] = (co, co is not None
+                                       and any(remote_trusted(co, f) for f in floors))
+        co, ok = owners[r["company_id"]]
+        loc = r["location"]
+        if (ok == trusted and not location_unknown(loc) and not is_nc(loc)
+                and remote_signal(loc) and us_eligible(loc)):
+            yield r, co
+
+
 def _mission_trusted(company: CompanyRow | None, floor: float | None) -> bool:
     """True if a store company row earns watch-grade remote treatment on its
     mission score alone: `floor` (the track's `remote_mission_floor`,
@@ -310,7 +338,7 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
         #              untrustworthy for an out-of-area exception (slug
         #              collisions flooded the ranking with remote junk).
         gm = geo_mode(job.get("location", ""), job.get("description", ""))
-        if tags.has(company, tags.WATCH) or _mission_trusted(company, floor):
+        if remote_trusted(company, floor):
             if gm is None or (gm == "remote" and not us_eligible(job.get("location", ""))):
                 return False
         elif gm != "onsite":

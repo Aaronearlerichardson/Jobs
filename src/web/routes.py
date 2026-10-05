@@ -185,7 +185,7 @@ def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
     # /api/jobs deliberately ships everything and gates on the client.
     d["remote_ok"] = store.remote_admitted(r, remote_floor)
     # An application of yours this posting repeats (store.prior_lookup).
-    d["prior"] = prior._asdict() if prior else None
+    d["prior"] = {**prior._asdict(), "label": prior.label} if prior else None
     return d
 
 

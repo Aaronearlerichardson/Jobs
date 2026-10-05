@@ -23,11 +23,11 @@ detail fetch). One Claude call per scored posting.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import json
 import sys
 from collections import defaultdict
 from collections.abc import Sequence
+from contextlib import aclosing
 from datetime import datetime
 from itertools import zip_longest
 from pathlib import Path
@@ -37,36 +37,22 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config, runstate, store, tags  # noqa: E402
-from src.match.locality import is_nc, location_unknown, remote_signal, us_eligible  # noqa: E402
-from src.ops.maintenance import _mission_trusted  # noqa: E402
+from src import config, runstate, store  # noqa: E402
+from src.net.parallel import fan_out  # noqa: E402
+from src.ops.maintenance import remote_us_geo_drops  # noqa: E402
 
 
 def candidates(conn: Any, floor: float | None) -> tuple[list[dict[str, Any]], int]:
     """(postings to screen, postings left out for want of a body)."""
-    companies: dict[int, Any] = {}
-    out: list[dict[str, Any]] = []
-    bodiless = 0
-    for r in conn.execute(
-            "SELECT job_id, company_id, company_name, title, location, description "
-            "FROM open_jobs WHERE triage_status='geo' AND disposition IS NULL"):
-        loc = r["location"]
-        if (location_unknown(loc) or is_nc(loc)
-                or not (remote_signal(loc) and us_eligible(loc))):
-            continue
-        if r["company_id"] not in companies:
-            row = conn.execute("SELECT * FROM companies WHERE id=?", (r["company_id"],)).fetchone()
-            companies[r["company_id"]] = store.as_company(row) if row else None
-        co = companies[r["company_id"]]
-        if co and (tags.has(co, tags.WATCH) or _mission_trusted(co, floor)):
-            continue
-        if len((r["description"] or "").strip()) < 200:
-            bodiless += 1
-            continue
-        out.append({"job_id": r["job_id"], "company": r["company_name"], "title": r["title"],
-                    "location": loc, "description": r["description"],
-                    "mission": co.get("mission_score") if co else None})
-    return out, bodiless
+    drops = list(remote_us_geo_drops(conn, [floor], trusted=False))
+    bodies = {r["job_id"]: r["description"] or "" for r in conn.execute(
+        "SELECT job_id, description FROM open_jobs WHERE job_id IN (SELECT value FROM json_each(?))",
+        (json.dumps([r["job_id"] for r, _ in drops]),))}
+    out = [{"job_id": r["job_id"], "company": r["company_name"], "title": r["title"],
+            "location": r["location"], "description": bodies[r["job_id"]],
+            "mission": co.get("mission_score") if co else None}
+           for r, co in drops if len(bodies[r["job_id"]].strip()) >= 200]
+    return out, len(drops) - len(out)
 
 
 def floors(scored: Sequence[dict[str, Any]], bar: float) -> list[tuple[float, int, int, int]]:
@@ -107,16 +93,16 @@ def report(scored: Sequence[dict[str, Any]], bar: float, floor: float | None) ->
 
 async def screen(rows: Sequence[dict[str, Any]], workers: int) -> list[dict[str, Any]]:
     from src.claude.fit import score_resume_fit
-    gate = asyncio.Semaphore(workers)
-    done: list[dict[str, Any]] = []
 
-    async def one(x: dict[str, Any]) -> None:
-        async with gate:
-            res = await score_resume_fit(x["title"] or "", x["description"], location=x["location"] or "")
-        if res.score is not None:
-            done.append({k: v for k, v in x.items() if k != "description"}
-                        | {"fit": res.score, "gates": res.gates, "reason": res.summary()})
-    await asyncio.gather(*(one(x) for x in rows))
+    async def one(x: dict[str, Any]) -> Any:
+        return await score_resume_fit(x["title"] or "", x["description"], location=x["location"] or "")
+    done: list[dict[str, Any]] = []
+    async with aclosing(fan_out(rows, one, lambda x: f"screen {x['company']}", workers,
+                                with_item=True)) as got:
+        async for x, res in got:
+            if res.score is not None:
+                done.append({k: v for k, v in x.items() if k != "description"}
+                            | {"fit": res.score, "gates": res.gates, "reason": res.summary()})
     return done
 
 
