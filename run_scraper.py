@@ -85,7 +85,7 @@ def _cmd_mark(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     disp, ref = args.mark
     conn = _store(t)
-    row, err = store.set_disposition(conn, ref, disp, note=args.why)
+    row, err = store.set_disposition(conn, ref, disp, note=args.why, reason=args.reason)
     conn.close()
     if err:
         print(f"  [!] {err}")
@@ -166,6 +166,8 @@ _COMMANDS = [
     ("rekey_jobs", _op("rekey-jobs", lambda a: {
         "ats": a.rekey_jobs, "apply": a.rekey_apply})),
     ("restamp_geo", _op("restamp-geo", lambda a: {
+        "apply": a.restamp_apply, "undo": a.restamp_undo})),
+    ("restamp_tiers", _op("restamp-tiers", lambda a: {
         "apply": a.restamp_apply, "undo": a.restamp_undo})),
 ]
 
@@ -250,12 +252,17 @@ def main(argv: list[str] | None = None) -> None:
                     help="Report the open jobs whose stored geo_mode the "
                          "current rule would change; writes only with "
                          "--restamp-apply")
+    ap.add_argument("--restamp-tiers", action="store_true",
+                    help="Report the companies whose mission_tier is not the "
+                         "tier their mission_score falls in; writes only with "
+                         "--restamp-apply")
     ap.add_argument("--restamp-apply", action="store_true",
-                    help="With --restamp-geo: save the old stamps to "
-                         "db_backups, then rewrite them")
+                    help="With --restamp-geo/--restamp-tiers: save the old "
+                         "stamps to db_backups, then rewrite them")
     ap.add_argument("--restamp-undo", metavar="FILE", default="",
-                    help="With --restamp-geo: restore the stamps in a "
-                         "restamp backup file (--restamp-apply to write)")
+                    help="With --restamp-geo/--restamp-tiers: restore the "
+                         "stamps in a restamp backup file (--restamp-apply "
+                         "to write)")
     ap.add_argument("--limit", type=int, default=None,
                     help="Cap rows processed (backfills / probes)")
     # ── roster / dispositions / store ───────────────────────────────────
@@ -284,6 +291,11 @@ def main(argv: list[str] | None = None) -> None:
                          "+ job_id/fragment/URL. Pair with --why.")
     ap.add_argument("--why", metavar="TEXT",
                     help="With --mark: one-line reason (teaches the scorer)")
+    ap.add_argument("--reason", metavar="CODE", default=None,
+                    help="With --mark dismissed: closed|sibling|location|"
+                         "function|seniority|other. closed and sibling are "
+                         "not fit signals and never reach the scorer; closed "
+                         "also closes the row")
     ap.add_argument("--pipeline", action="store_true",
                     help="Print every dispositioned job, then exit")
     ap.add_argument("--prune", action="store_true",

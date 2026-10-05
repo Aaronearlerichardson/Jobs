@@ -237,6 +237,7 @@ def api_job(job_id: str) -> ResponseReturnValue:
 class _Disposition(_Body):
     disposition: str = ""
     note: Text = None
+    reason: Text = None
 
 
 @app.post("/api/job/<job_id>/disposition")
@@ -245,7 +246,7 @@ def api_disposition(job_id: str) -> ResponseReturnValue:
     with track_store(_track(p.track)) as conn:
         row, err = store.set_disposition(
             conn, job_id, p.disposition,
-            note=p.note)
+            note=p.note, reason=p.reason)
     if err:
         return jsonify(error=err), 400
     return jsonify(ok=True, job_id=cast(JobRow, row)["job_id"])

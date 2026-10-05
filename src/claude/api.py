@@ -557,7 +557,7 @@ Return ONLY a JSON object with exactly:
     r = await call_claude_json(system, user, max_tokens=120, reply=MissionReply)
     if r is None:
         return None, None, ""
-    return r.tier, r.score, r.reason
+    return config.tier_for_score(r.score, r.tier), r.score, r.reason
 
 
 class BoardOwnerReply(Reply):

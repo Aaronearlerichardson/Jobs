@@ -925,6 +925,19 @@ class TestDispositions:
         assert 'PURSUED: "Data Engineer"' in block
         assert "wrong archetype" in block
 
+    def test_bookkeeping_dismissals_never_teach_the_scorer(self, db, add_job):
+        # A dead posting and a sibling of a role already applied to say
+        # nothing about fit; a location dismissal does, and says why.
+        self._seed(add_job)
+        store.set_disposition(db, "gh_acme_100", "dismissed", note="dead link", reason="closed")
+        store.set_disposition(db, "gh_acme_200", "dismissed", note="applied to the other",
+                              reason="sibling")
+        store.set_disposition(db, "gh_acme_300", "dismissed", reason="location")
+        from src.claude.fit import disposition_examples_block
+        block = disposition_examples_block(db, 3)
+        assert "DISMISSED" in block and "location" in block
+        assert "dead link" not in block and "applied to the other" not in block
+
 
 class TestPipelineTracking:
     """Everything an application needs AFTER 'applied': when to chase it,

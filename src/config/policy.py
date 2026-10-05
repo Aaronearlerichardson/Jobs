@@ -133,6 +133,40 @@ def is_multi_division(name: str | None) -> bool:
 ACTIVE_MISSION_TIERS = tuple(t.name for t in MISSION_TIERS if t.active)
 
 
+def tier_for_score(score: float | None, tier: str | None = None) -> str | None:
+    """The mission tier `score` belongs to: `tier` when the score is inside
+    its band, else the band that holds it. A score in the gap between two
+    bands keeps `tier` when it is one of the two bands on either side, and
+    otherwise takes the nearest. `tier` comes back unchanged when there is
+    no score to read.
+
+    The mission model names a tier and a score separately and does not
+    keep them in step (49 of 202 `core-mission` companies scored below that
+    band's floor on 2026-10-05: Eight Sleep at 0.5, Medtronic at 0.55, with
+    reasons that read "not neurotech"). The score is the finer judgment, it
+    is what ranking and remote trust read, so the tier follows it.
+
+    >>> tier_for_score(1.0) == MISSION_TIERS[0].name
+    True
+    >>> tier_for_score(0.0) == MISSION_TIERS[-1].name
+    True
+    >>> tier_for_score(None, "adjacent")
+    'adjacent'
+    >>> top, bottom = MISSION_TIERS[-2], MISSION_TIERS[-1]
+    >>> mid = (bottom.band[1] + top.band[0]) / 2
+    >>> tier_for_score(mid, top.name) == top.name
+    True
+    """
+    if score is None:
+        return tier
+
+    gap = {t.name: max(t.band[0] - score, score - t.band[1], 0) for t in MISSION_TIERS}
+    nearest = sorted(gap, key=lambda name: gap[name])
+    if gap[nearest[0]] == 0:
+        return tier if tier is not None and gap.get(tier) == 0 else nearest[0]
+    return tier if tier in nearest[:2] else nearest[0]
+
+
 def is_active_mission(tier: str | None, name: str | None,
                       include_missions: Collection[str] | None = None) -> int:
     """The one activation rule: should a newly-sourced company be crawled?

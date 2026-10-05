@@ -95,6 +95,13 @@
 
 <div id="overlay"><div class="box" id="overlaymsg">Config saved — restarting…</div></div>
 
+<dialog id="dismissdlg">
+  <b>Why dismiss this job?</b>
+  <div class="reasons" id="dismissreasons"></div>
+  <input type="text" id="dismissnote" placeholder="note (optional) — teaches the scorer" size="44">
+  <button class="qclear" id="dismisscancel">cancel</button>
+</dialog>
+
 <div id="toast"></div>
 
 <script src="/static/js/app.js"></script>

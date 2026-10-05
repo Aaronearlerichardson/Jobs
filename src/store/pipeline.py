@@ -12,13 +12,16 @@ inside the function.
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
 
+from src.match.names import name_key
 from src.rows import JobRow
 from src.validation import OneOf, Text, blank_is_none, error_lines
 from .schema import apply_update, as_job, sql
@@ -45,6 +48,14 @@ APPLIED_DISPOSITIONS = ("applied", "interviewing", "rejected")
 OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
                    "withdrew", "closed", "other")
 
+# Why a job was DISMISSED, in the same `outcome_reason` column. Only the
+# last three say something about FIT; the first two are bookkeeping and must
+# not teach the scorer that the role was a poor match: a posting that was
+# already dead ("closed", which also closes the row) or a second opening at
+# a company you had applied to ("sibling").
+DISMISS_REASONS = ("closed", "sibling", "location", "function", "seniority", "other")
+NOT_A_FIT_SIGNAL = ("closed", "sibling")
+
 # The resume_fit_score bands conversion_report groups by: (name, low, high),
 # half-open on the high side, ordered low to high.
 FIT_BANDS = (("low", 0.0, 0.4), ("mid", 0.4, 0.6), ("high", 0.6, 1.01))
@@ -62,7 +73,7 @@ class PipelineFields(BaseModel):
     contact: Text = None
     referral: Annotated[bool | None,
                         PlainSerializer(int, when_used="unless-none")] = None
-    outcome_reason: Annotated[Annotated[str, OneOf(OUTCOME_REASONS)] | None,
+    outcome_reason: Annotated[Annotated[str, OneOf(OUTCOME_REASONS + DISMISS_REASONS)] | None,
                               BeforeValidator(blank_is_none)] = None
 
 
@@ -96,7 +107,8 @@ def _resolve_job(conn: sqlite3.Connection, ref: str) -> list[JobRow]:
 
 
 def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
-                    note: str | None = None) -> tuple[JobRow | None, str | None]:
+                    note: str | None = None, reason: str | None = None
+                    ) -> tuple[JobRow | None, str | None]:
     """Record the user's decision on one job. `ref` is a job_id, a unique
     job_id fragment, or the posting URL; `disposition` is one of
     DISPOSITIONS, or 'none'/'clear' to erase. Returns (row, error) — row is
@@ -104,12 +116,37 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
 
     Marking a row 'applied' also stamps `applied_at`, once: a later
     interviewing/rejected leaves the original apply date alone. See
-    tests/test_store.py::TestPipelineTracking."""
+    tests/test_store.py::TestPipelineTracking.
+
+    `reason` (one of DISMISS_REASONS) goes with a 'dismissed' decision and
+    is kept in `outcome_reason`; 'closed' also closes the row. Clearing a
+    dismissed row clears its reason.
+
+    >>> from src import store
+    >>> conn = store.connect(":memory:")
+    >>> _ = store.upsert_job(conn, {"job_id": "j", "title": "T"})
+    >>> set_disposition(conn, "j", "applied", reason="closed")[1]
+    "a reason goes with 'dismissed' only"
+    >>> set_disposition(conn, "j", "dismissed", reason="bogus")[1]
+    "unknown dismissal reason 'bogus' - use one of closed, sibling, location, function, seniority, other"
+    >>> _ = set_disposition(conn, "j", "dismissed", reason="closed")
+    >>> tuple(conn.execute("SELECT outcome_reason, status FROM jobs").fetchone())
+    ('closed', 'closed')
+    >>> _ = set_disposition(conn, "j", "clear")
+    >>> tuple(conn.execute("SELECT outcome_reason FROM jobs").fetchone())
+    (None,)
+    """
     d = (disposition or "").strip().lower()
     clearing = d in ("none", "clear")
     if not clearing and d not in DISPOSITIONS:
         return None, (f"unknown disposition {disposition!r} — use one of "
                       f"{', '.join(DISPOSITIONS)} (or 'clear')")
+    reason = (reason or "").strip().lower() or None
+    if reason and d != "dismissed":
+        return None, "a reason goes with 'dismissed' only"
+    if reason and reason not in DISMISS_REASONS:
+        return None, (f"unknown dismissal reason {reason!r} - use one of "
+                      f"{', '.join(DISMISS_REASONS)}")
     matches = _resolve_job(conn, ref)
     if not matches:
         return None, f"no job matches {ref!r} (job_id, id fragment, or URL)"
@@ -122,6 +159,12 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
     sets: dict[str, Any] = {"disposition": None if clearing else d,
                             "disposition_note": None if clearing else note,
                             "disposition_at": None if clearing else now}
+    if reason:
+        sets["outcome_reason"] = reason
+    elif clearing and row.get("disposition") == "dismissed":
+        sets["outcome_reason"] = None
+    if reason == "closed":
+        sets.update(status="closed", closed_at=now)
     if d == "applied":
         # COALESCE, not an assignment: the FIRST apply owns the date. Without
         # it, re-marking a row that came back 'rejected' and then 'applied'
@@ -130,6 +173,87 @@ def set_disposition(conn: sqlite3.Connection, ref: str, disposition: str | None,
         sets["applied_at"] = sql("COALESCE(applied_at, ?)", now)
     apply_update(conn, "jobs", "job_id", row["job_id"], sets)
     return row, None
+
+
+class Prior(NamedTuple):
+    """An earlier application that a posting repeats: `kind` is "repost"
+    (the same title at the same company) or "sibling" (the same role at
+    another level), `title` the one you applied to, `disposition` where it
+    stands, `when` the day (YYYY-MM-DD)."""
+    kind: str
+    title: str
+    disposition: str
+    when: str
+
+
+_LEVEL_WORDS = frozenset({"senior", "sr", "staff", "principal", "lead", "junior", "jr",
+                          "associate", "i", "ii", "iii", "iv", "v", "level"})
+
+
+def title_keys(title: str | None) -> tuple[str, str]:
+    """(exact, role) keys of a job title. `exact` drops punctuation,
+    requisition numbers and level digits; `role` also drops the level words,
+    so a title and its other levels share it.
+
+    >>> title_keys("Senior Machine Learning Engineer II")
+    ('senior machine learning engineer ii', 'machine learning engineer')
+    >>> title_keys("Network Engineer - #4532")
+    ('network engineer', 'network engineer')
+    >>> title_keys("Data Engineer (R-10234)") == title_keys("data engineer")
+    True
+    >>> title_keys("Senior")
+    ('senior', 'senior')
+    """
+    text = re.sub(r"#\s*\d+|r-?\d+", " ", (title or "").lower())
+    words = [w for w in re.findall(r"[a-z0-9+]+", text) if not w.isdigit()]
+    role = [w for w in words if w not in _LEVEL_WORDS]
+    return " ".join(words), " ".join(role or words)
+
+
+def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
+                 ) -> Callable[[Mapping[str, Any]], Prior | None]:
+    """A function from a job row to the application it repeats, or None,
+    over `pipeline` (get_pipeline's rows; only the ones that went out count:
+    APPLIED_DISPOSITIONS). A job repeats an application at the same company
+    (name_key of company_name) whose title has the same `exact` key (a
+    "repost") or the same `role` key (a "sibling"); a repost wins, then the
+    newest application. A row never repeats itself.
+
+    >>> look = prior_lookup([{"job_id": "a", "company_name": "Acme, Inc.",
+    ...                       "title": "Algorithm Engineer", "disposition": "applied",
+    ...                       "applied_at": "2026-08-21T10:00"}])
+    >>> look({"job_id": "b", "company_name": "ACME", "title": "Algorithm Engineer"})
+    Prior(kind='repost', title='Algorithm Engineer', disposition='applied', when='2026-08-21')
+    >>> look({"job_id": "c", "company_name": "Acme", "title": "Senior Algorithm Engineer II"}).kind
+    'sibling'
+    >>> look({"job_id": "d", "company_name": "Other", "title": "Algorithm Engineer"}) is None
+    True
+    >>> look({"job_id": "a", "company_name": "Acme", "title": "Algorithm Engineer"}) is None
+    True
+    """
+    by_company: dict[str, list[tuple[str, str, Mapping[str, Any]]]] = {}
+    for p in pipeline:
+        if p.get("disposition") in APPLIED_DISPOSITIONS:
+            exact, role = title_keys(p.get("title"))
+            by_company.setdefault(name_key(p.get("company_name")), []).append((exact, role, p))
+
+    def when(p: Mapping[str, Any]) -> str:
+        return (p.get("applied_at") or p.get("disposition_at") or "")[:10]
+
+    def look(job: Mapping[str, Any]) -> Prior | None:
+        exact, role = title_keys(job.get("title"))
+        best: tuple[int, str, Mapping[str, Any]] | None = None
+        for e, r, p in by_company.get(name_key(job.get("company_name")), ()):
+            if p.get("job_id") == job.get("job_id") or role != r:
+                continue
+            cand = (1 if e == exact else 0, when(p), p)
+            if best is None or cand[:2] > best[:2]:
+                best = cand
+        if best is None:
+            return None
+        return Prior("repost" if best[0] else "sibling", best[2].get("title") or "",
+                     best[2].get("disposition") or "", best[1])
+    return look
 
 
 def get_pipeline(conn: sqlite3.Connection) -> list[JobRow]:

@@ -33,6 +33,7 @@ Wired into:
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import sqlite3
@@ -44,6 +45,7 @@ from typing import Annotated, Any, cast
 from pydantic import BeforeValidator
 
 from src import runstate
+from src.store import NOT_A_FIT_SIGNAL
 from src.claude.reply import Reply, Unit
 from src.rows import FitColumns
 from src.validation import OneOf
@@ -290,9 +292,11 @@ def disposition_examples_block(conn: sqlite3.Connection, limit: int = 3) -> str:
         "WHERE disposition IN ('applied','interviewing') "
         "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
     neg = conn.execute(
-        "SELECT title, company_name, disposition_note FROM jobs "
+        "SELECT title, company_name, disposition_note, outcome_reason FROM jobs "
         "WHERE disposition = 'dismissed' "
-        "ORDER BY disposition_at DESC LIMIT ?", (limit,)).fetchall()
+        "AND COALESCE(outcome_reason, '') NOT IN (SELECT value FROM json_each(?)) "
+        "ORDER BY disposition_at DESC LIMIT ?",
+        (json.dumps(NOT_A_FIT_SIGNAL), limit)).fetchall()
     rej = conn.execute(
         "SELECT title, company_name, disposition_note, outcome_reason "
         "FROM jobs WHERE disposition = 'rejected' "
@@ -303,8 +307,9 @@ def disposition_examples_block(conn: sqlite3.Connection, limit: int = 3) -> str:
     lines += [f'- PURSUED: "{(r["title"] or "")[:70]}" at {r["company_name"]}'
               for r in pos]
     for r in neg:
-        note = (r["disposition_note"] or "").strip()
-        tail = f' — their reason: "{note[:90]}"' if note else ""
+        why = " / ".join(x for x in ((r["outcome_reason"] or "").strip(),
+                                     (r["disposition_note"] or "").strip()[:90]) if x)
+        tail = f' — their reason: "{why}"' if why else ""
         lines.append(f'- DISMISSED: "{(r["title"] or "")[:70]}" at {r["company_name"]}{tail}')
     for r in rej:
         why = " / ".join(x for x in ((r["outcome_reason"] or "").strip(),

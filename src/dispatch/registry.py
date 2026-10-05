@@ -331,6 +331,13 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "params": RestampGeo,
         "ui": False,      # a one-off after the geo_mode rule changes
     },
+    "restamp-tiers": {
+        "label": "Restamp company mission tiers",
+        "engine": None,
+        "target": restamp.restamp_tiers,
+        "params": RestampGeo,
+        "ui": False,      # a one-off: tiers follow their scores
+    },
     "prune": {
         "label": "Prune dead boards",
         "engine": None,

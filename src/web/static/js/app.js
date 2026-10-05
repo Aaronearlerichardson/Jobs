@@ -275,15 +275,44 @@ async function loadDetail(id) {
     b.onclick = () => mark(b.dataset.id, "clear"));
 }
 
+/* Must match store.DISMISS_REASONS. The first two say nothing about fit
+   (a dead posting, a sibling of a role already applied to), so the server
+   keeps them out of the scorer's examples; "closed" also closes the row. */
+const DISMISS_REASONS = [
+  ["closed", "posting is closed"], ["sibling", "applied to a sibling role"],
+  ["location", "wrong location"], ["function", "wrong kind of job"],
+  ["seniority", "wrong level"], ["other", "other"]];
+
+/* Ask why a job is being dismissed: resolves {reason, note}, or null. */
+function askDismiss() {
+  const dlg = $("#dismissdlg");
+  $("#dismissnote").value = "";
+  $("#dismissreasons").innerHTML = DISMISS_REASONS.map(
+    ([k, label]) => `<button data-reason="${k}">${esc(label)}</button>`).join("");
+  return new Promise(resolve => {
+    const done = v => { dlg.close(); resolve(v); };
+    dlg.querySelectorAll("button[data-reason]").forEach(b =>
+      b.onclick = () => done({ reason: b.dataset.reason,
+                               note: $("#dismissnote").value.trim() || null }));
+    $("#dismisscancel").onclick = () => done(null);
+    dlg.oncancel = () => resolve(null);
+    dlg.showModal();
+  });
+}
+
 async function mark(id, disp) {
-  let note = null;
-  if (disp === "dismissed" || disp === "rejected") {
-    note = prompt(`Why ${disp}? (optional — dismissal reasons teach the scorer)`);
+  let note = null, reason = null;
+  if (disp === "dismissed") {
+    const d = await askDismiss();
+    if (!d) return;                         // cancelled
+    ({ reason, note } = d);
+  } else if (disp === "rejected") {
+    note = prompt("Why rejected? (optional)");
     if (note === null) return;              // cancelled
   }
   try {
     await post(withTrack(`/api/job/${encodeURIComponent(id)}/disposition`),
-               { disposition: disp, note });
+               { disposition: disp, note, reason });
     toast(disp === "clear" ? "cleared" : `marked ${disp}`);
     await refreshData();
   } catch (e) { toast("failed: " + e.message); }
