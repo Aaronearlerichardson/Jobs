@@ -103,6 +103,14 @@ class TestRespectRobots:
         assert waits == [("https://a.test/jobs", 3.0)]
         assert [url for _, url, _ in sent] == ["https://a.test/robots.txt", "https://a.test/jobs"]
 
+    async def test_a_429_is_retried_once_after_its_retry_after(self, wire, monkeypatch):
+        self.respect(monkeypatch, False)
+        slept = []
+        monkeypatch.setattr(http.asyncio, "sleep", answer(slept.append))
+        sent = wire((429, [(b"Retry-After", b"2")], b""), self.PAGE)
+        assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
+        assert slept == [2.0] and len(sent) == 2
+
     async def test_off_the_same_page_is_fetched_with_no_robots_fetch_and_no_wait(
             self, wire, monkeypatch, waits):
         self.respect(monkeypatch, False)

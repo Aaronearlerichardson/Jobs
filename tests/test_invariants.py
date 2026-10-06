@@ -1033,6 +1033,8 @@ MODULE_LEVEL_NAME_ALLOW = {
     ("src/store/jobs.py", "_COLLAPSE_SQL"): "declared query: ranked_jobs' collapse layer",
     ("src/discovery/name_sources.py", "_NAV_CHROME_RE"):
         "declared table: ~65 lines of site-chrome vocabulary",
+    ("src/discovery/resolve/directory.py", "_building"):
+        "run state: one lock so concurrent resolvers build the name index once",
     ("src/crawl/triage.py", "SCORE_CAP"):
         "run()'s default, cited by name in harvest.py's --help and crawl.harvest",
     ("src/match/filters.py", "SUBSTRING"):

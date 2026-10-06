@@ -4,6 +4,7 @@ the resolver reads (so store-free). `base_url` is [sources.board_directory]'s.
 
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 from collections.abc import Sequence
 from pathlib import Path
@@ -129,3 +130,20 @@ def lookup_name(name: str) -> list[tuple[str, Any, str]]:
     """
     key = name_key(name)
     return list(index().by_name.get(key, [])) if key else []
+
+
+_building = per_run(asyncio.Lock)
+
+
+async def find_boards(name: str) -> list[tuple[str, Any, str]]:
+    """`lookup_name` for the event loop: the index builds once per run, in a
+    thread, while concurrent callers wait.
+
+    Notes:
+        Fifty names resolved at once each built it (2026-10-06): the first
+        call blocked the loop, then every call raced to index 80K rows, and
+        the watchdog abandoned the whole pass.
+    """
+    async with _building():
+        await asyncio.to_thread(index)
+    return lookup_name(name)

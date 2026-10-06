@@ -402,13 +402,19 @@ def board_key(r: BoardCoords) -> tuple[Any, ...] | None:
     ('custom', 'https://x.com/careers')
     >>> board_key({"ats": None, "slug": None, "wd_tenant": None}) is None
     True
+
+    A site's case is not identity: Workday answers `External` and `external`
+    alike, and the roster held 7 boards twice that way (2026-10-06).
+
+    >>> a = {"ats": "workday", "wd_tenant": "aah", "wd_pod": 5, "wd_site": "External"}
+    >>> board_key(a) == board_key({**a, "wd_tenant": "AAH", "wd_site": "external"})
+    True
     """
     ats = r.get("ats")
     if not ats:
         return None
     cols = _board_columns(ats)
-    vals = [(r.get(c) or "").rstrip("/").lower() if c == "careers_url" else r.get(c)
-            for c in cols]
+    vals = [v.rstrip("/").lower() if isinstance(v := r.get(c), str) else v for c in cols]
     return (ats, *vals) if vals[0] else None
 
 
@@ -486,11 +492,11 @@ def company_by_board(conn: sqlite3.Connection, row: BoardCoords) -> CompanyRow |
     key = board_key(row)
     if key is None:
         return None
-    # SQL narrows to the rows sharing the ats and every plain handle column
-    # (careers_url is normalised by board_key, so it is left to the check);
+    # SQL narrows to the rows sharing the ats and every plain handle column,
+    # case aside (careers_url is normalised by board_key, so it is left to the check);
     # board_key then confirms, so the identity rule stays in one place.
     plain = [(c, v) for c, v in zip(_board_columns(key[0]), key[1:]) if c != "careers_url"]
-    where = " AND ".join(["ats = ?", *(f"{c} IS ?" for c, _ in plain)])
+    where = " AND ".join(["ats = ?", *(f"{c} IS ? COLLATE NOCASE" for c, _ in plain)])
     rows = conn.execute(f"SELECT * FROM companies WHERE {where} ORDER BY id",
                         [key[0], *(v for _, v in plain)])
     return next((c for c in map(as_company, rows) if board_key(c) == key), None)

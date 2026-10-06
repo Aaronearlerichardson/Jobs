@@ -141,7 +141,7 @@ class TestDirectoryStep:
         monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
 
     def _directory(self, monkeypatch, found):
-        monkeypatch.setattr(resolve_board, "lookup_name", lambda name: found)
+        monkeypatch.setattr(resolve_board, "find_boards", answer(found))
 
     async def test_the_candidate_with_most_local_jobs_wins_as_via_directory(
             self, monkeypatch):

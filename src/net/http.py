@@ -313,6 +313,22 @@ async def _exchange(method: str, url: str, polite: bool = True,
     return r
 
 
+def _retry_after(r: requests.Response, cap: float = 30.0) -> float:
+    """Seconds a 429 asks to wait (its Retry-After, when a number), at most
+    `cap`; 5 when it names none.
+
+    >>> from requests import Response
+    >>> r = Response(); r.headers["Retry-After"] = "2"
+    >>> _retry_after(r), _retry_after(Response())
+    (2.0, 5.0)
+    >>> r.headers["Retry-After"] = "600"
+    >>> _retry_after(r)
+    30.0
+    """
+    ask = r.headers.get("Retry-After", "")
+    return min(float(ask), cap) if ask.replace(".", "", 1).isdigit() else 5.0
+
+
 async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requests.Response:
     """The requests.Response for one request, taking requests' keywords
     (headers, params, data, json, timeout, allow_redirects).
@@ -341,6 +357,10 @@ async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requ
     await robots.wait_turn(url)
     try:
         r = await _exchange(method, url, **kw)
+        if r.status_code == 429:        # told to slow down: wait as asked, once
+            await asyncio.sleep(_retry_after(r))
+            await robots.wait_turn(url)
+            r = await _exchange(method, url, **kw)
     except Exception as e:
         _log.debug("%s %s -> %s", method, url, type(e).__name__)
         raise

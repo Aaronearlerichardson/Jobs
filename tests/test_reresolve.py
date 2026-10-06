@@ -213,7 +213,7 @@ class TestReresolveWrites:
         assert row["slug"] is None
         assert (row["ats"], row["wd_tenant"], row["wd_pod"],
                 row["wd_site"]) == ("workday", "advarra", 5, "External")
-        assert store.board_key(row) == ("workday", "advarra", 5, "External")
+        assert store.board_key(row) == ("workday", "advarra", 5, "external")
 
     async def test_a_repeated_miss_updates_the_reason_and_the_stamp(
             self, db, monkeypatch):

@@ -28,7 +28,6 @@ lives here and they live one level up.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -40,7 +39,7 @@ from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
 from src.rows import BoardCoords, BoardHit, FetchedJob
-from .directory import lookup_name
+from .directory import find_boards
 from .domain import official_domain
 from .identity import foreign_board
 from .probes import probe_company
@@ -141,11 +140,11 @@ async def _seeds(name: str, careers_url: str = "") -> list[str]:
 
 async def _directory_hit(name: str, mk: Callable[..., Awaitable[BoardHit | None]]
                          ) -> BoardHit | None:
-    """The best board (most local postings) `directory.lookup_name` gives
+    """The best board (most local postings) `directory.find_boards` gives
     for `name` that `mk` validates, or None (also when the directory could
     not be read)."""
     hits = []
-    for ats, handle, url in await asyncio.to_thread(lookup_name, name):
+    for ats, handle, url in await find_boards(name):
         if await foreign_board(name, ats, handle):
             continue
         hit = await mk(ats, handle, pack(ats, handle, url)["careers_url"], "directory")

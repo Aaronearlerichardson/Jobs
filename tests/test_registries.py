@@ -35,7 +35,8 @@ async def test_nih_pages_follow_the_total(serve, monkeypatch):
     assert [r.kw["json"]["offset"] for r in sent] == [0, 2]
 
 
-async def test_openfda_drops_duplicates_and_non_names(serve):
+async def test_openfda_drops_duplicates_and_non_names(serve, monkeypatch):
+    monkeypatch.setattr(config, "DISCOVERY_REGISTRY_SPECIALTIES", [])
     sent = serve({"api.fda.gov": fake_response(fixture("openfda_devices.json"))})
     assert [s.name for s in await reg.openfda_devices("NC")] == [
         "Teleflex Medical", "Neuro Widgets", "Zeta Devices"]
