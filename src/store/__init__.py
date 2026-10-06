@@ -48,6 +48,9 @@ from .companies import (  # noqa: F401
 from .employers import (  # noqa: F401
     clear_board_override, set_board_mission, set_mission, set_pending, set_watch,
 )
+from .health import (  # noqa: F401
+    latest_platform_health, platform_health_history, record_platform_health,
+)
 from .jobs import (  # noqa: F401
     TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,

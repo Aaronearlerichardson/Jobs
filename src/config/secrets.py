@@ -17,6 +17,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.validation import drop_blank
 
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+
 
 class Settings(BaseSettings):
     """The environment, typed: each field reads the variable of the same
@@ -29,7 +31,9 @@ class Settings(BaseSettings):
         configured", and the scorers authenticated with nothing instead of
         degrading to their offline fallbacks.
     """
-    model_config = SettingsConfigDict(extra="ignore")
+    # The repo-root .env (gitignored) fills anything the process environment
+    # leaves unset; a real environment variable still wins.
+    model_config = SettingsConfigDict(extra="ignore", env_file=_ENV_FILE)
 
     # Digest email is opt-in and OFF until both are set; a blank
     # GMAIL_ADDRESS disables emailing (src/digest/render.py).

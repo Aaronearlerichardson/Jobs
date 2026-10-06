@@ -72,7 +72,8 @@ function renderTiles() {
     [s.applied_7d ?? 0, "applied this week"],
     [s.closed, "closed"], [dated + "%", "have post date"],
     [s.companies_active, "active companies"], [s.watched, "watched"],
-  ].map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("");
+  ].map(([v, l]) => `<div class="tile"><b>${esc(v)}</b><span>${esc(l)}</span></div>`).join("")
+    + ((s.platform_alerts || []).length ? `<div class="tile" title="${esc(s.platform_alerts.join("; "))}"><b>${s.platform_alerts.length}</b><span>platforms failing</span></div>` : "");
   $("#keywarn").hidden = !!s.api_key;
   $("#dbpath").textContent =
     `${s.screen_model} screen · ${s.verify_model} verify · ${s.db}`;

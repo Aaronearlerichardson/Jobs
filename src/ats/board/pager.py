@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any
 
 from src import config
@@ -70,7 +70,7 @@ FILL_FLOORS = {"title": 0.98, "url": 0.98, "location": 0.5, "description": 0.0,
                "posted_at": 0.0, "remote_hint": 0.0}
 
 
-def fill_rates(rows: Sequence[EngineRow]) -> dict[str, float]:
+def fill_rates(rows: Sequence[Mapping[str, object]]) -> dict[str, float]:
     """Per `FILL_FLOORS` field, the share of `rows` that fill it (1.0 on no rows).
 
     >>> fill_rates([{"title": "A", "url": "u"}, {"title": "", "url": "v", "posted_at": "x"}])
@@ -82,7 +82,7 @@ def fill_rates(rows: Sequence[EngineRow]) -> dict[str, float]:
             for k in FILL_FLOORS}
 
 
-def fill_misses(rows: Sequence[EngineRow], floors: dict[str, float] | None = None) -> list[str]:
+def fill_misses(rows: Sequence[Mapping[str, object]], floors: Mapping[str, float] | None = None) -> list[str]:
     """The fields of `rows` filled under their floor (`FILL_FLOORS` over `floors`),
     each "field 40% < 98%".
 
@@ -91,7 +91,7 @@ def fill_misses(rows: Sequence[EngineRow], floors: dict[str, float] | None = Non
     >>> fill_misses([{"title": "A", "url": "u", "location": "x"}])
     []
     """
-    floor = FILL_FLOORS | (floors or {})
+    floor = FILL_FLOORS | dict(floors or {})
     return [f"{k} {v:.0%} < {floor[k]:.0%}" for k, v in fill_rates(rows).items() if v < floor[k]]
 
 

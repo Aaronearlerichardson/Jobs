@@ -48,6 +48,7 @@ from src.ats.registry import iter_store_sources, sweep
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
 from src.config.profile_schema import TrackKeywords
+from src.crawl import health
 from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
@@ -455,9 +456,12 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
     seen_ids: set[str] = set()
     new_ids: set[str] = set()
     n_closed = n_reopened = n_seen = 0
+    tally = health.Tally()
 
     for spec, (jobs, err, snapshot) in zip(specs, fetched):
         c = spec["company"]
+        if c is not None:
+            tally.note_jobs(c["ats"], jobs, err, snapshot)
         label = f"{spec['name']} ({spec['platform']})"
         if c is not None and c.get("id") and commit:
             # Judged on what the BOARD returned, before any of our gating:
@@ -492,6 +496,10 @@ async def _gate_sources(db: store.Writer, t: RuntimeTrack, specs: list[dict[str,
             matches += surfaced_jobs
             funnel.append((label, len(jobs), anchor_n, tech_n, surfaced_n,
                            "priority" if spec["platform"].endswith("*") else ""))
+
+    if commit:
+        for line in await db.run(health.record, tally):
+            print(f"  [!] {line}")
 
     # Board-sourced jobs (Getro) name their employer: link each to its
     # roster row, queue employers the roster lacks for review, and drop the

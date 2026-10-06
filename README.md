@@ -898,6 +898,8 @@ This paid for itself immediately: it caught `fetch_ashby` reading a
 **zero postings for every Ashby board** with no error. Recorded fixtures in
 `tests/fixtures/` (real responses, prose redacted) now pin the parsers offline.
 
+Adding an employer or a platform: [docs/ADDING_A_PLATFORM.md](docs/ADDING_A_PLATFORM.md).
+
 ### Source health — what can this crawler actually reach?
 
 `check_boards.py` asks one question per ATS platform. The companion covers

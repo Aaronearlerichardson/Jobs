@@ -23,6 +23,7 @@ from src import tags as company_tags
 from src.claude.api import have_api_key
 from src.claude.fit import is_deep_verified
 from src.config import RuntimeTrack, profile_edit
+from src.crawl import health
 from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
@@ -625,6 +626,8 @@ def api_stats() -> ResponseReturnValue:
             # family — the worklist behind a roster that stopped growing.
             "company_misses": dict(store.miss_counts(conn)),
             "watched": one("SELECT COUNT(*) FROM companies_effective WHERE watch = 1"),
+            # Platforms whose latest pass broke across their boards (crawl.health).
+            "platform_alerts": health.alerts(conn),
             # Roster candidates waiting on a human — the Review tab's badge.
             "pending_review": one("SELECT COUNT(*) FROM companies_effective "
                                   "WHERE review = 'pending'"),

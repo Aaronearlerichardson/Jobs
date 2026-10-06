@@ -67,8 +67,10 @@ from src import digest
 from src import store
 from src.ats.board import board_for
 from src.ats.board import company as company_fetch
+from src.ats.board.pager import fill_rates
 from src.ats.coords import slug_named
 from src.claude.api import api_disabled, have_api_key, report_cache_stats
+from src.crawl import health
 from src.match.locality import geo_mode, location_unknown
 from src.net import http
 from src.net.util import worker_count
@@ -370,6 +372,7 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
         return stats
     progress()
     stats["fetched"] = len(jobs)
+    stats["fill"] = fill_rates(jobs) if jobs else {}
     stats.update(http.snapshot_info())
 
     try:
@@ -616,6 +619,7 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
 
         t_start = time.monotonic()
         running: dict[int, CompanyRow] = {}    # id(company) -> company, mid-walk
+        tally = health.Tally()
 
         async def walk(group: list[CompanyRow]) -> None:
             loop = asyncio.get_running_loop()
@@ -638,6 +642,8 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
                     summary["abandoned"] += 1
                 else:
                     _report(c, s, summary)
+                    tally.note(c["ats"] or "", s["fetched"], s.get("fill") or {},
+                               err=s["err"], snap=s)
 
         try:
             async with asyncio.timeout(max_hours * 3600 if max_hours else None):
@@ -648,6 +654,8 @@ async def pull(db_path: str | Path, only: Collection[str] | None = None,
             for c in running.values():
                 print(f"  [!] {c['name']} ({c['ats']}): run out of time - abandoned")
             summary["abandoned"] += len(running)
+        for line in await db.run(health.record, tally):
+            print(f"  [!] {line}")
     summary["secs"] = time.monotonic() - t_start
     skipped = summary["boards"] - summary["ok"] - summary["err"] - summary["abandoned"]
     print(f"\n{bar}\n  HARVEST SUMMARY")

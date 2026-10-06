@@ -81,7 +81,7 @@ async def check_board(board: Board) -> dict[str, Any]:
         note = " ".join(buf.getvalue().split())
         if not ok and not note:
             note = "the board request failed"
-        misses = fill_misses(rows or [], canary.min_fill) if ok else []
+        misses = fill_misses(rows or [], {k: v for k, v in canary.min_fill.items()}) if ok else []
         if ok and n >= floor and not misses:
             status, detail = "ok", ""
         elif ok and n >= floor:
@@ -204,7 +204,7 @@ def main() -> int:
         handle = args.handle or (canary.handle if canary else None)
         if not handle:
             ap.error("--handle is required: the spec names no canary")
-        floors = dict(canary.min_fill) if canary else {}
+        floors: dict[str, float] = {k: v for k, v in canary.min_fill.items()} if canary else {}
         return runstate.run(dry_run(board, handle, args.rows, floors))
     if args.resolved:
         print_resolved(args.resolved)
