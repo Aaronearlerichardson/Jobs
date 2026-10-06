@@ -1311,8 +1311,142 @@ BOARDS: dict[str, dict[str, Any]] = {
                     "unmatched": "requisition page no longer carries the posting",
                     "why": "a closed requisition's page answers 200 without its posting, 2026-10"},
     },
-    "teamtailor": {"detect": [{"host": "teamtailor.com",
-                               "re": [r"(?i)([a-z0-9-]+\.teamtailor\.com)"]}]},
+    # Recruiterbox (Trakstar Hire): its public API wants a key, so the
+    # board's own server-rendered list is read, 25 cards a page with `?p=`.
+    # The old `<co>.recruiterbox.com` host redirects to `<co>.hire.trakstar.com`.
+    "recruiterbox": {
+        "detect": [{"host": "hire.trakstar.com",
+                    "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.hire\.trakstar\.com"],
+                    "blocklist": ["www", "app", "api", "help", "support", "blog", "status"],
+                    "careers_url": "https://{slug}.hire.trakstar.com"},
+                   {"host": "recruiterbox.com",
+                    "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.recruiterbox\.com"],
+                    "blocklist": ["www", "app", "api", "jobs", "help", "support", "blog", "status"],
+                    "careers_url": "https://{slug}.hire.trakstar.com"}],
+        "canary": {"name": "Planate Management Group", "handle": "planate", "min_jobs": 10},
+        "eager": True,
+        "job_ref": {"re": r"(?i)//([a-z0-9][a-z0-9-]*)\.(?:hire\.trakstar|recruiterbox)\.com/jobs/"
+                          r"([a-z0-9]+)"},
+        "listing": {
+            "url": "https://{slug}.hire.trakstar.com/",
+            "params": {"p": "$page"},
+            # The page's script names the board's count: `total_results: '624'`.
+            "pager": {"kind": "page", "size": 25, "start": 1, "pages": 40,
+                      "total": {"of": {"of": "page",
+                                       "transform": r"group:total_results:\s+'(\d+)'"},
+                                "transform": "int"}},
+            "decoder": {"kind": "html", "select": ".js-careers-page-job-list-item > a",
+                        "context": ["div"],
+                        "cells": {"title": ".js-job-list-opening-name",
+                                  "place": ".js-job-list-opening-loc",
+                                  "city": ".meta-job-location-city",
+                                  "state": ".meta-job-location-state",
+                                  "country": ".meta-job-location-country",
+                                  "dept": ".rb-text-4:not(.js-job-list-opening-meta)",
+                                  "meta": ".js-job-list-opening-meta"}},
+            "fields": {
+                "_jid": {"of": "url", "transform": r"group:/jobs/([a-z0-9]+)"},
+                "id": {"format": "recruiterbox_{slug}_{_jid}", "when": {"truthy": "_jid"}},
+                "title": "title",
+                "url": "url",
+                # The spans hold "City", "State" and "Country"; a free-text place has none.
+                "location": {"first": [{"join": ["city", "state", "country"], "sep": ", "},
+                                       {"of": "place", "transform": "one_line"}],
+                             "default": "Unknown"},
+                "remote_hint": {"const": "recruiterbox:remote",
+                                "when": {"contains": ["meta", "fully remote"]}},
+                "department": "dept",
+            },
+        },
+        # The listing names no body; the posting page does. Its JSON-LD
+        # holds raw line breaks in a string (not valid JSON), so the body is
+        # read off the page. A pulled posting's page answers 404.
+        "detail": {
+            "url": "https://{slug}.hire.trakstar.com/jobs/{jid}/",
+            "decoder": {"kind": "html", "select": "body",
+                        "cells": {"description": "div.jobdesciption"}},
+            "fields": {"description": "description"},
+        },
+    },
+    # Teamtailor: the tenant's JSON Feed (`/jobs.json`, JSON Feed 1.1 with a
+    # schema.org posting beside each item), endpoint shape credited to
+    # kalil0321/ats-scrapers (MIT). The handle is the tenant's host, so a
+    # tenant on its own domain is a board too once something names it. The
+    # RSS twin (`/jobs.rss`) also names the state ("Raleigh, North Carolina,
+    # United States"), a remote status and a department, but is RSS `item`s
+    # no decoder reads; the feed's places are city and country code.
+    "teamtailor": {
+        "detect": [{"host": "teamtailor.com", "re": [r"(?i)([a-z0-9-]+\.teamtailor\.com)"],
+                    "blocklist": ["www.teamtailor.com", "app.teamtailor.com", "api.teamtailor.com",
+                                  "support.teamtailor.com", "help.teamtailor.com",
+                                  "docs.teamtailor.com", "blog.teamtailor.com"],
+                    "careers_url": "https://{slug}/jobs"}],
+        "canary": {"name": "Slater Consult", "handle": "slaterconsult.teamtailor.com", "min_jobs": 3},
+        "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+\.teamtailor\.com)/jobs/(\d+)"},
+        "listing": {
+            "url": "https://{slug}/jobs.json",
+            # A board over 100 postings names the next page's URL, as JSON Feed does.
+            "pager": {"kind": "cursor", "size": 100, "pages": 40,
+                      "next": "next_url", "has_next": "next_url"},
+            "decoder": {"entries": "items"},
+            "fields": {
+                "_jid": {"of": "url", "transform": r"group:/jobs/(\d+)"},
+                "id": {"format": "teamtailor_{slug|host_key}_{_jid}", "when": {"truthy": "_jid"}},
+                "title": "title",
+                "url": "url",
+                "location": {"merge": {"primary": {"join": ["_jobposting.jobLocation[0].address.addressLocality",
+                                                            "_jobposting.jobLocation[0].address.addressRegion",
+                                                            "_jobposting.jobLocation[0].address.addressCountry"],
+                                                   "sep": ", "},
+                                       "extras": {"each": "_jobposting.jobLocation",
+                                                  "do": {"join": ["address.addressLocality",
+                                                                  "address.addressRegion",
+                                                                  "address.addressCountry"],
+                                                         "sep": ", "}}},
+                             "default": "Unknown"},
+                "description": {"of": "content_html", "transform": "html_text"},
+                "posted_at": "date_published",
+            },
+        },
+        # Closure only (the feed carries the body): the posting's own page,
+        # where the bare id redirects to the slugged one and a pulled posting
+        # answers 404. Its JSON-LD holds raw line breaks in a string, which
+        # no JSON parser takes.
+        "detail": {
+            "url": "https://{slug}/jobs/{jid}",
+            "decoder": {"kind": "html", "select": "body"},
+        },
+    },
+    # Gem's public job-board API (the whole board in one list), endpoint shape
+    # credited to kalil0321/ats-scrapers (MIT).
+    "gem": {
+        "detect": [{"host": "jobs.gem.com", "re": [r"(?i)jobs\.gem\.com/([a-z0-9_-]+)"],
+                    "blocklist": ["api", "embed", "static", "_next"],
+                    "careers_url": "https://jobs.gem.com/{slug}"}],
+        "canary": {"name": "ResProp Management", "handle": "resprop", "min_jobs": 10},
+        "job_ref": {"re": r"(?i)jobs\.gem\.com/([a-z0-9_-]+)/([A-Za-z0-9_-]{6,})"},
+        "listing": {
+            "url": "https://api.gem.com/job_board/v0/{slug}/job_posts/",
+            "fields": {
+                "id": {"format": "gem_{slug}_{id}"},
+                "title": "title",
+                "url": "absolute_url",
+                "location": {"first": [{"merge": {"primary": "location.name",
+                                                  "extras": "offices[].location.name"}},
+                                       {"const": "Remote", "when": {"eq": ["location_type", "remote"]}}],
+                             "default": "Unknown"},
+                "description": "content_plain",
+                "posted_at": {"first": ["first_published_at", "created_at"]},
+                "remote_hint": {"const": "gem:location_type",
+                                "when": {"eq": ["location_type", "remote"]}},
+                "department": {"join": ["departments[].name"]},
+            },
+        },
+        "detail": {
+            "url": "https://api.gem.com/job_board/v0/{slug}/job_posts/{jid}/",
+            "fields": {"description": "content_plain"},
+        },
+    },
     # Taleo Business Edition ("tbe"): an org on a site path, its career
     # center the (org, cws) pair. Enterprise Taleo stays a lead below.
     "taleo": {

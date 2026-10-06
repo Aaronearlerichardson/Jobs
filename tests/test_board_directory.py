@@ -45,15 +45,15 @@ def directory(tmp_path, monkeypatch, local_addr, elsewhere):
            ("faraway", _JOB.format(slug="faraway", n=1), elsewhere, "Engineer"),
            ("nolocation", _JOB.format(slug="nolocation", n=1), None, "Engineer")]
     _parquet(tmp_path / "greenhouse" / "jobs.parquet", gh, cols)
-    _parquet(tmp_path / "recruiterbox" / "jobs.parquet",
-             [("acme", "https://acme.recruiterbox.com/jobs/1", local_addr, "Engineer")], cols)
+    _parquet(tmp_path / "gohire" / "jobs.parquet",
+             [("acme", "https://acme.gohire.io/jobs/1", local_addr, "Engineer")], cols)
     _parquet(tmp_path / "companies.parquet",
              [("greenhouse", "Big Co Inc", "bigco", "https://job-boards.greenhouse.io/bigco"),
               ("greenhouse", "Precision Nutrition", "precisionnutrition",
                "https://job-boards.greenhouse.io/precisionnutrition")],
              ("ats", "name", "slug", "url"))
     (tmp_path / "manifest.json").write_text(json.dumps(
-        {"by_ats": {"greenhouse": {}, "recruiterbox": {}}}), encoding="utf-8")
+        {"by_ats": {"greenhouse": {}, "gohire": {}}}), encoding="utf-8")
     monkeypatch.setattr(config, "BOARD_DIRECTORY", config.BOARD_DIRECTORY.model_copy(
         update={"base_url": str(tmp_path), "files": []}))
     # The title gate is the profile's; the test names its own.
@@ -73,13 +73,13 @@ async def test_local_boards_are_grouped_named_and_ranked(directory):
 
 async def test_a_platform_with_no_fetcher_is_counted_never_listed(directory):
     scan = await bd._scan()
-    assert scan.leads == {"recruiterbox": {"acme"}}
-    assert all(b["ats"] != "recruiterbox" for b in scan.boards.values())
+    assert scan.leads == {"gohire": {"acme.gohire.io"}}
+    assert all(b["ats"] != "gohire" for b in scan.boards.values())
 
 
 async def test_configured_files_replace_the_manifest(directory, monkeypatch):
     monkeypatch.setattr(config, "BOARD_DIRECTORY",
-                        config.BOARD_DIRECTORY.model_copy(update={"files": ["recruiterbox"]}))
+                        config.BOARD_DIRECTORY.model_copy(update={"files": ["gohire"]}))
     assert await bd.directory_boards() == []
 
 

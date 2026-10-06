@@ -56,9 +56,9 @@ def detect(text: str, final_url: str = "", leads: bool = True,
     ('fetchable', 'infor', 'css-acme-prd.inforcloudsuite.com|42')
     >>> detect("", "https://apply.workable.com/acme-aps/j/D68529D654/")
     ('fetchable', 'workable', 'acme-aps')
-    >>> detect("via acme.teamtailor.com portal")
-    ('lead', 'teamtailor', 'acme.teamtailor.com')
-    >>> detect("via acme.teamtailor.com portal", leads=False) is None
+    >>> detect("via acme.gohire.io portal")
+    ('lead', 'gohire', 'acme.gohire.io')
+    >>> detect("via acme.gohire.io portal", leads=False) is None
     True
 
     Workday's CXS API URL (the tenant twice) is read first; an API or

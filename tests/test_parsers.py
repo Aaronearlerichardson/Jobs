@@ -1498,13 +1498,13 @@ class TestApplyToStoreFetchability:
         the sniffer can NAME but nothing can fetch stays out of the roster."""
         import src.store as store
         self._wire(monkeypatch, db)
-        assert company_fetch.board_for("teamtailor") is None
+        assert company_fetch.board_for("gohire") is None
 
         lines = await self._apply(self._candidate(
-            "Gamma Devices", "teamtailor", "gamma",
+            "Gamma Devices", "gohire", "gamma",
             "https://gamma.example/careers"))
 
-        assert any("no fetcher for ATS 'teamtailor'" in ln for ln in lines)
+        assert any("no fetcher for ATS 'gohire'" in ln for ln in lines)
         assert store.get_companies(db, active_only=False) == []
 
     async def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):

@@ -1,0 +1,167 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "Slater Consult ",
+  "home_page_url": "https://slaterconsult.teamtailor.com/jobs",
+  "feed_url": "https://slaterconsult.teamtailor.com/jobs.json",
+  "items": [
+    {
+      "id": "29913b0e-fd23-4083-8fc6-423d1ba251bf",
+      "title": "Product Lifecycle Management Lead",
+      "url": "https://slaterconsult.teamtailor.com/jobs/8312455-product-lifecycle-management-lead",
+      "date_published": "2026-09-02T20:27:38+02:00",
+      "content_html": "<p>Jupiter Bach is taking the next step in its development as a partner to the global wind industry. Building on our strong position within composite manufacturing, we are expanding our capabilities across engineering, assembly and full-system delivery, supporting leading wind OEMs.</p><p>This development requires a stronger and more integrated approach to how product data, documentation and technical systems are str",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Product Lifecycle Management Lead",
+        "description": "<p>Jupiter Bach is taking the next step in its development as a partner to the global wind industry. Building on our strong position within composite manufacturing, we are expanding our capabilities across engineering, assembly and full-system delivery, supporting leading wind OEMs.</p><p>This development requires a stronger and more integrated approach to how product data, documentation and technical systems are str",
+        "identifier": {
+          "@type": "PropertyValue",
+          "name": "Slater Consult ",
+          "value": 8312455
+        },
+        "datePosted": "2026-09-02T20:27:38+02:00",
+        "hiringOrganization": {
+          "@type": "Organization",
+          "name": "Slater Consult ",
+          "sameAs": "https://slaterconsult.teamtailor.com"
+        },
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": null,
+              "addressLocality": "Holstebro",
+              "postalCode": null,
+              "addressCountry": "DK",
+              "addressRegion": null
+            }
+          },
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": null,
+              "addressLocality": "Szczecin",
+              "postalCode": null,
+              "addressCountry": "PL",
+              "addressRegion": "Poland"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "4ba1ebbc-a71e-4d73-853d-7145b1eee237",
+      "title": "Controller",
+      "url": "https://slaterconsult.teamtailor.com/jobs/8305651-controller",
+      "date_published": "2026-09-01T20:52:51+02:00",
+      "content_html": "<p><span><strong>Monjasa </strong>is looking for a Controller to join its finance team in Panama. This is an opportunity for a strong accounting professional who enjoys getting into the details, understanding the business behind the numbers, and taking ownership of making sure things are done right.</span></p><p><span>Working in an international and fast-paced trading environment, you will take on a broad range of ac",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Controller",
+        "description": "<p><span><strong>Monjasa </strong>is looking for a Controller to join its finance team in Panama. This is an opportunity for a strong accounting professional who enjoys getting into the details, understanding the business behind the numbers, and taking ownership of making sure things are done right.</span></p><p><span>Working in an international and fast-paced trading environment, you will take on a broad range of ac",
+        "identifier": {
+          "@type": "PropertyValue",
+          "name": "Slater Consult ",
+          "value": 8305651
+        },
+        "datePosted": "2026-09-01T20:52:51+02:00",
+        "hiringOrganization": {
+          "@type": "Organization",
+          "name": "Slater Consult ",
+          "sameAs": "https://slaterconsult.teamtailor.com"
+        },
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": null,
+              "addressLocality": "Panama City",
+              "postalCode": null,
+              "addressCountry": "PA",
+              "addressRegion": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "483480c4-9e79-4d59-9e34-d1cc431e5a12",
+      "title": "Senior Project Engineer",
+      "url": "https://slaterconsult.teamtailor.com/jobs/6676516-senior-project-engineer",
+      "date_published": "2025-10-28T12:37:38+01:00",
+      "content_html": "<p><a target=\"_blank\" href=\"https://www.landiainc.com/\"><strong>Landia</strong></a>&nbsp;has&nbsp;been innovating pump and mixer solutions since 1933, and they are just getting started. As they continue to grow the business in the U.S., we are looking for a Senior Project Engineer to join the team. Landia believes every project is unique and requires tailored, custom solutions, so if you enjoy a technical challenge, ",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Senior Project Engineer",
+        "description": "<p><a target=\"_blank\" href=\"https://www.landiainc.com/\"><strong>Landia</strong></a>&nbsp;has&nbsp;been innovating pump and mixer solutions since 1933, and they are just getting started. As they continue to grow the business in the U.S., we are looking for a Senior Project Engineer to join the team. Landia believes every project is unique and requires tailored, custom solutions, so if you enjoy a technical challenge, ",
+        "identifier": {
+          "@type": "PropertyValue",
+          "name": "Slater Consult ",
+          "value": 6676516
+        },
+        "datePosted": "2025-10-28T12:37:38+01:00",
+        "hiringOrganization": {
+          "@type": "Organization",
+          "name": "Slater Consult ",
+          "sameAs": "https://slaterconsult.teamtailor.com"
+        },
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": null,
+              "addressLocality": "Morrisville",
+              "postalCode": null,
+              "addressCountry": "US",
+              "addressRegion": null
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "29f88d67-f314-485b-a7f0-24ca0f757ea8",
+      "title": "Automation Engineer",
+      "url": "https://slaterconsult.teamtailor.com/jobs/5583037-automation-engineer",
+      "date_published": "2025-02-20T09:07:36+01:00",
+      "content_html": "<p>We are seeking a mid-level Automation Engineer with 2-5 years of experience to support process automation systems in a highly regulated environment. You will&nbsp;work on-site with clients to develop, maintain and optimize automation solutions, ensuring compliance with industry standards.</p><p><strong>Key Responsibilities</strong></p><ul>\n<li>Provide on-site automation engineering support and troubleshooting</li>",
+      "_jobposting": {
+        "@context": "http://schema.org/",
+        "@type": "JobPosting",
+        "title": "Automation Engineer",
+        "description": "<p>We are seeking a mid-level Automation Engineer with 2-5 years of experience to support process automation systems in a highly regulated environment. You will&nbsp;work on-site with clients to develop, maintain and optimize automation solutions, ensuring compliance with industry standards.</p><p><strong>Key Responsibilities</strong></p><ul>\n<li>Provide on-site automation engineering support and troubleshooting</li>",
+        "identifier": {
+          "@type": "PropertyValue",
+          "name": "Slater Consult ",
+          "value": 5583037
+        },
+        "datePosted": "2025-02-20T09:07:36+01:00",
+        "hiringOrganization": {
+          "@type": "Organization",
+          "name": "Slater Consult ",
+          "sameAs": "https://slaterconsult.teamtailor.com"
+        },
+        "jobLocation": [
+          {
+            "@type": "Place",
+            "address": {
+              "@type": "PostalAddress",
+              "streetAddress": null,
+              "addressLocality": "Raleigh",
+              "postalCode": "27601",
+              "addressCountry": "US",
+              "addressRegion": null
+            }
+          }
+        ]
+      }
+    }
+  ]
+}
