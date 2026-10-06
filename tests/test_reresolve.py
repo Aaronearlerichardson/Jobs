@@ -130,7 +130,7 @@ class TestReresolveWrites:
         assert len(await repair.reresolve_misses(db=db, max_workers=1, t=self.T)) == 1
 
         row = dict(db.execute(
-            "SELECT * FROM companies WHERE name='Emmes'").fetchone())
+            "SELECT * FROM companies_effective WHERE name='Emmes'").fetchone())
         assert (row["ats"], row["slug"]) == ("greenhouse", "emmes")
         assert row["active"] == 0, "a re-resolved board is reviewed, not crawled"
         assert tags.parse(row["tags"]) == {tags.WATCH, tags.PENDING}, \
@@ -156,7 +156,7 @@ class TestReresolveWrites:
 
         assert len(written) == 1
         row = dict(db.execute(
-            "SELECT * FROM companies WHERE name='Quiet'").fetchone())
+            "SELECT * FROM companies_effective WHERE name='Quiet'").fetchone())
         assert (row["ats"], row["slug"]) == ("greenhouse", "quiet-new")
         assert row["active"] == 0, \
             "retargeted the same way as any other family: reviewed, not crawled"

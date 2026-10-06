@@ -77,24 +77,24 @@ def report(conn: sqlite3.Connection, since: str | None = None, fit: float = FIT_
     False
     """
     plans: list[dict[str, Any]] = []
-    roster: dict[str, Any] = {"total": query(conn, f"SELECT {ROSTER_COLS} FROM companies", (PENDING_LIKE,))}
+    roster: dict[str, Any] = {"total": query(conn, f"SELECT {ROSTER_COLS} FROM companies_effective", (PENDING_LIKE,))}
     for dim in DIMENSIONS:
         roster[dim] = query(conn, f"SELECT COALESCE({dim}, '(none)') AS key, {ROSTER_COLS} "
-                                  f"FROM companies GROUP BY key ORDER BY rows DESC, key", (PENDING_LIKE,))
+                                  f"FROM companies_effective GROUP BY key ORDER BY rows DESC, key", (PENDING_LIKE,))
     misses = {"family": query(conn, f"SELECT {FAMILY} AS family, COUNT(*) AS rows, SUM(ats IS NULL) AS boardless "
-                                    "FROM companies WHERE miss_reason IS NOT NULL GROUP BY family ORDER BY rows DESC"),
+                                    "FROM companies_effective WHERE miss_reason IS NOT NULL GROUP BY family ORDER BY rows DESC"),
               "reason": query(conn, "SELECT miss_reason AS reason, COUNT(*) AS rows, SUM(ats IS NULL) AS boardless "
-                                    "FROM companies WHERE miss_reason IS NOT NULL GROUP BY reason ORDER BY rows DESC")}
+                                    "FROM companies_effective WHERE miss_reason IS NOT NULL GROUP BY reason ORDER BY rows DESC")}
     yields: dict[str, Any] = {"min_fit": fit}
     for label, col in (("by_source", "c.source"), ("by_geo_mode", "j.geo_mode")):
         yields[label] = query(
             conn, f"SELECT COALESCE({col}, '(none)') AS key, COUNT(DISTINCT j.company_id) AS companies, "
-                  f"COUNT(*) AS jobs FROM jobs j JOIN companies c ON c.id = j.company_id "
+                  f"COUNT(*) AS jobs FROM jobs j JOIN companies_effective c ON c.id = j.company_id "
                   f"WHERE {OPEN} AND j.resume_fit_score >= ? GROUP BY key ORDER BY jobs DESC, key", (fit,), plans)
     out: dict[str, Any] = {"roster": roster, "misses": misses, "yield": yields, "plans": plans}
     if since:
         rows = query(conn, "SELECT name, source, mission_tier AS tier, ats, local_job_count AS local, created_at "
-                           "FROM companies WHERE created_at >= ? ORDER BY created_at", (since,))
+                           "FROM companies_effective WHERE created_at >= ? ORDER BY created_at", (since,))
         groups: dict[tuple[Any, ...], dict[str, Any]] = {}
         for r in rows:
             g = groups.setdefault((r["source"], r["tier"], r["ats"]), {

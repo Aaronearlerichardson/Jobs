@@ -48,7 +48,7 @@ def title_vocab(conn: sqlite3.Connection, min_companies: int = 3) -> dict[str, f
     tier: dict[int, bool] = {}
     for cid, mission, title in conn.execute(
             "SELECT DISTINCT j.company_id, c.mission_tier, j.title FROM jobs j "
-            "JOIN companies c ON c.id = j.company_id WHERE c.mission_tier IS NOT NULL"):
+            "JOIN companies_effective c ON c.id = j.company_id WHERE c.mission_tier IS NOT NULL"):
         seen[cid] |= words(title)
         tier[cid] = mission in active
     pos = sum(tier.values())

@@ -854,7 +854,7 @@ WITH pool AS (
   SELECT j.id, j.job_id, j.url, j.company_id, j.company_name, j.title,
          j.resume_fit_score, c.mission_score, c.employer_id AS _employer,
          effective_mission(j.company_name, c.mission_score) AS _mission
-  FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
+  FROM jobs j LEFT JOIN companies_effective c ON j.company_id = c.id
   WHERE {pool_where}
 ), scored AS (
   SELECT *, combined_score(resume_fit_score, _mission) AS combined_score
@@ -865,7 +865,7 @@ WITH pool AS (
 )
 SELECT {columns}, c.mission_tier, c.mission_score, c.tags AS company_tags,
        p.combined_score{extra}
-FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies c ON j.company_id = c.id
+FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies_effective c ON j.company_id = c.id
 ORDER BY {final_order}"""
 # The collapse layer's partition is one "same opening at the same employer"
 # group: the board's employer (companies.employer_id, so two boards of one
@@ -894,11 +894,12 @@ _COLLAPSE_SQL = """
 
 
 @sql_function("remote_admitted", 4)
-def _remote_admitted_cols(company_tags: str | None, company_name: str | None,
+def _remote_admitted_cols(watch: int | None, company_name: str | None,
                           mission_score: float | None, floor: float | None) -> bool:
-    """remote_admitted over a query's columns, for ranked_jobs' geo clause."""
-    return remote_admitted({"company_tags": company_tags, "company_name": company_name,
-                            "mission_score": mission_score}, floor)
+    """remote_admitted over a query's columns (the company's effective
+    `watch` flag), for ranked_jobs' geo clause."""
+    return remote_admitted({"company_tags": tags.WATCH if watch else None,
+                            "company_name": company_name, "mission_score": mission_score}, floor)
 
 
 def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
@@ -948,6 +949,11 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
     rejected/dismissed disappear — except 'saved' (shortlisted), which
     stays visible.
 
+    A row flagged `dup_of` (a mirror of an opening on another board of the
+    same employer, see flag_duplicate_jobs) is not in the pool at all; its
+    survivor stands for it. Company facts (mission, watch) are the
+    `companies_effective` view's.
+
     `collapse=True` (the default) then folds rows that are the SAME opening
     at the SAME employer — matched by _COLLAPSE_SQL, i.e. company_id (or a
     name/job_id fallback) plus the normalised title — down to their
@@ -988,6 +994,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
     conds, args = open_in_track_clause(
         track, alias="j", include_closed=include_closed,
         include_dispositioned=include_dispositioned)
+    conds.append("j.dup_of IS NULL")      # the survivor of a cross-board mirror stands for it
     if location_re is not None:
         # NC_RE is a Python matcher, not a regex: judge each DISTINCT stored
         # location once (~31k of 119k rows) and let SQL keep the accepted set.
@@ -997,7 +1004,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
             geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
-                    "remote_admitted(c.tags, j.company_name, c.mission_score, ?))")
+                    "remote_admitted(c.watch, j.company_name, c.mission_score, ?))")
             args += [json.dumps(sorted(allow_geo_modes)), remote_mission_floor]
         conds.append(f"({geo})")
     if min_mission is not None:
@@ -1171,7 +1178,10 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
     city (`city_key`; a row with no city matches any, when each board has
     the title once), both open, the rows paired one to one in id order so
     a board's three real openings stay three. The survivor is the row of the
-    board with the most jobs stored; the loser's flag names its id.
+    board with the best EFFECTIVE mission score (a scored board before an
+    unscored one), then the most jobs stored, then the lowest company id, so
+    a flagged row always has an open mirror at a board at least as on-mission;
+    the loser's flag names its id.
     Dispositioned rows are never flagged. A pair of boards counts only when at
     least 3 of the loser board's openings, and a fifth of them, pair up. The
     flag is recomputed from the open rows, so a loser whose survivor closed
@@ -1200,6 +1210,16 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
     1
     >>> sorted(r[0] for r in conn.execute("SELECT job_id FROM jobs WHERE dup_of IS NOT NULL"))
     ['A1', 'A2', 'A3']
+
+    Score board A as the better mission and it survives instead; ranking
+    leaves out the flagged copies:
+
+    >>> from .employers import set_board_mission
+    >>> set_board_mission(conn, a, "core", 0.9)
+    >>> flag_duplicate_jobs(conn)
+    6
+    >>> sorted(r["job_id"] for r in ranked_jobs(conn, collapse=False))
+    ['A0', 'A1', 'A2', 'A3', 'B9']
     """
     # A cross-board duplicate needs evidence the two boards are mirrors, not
     # just a title and a city in common ("Registered Nurse", Durham): at
@@ -1215,22 +1235,24 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
       FROM open_jobs j JOIN companies c ON c.id = j.company_id
       WHERE c.employer_id IN (SELECT employer_id FROM multi) AND COALESCE(j.title, '') != ''
     ), home AS MATERIALIZED (
-      SELECT company_id AS cid, COUNT(*) AS jobs FROM jobs
-      WHERE company_id IN (SELECT id FROM companies
-                           WHERE employer_id IN (SELECT employer_id FROM multi))
-      GROUP BY company_id
+      SELECT j.company_id AS cid, COUNT(*) AS jobs, c.mission_score AS mission
+      FROM jobs j JOIN companies_effective c ON c.id = j.company_id
+      WHERE c.employer_id IN (SELECT employer_id FROM multi)
+      GROUP BY j.company_id
     ), k AS MATERIALIZED (
-      SELECT o.*, h.jobs,
+      SELECT o.*, h.jobs, h.mission,
              ROW_NUMBER() OVER (PARTITION BY emp, t, l, o.cid ORDER BY o.id) AS ord,
              COUNT(*) OVER (PARTITION BY emp, t, o.cid) AS tn,
-             DENSE_RANK() OVER (PARTITION BY emp, t, l ORDER BY h.jobs DESC, o.cid) AS brank
+             DENSE_RANK() OVER (PARTITION BY emp, t, l
+                                ORDER BY h.mission IS NULL, h.mission DESC, h.jobs DESC, o.cid) AS brank
       FROM o JOIN home h ON h.cid = o.cid
     ), exact AS (
       SELECT lo.id, w.id AS survivor, lo.cid FROM k lo
       JOIN k w ON w.emp = lo.emp AND w.t = lo.t AND w.l = lo.l AND w.brank = 1 AND w.ord = lo.ord
       WHERE lo.brank > 1 AND lo.free
     ), tk AS (
-      SELECT *, DENSE_RANK() OVER (PARTITION BY emp, t ORDER BY jobs DESC, cid) AS trank
+      SELECT *, DENSE_RANK() OVER (PARTITION BY emp, t
+                                   ORDER BY mission IS NULL, mission DESC, jobs DESC, cid) AS trank
       FROM k WHERE tn = 1
     ), loose AS (
       SELECT lo.id, w.id AS survivor, lo.cid FROM tk lo

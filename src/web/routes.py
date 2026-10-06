@@ -497,7 +497,7 @@ def api_import() -> ResponseReturnValue:
 def api_export() -> ResponseReturnValue:
     with track_store(_track()) as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM companies ORDER BY name").fetchall()]
+            "SELECT * FROM companies_effective ORDER BY name").fetchall()]
     for r in rows:
         r.pop("id", None)
         r.pop("employer_id", None)
@@ -618,7 +618,7 @@ def api_stats() -> ResponseReturnValue:
             # Companies actually crawled every run: a dormant row is still
             # active, but only comes round weekly, so counting it here
             # overstated the roster by roughly 60%.
-            "companies_active": one("SELECT COUNT(*) FROM companies WHERE "
+            "companies_active": one("SELECT COUNT(*) FROM companies_effective WHERE "
                                     "active=1 AND "
                                     "COALESCE(crawl_state,'active')='active'"),
             # Roster GROWTH, from companies.created_at. last_probed cannot
@@ -627,12 +627,10 @@ def api_stats() -> ResponseReturnValue:
             # Candidates that failed to become crawlable companies, per reason
             # family — the worklist behind a roster that stopped growing.
             "company_misses": dict(store.miss_counts(conn)),
-            "watched": one("SELECT COUNT(*) FROM companies WHERE "
-                           "(','||COALESCE(tags,'')||',') LIKE '%,watch,%'"),
+            "watched": one("SELECT COUNT(*) FROM companies_effective WHERE watch = 1"),
             # Roster candidates waiting on a human — the Review tab's badge.
-            "pending_review": one("SELECT COUNT(*) FROM companies WHERE "
-                                  "(','||COALESCE(tags,'')||',') LIKE ?",
-                                  (f"%,{company_tags.PENDING},%",)),
+            "pending_review": one("SELECT COUNT(*) FROM companies_effective "
+                                  "WHERE review = 'pending'"),
             "api_key": have_api_key(),
             "screen_model": config.CLAUDE_MODEL,
             "verify_model": config.CLAUDE_VERIFY_MODEL,

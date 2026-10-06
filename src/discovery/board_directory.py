@@ -328,17 +328,21 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
              ) -> dict[str, list[DirectoryBoard]]:
     """`boards` sorted by the roster (`STATUSES`):
 
+    The employer is the roster row of the same name, else the one whose
+    careers host is this posting's; the board is renamed to that row's
+    spelling, and `store.plan_board` decides, as the write will:
+
     * tracked    the roster has this board
-    * alternate  the roster has the employer on another board (its name, or
-                 a roster careers host that is this posting's); import_boards
-                 adds it as that employer's sibling board
+    * alternate  a board of an employer the roster has a mission verdict for:
+                 a sibling of its live board, or the replacement of its dead
+                 one. import_boards writes it with that verdict, no score.
     * blocked    a name a reviewer rejected, or the profile blocks
-    * new        the rest. A name the roster holds only as a miss (no
-                 board) is new, under the roster's own spelling, so the
-                 import fills the miss.
+    * new        the rest: no such employer, or one with no verdict yet (a
+                 name held only as a miss, say), so it takes a mission score.
 
     >>> conn = store.connect(":memory:")
-    >>> _ = store.upsert_company(conn, {"name": "Acme Bio", "ats": "lever", "slug": "acme"})
+    >>> _ = store.upsert_company(conn, {"name": "Acme Bio", "ats": "lever", "slug": "acme",
+    ...                                 "mission_tier": "core", "mission_score": 0.9})
     >>> _ = store.record_miss(conn, "Zeta Labs", "no-board-found")
     >>> _ = store.block_name(conn, "Junk Co")
     >>> def board(name, ats, handle):
@@ -352,26 +356,24 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
     ...                       board("Junk Co", "lever", "junk"),
     ...                       board("Other", "lever", "other")])
     >>> {k: [b["name"] for b in v] for k, v in got.items()}
-    {'new': ['Zeta Labs Inc', 'Zeta Labs', 'Other'], 'alternate': ['ACME BIO'], 'tracked': ['Acme Bio'], 'blocked': ['Junk Co']}
+    {'new': ['Zeta Labs Inc', 'Zeta Labs', 'Other'], 'alternate': ['Acme Bio'], 'tracked': ['Acme Bio'], 'blocked': ['Junk Co']}
     """
-    roster = store.get_companies(conn, active_only=False)
-    have = {k for k in map(store.board_key, roster) if k}
-    by_name = {name_key(c["name"]): c for c in roster}
+    by_name = {name_key(c["name"]): c for c in store.get_companies(conn, active_only=False)}
     blocked = blocked_keys(conn)
     out: dict[str, list[DirectoryBoard]] = {s: [] for s in STATUSES}
     for b in boards:
-        if _key(Detected("fetchable", b["ats"], b["handle"], b["careers_url"])) in have:
-            out["tracked"].append(b)
-            continue
         nk = name_key(b["name"])
-        if nk in blocked:
-            out["blocked"].append(b)
-            continue
         row = by_name.get(nk) or store.company_by_host(conn, b["sample_url"])
-        if row and store.board_key(row):
-            out["alternate"].append(b)
+        if row:
+            b = {**b, "name": row["name"]}
+        plan = store.plan_board(conn, coords.columns(b["ats"], b["handle"], b["careers_url"],
+                                                     name=b["name"]))
+        if plan.action == "update":
+            out["tracked"].append(b)
+        elif nk in blocked:
+            out["blocked"].append(b)
         else:
-            out["new"].append({**b, "name": row["name"]} if row else b)
+            out["new" if plan.needs_score else "alternate"].append(b)
     return out
 
 
@@ -464,8 +466,9 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
     counts["added"], _ = await intake_boards(_hits(eligible), "board_directory", require_live=True, limit=cap)
     print(f"  {counts['added']} board(s) queued for review")
     # An alternate board needs no verdict of its own: it joins its employer
-    # (store.add_board), once a live local posting confirms it.
+    # or replaces its dead board (store.add_board), once a live local posting
+    # confirms it.
     counts["siblings"], _ = await intake_boards(_hits(groups["alternate"]), "board_directory",
-                                                require_live=True, score=False)
+                                                require_live=True)
     print(f"  {counts['siblings']} alternate board(s) added to their employers")
     return counts

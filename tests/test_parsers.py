@@ -1191,6 +1191,18 @@ class TestScoreAndUpsert:
         assert [c["name"] for c in store.get_companies(db, active_only=False)] \
             == ["Alpacahealth"]
 
+    async def test_a_dead_board_is_replaced_keeping_its_verdict(self, monkeypatch, db):
+        import src.store as store
+        store.upsert_company(db, {"name": "Alpaca Health", "ats": "greenhouse", "slug": "gone",
+                                  "mission_tier": "core", "mission_score": 0.9})
+        db.execute("UPDATE companies SET miss_reason='board-dead', active=0")
+        asked = self._wire(monkeypatch)
+        row, _, _ = await self._upsert(db, self._HIT, source="local_sourcing")
+        assert asked == []
+        (kept,) = store.get_companies(db, active_only=False)
+        assert (kept["ats"], kept["slug"], kept["miss_reason"], kept["mission_score"]) == (
+            "lever", "alpaca", None, 0.9)
+
     async def test_a_precomputed_score_skips_the_scorer(self, monkeypatch, db):
         asked = self._wire(monkeypatch)
         row, _, _ = await self._upsert(
@@ -1257,7 +1269,7 @@ class TestScoreMissionsHonoursTheReviewQueue:
                                   "slug": "failed", "active": 0})
         await local_sourcing.score_missions(max_workers=1)
         rows = {r["name"]: dict(r) for r in
-                db.execute("SELECT name, active, tags, mission_tier FROM companies")}
+                db.execute("SELECT name, active, tags, mission_tier FROM companies_effective")}
         assert rows["Queued Co"]["active"] == 0
         assert tags.has(rows["Queued Co"]["tags"], tags.PENDING)
         assert rows["Queued Co"]["mission_tier"] == "adjacent"

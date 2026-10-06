@@ -45,6 +45,9 @@ from .companies import (  # noqa: F401
     record_crawl_outcome, record_miss, roster_growth, set_company_tag,
     upsert_company,
 )
+from .employers import (  # noqa: F401
+    clear_board_override, set_board_mission, set_mission, set_pending, set_watch,
+)
 from .jobs import (  # noqa: F401
     TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,

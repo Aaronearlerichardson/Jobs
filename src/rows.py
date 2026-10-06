@@ -239,7 +239,9 @@ class CompanyIn(TypedDict, total=False, closed=True):
 
 
 class CompanyRow(TypedDict, closed=True):
-    """A stored companies row, as `SELECT *` returns it: every column, so
+    """A company as `SELECT *` over the companies_effective view returns it:
+    every column, with the mission, tags, active, review and watch the
+    EFFECTIVE ones (the board's own, else its employer's; migration 0005), so
     a subscript is checked. Its columns are declared a second time, apart
     from CompanyIn (a TypedDict cannot make an inherited optional key
     required); tests/test_store.py checks both against the table and
@@ -272,6 +274,8 @@ class CompanyRow(TypedDict, closed=True):
     next_crawl_at: str | None
     last_harvested_at: str | None
     employer_id: int | None
+    review: str | None
+    watch: int | None
 
 
 # Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.

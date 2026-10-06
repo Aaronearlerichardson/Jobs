@@ -13,6 +13,7 @@ package may import them in any order. Doctests import what they use.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from datetime import datetime
@@ -36,6 +37,12 @@ from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the 
 # instead of onto the roster: an `active = 0` row carrying tags.PENDING,
 # invisible to every crawl (they all read get_companies(active_only=True)),
 # until a person confirms or rejects it.
+#
+# The state is the EMPLOYER's (employers.review; migration 0005): confirming or
+# rejecting a candidate rules on the whole employer and all its boards. A board
+# of a vetted employer that is itself awaiting review carries its own state
+# (companies.review), and the same calls then rule on that board only. Readers
+# ask the companies_effective view.
 
 
 @sql_function("name_key", 1)
@@ -105,9 +112,9 @@ def is_confirmed_company(conn: sqlite3.Connection, name: str) -> bool:
     False
     """
     row = conn.execute(
-        "SELECT ats, tags FROM companies WHERE lower(name)=lower(?)",
+        "SELECT ats, review FROM companies_effective WHERE lower(name)=lower(?)",
         (name,)).fetchone()
-    return bool(row and row["ats"] and not tags.has(row["tags"], tags.PENDING))
+    return bool(row and row["ats"] and row["review"] != "pending")
 
 
 def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
@@ -132,16 +139,17 @@ def pending_companies(conn: sqlite3.Connection) -> list[CompanyRow]:
     """
     from .companies import as_company  # not at module level: see module doc
     return [as_company(r) for r in conn.execute(
-        "SELECT * FROM companies "
-        "WHERE (',' || COALESCE(tags,'') || ',') LIKE ? "
-        "ORDER BY created_at DESC, id DESC",
-        (f"%,{tags.PENDING},%",)).fetchall()]
+        "SELECT * FROM companies_effective WHERE review = 'pending' "
+        "ORDER BY created_at DESC, id DESC").fetchall()]
 
 
 def confirm_company(conn: sqlite3.Connection, cid: int,
                     active: int | None = None) -> CompanyRow | None:
-    """Accept a review candidate onto the roster: the pending tag comes off
-    and `active` is written as given (1 = crawl it, 0 = park it).
+    """Accept a review candidate onto the roster: its employer (and so every
+    board of it) leaves the queue, or just this board when only the board was
+    pending. `active` is written as given to this board (1 = crawl it, 0 =
+    park it); the employer's other boards get the mission rule's answer
+    on their own verdict, and a dead board stays as it is.
 
     The decision itself is the caller's: the shared mission rule
     (config.is_active_mission) applied to the tier already stored on the
@@ -175,16 +183,39 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
 
     >>> confirm_company(conn, 9999) is None
     True
+
+    Confirming one board of a pending employer rules on all of them:
+
+    >>> from src.store import add_board
+    >>> _ = add_board(conn, mark_pending({"name": "Duo", "ats": "lever", "slug": "d"}))
+    >>> _ = add_board(conn, {"name": "Duo", "ats": "ashby", "slug": "d2"})
+    >>> sorted(c["name"] for c in pending_companies(conn))
+    ['Duo', 'Duo (ashby)']
+    >>> _ = confirm_company(conn, company_id_by_name(conn, "Duo (ashby)"))
+    >>> pending_companies(conn)
+    []
     """
-    row = conn.execute("SELECT * FROM companies WHERE id=?", (cid,)).fetchone()
+    row = conn.execute("SELECT * FROM companies_effective WHERE id=?", (cid,)).fetchone()
     if not row:
         return None
-    if active is None:
-        active = config.is_active_mission(row["mission_tier"], row["name"])
-    kept = tags.parse(row["tags"]) - {tags.PENDING}
-    conn.execute(
-        "UPDATE companies SET tags=?, active=? WHERE id=?",
-        (tags.join(kept), int(active), cid))
+    held = conn.execute("SELECT review FROM employers WHERE id=?", (row["employer_id"],)).fetchone()
+    whole = bool(held and held[0] == "pending")
+    if whole:
+        conn.execute("UPDATE employers SET review=NULL WHERE id=?", (row["employer_id"],))
+        conn.execute("UPDATE companies SET review=NULL WHERE employer_id=?", (row["employer_id"],))
+    else:
+        conn.execute("UPDATE companies SET review=NULL WHERE id=?", (cid,))
+    boards = conn.execute(
+        "SELECT id, name, mission_tier, miss_reason FROM companies_effective "
+        "WHERE id=? OR (? AND employer_id=?)", (cid, whole, row["employer_id"])).fetchall()
+    for b in boards:
+        if b["id"] == cid and active is not None:
+            on = active
+        elif b["id"] != cid and b["miss_reason"]:
+            continue
+        else:
+            on = config.is_active_mission(b["mission_tier"], b["name"])
+        conn.execute("UPDATE companies SET active=? WHERE id=?", (int(on), b["id"]))
     _commit(conn)
     from .companies import get_company  # not at module level: see module doc
     return get_company(conn, cid)
@@ -193,7 +224,8 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
 def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None) -> str | None:
     """Throw a review candidate away for good: the row and any jobs it
     produced are deleted, and its name is blocklisted so no discovery path
-    re-finds it.
+    re-finds it. A pending EMPLOYER goes with all its boards (and their names
+    and its own are blocked); a pending board of a vetted employer goes alone.
 
     Returns the rejected name, or None when there is no such company.
 
@@ -218,16 +250,41 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
 
     >>> reject_company(conn, 9999) is None
     True
+
+    A pending employer goes whole; a pending board of a vetted employer goes alone:
+
+    >>> from src.store import add_board, confirm_company
+    >>> a, _ = add_board(conn, mark_pending({"name": "Duo", "ats": "lever", "slug": "d"}))
+    >>> _ = add_board(conn, {"name": "Duo", "ats": "ashby", "slug": "d2"})
+    >>> reject_company(conn, a)
+    'Duo'
+    >>> get_companies(conn, active_only=False)
+    []
+    >>> a, _ = add_board(conn, {"name": "Tri", "ats": "lever", "slug": "t"})
+    >>> b, _ = add_board(conn, mark_pending({"name": "Tri", "ats": "ashby", "slug": "t2"}))
+    >>> _ = reject_company(conn, b)
+    >>> [c["name"] for c in get_companies(conn, active_only=False)]
+    ['Tri']
     """
-    row = conn.execute("SELECT name FROM companies WHERE id=?",
-                       (cid,)).fetchone()
+    row = conn.execute(
+        "SELECT c.name, c.employer_id, e.name AS employer, e.review FROM companies c "
+        "LEFT JOIN employers e ON e.id = c.employer_id WHERE c.id=?", (cid,)).fetchone()
     if not row:
         return None
     name: str = row["name"]
-    conn.execute("DELETE FROM jobs WHERE company_id=?", (cid,))
-    conn.execute("DELETE FROM companies WHERE id=?", (cid,))
+    if row["review"] == "pending":
+        gone = conn.execute("SELECT id, name FROM companies WHERE employer_id=?",
+                            (row["employer_id"],)).fetchall()
+        names = [r["name"] for r in gone] + [row["employer"]]
+    else:
+        gone, names = [{"id": cid}], [name]
+    conn.execute("DELETE FROM jobs WHERE company_id IN (SELECT value FROM json_each(?))",
+                 (json.dumps([r["id"] for r in gone]),))
+    conn.execute("DELETE FROM companies WHERE id IN (SELECT value FROM json_each(?))",
+                 (json.dumps([r["id"] for r in gone]),))
     _commit(conn)
-    block_name(conn, name, reason)
+    for n in names:
+        block_name(conn, n, reason)
     return name
 
 

@@ -125,6 +125,28 @@ async def test_apply_queues_the_best_boards_up_to_the_limit(directory, db, monke
         "Big Co Inc", "board_directory", "greenhouse", "bigco")
 
 
+@pytest.mark.parametrize("dead, expected", [
+    (True, [("Big Co Inc", "greenhouse", "bigco", 0.9)]),                   # replaced
+    (False, [("Big Co Inc", "lever", "old", 0.9),
+             ("Big Co Inc (greenhouse)", "greenhouse", "bigco", 0.9)])])    # sibling
+async def test_an_alternate_board_is_always_written(directory, db, monkeypatch, dead, expected):
+    """A directory board of a tracked employer replaces the employer's dead
+    board and joins a live one as a sibling; either way it costs no score."""
+    keep_store_open(monkeypatch, db)
+    monkeypatch.setattr(dork, "validate_board", answer((9, 3)))
+    asked = []
+    monkeypatch.setattr(local_sourcing, "_score_hit", answer(lambda hit: asked.append(hit["name"]) or ("adjacent", 0.5, "stub")))
+    store.upsert_company(db, {"name": "Big Co Inc", "ats": "lever", "slug": "old", "active": 1,
+                              "mission_tier": "core-mission", "mission_score": 0.9})
+    if dead:
+        db.execute("UPDATE companies SET miss_reason='board-dead', active=0")
+    counts = await bd.import_boards(apply=True)
+    assert (counts["alternate"], counts["siblings"], asked) == (1, 1, ["Smallco"])
+    assert sorted((r["name"], r["ats"], r["slug"], r["mission_score"])
+                  for r in store.get_companies(db, active_only=False)
+                  if r["name"].startswith("Big")) == expected
+
+
 class TestIntake:
     """dork.intake_boards, the one intake of every board-first source."""
 
@@ -146,12 +168,12 @@ class TestIntake:
         assert (row["name"], row["source"], row["local_job_count"]) == (
             "Acme Bio", "ats_dork", 2)
 
-    async def test_a_directory_board_needs_a_live_local_posting(self, monkeypatch, db):
+    async def test_a_directory_board_needs_a_live_local_posting(self, monkeypatch, db, capsys):
         monkeypatch.setattr(dork, "validate_board", answer((5, 0)))
         monkeypatch.setattr(dork, "nc_hq_signal", answer(True))      # not consulted
         cand = {"name": "Acme Bio", "ats": "lever", "slug": "acmebio"}
-        assert await dork.intake_boards([cand], "board_directory", require_live=True,
-                                        verbose=False) == (0, 1)
+        assert await dork.intake_boards([cand], "board_directory", require_live=True) == (0, 1)
+        assert "skipped: 1 no live local posting" in capsys.readouterr().out
 
     async def test_a_board_on_the_roster_is_not_read(self, monkeypatch, db):
         store.upsert_company(db, {"name": "Other Name", "ats": "lever", "slug": "acmebio"})

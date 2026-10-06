@@ -91,13 +91,17 @@ class TestSchema:
         conn = store.connect(path)
         assert conn.execute("PRAGMA user_version").fetchone()[0] >= 2
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")} \
-            == {"open_jobs", "company_open_stats", "board_employers", "live_jobs"}
+            == {"open_jobs", "company_open_stats", "board_employers", "live_jobs",
+                "companies_effective"}
 
     def test_a_version_2_store_gets_its_employers_from_the_tag_and_replays_safely(
             self, tmp_path):
         path = tmp_path / "v2.db"
         conn = store.connect(path)
-        for stmt in ("DROP TRIGGER companies_employer_new", "DROP TRIGGER companies_employer_gone",
+        for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
+                     "ALTER TABLE companies DROP COLUMN review",
+                     "ALTER TABLE companies DROP COLUMN watch",
+                     "DROP TRIGGER companies_employer_new", "DROP TRIGGER companies_employer_gone",
                      "DROP TRIGGER companies_employer_renamed", "DROP VIEW board_employers",
                      "DROP VIEW live_jobs", "DROP INDEX ix_companies_employer",
                      "ALTER TABLE companies DROP COLUMN employer_id", "DROP TABLE employers",
@@ -121,6 +125,51 @@ class TestSchema:
             conn.commit()
             conn.close()
 
+    def test_a_version_4_store_gets_employer_facts_and_keeps_what_differs_per_board(
+            self, tmp_path):
+        path = tmp_path / "v4.db"
+        conn = store.connect(path)
+        for stmt in ("DROP VIEW companies_effective", "DROP TRIGGER companies_employer_moved",
+                     "ALTER TABLE companies DROP COLUMN review",
+                     "ALTER TABLE companies DROP COLUMN watch",
+                     "ALTER TABLE employers DROP COLUMN mission_tier",
+                     "ALTER TABLE employers DROP COLUMN mission_score",
+                     "ALTER TABLE employers DROP COLUMN mission_reason",
+                     "ALTER TABLE employers DROP COLUMN review",
+                     "ALTER TABLE employers DROP COLUMN watch", "PRAGMA user_version = 4"):
+            conn.execute(stmt)
+        for name, tier, score, held in (("A", "core", 0.9, "local,watch"),
+                                        ("B", "other", 0.1, "local,pending-review"),
+                                        ("C", "core", 0.9, "sweep,watch"),
+                                        ("D", None, None, None)):
+            conn.execute("INSERT INTO companies (name, mission_tier, mission_score, tags, active) "
+                         "VALUES (?, ?, ?, ?, 1)", (name, tier, score, held))
+        conn.execute("UPDATE companies SET employer_id = 1 WHERE id IN (2, 3)")
+        conn.commit()
+        conn.close()
+        today = [("A", "core", 0.9, 1, "confirmed", 1), ("B", "other", 0.1, 0, "pending", 0),
+                 ("C", "core", 0.9, 1, "confirmed", 1), ("D", None, None, 1, "confirmed", 0)]
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(
+                "SELECT name, mission_tier, mission_score, active, review, watch "
+                "FROM companies_effective ORDER BY id")] == today
+            assert conn.execute("SELECT mission_tier, review, watch FROM employers "
+                                "WHERE id = 1").fetchone()[:] == ("core", None, 1)
+            assert [r[0] for r in conn.execute(      # only B differs from its employer
+                "SELECT name FROM companies WHERE mission_tier IS NOT NULL OR review IS NOT NULL "
+                "OR watch IS NOT NULL")] == ["B"]
+            assert not conn.execute("SELECT 1 FROM companies WHERE tags LIKE '%watch%' "
+                                    "OR tags LIKE '%pending%'").fetchone()
+            conn.execute("PRAGMA user_version = 4")
+            conn.commit()
+            conn.close()
+        conn = store.connect(path)      # a board moved to an employer that holds it differently
+        conn.execute("UPDATE companies SET employer_id = 4 WHERE name = 'C'")
+        assert [tuple(r) for r in conn.execute(
+            "SELECT mission_tier, mission_score, review, watch FROM companies_effective "
+            "WHERE name = 'C'")] == [("core", 0.9, "confirmed", 1)]
+
     def test_the_job_input_model_names_only_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert set(JobIn.__annotations__) <= cols
@@ -128,6 +177,7 @@ class TestSchema:
     def test_the_company_row_model_is_exactly_the_companies_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
         assert set(CompanyRow.__annotations__) == cols
+        assert {r[1] for r in db.execute("PRAGMA table_info(companies_effective)")} == cols
         assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
         writer, reader = get_type_hints(CompanyIn), get_type_hints(CompanyRow)
         assert all(writer[k] == reader[k] for k in writer), "CompanyIn and CompanyRow disagree"
@@ -193,7 +243,7 @@ class TestSchema:
         assert not {"nc_job_count", "hq_location"} & cols("companies")
         assert {"anchor_signal", "triage_status", "outcome_reason"} <= cols("jobs")
         assert not {"neural_signal", "mission", "tech_bar_score"} & cols("jobs")
-        assert tuple(conn.execute("SELECT local_job_count, tags FROM companies").fetchone()) \
+        assert tuple(conn.execute("SELECT local_job_count, tags FROM companies_effective").fetchone()) \
             == (7, "local,sweep,watch")
         assert conn.execute("SELECT anchor_signal FROM jobs").fetchone()[0] == "bci"
         assert conn.execute("SELECT COUNT(*) FROM name_blocklist").fetchone()[0] == 0
@@ -304,7 +354,7 @@ class TestUpsertColumns:
     def test_upsert_stores_every_column_the_input_model_names(self, db):
         row = _sample_row(CompanyIn)
         store.upsert_company(db, row)
-        stored = dict(db.execute("SELECT * FROM companies").fetchone())
+        stored = dict(db.execute("SELECT * FROM companies_effective").fetchone())
         # an `ats` clears the miss pair (see upsert_company), so it is not compared
         assert {c: v for c, v in row.items()
                 if c not in ("miss_reason", "miss_at")}.items() <= stored.items()
@@ -363,7 +413,7 @@ class TestImportCompanies:
         store.export_companies(db, tmp_path / "out.json")
         other = store.connect(":memory:")
         assert store.import_companies(other, tmp_path / "out.json") == 1
-        assert other.execute("SELECT name, ats, slug, tags, mission_score FROM companies"
+        assert other.execute("SELECT name, ats, slug, tags, mission_score FROM companies_effective"
                              ).fetchone()[:] == ("Acme", "lever", "acme", "watch", 1.0)
 
     @pytest.mark.parametrize("row, loc, kind", [

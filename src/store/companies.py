@@ -12,6 +12,15 @@ out to be genuinely independent -- not one reference crosses between them
 -- which is why `dedup_jobs` went to jobs.py rather than staying beside
 `dedup_companies`: it reads the jobs table and nothing else.
 
+A row is ONE BOARD. What an employer decides (mission verdict, review state,
+watch) lives on its `employers` row and a board may override it (migration
+0005, employers.py); readers ask the `companies_effective` view, whose columns
+are this table's with those facts resolved, and writers go through
+_write_company, which sends the facts to the employer. What stays the board's:
+coordinates, counts, dormancy, scope tags and `active`, its own crawl switch
+(so deactivating a dead board is board-only; the view also reads a pending
+board as inactive).
+
 Never imports store/__init__ at load time (that module imports this one).
 """
 
@@ -31,14 +40,23 @@ from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 from src import config, tags
 from src.match.names import name_key as _name_key
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
+from .employers import FACT_TAGS, apply_tag_facts, set_pending, set_watch, write_mission
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
 
 def as_company(row: sqlite3.Row) -> CompanyRow:
-    """A `SELECT *` companies row as a CompanyRow: every column, which the
-    total type promises."""
-    return cast(CompanyRow, dict(row))
+    """A `SELECT *` companies_effective row as a CompanyRow: every column,
+    which the total type promises, its `tags` in the canonical order.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "A", "tags": "sweep,watch,pending-review"})
+    >>> as_company(conn.execute("SELECT * FROM companies_effective").fetchone())["tags"]
+    'pending-review,sweep,watch'
+    """
+    out = dict(row)
+    out["tags"] = tags.join(tags.parse(out.get("tags")))
+    return cast(CompanyRow, out)
 
 
 # --------------------------------------------------------------------------- #
@@ -53,6 +71,21 @@ class BoardPlan(NamedTuple):
     action: Literal["new", "update", "replace", "sibling"]
     row: CompanyRow | None = None
     employer_id: int | None = None
+
+    @property
+    def verdict(self) -> tuple[str | None, float | None, str] | None:
+        """The (tier, score, reason) a "replace" or "sibling" inherits from
+        `row`, or None when `row` has none."""
+        r = self.row
+        if self.action not in ("replace", "sibling") or r is None or r["mission_score"] is None:
+            return None
+        return r["mission_tier"], r["mission_score"], r["mission_reason"] or ""
+
+    @property
+    def needs_score(self) -> bool:
+        """True when writing the board takes a mission score of its own: a
+        "new" or "update" one, or a "replace"/"sibling" with no `verdict`."""
+        return self.verdict is None
 
 
 # The columns that name a board (the handle columns of every ATS spec, plus
@@ -121,7 +154,11 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
                    employer_id: int | None = None) -> int | None:
     """upsert_company's write: insert or update by name, whatever the row
     already holds. `employer_id` places a NEW row under that employer (the
-    insert trigger gives it one of its own otherwise)."""
+    insert trigger gives it one of its own otherwise).
+
+    The mission columns and the `watch` and `pending-review` tags are the
+    EMPLOYER's: they are written there (employers.py), and the board keeps the
+    rest. A board's own verdict is set_board_mission's, never an upsert's."""
     c: dict[str, Any] = {**company, "last_probed": company.get("last_probed")
                          or datetime.now().isoformat()}
     c.setdefault("created_at", datetime.now().isoformat())
@@ -129,12 +166,14 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     # (e.g. a failed/keyless mission-scoring pass writing mission_score=None
     # over a previously scored company). Inserts still get NULL defaults.
     c = {k: v for k, v in c.items() if v is not None}
+    facts = {k: c.pop(k) for k in ("mission_tier", "mission_score", "mission_reason") if k in c}
     old = conn.execute("SELECT tags FROM companies WHERE name=?",
                        (c["name"],)).fetchone()
-    if old and old["tags"]:
-        merged = set(t for t in old["tags"].split(",") if t)
-        merged |= set(t for t in (c.get("tags") or "").split(",") if t)
-        c["tags"] = ",".join(sorted(merged))
+    held = tags.parse(c.get("tags")) | (tags.parse(old["tags"]) if old else set())
+    if scope := held - FACT_TAGS:
+        c["tags"] = tags.join(scope)
+    else:
+        c.pop("tags", None)
     cols = [k for k in CompanyIn.__annotations__ if k in c]
     if employer_id is not None:
         c["employer_id"] = employer_id
@@ -153,8 +192,11 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     if c.get("ats"):
         conn.execute("UPDATE companies SET miss_reason=NULL, miss_at=NULL "
                      "WHERE name=? AND miss_reason IS NOT NULL", (c["name"],))
-    _commit(conn)
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
+    if row:
+        write_mission(conn, row["id"], **facts)
+        apply_tag_facts(conn, row["id"], held)
+    _commit(conn)
     return row["id"] if row else None
 
 
@@ -190,7 +232,8 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
     row, whatever its name. Otherwise the employer is found (see
     _employer_id); one of its rows whose board is gone is "replaced", and
     when every board it has is live the new one is a "sibling". No known
-    employer: "new".
+    employer: "new". The one decision every intake path reads (`needs_score`
+    says whether it also takes a mission call).
 
     >>> conn = connect(":memory:")
     >>> _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"})
@@ -203,8 +246,14 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
     >>> _ = record_miss(conn, "Lead", "no-board-found")
     >>> plan_board(conn, {"name": "Lead", "ats": "ashby", "slug": "lead"}).action
     'replace'
+
+    >>> _ = upsert_company(conn, {"name": "Acme", "mission_tier": "core", "mission_score": 0.9})
+    >>> [plan_board(conn, {"name": "Acme", "ats": "ashby", "slug": "acme"}).needs_score,
+    ...  plan_board(conn, {"name": "Lead", "ats": "ashby", "slug": "lead"}).needs_score]
+    [False, True]
     """
-    named_row = conn.execute("SELECT * FROM companies WHERE name=?", (company["name"],)).fetchone()
+    named_row = conn.execute("SELECT * FROM companies_effective WHERE name=?",
+                             (company["name"],)).fetchone()
     named = as_company(named_row) if named_row else None
     if board_key(company) is None:
         return BoardPlan("update" if named else "new", named,
@@ -216,7 +265,7 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
     if emp is None:
         return BoardPlan("new")
     rows = [as_company(r) for r in conn.execute(
-        "SELECT * FROM companies WHERE employer_id=? ORDER BY id", (emp,))]
+        "SELECT * FROM companies_effective WHERE employer_id=? ORDER BY id", (emp,))]
     if not rows:
         return BoardPlan("new", None, emp)
     rows.sort(key=lambda r: r["name"] != company["name"])
@@ -232,21 +281,25 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
     Returns (company id, the BoardPlan action taken); see plan_board.
 
     A sibling is a new row named "<employer> (<ats>)" under the same
-    employer, inheriting its primary row's mission tier, score and reason,
-    scope tags, active flag and pending-review state (so it costs no mission
-    call); anything `company` itself sets wins, except that a pending
-    primary keeps the sibling pending. The caller has validated the board
-    live. A "replace" clears the old coordinates first, so none of them
-    survives beside the new ones.
+    employer. It INHERITS the employer's mission verdict, review state and
+    watch flag (nothing is copied, so it costs no mission call, and a verdict
+    in `company` is dropped when the employer already has one:
+    set_board_mission scores a board on its own); its scope tags are its own.
+    Its `active` is `company`'s, else follows the employer's live boards
+    (the mission rule's answer when it has none).
+    The caller has validated the board live. A "replace" clears the old
+    coordinates first, so none of them survives beside the new ones.
 
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme",
     ...                         "mission_tier": "core", "mission_score": 0.9, "tags": "local"})
     >>> b, how = add_board(conn, {"name": "Acme", "ats": "workday", "wd_tenant": "acme",
     ...                           "wd_pod": 5, "wd_site": "ext"})
-    >>> how, conn.execute("SELECT name, mission_score, tags FROM companies WHERE id=?",
+    >>> how, conn.execute("SELECT name, mission_score, tags FROM companies_effective WHERE id=?",
     ...                   (b,)).fetchone()[:]
-    ('sibling', ('Acme (workday)', 0.9, 'local'))
+    ('sibling', ('Acme (workday)', 0.9, None))
+    >>> conn.execute("SELECT mission_score FROM companies WHERE id=?", (b,)).fetchone()[0] is None
+    True
     >>> conn.execute("SELECT COUNT(DISTINCT employer_id), COUNT(*) FROM companies").fetchone()[:]
     (1, 2)
 
@@ -254,8 +307,7 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
     plan = plan_board(conn, company)
     row = plan.row
     if plan.action == "sibling":
-        return _write_sibling(conn, company, cast(CompanyRow, row),
-                              cast(int, plan.employer_id)), plan.action
+        return _write_sibling(conn, company, cast(int, plan.employer_id)), plan.action
     if plan.action == "new":
         return _write_company(conn, company, plan.employer_id), plan.action
     row = cast(CompanyRow, row)
@@ -265,23 +317,24 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
     return _write_company(conn, {**company, "name": row["name"]}), plan.action
 
 
-def _write_sibling(conn: sqlite3.Connection, company: CompanyIn, primary: CompanyRow,
-                   employer_id: int) -> int | None:
-    """add_board's new row for a board that is another of `primary`'s employer."""
-    base = conn.execute("SELECT name FROM employers WHERE id=?", (employer_id,)).fetchone()[0]
+def _write_sibling(conn: sqlite3.Connection, company: CompanyIn, employer_id: int) -> int | None:
+    """add_board's new row for a board that is another of an employer's."""
+    base, tier, has_verdict = conn.execute(
+        "SELECT name, mission_tier, mission_tier IS NOT NULL OR mission_score IS NOT NULL "
+        "FROM employers WHERE id=?", (employer_id,)).fetchone()
     label, n = company.get("ats") or "board", 1
     name = f"{base} ({label})"
     while conn.execute("SELECT 1 FROM companies WHERE name=?", (name,)).fetchone():
         n += 1
         name = f"{base} ({label} {n})"
-    row: dict[str, Any] = {k: primary[k] for k in
-                           ("mission_tier", "mission_score", "mission_reason", "active")
-                           if primary.get(k) is not None}
-    row.update({k: v for k, v in company.items() if v is not None})
+    row: dict[str, Any] = {k: v for k, v in company.items() if v is not None}
+    if has_verdict:
+        for k in ("mission_tier", "mission_score", "mission_reason"):
+            row.pop(k, None)
     row["name"] = name
-    row["tags"] = tags.join(tags.parse(primary["tags"]) | tags.parse(company.get("tags"))) or None
-    if tags.has(primary["tags"], tags.PENDING):
-        row["active"] = 0
+    live = conn.execute("SELECT MAX(active) FROM companies WHERE employer_id=? "
+                        "AND miss_reason IS NULL", (employer_id,)).fetchone()[0]
+    row.setdefault("active", config.is_active_mission(tier, base) if live is None else live)
     return _write_company(conn, cast(CompanyIn, row), employer_id)
 
 
@@ -363,7 +416,7 @@ def record_miss(conn: sqlite3.Connection, name: str, reason: str, /,
     >>> [c["name"] for c in get_companies(conn, active_only=True)]
     ['Locus']
     """
-    row = conn.execute("SELECT active FROM companies WHERE name=?",
+    row = conn.execute("SELECT active FROM companies_effective WHERE name=?",
                        (name,)).fetchone()
     if row and row["active"]:
         return False
@@ -636,7 +689,7 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     """
 
     rows = [as_company(r) for r in
-            conn.execute("SELECT * FROM companies ORDER BY id").fetchall()]
+            conn.execute("SELECT * FROM companies_effective ORDER BY id").fetchall()]
     by_board: defaultdict[tuple[Any, ...], list[CompanyRow]] = defaultdict(list)
     by_host: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
     by_domain: defaultdict[str, list[tuple[CompanyRow, str]]] = defaultdict(list)
@@ -678,7 +731,7 @@ def company_by_board(conn: sqlite3.Connection, row: BoardCoords) -> CompanyRow |
     # board_key then confirms, so the identity rule stays in one place.
     plain = [(c, v) for c, v in zip(_board_columns(key[0]), key[1:]) if c != "careers_url"]
     where = " AND ".join(["ats = ?", *(f"{c} IS ? COLLATE NOCASE" for c, _ in plain)])
-    rows = conn.execute(f"SELECT * FROM companies WHERE {where} ORDER BY id",
+    rows = conn.execute(f"SELECT * FROM companies_effective WHERE {where} ORDER BY id",
                         [key[0], *(v for _, v in plain)])
     return next((c for c in map(as_company, rows) if board_key(c) == key), None)
 
@@ -717,7 +770,7 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
               SELECT c.id, c.name, c.tags, c.active, c.mission_tier, k.board
               FROM (SELECT json_extract(value, '$[0]') AS id,
                            json_extract(value, '$[1]') AS board FROM json_each(?)) k
-              JOIN companies c ON c.id = k.id
+              JOIN companies_effective c ON c.id = k.id
             )
             SELECT s.*, MIN(s.id) OVER same AS g,
                    ROW_NUMBER() OVER (same ORDER BY s.mission_tier IS NULL,
@@ -732,7 +785,7 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
         groups.setdefault(r["g"], []).append(dict(r))
 
     def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
-        merged = {t for m in [keep, *losers] for t in (m.get("tags") or "").split(",") if t}
+        merged = {t for m in [keep, *losers] for t in tags.parse(m.get("tags"))}
         # Re-point the losers' jobs AND rename them: jobs.company_name
         # is the denormalized display/grouping key (ranked_jobs groups
         # and the digest prints by it), so a merge that only moved
@@ -748,7 +801,8 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
                      "WHERE id=?) WHERE employer_id IN (SELECT employer_id FROM companies "
                      "WHERE id IN (SELECT value FROM json_each(?)))", (keep["id"], lost))
         apply_update(conn, "companies", "id", keep["id"],
-                     {"tags": ",".join(sorted(merged)) or None, "active": keep["any_active"]})
+                     {"tags": tags.join(merged - FACT_TAGS), "active": keep["any_active"]})
+        apply_tag_facts(conn, keep["id"], merged)
 
     merged = dedup_groups(
         conn, "companies", "id", groups, rank=lambda r: r["rn"], merge=carry_over,
@@ -794,9 +848,11 @@ def realign_job_names(conn: sqlite3.Connection) -> int:
 
 def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
     """Dump the company roster to JSON — the shareable/bootstrap artifact
-    that replaced config.py's seed lists. Secrets-free by construction."""
+    that replaced config.py's seed lists. Secrets-free by construction. A
+    row carries its board's EFFECTIVE facts, flat: employer links and board
+    overrides are not exported."""
     rows = [dict(r) for r in conn.execute(
-        "SELECT * FROM companies ORDER BY name").fetchall()]
+        "SELECT * FROM companies_effective ORDER BY name").fetchall()]
     for r in rows:
         r.pop("id", None)          # ids are per-database
         r.pop("employer_id", None)
@@ -842,36 +898,41 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
 
 
 def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
-                    add: bool = True) -> str | None:
-    """Add or remove one scope tag on a company (case-insensitive name
-    match) and on every other board of its employer. Returns the named
-    company's new comma-joined tag string ('' when the last tag was
-    removed), or None if no such company exists.
+                    add: bool = True, board: bool = False) -> str | None:
+    """Add or remove one tag on a company (case-insensitive name match).
+    `watch` and `pending-review` are the EMPLOYER's, so they take effect on
+    every one of its boards (`board=True`: this board only); any other tag is
+    this board's own scope. Returns the named company's new comma-joined
+    effective tags ('' when none), or None if no such company exists.
 
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
     >>> _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
     >>> set_company_tag(conn, "acme", "watch")
     'watch'
-    >>> [r[0] for r in conn.execute("SELECT tags FROM companies")]
+    >>> [r[0] for r in conn.execute("SELECT tags FROM companies_effective")]
     ['watch', 'watch']
+    >>> set_company_tag(conn, "acme", "watch", add=False, board=True)
+    ''
+    >>> [r[0] for r in conn.execute("SELECT tags FROM companies_effective")]
+    [None, 'watch']
     """
-    row = conn.execute(
-        "SELECT id, employer_id FROM companies WHERE lower(name)=lower(?)",
-        (name,)).fetchone()
+    row = conn.execute("SELECT id, tags FROM companies WHERE lower(name)=lower(?)",
+                       (name,)).fetchone()
     if not row:
         return None
-    val: str | None = None
-    for r in conn.execute("SELECT id, tags FROM companies WHERE id=? OR employer_id=?",
-                          (row["id"], row["employer_id"])).fetchall():
-        held = {t for t in (r["tags"] or "").split(",") if t}
+    tag = tags.canonical(tag)
+    if tag == tags.WATCH:
+        set_watch(conn, row["id"], add, board=board)
+    elif tag == tags.PENDING:
+        set_pending(conn, row["id"], add, board=board or None)
+    else:
+        held = tags.parse(row["tags"])
         (held.add if add else held.discard)(tag)
-        new = ",".join(sorted(held)) or None
-        conn.execute("UPDATE companies SET tags=? WHERE id=?", (new, r["id"]))
-        if r["id"] == row["id"]:
-            val = new
-    _commit(conn)
-    return val or ""
+        conn.execute("UPDATE companies SET tags=? WHERE id=?", (tags.join(held), row["id"]))
+        _commit(conn)
+    now = get_company(conn, row["id"])
+    return (now["tags"] if now else None) or ""
 
 
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
@@ -881,7 +942,7 @@ def get_company(conn: sqlite3.Connection, company_id: int | None) -> CompanyRow 
     """One company row by id, or None."""
     if not company_id:
         return None
-    row = conn.execute("SELECT * FROM companies WHERE id=?", (company_id,)).fetchone()
+    row = conn.execute("SELECT * FROM companies_effective WHERE id=?", (company_id,)).fetchone()
     return as_company(row) if row else None
 
 
@@ -900,8 +961,9 @@ def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None
 def get_companies(conn: sqlite3.Connection, active_only: bool = True,
                   missions: Collection[str] | None = None,
                   tag: str | None = None) -> list[CompanyRow]:
-    """Companies, optionally filtered by mission tier(s) and/or scope tag."""
-    q = "SELECT * FROM companies"
+    """Companies (their effective facts), optionally filtered by mission
+    tier(s) and/or tag (the scope tags, `watch` and `pending-review`)."""
+    q = "SELECT * FROM companies_effective"
     conds: list[str] = []
     args: list[Any] = []
     if active_only:
@@ -987,7 +1049,7 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     """
     row = conn.execute(
         "SELECT id, tags, crawl_state, empty_streak, last_crawled_at "
-        "FROM companies WHERE id = ?", (company_id,)).fetchone()
+        "FROM companies_effective WHERE id = ?", (company_id,)).fetchone()
     if not row:
         return None
     state = row["crawl_state"] or "active"

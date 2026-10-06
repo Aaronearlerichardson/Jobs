@@ -87,18 +87,26 @@ def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None =
     Notes:
         `active` is left alone: it comes from the tier at sourcing time and
         is a human-editable switch, so a re-tier never parks or wakes a
-        board. New scores are reconciled when written
+        board. Verdicts are the employers' (and any board's own override). New scores are reconciled when written
         (api.score_company_mission); this brings the stored ones in line.
     """
     with track_store(t, conn) as conn:
-        def fresh() -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
+        def fresh(table: str) -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
             for r in conn.execute(
-                    "SELECT id, name, mission_tier, mission_score FROM companies "
+                    f"SELECT id, name, mission_tier, mission_score FROM {table} "
                     "WHERE mission_score IS NOT NULL"):
                 yield (r["id"], r["mission_tier"],
                        config.tier_for_score(r["mission_score"], r["mission_tier"]), r)
-        return _restamp(conn, commit, undo, ("companies", "id", "mission_tier"), fresh(),
-                        lambda r: f"{r['name']} | score {r['mission_score']:.2f}")
+        describe = lambda r: f"{r['name']} | score {r['mission_score']:.2f}"  # noqa: E731
+        # The verdicts live on employers; a board's own (override) is the rare second pass.
+        counts = _restamp(conn, commit, undo, ("employers", "id", "mission_tier"),
+                          fresh("employers"), describe)
+        if not undo and conn.execute(
+                "SELECT 1 FROM companies WHERE mission_score IS NOT NULL LIMIT 1").fetchone():
+            for kind, n in _restamp(conn, commit, undo, ("companies", "id", "mission_tier"),
+                                    fresh("companies"), describe).items():
+                counts[kind] = counts.get(kind, 0) + n
+        return counts
 
 
 def _employer_clusters(pairs: Iterable[tuple[int, int, int]], size: dict[int, int],

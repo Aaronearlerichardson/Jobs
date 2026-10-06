@@ -43,6 +43,7 @@ from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow
+from src.store.companies import BoardPlan
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
@@ -410,12 +411,12 @@ async def mission_context(board: BoardCoords) -> str:
     return titles or coords.board_context(board)
 
 
-def _board_already_tracked(conn: sqlite3.Connection,
-                           row: CompanyIn) -> CompanyRow | None:
-    """store.company_by_board, minus a same-name match: that is the
-    ordinary re-probe/update path, which the caller may upsert. Only the
-    SAME board counts: another board of a tracked employer is a sibling
-    (store.add_board), not a duplicate.
+def _tracked_elsewhere(plan: BoardPlan, name: str | None) -> CompanyRow | None:
+    """The roster row `plan` (store.plan_board) updates when it is not
+    named `name`: the same board under another name, a duplicate. A
+    same-name match is the ordinary re-probe/update path, which the caller
+    may upsert; another board of a tracked employer is a sibling, not a
+    duplicate.
 
     Notes:
         Same NAME, not same name_key: the upsert keys on the exact name, so
@@ -423,11 +424,14 @@ def _board_already_tracked(conn: sqlite3.Connection,
         passed here and landed as a second, pending row on one board
         (2026-09-29).
     """
-    from src.store import company_by_board
-    existing = company_by_board(conn, row)
-    if not existing or existing.get("name") == row.get("name"):
-        return None
-    return existing
+    row = plan.row
+    return row if plan.action == "update" and row and row["name"] != name else None
+
+
+def _board_already_tracked(conn: sqlite3.Connection,
+                           row: CompanyIn) -> CompanyRow | None:
+    """`_tracked_elsewhere` of the plan for `row`."""
+    return _tracked_elsewhere(store.plan_board(conn, row), row.get("name"))
 
 
 def _report_dup_board(name: str, existing: CompanyRow) -> None:
@@ -448,7 +452,7 @@ def _since_productive() -> str:
 def _productive_row(conn: sqlite3.Connection, name: str) -> CompanyRow | None:
     """The roster row named `name` if it is productive (_PRODUCTIVE), else
     None."""
-    row = conn.execute(f"SELECT * FROM companies WHERE name=? AND {_PRODUCTIVE}",
+    row = conn.execute(f"SELECT * FROM companies_effective WHERE name=? AND {_PRODUCTIVE}",
                        (name, _since_productive())).fetchone()
     return store.as_company(row) if row else None
 
@@ -457,7 +461,7 @@ def _productive_keys(conn: sqlite3.Connection) -> frozenset[str]:
     """The name keys of every productive roster row: discover_local's
     `tracked`."""
     return frozenset(name_key(r[0]) for r in conn.execute(
-        f"SELECT name FROM companies WHERE {_PRODUCTIVE}", (_since_productive(),)))
+        f"SELECT name FROM companies_effective WHERE {_PRODUCTIVE}", (_since_productive(),)))
 
 
 async def _score_hit(hit: BoardHit) -> tuple[str | None, float | None, str]:
@@ -471,7 +475,7 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
                            include_missions: list[str] | None = None,
                            tags: str | None = None,
                            scored: tuple[str | None, float | None, str] | None = None,
-                           extra: CompanyIn | None = None, score: bool = True
+                           extra: CompanyIn | None = None
                            ) -> tuple[CompanyRow | CompanyIn, int, bool] | None:
     """Mission-score a resolved board and write it to the store (`db`, a
     store.Writer) as a review candidate -- the one write path behind every
@@ -483,16 +487,17 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
     written, whether a reviewer's confirmation would activate it
     (src.claude.is_active_mission), and whether it went to the review queue
     -- or None when the board is already on the roster under ANOTHER name
-    (_board_already_tracked). The dedup runs before the mission call, so a
+    (_tracked_elsewhere). The dedup runs before the mission call, so a
     duplicate costs no LLM request; a caller that scored concurrently
     first (populate_companies) passes the result as `scored`.
 
     A name whose roster row is active and has produced jobs
     (_productive_row) keeps its board, `active` and mission verdict: the
-    same board only refreshes the counts. A different board of a scored
-    employer is added beside it as a sibling row (store.add_board) with the
-    employer's verdict. Neither pays for a score; with `score=False` a board
-    that is not settled that way (it would need one) returns None unwritten.
+    same board only refreshes the counts. The rest follows store.plan_board:
+    a different board of an employer with a verdict is added beside it as a
+    sibling row (store.add_board), and a board of an employer whose own is
+    gone replaces it, each with the employer's verdict and no score; only a
+    board whose plan `needs_score` pays for one.
 
     >>> import asyncio
     >>> from src.store import Writer, connect, upsert_company
@@ -533,11 +538,11 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
         board coordinates first) still differ in ways this helper does not
         cover.
     """
-    settled, result = await db.run(_settled_board, hit, source, tags, extra)
-    if settled or not score:
+    settled, result, held = await db.run(_settled_board, hit, source, tags, extra)
+    if settled:
         return result
     return await db.run(_write_candidate, hit,
-                        scored if scored is not None else await _score_hit(hit),
+                        held or (scored if scored is not None else await _score_hit(hit)),
                         source, include_missions, tags, extra)
 
 
@@ -555,40 +560,42 @@ def _hit_stamp(hit: BoardHit, source: str, tags: str | None,
 
 def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
                    tags: str | None, extra: CompanyIn | None
-                   ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None]:
-    """(True, score_and_upsert's answer) when the roster already settles
-    `hit` without a score (a duplicate board, a productive row kept, a
-    sibling of a scored employer), else (False, None)."""
-    from src.store import board_key, upsert_company
+                   ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None,
+                              tuple[str | None, float | None, str] | None]:
+    """(True, score_and_upsert's answer, None) when the roster already
+    settles `hit` without a score (a duplicate board, a productive row kept,
+    a sibling of a scored employer), else (False, None, the verdict the
+    plan inherits, if any: a replaced board's)."""
+    from src.store import upsert_company
 
     name = hit["name"]
     row = coords.from_hit(hit, name=name)
-    dup = _board_already_tracked(conn, row)
+    plan = store.plan_board(conn, row)
+    dup = _tracked_elsewhere(plan, name)
     if dup:
         _report_dup_board(name, dup)
-        return True, None
-    plan = store.plan_board(conn, row)
+        return True, None, None
     primary = plan.row
-    kept = _productive_row(conn, name)
-    if kept and board_key(kept) == board_key(row):
+    kept = _productive_row(conn, name) if plan.action == "update" else None
+    if kept:
         upsert_company(conn, {"name": name,
                               "local_job_count": hit.get("nc") or 0,
                               "total_job_count": hit.get("count")})
-        return True, (kept, kept["active"] or 0, False)
+        return True, (kept, kept["active"] or 0, False), None
     # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
     # name-keyed upsert re-pointed its Workday row (353 relevant jobs an
     # hour earlier) at it; the next crawl read 27 jobs and counted every one
     # as new. A board that works is never re-pointed: the other board of a
     # scored employer joins it as a sibling, which inherits the mission
     # verdict and so pays for no score.
-    if plan.action != "sibling" or primary is None or primary["mission_score"] is None:
-        return False, None
+    if plan.action != "sibling" or plan.needs_score or primary is None:
+        return False, None, plan.verdict
     row.update(_hit_stamp(hit, source, tags, extra))
     sid, _ = store.add_board(conn, row)
     sibling = cast(CompanyRow, store.get_company(conn, sid))
     print(f"    [sibling] {name}: {row['ats']} board added beside '{primary['name']}'")
     return True, (sibling, sibling["active"] or 0,
-                  company_tags.has(sibling["tags"], company_tags.PENDING))
+                  company_tags.has(sibling["tags"], company_tags.PENDING)), None
 
 
 def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
@@ -672,10 +679,13 @@ async def populate_companies(extra_names: list[str] | None = None,
         # kept) costs no mission call: until 2026-09-29 every confirmed hit
         # was scored first, 45 of 49 calls on boards already tracked.
         todo = []
+        held = {}       # name -> the verdict a replaced board keeps
         for h in confirmed:
-            settled, result = await db.run(_settled_board, h, "local_sourcing", None, None)
+            settled, result, verdict = await db.run(_settled_board, h, "local_sourcing", None, None)
             if not settled:
                 todo.append(h)
+                if verdict:
+                    held[h["name"]] = verdict
             elif result:
                 written.append(dict(result[0]))
                 _print_scored(h["name"], result[0], "tracked")
@@ -685,8 +695,11 @@ async def populate_companies(extra_names: list[str] | None = None,
         # The title fetch (1 GET) + mission call (1 LLM request) per company are
         # pure network I/O -- the historical serial tail of the pass. Run them
         # concurrently, under the stall watchdog; output is completion-ordered.
+        async def verdict_of(h: BoardHit) -> tuple[str | None, float | None, str]:
+            return held.get(h["name"]) or await _score_hit(h)
+
         async for h, scored in fan_out(
-                todo, _score_hit, lambda h: h["name"], 8, with_item=True,
+                todo, verdict_of, lambda h: h["name"], 8, with_item=True,
                 on_error=lambda h, e: print(
                     f"    [!] mission scoring failed for {h['name']!r}: {e}"),
                 stall_s=RESOLVE_STALL_S):

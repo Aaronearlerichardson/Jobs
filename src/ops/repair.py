@@ -206,7 +206,7 @@ def _silent_board_candidates(conn: sqlite3.Connection,
     harvested_cut = (now - timedelta(days=silent_harvested_within_days)
                     ).isoformat()
     return [store.as_company(r) for r in conn.execute(
-        "SELECT * FROM companies WHERE ats IS NOT NULL AND ats != ? "
+        "SELECT * FROM companies_effective WHERE ats IS NOT NULL AND ats != ? "
         "AND miss_reason IS NULL "
         "AND COALESCE(total_job_count, 0) = 0 "
         "AND last_harvested_at IS NOT NULL AND last_harvested_at >= ? "
@@ -291,7 +291,7 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     cutoff = ((datetime.now() - timedelta(days=int(days))).isoformat()
               if days else None)
     rows = [store.as_company(r) for r in conn.execute(
-        "SELECT * FROM companies WHERE COALESCE(active, 0) = 0 "
+        "SELECT * FROM companies_effective WHERE COALESCE(active, 0) = 0 "
         "AND miss_reason IS NOT NULL "
         "ORDER BY COALESCE(miss_at, '') ASC, name ASC").fetchall()]
     rows = [r for r in rows if store.miss_family(r["miss_reason"]) in families]
@@ -528,7 +528,7 @@ def _slug_named_boards(conn: sqlite3.Connection) -> list[CompanyRow]:
     atses = sorted(b.name for b in BOARDS.values() if b.spec.employer)
     ph = ",".join("?" for _ in atses)
     rows = [store.as_company(r) for r in conn.execute(
-        f"SELECT * FROM companies "
+        f"SELECT * FROM companies_effective "
         f"WHERE COALESCE(active,0)=1 AND ats IN ({ph})",
         tuple(atses)).fetchall()]
     rows = [r for r in rows if coords.slug_named(r)]

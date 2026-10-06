@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sqlite3
 from collections.abc import Iterable, Sequence
 from functools import partial
 from typing import Any
@@ -183,11 +182,6 @@ def extract_boards_from_urls(urls: Iterable[str]) -> list[tuple[str, Any]]:
     return out
 
 
-def _existing_boards(conn: sqlite3.Connection) -> set[Any]:
-    """The roster's boards, as `store.board_key` names them."""
-    return {k for k in map(store.board_key, store.get_companies(conn, active_only=False)) if k}
-
-
 async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
     """`cand` with the counts of a live read of its board, or None when it
     is not worth scoring: no live local posting (`require_live`), else no
@@ -215,8 +209,7 @@ async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
 async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                         tags: str | None = company_tags.LOCAL,
                         require_live: bool = False, limit: int | None = None,
-                        verbose: bool = True, score: bool = True
-                        ) -> tuple[int, int]:
+                        verbose: bool = True) -> tuple[int, int]:
     """
     Read each candidate board the roster lacks (a `BoardHit`: ats, slug and
     optionally name and careers_url), mission-score the ones with local
@@ -233,9 +226,11 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
     when the employer has a confirmed local HQ (dork's rule). `limit` caps
     the rows written, taking candidates in the order given.
 
-    A board of an employer the roster already holds on another board is
-    written as its sibling, with the employer's mission verdict and no
-    score; with `score=False` it writes only those.
+    What a board becomes is store.plan_board's: one the roster has is
+    skipped; a board of an employer the roster holds on another is written
+    as its sibling, or replaces the employer's dead one, with the
+    employer's mission verdict and no score. A candidate left out is
+    counted, with its reason, in one "skipped" line (`verbose`).
 
     Notes:
         harvest_urls' body, made the one intake of every board-first source
@@ -246,8 +241,11 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
         {**c, "name": c.get("name") or coords.slug_title(coords.from_hit(c))}
         for c in candidates]
     async with store.Writer() as db:
-        have = await db.run(_existing_boards)
-        todo = [c for c in named if store.board_key(coords.from_hit(c)) not in have]
+        todo = [c for c in named
+                if (await db.run(store.plan_board,
+                                 coords.from_hit(c, name=c["name"]))).action != "update"]
+        skipped = {"already tracked": len(named) - len(todo), "no live local posting": 0,
+                   "same board under another name": 0, "over the limit": 0}
         origin = ((lambda c: company_fetch.board_origin(coords.from_hit(c)))
                   if require_live else None)
         added = 0
@@ -260,7 +258,11 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                     "board", with_item=True, max_workers=1, key=origin) if hit}
             for cand in chunk:
                 hit = live.get(id(cand))
-                if not hit or (limit is not None and added >= limit):
+                if not hit:
+                    skipped["no live local posting"] += 1
+                    continue
+                if limit is not None and added >= limit:
+                    skipped["over the limit"] += 1
                     continue
                 # Scoring, activation and the review queue are the shared write
                 # path (local_sourcing.score_and_upsert). The row is tagged local
@@ -268,9 +270,9 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                 # row is near-unrecoverable here -- a board already in the store
                 # is never re-probed -- which is why the activation rule must be
                 # the shared one.
-                result = await score_and_upsert(db, hit, source=source, tags=tags,
-                                                score=score)
+                result = await score_and_upsert(db, hit, source=source, tags=tags)
                 if not result:
+                    skipped["same board under another name"] += 1
                     continue
                 row, active, pending = result
                 added += 1
@@ -280,6 +282,9 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                     print(f"  {hit['name'][:26]:26} {hit['ats'] or '':12} nc={hit['nc']:2} "
                           f"{str(row['mission_tier']):19} "
                           f"{row['mission_score'] or 0:.2f} {state}")
+    skipped["over the limit"] += len(todo)
+    if verbose and any(skipped.values()):
+        print("  skipped: " + ", ".join(f"{n} {why}" for why, n in skipped.items() if n))
     return added, len(named)
 
 
