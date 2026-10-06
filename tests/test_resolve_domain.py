@@ -8,9 +8,7 @@ network steps are stubbed as test_parsers.py stubs them.
 """
 
 import json
-import sys
 import time
-import types
 
 import pytest
 
@@ -90,7 +88,6 @@ class TestSeededResolution:
         monkeypatch.setattr(config, "DISCOVERY_DOMAIN_HOSTS", HOSTS)
         monkeypatch.setattr(resolve_board, "official_domain", answer("lilly.com"))
         monkeypatch.setattr(resolve_board, "validate_board", answer((10, 3)))
-        monkeypatch.setitem(sys.modules, "src.discovery.board_directory", None)
         monkeypatch.setattr(resolve_board, "probe_company", answer(
             lambda *a, **k: pytest.fail("the seeded sniff should have won")))
 
@@ -144,9 +141,7 @@ class TestDirectoryStep:
         monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
 
     def _directory(self, monkeypatch, found):
-        mod = types.ModuleType("src.discovery.board_directory")
-        mod.lookup_name = lambda name: found
-        monkeypatch.setitem(sys.modules, mod.__name__, mod)
+        monkeypatch.setattr(resolve_board, "lookup_name", lambda name: found)
 
     async def test_the_candidate_with_most_local_jobs_wins_as_via_directory(
             self, monkeypatch):
@@ -157,10 +152,6 @@ class TestDirectoryStep:
             lambda comp: (9, 4) if comp["ats"] == "lever" else (20, 1)))
         hit = await resolve_board.resolve_board_sniff_first("Acme")
         assert (hit["ats"], hit["via"], hit["nc"]) == ("lever", "directory", 4)
-
-    async def test_it_is_skipped_while_the_module_is_missing(self, monkeypatch):
-        monkeypatch.setitem(sys.modules, "src.discovery.board_directory", None)
-        assert await resolve_board.resolve_board_sniff_first("Acme") is None
 
     async def test_a_foreign_board_is_not_taken(self, monkeypatch):
         self._directory(monkeypatch, [("workday", ("danaher", 1, "Jobs"), "")])

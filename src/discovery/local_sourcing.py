@@ -1016,45 +1016,37 @@ async def resolve_leads(max_workers: int = 8,
         print(f"  resolving {len(leads)} lead(s) (careers-page sniff -> slug-probe "
               f"fallback; every board validated by a live fetch)...")
 
-        # Not `resolved`: that name is board.resolved(), which resolves each.
         resolved_rows: list[CompanyRow | CompanyIn] = []
         probe_only: list[str] = []
-        stalled: list[CompanyRow] = []
 
-        async for c, (hit, reason) in fan_out(
-                leads, lambda c: resolved(c["name"], c.get("careers_url") or ""),
-                lambda c: str(c["name"]), max_workers, with_item=True,
-                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
-            if not hit:
-                # Was printed and forgotten; now the lead row keeps WHY, so
-                # the next run can skip it and the user can see the tally.
-                await db.run(store.record_miss, c["name"], cast(str, reason),
-                             source=c.get("source"))
-                print(f"    [miss] {c['name'][:34]:34} {reason}")
-                continue
-            # A lead is a name somebody's page mentioned, not an employer
-            # anyone vouched for: resolving it produces a review candidate,
-            # written under the lead's own name.
-            result = await score_and_upsert(db, {**hit, "name": c["name"]},
-                                            source=c.get("source") or "resolve_leads")
-            if not result:
-                continue
+        def report(name: str, hit: BoardHit,
+                   result: tuple[CompanyRow | CompanyIn, int, bool]) -> None:
             row, active, pending = result
             resolved_rows.append(row)
             if hit.get("via") == "probe":
-                probe_only.append(c["name"])
-            tier, score = row["mission_tier"], row["mission_score"]
+                probe_only.append(name)
+            score = row["mission_score"]
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             flag = "  [probe-only: verify]" if hit.get("via") == "probe" else ""
             mark = "queue" if pending else ("OK  " if active else "off ")
-            print(f"    [{mark}] {c['name'][:30]:30} "
+            print(f"    [{mark}] {name[:30]:30} "
                   f"{hit['ats']:12} nc={hit['nc']:<3} tot={hit['count']:<4} "
-                  f"{str(tier):18} {ss}{flag}")
-        for c in stalled:
-            # A lead whose domains blackhole becomes a recorded miss, not a
-            # hung command.
-            await db.run(store.record_miss, c["name"], "fetch-error:stalled",
-                         source=c.get("source"))
+                  f"{str(row['mission_tier']):18} {ss}{flag}")
+
+        # A lead is a name somebody's page mentioned, not an employer anyone
+        # vouched for: resolving it produces a review candidate under the
+        # lead's own name, and the lead row keeps WHY a miss missed (a
+        # stalled one included) so the next run can skip it.
+        missed: list[tuple[str, str]] = []
+        for source in sorted({c.get("source") or "resolve_leads" for c in leads}):
+            group = [c for c in leads if (c.get("source") or "resolve_leads") == source]
+            _, m = await queue_names(
+                db, [c["name"] for c in group], source,
+                {c["name"]: u for c in group if (u := c.get("careers_url"))},
+                max_workers, local_only=False, report=report)
+            missed += m
+        for name, reason in missed:
+            print(f"    [miss] {name[:34]:34} {reason}")
     queued = sum(1 for r in resolved_rows
                  if company_tags.has(r.get("tags"), company_tags.PENDING))
     print(f"\n  {len(resolved_rows)} board(s) resolved, "

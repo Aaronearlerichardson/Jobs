@@ -13,6 +13,8 @@
                          counting its local postings
     websearch_board.py   the same question asked of a search engine
     domain.py            name -> official web domain, to seed the sniff
+    directory.py         name -> boards the public board directory lists
+                         (the read side of `discovery.board_directory`)
     board.py             the top: name -> validated board, or the miss
                          reason that explains why not
 

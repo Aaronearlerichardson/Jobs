@@ -9,13 +9,12 @@ free pre-screen, `prescreen`), and hands the best to `dork.intake_boards`,
 which validates, scores and queues them for review.
 
     directory_boards()   every local board in the directory, grouped
-    lookup_name(name)    a company name's boards in the directory
     title_vocab(conn)    the roster's title words, by mission log-odds
     prescreen(board, v)  a board's title words' mean log-odds
     import_boards()      the op behind `discover.py --import-boards`
 
 Configured by [sources.board_directory]. `base_url` may be a local directory
-of the same layout.
+of the same layout. The resolver's name index is `resolve.directory`.
 """
 
 from __future__ import annotations
@@ -31,20 +30,18 @@ from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, NamedTuple, TypedDict
-from urllib.parse import urlsplit
+from typing import Any, TypedDict
 
 from src import config, store
 from src.ats import coords
 from src.ats.board import BOARDS
-from src.ats.signatures import detect, pack
 from src.discovery.name_sources import blocked_keys
-from src.discovery.resolve.probes import slug_keyed
+from src.discovery.resolve import directory
+from src.discovery.resolve.directory import Detected, board_of, cache_path, is_url, locate, query
 from src.match.gates import exclude_reason, is_technical_role
 from src.match.locality import is_nc
 from src.match.names import name_key
 from src.net import http
-from src.net.util import cache_dir
 from src.rows import BoardHit
 from src.runstate import per_run
 
@@ -73,46 +70,6 @@ def words(text: str | None) -> frozenset[str]:
     ['clinical', 'data', 'engineer']
     """
     return frozenset(re.findall(r"[a-z]{3,}", (text or "").lower()))
-
-
-class Detected(NamedTuple):
-    kind: str                   # "fetchable" or "lead"
-    ats: str
-    handle: Any
-    careers_url: str | None
-
-
-def _board_of(url: str | None, label: str = "", slug: str = "") -> Detected | None:
-    """The board a posting or board URL names (`signatures.detect`), never
-    the dataset's own platform `label`. Failing that, a `label` that is a
-    fetchable platform names its board anyway: by `slug`, else the URL's
-    host, where the platform's handle is one slug; by the URL's origin where
-    it is the careers URL. The live read after it rejects a wrong guess.
-
-    >>> _board_of("https://boards.greenhouse.io/acmebio/jobs/1")
-    Detected(kind='fetchable', ats='greenhouse', handle='acmebio', careers_url=None)
-    >>> _board_of("https://acme.wd5.myworkdayjobs.com/en-US/External/job/x").handle
-    ('acme', 5, 'External')
-    >>> _board_of("https://example.com/careers", "no-such-platform") is None
-    True
-    >>> _board_of("https://careers.acme.org/job/94095", "phenom")
-    Detected(kind='fetchable', ats='phenom', handle='careers.acme.org', careers_url=None)
-    >>> _board_of("https://career.acme.org/job/x/1", "successfactors")
-    Detected(kind='fetchable', ats='successfactors', handle=None, careers_url='https://career.acme.org')
-    """
-    hit = detect("", url or "")
-    if hit:
-        kind, ats, handle = hit
-        careers = (pack(ats, handle, url or "")["careers_url"]
-                   if kind == "fetchable" and not slug_keyed(BOARDS[ats]) else None)
-        return Detected(kind, ats, handle, careers)
-    board, parts = BOARDS.get(label), urlsplit(url or "")
-    if not (board and board.fetchable and not board.multi_column and parts.hostname):
-        return None
-    if not slug_keyed(board):
-        return Detected("fetchable", label, None, f"{parts.scheme}://{parts.netloc}")
-    slug = slug or parts.hostname
-    return Detected("fetchable", label, slug, None) if " " not in slug else None
 
 
 def _key(found: Detected) -> tuple[Any, ...] | None:
@@ -148,16 +105,6 @@ def _prefilter(substrings: Sequence[str], words: Sequence[str]) -> tuple[str, li
     return f"({' OR '.join(clauses)})", args
 
 
-def _is_url(base: str) -> bool:
-    return base.startswith(("http://", "https://"))
-
-
-def _locate(rel: str) -> str:
-    """The directory's file `rel`: its URL, or its path under a local base."""
-    base = config.BOARD_DIRECTORY.base_url
-    return f"{base.rstrip('/')}/{rel}" if _is_url(base) else str(Path(base) / rel)
-
-
 def _try_httpfs() -> bool:
     """Whether DuckDB's httpfs extension installs and loads here."""
     import duckdb
@@ -176,23 +123,6 @@ def _try_httpfs() -> bool:
 _HTTPFS = per_run(_try_httpfs)
 
 
-def _query(src: str, sql: str, args: Sequence[str], remote: bool) -> list[tuple[Any, ...]]:
-    """The rows of `sql` over the parquet file or URL `src` (`?` in `sql`
-    is `src`, then `args`)."""
-    import duckdb
-    con = duckdb.connect()
-    try:
-        if remote:
-            con.load_extension("httpfs")
-        return con.execute(sql, [src, *args]).fetchall()
-    finally:
-        con.close()
-
-
-def _cache_path(rel: str) -> Path:
-    return cache_dir("board_directory", rel.replace("/", "_"))
-
-
 def _fresh(path: Path) -> bool:
     """Whether the cached file is younger than `refresh_days`."""
     try:
@@ -206,7 +136,7 @@ async def _cached(rel: str) -> Path | None:
     """The directory's file `rel` in the cache, downloaded when missing or
     older than `refresh_days`; a stale copy when the download fails, else
     None."""
-    path = _cache_path(rel)
+    path = cache_path(rel)
     if _fresh(path):
         return path
     url = f"{config.BOARD_DIRECTORY.base_url.rstrip('/')}/{rel}"
@@ -223,69 +153,22 @@ async def _read(rel: str, sql: str, args: Sequence[str] = ()) -> list[tuple[Any,
     """`sql` over the directory's file `rel` (`?` is the file); None when it
     cannot be read. A remote file is read in place (httpfs), else through
     the cache."""
-    src, remote = _locate(rel), _is_url(config.BOARD_DIRECTORY.base_url)
+    src, remote = locate(rel), is_url(config.BOARD_DIRECTORY.base_url)
     if remote and not await asyncio.to_thread(_HTTPFS):
         cached = await _cached(rel)
         src, remote = (str(cached) if cached else ""), False
     import duckdb
     try:
-        return await asyncio.to_thread(_query, src, sql, args, remote) if src else None
+        return await asyncio.to_thread(query, src, sql, args, remote) if src else None
     except duckdb.Error as e:
         print(f"    [!] board directory {rel}: {str(e).splitlines()[0][:100]}")
     if not remote:
         return None
     cached = await _cached(rel)         # the in-place read failed: try a download
     try:
-        return await asyncio.to_thread(_query, str(cached), sql, args, False) if cached else None
+        return await asyncio.to_thread(query, str(cached), sql, args, False) if cached else None
     except duckdb.Error:
         return None
-
-
-class Companies(NamedTuple):
-    """companies.parquet, indexed."""
-    names: dict[tuple[Any, ...], str]                    # board key -> name
-    by_name: dict[str, list[tuple[str, Any, str]]]       # name_key -> (ats, handle, url)
-
-
-def _load_companies() -> Companies:
-    """companies.parquet's boards by identity and by name, each row's URL
-    read through `detect`. Empty when the file cannot be read."""
-    cached = _cache_path("companies.parquet")
-    src = (str(cached) if _is_url(config.BOARD_DIRECTORY.base_url) and cached.exists()
-           else _locate("companies.parquet"))
-    remote = _is_url(src)
-    try:
-        rows = _query(src, "SELECT ats, name, slug, url FROM read_parquet(?)", (), remote)
-    except Exception as e:      # no file, no httpfs: the lookup answers nothing
-        print(f"    [!] board directory companies: {str(e).splitlines()[0][:100]}")
-        return Companies({}, {})
-    names: dict[tuple[Any, ...], str] = {}
-    by_name: defaultdict[str, list[tuple[str, Any, str]]] = defaultdict(list)
-    for label, name, slug, url in rows:
-        found = _board_of(url, label or "", slug or "")
-        if not name or not found or found.kind != "fetchable" or not (key := _key(found)):
-            continue
-        names.setdefault(key, name)
-        by_name[name_key(name)].append((found.ats, found.handle, url))
-    return Companies(names, dict(by_name))
-
-
-#: The directory's boards by name, built at the run's first use.
-_companies = per_run(_load_companies)
-
-
-def lookup_name(name: str) -> list[tuple[str, Any, str]]:
-    """(ats, handle, url) of each board the directory lists under exactly
-    `name` (`name_key`, suffixes kept), for a caller to validate: some are
-    other companies that share the name. The first call of a run reads
-    companies.parquet (the cache after an `import_boards`, else the
-    dataset) and blocks while it indexes it.
-
-    >>> lookup_name("")
-    []
-    """
-    key = name_key(name)
-    return list(_companies().by_name.get(key, [])) if key else []
 
 
 # --------------------------------------------------------------------------- #
@@ -318,7 +201,7 @@ class Scan:
             self.read += 1
             if not is_nc(location):
                 continue
-            found = _board_of(url, label, company or "")
+            found = board_of(url, label, company or "")
             if not found:
                 # No spec for the platform: a board the crawl cannot read.
                 # With one, a board the URL does not identify.
@@ -367,16 +250,26 @@ async def _files() -> list[str]:
     cfg = config.BOARD_DIRECTORY
     if cfg.files:
         return list(cfg.files)
-    if _is_url(cfg.base_url):
-        manifest = await http.get_json(_locate("manifest.json"),
+    if is_url(cfg.base_url):
+        manifest = await http.get_json(locate("manifest.json"),
                                        "board directory manifest", {})
     else:
         try:
             manifest = json.loads(await asyncio.to_thread(
-                Path(_locate("manifest.json")).read_text, "utf-8"))
+                Path(locate("manifest.json")).read_text, "utf-8"))
         except (OSError, ValueError):
             manifest = {}
     return list((manifest or {}).get("by_ats", {}))
+
+
+def _names() -> dict[tuple[Any, ...], str]:
+    """The directory's board names by board key (`_key`), the first listed
+    winning."""
+    names: dict[tuple[Any, ...], str] = {}
+    for found, name in directory.index().named:
+        if key := _key(found):
+            names.setdefault(key, name)
+    return names
 
 
 async def _scan() -> Scan:
@@ -385,9 +278,9 @@ async def _scan() -> Scan:
     where, args = _prefilter(config.LOCALITY_SUBSTRINGS,
                              [*config.LOCALITY_WORD_TOKENS, *config.LOCALITY_STATE_SUFFIX])
     sql = f"SELECT company, url, location, title FROM read_parquet(?) WHERE location IS NOT NULL AND {where}"
-    if _is_url(cfg.base_url):
+    if is_url(cfg.base_url):
         await _cached("companies.parquet")       # warm, for lookup_name
-    names = (await asyncio.to_thread(_companies)).names
+    names = await asyncio.to_thread(_names)
     track = config.track_for_engine("local")
     scan = Scan()
     for label in await _files():

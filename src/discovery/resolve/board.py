@@ -29,7 +29,6 @@ lives here and they live one level up.
 from __future__ import annotations
 
 import asyncio
-import importlib
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -41,6 +40,7 @@ from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
 from src.rows import BoardCoords, BoardHit, FetchedJob
+from .directory import lookup_name
 from .domain import official_domain
 from .identity import foreign_board
 from .probes import probe_company
@@ -141,16 +141,11 @@ async def _seeds(name: str, careers_url: str = "") -> list[str]:
 
 async def _directory_hit(name: str, mk: Callable[..., Awaitable[BoardHit | None]]
                          ) -> BoardHit | None:
-    """The best board (most local postings) `board_directory.lookup_name`
-    gives for `name` that `mk` validates, or None. Skipped silently while
-    that module or its cache is missing."""
-    try:
-        lookup = importlib.import_module("src.discovery.board_directory").lookup_name
-        found = await asyncio.to_thread(lookup, name)
-    except Exception:
-        return None
+    """The best board (most local postings) `directory.lookup_name` gives
+    for `name` that `mk` validates, or None (also when the directory could
+    not be read)."""
     hits = []
-    for ats, handle, url in found:
+    for ats, handle, url in await asyncio.to_thread(lookup_name, name):
         if await foreign_board(name, ats, handle):
             continue
         hit = await mk(ats, handle, pack(ats, handle, url)["careers_url"], "directory")

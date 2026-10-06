@@ -16,6 +16,7 @@ from conftest import answer, keep_store_open
 from src import config
 from src.runstate import per_run
 from src.discovery import board_directory as bd
+from src.discovery.resolve import directory as resolve_directory
 from src.discovery import dork, local_sourcing
 
 _JOB = "https://boards.greenhouse.io/{slug}/jobs/{n}"
@@ -58,7 +59,7 @@ def directory(tmp_path, monkeypatch, local_addr, elsewhere):
     # The title gate is the profile's; the test names its own.
     monkeypatch.setattr(bd, "is_technical_role", lambda title, track: "Engineer" in title)
     monkeypatch.setattr(bd, "exclude_reason", lambda *a, **k: None)
-    monkeypatch.setattr(bd, "_companies", per_run(bd._load_companies))   # conftest stubs it
+    monkeypatch.setattr(resolve_directory, "index", per_run(resolve_directory._load_companies))   # conftest stubs it
     return tmp_path
 
 
@@ -83,9 +84,9 @@ async def test_configured_files_replace_the_manifest(directory, monkeypatch):
 
 
 def test_lookup_name_matches_the_whole_name(directory):
-    assert bd.lookup_name("Big Co Inc") == [
+    assert resolve_directory.lookup_name("Big Co Inc") == [
         ("greenhouse", "bigco", "https://job-boards.greenhouse.io/bigco")]
-    assert bd.lookup_name("Precision Bio") == []      # not a suffix-stripped match
+    assert resolve_directory.lookup_name("Precision Bio") == []      # not a suffix-stripped match
 
 
 async def test_a_dry_run_reports_and_writes_nothing(directory, db, monkeypatch, capsys):

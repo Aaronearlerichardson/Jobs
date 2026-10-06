@@ -21,6 +21,7 @@ harvest triage pass and the webapp all delegate here.
 
 from __future__ import annotations
 
+import functools
 import re
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
@@ -77,7 +78,7 @@ NC_HQ_RE = re.compile(
 #
 # Every US state but this profile's own, name and postal code (a segment
 # naming OUR state is not "a different state"). Non-US countries/regions
-# reuse _NON_US_REGIONS/_NON_US_REGION_RE below (the remote-eligibility
+# reuse _NON_US_REGIONS/non_us_place below (the remote-eligibility
 # vocabulary already covers "uk", "canada", "europe", ...) rather than a
 # second copy.
 _ALL_US_STATES = {
@@ -525,50 +526,25 @@ _DEFAULT_US_MARKERS = (
 )
 _US_MARKERS = extend_vocab(_DEFAULT_US_MARKERS, getattr(config, "REMOTE_US_MARKERS", None))
 
-_DEFAULT_NON_US_REGIONS = (
-    "philippines", "india", "pakistan", "bangladesh", "nigeria", "kenya",
-    "south africa", "europe", "emea", "apac", "asia", "africa", "latam",
-    "latin america", "south america", "canada", "uk", "united kingdom",
-    "ireland", "australia", "new zealand", "germany", "france", "spain",
-    "poland", "portugal", "netherlands", "ukraine", "romania", "czech",
-    "brazil", "argentina", "mexico", "colombia", "vietnam", "indonesia",
-    "china", "japan", "singapore", "gb", "uae", "united arab emirates", "dubai",
-    "israel", "switzerland", "sweden", "denmark", "norway", "finland", "belgium",
-    "austria", "italy", "hungary", "slovakia", "serbia", "korea", "taiwan",
-    "malaysia", "saudi", "qatar", "costa rica", "cape town", "johannesburg",
-    # Canadian provinces and Australian states, spelled out. "victoria" is
-    # left out (a Texas city, a Seychelles capital); its code is below.
-    # "ontario" and "new brunswick" are out too: US cities (Ontario CA,
-    # New Brunswick NJ) would lose remote eligibility; see _NON_US_REGION_RE.
-    "quebec", "british columbia", "alberta", "manitoba",
-    "saskatchewan", "nova scotia", "newfoundland",
-    "prince edward island", "yukon", "nunavut", "northwest territories",
-    "new south wales", "queensland", "tasmania", "western australia",
-    "northern territory", "australian capital territory",
-)
+_DEFAULT_NON_US_REGIONS = tuple(config.NON_US_PLACES["regions"])
 _NON_US_REGIONS = extend_vocab(_DEFAULT_NON_US_REGIONS, getattr(config, "REMOTE_NON_US_REGIONS", None))
 
-# A country/region name always on a word boundary -- unlike _has_token's
-# substring rule for this tuple's longer entries, which is fine when
-# scanning a whole description but would let "india" match inside "Indian
-# Trail", a real NC town, in a short, structured location segment. Used by
-# is_nc's _segment_is_local above (defined here, after _NON_US_REGIONS
-# exists, and referenced there by name at call time).
-#
-# The last alternative reads Canadian province and Australian state CODES
-# (WA is also a US state, so it is out). They count only in address position
-# -- after a comma or as the trailing token, then a separator, a closing
-# bracket, a postal code or the end -- and only in capitals, so "Raleigh, ON-SITE"
-# and "Hands on" are not hits. "ontario" and "new brunswick" are names here but
-# not in _NON_US_REGIONS: is_nc has already ruled out a same-segment US state
-# by the time it asks, while us_eligible would misread Ontario CA and New
-# Brunswick NJ.
-_NON_US_REGION_RE = re.compile(
-    "|".join(rf"\b{re.escape(t)}\b"
-             for t in (*_NON_US_REGIONS, "ontario", "new brunswick"))
-    + r"|(?-i:(?:,\s*|\s)(?:AB|BC|MB|NB|NL|NS|NT|NU|ON|PE|QC|SK|YT"
-      r"|ACT|NSW|QLD|SA|TAS|VIC)"
-      r"(?=\s*[,/)]|\s+-\s|\s+[A-Z]\d[A-Z]\b|\s+\d{4}\b|\s*$))", re.I)
+
+@functools.cache
+def _region_res(names: tuple[str, ...], codes: tuple[str, ...]) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """(names, codes) as patterns, built once per vocabulary. A name matches
+    on word boundaries, so "india" misses "Indian Trail". A code, in capitals
+    only, matches in address position: after a comma or whitespace, then a
+    separator, ")", a Canadian postal code, an AU postcode or the end -- so
+    "Raleigh, ON-SITE" and "Hands on" are not hits.
+
+    >>> n, c = _region_res(("india",), ("ON",))
+    >>> n.search("Indian Trail") is None, bool(c.search("Dover, ON L7L 1A1")), c.search("Hands on")
+    (True, True, None)
+    """
+    return (re.compile("|".join(rf"\b{re.escape(t)}\b" for t in names) or r"(?!x)x", re.I),
+            re.compile(rf"(?:,\s*|\s)(?:{'|'.join(map(re.escape, codes))})"
+                       r"(?=\s*[,/)]|\s+-\s|\s+[A-Z]\d[A-Z]\b|\s+\d{4}\b|\s*$)"))
 
 
 def non_us_place(segment: str) -> bool:
@@ -582,7 +558,12 @@ def non_us_place(segment: str) -> bool:
     ...     "Concord, North Carolina", "Hands on", "Victoria, TX", "Indian Trail, NC")]
     [False, False, False, False, False, False, False]
     """
-    return _NON_US_REGION_RE.search(segment) is not None
+    # The segment names ("ontario", "new brunswick") stay out of _NON_US_REGIONS:
+    # is_nc has ruled out a same-segment US state by now, while us_eligible
+    # would misread Ontario CA and New Brunswick NJ.
+    places = config.NON_US_PLACES
+    return any(r.search(segment) for r in _region_res(
+        (*_NON_US_REGIONS, *places["segment_names"]), tuple(places["codes"])))
 
 
 def us_eligible(location: str | None) -> bool:

@@ -52,7 +52,7 @@ if sys.platform == "win32":
 
 from src import config as _config                           # noqa: E402
 from src.config.profile_schema import TrackExclude          # noqa: E402
-from src.discovery import board_directory as _board_directory  # noqa: E402
+from src.discovery.resolve import directory as _directory   # noqa: E402
 from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
@@ -74,8 +74,7 @@ def _no_network(monkeypatch):
     # The resolver's domain lookup is a network call: off unless a test says so.
     monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
     # Likewise the board directory, which reads a remote dataset.
-    monkeypatch.setattr(_board_directory, "_companies",
-                        lambda: _board_directory.Companies({}, {}))
+    monkeypatch.setattr(_directory, "index", lambda: _directory.Companies([], {}))
 
 
 @pytest.fixture(scope="session", autouse=True)

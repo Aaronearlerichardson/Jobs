@@ -11,6 +11,7 @@ reads:
     src/config/profile.py   profile.toml loaded; keywords, locations,
                         candidate, résumé, fit, mission, locality,
                         discovery; PROFILE, the validated whole
+    src/config/places.py    NON_US_PLACES: built-in non-US names and codes
     src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
@@ -35,6 +36,7 @@ from .paths import (  # noqa: F401
     SCRIPT_DIR, APP_HOME, DATA_DIR, STORE_DB_PATH, REPORT_DIR,
     MAX_DESC_CHARS,
 )
+from .places import NON_US_PLACES  # noqa: F401
 from .policy import (  # noqa: F401
     USER_AGENT, PLAIN_USER_AGENT, PROBE_TIMEOUT, FETCH_TIMEOUT, BROWSER_UA,
     FETCH_BUDGET_S, PASS_BUDGET_S, CLAUDE_THINKING_HEADROOM,

@@ -16,7 +16,7 @@ from conftest import answer, keep_store_open
 from src.discovery import local_sourcing
 from src.discovery.resolve import board as resolve_board
 
-_HIT = {"name": "ignored", "ats": "lever", "slug": "alpaca",
+_HIT = {"name": "Alpaca Health", "ats": "lever", "slug": "alpaca",
         "careers_url": "https://alpaca.example/careers",
         "count": 8, "nc": 3, "via": "sniff"}
 
