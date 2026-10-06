@@ -28,7 +28,6 @@ import argparse
 import json
 import sqlite3
 import sys
-from contextlib import aclosing
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -38,8 +37,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config, runstate, store  # noqa: E402
-from src.net.parallel import fan_out  # noqa: E402
+from src import runstate, store  # noqa: E402
+from src.ops.maintenance import track_store  # noqa: E402
+from tools._harness import default_track, score_rows  # noqa: E402
 
 #: How a disposition groups: what you went after, and what you passed on.
 CLASS = {"interviewing": "interviewed", "dismissed": "dismissed"}
@@ -71,17 +71,8 @@ def decided(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 async def _rescore(rows: Sequence[dict[str, Any]]) -> dict[str, float | None]:
-    from src.claude.fit import score_resume_fit
-
-    async def one(r: dict[str, Any]) -> float | None:
-        return (await score_resume_fit(r["title"] or "", r["description"] or "",
-                                       location=r["location"] or "")).score
-    out: dict[str, float | None] = {}
-    async with aclosing(fan_out(rows, one, lambda r: f"rescore {r['company_name']}",
-                                with_item=True)) as got:
-        async for r, score in got:
-            out[r["job_id"]] = score
-    return out
+    return {r["job_id"]: fit.score
+            for r, fit in await score_rows(rows, lambda r: f"rescore {r['company_name']}")}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -91,15 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--thresholds", default="0.2,0.3,0.4,0.5,0.6",
                     help="comma-separated digest thresholds to compare")
     args = ap.parse_args(argv)
-    track = config.UI_TRACKS[config.DEFAULT_TRACK or next(iter(config.UI_TRACKS))]
-    conn = store.connect(track.db_path)
-    try:
+    track = default_track()
+    with track_store(track) as conn:
         rows = decided(conn)
         open_scores = [r[0] for r in conn.execute(
             "SELECT resume_fit_score FROM open_jobs WHERE resume_fit_score IS NOT NULL "
             "AND disposition IS NULL")]
-    finally:
-        conn.close()
     thresholds = [float(x) for x in args.thresholds.split(",")]
     new = runstate.run(_rescore([r for r in rows if r["description"]])) if args.rescore else {}
 

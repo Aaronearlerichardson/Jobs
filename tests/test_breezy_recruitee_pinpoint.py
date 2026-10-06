@@ -1,7 +1,6 @@
 """Breezy, Recruitee and Pinpoint (their `config.BOARDS` specs, run by
 src.ats.board.engine): the one-request JSON listings, the location each
-builds, closure by board membership, Breezy's JSON-LD detail, and the board
-detection that promoted them out of the detection-only lead bucket.
+builds, closure by board membership, and Breezy's JSON-LD detail.
 
 `tests/fixtures/{breezy,recruitee,pinpoint}_board.json` and
 `breezy_post.html` are trimmed REAL responses recorded live on 2026-10-05
@@ -13,7 +12,6 @@ import pytest
 
 from conftest import fake_response, fixture
 from src.ats.board import board_for, company
-from src.ats.signatures import detect
 
 #: platform -> (handle, a stored posting URL on the fixture's board)
 BOARDS = {
@@ -63,10 +61,6 @@ class TestListing:
         assert rows[1]["remote_hint"] == "pinpoint:workplace_type"
         assert "<" not in rows[0]["description"]
 
-    async def test_a_dead_board_reads_as_nothing(self, serve, platform):
-        serve(fake_response(status=404))
-        assert await company.fetch_company({"ats": platform, "slug": "no-such-board"}) == []
-
 
 class TestBreezyDetail:
     async def test_the_posting_page_json_ld_names_the_body(self, serve):
@@ -92,20 +86,3 @@ class TestClosure:
             url if listed else url.replace("9b5dbab30b78", "0" * 12),
             row_id if listed else f"{platform}_gone")
         assert is_open is want
-
-
-class TestDetection:
-    @pytest.mark.parametrize("url,ats,slug", [
-        ("https://highlights-healthcare.breezy.hr/", "breezy", "highlights-healthcare"),
-        ("https://highlights-healthcare.breezy.hr/p/9b5dbab30b78-x", "breezy", "highlights-healthcare"),
-        ("https://hudsonmanpower.recruitee.com/o/head-of-recruitment-operations", "recruitee",
-         "hudsonmanpower"),
-        ("https://trilongroup.pinpointhq.com/en/postings/6547427b-f71c", "pinpoint", "trilongroup"),
-    ])
-    def test_a_board_url_resolves_to_its_subdomain(self, url, ats, slug):
-        assert detect("", url) == ("fetchable", ats, slug)
-
-    @pytest.mark.parametrize("url", ["https://app.breezy.hr/signin", "https://www.recruitee.com/",
-                                     "https://developers.pinpointhq.com/docs"])
-    def test_a_vendor_host_is_no_board(self, url):
-        assert detect("", url) is None

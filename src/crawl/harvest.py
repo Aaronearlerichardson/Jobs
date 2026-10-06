@@ -762,11 +762,11 @@ async def _triage(db_path: str | Path, max_workers: int,
                                      db=db, t=t)
         await check_closed_jobs(limit=CLOSED_PROBE_LIMIT,
                                 stale_days=CLOSED_PROBE_STALE_DAYS, db=db)
+        pipeline, followups = await db.run(
+            lambda conn: (store.get_pipeline(conn), store.followups_due(conn)))
         for t in tracks:
             ranked = await db.run(rewrite_digest, t, top_n=5,
                                   heading=f"\n  [{t.track}] digest rewritten:")
-            pipeline, followups = await db.run(
-                lambda conn: (store.get_pipeline(conn), store.followups_due(conn)))
             await asyncio.to_thread(digest.announce, ranked, t, since,
                                     pipeline=pipeline, followups=followups)
     report_cache_stats()

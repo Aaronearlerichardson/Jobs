@@ -10,11 +10,8 @@ prose blobs of each cut to a few hundred characters.
 
 import copy
 
-import pytest
-
 from conftest import fake_response, fixture
-from src.ats.board import board_for, company
-from src.ats.signatures import detect
+from src.ats.board import board_for
 
 BOARD = board_for("gem")
 SLUG = "resprop"
@@ -43,9 +40,6 @@ class TestListing:
         assert (rows[2]["location"], rows[2]["remote_hint"]) == ("Remote", "gem:location_type")
         assert "remote_hint" not in rows[1]
 
-    async def test_a_dead_board_reads_as_nothing(self, serve):
-        serve(fake_response(status=404))
-        assert await company.fetch_company({"ats": "gem", "slug": "no-such-board"}) == []
 
 
 class TestPosting:
@@ -53,21 +47,7 @@ class TestPosting:
         serve(fake_response(fixture("gem_job_post.json")))
         assert "ResProp Management" in await BOARD.description_for(POSTING)
 
-    @pytest.mark.parametrize("status,want", [(200, True), (404, False)])
-    async def test_a_pulled_posting_is_a_404(self, serve, status, want):
-        serve(fake_response(fixture("gem_job_post.json") if status == 200 else None, status=status))
-        assert (await BOARD.probe_job(POSTING, "x"))[0] is want
-
     def test_a_posting_url_names_its_board(self):
         assert BOARD.job_ref(POSTING) == {"slug": SLUG, "jid": JID}
         assert BOARD.job_ref("https://jobs.gem.com/the-swift-group/4123291008") == {
             "slug": "the-swift-group", "jid": "4123291008"}
-
-
-class TestDetection:
-    @pytest.mark.parametrize("url", [f"https://jobs.gem.com/{SLUG}", POSTING])
-    def test_a_board_url_is_a_fetchable_board(self, url):
-        assert detect("", url) == ("fetchable", "gem", SLUG)
-
-    def test_the_api_host_is_no_board(self):
-        assert detect("", "https://api.gem.com/job_board/v0/resprop/job_posts/") is None

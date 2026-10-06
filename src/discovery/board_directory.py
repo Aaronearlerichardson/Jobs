@@ -22,13 +22,11 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
-import math
 import re
 import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, TypedDict
 
@@ -45,6 +43,8 @@ from src.net import http
 from src.rows import BoardHit
 from src.runstate import per_run
 
+from .vocab import title_vocab, word_score, words
+
 #: The roster statuses `classify` sorts a directory board into.
 STATUSES = ("new", "alternate", "tracked", "blocked")
 
@@ -60,16 +60,6 @@ class DirectoryBoard(TypedDict):
     sample_titles: list[str]    # five, the gate's first
     sample_url: str
     title_words: set[str]       # the words of every local posting title (`words`)
-
-
-@lru_cache(maxsize=1 << 16)
-def words(text: str | None) -> frozenset[str]:
-    """The lower-case words of `text`: runs of three or more letters.
-
-    >>> sorted(words("Sr. Clinical Data Engineer (II)"))
-    ['clinical', 'data', 'engineer']
-    """
-    return frozenset(re.findall(r"[a-z]{3,}", (text or "").lower()))
 
 
 def _key(found: Detected) -> tuple[Any, ...] | None:
@@ -300,55 +290,6 @@ async def directory_boards() -> list[DirectoryBoard]:
     return _ranked((await _scan()).boards.values())
 
 
-def title_vocab(conn: sqlite3.Connection, min_companies: int = 3) -> dict[str, float]:
-    """The log-odds that a title word belongs to a company of an active
-    mission tier, over the roster's stored job titles: each word of at
-    least `min_companies` mission-scored companies, counted once per
-    company (add-one smoothed). {} when the roster has only one side.
-
-    >>> conn = store.connect(":memory:")
-    >>> for name, tier, titles in [("A", "core-mission", ["Clinical Scientist"]),
-    ...                            ("B", "core-mission", ["Clinical Engineer"]),
-    ...                            ("C", "other", ["Store Engineer"]),
-    ...                            ("D", "other", ["Store Manager"])]:
-    ...     cid = store.upsert_company(conn, {"name": name, "mission_tier": tier})
-    ...     for n, t in enumerate(titles):
-    ...         _ = store.upsert_job(conn, {"job_id": f"{name}{n}", "title": t, "company_id": cid})
-    >>> {w: round(v, 1) for w, v in sorted(title_vocab(conn, 2).items())}
-    {'clinical': 1.1, 'engineer': 0.0, 'store': -1.1}
-    >>> title_vocab(store.connect(":memory:"))
-    {}
-    """
-    active = set(config.ACTIVE_MISSION_TIERS)
-    seen: defaultdict[int, set[str]] = defaultdict(set)
-    tier: dict[int, bool] = {}
-    for cid, mission, title in conn.execute(
-            "SELECT DISTINCT j.company_id, c.mission_tier, j.title FROM jobs j "
-            "JOIN companies c ON c.id = j.company_id WHERE c.mission_tier IS NOT NULL"):
-        seen[cid] |= words(title)
-        tier[cid] = mission in active
-    pos = sum(tier.values())
-    neg = len(tier) - pos
-    if not pos or not neg:
-        return {}
-    ins, outs = Counter[str](), Counter[str]()
-    for cid, ws in seen.items():
-        (ins if tier[cid] else outs).update(ws)
-    return {w: math.log((ins[w] + 1) / (pos + 2)) - math.log((outs[w] + 1) / (neg + 2))
-            for w in ins.keys() | outs.keys() if ins[w] + outs[w] >= min_companies}
-
-
-def word_score(ws: Iterable[str], vocab: dict[str, float], shrink: int = 3) -> float:
-    """The mean log-odds (`title_vocab`) of the distinct words `ws`, `shrink`
-    extra words of zero keeping a short text modest.
-
-    >>> round(word_score({"clinical", "unseen"}, {"clinical": 1.0}), 2)
-    0.2
-    """
-    ws = set(ws)
-    return sum(vocab.get(w, 0.0) for w in ws) / (len(ws) + shrink)
-
-
 def prescreen(board: DirectoryBoard, vocab: dict[str, float], shrink: int = 3) -> float:
     """How much a board's posting titles read like the mission-aligned
     employers' (`title_vocab`): the `word_score` of its title words.
@@ -479,6 +420,12 @@ def _write_report(groups: dict[str, list[DirectoryBoard]], vocab: dict[str, floa
     return path
 
 
+def _hits(boards: Iterable[DirectoryBoard]) -> list[BoardHit]:
+    """`boards` as the resolver-shaped hits intake_boards reads."""
+    return [{"name": b["name"], "ats": b["ats"], "slug": b["handle"],
+             "careers_url": b["careers_url"]} for b in boards]
+
+
 async def import_boards(apply: bool = False, limit: int | None = None) -> dict[str, int]:
     """Boards in the directory with local postings that the roster lacks:
     a dry run reports them per platform and writes the report CSV; `apply`
@@ -513,18 +460,12 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
         print("  dry run: nothing written (--apply to validate, score and queue)")
         return counts
     from src.discovery.dork import intake_boards      # dork imports the resolver, which may import this
-    cands: list[BoardHit] = [
-        {"name": b["name"], "ats": b["ats"], "slug": b["handle"], "careers_url": b["careers_url"]}
-        for b in eligible]
     cap = min(cfg.max_scored_per_run, limit) if limit else cfg.max_scored_per_run
-    counts["added"], _ = await intake_boards(cands, "board_directory", require_live=True, limit=cap)
+    counts["added"], _ = await intake_boards(_hits(eligible), "board_directory", require_live=True, limit=cap)
     print(f"  {counts['added']} board(s) queued for review")
     # An alternate board needs no verdict of its own: it joins its employer
     # (store.add_board), once a live local posting confirms it.
-    alts: list[BoardHit] = [
-        {"name": b["name"], "ats": b["ats"], "slug": b["handle"], "careers_url": b["careers_url"]}
-        for b in groups["alternate"]]
-    counts["siblings"], _ = await intake_boards(alts, "board_directory", require_live=True,
-                                                siblings_only=True)
+    counts["siblings"], _ = await intake_boards(_hits(groups["alternate"]), "board_directory",
+                                                require_live=True, score=False)
     print(f"  {counts['siblings']} alternate board(s) added to their employers")
     return counts

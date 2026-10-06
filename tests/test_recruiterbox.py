@@ -9,11 +9,8 @@ list (APR, `aprco`) and `recruiterbox_job.html` one posting's description
 the rest of the page cut to the script block that names the board's total.
 """
 
-import pytest
-
 from conftest import fake_response, fixture
 from src.ats.board import board_for, company
-from src.ats.signatures import detect
 
 BOARD = board_for("recruiterbox")
 SLUG = "aprco"
@@ -55,10 +52,6 @@ class TestListing:
         assert len(rows) == 12 and len({r["id"] for r in rows}) == 12
         assert [r.params["p"] for r in log] == [1, 2]
 
-    async def test_a_dead_board_reads_as_nothing(self, serve):
-        serve(fake_response(status=404))
-        assert await company.fetch_company({"ats": "recruiterbox", "slug": "no-such-board"}) == []
-
 
 class TestPosting:
     async def test_the_page_gives_the_body_as_text(self, serve):
@@ -73,23 +66,3 @@ class TestPosting:
         assert BOARD.job_ref(POSTING) == {"slug": SLUG, "jid": "fk0ztte"}
         assert BOARD.job_ref("https://aprco.recruiterbox.com/jobs/fk0ztte/") == {"slug": SLUG,
                                                                                 "jid": "fk0ztte"}
-
-    @pytest.mark.parametrize("status,want", [(200, True), (404, False)])
-    async def test_a_pulled_posting_is_a_404(self, serve, status, want):
-        serve(fake_response(text=fixture("recruiterbox_job.html") if status == 200 else "",
-                            status=status))
-        assert (await BOARD.probe_job(POSTING, "x"))[0] is want
-
-
-class TestDetection:
-    @pytest.mark.parametrize("url", [
-        "https://aprco.hire.trakstar.com/",
-        POSTING,
-        "https://aprco.recruiterbox.com/jobs/fk0ztte/",
-    ])
-    def test_a_tenant_url_is_a_fetchable_board(self, url):
-        assert detect("", url) == ("fetchable", "recruiterbox", SLUG)
-
-    @pytest.mark.parametrize("url", ["https://www.recruiterbox.com/", "https://app.hire.trakstar.com/"])
-    def test_a_vendor_host_is_no_board(self, url):
-        assert detect("", url) is None

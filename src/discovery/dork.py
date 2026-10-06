@@ -215,7 +215,7 @@ async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
 async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                         tags: str | None = company_tags.LOCAL,
                         require_live: bool = False, limit: int | None = None,
-                        verbose: bool = True, siblings_only: bool = False
+                        verbose: bool = True, score: bool = True
                         ) -> tuple[int, int]:
     """
     Read each candidate board the roster lacks (a `BoardHit`: ats, slug and
@@ -235,7 +235,7 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
 
     A board of an employer the roster already holds on another board is
     written as its sibling, with the employer's mission verdict and no
-    score; `siblings_only` writes only those.
+    score; with `score=False` it writes only those.
 
     Notes:
         harvest_urls' body, made the one intake of every board-first source
@@ -269,7 +269,7 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                 # is never re-probed -- which is why the activation rule must be
                 # the shared one.
                 result = await score_and_upsert(db, hit, source=source, tags=tags,
-                                                score=not siblings_only)
+                                                score=score)
                 if not result:
                     continue
                 row, active, pending = result

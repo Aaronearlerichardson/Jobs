@@ -313,20 +313,26 @@ async def _exchange(method: str, url: str, polite: bool = True,
     return r
 
 
-def _retry_after(r: requests.Response, cap: float = 30.0) -> float:
-    """Seconds a 429 asks to wait (its Retry-After, when a number), at most
-    `cap`; 5 when it names none.
+def retry_after(r: requests.Response, cap: float = 30.0, default: float = 5.0) -> float:
+    """Seconds a reply asks to wait (its Retry-After, when a non-negative
+    number), at most `cap`; `default` when it names none.
 
     >>> from requests import Response
     >>> r = Response(); r.headers["Retry-After"] = "2"
-    >>> _retry_after(r), _retry_after(Response())
-    (2.0, 5.0)
+    >>> retry_after(r), retry_after(Response()), retry_after(Response(), default=20)
+    (2.0, 5.0, 20)
     >>> r.headers["Retry-After"] = "600"
-    >>> _retry_after(r)
-    30.0
+    >>> retry_after(r), retry_after(r, cap=900)
+    (30.0, 600.0)
+    >>> r.headers["Retry-After"] = "Wed, 21 Oct 2026 07:28:00 GMT"
+    >>> retry_after(r)
+    5.0
     """
-    ask = r.headers.get("Retry-After", "")
-    return min(float(ask), cap) if ask.replace(".", "", 1).isdigit() else 5.0
+    try:
+        ask = float(r.headers.get("Retry-After", ""))
+    except ValueError:
+        return default
+    return min(ask, cap) if ask >= 0 else default
 
 
 async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requests.Response:
@@ -357,8 +363,8 @@ async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requ
     await robots.wait_turn(url)
     try:
         r = await _exchange(method, url, **kw)
-        if r.status_code == 429:        # told to slow down: wait as asked, once
-            await asyncio.sleep(_retry_after(r))
+        if r.status_code == 429:        # told to slow down: the host waits as asked, then retry once
+            LIMITER.defer(url, retry_after(r))
             await robots.wait_turn(url)
             r = await _exchange(method, url, **kw)
     except Exception as e:
@@ -378,12 +384,32 @@ class HostLimiter:
     def __init__(self) -> None:
         self._origins: dict[str, list[Any]] = {}   # origin -> [asyncio.Lock, next turn (monotonic)]
 
+    def _slot(self, url: str) -> list[Any]:
+        return self._origins.setdefault(origin_key(url), [asyncio.Lock(), 0.0])
+
     async def wait(self, url: str, gap: float) -> None:
         """Wait for url's origin's turn, then book the next `gap` on."""
-        slot = self._origins.setdefault(origin_key(url), [asyncio.Lock(), 0.0])
+        slot = self._slot(url)
         async with slot[0]:
-            await asyncio.sleep(slot[1] - time.monotonic())
+            while (left := slot[1] - time.monotonic()) > 0:   # a defer may land mid-sleep
+                await asyncio.sleep(left)
             slot[1] = time.monotonic() + gap
+
+    def defer(self, url: str, seconds: float) -> None:
+        """Push url's origin's next turn out to `seconds` from now (never
+        earlier): a 429's Retry-After holds back every call queued on the
+        origin, not only the one that earned it.
+
+        >>> async def demo():
+        ...     lim, t0 = HostLimiter(), time.monotonic()
+        ...     lim.defer("https://a.test/x", 0.05)
+        ...     await lim.wait("https://a.test/y", 0)
+        ...     return time.monotonic() - t0 >= 0.04
+        >>> asyncio.run(demo())
+        True
+        """
+        slot = self._slot(url)
+        slot[1] = max(slot[1], time.monotonic() + seconds)
 
 
 #: The process's one limiter: robots.txt's Crawl-delay feeds it. Not run

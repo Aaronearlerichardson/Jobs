@@ -257,8 +257,8 @@ def main(argv: list[str] | None = None) -> None:
                          "--restamp-apply")
     ap.add_argument("--link-employers", action="store_true",
                     help="Report the companies that are boards of one employer "
-                         "(shared postings) and would get a shared employer: "
-                         "tag, so the ranking shows a posting once; writes "
+                         "(shared postings) and would share an employer_id, "
+                         "so the ranking shows a posting once; writes "
                          "only with --restamp-apply")
     ap.add_argument("--restamp-apply", action="store_true",
                     help="With --restamp-geo/--restamp-tiers/--link-employers: save the old "

@@ -167,21 +167,15 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
 # found a board for an employer the roster may already hold.
 
 def _employer_id(conn: sqlite3.Connection, company: CompanyIn,
-                 employer: str | int | None, named: CompanyRow | None) -> int | None:
+                 named: CompanyRow | None) -> int | None:
     """The employer a board belongs to, or None when the roster has none:
-    the explicit `employer` (an id, or a name), the employer of the row
-    already named so, an employer with the same name_key, or the employer of
-    the roster row whose careers host `company` shares (company_by_host)."""
-    if isinstance(employer, int):
-        return employer
-    if employer:
-        found = conn.execute("SELECT id FROM employers WHERE name=?", (employer,)).fetchone()
-        return found[0] if found else None
+    the employer of the row already named so, an employer with the same
+    name_key, or the employer of the roster row whose careers host `company`
+    shares (company_by_host)."""
     if named and named.get("employer_id"):
         return named["employer_id"]
-    conn.execute("UPDATE employers SET name_key=name_key(name) WHERE name_key IS NULL")
     key = _name_key(company["name"])
-    found = conn.execute("SELECT id FROM employers WHERE name_key=? ORDER BY id LIMIT 1",
+    found = conn.execute("SELECT id FROM employers WHERE name_key(name)=? ORDER BY id LIMIT 1",
                          (key,)).fetchone() if key else None
     if found:
         return cast(int, found[0])
@@ -189,10 +183,8 @@ def _employer_id(conn: sqlite3.Connection, company: CompanyIn,
     return host_row["employer_id"] if host_row else None
 
 
-def plan_board(conn: sqlite3.Connection, company: CompanyIn,
-               employer: str | int | None = None) -> BoardPlan:
-    """Decide what add_board would do. Writes nothing but the name keys it
-    caches on `employers`.
+def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
+    """Decide what add_board would do. Writes nothing.
 
     The same board (board_key) already on the roster is an "update" of that
     row, whatever its name. Otherwise the employer is found (see
@@ -220,7 +212,7 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn,
     same = company_by_board(conn, company)
     if same:
         return BoardPlan("update", same, same["employer_id"])
-    emp = _employer_id(conn, company, employer, named)
+    emp = _employer_id(conn, company, named)
     if emp is None:
         return BoardPlan("new")
     rows = [as_company(r) for r in conn.execute(
@@ -235,8 +227,7 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn,
     return BoardPlan("sibling", primary, emp)
 
 
-def add_board(conn: sqlite3.Connection, company: CompanyIn,
-              employer: str | int | None = None) -> tuple[int | None, str]:
+def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None, str]:
     """Write a board the roster may already hold, never losing one that works.
     Returns (company id, the BoardPlan action taken); see plan_board.
 
@@ -259,25 +250,14 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn,
     >>> conn.execute("SELECT COUNT(DISTINCT employer_id), COUNT(*) FROM companies").fetchone()[:]
     (1, 2)
 
-    An employer named outright takes boards the name does not give away:
-
-    >>> c, how = add_board(conn, {"name": "Acme Labs", "ats": "ashby", "slug": "al"},
-    ...                    employer="Acme")
-    >>> how, conn.execute("SELECT name FROM companies WHERE id=?", (c,)).fetchone()[0]
-    ('sibling', 'Acme (ashby)')
     """
-    plan = plan_board(conn, company, employer)
+    plan = plan_board(conn, company)
     row = plan.row
     if plan.action == "sibling":
         return _write_sibling(conn, company, cast(CompanyRow, row),
                               cast(int, plan.employer_id)), plan.action
     if plan.action == "new":
-        emp = plan.employer_id
-        if emp is None and isinstance(employer, str):
-            conn.execute("INSERT OR IGNORE INTO employers (name, created_at) VALUES (?, ?)",
-                         (employer, datetime.now().isoformat()))
-            emp = conn.execute("SELECT id FROM employers WHERE name=?", (employer,)).fetchone()[0]
-        return _write_company(conn, company, emp), plan.action
+        return _write_company(conn, company, plan.employer_id), plan.action
     row = cast(CompanyRow, row)
     if plan.action == "replace":
         conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, wd_pod=NULL, "

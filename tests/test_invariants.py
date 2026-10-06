@@ -1041,7 +1041,7 @@ MODULE_LEVEL_NAME_ALLOW = {
         "a match mode token_in()'s doctest reads beside _excluded()",
     **{("src/match/locality.py", name): "measured hot compile: the geo gate, per posting"
        for name in ("_OTHER_STATE_NAME_RE", "_OTHER_STATE_ABBR_RE", "_OWN_STATE_RE",
-                    "_WB_LOW_RE")},
+                    "_WB_LOW_RE", "_NON_US_NAME_RE", "_NON_US_CODE_RE")},
 }
 
 SINGLE_USE_HELPER_ALLOW = {

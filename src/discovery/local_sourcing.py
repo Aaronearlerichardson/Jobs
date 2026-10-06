@@ -541,8 +541,20 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
                         source, include_missions, tags, extra)
 
 
-def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str = "",
-                   tags: str | None = None, extra: CompanyIn | None = None
+def _hit_stamp(hit: BoardHit, source: str, tags: str | None,
+               extra: CompanyIn | None) -> CompanyIn:
+    """The columns of every board written from a resolver `hit`: its counts,
+    the scope tag (`tags`, else local when it has local jobs), `source`, the
+    probe time, then `extra`."""
+    nc = hit.get("nc") or 0
+    return cast(CompanyIn, {
+        "local_job_count": nc, "total_job_count": hit.get("count"),
+        "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
+        "source": source, "last_probed": datetime.now().isoformat(), **(extra or {})})
+
+
+def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
+                   tags: str | None, extra: CompanyIn | None
                    ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None]:
     """(True, score_and_upsert's answer) when the roster already settles
     `hit` without a score (a duplicate board, a productive row kept, a
@@ -558,7 +570,7 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str = "",
     plan = store.plan_board(conn, row)
     primary = plan.row
     kept = _productive_row(conn, name)
-    if kept and plan.action == "update" and board_key(kept) == board_key(row):
+    if kept and board_key(kept) == board_key(row):
         upsert_company(conn, {"name": name,
                               "local_job_count": hit.get("nc") or 0,
                               "total_job_count": hit.get("count")})
@@ -571,12 +583,7 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str = "",
     # verdict and so pays for no score.
     if plan.action != "sibling" or primary is None or primary["mission_score"] is None:
         return False, None
-    nc = hit.get("nc") or 0
-    row.update({"local_job_count": nc, "total_job_count": hit.get("count"),
-                "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
-                "source": source, "last_probed": datetime.now().isoformat()})
-    if extra:
-        row.update(extra)
+    row.update(_hit_stamp(hit, source, tags, extra))
     sid, _ = store.add_board(conn, row)
     sibling = cast(CompanyRow, store.get_company(conn, sid))
     print(f"    [sibling] {name}: {row['ats']} board added beside '{primary['name']}'")
@@ -600,16 +607,9 @@ def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
     # an UNAVAILABLE (None) score, or a multi-division conglomerate whose
     # subdivisions are filtered at crawl time.
     active = is_active_mission(tier, name, include_missions)
-    nc = hit.get("nc") or 0
-    row.update({
-        "local_job_count": nc, "total_job_count": hit.get("count"),
-        "mission_tier": tier, "mission_score": score, "mission_reason": reason,
-        "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
-        "source": source, "active": active,
-        "last_probed": datetime.now().isoformat(),
-    })
-    if extra:
-        row.update(extra)
+    row.update({"mission_tier": tier, "mission_score": score,
+                "mission_reason": reason, "active": active})
+    row.update(_hit_stamp(hit, source, tags, extra))
     # Nothing an automated pass finds joins the roster by itself: a name
     # the store has never confirmed lands in the review queue
     # (src.store.mark_pending) for a person to accept or reject.
@@ -673,7 +673,7 @@ async def populate_companies(extra_names: list[str] | None = None,
         # was scored first, 45 of 49 calls on boards already tracked.
         todo = []
         for h in confirmed:
-            settled, result = await db.run(_settled_board, h)
+            settled, result = await db.run(_settled_board, h, "local_sourcing", None, None)
             if not settled:
                 todo.append(h)
             elif result:

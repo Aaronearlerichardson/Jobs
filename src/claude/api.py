@@ -414,13 +414,10 @@ async def call_claude_json[R: Reply](system_prompt: str, user_content: str,
             )
             # Transient statuses worth one short retry ladder (529 = overloaded_error).
             if r.status_code in (429, 500, 502, 503, 529) and attempt < len(delays):
-                try:
-                    delay = float(r.headers.get("retry-after", ""))
-                except ValueError:
-                    delay = delays[attempt]
+                delay = http.retry_after(r, cap=60.0, default=delays[attempt])
                 _log.debug("claude %s -> retrying in %.0fs (attempt %d)",
                            r.status_code, delay, attempt + 1)
-                await asyncio.sleep(min(delay, 60.0))
+                await asyncio.sleep(delay)
                 continue
             break
         r.raise_for_status()  # type: ignore[possibly-undefined]  # the loop runs at least once

@@ -326,14 +326,12 @@ class RobotsCache:
         return rules.sitemaps if rules else []
 
     async def wait_turn(self, url: str) -> None:
-        """Wait as long as this host's Crawl-delay requires (a turn on
-        net.http.LIMITER): requests to the SAME host queue up, while other
-        hosts keep going."""
-        if not config.RESPECT_ROBOTS:
-            return
-        delay = await self.crawl_delay(url)
-        if delay:
-            await http.LIMITER.wait(url, delay)
+        """Wait for this host's turn on net.http.LIMITER, `Crawl-delay` apart
+        from the last (none when robots.txt is off or names none; a 429's
+        Retry-After still holds the turn): requests to the SAME host queue
+        up, while other hosts keep going."""
+        delay = await self.crawl_delay(url) if config.RESPECT_ROBOTS else None
+        await http.LIMITER.wait(url, delay or 0)
 
 
 class RobotsDisallowed(Exception):

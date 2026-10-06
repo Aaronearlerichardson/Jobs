@@ -1,7 +1,8 @@
 -- Cross-board duplicates: the same opening listed on two boards of one
 -- employer. `dup_of` is the jobs.id of the surviving row (NULL = this row
--- stands on its own); store.flag_duplicate_jobs maintains it and counts,
--- digests and notifications skip rows that carry it. Nothing is deleted.
+-- stands on its own); store.flag_duplicate_jobs maintains it. The triage queue
+-- (triage_pending) and the live_jobs counts skip rows that carry it. Nothing
+-- is deleted.
 
 ALTER TABLE jobs ADD COLUMN dup_of INTEGER;
 

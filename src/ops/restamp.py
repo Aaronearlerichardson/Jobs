@@ -1,5 +1,5 @@
 """Stored stamps recomputed after the rule that sets them changes: a job's
-`geo_mode`, a company's `mission_tier`, and the `employer:` tag that joins
+`geo_mode`, a company's `mission_tier`, and the `employer_id` that joins
 two boards of one company."""
 
 from __future__ import annotations

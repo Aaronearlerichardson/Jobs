@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import re
 import sys
 from collections import Counter, defaultdict
@@ -304,7 +305,7 @@ class Wikidata:
                 "GET", config.WIKIDATA_API, "wikidata" if attempt == MAX_TRIES else None,
                 params={**params, "format": "json"}, polite=False)
             if status == 429 and r is not None:
-                await asyncio.sleep(float(r.headers.get("Retry-After") or 20) + attempt)
+                await asyncio.sleep(http.retry_after(r, cap=math.inf, default=20.0) + attempt)
                 continue
             if err or r is None:
                 return None

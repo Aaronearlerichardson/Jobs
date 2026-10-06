@@ -5,19 +5,16 @@
 -- Backfill (all SQL): one employer per `employer:<key>` tag group, named for
 -- the group's board with the most open postings (what restamp.link_employers
 -- picked), one per remaining row, named for it. The tag is then retired.
--- name_key is the registered SQL function connect() installs before migrating.
 
 CREATE TABLE IF NOT EXISTS employers (
     id         INTEGER PRIMARY KEY,
     name       TEXT UNIQUE NOT NULL,
-    name_key   TEXT,                -- NULL until first looked up (see store.companies)
     created_at TEXT
 );
 
 ALTER TABLE companies ADD COLUMN employer_id INTEGER REFERENCES employers(id);
 
 CREATE INDEX IF NOT EXISTS ix_companies_employer ON companies(employer_id);
-CREATE INDEX IF NOT EXISTS ix_employers_key ON employers(name_key);
 
 -- A board's employer, for the places that show or group by employer.
 CREATE VIEW IF NOT EXISTS board_employers AS
@@ -44,8 +41,8 @@ SELECT key, name FROM (
                GROUP BY company_id) n ON n.company_id = c.id
 ) WHERE rn = 1;
 
-INSERT OR IGNORE INTO employers (name, name_key, created_at)
-SELECT c.name, name_key(c.name), c.created_at FROM companies c
+INSERT OR IGNORE INTO employers (name, created_at)
+SELECT c.name, c.created_at FROM companies c
 WHERE c.employer_id IS NULL
   AND (c.id NOT IN (SELECT company_id FROM _emp_tag) OR c.name IN (SELECT name FROM _emp_pick));
 
@@ -92,7 +89,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS companies_employer_renamed AFTER UPDATE OF name ON companies
 WHEN NEW.name IS NOT OLD.name
 BEGIN
-    UPDATE employers SET name = NEW.name, name_key = NULL
+    UPDATE employers SET name = NEW.name
     WHERE id = NEW.employer_id AND name = OLD.name
       AND NOT EXISTS (SELECT 1 FROM employers x WHERE x.name = NEW.name);
 END;

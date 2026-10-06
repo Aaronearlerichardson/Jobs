@@ -25,7 +25,14 @@ from __future__ import annotations
 import re
 import sqlite3
 import sys
+from collections.abc import Callable, Sequence
+from contextlib import aclosing
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from src.claude.fit import FitResult
+    from src.config import RuntimeTrack
 
 # An anti-bot wall or a rate limit says nothing about our parser: the
 # endpoint is reachable and the code is fine, the request was refused.
@@ -74,3 +81,23 @@ def open_ro(path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def default_track() -> RuntimeTrack:
+    """The profile's default-flagged track, else its first."""
+    from src import config
+    return config.UI_TRACKS[config.DEFAULT_TRACK or next(iter(config.UI_TRACKS))]
+
+
+async def score_rows(rows: Sequence[dict[str, Any]], label: Callable[[dict[str, Any]], str],
+                     workers: int | None = None) -> list[tuple[dict[str, Any], FitResult]]:
+    """Each row (`title`, `description`, `location`) with its current fit
+    (paid: one Claude call per row), in completion order."""
+    from src.claude.fit import score_resume_fit
+    from src.net.parallel import DEFAULT_WORKERS, fan_out
+
+    async def one(r: dict[str, Any]) -> FitResult:
+        return await score_resume_fit(r["title"] or "", r["description"] or "",
+                                      location=r["location"] or "")
+    async with aclosing(fan_out(rows, one, label, workers or DEFAULT_WORKERS, with_item=True)) as got:
+        return [pair async for pair in got]

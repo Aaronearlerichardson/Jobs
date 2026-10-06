@@ -105,11 +105,23 @@ class TestRespectRobots:
 
     async def test_a_429_is_retried_once_after_its_retry_after(self, wire, monkeypatch):
         self.respect(monkeypatch, False)
-        slept = []
-        monkeypatch.setattr(http.asyncio, "sleep", answer(slept.append))
-        sent = wire((429, [(b"Retry-After", b"2")], b""), self.PAGE)
+        monkeypatch.setattr(http, "LIMITER", http.HostLimiter())
+        sent = wire((429, [(b"Retry-After", b"0.2")], b""), self.PAGE)
+        t0 = time.monotonic()
         assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
-        assert slept == [2.0] and len(sent) == 2
+        assert len(sent) == 2 and time.monotonic() - t0 >= 0.19
+
+    async def test_one_429_holds_back_every_request_to_that_host(self, wire, monkeypatch):
+        self.respect(monkeypatch, False)
+        monkeypatch.setattr(http, "LIMITER", http.HostLimiter())
+        sent = wire((429, [(b"Retry-After", b"0.2")], b""), self.PAGE, self.PAGE)
+
+        async def took(url):
+            t0 = time.monotonic()
+            assert (await http.send("GET", url)).status_code == 200
+            return time.monotonic() - t0
+        assert min(await asyncio.gather(took("https://a.test/1"), took("https://a.test/2"))) >= 0.19
+        assert len(sent) == 3
 
     async def test_off_the_same_page_is_fetched_with_no_robots_fetch_and_no_wait(
             self, wire, monkeypatch, waits):
@@ -117,7 +129,7 @@ class TestRespectRobots:
         sent = wire(self.PAGE)
         assert (await http.send("GET", "https://a.test/jobs")).status_code == 200
         assert [url for _, url, _ in sent] == ["https://a.test/jobs"]
-        assert waits == []
+        assert waits == [("https://a.test/jobs", 0)]       # its turn, no Crawl-delay gap
 
 
 class TestWhatAFetchedFileMeans:

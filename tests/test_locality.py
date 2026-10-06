@@ -182,6 +182,6 @@ class TestUsEligibilityVocabulary:
 
     def test_what_the_loaded_profile_names_is_in_the_vocabulary(self):
         from src import config
-        assert set(locality._DEFAULT_NON_US_REGIONS) <= set(locality._NON_US_REGIONS)
+        assert set(config.NON_US_PLACES["regions"]) <= set(locality._NON_US_REGIONS)
         assert {t.strip().lower() for t in config.REMOTE_NON_US_REGIONS} <= set(locality._NON_US_REGIONS)
         assert {t.strip().lower() for t in config.REMOTE_US_MARKERS} <= set(locality._US_MARKERS)

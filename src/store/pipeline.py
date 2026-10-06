@@ -53,8 +53,8 @@ OUTCOME_REASONS = ("no-response", "rejected-screen", "rejected-interview",
 # not teach the scorer that the role was a poor match: a posting that was
 # already dead ("closed", which also closes the row) or a second opening at
 # a company you had applied to ("sibling").
-DISMISS_REASONS = ("closed", "sibling", "location", "function", "seniority", "other")
 NOT_A_FIT_SIGNAL = ("closed", "sibling")
+DISMISS_REASONS = (*NOT_A_FIT_SIGNAL, "location", "function", "seniority", "other")
 
 # The resume_fit_score bands conversion_report groups by: (name, low, high),
 # half-open on the high side, ordered low to high.
@@ -256,13 +256,9 @@ def prior_lookup(pipeline: Iterable[Mapping[str, Any]]
         if not rivals:
             return None
         exact, role = title_keys(job.get("title"))
-        best: tuple[int, str, Mapping[str, Any]] | None = None
-        for e, r, p in rivals:
-            if p.get("job_id") == job.get("job_id") or role != r:
-                continue
-            cand = (1 if e == exact else 0, when(p), p)
-            if best is None or cand[:2] > best[:2]:
-                best = cand
+        best = max(((1 if e == exact else 0, when(p), p) for e, r, p in rivals
+                    if p.get("job_id") != job.get("job_id") and r == role),
+                   key=lambda c: c[:2], default=None)
         if best is None:
             return None
         return Prior("repost" if best[0] else "sibling", best[2].get("title") or "",

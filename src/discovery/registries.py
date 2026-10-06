@@ -4,13 +4,14 @@ A directory page needs scraping and a web search needs luck; a registry
 answers with the state's companies in one query. `discover_registries` reads
 the `[discovery].registries` that are enabled, drops every name the roster
 already holds, ranks the rest by how much their project titles read like the
-mission-aligned employers' (`board_directory.title_vocab`), and resolves the
+mission-aligned employers' (`vocab.title_vocab`), and resolves the
 best unprocessed batch at a time, queueing boards for review as
 `registry:<name>` and recording the rest as misses.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import date
@@ -21,9 +22,9 @@ from src.match.names import junk_name_reason, name_key, strip_suffixes
 from src.net import http
 from src.net.util import cache_dir, json_cache_get, json_cache_put
 from src.rows import BoardHit
-from .board_directory import title_vocab, word_score, words
 from .local_sourcing import queue_names
 from .name_sources import blocked_keys
+from .vocab import title_vocab, word_score, words
 
 
 class NamedSource(NamedTuple):
@@ -221,8 +222,9 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
     async with store.Writer() as db:
         known = await db.run(_known_keys)
         vocab = await db.run(title_vocab)
-    for reader in readers:
-        found = await READERS[reader](state)
+    # One reader per host, so they read side by side; results keep reader order.
+    results = await asyncio.gather(*(READERS[r](state) for r in readers))
+    for reader, found in zip(readers, results):
         new = [s for s in found if name_key(s.name) not in known]
         counts[reader] = len(found)
         counts[f"{reader}_new"] = len(new)

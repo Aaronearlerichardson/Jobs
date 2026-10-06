@@ -27,7 +27,6 @@ import json
 import sys
 from collections import defaultdict
 from collections.abc import Sequence
-from contextlib import aclosing
 from datetime import datetime
 from itertools import zip_longest
 from pathlib import Path
@@ -37,9 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config, runstate, store  # noqa: E402
-from src.net.parallel import fan_out  # noqa: E402
-from src.ops.maintenance import remote_us_geo_drops  # noqa: E402
+from src import config, runstate  # noqa: E402
+from src.ops.maintenance import remote_us_geo_drops, track_store  # noqa: E402
+from tools._harness import default_track, score_rows  # noqa: E402
 
 
 def candidates(conn: Any, floor: float | None) -> tuple[list[dict[str, Any]], int]:
@@ -92,18 +91,10 @@ def report(scored: Sequence[dict[str, Any]], bar: float, floor: float | None) ->
 
 
 async def screen(rows: Sequence[dict[str, Any]], workers: int) -> list[dict[str, Any]]:
-    from src.claude.fit import score_resume_fit
-
-    async def one(x: dict[str, Any]) -> Any:
-        return await score_resume_fit(x["title"] or "", x["description"], location=x["location"] or "")
-    done: list[dict[str, Any]] = []
-    async with aclosing(fan_out(rows, one, lambda x: f"screen {x['company']}", workers,
-                                with_item=True)) as got:
-        async for x, res in got:
-            if res.score is not None:
-                done.append({k: v for k, v in x.items() if k != "description"}
-                            | {"fit": res.score, "gates": res.gates, "reason": res.summary()})
-    return done
+    return [{k: v for k, v in x.items() if k != "description"}
+            | {"fit": res.score, "gates": res.gates, "reason": res.summary()}
+            for x, res in await score_rows(rows, lambda x: f"screen {x['company']}", workers)
+            if res.score is not None]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -113,16 +104,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--report", metavar="FILE", help="reread a saved screen; no calls")
     ap.add_argument("--workers", type=int, default=6)
     args = ap.parse_args(argv)
-    track = config.UI_TRACKS[config.DEFAULT_TRACK or next(iter(config.UI_TRACKS))]
+    track = default_track()
     bar, floor = track.digest_min_fit, track.remote_mission_floor
     if args.report:
         report(json.loads(Path(args.report).read_text(encoding="utf-8")), bar, floor)
         return 0
-    conn = store.connect(track.db_path)
-    try:
+    with track_store(track) as conn:
         rows, bodiless = candidates(conn, floor)
-    finally:
-        conn.close()
     print(f"  {len(rows)} posting(s) at {len({r['company'] for r in rows})} company(ies) to screen; "
           f"{bodiless} more have no stored body")
     if not (args.pilot or args.go):

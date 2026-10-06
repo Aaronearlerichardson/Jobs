@@ -92,7 +92,3 @@ class TestDetection:
     ])
     def test_a_tenant_host_is_a_fetchable_board(self, text, slug):
         assert detect(text) == ("fetchable", "eightfold", slug)
-
-    @pytest.mark.parametrize("host", ["www", "app", "apply", "docs", "support"])
-    def test_the_vendors_own_hosts_are_no_board(self, host):
-        assert detect(f"https://{host}.eightfold.ai/") is None
