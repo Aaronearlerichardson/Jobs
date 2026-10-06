@@ -498,6 +498,10 @@ locale_paths = ["/us/en", "/en-us", "/en"]
 # Structured name registries read by `discover.py --registries`; the state is
 # the first two-letter [locality].state_suffix entry.
 registries = ["nih_sbir", "openfda_devices"]
+# openFDA lists every device establishment, distributors included; keep the
+# ones with a device in these medical specialties (openFDA's own labels, e.g.
+# "Radiology"). Empty = all.
+registry_specialties = []
 # The main recall lever — searches whose results are harvested for names, then
 # probed. Tailor to your region/field.
 name_search_queries = [

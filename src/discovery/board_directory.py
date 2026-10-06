@@ -338,10 +338,20 @@ def title_vocab(conn: sqlite3.Connection, min_companies: int = 3) -> dict[str, f
             for w in ins.keys() | outs.keys() if ins[w] + outs[w] >= min_companies}
 
 
+def word_score(ws: Iterable[str], vocab: dict[str, float], shrink: int = 3) -> float:
+    """The mean log-odds (`title_vocab`) of the distinct words `ws`, `shrink`
+    extra words of zero keeping a short text modest.
+
+    >>> round(word_score({"clinical", "unseen"}, {"clinical": 1.0}), 2)
+    0.2
+    """
+    ws = set(ws)
+    return sum(vocab.get(w, 0.0) for w in ws) / (len(ws) + shrink)
+
+
 def prescreen(board: DirectoryBoard, vocab: dict[str, float], shrink: int = 3) -> float:
     """How much a board's posting titles read like the mission-aligned
-    employers' (`title_vocab`): the mean log-odds of its distinct title
-    words, `shrink` extra words of zero keeping a one-title board modest.
+    employers' (`title_vocab`): the `word_score` of its title words.
 
     >>> b = DirectoryBoard(name="A", ats="x", handle="a", careers_url=None, nc_postings=2,
     ...                    gate_passes=1, sample_titles=[], sample_url="",
@@ -349,8 +359,7 @@ def prescreen(board: DirectoryBoard, vocab: dict[str, float], shrink: int = 3) -
     >>> round(prescreen(b, {"clinical": 1.2, "engineer": 0.0, "store": -1.1}), 2)
     0.2
     """
-    ws = board["title_words"]
-    return sum(vocab.get(w, 0.0) for w in ws) / (len(ws) + shrink)
+    return word_score(board["title_words"], vocab, shrink)
 
 
 def _ranked(boards: Iterable[DirectoryBoard], vocab: dict[str, float] | None = None

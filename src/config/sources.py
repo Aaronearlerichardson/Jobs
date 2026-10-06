@@ -96,10 +96,18 @@ REGISTRIES: dict[str, dict[str, Any]] = {
         "activity_codes": ["R41", "R42", "R43", "R44", "U43", "U44", "SB1"],
         "page": 500,
         "max_offset": 14999,
+        # What each project returns, and the reply key of the title kept as
+        # the organization's blurb (the mission pre-screen reads it).
+        "include_fields": ["Organization", "ProjectTitle"],
+        "blurb_field": "project_title",
     },
     "openfda_devices": {
         "url": "https://api.fda.gov/device/registrationlisting.json",
         "limit": 1000,
+        "count": "registration.name.exact",
+        "search": "registration.state_code:{state}",
+        # One clause per [discovery].registry_specialties entry, ORed in.
+        "specialty_search": 'products.openfda.medical_specialty_description.exact:"{value}"',
     },
 }
 

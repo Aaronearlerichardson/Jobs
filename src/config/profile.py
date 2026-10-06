@@ -284,6 +284,7 @@ DISCOVERY_DOMAIN_LOOKUP_URLS = list(PROFILE.discovery.domain_lookup_urls)
 DISCOVERY_DOMAIN_HOSTS       = list(PROFILE.discovery.domain_hosts)
 DISCOVERY_LOCALE_PATHS       = list(PROFILE.discovery.locale_paths)
 DISCOVERY_REGISTRIES         = list(PROFILE.discovery.registries)
+DISCOVERY_REGISTRY_SPECIALTIES = list(PROFILE.discovery.registry_specialties)
 DISCOVERY_NAME_SEARCH_QUERIES = list(PROFILE.discovery.name_search_queries)
 # LLM name-brainstorm source for discovery (names verified downstream, so
 # hallucinations are harmless); 0 disables.

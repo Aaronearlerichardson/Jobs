@@ -1,6 +1,7 @@
-{"meta": {"total": 3, "offset": 0, "limit": 500},
+{"meta": {"total": 4, "offset": 0, "limit": 500},
  "results": [
-  {"organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
-  {"organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
-  {"organization": {"org_name": "NEURO WIDGETS LLC", "org_city": "CHAPEL HILL", "org_state": "NC"}}
+  {"project_title": "Gene therapy for ALS", "organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
+  {"project_title": "Gene therapy for ALS", "organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
+  {"project_title": "Spinal cord interface", "organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
+  {"project_title": "Cortical array", "organization": {"org_name": "NEURO WIDGETS LLC", "org_city": "CHAPEL HILL", "org_state": "NC"}}
  ]}

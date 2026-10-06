@@ -410,6 +410,8 @@ class Discovery(_Table):
     # Structured name registries `discover.py --registries` reads.
     registries: list[Literal["nih_sbir", "openfda_devices"]] = [
         "nih_sbir", "openfda_devices"]
+    # openFDA medical specialties worth reading (its own labels); [] = all.
+    registry_specialties: list[str] = []
     name_search_queries: list[str] = []
     brainstorm_names: Count = 50
     name_blocklist: list[str] = []

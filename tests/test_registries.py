@@ -14,11 +14,12 @@ from src.discovery import registries as reg
 async def test_nih_names_are_titled_stripped_and_deduped(serve):
     sent = serve({"reporter.nih.gov": fake_response(fixture("nih_reporter.json"))})
     got = await reg.nih_sbir("NC")
-    assert [(s.name, s.city, s.source) for s in got] == [
-        ("Acme", "Durham", "registry:nih_sbir"),
-        ("Neuro Widgets", "Chapel Hill", "registry:nih_sbir")]
-    criteria = sent[0].kw["json"]["criteria"]
-    assert criteria["org_states"] == ["NC"] and "R43" in criteria["activity_codes"]
+    assert [(s.name, s.city, s.source, s.blurb) for s in got] == [
+        ("Acme", "Durham", "registry:nih_sbir", "Gene therapy for ALS; Spinal cord interface"),
+        ("Neuro Widgets", "Chapel Hill", "registry:nih_sbir", "Cortical array")]
+    body = sent[0].kw["json"]
+    assert body["criteria"]["org_states"] == ["NC"] and "R43" in body["criteria"]["activity_codes"]
+    assert "ProjectTitle" in body["include_fields"]
 
 
 async def test_nih_pages_follow_the_total(serve, monkeypatch):
@@ -27,7 +28,7 @@ async def test_nih_pages_follow_the_total(serve, monkeypatch):
 
     def page(_url, **kw):
         offset = kw["json"]["offset"]
-        return fake_response({"meta": {"total": 3}, "results": rows[offset:offset + 2]})
+        return fake_response({"meta": {"total": 4}, "results": rows[offset:offset + 2]})
 
     sent = serve({"reporter.nih.gov": page})
     assert len(await reg.nih_sbir("NC")) == 2
@@ -35,9 +36,18 @@ async def test_nih_pages_follow_the_total(serve, monkeypatch):
 
 
 async def test_openfda_drops_duplicates_and_non_names(serve):
-    serve({"api.fda.gov": fake_response(fixture("openfda_devices.json"))})
+    sent = serve({"api.fda.gov": fake_response(fixture("openfda_devices.json"))})
     assert [s.name for s in await reg.openfda_devices("NC")] == [
         "Teleflex Medical", "Neuro Widgets", "Zeta Devices"]
+    assert sent[0].kw["params"]["search"] == "registration.state_code:NC"
+
+
+async def test_openfda_specialties_narrow_the_query(serve, monkeypatch):
+    monkeypatch.setattr(config, "DISCOVERY_REGISTRY_SPECIALTIES", ["Radiology"])
+    sent = serve({"api.fda.gov": fake_response(fixture("openfda_devices.json"))})
+    await reg.openfda_devices("NC")
+    assert sent[0].kw["params"]["search"].endswith('AND (products.openfda.medical_specialty_'
+                                                   'description.exact:"Radiology")')
 
 
 class TestDiscoverRegistries:
@@ -50,8 +60,11 @@ class TestDiscoverRegistries:
         monkeypatch.setattr(config, "LOCALITY_STATE_SUFFIX", ["nc", "north carolina"])
         monkeypatch.setattr(config, "DISCOVERY_REGISTRIES", ["nih_sbir"])
         names = ["Alpha", "Bravo", "Charlie", "Delta", "Neuro Widgets"]
+        blurbs = {"Alpha": "store", "Delta": "clinical"}
+        monkeypatch.setattr(reg, "title_vocab", lambda _conn: {"store": -1.0, "clinical": 1.0})
         monkeypatch.setitem(reg.READERS, "nih_sbir", answer(
-            [reg.NamedSource(n, None, None, "registry:nih_sbir") for n in names]))
+            [reg.NamedSource(n, None, None, "registry:nih_sbir", blurbs.get(n))
+             for n in names]))
         store.upsert_company(db, {"name": "Neuro Widgets Inc", "ats": "lever", "slug": "nw"})
         store.record_miss(db, "Bravo", "no-board-found")
         self.queued = []
@@ -69,11 +82,11 @@ class TestDiscoverRegistries:
         assert (counts["nih_sbir"], counts["nih_sbir_new"], counts["batch"]) == (5, 3, 3)
         assert self.queued == []
 
-    async def test_roster_and_missed_names_are_dropped_and_batches_follow_the_cursor(self):
+    async def test_roster_and_missed_names_are_dropped_and_batches_take_the_best_unprocessed(self):
         assert (await reg.discover_registries(apply=True, limit=2))["queued"] == 2
         assert (await reg.discover_registries(apply=True, limit=2))["queued"] == 1
-        assert self.queued == [(["Alpha", "Charlie"], "registry:nih_sbir"),
-                               (["Delta"], "registry:nih_sbir")]
+        assert self.queued == [(["Delta", "Charlie"], "registry:nih_sbir"),
+                               (["Alpha"], "registry:nih_sbir")]
 
     async def test_no_state_skips_the_registries(self, monkeypatch, capsys):
         monkeypatch.setattr(config, "LOCALITY_STATE_SUFFIX", ["california"])

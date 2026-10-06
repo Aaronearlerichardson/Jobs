@@ -3,9 +3,10 @@
 A directory page needs scraping and a web search needs luck; a registry
 answers with the state's companies in one query. `discover_registries` reads
 the `[discovery].registries` that are enabled, drops every name the roster
-already holds, and resolves the rest a batch at a time (a cursor persisted
-under `.cache/`), queueing boards for review as `registry:<name>` and
-recording the rest as misses.
+already holds, ranks the rest by how much their project titles read like the
+mission-aligned employers' (`board_directory.title_vocab`), and resolves the
+best unprocessed batch at a time, queueing boards for review as
+`registry:<name>` and recording the rest as misses.
 """
 
 from __future__ import annotations
@@ -20,16 +21,19 @@ from src.match.names import junk_name_reason, name_key, strip_suffixes
 from src.net import http
 from src.net.util import cache_dir, json_cache_get, json_cache_put
 from src.rows import BoardHit
+from .board_directory import title_vocab, word_score, words
 from .local_sourcing import queue_names
 from .name_sources import blocked_keys
 
 
 class NamedSource(NamedTuple):
-    """An employer a registry names; `website` and `city` when it says."""
+    """An employer a registry names; `website` and `city` when it says, and
+    a text `blurb` of what it does (project titles) for the mission ranking."""
     name: str
     website: str | None
     city: str | None
     source: str
+    blurb: str | None = None
 
 
 def state_code(suffixes: Iterable[str]) -> str | None:
@@ -61,15 +65,28 @@ def _clean(name: str | None) -> str:
     return strip_suffixes(n.title() if n.isupper() else n)
 
 
-def _named(rows: Iterable[tuple[str | None, str | None]], label: str) -> list[NamedSource]:
+def _named(rows: Iterable[tuple[str | None, str | None, str | None]], label: str
+           ) -> list[NamedSource]:
     """One source per distinct, employer-shaped cleaned name of the
-    (name, city) `rows`, in order of first appearance."""
+    (name, city, text) `rows`, in order of first appearance, its distinct
+    texts joined as the blurb.
+
+    >>> [(s.name, s.blurb) for s in _named([("ACME INC", None, "x"), ("Acme", None, "y"),
+    ...                                     ("Acme", None, "x"), ("Beta", None, None)], "t")]
+    [('Acme', 'x; y'), ('Beta', None)]
+    """
     out: dict[str, NamedSource] = {}
-    for raw, city in rows:
+    for raw, city, text in rows:
         name = _clean(raw)
-        if name and not junk_name_reason(name):
-            out.setdefault(name_key(name), NamedSource(
-                name, None, (city or "").title() or None, f"registry:{label}"))
+        if not name or junk_name_reason(name):
+            continue
+        key = name_key(name)
+        prev = out.get(key) or NamedSource(
+            name, None, (city or "").title() or None, f"registry:{label}")
+        texts = prev.blurb.split("; ") if prev.blurb else []
+        if text and text not in texts:
+            texts.append(text)
+        out[key] = prev._replace(blurb="; ".join(texts) or None)
     return list(out.values())
 
 
@@ -79,25 +96,42 @@ def _results(payload: Any) -> list[dict[str, Any]]:
     return [r for r in results or [] if isinstance(r, dict)]
 
 
-def nih_rows(payload: Any) -> list[tuple[str | None, str | None]]:
-    """(organization, city) of each project in a RePORTER reply.
+def nih_rows(payload: Any) -> list[tuple[str | None, str | None, str | None]]:
+    """(organization, city, project title) of each project in a RePORTER reply.
 
-    >>> nih_rows({"results": [{"organization": {"org_name": "A", "org_city": "B"}}]})
-    [('A', 'B')]
+    >>> nih_rows({"results": [{"project_title": "T",
+    ...                        "organization": {"org_name": "A", "org_city": "B"}}]})
+    [('A', 'B', 'T')]
     >>> nih_rows(None)
     []
     """
-    orgs = [(r.get("organization") or {}) for r in _results(payload)]
-    return [(o.get("org_name"), o.get("org_city")) for o in orgs]
+    field = config.REGISTRIES["nih_sbir"]["blurb_field"]
+    return [((o := r.get("organization") or {}).get("org_name"), o.get("org_city"),
+             r.get(field)) for r in _results(payload)]
 
 
-def fda_rows(payload: Any) -> list[tuple[str | None, str | None]]:
-    """(establishment, None) of each term in an openFDA count reply.
+def fda_rows(payload: Any) -> list[tuple[str | None, str | None, str | None]]:
+    """(establishment, None, None) of each term in an openFDA count reply.
 
     >>> fda_rows({"results": [{"term": "Acme Medical LLC", "count": 3}]})
-    [('Acme Medical LLC', None)]
+    [('Acme Medical LLC', None, None)]
     """
-    return [(r.get("term"), None) for r in _results(payload)]
+    return [(r.get("term"), None, None) for r in _results(payload)]
+
+
+def fda_search(state: str, specialties: Sequence[str]) -> str:
+    """The openFDA query for `state`'s establishments, narrowed to devices in
+    any of `specialties` when there are some.
+
+    >>> fda_search("NC", [])
+    'registration.state_code:NC'
+    >>> fda_search("NC", ["Neurology", 'Ear "x"'])  # doctest: +ELLIPSIS
+    'registration.state_code:NC AND (...exact:"Neurology" OR ...exact:"Ear  x ")'
+    """
+    cfg = config.REGISTRIES["openfda_devices"]
+    clauses = [cfg["specialty_search"].format(value=v.replace('"', " ")) for v in specialties]
+    base = cfg["search"].format(state=state)
+    return f"{base} AND ({' OR '.join(clauses)})" if clauses else base
 
 
 async def nih_sbir(state: str) -> list[NamedSource]:
@@ -106,8 +140,8 @@ async def nih_sbir(state: str) -> list[NamedSource]:
     cfg = config.REGISTRIES["nih_sbir"]
     body = {"criteria": {"org_states": [state], "activity_codes": cfg["activity_codes"],
                          "fiscal_years": fiscal_years(date.today())},
-            "include_fields": ["Organization"], "limit": cfg["page"]}
-    rows: list[tuple[str | None, str | None]] = []
+            "include_fields": cfg["include_fields"], "limit": cfg["page"]}
+    rows: list[tuple[str | None, str | None, str | None]] = []
     offset = 0
     while offset <= cfg["max_offset"]:
         _status, data, err = await http.request_json(
@@ -124,12 +158,13 @@ async def nih_sbir(state: str) -> list[NamedSource]:
 
 
 async def openfda_devices(state: str) -> list[NamedSource]:
-    """Medical-device establishments registered in `state` (openFDA)."""
+    """Medical-device establishments registered in `state` (openFDA), those
+    with a device in `[discovery].registry_specialties` when it is set."""
     cfg = config.REGISTRIES["openfda_devices"]
     data = await http.get_json(
         cfg["url"], "openfda", params={
-            "search": f"registration.state_code:{state}",
-            "count": "registration.name.exact", "limit": cfg["limit"]})
+            "search": fda_search(state, config.DISCOVERY_REGISTRY_SPECIALTIES),
+            "count": cfg["count"], "limit": cfg["limit"]})
     return _named(fda_rows(data), "openfda_devices")
 
 
@@ -137,16 +172,21 @@ READERS: dict[str, Callable[[str], Awaitable[list[NamedSource]]]] = {
     "nih_sbir": nih_sbir, "openfda_devices": openfda_devices}
 
 
-def next_batch(keys: Sequence[str], cursor: str, limit: int) -> list[str]:
-    """Up to `limit` of the sorted `keys` after `cursor`, wrapping to the
-    start when the end is reached.
+def ranked(sources: Iterable[NamedSource], vocab: dict[str, float]) -> list[NamedSource]:
+    """`sources`, the best mission fit first: the `word_score` of the blurb's
+    words. A source with no blurb (or no `vocab`) scores zero, and ties go
+    in name order.
 
-    >>> keys = ["a", "b", "c", "d"]
-    >>> next_batch(keys, "", 2), next_batch(keys, "b", 2), next_batch(keys, "c", 3)
-    (['a', 'b'], ['c', 'd'], ['d', 'a', 'b'])
+    >>> a, b, c = (NamedSource(n, None, None, "r", t) for n, t in
+    ...            [("A", "store"), ("B", None), ("C", "clinical")])
+    >>> [s.name for s in ranked([a, b, c], {"store": -1.0, "clinical": 1.0})]
+    ['C', 'B', 'A']
+    >>> [s.name for s in ranked([c, b, a], {})]
+    ['A', 'B', 'C']
     """
-    after = [k for k in keys if k > cursor]
-    return (after + [k for k in keys if k <= cursor])[:limit]
+    def fit(s: NamedSource) -> float:
+        return word_score(words(s.blurb), vocab) if s.blurb and vocab else 0.0
+    return sorted(sources, key=lambda s: (-fit(s), name_key(s.name)))
 
 
 def _known_keys(conn: sqlite3.Connection) -> set[str]:
@@ -158,10 +198,18 @@ def _known_keys(conn: sqlite3.Connection) -> set[str]:
 
 
 async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str, int]:
-    """Names from the enabled registries that the roster lacks: a dry run
-    counts them per source; `apply` resolves the next `limit` of them from
-    the cursor, queues boards for review and records the misses. Returns
-    the counts."""
+    """Names from the enabled registries that the roster lacks, best mission
+    fit first (`ranked`): a dry run counts them per source; `apply` resolves
+    the best `limit` not yet processed, queues boards for review and records
+    the misses. Returns the counts.
+
+    Notes:
+        A processed name is on the roster (a board or a miss) and so is
+        dropped on the next run, except one whose board the roster already
+        holds under another name: no row is written for it. The processed
+        keys are kept in `.cache/registries_done.json` so the best-ranked
+        names are not resolved again.
+    """
     state = state_code(config.LOCALITY_STATE_SUFFIX)
     readers = [r for r in config.DISCOVERY_REGISTRIES if r in READERS]
     if not (state and readers):
@@ -172,6 +220,7 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
     counts: dict[str, int] = {}
     async with store.Writer() as db:
         known = await db.run(_known_keys)
+        vocab = await db.run(title_vocab)
     for reader in readers:
         found = await READERS[reader](state)
         new = [s for s in found if name_key(s.name) not in known]
@@ -180,12 +229,16 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
         print(f"  {reader:16} {len(found):5} name(s), {len(found) - len(new)} on the "
               f"roster, {len(new)} new")
         for s in new:
-            gathered.setdefault(name_key(s.name), s)
-    path = cache_dir("registries_cursor.json")
-    cursor = (json_cache_get(path, float("inf")) or {}).get("key", "")
-    batch = next_batch(sorted(gathered), cursor, limit)
+            if not (prev := gathered.get(name_key(s.name))) or (s.blurb and not prev.blurb):
+                gathered[name_key(s.name)] = s
+    path = cache_dir("registries_done.json")
+    done = set((json_cache_get(path, float("inf")) or {}).get("done", []))
+    todo = [s for s in ranked(gathered.values(), vocab) if name_key(s.name) not in done]
+    batch = [name_key(s.name) for s in todo[:limit]]
     counts |= {"new": len(gathered), "batch": len(batch), "queued": 0, "missed": 0}
-    print(f"  {len(gathered)} new name(s) in all; the next batch is {len(batch)}")
+    print(f"  {len(gathered)} new name(s) in all, {len(todo)} not yet processed; "
+          f"the next batch is {len(batch)}: {', '.join(s.name for s in todo[:5])}"
+          f"{' ...' * (len(batch) > 5)}")
     if not apply:
         print("  dry run: nothing written (--apply to resolve and queue the batch)")
         return counts
@@ -193,13 +246,13 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
     missed: list[tuple[str, str]] = []
     async with store.Writer() as db:
         for source in sorted({gathered[k].source for k in batch}):
-            todo = [gathered[k] for k in batch if gathered[k].source == source]
-            q, m = await queue_names(db, [s.name for s in todo], source,
-                                     {s.name: s.website for s in todo if s.website})
+            part = [gathered[k] for k in batch if gathered[k].source == source]
+            q, m = await queue_names(db, [s.name for s in part], source,
+                                     {s.name: s.website for s in part if s.website})
             queued += q
             missed += m
     if batch:
-        json_cache_put(path, {"key": batch[-1]})
+        json_cache_put(path, {"done": sorted(done | set(batch))})
     counts |= {"queued": len(queued), "missed": len(missed)}
     print(f"  resolved {len(queued)} of {len(batch)} ({len(missed)} missed); "
           f"{len(queued)} board(s) queued for review")
