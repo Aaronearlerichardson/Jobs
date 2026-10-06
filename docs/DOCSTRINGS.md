@@ -31,8 +31,8 @@ def canonical(tag):
 
     <Optional: a sentence or two of behaviour, each one demonstrated below.>
 
-    >>> canonical("watch")
-    'watch'
+    >>> canonical("sweep")
+    'sweep'
     >>> canonical("  NC_Local ")
     'local'
 
@@ -169,8 +169,8 @@ To check yourself: `JOBS_PROFILE=profile.example.toml pytest`.
 contract, so do not assert one:
 
 ```python
-    >>> sorted(parse("local,watch"))
-    ['local', 'watch']
+    >>> sorted(parse("local,sweep"))
+    ['local', 'sweep']
     >>> parse(None) == set()
     True
 ```

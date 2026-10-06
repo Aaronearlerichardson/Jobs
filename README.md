@@ -806,7 +806,8 @@ default they share:
 Company `tags` are **scope** tokens describing how to crawl a company, not
 what it does (`src/tags.py`): `local` (query its board per-region — the
 expensive enterprise boards), `sweep` (pull the whole board — the cheap JSON
-APIs), `watch` (human-set: fetch every crawl, flag anything new).
+APIs). Watching is not a tag: `watch` is a separate company flag (`--watch`, or
+the Companies tab) that fetches the board every crawl and flags anything new.
 
 Schema migrations are additive and automatic; old DBs upgrade in place, shed
 retired columns, and carry renamed columns' values across.
@@ -947,7 +948,7 @@ identically to a dead one.
 | `src/discovery/` | sourcing: where company names come from (seeds, directories, pasted pages, search dorking), local sourcing and the pipeline; `apply.py` upserts into the store |
 | `src/discovery/resolve/` | resolution: name -> board. Candidate URLs, the identity guard, the careers-page sniffer, the ATS slug probes, the web-search fallback. Reads no store |
 | `src/store/` | the SQLite store, one import surface (`store.X`): `schema.py` (tables, migrations, connect/batch), `companies.py` (roster, misses, board identity, dormancy), `jobs.py` (postings, track membership, triage columns, ranking), `review.py` (the review queue), `pipeline.py` (dispositions, follow-ups) |
-| `src/tags.py` | company scope tags (`local` / `sweep` / `watch`) + legacy aliases |
+| `src/tags.py` | company scope tags (`local` / `sweep`) + legacy aliases |
 | `src/claude/fit.py` | multi-axis résumé-fit rubric, templated from `[fit]`; calibration harness via `python -m src.claude.fit` |
 | `src/claude/api.py` | LLM wrapper (prompt caching + token accounting) + discovery/expansion/mission/tech-bar prompts |
 | `src/match/gates.py` / `src/digest/render.py` | config-driven title/exclude gates; ranked + matches digest renderers |

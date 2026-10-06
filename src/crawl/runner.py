@@ -52,7 +52,7 @@ from src.match.filters import SHORT_KEYWORD, first_hit, is_relevant
 from src.match.locality import NC_RE, geo_label, remote_signal_for, us_eligible
 from src.net.parallel import fan_out, fetch_all
 from src.net.util import strip_html
-from src.rows import CompanyRow, FetchedJob, RankedJob
+from src.rows import CompanyRow, FetchedJob, RankedJob, is_watched
 
 #: Re-exported, not defined here: it moved to src/config/tracks.py, beside
 #: the two tables it reads. Keeping the name importable from the runner is
@@ -355,7 +355,7 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow,
 
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
     watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
-    if c.get("watch"):
+    if is_watched(c):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
         # were NVIDIA seats in Israel, India and Europe) -- out-of-scope

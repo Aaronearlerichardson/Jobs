@@ -13,6 +13,7 @@ import it, so it imports nothing of theirs.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
 from annotated_types import MinLen
@@ -282,6 +283,11 @@ class CompanyRow(TypedDict, closed=True):
     employer_id: int | None
     review: str | None
     watch: int | None
+
+
+def is_watched(company: Mapping[str, Any] | None) -> bool:
+    """True when `company` (a CompanyRow, or None) is on the watch list."""
+    return bool(company and company.get("watch"))
 
 
 # Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.

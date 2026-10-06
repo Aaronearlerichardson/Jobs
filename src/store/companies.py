@@ -26,9 +26,10 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import EllipsisType
 from typing import Annotated, Any, Literal, NamedTuple, Unpack, cast
 
 from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
@@ -37,7 +38,7 @@ from src import config, tags
 from src.runstate import per_run
 from src.match.names import name_key as _name_key
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
-from .employers import MISSION_COLS, set_pending, set_watch, write_mission
+from .employers import MISSION_COLS, apply_facts, write_mission
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
@@ -147,11 +148,12 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
                 return add_board(conn, company)[0]
             company = cast(CompanyIn, {k: v for k, v in company.items()
                                        if k not in _COORD_COLUMNS})
-    return _write_company(conn, company)
+    return _write_company(conn, company, old=old)
 
 
 def _write_company(conn: sqlite3.Connection, company: CompanyIn,
-                   employer_id: int | None = None) -> int | None:
+                   employer_id: int | None = None, *,
+                   old: Mapping[str, Any] | None | EllipsisType = ...) -> int | None:
     """upsert_company's write: insert or update by name, whatever the row
     already holds. `employer_id` places a NEW row under that employer (the
     insert trigger gives it one of its own otherwise).
@@ -159,7 +161,8 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     The mission columns, `review` and `watch` are the EMPLOYER's: they are
     written there (employers.py), and the board keeps the rest. A board's own
     verdict is set_board_mission's, never an upsert's. The two legacy tag
-    tokens of the last two are converted here, once, and never stored."""
+    tokens of the last two are converted here, once, and never stored. `old` is
+    the row already named so (None: there is none); left out, it is looked up."""
     c: dict[str, Any] = {**company, "last_probed": company.get("last_probed")
                          or datetime.now().isoformat()}
     c.setdefault("created_at", datetime.now().isoformat())
@@ -170,9 +173,10 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     facts = {k: c.pop(k) for k in MISSION_COLS if k in c}
     review, watch = c.pop("review", None), c.pop("watch", None)
     named = tags.parse(c.get("tags"))
-    old = conn.execute("SELECT tags FROM companies WHERE name=?",
-                       (c["name"],)).fetchone()
-    if scope := (named | (tags.parse(old["tags"]) if old else set())) - {tags.WATCH, tags.PENDING}:
+    prior = (conn.execute("SELECT tags FROM companies WHERE name=?", (c["name"],)).fetchone()
+             if isinstance(old, EllipsisType) else old)
+    held = named | (tags.parse(prior["tags"]) if prior else set())
+    if scope := held - tags.FACT_TOKENS:
         c["tags"] = tags.join(scope)
     else:
         c.pop("tags", None)
@@ -197,25 +201,10 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
     if row:
         write_mission(conn, row["id"], **facts)
-        _apply_facts(conn, row["id"], "pending" if tags.PENDING in named else review,
-                     bool(watch) or tags.WATCH in named)
+        apply_facts(conn, row["id"], review == "pending" or tags.PENDING in named,
+                    bool(watch) or tags.WATCH in named)
     _commit(conn)
     return row["id"] if row else None
-
-
-def _apply_facts(conn: sqlite3.Connection, company_id: int, review: str | None,
-                 watch: bool) -> None:
-    """Make true of board `company_id` the facts a write names (`review`
-    "pending", `watch`), each at the level set_pending / set_watch choose; one
-    already effective is left alone, and a write never clears either."""
-    if review != "pending" and not watch:
-        return
-    row = conn.execute("SELECT review, watch FROM companies_effective WHERE id=?",
-                       (company_id,)).fetchone()
-    if watch and not row["watch"]:
-        set_watch(conn, company_id, True)
-    if review == "pending" and row["review"] != "pending":
-        set_pending(conn, company_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -838,9 +827,8 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
         apply_update(conn, "companies", "id", keep["id"],
                      {"tags": tags.join(merged), "active": keep["any_active"]})
         everyone = [keep, *losers]
-        _apply_facts(conn, keep["id"],
-                     "pending" if any(m["review"] == "pending" for m in everyone) else None,
-                     any(m["watch"] for m in everyone))
+        apply_facts(conn, keep["id"], any(m["review"] == "pending" for m in everyone),
+                    any(m["watch"] for m in everyone))
 
     merged = dedup_groups(
         conn, "companies", "id", groups, rank=lambda r: r["rn"], merge=carry_over,
@@ -938,43 +926,32 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
 
 
 def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
-                    add: bool = True, board: bool = False) -> str | None:
-    """Add or remove one tag on a company (case-insensitive name match).
-    `watch` and `pending-review` name the EMPLOYER's facts, so they take
-    effect on every one of its boards (`board=True`: this board only) and are
-    never stored as tags; any other tag is this board's own scope. Returns the
-    named company's new comma-joined tags ('' when none), or None if no such
-    company exists.
+                    add: bool = True) -> str | None:
+    """Add or remove one scope tag on a company (case-insensitive name
+    match). Returns its new comma-joined tags ('' when none), or None if no
+    such company exists. Watching is set_watch's, not a tag.
 
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
-    >>> _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
-    >>> set_company_tag(conn, "acme", "watch")
-    ''
-    >>> [r[0] for r in conn.execute("SELECT watch FROM companies_effective")]
-    [1, 1]
     >>> set_company_tag(conn, "acme", "sweep")
     'sweep'
-    >>> set_company_tag(conn, "acme", "watch", add=False, board=True)
-    'sweep'
-    >>> [r[0] for r in conn.execute("SELECT watch FROM companies_effective")]
-    [0, 1]
+    >>> set_company_tag(conn, "ACME", "nc_local")
+    'local,sweep'
+    >>> set_company_tag(conn, "acme", "sweep", add=False)
+    'local'
+    >>> set_company_tag(conn, "nope", "sweep") is None
+    True
     """
     row = conn.execute("SELECT id, tags FROM companies WHERE lower(name)=lower(?)",
                        (name,)).fetchone()
     if not row:
         return None
-    tag = tags.canonical(tag)
-    if tag == tags.WATCH:
-        set_watch(conn, row["id"], add, board=board)
-    elif tag == tags.PENDING:
-        set_pending(conn, row["id"], add, board=board or None)
-    else:
-        held = tags.parse(row["tags"])
-        (held.add if add else held.discard)(tag)
-        conn.execute("UPDATE companies SET tags=? WHERE id=?", (tags.join(held), row["id"]))
-        _commit(conn)
-    return cast(CompanyRow, get_company(conn, row["id"]))["tags"] or ""
+    held = tags.parse(row["tags"])
+    (held.add if add else held.discard)(tags.canonical(tag))
+    new = tags.join(held)
+    conn.execute("UPDATE companies SET tags=? WHERE id=?", (new, row["id"]))
+    _commit(conn)
+    return new or ""
 
 
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
@@ -1002,22 +979,9 @@ def company_id_by_name(conn: sqlite3.Connection, name: str | None) -> int | None
 
 def get_companies(conn: sqlite3.Connection, active_only: bool = True,
                   missions: Collection[str] | None = None,
-                  tag: str | None = None, *, watch: bool = False,
-                  pending: bool | None = None) -> list[CompanyRow]:
+                  tag: str | None = None) -> list[CompanyRow]:
     """Companies (their effective facts), optionally filtered by mission
-    tier(s), scope `tag`, `watch` (only the watched) and `pending` (only the
-    ones awaiting review, or only the others).
-
-    >>> conn = connect(":memory:")
-    >>> _ = upsert_company(conn, {"name": "A", "tags": "sweep", "watch": 1})
-    >>> _ = upsert_company(conn, {"name": "B", "review": "pending"})
-    >>> [c["name"] for c in get_companies(conn, active_only=False, watch=True)]
-    ['A']
-    >>> [c["name"] for c in get_companies(conn, active_only=False, pending=True)]
-    ['B']
-    >>> [c["name"] for c in get_companies(conn, active_only=False, tag="sweep", pending=False)]
-    ['A']
-    """
+    tier(s) and scope `tag`."""
     q = "SELECT * FROM companies_effective"
     conds: list[str] = []
     args: list[Any] = []
@@ -1030,10 +994,6 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
         # tags is a comma-joined token list; match the token exactly.
         conds.append("(',' || COALESCE(tags,'') || ',') LIKE ?")
         args.append(f"%,{tag},%")
-    if watch:
-        conds.append("watch = 1")
-    if pending is not None:
-        conds.append("review = 'pending'" if pending else "review != 'pending'")
     if conds:
         q += " WHERE " + " AND ".join(conds)
     q += " ORDER BY mission_score DESC, local_job_count DESC"
@@ -1057,7 +1017,7 @@ def get_companies(conn: sqlite3.Connection, active_only: bool = True,
 #     from a board with no open postings on file either (a location-scoped
 #     read of a big employer with nothing local is not an empty board);
 #   * off-mission volume -- >= 30 jobs stored and a best fit under 0.20.
-# Watched companies are exempt from both: the watch tag means "tell me the
+# Watched companies are exempt from both: watching means "tell me the
 # moment anything opens here", which a weekly cadence would break.
 
 # Off-mission volume rule. A board this big that has never scored above

@@ -27,7 +27,7 @@ from src.dispatch.background import (OPS, queue_clear, queue_remove, status,
                                      stop, submit)
 from src.match import locality
 from src.ops.maintenance import track_store
-from src.rows import CompanyRow, JobRow, RankedJob
+from src.rows import CompanyRow, JobRow, RankedJob, is_watched
 from src.validation import Text, error_lines
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart
@@ -318,7 +318,7 @@ def api_companies() -> ResponseReturnValue:
             "mission_tier": c.get("mission_tier"),
             "mission_score": c.get("mission_score"),
             "active": bool(c.get("active")), "tags": sorted(company_tags.parse(c.get("tags"))),
-            "watched": bool(c.get("watch")), "review": c.get("review"), "open_jobs": n_open,
+            "watched": is_watched(c), "review": c.get("review"), "open_jobs": n_open,
             "best_fit": best_fit,
             # Crawl cadence, so the roster shows WHY a company stopped
             # producing rows instead of looking silently broken.

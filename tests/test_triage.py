@@ -315,16 +315,16 @@ async def test_multi_division_company_waits_for_the_body(tmp_path, tracks, stubs
 async def test_watching_a_multi_division_company_admits_its_remote_rows(
         tmp_path, tracks, stubs, local_addr, monkeypatch):
     """The two gates a conglomerate's remote row meets are independent, and
-    only ONE of them answers to the watch tag.
+    only ONE of them answers to the watch flag.
 
     A multi-division employer scores "other" overall (that is what the
     [policy] multi_division exemption exists for), so it is never
     mission-trusted and its REMOTE rows are geo-dropped however relevant
-    they are. The `watch` tag on the company row is what admits them --
-    the same tag, and the same code path, as any other watched company.
+    they are. The `watch` flag on the company row is what admits them --
+    the same flag, and the same code path, as any other watched company.
     The division keyword gate is NOT lifted by it: that one is keyed off
     [policy] multi_division, and an off-division posting still drops. The
-    watch tag only WIDENS its vocabulary, by the titles [policy]
+    watch flag only WIDENS its vocabulary, by the titles [policy]
     watch_division_titles names -- see
     test_a_watched_conglomerates_own_engineering_titles_pass_the_division_gate
     below, whose stub (unlike this one) honours the `watch_titles` flag.
@@ -354,7 +354,7 @@ async def test_watching_a_multi_division_company_admits_its_remote_rows(
     assert _row(conn, "wrem")["remote_eligible"] == 1
     assert _row(conn, "wloc")["triage_status"] == "ok"
     assert _row(conn, "woff")["triage_status"] == "division", \
-        "the watch tag admits the row's geography, not its division"
+        "watching admits the row's geography, not its division"
 
 
 #: A posting body from the division that is actually worth watching: plain
@@ -370,7 +370,7 @@ async def test_a_watched_conglomerates_own_engineering_titles_pass_the_division_
     A conglomerate's postings are asked for the profile's health/bio
     vocabulary because a corporate mission score says nothing about the
     division that is hiring. At a WATCHED one that is the wrong question:
-    the watch tag already says "show me this employer's technical roles",
+    watching already says "show me this employer's technical roles",
     and the division worth watching is a plain engineering org. NVIDIA's
     "Software Engineer - AI Research Clusters" (Durham, NC) is the real
     case -- applied to off LinkedIn, dropped here.
@@ -401,7 +401,7 @@ async def test_a_watched_conglomerates_own_engineering_titles_pass_the_division_
 
 async def test_an_unwatched_conglomerate_keeps_the_narrow_division_gate(
         tmp_path, tracks, stubs, local_addr, division_vocab):
-    """The widening is keyed off the `watch` tag, not off multi_division:
+    """The widening is keyed off the `watch` flag, not off multi_division:
     the same title at a conglomerate nobody watches drops exactly as it did
     before (SAS Institute, GRAIL, Labcorp, Google/Microsoft/Meta -- 2,114
     open rows, none of which moved in the 2026-09-22 differential)."""

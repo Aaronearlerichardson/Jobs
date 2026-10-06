@@ -888,12 +888,12 @@ _COLLAPSE_SQL = """
 )"""
 
 
-@sql_function("remote_admitted", 4)
-def _remote_admitted_cols(company_watch: int | None, company_name: str | None,
-                          mission_score: float | None, floor: float | None) -> bool:
-    """remote_admitted over a query's columns, for ranked_jobs' geo clause."""
-    return remote_admitted({"company_watch": company_watch, "company_name": company_name,
-                            "mission_score": mission_score}, floor)
+@sql_function("remote_admitted", 3)
+def _remote_admitted_cols(company_name: str | None, mission_score: float | None,
+                          floor: float | None) -> bool:
+    """remote_admitted's score arm over a query's columns, for ranked_jobs'
+    geo clause (which tests the watch arm itself, in SQL)."""
+    return remote_admitted({"company_name": company_name, "mission_score": mission_score}, floor)
 
 
 def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
@@ -998,7 +998,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
             geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
-                    "remote_admitted(c.watch, j.company_name, c.mission_score, ?))")
+                    "(c.watch = 1 OR remote_admitted(j.company_name, c.mission_score, ?)))")
             args += [json.dumps(sorted(allow_geo_modes)), remote_mission_floor]
         conds.append(f"({geo})")
     if min_mission is not None:

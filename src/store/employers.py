@@ -150,6 +150,21 @@ def set_pending(conn: sqlite3.Connection, company_id: int, pending: bool = True,
               employer_value="pending" if pending else None)
 
 
+def apply_facts(conn: sqlite3.Connection, company_id: int, pending: bool, watch: bool) -> None:
+    """Make true of board `company_id` the facts a write names (`pending`,
+    `watch`), each at the level set_pending / set_watch choose; one already
+    effective is left alone, and a write never clears either (upsert_company's
+    doctests show it at work)."""
+    if not (pending or watch):
+        return
+    row = conn.execute("SELECT review, watch FROM companies_effective WHERE id=?",
+                       (company_id,)).fetchone()
+    if watch and not row["watch"]:
+        set_watch(conn, company_id, True)
+    if pending and row["review"] != "pending":
+        set_pending(conn, company_id)
+
+
 def clear_pending(conn: sqlite3.Connection, company_id: int, employer_id: int, *,
                   whole: bool) -> None:
     """Take a reviewed candidate out of the queue: with `whole`, the employer

@@ -39,6 +39,8 @@ WATCH = "watch"
 # active=0; confirming applies the mission rule; rejecting removes the row
 # and blocklists the name. Never crawled while pending.
 PENDING = "pending-review"
+#: The legacy spellings of the facts that are not scope tags.
+FACT_TOKENS = frozenset({WATCH, PENDING})
 
 # Retired name -> current name. Read-side only: nothing writes these.
 ALIASES = {
@@ -53,8 +55,8 @@ def canonical(tag: str | None) -> str:
     Case- and whitespace-insensitive; unknown tokens pass through unchanged
     so a hand-written profile is never silently rewritten.
 
-    >>> canonical("watch")
-    'watch'
+    >>> canonical("sweep")
+    'sweep'
     >>> canonical("  NC_Local ")
     'local'
     >>> canonical("neural")
@@ -77,8 +79,8 @@ def parse(raw: str | None) -> set[str]:
     Set order is not part of the contract, so sort before comparing —
     the house style for any function whose output is unordered:
 
-    >>> sorted(parse("local,watch"))
-    ['local', 'watch']
+    >>> sorted(parse("local,sweep"))
+    ['local', 'sweep']
 
     Legacy tokens are canonicalised, and a legacy/current pair collapses
     to one token rather than two:
@@ -104,8 +106,8 @@ def join(tags: Iterable[str | None]) -> str | None:
     Output is sorted, so the same token set always stores the same string
     and a row does not churn between crawls:
 
-    >>> join({"watch", "local"})
-    'local,watch'
+    >>> join({"sweep", "local"})
+    'local,sweep'
     >>> join(["neural", "nc_local"])
     'local,sweep'
 
@@ -119,7 +121,7 @@ def join(tags: Iterable[str | None]) -> str | None:
 
     join/parse round-trip on any canonical token set:
 
-    >>> parse(join({"local", "watch"})) == {"local", "watch"}
+    >>> parse(join({"local", "sweep"})) == {"local", "sweep"}
     True
     """
     return ",".join(sorted({canonical(t) for t in tags if t})) or None
@@ -132,7 +134,7 @@ def has(raw: str | Mapping[str, Any] | None, tag: str) -> bool:
     Either side may be legacy — a stored `nc_local` answers to `local`, and
     a caller still asking for `nc_local` gets the row stored as `local`:
 
-    >>> has("local,watch", "watch")
+    >>> has("local,sweep", "sweep")
     True
     >>> has("nc_local", "local")
     True
@@ -145,7 +147,7 @@ def has(raw: str | Mapping[str, Any] | None, tag: str) -> bool:
 
     >>> has(None, "local")
     False
-    >>> has({"name": "Acme", "tags": "watch"}, "watch"), has({}, "watch")
+    >>> has({"name": "Acme", "tags": "sweep"}, "sweep"), has({}, "sweep")
     (True, False)
     """
     if isinstance(raw, Mapping):

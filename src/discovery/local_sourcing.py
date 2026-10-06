@@ -42,7 +42,7 @@ from src.ats.board import company as company_fetch
 from src.match.locality import NC_RE
 from src.match.names import name_key
 from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow
+from src.rows import BoardCoords, BoardHit, CompanyIn, CompanyRow, is_watched
 from src.store.companies import BoardPlan
 from .name_sources import MAJORS, NAME_BLOCKLIST, _MAJORS_KEYS, gather_names
 from .resolve.board import read_local, resolved
@@ -917,7 +917,7 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             revived = False
             if (tier is not None and tier not in ACTIVE_MISSION_TIERS
                     and not config.is_multi_division(c["name"])
-                    and not c["watch"]):
+                    and not is_watched(c)):
                 update["active"] = 0
             # NOT src.claude.is_active_mission: this is the REACTIVATION half
             # and must not revive on `tier is None`. A None tier with a score

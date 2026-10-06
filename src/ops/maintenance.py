@@ -28,7 +28,7 @@ from src.match.filters import is_relevant
 from src.match.locality import (NC_RE, geo_label, geo_mode, is_nc, location_unknown,
                                 remote_signal, us_eligible)
 from src.net.http import fetch_failed
-from src.rows import CompanyRow, FetchedJob, JobIn, JobRow, RankedJob
+from src.rows import CompanyRow, FetchedJob, JobIn, JobRow, RankedJob, is_watched
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -201,13 +201,13 @@ def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
 
 # --------------------------------------------------------------------------- #
 #  Company-row helpers (store roster semantics, shared by crawl + ops).        #
-#  The watch flag is company.get("watch"); scope tags are tags.has(...).       #
+#  The watch flag is rows.is_watched(company); scope tags are tags.has(...).   #
 # --------------------------------------------------------------------------- #
 
 def remote_trusted(company: CompanyRow | None, floor: float | None) -> bool:
     """True if the geo gate admits a company's remote postings: it is on
     the watch list, or `_mission_trusted` at `floor`."""
-    return bool(company and company.get("watch")) or _mission_trusted(company, floor)
+    return is_watched(company) or _mission_trusted(company, floor)
 
 
 def remote_us_geo_drops(conn: sqlite3.Connection, floors: Iterable[float | None], *,
@@ -291,7 +291,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
         and the count climbs fast as the floor drops. It is a knob to move
         deliberately.
     """
-    return (tags.has(company, tags.SWEEP) or bool(company.get("watch"))
+    return (tags.has(company, tags.SWEEP) or is_watched(company)
             or _mission_trusted(company, mission_floor))
 
 
@@ -306,6 +306,7 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
     title = job.get("title", "")
     if not gates.is_technical_role(title, t):
         return False
+    watched = is_watched(company)
     if config.is_multi_division(company["name"]):
         # Workday/SmartRecruiters listings carry no description until the
         # detail call — but the relevance gate NEEDS the description (titles
@@ -318,11 +319,11 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
         # crawl path and the triage path disagreed about the same posting at
         # the same company, and one silently dropped what the other kept.
         if not is_relevant(title, job.get("description", ""),
-                           watch_titles=bool(company.get("watch"))):
+                           watch_titles=watched):
             return False
     if t.exclude_gate and gates.exclude_reason(
             title, job.get("description", ""),
-            allow_defense=bool(company.get("watch")), track_id=t.id):
+            allow_defense=watched, track_id=t.id):
         return False
     floor = t.remote_mission_floor
     if t.geo_gate and _whole_board(company, floor):
@@ -331,7 +332,7 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
         # fetch. Gate here:
         #   watched / core-mission -> local-onsite or explicitly-remote (and
         #              US-eligible: "Canada, Remote" is not remote for us) is
-        #              scored (the watch tag is human-curated, the mission
+        #              scored (the watch flag is human-curated, the mission
         #              floor is a judged score, and ranked_jobs admits both
         #              kinds of remote into the local list);
         #   sweep   -> local-onsite ONLY. That tag is machine-set and proved

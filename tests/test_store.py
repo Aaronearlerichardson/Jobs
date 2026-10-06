@@ -312,16 +312,14 @@ class TestCompanies:
         store.upsert_company(db, {"name": "X", "tags": "local"})
         assert store.get_companies(db, tag="sweep")[0]["tags"] == "local,sweep"
 
-    def test_watch_tag_roundtrip(self, db):
-        store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
-        assert store.set_company_tag(db, "w", "watch") == ""   # case-insensitive
-        row = store.get_companies(db, active_only=False)[0]
+    def test_watch_flag_roundtrip(self, db):
+        cid = store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
+        store.set_watch(db, cid, True)
+        row = store.get_company(db, cid)
         import src.ops.maintenance as ops
         assert row["watch"] == 1 and row["tags"] is None and ops._whole_board(row)
-        assert store.get_companies(db, active_only=False, watch=True) == [row]
-        assert store.set_company_tag(db, "W", "watch", add=False) == ""
-        assert store.get_companies(db, active_only=False, watch=True) == []
-        assert store.set_company_tag(db, "Nope", "watch") is None
+        store.set_watch(db, cid, False)
+        assert not store.get_company(db, cid)["watch"]
 
 
 class TestCompanyReaders:
@@ -562,7 +560,7 @@ class TestDormancy:
         assert self._empty_days(db, company, 4) == "dormant"
 
     def test_watched_company_never_sleeps(self, db, company):
-        store.set_company_tag(db, "Acme", "watch")
+        store.set_watch(db, company, True)
         assert self._empty_days(db, company, 6) == "active"
 
     def test_offmission_volume_sleeps_a_busy_board(self, db, company, add_job):
@@ -586,7 +584,7 @@ class TestDormancy:
         assert store.record_crawl_outcome(db, company, 40) == "active"
 
     def test_watched_company_survives_the_volume_rule(self, db, company, add_job):
-        store.set_company_tag(db, "Acme", "watch")
+        store.set_watch(db, company, True)
         for i in range(store._OFFMISSION_MIN_JOBS):
             add_job(f"gh_acme_{i}", fit=0.03)
         assert store.record_crawl_outcome(db, company, 663) == "active"
@@ -941,7 +939,7 @@ class TestCollapse:
 
 class TestRemoteAdmission:
     """A location-scoped ranking rescues out-of-area rows only from
-    companies it trusts. The 'watch' tag is one such signal, but it is
+    companies it trusts. The watch flag is one such signal, but it is
     hand-set and lags the data — 8 starred companies produced a third of all
     good-fit rows while 20 unstarred ones had produced at least one, and a
     remote research-engineer posting at fit 0.94 fell out of the ranking for
@@ -949,9 +947,9 @@ class TestRemoteAdmission:
     """
 
     def _seed(self, db, add_job, elsewhere, mission=None, watch=False):
-        store.upsert_company(db, {"name": "Acme", "mission_score": mission})
+        cid = store.upsert_company(db, {"name": "Acme", "mission_score": mission})
         if watch:
-            store.set_company_tag(db, "Acme", "watch")
+            store.set_watch(db, cid, True)
         add_job("gh_acme_local", fit=0.5)
         add_job("gh_acme_remote", fit=0.9, location=elsewhere,
                 geo_mode="remote")
@@ -993,7 +991,7 @@ class TestRemoteAdmission:
                             lambda n: (n or "").strip().lower() == "acme")
         self._seed(db, add_job, elsewhere, mission=0.99)
         assert self._ranked(db) == ["gh_acme_local"]
-        store.set_company_tag(db, "Acme", "watch")
+        store.set_watch(db, store.company_id_by_name(db, "Acme"), True)
         assert "gh_acme_remote" in self._ranked(db)
 
 

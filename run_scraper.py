@@ -71,9 +71,11 @@ def _cmd_watch(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     name = args.watch or args.unwatch
     conn = _store(t)
-    found = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
+    cid = store.company_id_by_name(conn, name)
+    if cid is not None:
+        store.set_watch(conn, cid, bool(args.watch))
     conn.close()
-    if found is None:
+    if cid is None:
         print(f"  [!] no company named {name!r} in the store "
               f"(names are matched case-insensitively but exactly).")
     else:

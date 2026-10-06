@@ -40,7 +40,7 @@ Gates, per configured track, in order:
   6. division  multi-division companies only: src.match.filters.is_relevant on
                the body (needs one). A WATCHED conglomerate also passes on a
                [policy] watch_division_titles TITLE (is_relevant's
-               watch_titles tier): the watch tag already says "I want this
+               watch_titles tier): watching already says "I want this
                employer's technical roles", and its aligned division is a
                plain engineering org whose postings never carry the
                profile's health/bio vocabulary. The [exclude] gate inside
@@ -103,7 +103,7 @@ from src.match.locality import (NC_HQ_RE, geo_mode, is_nc, location_unknown,
 from src.net.parallel import fan_out
 from src.net.util import clean_field
 from src.ops import maintenance as ops
-from src.rows import CompanyRow, FetchedJob, JobRow
+from src.rows import CompanyRow, FetchedJob, JobRow, is_watched
 
 _log = logging.getLogger(__name__)
 
@@ -321,15 +321,14 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
         if v == "geo":
             return "geo"
         deferred = deferred or v == DEFER
+    watched = is_watched(company)
     if t.exclude_gate and gates.exclude_reason(
-            title, desc, allow_defense=bool(company.get("watch")),
-            track_id=t.id):
+            title, desc, allow_defense=watched, track_id=t.id):
         return "exclude"
     if config.is_multi_division(company.get("name")):
         if not has_body:
             deferred = True
-        elif not is_relevant(title, desc,
-                             watch_titles=bool(company.get("watch"))):
+        elif not is_relevant(title, desc, watch_titles=watched):
             return "division"
     return DEFER if deferred else OK
 

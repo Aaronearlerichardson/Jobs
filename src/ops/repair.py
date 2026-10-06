@@ -16,7 +16,7 @@ from src.ats.board.engine import Board
 from src.config import RuntimeTrack
 from src.net.parallel import RESOLVE_STALL_S, fan_out
 from src.ops.maintenance import _DEAD_BOARD_FAMILY, _t, track_writer
-from src.rows import CompanyIn, CompanyRow
+from src.rows import CompanyIn, CompanyRow, is_watched
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
@@ -76,7 +76,7 @@ def _deactivate(conn: sqlite3.Connection, dead: list[CompanyRow], offmission: bo
     off = [c for c in store.get_companies(conn, active_only=True)
            if c.get("mission_tier") == "other"
            and not config.is_multi_division(c.get("name"))
-           and not c.get("watch")]
+           and not is_watched(c)]
     for c in off:
         store.deactivate_company(conn, c["id"])
         print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "

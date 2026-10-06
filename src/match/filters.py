@@ -315,7 +315,7 @@ def is_relevant(title: str, description: str = "", *, watch_titles: bool = False
     escape hatch. Only the two DIVISION gates pass it (src.crawl.triage's
     and src.ops.maintenance._keep_job's, which ask the same question of the
     same posting on the harvest and crawl paths), and only for a company
-    carrying the `watch` tag; every other caller (the hydration ordering,
+    that is watched; every other caller (the hydration ordering,
     the discovery filters) gets the unchanged two-tier answer.
 
     The [exclude] gate above it is NOT bypassed: a watched conglomerate's

@@ -58,7 +58,7 @@ def _scope_tag(v: str | None) -> str | None:
     ValueError: not a scope tag
     """
     tag = tags.canonical(v)
-    if tag in (tags.WATCH, tags.PENDING):
+    if tag in tags.FACT_TOKENS:
         raise ValueError(f"{tag!r} is a company flag, not a scope tag")
     return tag or None
 
