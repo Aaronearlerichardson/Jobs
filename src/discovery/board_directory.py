@@ -326,19 +326,19 @@ def _ranked(boards: Iterable[DirectoryBoard], vocab: dict[str, float] | None = N
 
 def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
              ) -> dict[str, list[DirectoryBoard]]:
-    """`boards` sorted by the roster (`STATUSES`):
+    """`boards` sorted by the roster (`STATUSES`).
 
-    The employer is the roster row of the same name, else the one whose
-    careers host is this posting's; the board is renamed to that row's
-    spelling, and `store.plan_board` decides, as the write will:
+    A board's employer is the roster row of the same name, else the one whose
+    careers host is the posting's; the board takes that row's name and
+    `store.plan_board` decides, as the write will:
 
     * tracked    the roster has this board
-    * alternate  a board of an employer the roster has a mission verdict for:
-                 a sibling of its live board, or the replacement of its dead
-                 one. import_boards writes it with that verdict, no score.
+    * alternate  a board of an employer with a mission verdict: a sibling of
+                 its live board or the replacement of its dead one
+                 (import_boards writes it with that verdict, no score)
     * blocked    a name a reviewer rejected, or the profile blocks
-    * new        the rest: no such employer, or one with no verdict yet (a
-                 name held only as a miss, say), so it takes a mission score.
+    * new        the rest (no such employer, or none with a verdict yet, e.g.
+                 a name held only as a miss): it takes a mission score
 
     >>> conn = store.connect(":memory:")
     >>> _ = store.upsert_company(conn, {"name": "Acme Bio", "ats": "lever", "slug": "acme",
@@ -429,25 +429,19 @@ def _hits(boards: Iterable[DirectoryBoard]) -> list[BoardHit]:
 
 
 async def import_boards(apply: bool = False, limit: int | None = None) -> dict[str, int]:
-    """Boards in the directory with local postings that the roster lacks:
-    a dry run reports them per platform and writes the report CSV; `apply`
-    validates (a live local posting), mission-scores and queues the best
-    for review, the highest pre-screen first, at most `limit` (and
-    [sources.board_directory] `max_scored_per_run`) of them. Returns the
-    counts.
+    """Boards in the directory with local postings that the roster lacks: a
+    dry run reports them per platform and writes the report CSV; `apply`
+    validates (a live local posting), mission-scores and queues the best for
+    review, the highest pre-screen first, at most `limit` (and
+    [sources.board_directory] `max_scored_per_run`). Returns the counts.
 
     Notes:
-        A platform with no fetcher is only counted: the roster could hold
-        its board but the crawl could not read it.
-
-        The pre-screen ranks by title words learned from the roster's own
-        mission tiers (`title_vocab`), so the capped mission-scoring budget
-        goes to boards that read like the employers already judged
-        mission-aligned. On the 220 tracked boards of the 2026-10-05
-        directory (91 core-mission or adjacent), trained on the roster
-        without them, it put 75 of the first 100 there, against 46 for
-        gate passes then postings; a floor on the
-        score was not worth it: the cap binds first.
+        A platform with no fetcher is only counted, since the crawl could not
+        read its boards. The pre-screen (`title_vocab`) spends the capped
+        scoring budget on boards that read like already-judged mission
+        employers: backtested on the 2026-10-05 directory it put 75 of the
+        first 100 there against 46 for gate passes then postings, and the cap
+        binds before a score floor would.
     """
     cfg = config.BOARD_DIRECTORY
     scan = await _scan()
@@ -465,9 +459,8 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
     cap = min(cfg.max_scored_per_run, limit) if limit else cfg.max_scored_per_run
     counts["added"], _ = await intake_boards(_hits(eligible), "board_directory", require_live=True, limit=cap)
     print(f"  {counts['added']} board(s) queued for review")
-    # An alternate board needs no verdict of its own: it joins its employer
-    # or replaces its dead board (store.add_board), once a live local posting
-    # confirms it.
+    # An alternate board needs no verdict: once a live local posting confirms
+    # it, it joins its employer or replaces its dead board (store.add_board).
     counts["siblings"], _ = await intake_boards(_hits(groups["alternate"]), "board_directory",
                                                 require_live=True)
     print(f"  {counts['siblings']} alternate board(s) added to their employers")

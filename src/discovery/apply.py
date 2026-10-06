@@ -18,7 +18,6 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 from src import store
-from src import tags
 from src.ats import coords
 from src.ats.board import board_for
 from src.ats.board.fields import TRANSFORMS
@@ -215,8 +214,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
             cid = store.company_id_by_name(conn, name)
             row = store.get_company(conn, cid) if cid else None
         if row is not None:
-            crawled = bool(row.get("active")) and not tags.has(
-                row.get("tags"), tags.PENDING)
+            crawled = bool(row.get("active")) and row["review"] != "pending"
             for j in group:
                 j["company_id"] = row["id"]
                 if crawled and j.get("url") and conn.execute(

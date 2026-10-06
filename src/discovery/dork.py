@@ -215,35 +215,34 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
     optionally name and careers_url), mission-score the ones with local
     jobs, and queue them for review under `source`. Returns (added, checked).
     A nameless candidate is named after its slug; mission scoring reads the
-    board's live job titles for domain context.
+    board's live job titles for context.
 
     Every row lands in the review queue (src.store.mark_pending), never on
-    the roster: a candidate named by a search engine or a dataset is the
-    weakest-sourced one in the codebase.
+    the roster: a name from a search engine or dataset is the weakest-sourced.
 
-    `require_live` admits only a board with a live local posting, read the
-    way the resolver reads one; without it a board with none is admitted too
-    when the employer has a confirmed local HQ (dork's rule). `limit` caps
-    the rows written, taking candidates in the order given.
+    `require_live` admits only a board with a live local posting, read as the
+    resolver reads one; without it a board with none is admitted too when the
+    employer has a confirmed local HQ (dork's rule). `limit` caps the rows
+    written, taking candidates in the order given.
 
     What a board becomes is store.plan_board's: one the roster has is
-    skipped; a board of an employer the roster holds on another is written
-    as its sibling, or replaces the employer's dead one, with the
-    employer's mission verdict and no score. A candidate left out is
-    counted, with its reason, in one "skipped" line (`verbose`).
+    skipped; a board of an employer the roster holds on another is written as
+    its sibling, or replaces the employer's dead one, with the employer's
+    mission verdict and no score. Each candidate left out is counted by
+    reason in one "skipped" line (`verbose`).
 
     Notes:
-        harvest_urls' body, made the one intake of every board-first source
-        (2026-10-05). Reads run concurrently across hosts for a directory
-        pass; dork's HQ lookups stay one at a time.
+        The one intake of every board-first source (harvest_urls' former
+        body); a directory pass reads concurrently across hosts, dork's HQ
+        lookups stay one at a time.
     """
     named: list[BoardHit] = [
         {**c, "name": c.get("name") or coords.slug_title(coords.from_hit(c))}
         for c in candidates]
     async with store.Writer() as db:
-        todo = [c for c in named
-                if (await db.run(store.plan_board,
-                                 coords.from_hit(c, name=c["name"]))).action != "update"]
+        todo = await db.run(lambda conn: [
+            c for c in named
+            if store.plan_board(conn, coords.from_hit(c, name=c["name"])).action != "update"])
         skipped = {"already tracked": len(named) - len(todo), "no live local posting": 0,
                    "same board under another name": 0, "over the limit": 0}
         origin = ((lambda c: company_fetch.board_origin(coords.from_hit(c)))
@@ -264,12 +263,10 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                 if limit is not None and added >= limit:
                     skipped["over the limit"] += 1
                     continue
-                # Scoring, activation and the review queue are the shared write
-                # path (local_sourcing.score_and_upsert). The row is tagged local
-                # even at nc == 0: the HQ signal is what admitted it. An inactive
-                # row is near-unrecoverable here -- a board already in the store
-                # is never re-probed -- which is why the activation rule must be
-                # the shared one.
+                # Scoring, activation and the review queue are score_and_upsert's.
+                # The row is tagged local even at nc == 0 (the HQ signal admitted
+                # it); a board already in the store is never re-probed, so
+                # activation must be the shared rule.
                 result = await score_and_upsert(db, hit, source=source, tags=tags)
                 if not result:
                     skipped["same board under another name"] += 1

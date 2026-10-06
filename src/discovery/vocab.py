@@ -24,10 +24,10 @@ def words(text: str | None) -> frozenset[str]:
 
 
 def title_vocab(conn: sqlite3.Connection, min_companies: int = 3) -> dict[str, float]:
-    """The log-odds that a title word belongs to a company of an active
-    mission tier, over the roster's stored job titles: each word of at
-    least `min_companies` mission-scored companies, counted once per
-    company (add-one smoothed). {} when the roster has only one side.
+    """The log-odds that a title word marks a company of an active mission
+    tier, over the roster's stored titles: each word of at least
+    `min_companies` mission-scored companies, counted once per company
+    (add-one smoothed). {} when the roster has only one side.
 
     >>> from src import store
     >>> conn = store.connect(":memory:")

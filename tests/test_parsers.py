@@ -1276,6 +1276,52 @@ class TestScoreMissionsHonoursTheReviewQueue:
         assert rows["Failed Call Co"]["active"] == 1
 
 
+class TestScoreMissionsScoresAnEmployerOnce:
+    """The verdict is the employer's, so its boards are scored once, through
+    the largest; a board holding a verdict of its own is scored on its own."""
+
+    def _wire(self, monkeypatch, db):
+        import src.claude.api as claude
+
+        asked = []
+
+        def score(name, context):
+            asked.append(name)
+            return ("adjacent", 0.5 if name == "Acme (ashby)" else 0.6, name)
+
+        keep_store_open(monkeypatch, db)
+        monkeypatch.setattr(claude, "score_company_mission", answer(score))
+        monkeypatch.setattr(local_sourcing, "_sample_titles", answer([]))
+        return asked
+
+    async def test_an_unscored_employer_is_scored_through_its_largest_board(self, monkeypatch, db):
+        import src.store as store
+        asked = self._wire(monkeypatch, db)
+        store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a", "total_job_count": 3})
+        store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "b", "total_job_count": 9})
+        await local_sourcing.score_missions(max_workers=1)
+        assert asked == ["Acme (ashby)"]
+        assert [r[:] for r in db.execute(
+            "SELECT mission_tier, mission_score FROM companies_effective")] == [("adjacent", 0.5)] * 2
+
+    async def test_a_board_with_its_own_verdict_is_rescored_on_its_own(self, monkeypatch, db):
+        import src.store as store
+        asked = self._wire(monkeypatch, db)
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a",
+                                    "active": 1, "total_job_count": 3})
+        store.set_mission(db, a, "core", 0.9)
+        b, _ = store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "b",
+                                    "active": 1, "total_job_count": 9})
+        c, _ = store.add_board(db, {"name": "Acme", "ats": "icims", "slug": "c",
+                                    "active": 1, "total_job_count": 1})
+        store.set_board_mission(db, c, "other", 0.1)
+        await local_sourcing.score_missions(max_workers=1, rescore_all=True)
+        assert sorted(asked) == ["Acme (ashby)", "Acme (icims)"]
+        got = {r["id"]: (r["mission_tier"], r["mission_score"]) for r in
+               db.execute("SELECT id, mission_tier, mission_score FROM companies_effective")}
+        assert got == {a: ("adjacent", 0.5), b: ("adjacent", 0.5), c: ("adjacent", 0.6)}
+
+
 class TestValidateCandidateResolutionOrder:
     """The order discovery resolves a candidate in, pinned.
 

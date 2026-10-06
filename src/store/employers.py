@@ -1,12 +1,10 @@
 """Employer-level facts and the per-board overrides of them.
 
-An employer holds the mission verdict, the review state and the watch flag; a
-board (a `companies` row) inherits them and may override them (migration
-0005). A reader asks the `companies_effective` view, so which value wins is
-decided there and nowhere else. These functions are the writers: each says
-which level it writes, and the default is the EMPLOYER, so every board
-inherits. Deactivating a dead board is not one of them: `active` is the
-board's own crawl switch (companies.py).
+An employer holds the mission verdict, review state and watch flag; a board
+(a `companies` row) inherits them and may override them. The
+`companies_effective` view alone decides which wins. These functions are the
+writers, defaulting to the EMPLOYER so every board inherits. `active`, the
+board's own crawl switch, is not one of them (companies.py).
 
 Imports only .schema, so companies.py and review.py may both use it.
 """
@@ -17,10 +15,13 @@ import sqlite3
 from typing import Literal
 
 from src import tags
-from .schema import _commit, connect  # noqa: F401  (connect: the doctests open stores)
+from .schema import _commit, apply_update, connect  # noqa: F401  (connect: the doctests open stores)
 
 #: The tag tokens that are employer facts, not board scope.
 FACT_TAGS = frozenset({tags.WATCH, tags.PENDING})
+
+#: The columns of one mission verdict, on an employer and on a board alike.
+MISSION_COLS = ("mission_tier", "mission_score", "mission_reason")
 
 _Fact = Literal["mission", "review", "watch"]
 
@@ -45,7 +46,7 @@ def write_mission(conn: sqlite3.Connection, company_id: int, **facts: object) ->
     >>> conn.execute("SELECT mission_tier, mission_score FROM companies_effective").fetchone()[:]
     ('core', 0.8)
     """
-    sets = {k: v for k, v in facts.items() if k in ("mission_tier", "mission_score", "mission_reason")}
+    sets = {k: v for k, v in facts.items() if k in MISSION_COLS}
     if sets:
         conn.execute(f"UPDATE employers SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
                      [*sets.values(), _employer(conn, company_id)])
@@ -61,9 +62,9 @@ def set_mission(conn: sqlite3.Connection, company_id: int, tier: str | None,
 
 def set_board_mission(conn: sqlite3.Connection, company_id: int, tier: str | None,
                       score: float | None, reason: str | None = None) -> None:
-    """Score ONE board as a division of its own: the verdict overrides the
-    employer's for this board only. Needs a tier or a score (a verdict with
-    neither reads as "inherit"). clear_board_override undoes it.
+    """Score ONE board as a division of its own, overriding the employer's
+    verdict for this board only. Needs a tier or a score (neither reads as
+    "inherit"). clear_board_override undoes it.
 
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
@@ -81,27 +82,36 @@ def set_board_mission(conn: sqlite3.Connection, company_id: int, tier: str | Non
     """
     if tier is None and score is None:
         raise ValueError("a board verdict needs a tier or a score")
-    conn.execute("UPDATE companies SET mission_tier=?, mission_score=?, mission_reason=? WHERE id=?",
-                 (tier, score, reason, company_id))
-    _commit(conn)
+    apply_update(conn, "companies", "id", company_id,
+                 dict(zip(MISSION_COLS, (tier, score, reason))))
 
 
 def clear_board_override(conn: sqlite3.Connection, company_id: int, *facts: _Fact) -> None:
     """Drop board `company_id`'s own mission, review and watch (just the
     ones named, when any are), so it inherits its employer's again."""
     cols: dict[_Fact, tuple[str, ...]] = {
-        "mission": ("mission_tier", "mission_score", "mission_reason"),
-        "review": ("review",), "watch": ("watch",)}
-    chosen = [c for f in (facts or tuple(cols)) for c in cols[f]]
-    conn.execute(f"UPDATE companies SET {', '.join(f'{c}=NULL' for c in chosen)} WHERE id=?",
-                 (company_id,))
+        "mission": MISSION_COLS, "review": ("review",), "watch": ("watch",)}
+    apply_update(conn, "companies", "id", company_id,
+                 {c: None for f in (facts or tuple(cols)) for c in cols[f]})
+
+
+def _set_fact(conn: sqlite3.Connection, company_id: int, col: str, *, board: bool,
+              board_value: object, employer_value: object) -> None:
+    """Write fact `col` on board `company_id` (`board_value`), or on its
+    employer (`employer_value`) and drop the board's own, in one commit."""
+    if board:
+        apply_update(conn, "companies", "id", company_id, {col: board_value})
+        return
+    conn.execute(f"UPDATE employers SET {col}=? WHERE id=?",
+                 (employer_value, _employer(conn, company_id)))
+    conn.execute(f"UPDATE companies SET {col}=NULL WHERE id=?", (company_id,))
     _commit(conn)
 
 
 def set_watch(conn: sqlite3.Connection, company_id: int, on: bool, *, board: bool = False) -> None:
-    """Watch (or stop watching) the employer of board `company_id`; with
-    `board`, only this board. An employer-wide call also drops this board's
-    own override, so the board ends up as asked.
+    """Watch (or stop watching) the employer of board `company_id`, or with
+    `board` only this board. An employer-wide call drops the board's own
+    override.
 
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
@@ -114,21 +124,15 @@ def set_watch(conn: sqlite3.Connection, company_id: int, on: bool, *, board: boo
     >>> [r[0] for r in conn.execute("SELECT watch FROM companies_effective")]
     [1, 0]
     """
-    if board:
-        conn.execute("UPDATE companies SET watch=? WHERE id=?", (int(on), company_id))
-    else:
-        conn.execute("UPDATE employers SET watch=? WHERE id=?", (int(on), _employer(conn, company_id)))
-        conn.execute("UPDATE companies SET watch=NULL WHERE id=?", (company_id,))
-    _commit(conn)
+    _set_fact(conn, company_id, "watch", board=board, board_value=int(on), employer_value=int(on))
 
 
 def set_pending(conn: sqlite3.Connection, company_id: int, pending: bool = True, *,
                 board: bool | None = None) -> None:
     """Put the employer of board `company_id` into (or out of) the review
-    queue. `board=True` marks just this board (a new board of a vetted
-    employer awaits its own review); the default is the whole employer,
-    except that a board of a multi-board employer found for review is its
-    own (`board=None` picks by that rule when `pending`).
+    queue; `board=True` marks only this board (a new board of a vetted
+    employer awaits its own review). `board=None` means the whole employer,
+    except that a pending board of a multi-board employer is its own.
 
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
@@ -145,14 +149,21 @@ def set_pending(conn: sqlite3.Connection, company_id: int, pending: bool = True,
         board = pending and conn.execute(
             "SELECT COUNT(*) FROM companies WHERE employer_id=(SELECT employer_id FROM companies "
             "WHERE id=?)", (company_id,)).fetchone()[0] > 1
-    if board:
-        conn.execute("UPDATE companies SET review=? WHERE id=?",
-                     ("pending" if pending else "confirmed", company_id))
+    _set_fact(conn, company_id, "review", board=bool(board),
+              board_value="pending" if pending else "confirmed",
+              employer_value="pending" if pending else None)
+
+
+def clear_pending(conn: sqlite3.Connection, company_id: int, employer_id: int, *,
+                  whole: bool) -> None:
+    """Take a reviewed candidate out of the queue: with `whole`, the employer
+    `employer_id` and every board of it, else board `company_id` alone.
+    The caller commits (review.confirm_company)."""
+    if whole:
+        conn.execute("UPDATE employers SET review=NULL WHERE id=?", (employer_id,))
+        conn.execute("UPDATE companies SET review=NULL WHERE employer_id=?", (employer_id,))
     else:
-        conn.execute("UPDATE employers SET review=? WHERE id=?",
-                     ("pending" if pending else None, _employer(conn, company_id)))
         conn.execute("UPDATE companies SET review=NULL WHERE id=?", (company_id,))
-    _commit(conn)
 
 
 def apply_tag_facts(conn: sqlite3.Connection, company_id: int, held: set[str]) -> None:
@@ -160,12 +171,11 @@ def apply_tag_facts(conn: sqlite3.Connection, company_id: int, held: set[str]) -
     `company_id`, writing the level each belongs to (set_watch, set_pending);
     a fact already effective is left alone. What an upsert's `tags` and a
     dedup merge do with the two tokens that are not board scope."""
-    held = held & FACT_TAGS
-    if not held:
+    if not held & FACT_TAGS:
         return
     row = conn.execute("SELECT review, watch FROM companies_effective WHERE id=?",
                        (company_id,)).fetchone()
-    if tags.WATCH in held and row and not row["watch"]:
+    if tags.WATCH in held and not row["watch"]:
         set_watch(conn, company_id, True)
-    if tags.PENDING in held and row and row["review"] != "pending":
+    if tags.PENDING in held and row["review"] != "pending":
         set_pending(conn, company_id)

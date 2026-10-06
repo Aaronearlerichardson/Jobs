@@ -22,17 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src import config, tags  # noqa: E402
+from src import config  # noqa: E402
 from tools._harness import open_ro  # noqa: E402
 
 FIT_BAR = 0.40
 DIMENSIONS = ("source", "mission_tier", "ats")
 FAMILY = "substr(miss_reason, 1, instr(miss_reason || ':', ':') - 1)"
 OPEN = "COALESCE(j.status, 'open') != 'closed'"
-PENDING_LIKE = f"%,{tags.PENDING},%"
 ROSTER_COLS = ("COUNT(*) AS rows, SUM(ats IS NOT NULL) AS boards, "
                "SUM(COALESCE(local_job_count, 0) > 0) AS local, SUM(active = 1) AS active, "
-               "SUM((',' || COALESCE(tags, '') || ',') LIKE ?) AS pending")
+               "SUM(review = 'pending') AS pending")
 
 
 def query(conn: sqlite3.Connection, sql: str, args: tuple[Any, ...] = (),
@@ -77,10 +76,10 @@ def report(conn: sqlite3.Connection, since: str | None = None, fit: float = FIT_
     False
     """
     plans: list[dict[str, Any]] = []
-    roster: dict[str, Any] = {"total": query(conn, f"SELECT {ROSTER_COLS} FROM companies_effective", (PENDING_LIKE,))}
+    roster: dict[str, Any] = {"total": query(conn, f"SELECT {ROSTER_COLS} FROM companies_effective")}
     for dim in DIMENSIONS:
         roster[dim] = query(conn, f"SELECT COALESCE({dim}, '(none)') AS key, {ROSTER_COLS} "
-                                  f"FROM companies_effective GROUP BY key ORDER BY rows DESC, key", (PENDING_LIKE,))
+                                  f"FROM companies_effective GROUP BY key ORDER BY rows DESC, key")
     misses = {"family": query(conn, f"SELECT {FAMILY} AS family, COUNT(*) AS rows, SUM(ats IS NULL) AS boardless "
                                     "FROM companies_effective WHERE miss_reason IS NOT NULL GROUP BY family ORDER BY rows DESC"),
               "reason": query(conn, "SELECT miss_reason AS reason, COUNT(*) AS rows, SUM(ats IS NULL) AS boardless "

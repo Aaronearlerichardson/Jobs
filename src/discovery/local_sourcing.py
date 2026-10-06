@@ -400,29 +400,24 @@ async def mission_context(board: BoardCoords) -> str:
     board could have said more.
 
     Notes:
-        A name alone is a poor signal. "Studycast", scored on its name with
-        nothing else, came back `other` / 0.05 ("Study/education platform");
-        its Rippling board is core-sound-imaging, a medical-imaging vendor's
-        cloud PACS. Boards that list no postings at all are common: 73 of
-        the 237 boards on the sixteen families that had no sampler were empty
-        on 2026-09-18 (26 of 31 JazzHR boards).
+        A name alone is a poor signal (a medical-imaging vendor scored
+        `other` / 0.05 on its name), and boards that list no postings are
+        common.
     """
     titles = " | ".join(t for t in await _sample_titles(board) if t)
     return titles or coords.board_context(board)
 
 
 def _tracked_elsewhere(plan: BoardPlan, name: str | None) -> CompanyRow | None:
-    """The roster row `plan` (store.plan_board) updates when it is not
-    named `name`: the same board under another name, a duplicate. A
-    same-name match is the ordinary re-probe/update path, which the caller
-    may upsert; another board of a tracked employer is a sibling, not a
-    duplicate.
+    """The roster row `plan` (store.plan_board) updates when it is not named
+    `name`: the same board under another name, a duplicate. A same-name match
+    is the ordinary re-probe; another board of a tracked employer is a
+    sibling.
 
     Notes:
-        Same NAME, not same name_key: the upsert keys on the exact name, so
-        "Alpaca Health" on the board the roster spells "Alpacahealth"
-        passed here and landed as a second, pending row on one board
-        (2026-09-29).
+        Compares the exact NAME, not name_key, because the upsert keys on it:
+        "Alpaca Health" on the board spelled "Alpacahealth" once landed as a
+        second row.
     """
     row = plan.row
     return row if plan.action == "update" and row and row["name"] != name else None
@@ -478,26 +473,26 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
                            extra: CompanyIn | None = None
                            ) -> tuple[CompanyRow | CompanyIn, int, bool] | None:
     """Mission-score a resolved board and write it to the store (`db`, a
-    store.Writer) as a review candidate -- the one write path behind every
+    store.Writer) as a review candidate: the one write path behind every
     automated add surface.
 
     `hit` is a resolver result: {name, ats, slug, nc, count} plus an optional
-    careers_url, `slug` being the (tenant, pod, site) triple for Workday and
-    None for a custom board. Returns (row, active, pending) -- the row as
-    written, whether a reviewer's confirmation would activate it
-    (src.claude.is_active_mission), and whether it went to the review queue
-    -- or None when the board is already on the roster under ANOTHER name
+    careers_url (`slug` is the (tenant, pod, site) triple for Workday, None
+    for a custom board). Returns (row, active, pending): the row as written,
+    whether a reviewer's confirmation would activate it
+    (src.claude.is_active_mission), and whether it went to the review queue;
+    or None when the board is already on the roster under ANOTHER name
     (_tracked_elsewhere). The dedup runs before the mission call, so a
     duplicate costs no LLM request; a caller that scored concurrently
-    first (populate_companies) passes the result as `scored`.
+    (populate_companies) passes the result as `scored`.
 
-    A name whose roster row is active and has produced jobs
-    (_productive_row) keeps its board, `active` and mission verdict: the
-    same board only refreshes the counts. The rest follows store.plan_board:
-    a different board of an employer with a verdict is added beside it as a
-    sibling row (store.add_board), and a board of an employer whose own is
-    gone replaces it, each with the employer's verdict and no score; only a
-    board whose plan `needs_score` pays for one.
+    A name whose roster row is active and has produced jobs (_productive_row)
+    keeps its board, `active` and verdict; the same board only refreshes the
+    counts. The rest follows store.plan_board: a different board of an
+    employer with a verdict is added beside it as a sibling (store.add_board)
+    and a board of an employer whose own is gone replaces it, each with the
+    employer's verdict and no score; only a board whose plan `needs_score`
+    pays for one.
 
     >>> import asyncio
     >>> from src.store import Writer, connect, upsert_company
@@ -522,21 +517,15 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
     already confirmed the name (src.store.is_confirmed_company). `tags`
     defaults to the local scope tag when the board has local jobs; a caller
     with another reason to call the company local (ats_dork's HQ signal)
-    passes it explicitly. `extra` is further columns the caller owns and the
-    resolver has no opinion about (apply_to_store's [VERIFY] notes).
+    passes it. `extra` is further columns the caller owns (apply_to_store's
+    [VERIFY] notes).
 
     Notes:
-        This sequence was spelled out at four sites (populate_companies,
-        resolve_leads, paste_ingest.add_names, ats_dork.harvest_urls), each
-        with small drift: two checked duplicates only after paying for the
-        score, one never checked, two stamped last_probed and two left it to
-        the store (which stamps it on insert anyway). add_board is not a
-        fifth: a board the user registered by URL is written active
-        regardless of mission tier, and carries no total count. The two
-        copies in src/ops (ingest.add_manual_job, which writes straight to
-        the roster, and repair.reresolve_misses, which clears the old
-        board coordinates first) still differ in ways this helper does not
-        cover.
+        Replaced four drifted copies (populate_companies, resolve_leads,
+        paste_ingest.add_names, ats_dork.harvest_urls); add_board is not a
+        fifth (a URL-registered board is written active, with no total
+        count), and ingest.add_manual_job and repair.reresolve_misses still
+        differ.
     """
     settled, result, held = await db.run(_settled_board, hit, source, tags, extra)
     if settled:
@@ -548,9 +537,9 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
 
 def _hit_stamp(hit: BoardHit, source: str, tags: str | None,
                extra: CompanyIn | None) -> CompanyIn:
-    """The columns of every board written from a resolver `hit`: its counts,
-    the scope tag (`tags`, else local when it has local jobs), `source`, the
-    probe time, then `extra`."""
+    """The columns of every board written from a resolver `hit`: counts, scope
+    tag (`tags`, else local when it has local jobs), `source`, probe time,
+    then `extra`."""
     nc = hit.get("nc") or 0
     return cast(CompanyIn, {
         "local_job_count": nc, "total_job_count": hit.get("count"),
@@ -562,10 +551,9 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
                    tags: str | None, extra: CompanyIn | None
                    ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None,
                               tuple[str | None, float | None, str] | None]:
-    """(True, score_and_upsert's answer, None) when the roster already
-    settles `hit` without a score (a duplicate board, a productive row kept,
-    a sibling of a scored employer), else (False, None, the verdict the
-    plan inherits, if any: a replaced board's)."""
+    """(True, score_and_upsert's answer, None) when the roster settles `hit`
+    without a score (a duplicate board, a productive row kept, a sibling of a
+    scored employer), else (False, None, the verdict the plan inherits)."""
     from src.store import upsert_company
 
     name = hit["name"]
@@ -582,12 +570,8 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
                               "local_job_count": hit.get("nc") or 0,
                               "total_job_count": hit.get("count")})
         return True, (kept, kept["active"] or 0, False), None
-    # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
-    # name-keyed upsert re-pointed its Workday row (353 relevant jobs an
-    # hour earlier) at it; the next crawl read 27 jobs and counted every one
-    # as new. A board that works is never re-pointed: the other board of a
-    # scored employer joins it as a sibling, which inherits the mission
-    # verdict and so pays for no score.
+    # A working board is never re-pointed: another board of a scored employer
+    # joins it as a sibling, inheriting the verdict, so it pays for no score.
     if plan.action != "sibling" or plan.needs_score or primary is None:
         return False, None, plan.verdict
     row.update(_hit_stamp(hit, source, tags, extra))
@@ -595,7 +579,7 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
     sibling = cast(CompanyRow, store.get_company(conn, sid))
     print(f"    [sibling] {name}: {row['ats']} board added beside '{primary['name']}'")
     return True, (sibling, sibling["active"] or 0,
-                  company_tags.has(sibling["tags"], company_tags.PENDING)), None
+                  sibling["review"] == "pending"), None
 
 
 def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
@@ -881,25 +865,32 @@ async def add_board(name: str, url: str, capture: bool = False) -> dict[str, Any
 
 async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int:
     """Backfill company mission scores: every company with a board and no
-    mission_tier (or every ACTIVE one, with rescore_all) gets sampled titles
-    + one score_company_mission call. Heals stores populated by
-    --import-companies / older seed imports (no scoring) or by
-    keyless/failed scoring passes.
+    mission_tier (every ACTIVE one, with rescore_all) gets sampled titles and
+    one score_company_mission call. Heals stores imported without scoring or
+    left by keyless/failed scoring passes.
 
-    The unscored pass deliberately includes INACTIVE rows. A company whose
-    mission call failed can have been written active=0 by the add path that
-    created it, and that state is otherwise terminal: the sourcing passes all
-    skip boards already present in the store, so the row is never re-probed
-    and never re-scored. Reading only active rows made this healer blind to
-    exactly the rows it exists to heal. Scoring one of them to an active tier
-    reactivates it below. `rescore_all` stays active-only — it is a
-    re-judgement of the live roster, not a recovery pass, and widening it
-    would resurrect everything ever deactivated for being off-mission."""
+    The unscored pass includes INACTIVE rows: a row whose mission call failed
+    may have been written active=0, and the sourcing passes skip boards
+    already in the store, so nothing else would re-score it. Scoring one to an
+    active tier reactivates it. `rescore_all` stays active-only: it re-judges
+    the live roster, and widening it would resurrect off-mission rows.
+
+    The verdict is the EMPLOYER's, so an employer's boards are scored once,
+    through its largest board; only a board holding a verdict of its own
+    (set_board_mission) is scored on its own and keeps it."""
     from src.claude.api import ACTIVE_MISSION_TIERS, score_company_mission
 
     async with store.Writer() as db:
         cos = [c for c in await db.run(store.get_companies, active_only=rescore_all)
                if c.get("ats") and (rescore_all or not c.get("mission_tier"))]
+        own = {r[0] for r in await db.run(lambda conn: conn.execute(
+            "SELECT id FROM companies WHERE mission_tier IS NOT NULL "
+            "OR mission_score IS NOT NULL").fetchall())}
+        lead: dict[int | None, int] = {}
+        for c in sorted(cos, key=lambda c: (-(c.get("total_job_count") or 0), c["id"])):
+            if c["id"] not in own:
+                lead.setdefault(c["employer_id"], c["id"])
+        cos = [c for c in cos if c["id"] in own or lead[c["employer_id"]] == c["id"]]
         if not cos:
             print("  Nothing to score - every active company has a mission tier.")
             return 0
@@ -916,40 +907,31 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             if tier is None and score is None:
                 continue          # scoring unavailable - leave the row alone
             # Off-mission companies are deactivated so the crawl skips them,
-            # matching the new-company sourcing path (an `other` tier means
-            # "not health/bio/science" — no reason to keep crawling it).
-            # Watched companies are exempt: the watch tag is the user
-            # deliberately keeping an off-mission employer crawled (Covar).
-            update: CompanyIn = {"name": c["name"], "mission_tier": tier,
-                                 "mission_score": score, "mission_reason": reason}
+            # as in the new-company path; watched ones are exempt (the user
+            # keeps them crawled on purpose).
+            update: CompanyIn = {"name": c["name"]}
+            if c["id"] in own:
+                await db.run(store.set_board_mission, c["id"], tier, score, reason)
+            else:
+                update |= {"mission_tier": tier, "mission_score": score, "mission_reason": reason}
             revived = False
             if (tier is not None and tier not in ACTIVE_MISSION_TIERS
                     and not config.is_multi_division(c["name"])
-                    and not company_tags.has(c.get("tags"), company_tags.WATCH)):
+                    and not c["watch"]):
                 update["active"] = 0
-            # NOT src.claude.is_active_mission: this is the REACTIVATION
-            # half, and it deliberately does not revive on `tier is None`.
-            # A None tier with a non-None score means the model answered with
-            # a mission name outside the profile's taxonomy (score_company_
-            # mission nulls the tier but keeps the score), so the `return`
-            # above did not fire. The helper would call that "unavailable" and
-            # revive the row; here an unrecognised answer must leave an
-            # already-inactive company alone. See tests/test_invariants.py.
+            # NOT src.claude.is_active_mission: this is the REACTIVATION half
+            # and must not revive on `tier is None`. A None tier with a score
+            # is an answer outside the profile's taxonomy; the helper would
+            # call it "unavailable" and revive, but it must leave an inactive
+            # company alone. See tests/test_invariants.py.
             elif not c.get("active") and (tier in ACTIVE_MISSION_TIERS
                                           or config.is_multi_division(c["name"])):
-                # The recovery half: this row reached an on-mission tier but
-                # is sitting inactive, which for an unscored row means its
-                # original mission call failed rather than judged it. Revive
-                # it. Dead boards are excluded — prune_dead_boards turns those
-                # off because the endpoint 404s, and a good mission score says
-                # nothing about whether the board still resolves. Rows in the
-                # review queue are excluded too: they are inactive because a
-                # person has not confirmed them yet, not because a call
-                # failed, and reviving them here would skip the queue (the
-                # 2026-09-01 re-resolution pass queued 24 unscored rows that
-                # this healer would otherwise have activated wholesale).
+                # Recovery: an on-mission tier on an inactive, unscored row
+                # means its mission call failed. Dead boards stay off
+                # (prune_dead_boards: the endpoint 404s), and so do rows in
+                # the review queue (reviving them would skip it).
                 if (not str(c.get("notes") or "").startswith("deactivated: dead")
-                        and not company_tags.has(c.get("tags"), company_tags.PENDING)):
+                        and c["review"] != "pending"):
                     update["active"] = 1
                     revived = True
             await db.run(store.upsert_company, update)

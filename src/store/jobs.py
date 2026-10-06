@@ -4,12 +4,11 @@ Track membership (jobs.track holds a comma-separated SET, not one name),
 the upsert and dedup paths, the harvest triage columns src/crawl/triage.py
 writes, and the status/score/ranking reads the digest and the web UI make.
 
-Split out of store/__init__.py alongside companies.py. The two share
-nothing: this module never reads the companies table and the roster half
-never reads this one. `combined_score` and the track-set helpers are here
-because ranking and upsert are their only callers.
-
 Never imports store/__init__ at load time (that module imports this one).
+
+Notes:
+    `combined_score` and the track-set helpers are here because ranking and
+    upsert are their only callers.
 """
 
 from __future__ import annotations
@@ -522,9 +521,8 @@ def _norm_url(u: str | None) -> str:
 
 @sql_function("city_key", 1)
 def _city_key(location: str | None) -> str:
-    """The city a location names, as a comparison key: its first
-    comma/semicolon/slash-separated part, [a-z0-9] only; '' when it names no
-    city ("2 Locations", blank).
+    """A location's city as a comparison key: its first comma/semicolon/slash
+    part, [a-z0-9] only; '' when it names none ("2 Locations", blank).
 
     >>> _city_key("Durham, NC, United States"), _city_key("Durham, North Carolina")
     ('durham', 'durham')
@@ -867,13 +865,11 @@ SELECT {columns}, c.mission_tier, c.mission_score, c.tags AS company_tags,
        p.combined_score{extra}
 FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies_effective c ON j.company_id = c.id
 ORDER BY {final_order}"""
-# The collapse layer's partition is one "same opening at the same employer"
-# group: the board's employer (companies.employer_id, so two boards of one
-# employer fold the same posting into one row), else the name key (LinkedIn
-# captures, jsonld sweep hits and manual --add carry no company_id -- 4 of
-# 119,411 rows in the 2026-09-17 live store), else the row's own job_id,
-# which never repeats, so a nameless row never collides with every other
-# nameless row. Then the normalised title.
+# The collapse partition is one "same opening at the same employer": the
+# board's employer (so two boards of one employer fold one posting), else the
+# name key (LinkedIn captures, jsonld sweep hits and manual --add carry no
+# company_id), else the row's own job_id (never repeats, so nameless rows never
+# collide), then the normalised title.
 _COLLAPSE_SQL = """
 , ranked AS (
   SELECT *, ROW_NUMBER() OVER ordered AS _rn,
@@ -894,12 +890,11 @@ _COLLAPSE_SQL = """
 
 
 @sql_function("remote_admitted", 4)
-def _remote_admitted_cols(watch: int | None, company_name: str | None,
+def _remote_admitted_cols(company_tags: str | None, company_name: str | None,
                           mission_score: float | None, floor: float | None) -> bool:
-    """remote_admitted over a query's columns (the company's effective
-    `watch` flag), for ranked_jobs' geo clause."""
-    return remote_admitted({"company_tags": tags.WATCH if watch else None,
-                            "company_name": company_name, "mission_score": mission_score}, floor)
+    """remote_admitted over a query's columns, for ranked_jobs' geo clause."""
+    return remote_admitted({"company_tags": company_tags, "company_name": company_name,
+                            "mission_score": mission_score}, floor)
 
 
 def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int | None = None,
@@ -1004,7 +999,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
             geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
-                    "remote_admitted(c.watch, j.company_name, c.mission_score, ?))")
+                    "remote_admitted(c.tags, j.company_name, c.mission_score, ?))")
             args += [json.dumps(sorted(allow_geo_modes)), remote_mission_floor]
         conds.append(f"({geo})")
     if min_mission is not None:
@@ -1141,10 +1136,9 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
         `?hub=9&in_iframe=1`). The dry run without the requisition guard
         would have merged three Butterfly Network pairs.
     """
-    # The group is (company, posting key, requisition tail): the tail is the
-    # id after its last "_" (the whole id when it has none), taken by
-    # stripping the id's non-"_" characters off its right end. Members come
-    # back best-first (_SURVIVOR_ORDER), groups in first-row order.
+    # Group = (company, posting key, requisition tail): the tail is the id
+    # after its last "_" (the whole id when none). Members come back
+    # best-first (_SURVIVOR_ORDER), groups in first-row order.
     groups: dict[int, list[dict[str, Any]]] = {}
     for r in conn.execute(f"""
             WITH keyed AS (
@@ -1170,22 +1164,21 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
 
 
 def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
-    """Set `jobs.dup_of` on the rows that list, on another board of the
-    same employer, an opening another row already lists; clear it where it
-    no longer holds. Returns the rows whose flag changed. Nothing is deleted.
+    """Set `jobs.dup_of` on rows that list, on another board of the same
+    employer, an opening another row already lists; clear it where it no
+    longer holds. Returns the rows whose flag changed. Nothing is deleted.
 
-    A cross-board duplicate: same employer, same normalised title, same
-    city (`city_key`; a row with no city matches any, when each board has
-    the title once), both open, the rows paired one to one in id order so
-    a board's three real openings stay three. The survivor is the row of the
-    board with the best EFFECTIVE mission score (a scored board before an
-    unscored one), then the most jobs stored, then the lowest company id, so
-    a flagged row always has an open mirror at a board at least as on-mission;
-    the loser's flag names its id.
-    Dispositioned rows are never flagged. A pair of boards counts only when at
+    A cross-board duplicate: same employer, normalised title and city
+    (`city_key`; a row with no city matches any when each board has the title
+    once), both open, paired one to one in id order so a board's three real
+    openings stay three. The survivor is the row of the board with the best
+    EFFECTIVE mission score (scored before unscored), then the most jobs
+    stored, then the lowest company id, so a flagged row always has an open
+    mirror on a board at least as on-mission; the loser's flag names its id.
+    Dispositioned rows are never flagged. A board pair counts only when at
     least 3 of the loser board's openings, and a fifth of them, pair up. The
     flag is recomputed from the open rows, so a loser whose survivor closed
-    or vanished comes back.
+    comes back.
 
     >>> from .companies import add_board, upsert_company
     >>> conn = connect(":memory:")
@@ -1221,10 +1214,9 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
     >>> sorted(r["job_id"] for r in ranked_jobs(conn, collapse=False))
     ['A0', 'A1', 'A2', 'A3', 'B9']
     """
-    # A cross-board duplicate needs evidence the two boards are mirrors, not
-    # just a title and a city in common ("Registered Nurse", Durham): at
-    # least `paired` of the loser board's open postings must pair with the
-    # survivor board's, and at least `share` of its open postings.
+    # Mirror evidence, not just a shared "Registered Nurse" in Durham: at
+    # least `paired` of the loser board's open postings, and `share` of them,
+    # pair with the survivor's.
     flag = """
     WITH multi AS MATERIALIZED (
       SELECT employer_id FROM companies WHERE employer_id IS NOT NULL

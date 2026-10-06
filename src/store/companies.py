@@ -3,25 +3,21 @@ goes in it.
 
 Company rows, the miss log (names that resolved to no board), board
 identity and dedup, the roster CRUD every discovery path writes through,
-and crawl scheduling (dormancy). The review queue is next door in
-review.py; jobs are in jobs.py and this module never touches them.
-
-Split out of store/__init__.py, which had reached 1593 lines around
-section banners that were already drawing this line. The two halves turn
-out to be genuinely independent -- not one reference crosses between them
--- which is why `dedup_jobs` went to jobs.py rather than staying beside
-`dedup_companies`: it reads the jobs table and nothing else.
+and crawl scheduling (dormancy). The review queue is in review.py; jobs
+are in jobs.py and this module never touches them.
 
 A row is ONE BOARD. What an employer decides (mission verdict, review state,
-watch) lives on its `employers` row and a board may override it (migration
-0005, employers.py); readers ask the `companies_effective` view, whose columns
-are this table's with those facts resolved, and writers go through
-_write_company, which sends the facts to the employer. What stays the board's:
-coordinates, counts, dormancy, scope tags and `active`, its own crawl switch
-(so deactivating a dead board is board-only; the view also reads a pending
-board as inactive).
+watch) lives on its `employers` row, which a board may override
+(employers.py). Readers ask the `companies_effective` view; writers go
+through _write_company, which sends those facts to the employer. The board
+keeps its coordinates, counts, dormancy, scope tags and `active` (its own
+crawl switch; the view also reads a pending board as inactive).
 
 Never imports store/__init__ at load time (that module imports this one).
+
+Notes:
+    Split out of store/__init__.py; `dedup_jobs` lives in jobs.py because it
+    reads only the jobs table.
 """
 
 from __future__ import annotations
@@ -30,7 +26,7 @@ import json
 import re
 import sqlite3
 from collections import defaultdict
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal, NamedTuple, Unpack, cast
@@ -38,9 +34,10 @@ from typing import Annotated, Any, Literal, NamedTuple, Unpack, cast
 from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 
 from src import config, tags
+from src.runstate import per_run
 from src.match.names import name_key as _name_key
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
-from .employers import FACT_TAGS, apply_tag_facts, set_pending, set_watch, write_mission
+from .employers import FACT_TAGS, MISSION_COLS, apply_tag_facts, set_pending, set_watch, write_mission
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
 
@@ -65,26 +62,18 @@ def as_company(row: sqlite3.Row) -> CompanyRow:
 
 class BoardPlan(NamedTuple):
     """What add_board will do with a board. `action`: "new" (a company, and its
-    employer if `employer_id` is None), "update" (it is `row`'s board already),
-    "replace" (`row`'s own board is gone: point it here) or "sibling" (one more
-    board of `row`'s employer, `row` being the employer's primary)."""
+    employer if `employer_id` is None), "update" (already `row`'s board),
+    "replace" (`row`'s board is gone: point it here) or "sibling" (another
+    board of `row`'s employer; `row` is its primary)."""
     action: Literal["new", "update", "replace", "sibling"]
     row: CompanyRow | None = None
     employer_id: int | None = None
-
-    @property
-    def verdict(self) -> tuple[str | None, float | None, str] | None:
-        """The (tier, score, reason) a "replace" or "sibling" inherits from
-        `row`, or None when `row` has none."""
-        r = self.row
-        if self.action not in ("replace", "sibling") or r is None or r["mission_score"] is None:
-            return None
-        return r["mission_tier"], r["mission_score"], r["mission_reason"] or ""
+    #: The employer's (tier, score, reason) a "replace"/"sibling" inherits, or None.
+    verdict: tuple[str | None, float | None, str] | None = None
 
     @property
     def needs_score(self) -> bool:
-        """True when writing the board takes a mission score of its own: a
-        "new" or "update" one, or a "replace"/"sibling" with no `verdict`."""
+        """True when the board needs a mission score of its own (no inherited `verdict`)."""
         return self.verdict is None
 
 
@@ -166,7 +155,7 @@ def _write_company(conn: sqlite3.Connection, company: CompanyIn,
     # (e.g. a failed/keyless mission-scoring pass writing mission_score=None
     # over a previously scored company). Inserts still get NULL defaults.
     c = {k: v for k, v in c.items() if v is not None}
-    facts = {k: c.pop(k) for k in ("mission_tier", "mission_score", "mission_reason") if k in c}
+    facts = {k: c.pop(k) for k in MISSION_COLS if k in c}
     old = conn.execute("SELECT tags FROM companies WHERE name=?",
                        (c["name"],)).fetchone()
     held = tags.parse(c.get("tags")) | (tags.parse(old["tags"]) if old else set())
@@ -217,23 +206,21 @@ def _employer_id(conn: sqlite3.Connection, company: CompanyIn,
     if named and named.get("employer_id"):
         return named["employer_id"]
     key = _name_key(company["name"])
-    found = conn.execute("SELECT id FROM employers WHERE name_key(name)=? ORDER BY id LIMIT 1",
-                         (key,)).fetchone() if key else None
+    found = _company_index(conn)["employer_ids"].get(key) if key else None
     if found:
-        return cast(int, found[0])
+        return cast(int, found)
     host_row = company_by_host(conn, company.get("careers_url"))
     return host_row["employer_id"] if host_row else None
 
 
 def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
-    """Decide what add_board would do. Writes nothing.
+    """Decide what add_board would do; writes nothing.
 
     The same board (board_key) already on the roster is an "update" of that
-    row, whatever its name. Otherwise the employer is found (see
-    _employer_id); one of its rows whose board is gone is "replaced", and
-    when every board it has is live the new one is a "sibling". No known
-    employer: "new". The one decision every intake path reads (`needs_score`
-    says whether it also takes a mission call).
+    row, whatever its name. Otherwise find the employer (_employer_id): one of
+    its rows whose board is gone is "replaced", else the board is a "sibling";
+    no known employer is "new". `needs_score` says whether it also takes a
+    mission call.
 
     >>> conn = connect(":memory:")
     >>> _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"})
@@ -269,26 +256,29 @@ def plan_board(conn: sqlite3.Connection, company: CompanyIn) -> BoardPlan:
     if not rows:
         return BoardPlan("new", None, emp)
     rows.sort(key=lambda r: r["name"] != company["name"])
+    held = conn.execute("SELECT mission_tier, mission_score, mission_reason FROM employers "
+                        "WHERE id=?", (emp,)).fetchone()
+    verdict = (held["mission_tier"], held["mission_score"], held["mission_reason"] or "") \
+        if held and held["mission_score"] is not None else None
     gone = next((r for r in rows if _board_gone(r)), None)
     if gone:
-        return BoardPlan("replace", gone, emp)
+        return BoardPlan("replace", gone, emp, verdict)
     primary = min(rows, key=lambda r: (r["mission_tier"] is None, r["id"]))
-    return BoardPlan("sibling", primary, emp)
+    return BoardPlan("sibling", primary, emp, verdict)
 
 
 def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None, str]:
-    """Write a board the roster may already hold, never losing one that works.
-    Returns (company id, the BoardPlan action taken); see plan_board.
+    """Write a board the roster may already hold, never losing a working one.
+    Returns (company id, the BoardPlan action); see plan_board.
 
-    A sibling is a new row named "<employer> (<ats>)" under the same
-    employer. It INHERITS the employer's mission verdict, review state and
-    watch flag (nothing is copied, so it costs no mission call, and a verdict
-    in `company` is dropped when the employer already has one:
-    set_board_mission scores a board on its own); its scope tags are its own.
-    Its `active` is `company`'s, else follows the employer's live boards
-    (the mission rule's answer when it has none).
+    A sibling is a new row "<employer> (<ats>)" under the same employer. It
+    INHERITS the employer's mission verdict, review state and watch (nothing
+    is copied, so no mission call, and a verdict in `company` is dropped when
+    the employer has one; set_board_mission scores a board on its own). Its
+    scope tags are its own; its `active` is `company`'s, else follows the
+    employer's live boards (the mission rule's answer when it has none).
     The caller has validated the board live. A "replace" clears the old
-    coordinates first, so none of them survives beside the new ones.
+    coordinates first.
 
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme",
@@ -329,7 +319,7 @@ def _write_sibling(conn: sqlite3.Connection, company: CompanyIn, employer_id: in
         name = f"{base} ({label} {n})"
     row: dict[str, Any] = {k: v for k, v in company.items() if v is not None}
     if has_verdict:
-        for k in ("mission_tier", "mission_score", "mission_reason"):
+        for k in MISSION_COLS:
             row.pop(k, None)
     row["name"] = name
     live = conn.execute("SELECT MAX(active) FROM companies WHERE employer_id=? "
@@ -551,14 +541,13 @@ def _board_prefix(path: str) -> str:
 
 def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | None:
     """The roster company whose careers_url (or URL-shaped slug) claims the
-    host of `url`, or None. The manual capture path asks this so a page the
-    person saved from an employer's own careers site lands under that
-    employer's EXISTING row -- id, name, mission score and all -- instead of
-    minting a new company from whatever name the page text yields.
+    host of `url`, or None. The capture path asks this so a page saved from an
+    employer's own careers site lands under that employer's EXISTING row
+    instead of minting a new company.
 
-    An exact host match wins, and a sibling host on the same company-owned
-    domain is accepted too (careers sites live on jobs./careers. subdomains
-    while the roster usually holds the www. site):
+    An exact host match wins; a sibling host on the same company-owned domain
+    is accepted too (careers sites live on jobs./careers. subdomains, the
+    roster usually holds www.):
 
     >>> conn = connect(":memory:")
     >>> _ = record_miss(conn, "Acme Health", "no-board-found",
@@ -588,21 +577,19 @@ def company_by_host(conn: sqlite3.Connection, url: str | None) -> CompanyRow | N
     host, path = _split_url(url)
     if not host:
         return None
-    # Multi-tenant hosts (config.SHARED_HOSTS). A page there says which
-    # BOARD it is, not which company owns it, so a domain-level match
-    # against a roster row's careers_url is trusted only on company-owned
-    # hosts; on these the board's own path must match.
+    # config.SHARED_HOSTS are multi-tenant: a domain match proves nothing
+    # there, so the board's own path must match.
     shared = bool(config.hosts_re(config.SHARED_HOSTS).search(host))
     idx = _company_index(conn)
     for c, cpath in idx["by_host"].get(host, ()):
         prefix = _board_prefix(cpath) if shared else ""
         if not prefix or path.lower().startswith(prefix.lower()):
-            return cast(CompanyRow, c)
+            return cast(CompanyRow, dict(c))
     if shared:
         return None
     for c, chost in idx["by_domain"].get(_domain(host), ()):
         if chost != host:
-            return cast(CompanyRow, c)
+            return cast(CompanyRow, dict(c))
     return None
 
 
@@ -658,12 +645,18 @@ def _domain(host: str) -> str:
     return ".".join(host.split(".")[-2:])
 
 
+#: This run's company index per connection: conn -> (store stamp, index).
+_INDEXES: Callable[[], dict[sqlite3.Connection, tuple[tuple[int, int], dict[str, Any]]]] = (
+    per_run(dict))
+
+
 def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
-    """One scan of the companies table, shaped for the identity lookups
-    (company_by_host, company_by_board, dedup_companies) so none of them
-    re-walks and re-parses the roster on its own. Built per call, never
-    cached: every caller may have just written the row it is about to look
-    for.
+    """The roster scanned once for the identity lookups (company_by_host,
+    _employer_id, dedup_companies), held per connection for the run. A write
+    through this connection (`total_changes`) or another (`PRAGMA
+    data_version`) invalidates it, and with uncommitted writes it is rebuilt
+    each call, so a caller always sees its own writes. Outside a run nothing
+    holds it. Callers must not mutate what it returns.
 
     Returns a dict:
 
@@ -672,6 +665,7 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     * ``by_host``    careers host -> [(row, path)], id order, a row's
                      careers_url candidate before its URL-shaped slug
     * ``by_domain``  _domain(host) -> [(row, host)], same order
+    * ``employer_ids``  name_key -> the lowest employer id with that key
 
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "A", "ats": "lever", "slug": "a",
@@ -686,8 +680,25 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
     [('A', '/jobs/')]
     >>> [(r["name"], h) for r, h in idx["by_domain"]["a.org"]]
     [('A', 'a.org')]
+    >>> idx["employer_ids"]
+    {'a': 1, 'b': 2}
     """
+    stamp = (conn.total_changes, conn.execute("PRAGMA data_version").fetchone()[0])
+    try:
+        memo = _INDEXES()
+    except RuntimeError:                  # no run (a doctest, a script): nothing holds it
+        memo = {}
+    held = memo.get(conn)
+    if held and held[0] == stamp:
+        return held[1]
+    idx = _build_company_index(conn)
+    if not conn.in_transaction:
+        memo[conn] = (stamp, idx)
+    return idx
 
+
+def _build_company_index(conn: sqlite3.Connection) -> dict[str, Any]:
+    """One scan of the roster for _company_index."""
     rows = [as_company(r) for r in
             conn.execute("SELECT * FROM companies_effective ORDER BY id").fetchall()]
     by_board: defaultdict[tuple[Any, ...], list[CompanyRow]] = defaultdict(list)
@@ -707,8 +718,11 @@ def _company_index(conn: sqlite3.Connection) -> dict[str, Any]:
                 continue
             by_host[chost].append((c, cpath))
             by_domain[_domain(chost)].append((c, chost))
-    return {"rows": rows, "by_board": by_board,
-            "by_host": by_host, "by_domain": by_domain}
+    employer_ids: dict[str, int] = {}
+    for e in conn.execute("SELECT id, name FROM employers ORDER BY id"):
+        employer_ids.setdefault(_name_key(e["name"]), e["id"])
+    return {"rows": rows, "by_board": by_board, "by_host": by_host,
+            "by_domain": by_domain, "employer_ids": employer_ids}
 
 
 def company_by_board(conn: sqlite3.Connection, row: BoardCoords) -> CompanyRow | None:
@@ -738,10 +752,9 @@ def company_by_board(conn: sqlite3.Connection, row: BoardCoords) -> CompanyRow |
 
 def dedup_companies(conn: sqlite3.Connection) -> int:
     """Merge company rows that point at the SAME board (same ats+slug, or the
-    same Workday triple) but were created under different name spellings
-    ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
-    those, so the crawl fetches one board several times. Jobs are re-pointed to
-    the kept row and tags merge, so the merge is lossless. Returns rows merged.
+    same Workday triple) under different name spellings ("IQVIA" vs "Quintiles
+    IMS (IQVIA)"), which the name-keyed upsert can't catch. Jobs are
+    re-pointed to the kept row and tags merge. Returns rows merged.
 
     Rows that are different boards of one employer (add_board's siblings)
     are never merged, and a merged row's employer takes over its losers':
@@ -757,10 +770,8 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
     ...                             "JOIN employers e ON e.id = c.employer_id")]
     [('Acme', 'Acme'), ('Acme (ashby)', 'Acme')]
     """
-    # The board key is config-driven Python (board_key); which row of a
-    # shared board survives, and whether any of them was active, is SQL:
-    # survivor first = a scored row, then active, then most-referenced, then
-    # the shortest (most canonical) name, then the oldest row.
+    # board_key is Python; the survivor is SQL: a scored row, then active,
+    # then most-referenced, then the shortest name, then the oldest.
     shared = [[c["id"], json.dumps(key)]
               for key, rows in _company_index(conn)["by_board"].items() if len(rows) > 1
               for c in rows]
@@ -786,17 +797,12 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
 
     def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
         merged = {t for m in [keep, *losers] for t in tags.parse(m.get("tags"))}
-        # Re-point the losers' jobs AND rename them: jobs.company_name
-        # is the denormalized display/grouping key (ranked_jobs groups
-        # and the digest prints by it), so a merge that only moved
-        # company_id left "Red Hat" and "Red Hat (IBM subsidiary, RTP
-        # HQ)" as two companies in every ranking after the 2026-09-01
-        # dedup, though both pointed at company 85.
+        # Rename as well as re-point: jobs.company_name is the grouping key
+        # (ranked_jobs, the digest).
         lost = json.dumps([l["id"] for l in losers])
         conn.execute("UPDATE jobs SET company_id=?, company_name=? WHERE company_id IN "
                      "(SELECT value FROM json_each(?))", (keep["id"], keep["name"], lost))
-        # One board is one employer's: the losers' employers (and any other
-        # boards they own) join the survivor's.
+        # The losers' employers (and their other boards) join the survivor's.
         conn.execute("UPDATE companies SET employer_id=(SELECT employer_id FROM companies "
                      "WHERE id=?) WHERE employer_id IN (SELECT employer_id FROM companies "
                      "WHERE id IN (SELECT value FROM json_each(?)))", (keep["id"], lost))
@@ -931,8 +937,7 @@ def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
         (held.add if add else held.discard)(tag)
         conn.execute("UPDATE companies SET tags=? WHERE id=?", (tags.join(held), row["id"]))
         _commit(conn)
-    now = get_company(conn, row["id"])
-    return (now["tags"] if now else None) or ""
+    return cast(CompanyRow, get_company(conn, row["id"]))["tags"] or ""
 
 
 # NEAR-MISS, DELIBERATE: different queries (row-by-id vs column-by-name);
@@ -1048,7 +1053,7 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
     Watched companies, and rows the user switched 'off', are left alone.
     """
     row = conn.execute(
-        "SELECT id, tags, crawl_state, empty_streak, last_crawled_at "
+        "SELECT id, watch, crawl_state, empty_streak, last_crawled_at "
         "FROM companies_effective WHERE id = ?", (company_id,)).fetchone()
     if not row:
         return None
@@ -1077,8 +1082,7 @@ def record_crawl_outcome(conn: sqlite3.Connection, company_id: int, n_jobs: int,
             streak += 1
             sets["empty_streak"] = streak
 
-    watched = "watch" in {t for t in (row["tags"] or "").split(",") if t}
-    if state != "off" and not watched:
+    if state != "off" and not row["watch"]:
         if streak >= dormant_after or _offmission_volume(conn, company_id):
             state = "dormant"
             sets["next_crawl_at"] = (now + timedelta(days=dormant_days)

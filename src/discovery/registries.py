@@ -174,9 +174,8 @@ READERS: dict[str, Callable[[str], Awaitable[list[NamedSource]]]] = {
 
 
 def ranked(sources: Iterable[NamedSource], vocab: dict[str, float]) -> list[NamedSource]:
-    """`sources`, the best mission fit first: the `word_score` of the blurb's
-    words. A source with no blurb (or no `vocab`) scores zero, and ties go
-    in name order.
+    """`sources`, best mission fit first: the `word_score` of the blurb's
+    words. No blurb (or no `vocab`) scores zero; ties go in name order.
 
     >>> a, b, c = (NamedSource(n, None, None, "r", t) for n, t in
     ...            [("A", "store"), ("B", None), ("C", "clinical")])
@@ -205,11 +204,9 @@ async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str,
     the misses. Returns the counts.
 
     Notes:
-        A processed name is on the roster (a board or a miss) and so is
-        dropped on the next run, except one whose board the roster already
-        holds under another name: no row is written for it. The processed
-        keys are kept in `.cache/registries_done.json` so the best-ranked
-        names are not resolved again.
+        Processed keys are kept in `.cache/registries_done.json` because a
+        name whose board the roster holds under another name writes no row,
+        and would otherwise be re-resolved every run.
     """
     state = state_code(config.LOCALITY_STATE_SUFFIX)
     readers = [r for r in config.DISCOVERY_REGISTRIES if r in READERS]

@@ -431,14 +431,13 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                 continue
             tier, score, reason = await score_company_mission(
                 name, await mission_context(hit))
-            await db.run(_retarget, name, {
+            await db.run(_retarget, name, store.mark_pending({
                 **board,
                 "local_job_count": hit["nc"], "total_job_count": hit["count"],
                 "mission_tier": tier, "mission_score": score,
                 "mission_reason": reason,
-                "tags": tags.PENDING, "active": 0,
                 "last_probed": datetime.now().isoformat(),
-            })
+            }))
             written.append(board)
             ss = f"{score:.2f}" if isinstance(score, float) else "n/a"
             print(f"    [pending] {name[:30]:30} {hit['ats']:12} "

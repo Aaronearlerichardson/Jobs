@@ -1662,3 +1662,60 @@ class TestConcurrentWriters:
         conn = store.connect(db)
         assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 8 * 60
         conn.close()
+
+
+class TestPlanBoardVerdict:
+    """A plan's verdict is the EMPLOYER's: the write lands there, so a
+    board's own override must never be promoted to the whole employer."""
+
+    def test_a_replaced_board_with_an_override_inherits_the_employers_verdict(self, db):
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
+        store.set_mission(db, a, "core", 0.9, "the lab")
+        b, _ = store.add_board(db, {"name": "Acme", "ats": "workday", "wd_tenant": "acme",
+                                    "wd_pod": 5, "wd_site": "ext"})
+        store.set_board_mission(db, b, "other", 0.1, "the hospital division")
+        db.execute("UPDATE companies SET miss_reason='board-dead' WHERE id=?", (b,))
+        plan = store.plan_board(db, {"name": "Acme", "ats": "ashby", "slug": "z"})
+        assert (plan.action, plan.row["id"]) == ("replace", b)
+        assert plan.verdict == ("core", 0.9, "the lab")
+        assert not plan.needs_score
+
+    def test_an_employer_with_no_verdict_needs_a_score_whatever_a_board_holds(self, db):
+        a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
+        store.set_board_mission(db, a, "other", 0.1)
+        plan = store.plan_board(db, {"name": "Acme", "ats": "ashby", "slug": "z"})
+        assert plan.action == "sibling" and plan.verdict is None and plan.needs_score
+
+
+class TestCompanyIndexMemo:
+    """_company_index is held per connection for the run, and a write through
+    this connection or another one drops it."""
+
+    def test_a_write_through_this_or_another_connection_invalidates_it(self, tmp_path):
+        one, other = store.connect(tmp_path / "s.db"), store.connect(tmp_path / "s.db")
+        index = store.companies._company_index
+        store.upsert_company(one, {"name": "A", "careers_url": "https://jobs.a.org/"})
+        held = index(one)
+        assert index(one) is held
+        store.upsert_company(one, {"name": "B", "careers_url": "https://jobs.b.org/"})
+        assert store.company_by_host(one, "https://jobs.b.org/")["name"] == "B"
+        store.upsert_company(other, {"name": "C", "careers_url": "https://jobs.c.org/"})
+        assert store.company_by_host(one, "https://jobs.c.org/")["name"] == "C"
+        assert index(one) is not held
+        one.close()
+        other.close()
+
+    def test_uncommitted_writes_are_never_held(self, db):
+        with pytest.raises(RuntimeError):
+            with store.batch(db):
+                store.upsert_company(db, {"name": "D", "careers_url": "https://jobs.d.org/"})
+                assert store.company_by_host(db, "https://jobs.d.org/")["name"] == "D"
+                raise RuntimeError
+        assert store.company_by_host(db, "https://jobs.d.org/") is None
+
+    def test_the_employer_of_equal_name_keys_is_the_lowest_id(self, db):
+        store.upsert_company(db, {"name": "A.C.M.E"})
+        store.upsert_company(db, {"name": "ACME"})
+        first = db.execute("SELECT employer_id FROM companies WHERE name='A.C.M.E'").fetchone()[0]
+        plan = store.plan_board(db, {"name": "acme!", "ats": "ashby", "slug": "acme"})
+        assert plan.employer_id == first

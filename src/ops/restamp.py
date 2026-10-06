@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
@@ -85,10 +85,10 @@ def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None =
     True
 
     Notes:
-        `active` is left alone: it comes from the tier at sourcing time and
-        is a human-editable switch, so a re-tier never parks or wakes a
-        board. Verdicts are the employers' (and any board's own override). New scores are reconciled when written
-        (api.score_company_mission); this brings the stored ones in line.
+        `active` is left alone (a human-editable switch set at sourcing), so
+        a re-tier never parks or wakes a board. Verdicts are the employers'
+        and any board's own override. New scores are reconciled when written
+        (api.score_company_mission); this brings stored ones in line.
     """
     with track_store(t, conn) as conn:
         def fresh(table: str) -> Iterable[tuple[Any, Any, Any, sqlite3.Row]]:
@@ -97,16 +97,17 @@ def restamp_tiers(commit: bool = False, undo: str = "", t: RuntimeTrack | None =
                     "WHERE mission_score IS NOT NULL"):
                 yield (r["id"], r["mission_tier"],
                        config.tier_for_score(r["mission_score"], r["mission_tier"]), r)
-        describe = lambda r: f"{r['name']} | score {r['mission_score']:.2f}"  # noqa: E731
+        def describe(r: sqlite3.Row) -> str:
+            return f"{r['name']} | score {r['mission_score']:.2f}"
         # The verdicts live on employers; a board's own (override) is the rare second pass.
-        counts = _restamp(conn, commit, undo, ("employers", "id", "mission_tier"),
-                          fresh("employers"), describe)
-        if not undo and conn.execute(
-                "SELECT 1 FROM companies WHERE mission_score IS NOT NULL LIMIT 1").fetchone():
-            for kind, n in _restamp(conn, commit, undo, ("companies", "id", "mission_tier"),
-                                    fresh("companies"), describe).items():
-                counts[kind] = counts.get(kind, 0) + n
-        return counts
+        counts: Counter[str] = Counter()
+        for table in ("employers", "companies"):
+            if table == "companies" and (undo or not conn.execute(
+                    "SELECT 1 FROM companies WHERE mission_score IS NOT NULL LIMIT 1").fetchone()):
+                break
+            counts.update(_restamp(conn, commit, undo, (table, "id", "mission_tier"),
+                                   fresh(table), describe))
+        return dict(counts)
 
 
 def _employer_clusters(pairs: Iterable[tuple[int, int, int]], size: dict[int, int],
@@ -141,9 +142,8 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
     undo as restamp_geo.
 
     Two companies are one employer when at least `min_shared` of their open
-    postings share a title and city, and those are at least `min_share`
-    of the smaller board's open postings. The employer is the cluster's
-    largest board's.
+    postings share a title and city, and those are at least `min_share` of
+    the smaller board's. The employer is the cluster's largest board's.
 
     >>> conn = store.connect(":memory:")
     >>> for name in ("Acme", "Acme Labs"):
@@ -160,11 +160,9 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
     {'2 -> 1': 1}
 
     Notes:
-        On 2026-10-05 this found exactly three pairs: ThermoFisher and PPD
-        (892 shared postings), Novartis and Novartis Gene Therapies (436),
-        Pfm and Precision Medicine Group (128). store.dedup_companies cannot
-        take this over: it merges rows of one board key, and these are
-        different boards (a Phenom careers site and a Workday tenant).
+        store.dedup_companies cannot do this: it merges rows of one board key,
+        and these are different boards (say a Phenom site and a Workday
+        tenant).
     """
     with track_store(t, conn) as conn:
         pairs = conn.execute("""

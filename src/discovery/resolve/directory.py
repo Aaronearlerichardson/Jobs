@@ -29,10 +29,10 @@ class Detected(NamedTuple):
 
 def board_of(url: str | None, label: str = "", slug: str = "") -> Detected | None:
     """The board a posting or board URL names (`signatures.detect`), never
-    the dataset's own platform `label`. Failing that, a `label` that is a
-    fetchable platform names its board anyway: by `slug`, else the URL's
-    host, where the platform's handle is one slug; by the URL's origin where
-    it is the careers URL. The live read after it rejects a wrong guess.
+    the dataset's `label`. Failing that, a `label` that is a fetchable
+    platform names the board: by `slug`, else the URL's host, where the
+    handle is one slug; by the URL's origin, where it is the careers URL.
+    The live read afterwards rejects a wrong guess.
 
     >>> board_of("https://boards.greenhouse.io/acmebio/jobs/1")
     Detected(kind='fetchable', ats='greenhouse', handle='acmebio', careers_url=None)
@@ -140,9 +140,8 @@ async def find_boards(name: str) -> list[tuple[str, Any, str]]:
     thread, while concurrent callers wait.
 
     Notes:
-        Fifty names resolved at once each built it (2026-10-06): the first
-        call blocked the loop, then every call raced to index 80K rows, and
-        the watchdog abandoned the whole pass.
+        Without the lock, concurrent names each built the 80K-row index,
+        blocking the loop until the watchdog abandoned the pass.
     """
     async with _building():
         await asyncio.to_thread(index)

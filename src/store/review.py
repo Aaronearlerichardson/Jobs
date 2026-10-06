@@ -13,7 +13,6 @@ package may import them in any order. Doctests import what they use.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from datetime import datetime
@@ -21,6 +20,7 @@ from datetime import datetime
 from src import config
 from src import tags
 from src.rows import CompanyIn, CompanyRow
+from .employers import clear_pending
 from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
 
 
@@ -200,11 +200,7 @@ def confirm_company(conn: sqlite3.Connection, cid: int,
         return None
     held = conn.execute("SELECT review FROM employers WHERE id=?", (row["employer_id"],)).fetchone()
     whole = bool(held and held[0] == "pending")
-    if whole:
-        conn.execute("UPDATE employers SET review=NULL WHERE id=?", (row["employer_id"],))
-        conn.execute("UPDATE companies SET review=NULL WHERE employer_id=?", (row["employer_id"],))
-    else:
-        conn.execute("UPDATE companies SET review=NULL WHERE id=?", (cid,))
+    clear_pending(conn, cid, row["employer_id"], whole=whole)
     boards = conn.execute(
         "SELECT id, name, mission_tier, miss_reason FROM companies_effective "
         "WHERE id=? OR (? AND employer_id=?)", (cid, whole, row["employer_id"])).fetchall()
@@ -278,10 +274,9 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
         names = [r["name"] for r in gone] + [row["employer"]]
     else:
         gone, names = [{"id": cid}], [name]
-    conn.execute("DELETE FROM jobs WHERE company_id IN (SELECT value FROM json_each(?))",
-                 (json.dumps([r["id"] for r in gone]),))
-    conn.execute("DELETE FROM companies WHERE id IN (SELECT value FROM json_each(?))",
-                 (json.dumps([r["id"] for r in gone]),))
+    ids = [(r["id"],) for r in gone]
+    conn.executemany("DELETE FROM jobs WHERE company_id=?", ids)
+    conn.executemany("DELETE FROM companies WHERE id=?", ids)
     _commit(conn)
     for n in names:
         block_name(conn, n, reason)
