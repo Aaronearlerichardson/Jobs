@@ -421,6 +421,7 @@ BOARDS: dict[str, dict[str, Any]] = {
         # are pulled scoped to the locality.
         "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
                    "parts": ["tenant", "pod", "site"],
+                   "fold": True,
                    "try": {"cxs_tenant": ["{tenant}", "{tenant|underscore}"]},
                    "accept": {"status": [200], "total": True},
                    "why": "a hyphenated tenant's CXS path takes the underscore form; "

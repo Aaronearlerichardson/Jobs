@@ -886,11 +886,14 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
         own = {r[0] for r in await db.run(lambda conn: conn.execute(
             "SELECT id FROM companies WHERE mission_tier IS NOT NULL "
             "OR mission_score IS NOT NULL").fetchall())}
-        lead: dict[int | None, int] = {}
+        def employer(c: CompanyRow) -> int | str:
+            return c["employer_id"] if c.get("employer_id") is not None else f"row{c['id']}"
+
+        lead: dict[int | str, int] = {}
         for c in sorted(cos, key=lambda c: (-(c.get("total_job_count") or 0), c["id"])):
             if c["id"] not in own:
-                lead.setdefault(c["employer_id"], c["id"])
-        cos = [c for c in cos if c["id"] in own or lead[c["employer_id"]] == c["id"]]
+                lead.setdefault(employer(c), c["id"])
+        cos = [c for c in cos if c["id"] in own or lead[employer(c)] == c["id"]]
         if not cos:
             print("  Nothing to score - every active company has a mission tier.")
             return 0

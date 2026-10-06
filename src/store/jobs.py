@@ -1249,6 +1249,7 @@ def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
       SELECT lo.id, w.id AS survivor, lo.cid FROM tk lo
       JOIN tk w ON w.emp = lo.emp AND w.t = lo.t AND w.trank = 1 AND (lo.l = '' OR w.l = '')
       WHERE lo.trank > 1 AND lo.free AND w.id NOT IN (SELECT id FROM exact)
+        AND lo.id NOT IN (SELECT survivor FROM exact)
     ), pair AS (
       SELECT id, MIN(survivor) AS survivor, cid FROM (
         SELECT * FROM exact UNION ALL SELECT * FROM loose) GROUP BY id

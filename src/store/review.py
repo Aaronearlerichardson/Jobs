@@ -248,6 +248,7 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
     A pending employer goes whole; a pending board of a vetted employer goes alone:
 
     >>> from src.store import add_board, confirm_company
+    >>> from src.store.employers import set_pending
     >>> a, _ = add_board(conn, mark_pending({"name": "Duo", "ats": "lever", "slug": "d"}))
     >>> _ = add_board(conn, {"name": "Duo", "ats": "ashby", "slug": "d2"})
     >>> reject_company(conn, a)
@@ -259,6 +260,16 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
     >>> _ = reject_company(conn, b)
     >>> [c["name"] for c in get_companies(conn, active_only=False)]
     ['Tri']
+
+    A board confirmed on its own outlives its pending employer's rejection:
+
+    >>> a, _ = add_board(conn, mark_pending({"name": "Quad", "ats": "lever", "slug": "q"}))
+    >>> b, _ = add_board(conn, {"name": "Quad", "ats": "ashby", "slug": "q2"})
+    >>> set_pending(conn, b, False, board=True)
+    >>> _ = reject_company(conn, a)
+    >>> [c["slug"] for c in get_companies(conn, active_only=False)
+    ...  if c["slug"] in ("q", "q2")]
+    ['q2']
     """
     row = conn.execute(
         "SELECT c.name, c.employer_id, e.name AS employer, e.review FROM companies c "
@@ -267,8 +278,9 @@ def reject_company(conn: sqlite3.Connection, cid: int, reason: str | None = None
         return None
     name: str = row["name"]
     if row["review"] == "pending":
-        gone = conn.execute("SELECT id, name FROM companies WHERE employer_id=?",
-                            (row["employer_id"],)).fetchall()
+        gone = conn.execute("SELECT id, name FROM companies WHERE employer_id=? "
+                            "AND (review IS NULL OR review != 'confirmed' OR id=?)",
+                            (row["employer_id"], cid)).fetchall()
         names = [r["name"] for r in gone] + [row["employer"]]
     else:
         gone, names = [{"id": cid}], [name]

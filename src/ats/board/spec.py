@@ -364,6 +364,8 @@ class Handle(_Workaround):
     parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
                                                    "columns")
     sep: Str = Field("|", description="Joins the columns into one handle string")
+    fold: Bool = Field(False, description="The host answers a handle's case alike, so boards "
+                                          "differing only in case are one board")
     try_: dict[Str, tuple[Template, ...]] = Field(
         {}, alias="try", max_length=1,
         description="One part's templates, tried until an answer `accept` allows; "

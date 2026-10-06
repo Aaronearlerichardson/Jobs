@@ -648,12 +648,20 @@ def board_key(r: BoardCoords) -> tuple[Any, ...] | None:
     >>> a = {"ats": "workday", "wd_tenant": "aah", "wd_pod": 5, "wd_site": "External"}
     >>> board_key(a) == board_key({**a, "wd_tenant": "AAH", "wd_site": "external"})
     True
+
+    Only a host that answers case alike (handle `fold`) is folded; another's
+    slugs are case-sensitive:
+
+    >>> board_key({"ats": "lever", "slug": "Acme"}) == board_key({"ats": "lever", "slug": "acme"})
+    False
     """
     ats = r.get("ats")
     if not ats:
         return None
     cols = _board_columns(ats)
-    vals = [v.rstrip("/").lower() if isinstance(v := r.get(c), str) else v for c in cols]
+    fold = bool(((config.BOARDS.get(ats) or {}).get("handle") or {}).get("fold"))
+    vals = [(v.rstrip("/").lower() if fold or c == "careers_url" else v.rstrip("/"))
+            if isinstance(v := r.get(c), str) else v for c in cols]
     return (ats, *vals) if vals[0] else None
 
 
