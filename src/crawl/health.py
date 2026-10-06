@@ -55,21 +55,31 @@ class Tally:
             c["errors" if failed else "empty"] += 1
         elif failed or snap.get("capped"):
             c["partial"] += 1
+        weight = snap.get("fill_rows", n)
+        c["filled"] += weight
         for k, v in fill.items():
-            self._fill[ats][k] += v * n
+            self._fill[ats][k] += v * weight
 
     def note_jobs(self, ats: str, jobs: list[FetchedJob] | None, err: object,
                   snap: Mapping[str, Any] | None) -> None:
-        """`note` for a board whose rows are in hand."""
-        jobs = jobs or []
-        self.note(ats, len(jobs), fill_rates(jobs) if jobs else {}, err=err, snap=snap or {})
+        """`note` for a board whose rows are in hand; the fill is the
+        snapshot's (raw listing rows), else the kept `jobs`'.
+
+        >>> t = Tally()
+        >>> t.note_jobs("x", [], None, {"fill": {"title": 0.5}, "fill_rows": 4})
+        >>> t.rows("p")[0]["fill"]
+        '{"title": 0.5}'
+        """
+        jobs, snap = jobs or [], snap or {}
+        fill = snap.get("fill") or (fill_rates(jobs) if jobs else {})
+        self.note(ats, len(jobs), fill, err=err, snap=snap)
 
     def rows(self, pass_at: str) -> list[dict[str, Any]]:
         """The `platform_health` rows of the pass, `fill` as JSON."""
         return [{"pass_at": pass_at, "ats": ats, "boards": c["boards"], "errors": c["errors"],
                  "partial": c["partial"], "empty": c["empty"], "jobs": c["jobs"],
-                 "fill": json.dumps({k: round(v / c["jobs"], 3)
-                                     for k, v in self._fill[ats].items()} if c["jobs"] else {})}
+                 "fill": json.dumps({k: round(v / c["filled"], 3)
+                                     for k, v in self._fill[ats].items()} if c["filled"] else {})}
                 for ats, c in sorted(self._n.items())]
 
 

@@ -67,7 +67,6 @@ from src import digest
 from src import store
 from src.ats.board import board_for
 from src.ats.board import company as company_fetch
-from src.ats.board.pager import fill_rates
 from src.ats.coords import slug_named
 from src.claude.api import api_disabled, have_api_key, report_cache_stats
 from src.crawl import health
@@ -372,7 +371,6 @@ async def harvest_board(company: CompanyRow, db: store.Writer, hydrate: bool = F
         return stats
     progress()
     stats["fetched"] = len(jobs)
-    stats["fill"] = fill_rates(jobs) if jobs else {}
     stats.update(http.snapshot_info())
 
     try:

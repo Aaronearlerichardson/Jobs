@@ -81,7 +81,9 @@ async def check_board(board: Board) -> dict[str, Any]:
         note = " ".join(buf.getvalue().split())
         if not ok and not note:
             note = "the board request failed"
-        misses = fill_misses(rows or [], {k: v for k, v in canary.min_fill.items()}) if ok else []
+        # Id-less rows are the shell's own links, not postings: no fill to judge.
+        posts = [r for r in rows or [] if r["id"] is not None]
+        misses = fill_misses(posts, {k: v for k, v in canary.min_fill.items()}) if ok else []
         if ok and n >= floor and not misses:
             status, detail = "ok", ""
         elif ok and n >= floor:
@@ -172,13 +174,14 @@ async def dry_run(board: Board, handle: str, show: int, floors: dict[str, float]
     if not rows:
         return 1
     floor = FILL_FLOORS | floors
-    rates = fill_rates(rows)
+    posts = [r for r in rows if r["id"] is not None]     # id-less rows are shell links
+    rates = fill_rates(posts)
     for k, v in rates.items():
         print(f"  {k:12} {v:6.1%}  (floor {floor[k]:.0%}){'  FAIL' if v < floor[k] else ''}")
     for r in rows[:show]:
         print(" ", json.dumps({k: v for k, v in r.items() if v and not k.startswith("_")},
                               ensure_ascii=False)[:400])
-    return 1 if fill_misses(rows, floors) else 0
+    return 1 if fill_misses(posts, floors) else 0
 
 
 def main() -> int:

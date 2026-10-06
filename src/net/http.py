@@ -507,13 +507,15 @@ def failed[E](label: str | None, err: E) -> E:
 class _Account:
     """One fetch attempt's accounting (see snapshot_info)."""
 
-    __slots__ = ("n", "last", "capped", "total")
+    __slots__ = ("n", "last", "capped", "total", "fill_rows", "fill_sum")
 
     def __init__(self) -> None:
         self.n = 0
         self.last: str | None = None
         self.capped = False
         self.total: int | None = None
+        self.fill_rows = 0
+        self.fill_sum: dict[str, float] = {}
 
 
 #: The current fetch attempt's accounting: per task.
@@ -584,8 +586,8 @@ def note_capped(total: int | None = None) -> None:
     total to prove the walk complete. A fetcher that never calls it reads
     as uncapped.
 
-    >>> reset_fetch_failures(); note_capped(50); snapshot_info()
-    {'fetch_errors': 0, 'incomplete': False, 'capped': True, 'capped_total': 50, 'last_error': None}
+    >>> reset_fetch_failures(); note_capped(50); snapshot_info()["capped_total"]
+    50
 
     Notes:
         A capped snapshot is partial, not failed: its rows are real, but a
@@ -596,14 +598,29 @@ def note_capped(total: int | None = None) -> None:
     acct.capped, acct.total = True, total
 
 
+def note_fill(rows: int, rates: dict[str, float]) -> None:
+    """Record the per-field fill `rates` of `rows` raw listing rows, before
+    any screening drops the unfilled ones; calls pool by row count.
+
+    >>> reset_fetch_failures(); note_fill(2, {"title": 1.0}); note_fill(2, {"title": 0.5})
+    >>> snapshot_info()["fill"], snapshot_info()["fill_rows"]
+    ({'title': 0.75}, 4)
+    """
+    acct = _account()
+    acct.fill_rows += rows
+    for k, v in rates.items():
+        acct.fill_sum[k] = acct.fill_sum.get(k, 0.0) + v * rows
+
+
 def snapshot_info() -> dict[str, Any]:
     """This context's fetch accounting since the last reset, as the callers
     record it: the failure count, whether the snapshot is INCOMPLETE (a
-    fetch failed partway) or CAPPED (truncated without an error), and the
-    LAST failure reported (None when there was none).
+    fetch failed partway) or CAPPED (truncated without an error), the
+    LAST failure reported (None when there was none), and the pooled
+    `fill` rates of the `fill_rows` raw rows (see note_fill; {} when none).
 
     >>> reset_fetch_failures(); snapshot_info()
-    {'fetch_errors': 0, 'incomplete': False, 'capped': False, 'capped_total': None, 'last_error': None}
+    {'fetch_errors': 0, 'incomplete': False, 'capped': False, 'capped_total': None, 'last_error': None, 'fill': {}, 'fill_rows': 0}
 
     A failure outranks a cap: an incomplete snapshot closes nothing, so it
     is never also reported capped.
@@ -611,13 +628,15 @@ def snapshot_info() -> dict[str, Any]:
     >>> _ = fetch_failed("board p3", "timeout", indent=0)
     [!] board p3: timeout
     >>> note_capped(50); snapshot_info()
-    {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None, 'last_error': 'board p3: timeout'}
+    {'fetch_errors': 1, 'incomplete': True, 'capped': False, 'capped_total': None, 'last_error': 'board p3: timeout', 'fill': {}, 'fill_rows': 0}
     """
     acct = _account()
     capped = acct.capped and not acct.n
     return {"fetch_errors": acct.n, "incomplete": acct.n > 0, "capped": capped,
             "capped_total": acct.total if capped else None,
-            "last_error": acct.last}
+            "last_error": acct.last,
+            "fill": {k: v / acct.fill_rows for k, v in acct.fill_sum.items()},
+            "fill_rows": acct.fill_rows}
 
 
 class HostBreaker:

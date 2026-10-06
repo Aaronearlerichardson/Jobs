@@ -134,6 +134,10 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
     >>> [(j["id"], j["title"], j["location"]) for j in jobs]
     [('4', 'Data Engineer', 'Durham, NC')]
     """
+    rows = list(rows)
+    posts = [r for r in rows if r and r.get("id")]
+    http.note_fill(len(posts), pager.fill_rates(posts))
+
     def screened() -> Iterator[tuple[EngineRow, str, str, bool, bool]]:
         for row in rows:
             if not row or not row.get("id"):
