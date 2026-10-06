@@ -4,13 +4,14 @@ The top of this package: `resolve_or_miss` is the single entry point for
 "attempt a company, and record the outcome either way", and everything
 else here is what it is built from.
 
-    resolve_board_sniff_first   sniff the company's OWN careers page
-                                first, slug-probe second, web search
-                                third, and VALIDATE every hit with a
-                                live fetch
+    resolve_board_sniff_first   the board directory by exact name, then
+                                sniff the company's OWN careers page
+                                (and its looked-up domain's hosts),
+                                slug-probe, web search last, and
+                                VALIDATE every hit with a live fetch
     classify_miss               when none of that worked, which of the
                                 store's MISS_REASONS codes explains it
-    _validate_board             the cheap live read that rejects a slug
+    validate_board             the cheap live read that rejects a slug
                                 guess landing on an empty or nonexistent
                                 board; one that fails rejects nothing
 
@@ -27,6 +28,9 @@ lives here and they live one level up.
 
 from __future__ import annotations
 
+import asyncio
+import importlib
+from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from src import config
@@ -37,6 +41,7 @@ from src.ats.signatures import detect, pack
 from src.match.locality import NC_RE, LocationRE
 from src.net import http
 from src.rows import BoardCoords, BoardHit, FetchedJob
+from .domain import official_domain
 from .identity import foreign_board
 from .probes import probe_company
 from .websearch_board import websearch_board
@@ -89,7 +94,7 @@ async def read_local(comp: BoardCoords) -> tuple[list[FetchedJob], int, str | No
     return [], 0, f"board-dead:{ats}" if ok else f"fetch-error:unreadable-{ats}"
 
 
-async def _validate_board(comp: BoardCoords) -> tuple[int, int] | None:
+async def validate_board(comp: BoardCoords) -> tuple[int, int] | None:
     """(total, nc) live posting counts of a resolved board from its cheap
     reads, as `probe_company` counts a guess: `Board.alive` (the listing's
     own total where it reports one) and `Board.local_count`. None when the
@@ -118,6 +123,40 @@ async def _url_board(name: str, careers_url: str) -> tuple[str, Any, str] | None
     if not hit or await foreign_board(name, hit[1], hit[2]):
         return None
     return hit[1], hit[2], pack(hit[1], hit[2], careers_url)["careers_url"]
+
+
+async def _seeds(name: str, careers_url: str = "") -> list[str]:
+    """Root URLs of `name`'s official domain, one per `[discovery].domain_hosts`
+    entry; none when `careers_url` is given, the lookup is off, or it found
+    nothing (a failed lookup never fails a resolution)."""
+    if careers_url or not config.DISCOVERY_DOMAIN_LOOKUP:
+        return []
+    try:
+        domain = await official_domain(name)
+    except Exception:
+        return []
+    return [f"https://{h.format(domain=domain)}/"
+            for h in config.DISCOVERY_DOMAIN_HOSTS] if domain else []
+
+
+async def _directory_hit(name: str, mk: Callable[..., Awaitable[BoardHit | None]]
+                         ) -> BoardHit | None:
+    """The best board (most local postings) `board_directory.lookup_name`
+    gives for `name` that `mk` validates, or None. Skipped silently while
+    that module or its cache is missing."""
+    try:
+        lookup = importlib.import_module("src.discovery.board_directory").lookup_name
+        found = await asyncio.to_thread(lookup, name)
+    except Exception:
+        return None
+    hits = []
+    for ats, handle, url in found:
+        if await foreign_board(name, ats, handle):
+            continue
+        hit = await mk(ats, handle, pack(ats, handle, url)["careers_url"], "directory")
+        if hit:
+            hits.append(hit)
+    return max(hits, key=lambda h: (h["nc"], h["count"]), default=None)
 
 
 async def resolve_board_sniff_first(name: str, careers_url: str = "",
@@ -155,7 +194,7 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
     unread = []
 
     async def _mk(ats: str, slug: Any, curl: str | None, via: str) -> BoardHit | None:
-        counts = await _validate_board(coords.columns(ats, slug, curl))
+        counts = await validate_board(coords.columns(ats, slug, curl))
         if counts is None:
             unread.append(ats)
             return None
@@ -175,24 +214,48 @@ async def _resolve(name: str, careers_url: str = "", websearch: bool = True
     if hit:
         return _out(hit)
 
+    # 0.5) The public board directory, by exact name; each candidate gets
+    # the same parent-tenant guard as a sniffed one.
+    hit = await _directory_hit(name, _mk)
+    if hit:
+        return _out(hit)
+
     # 1) Authoritative: detect the ATS embedded on the company's own careers page.
     # A `custom` sniff hit is held back rather than returned outright: a
     # marketing/careers page with no real ATS embedded still classifies as
     # `custom`, and a handful of scraped page fragments is enough for
-    # _validate_board's total > 0 to pass (Pfizer/Sanofi/AstraZeneca/Syngenta/
+    # validate_board's total > 0 to pass (Pfizer/Sanofi/AstraZeneca/Syngenta/
     # Novozymes all resolved this way, each with a single-digit `total` that
     # was never their real Workday board). Only a `custom` hit that already
     # carries LOCAL jobs (nc > 0) is a genuine self-hosted board worth taking
     # immediately; an nc == 0 custom hit is kept as a last-resort fallback so
     # steps 2/3 get a chance to find the real ATS first.
-    fallback = None
-    s = await sniff_ats(name, careers_url or "")
-    if s:
-        hit = await _mk(s["ats"], s.get("triple", s.get("slug")), s.get("careers_url"), "sniff")
+    fallback: BoardHit | None = None
+
+    async def _sniff(curl: str) -> BoardHit | None:
+        nonlocal fallback
+        s = await sniff_ats(name, curl)
+        if not s:
+            return None
+        hit = await _mk(s["ats"], s.get("triple", s.get("slug")),
+                        s.get("careers_url"), "sniff")
+        if not hit:
+            return None
+        if hit["ats"] != config.CAREERS_PAGE_ATS or hit["nc"] > 0:
+            return hit
+        fallback = fallback or hit
+        return None
+
+    hit = await _sniff(careers_url or "")
+    if hit:
+        return _out(hit)
+
+    # 1.5) The same sniff on the name's looked-up official domain
+    # (resolve.domain), its hosts in order, stopping at the first board.
+    for seed in await _seeds(name, careers_url):
+        hit = await _sniff(seed)
         if hit:
-            if s["ats"] != config.CAREERS_PAGE_ATS or hit["nc"] > 0:
-                return _out(hit)
-            fallback = hit
+            return _out(hit)
 
     # 2) Fallback: name-guessed slugs, then the scanned platforms' probe
     #    (collision risk -> validated).
@@ -232,7 +295,9 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
     or a candidate resolved to someone else's site) — sniffer.diagnose_no_board
     tells them apart, appended as the ':'-qualifier a rerun's miss_counts
     already knows how to aggregate past (see src.store.miss_family). A
-    careers_url naming a board itself is that board, dead.
+    careers_url naming a board itself is that board, dead. With none given,
+    the name's looked-up domain hosts (`_seeds`) are read after the plain
+    guesses.
 
     Notes:
         Costs one extra careers-page sniff (plus diagnose_no_board's own,
@@ -240,10 +305,22 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
         path and only by the on-demand resolvers — never per candidate in
         a full discover_local pass.
     """
-    from .sniffer import diagnose_no_board, sniff_careers_ats
     u = await _url_board(name, careers_url)
     if u:
         return f"board-dead:{u[0]}"
+    first = await _classify(name, careers_url)
+    if not first.startswith("no-board-found"):
+        return first
+    for seed in await _seeds(name, careers_url):
+        reason = await _classify(name, seed)
+        if not reason.startswith("no-board-found"):
+            return reason
+    return first
+
+
+async def _classify(name: str, careers_url: str) -> str:
+    """classify_miss for one careers page: sniff it, else diagnose it."""
+    from .sniffer import diagnose_no_board, sniff_careers_ats
     try:
         lead = await sniff_careers_ats(name, careers_url or "")
     except Exception as e:

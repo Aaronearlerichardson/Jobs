@@ -1,0 +1,454 @@
+{
+ "items": [
+  {
+   "SearchId": 1,
+   "Keyword": null,
+   "CorrectedKeyword": null,
+   "UseExactKeywordFlag": false,
+   "SuggestedKeyword": null,
+   "ExecuteSpellCheckFlag": true,
+   "Location": null,
+   "LocationId": null,
+   "Radius": 0,
+   "RadiusUnit": "MI",
+   "SelectedTitlesFacet": null,
+   "SelectedCategoriesFacet": null,
+   "SelectedPostingDatesFacet": null,
+   "SelectedLocationsFacet": null,
+   "LastSelectedFacet": null,
+   "Facets": "TITLES;LOCATIONS;LOCATION_LEVEL1;LOCATION_LEVEL2;LOCATION_LEVEL3;CATEGORIES;POSTING_DATES;WORK_LOCATIONS;FLEX_FIELDS;ORGANIZATIONS;WORKPLACE_TYPES",
+   "Offset": 0,
+   "Limit": 200,
+   "SortBy": "RELEVANCY",
+   "TotalJobsCount": 4,
+   "Latitude": null,
+   "Longitude": null,
+   "SiteNumber": "ULSolutionsCareers",
+   "JobFamilyId": null,
+   "PostingStartDate": null,
+   "PostingEndDate": null,
+   "SelectedWorkLocationsFacet": null,
+   "RequisitionId": null,
+   "CandidateNumber": null,
+   "WorkLocationZipCode": null,
+   "WorkLocationCountryCode": null,
+   "SelectedFlexFieldsFacets": null,
+   "OrganizationId": null,
+   "SelectedOrganizationsFacet": null,
+   "UserTargetFacetName": null,
+   "UserTargetFacetInputTerm": null,
+   "HotJobFlag": null,
+   "WorkplaceType": null,
+   "SelectedWorkplaceTypesFacet": null,
+   "BotQRShortCode": null,
+   "requisitionList": [
+    {
+     "Id": "10139",
+     "Title": "Engineer - Electrical Distribution",
+     "PostedDate": "2026-10-05",
+     "PostingEndDate": null,
+     "Language": "US",
+     "PrimaryLocationCountry": "US",
+     "GeographyId": 100000067181895,
+     "HotJobFlag": false,
+     "WorkplaceTypeCode": null,
+     "JobFamily": null,
+     "JobFunction": null,
+     "WorkerType": null,
+     "ContractType": null,
+     "ManagerLevel": null,
+     "JobSchedule": null,
+     "JobShift": null,
+     "JobType": null,
+     "StudyLevel": null,
+     "DomesticTravelRequired": null,
+     "InternationalTravelRequired": null,
+     "WorkDurationYears": null,
+     "WorkDurationMonths": null,
+     "WorkHours": null,
+     "WorkDays": null,
+     "LegalEmployer": null,
+     "BusinessUnit": null,
+     "Department": null,
+     "Organization": null,
+     "BusinessUnitId": 300000008731527,
+     "LegalEmployerId": 300000007928902,
+     "OrganizationId": 1,
+     "MediaThumbURL": null,
+     "ShortDescriptionStr": "",
+     "PrimaryLocation": "Raleigh, NC, United States",
+     "Distance": 9,
+     "TrendingFlag": true,
+     "BeFirstToApplyFlag": false,
+     "Relevancy": 9,
+     "WorkplaceType": "",
+     "ExternalQualificationsStr": null,
+     "ExternalResponsibilitiesStr": null,
+     "secondaryLocations": []
+    },
+    {
+     "Id": "10947",
+     "Title": "Senior Project Engineer - Heat Pumps",
+     "PostedDate": "2026-10-05",
+     "PostingEndDate": null,
+     "Language": "US",
+     "PrimaryLocationCountry": "ES",
+     "GeographyId": 300000000433544,
+     "HotJobFlag": false,
+     "WorkplaceTypeCode": null,
+     "JobFamily": null,
+     "JobFunction": null,
+     "WorkerType": null,
+     "ContractType": null,
+     "ManagerLevel": null,
+     "JobSchedule": null,
+     "JobShift": null,
+     "JobType": null,
+     "StudyLevel": null,
+     "DomesticTravelRequired": null,
+     "InternationalTravelRequired": null,
+     "WorkDurationYears": null,
+     "WorkDurationMonths": null,
+     "WorkHours": null,
+     "WorkDays": null,
+     "LegalEmployer": null,
+     "BusinessUnit": null,
+     "Department": null,
+     "Organization": null,
+     "BusinessUnitId": 300000008731631,
+     "LegalEmployerId": 300000008675361,
+     "OrganizationId": 1,
+     "MediaThumbURL": null,
+     "ShortDescriptionStr": "Help Shape the Future of Heat Pump Technology\n\nThe transition to low-carbon heating is transforming the HVAC industry, and heat pumps are at the centre of that change.\n\nWe're looking for a Senior Project Engineer - Heat Pumps to join our team and provide technical leadership in the testing, certification, and evaluation of residential and commercial heat pump technologies. This role offers a unique opportunity to work with leading manufacturers, influence industry standards, support innovative product development, and contribute to the adoption of more sustainable energy solutions worldwide.\n\nYou will be a recognised technical expert, supporting customers and colleagues across a wide range of performance, energy efficiency, and certification activities while helping to shape the future of heat pump technologies.",
+     "PrimaryLocation": "Spain",
+     "Distance": 9,
+     "TrendingFlag": false,
+     "BeFirstToApplyFlag": true,
+     "Relevancy": 9,
+     "WorkplaceType": "",
+     "ExternalQualificationsStr": null,
+     "ExternalResponsibilitiesStr": null,
+     "secondaryLocations": [
+      {
+       "RequisitionLocationId": 300002582716125,
+       "GeographyNodeId": 100001373637842,
+       "GeographyId": 300000000433670,
+       "Name": "Italy",
+       "CountryCode": "IT",
+       "Latitude": 42.63064,
+       "Longitude": 11.82509
+      }
+     ]
+    },
+    {
+     "Id": "11068",
+     "Title": "Engineer - Wiring Devices",
+     "PostedDate": "2026-10-05",
+     "PostingEndDate": null,
+     "Language": "US",
+     "PrimaryLocationCountry": "US",
+     "GeographyId": 100000067163908,
+     "HotJobFlag": false,
+     "WorkplaceTypeCode": null,
+     "JobFamily": null,
+     "JobFunction": null,
+     "WorkerType": null,
+     "ContractType": null,
+     "ManagerLevel": null,
+     "JobSchedule": null,
+     "JobShift": null,
+     "JobType": null,
+     "StudyLevel": null,
+     "DomesticTravelRequired": null,
+     "InternationalTravelRequired": null,
+     "WorkDurationYears": null,
+     "WorkDurationMonths": null,
+     "WorkHours": null,
+     "WorkDays": null,
+     "LegalEmployer": null,
+     "BusinessUnit": null,
+     "Department": null,
+     "Organization": null,
+     "BusinessUnitId": 300000008731527,
+     "LegalEmployerId": 300000007928902,
+     "OrganizationId": 1,
+     "MediaThumbURL": null,
+     "ShortDescriptionStr": "",
+     "PrimaryLocation": "Northbrook, IL, United States",
+     "Distance": 9,
+     "TrendingFlag": false,
+     "BeFirstToApplyFlag": false,
+     "Relevancy": 9,
+     "WorkplaceType": "",
+     "ExternalQualificationsStr": null,
+     "ExternalResponsibilitiesStr": null,
+     "secondaryLocations": [
+      {
+       "RequisitionLocationId": 300002607062010,
+       "GeographyNodeId": 100001373637852,
+       "GeographyId": 100000067181895,
+       "Name": "Raleigh, NC, United States",
+       "CountryCode": "US",
+       "Latitude": 35.9265,
+       "Longitude": -78.76087
+      },
+      {
+       "RequisitionLocationId": 300002607062011,
+       "GeographyNodeId": 100001373637838,
+       "GeographyId": 100000067189567,
+       "Name": "Melville, NY, United States",
+       "CountryCode": "US",
+       "Latitude": 40.7931,
+       "Longitude": -73.4162
+      }
+     ]
+    },
+    {
+     "Id": "11129",
+     "Title": "Project Engineer - Electrical Distribution",
+     "PostedDate": "2026-10-05",
+     "PostingEndDate": null,
+     "Language": "US",
+     "PrimaryLocationCountry": "US",
+     "GeographyId": 100000067181895,
+     "HotJobFlag": false,
+     "WorkplaceTypeCode": null,
+     "JobFamily": null,
+     "JobFunction": null,
+     "WorkerType": null,
+     "ContractType": null,
+     "ManagerLevel": null,
+     "JobSchedule": null,
+     "JobShift": null,
+     "JobType": null,
+     "StudyLevel": null,
+     "DomesticTravelRequired": null,
+     "InternationalTravelRequired": null,
+     "WorkDurationYears": null,
+     "WorkDurationMonths": null,
+     "WorkHours": null,
+     "WorkDays": null,
+     "LegalEmployer": null,
+     "BusinessUnit": null,
+     "Department": null,
+     "Organization": null,
+     "BusinessUnitId": 300000008731527,
+     "LegalEmployerId": 300000007928902,
+     "OrganizationId": 1,
+     "MediaThumbURL": null,
+     "ShortDescriptionStr": "",
+     "PrimaryLocation": "Raleigh, NC, United States",
+     "Distance": 9,
+     "TrendingFlag": false,
+     "BeFirstToApplyFlag": true,
+     "Relevancy": 9,
+     "WorkplaceType": "",
+     "ExternalQualificationsStr": null,
+     "ExternalResponsibilitiesStr": null,
+     "secondaryLocations": []
+    }
+   ],
+   "categoriesFacet": [
+    {
+     "Id": 300000009834348,
+     "Name": "Engineering",
+     "TotalCount": 133
+    },
+    {
+     "Id": 300000009834366,
+     "Name": "Laboratory",
+     "TotalCount": 78
+    },
+    {
+     "Id": 300000009834324,
+     "Name": "Sales (SIP eligible)",
+     "TotalCount": 49
+    },
+    {
+     "Id": 300000009834315,
+     "Name": "Field Engineering/Audit & Inspections",
+     "TotalCount": 30
+    },
+    {
+     "Id": 300000009834333,
+     "Name": "Advisory/Consultancy",
+     "TotalCount": 25
+    },
+    {
+     "Id": 300000009834375,
+     "Name": "Intern",
+     "TotalCount": 19
+    },
+    {
+     "Id": 300000009834339,
+     "Name": "Program/Project Management",
+     "TotalCount": 16
+    },
+    {
+     "Id": 300000009834330,
+     "Name": "Human Resources",
+     "TotalCount": 12
+    },
+    {
+     "Id": 300000009834342,
+     "Name": "Information Technology",
+     "TotalCount": 12
+    },
+    {
+     "Id": 300000009834354,
+     "Name": "Marketing",
+     "TotalCount": 10
+    }
+   ],
+   "locationsFacet": [
+    {
+     "Id": 300000000445033,
+     "Name": "United States",
+     "TotalCount": 170
+    },
+    {
+     "Id": 100000067111326,
+     "Name": "IL, United States",
+     "TotalCount": 95
+    },
+    {
+     "Id": 100000067163908,
+     "Name": "Northbrook, IL, United States",
+     "TotalCount": 90
+    },
+    {
+     "Id": 300000000433487,
+     "Name": "China",
+     "TotalCount": 55
+    },
+    {
+     "Id": 300000000433682,
+     "Name": "Japan",
+     "TotalCount": 30
+    },
+    {
+     "Id": 100000067164484,
+     "Name": "Chicago, IL, United States",
+     "TotalCount": 29
+    },
+    {
+     "Id": 300000000445018,
+     "Name": "Taiwan",
+     "TotalCount": 28
+    },
+    {
+     "Id": 300000000433706,
+     "Name": "Korea, Republic of",
+     "TotalCount": 26
+    },
+    {
+     "Id": 100000036354095,
+     "Name": "Jiangsu, China",
+     "TotalCount": 25
+    },
+    {
+     "Id": 100000036354744,
+     "Name": "Suzhou, Jiangsu, China",
+     "TotalCount": 23
+    }
+   ],
+   "postingDatesFacet": [
+    {
+     "Id": 7,
+     "Name": "Less than 7 days",
+     "TotalCount": 57
+    },
+    {
+     "Id": 30,
+     "Name": "Less than 30 days",
+     "TotalCount": 199
+    },
+    {
+     "Id": 31,
+     "Name": "Greater than 30 days",
+     "TotalCount": 245
+    }
+   ],
+   "titlesFacet": [],
+   "workLocationsFacet": [
+    {
+     "Id": 300000009600506,
+     "Name": "United States - Northbrook",
+     "TotalCount": 71
+    },
+    {
+     "Id": 300000009600066,
+     "Name": "United States - Chicago",
+     "TotalCount": 20
+    },
+    {
+     "Id": 300000009838137,
+     "Name": "China - Suzhou",
+     "TotalCount": 11
+    },
+    {
+     "Id": 300000009882072,
+     "Name": "Germany - Neu-Isenburg",
+     "TotalCount": 11
+    },
+    {
+     "Id": 300000009600145,
+     "Name": "United States - RTP",
+     "TotalCount": 10
+    },
+    {
+     "Id": 300000009881385,
+     "Name": "Poland - Warsaw",
+     "TotalCount": 10
+    },
+    {
+     "Id": 300000009600795,
+     "Name": "United States - Lowell (COE)",
+     "TotalCount": 9
+    },
+    {
+     "Id": 300000009747880,
+     "Name": "Japan - Tokyo",
+     "TotalCount": 9
+    },
+    {
+     "Id": 300000009838271,
+     "Name": "China - Shenzhen (Sino-German Europe Industrial Park)",
+     "TotalCount": 7
+    },
+    {
+     "Id": 300000009882078,
+     "Name": "United Kingdom - Kingsland Park",
+     "TotalCount": 7
+    }
+   ],
+   "flexFieldsFacet": [],
+   "organizationsFacet": [
+    {
+     "Id": 1,
+     "Name": "UL Solutions",
+     "TotalCount": 444
+    }
+   ],
+   "workplaceTypesFacet": [
+    {
+     "Id": "ORA_ON_SITE",
+     "Name": "On-site",
+     "TotalCount": 444
+    }
+   ]
+  }
+ ],
+ "count": 1,
+ "hasMore": false,
+ "limit": 200,
+ "offset": 0,
+ "links": [
+  {
+   "rel": "self",
+   "href": "https://fa-eups-saasfaprod1.fa.ocs.oraclecloud.com:443/hcmRestApi/resources/11.13.18.05/recruitingCEJobRequisitions",
+   "name": "recruitingCEJobRequisitions",
+   "kind": "collection"
+  }
+ ]
+}

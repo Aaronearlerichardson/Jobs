@@ -11,27 +11,20 @@ couple of sentences that keep their real markup. Every key name and the
 nesting are exactly what the host sent.
 """
 
-import json
 import re
-from pathlib import Path
 
 import pytest
 
-from conftest import fake_response
+from conftest import fake_response, fixture
 from src.ats.board import board_for
 from src.ats.signatures import detect
 
-FIXTURES = Path(__file__).parent / "fixtures"
 
 SLUG = "eupry-aps"
 WIDGET_URL = f"https://apply.workable.com/api/v1/widget/accounts/{SLUG}"
 JOB_API_ROOT = f"https://apply.workable.com/api/v1/accounts/{SLUG}/jobs/"
 JOB_URL = f"https://apply.workable.com/{SLUG}/j/D68529D654/"
 WORKABLE = board_for("workable")
-
-
-def load(name):
-    return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
 def _job(shortcode="D68529D654", title="Field Engineer",
@@ -135,7 +128,7 @@ class TestDetection:
     async def test_the_probe_confirms_a_board_with_a_live_count(self, serve):
         """A fetchable platform is one a slug can be CONFIRMED on
         (signatures.py's own definition)."""
-        serve(fake_response(load("workable_board.json")))
+        serve(fake_response(fixture("workable_board.json")))
         assert await board_for("workable").probe(SLUG) == (True, 4)
         # An account with nothing published is not a board worth a row: an
         # account slug is not the company name ("eupry" is a different,
@@ -158,8 +151,8 @@ class TestRegistry:
 
     async def test_the_registry_thunk_gates_and_names_the_company(self, workable_board):
         from src.ats.registry import sweep
-        workable_board(load("workable_board.json"),
-                       detail=load("workable_job_detail.json"))
+        workable_board(fixture("workable_board.json"),
+                       detail=fixture("workable_job_detail.json"))
         jobs = await sweep("workable", "Eupry", SLUG)()
         assert all(j["company"] == "Eupry" for j in jobs)
 
@@ -171,8 +164,8 @@ class TestCompanyDispatch:
 
     async def test_fetch_company_adapts_this_modules_rows(self, workable_board):
         from src.ats.board import company
-        workable_board(load("workable_board.json"),
-                       detail=load("workable_job_detail.json"))
+        workable_board(fixture("workable_board.json"),
+                       detail=fixture("workable_job_detail.json"))
         out = await company.fetch_company({"ats": "workable", "slug": SLUG})
         assert [j["id"] for j in out][0] == "workable_eupry-aps_D68529D654"
         assert out[0]["ats"] == "workable"
@@ -191,7 +184,7 @@ class TestCompanyDispatch:
     async def test_hydrate_description_reads_the_posting_from_its_url(
             self, workable_board):
         from src.ats.board import company
-        workable_board(detail=load("workable_job_detail.json"))
+        workable_board(detail=fixture("workable_job_detail.json"))
         job = {"ats": "workable", "url": JOB_URL,
                "description": "", "location": "Raleigh, North Carolina"}
         out = await company.hydrate_description(job)
@@ -200,8 +193,8 @@ class TestCompanyDispatch:
 
     async def test_the_title_sampler_reads_the_listing_only(self, workable_board):
         from src.ats.board import company
-        calls = workable_board(load("workable_board.json"),
-                               detail=load("workable_job_detail.json"))
+        calls = workable_board(fixture("workable_board.json"),
+                               detail=fixture("workable_job_detail.json"))
         titles = await company.sample_titles({"ats": "workable", "slug": SLUG}, n=2)
         assert titles == ["Field Engineer", "Junior Customer Support"]
         assert [c.url for c in calls] == [WIDGET_URL]   # no detail spend

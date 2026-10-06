@@ -84,6 +84,10 @@ _COMMANDS = [
     ("resolve_leads", _op("resolve-leads", lambda a: {
         "all_leads": a.all_leads, "limit": a.limit})),
     ("dork", _op("dork", lambda a: {})),
+    ("import_boards", _op("import-boards", lambda a: {
+        "apply": a.apply, "limit": a.limit})),
+    ("registries", _op("discover-registries", lambda a: {
+        "apply": a.apply, "limit": a.limit})),
 ]
 
 
@@ -140,10 +144,23 @@ def main() -> None:
     ap.add_argument("--dork", "--ats-dork", action="store_true", dest="dork",
                     help="ATS dorking via DuckDuckGo: mine search-indexed ATS "
                          "board URLs for local companies into the company store")
+    ap.add_argument("--import-boards", action="store_true",
+                    help="Boards with postings in your [locality] in the public "
+                         "board directory (jobhive) that the roster lacks: a dry "
+                         "run reports them per platform and writes a CSV; --apply "
+                         "validates, mission-scores and queues the best for review "
+                         "(--limit N caps the rows)")
+    ap.add_argument("--registries", action="store_true",
+                    help="Names from the public registries in [discovery].registries "
+                         "(NIH SBIR grantees, FDA device establishments) for your "
+                         "[locality] state that the roster lacks: a dry run counts "
+                         "them per source; --apply resolves the next batch "
+                         "(--limit N, default 60) and queues the boards for review")
     ap.add_argument("--no-report", action="store_true",
                     help="Print to stdout only, don't write a markdown report")
     ap.add_argument("--apply", action="store_true",
-                    help="Deprecated no-op: confirmed candidates are applied "
+                    help="With --import-boards or --registries: write. Otherwise a "
+                         "deprecated no-op: confirmed candidates are applied "
                          "to the company store by default now (deduped by "
                          "slug, tagged with date/term for audit). Kept only "
                          "so old scripts/muscle memory that pass --apply "

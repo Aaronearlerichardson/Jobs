@@ -95,10 +95,9 @@ def _deactivate(conn: sqlite3.Connection, dead: list[CompanyRow], offmission: bo
 # coordinates were found and the live fetch came back empty ("board-dead").
 # Neither is a permanent verdict — a resolver improves, a company migrates
 # ATS, a careers page comes back — and that bucket is where the roster's
-# best-known local employers sit. The other families are not retried here:
-# "no-local-jobs" already IS a live board, "ats-unsupported" needs a fetcher
-# rather than a retry, and "fetch-error" is a transient every pass re-attempts
-# anyway.
+# best-known local employers sit. The other families are not retried by
+# default: "no-local-jobs" already IS a live board, and "ats-unsupported" and
+# "fetch-error" are opt-in (OPT_IN_FAMILIES).
 RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
 
 # A board that is not a resolution failure at all -- ats/slug are set, the
@@ -111,6 +110,13 @@ RERESOLVE_FAMILIES = ("no-board-found", _DEAD_BOARD_FAMILY)
 # _silent_board_candidates -- so a pass opts into it through
 # reresolve_misses's `families` rather than getting it by default.
 SILENT_FAMILY = "silent-board"
+
+# Every family a pass may be asked to retry: the defaults, plus the ones a
+# caller opts into. "fetch-error" rows died on a transient the harvest pass
+# does not clear; "ats-unsupported" rows wait on a fetcher that may exist now.
+OPT_IN_FAMILIES = (SILENT_FAMILY, "fetch-error", "ats-unsupported")
+
+
 def _silent_board_candidates(conn: sqlite3.Connection,
                              now: datetime | None = None) -> list[CompanyRow]:
     """Harvested boards that have listed nothing in >= SILENT_DAYS days --
@@ -273,6 +279,13 @@ def _reresolve_candidates(conn: sqlite3.Connection, days: int | None = None,
     ['Advarra', 'Emmes', 'Quiet']
     >>> [c["name"] for c in _reresolve_candidates(conn)]
     ['Advarra', 'Emmes']
+
+    "fetch-error" and "ats-unsupported" rows are selected only when named:
+
+    >>> _ = record_miss(conn, "Delsys", "fetch-error:stalled")
+    >>> sorted(c["name"] for c in _reresolve_candidates(
+    ...     conn, families=("fetch-error", "ats-unsupported")))
+    ['Delsys', 'Locus']
     """
     wanted = {str(n).strip().lower() for n in (names or []) if str(n).strip()}
     cutoff = ((datetime.now() - timedelta(days=int(days))).isoformat()
@@ -348,7 +361,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
     from src.match.names import junk_name_reason
 
     families = tuple(families or RERESOLVE_FAMILIES)
-    unknown = set(families) - {*RERESOLVE_FAMILIES, SILENT_FAMILY}
+    unknown = set(families) - {*RERESOLVE_FAMILIES, *OPT_IN_FAMILIES}
     if unknown:
         raise ValueError(f"unknown reresolve families: {sorted(unknown)}")
     t = _t(t)

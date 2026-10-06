@@ -187,6 +187,11 @@ class TestReresolveWrites:
         assert [dict(r) for r in db.execute(
             "SELECT * FROM companies")] == before
 
+    async def test_fetch_error_and_ats_unsupported_are_accepted(self, db):
+        # Selection is doctested on _reresolve_candidates; this is the gate.
+        assert await repair.reresolve_misses(
+            db=db, t=self.T, families=["fetch-error", "ats-unsupported"]) == []
+
     async def test_an_unknown_family_is_refused(self, db):
         with pytest.raises(ValueError):
             await repair.reresolve_misses(db=db, t=self.T, families=["silent"])

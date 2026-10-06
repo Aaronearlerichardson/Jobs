@@ -282,7 +282,8 @@ def main(argv: list[str] | None = None) -> None:
                          "days")
     ap.add_argument("--reresolve-families", metavar="FAM[,FAM]",
                     help="With --reresolve-misses: which families to retry "
-                         "(default no-board-found,board-dead; silent-board "
+                         "(default no-board-found,board-dead; also fetch-error, "
+                         "ats-unsupported; silent-board "
                          "= harvested boards that listed nothing in 7+ "
                          "days)")
     ap.add_argument("--dedup", action="store_true",

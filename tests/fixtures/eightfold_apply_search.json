@@ -1,0 +1,57 @@
+{
+ "positions": [
+  {
+   "id": 1099556324897,
+   "name": "Environmental Professional",
+   "posting_name": "Environmental Professional",
+   "location": "Silver Peak, Nevada, United States of America",
+   "locations": [
+    "Silver Peak, Nevada, United States of America"
+   ],
+   "hot": 0,
+   "department": "Health, Safety & Environment",
+   "business_unit": "Corporate",
+   "t_update": 1790208000,
+   "t_create": 1790208000,
+   "ats_job_id": "REQ-31520",
+   "display_job_id": "REQ-31520",
+   "type": "ATS",
+   "id_locale": "REQ-31520-en-US",
+   "job_description": "",
+   "locale": "en-US",
+   "stars": 0.0,
+   "medallionProgram": null,
+   "location_flexibility": "flexible_within_country",
+   "work_location_option": "onsite",
+   "canonicalPositionUrl": "https://albemarle.eightfold.ai/careers/job/1099556324897",
+   "isPrivate": false
+  },
+  {
+   "id": 1099556190478,
+   "name": "Industrial Electrician",
+   "posting_name": "Industrial Electrician",
+   "location": "Pasadena, Texas, United States of America",
+   "locations": [
+    "Pasadena, Texas, United States of America"
+   ],
+   "hot": 0,
+   "department": "Manufacturing",
+   "business_unit": "Corporate",
+   "t_update": 1789344000,
+   "t_create": 1789344000,
+   "ats_job_id": "REQ-31463",
+   "display_job_id": "REQ-31463",
+   "type": "ATS",
+   "id_locale": "REQ-31463-en-US",
+   "job_description": "",
+   "locale": "en-US",
+   "stars": 0.0,
+   "medallionProgram": null,
+   "location_flexibility": null,
+   "work_location_option": "onsite",
+   "canonicalPositionUrl": "https://albemarle.eightfold.ai/careers/job/1099556190478",
+   "isPrivate": false
+  }
+ ],
+ "count": 59
+}

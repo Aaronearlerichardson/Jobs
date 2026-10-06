@@ -344,6 +344,17 @@ class Getro(_Table):
     max_details: Count = 150
 
 
+class BoardDirectory(_Table):
+    # A URL or a local directory holding manifest.json, companies.parquet and
+    # one <file>/jobs.parquet per platform (the jobhive dataset's layout).
+    base_url: Filled = "https://storage.stapply.ai/jobhive/v1"
+    # Platform files to read; [] -> every file the manifest lists.
+    files: list[str] = []
+    min_gate_titles: Count = 1
+    max_scored_per_run: Count = 200
+    refresh_days: Count = 7
+
+
 class Sources(_Table):
     remoteok: bool = True
     remotive: bool = True
@@ -356,6 +367,7 @@ class Sources(_Table):
     rss: list[RssFeed] = Field(default_factory=_default_rss)
     usajobs: Usajobs = Field(default_factory=Usajobs)
     getro: Getro = Field(default_factory=Getro)
+    board_directory: BoardDirectory = Field(default_factory=BoardDirectory)
 
 
 # --- [discovery] -------------------------------------------------------------
@@ -371,6 +383,12 @@ class PriorityCompany(_Table):
     slug: Filled
 
 
+class DirectoryPage(_Table):
+    url: Filled
+    # First group = the company name in a link href; "" -> the generic harvest.
+    link_re: Regex = ""
+
+
 class Discovery(_Table):
     # A bare name, or a { name, notes } table.
     seed_companies: list[Annotated[SeedCompany, BeforeValidator(
@@ -378,7 +396,20 @@ class Discovery(_Table):
     seed_triggers: list[str] = []
     # Big employers worth the slow careers-page scan (`discovery.scan`).
     scan_majors: list[str] = []
-    directory_urls: list[str] = []
+    # A bare URL, or a { url, link_re } table.
+    directory_urls: list[Annotated[DirectoryPage, BeforeValidator(
+        lambda v: {"url": v} if isinstance(v, str) else v)]] = []
+    # Name -> official domain before the resolver guesses one.
+    domain_lookup: bool = True
+    domain_lookup_urls: list[str] = [
+        "https://autocomplete.clearbit.com/v1/companies/suggest?query={q}"]
+    # Hosts tried for a found domain, in order, until one has a board.
+    domain_hosts: list[str] = ["{domain}", "careers.{domain}", "jobs.{domain}"]
+    # Tried after a seeded host's root, which some careers sites refuse.
+    locale_paths: list[str] = ["/us/en", "/en-us", "/en"]
+    # Structured name registries `discover.py --registries` reads.
+    registries: list[Literal["nih_sbir", "openfda_devices"]] = [
+        "nih_sbir", "openfda_devices"]
     name_search_queries: list[str] = []
     brainstorm_names: Count = 50
     name_blocklist: list[str] = []

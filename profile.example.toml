@@ -452,6 +452,20 @@ boards = [
 ]
 max_details = 150            # posting pages fetched per board per crawl
 
+# Board directory: the jobhive dataset of live postings, read by
+# `discover.py --import-boards` for boards in your locality the roster lacks
+# (every import lands pending-review). base_url may also be a local directory.
+[sources.board_directory]
+base_url = "https://storage.stapply.ai/jobhive/v1"
+files = ["workday", "successfactors", "oracle", "smartrecruiters", "icims",
+         "greenhouse", "phenom", "lever", "jazzhr", "ashby", "cornerstone",
+         "breezy", "bamboohr", "teamtailor", "recruitee", "rippling", "dayforce",
+         "pinpoint", "eightfold", "ukg", "jobvite", "recruiterbox", "workable",
+         "avature", "gem", "paylocity", "taleo", "pageup"]
+min_gate_titles = 1          # local title-gate passes a board needs to be imported
+max_scored_per_run = 200     # mission scores per --apply run (about $1)
+refresh_days = 7
+
 # ---------------------------------------------------------------------------
 # Discovery — how the roster of companies to crawl gets built (discover.py).
 # Everything here is a starting pool; each name is probed for a real job board
@@ -468,7 +482,22 @@ seed_companies = [
 # of these (usually your region). Omit to always merge them.
 seed_triggers = []
 scan_majors = []             # big employers worth the slow careers-page scan
-directory_urls = []          # e.g. a local chamber/association "/company/<slug>/" directory
+# A bare URL, or { url, link_re } where link_re's first group is the company
+# name in a link href (e.g. a local chamber/association "/company/<slug>/" directory).
+directory_urls = [
+    # "https://example.org/members",
+    # { url = "https://example.org/companies", link_re = "/company/([^/?#]+)" },
+]
+# Name -> official domain (keyless autocomplete, Wikidata fallback) before the
+# resolver guesses one; the found domain is tried at each host, then at the
+# locale paths when a careers root refuses.
+domain_lookup = true
+domain_lookup_urls = ["https://autocomplete.clearbit.com/v1/companies/suggest?query={q}"]
+domain_hosts = ["{domain}", "careers.{domain}", "jobs.{domain}"]
+locale_paths = ["/us/en", "/en-us", "/en"]
+# Structured name registries read by `discover.py --registries`; the state is
+# the first two-letter [locality].state_suffix entry.
+registries = ["nih_sbir", "openfda_devices"]
 # The main recall lever — searches whose results are harvested for names, then
 # probed. Tailor to your region/field.
 name_search_queries = [

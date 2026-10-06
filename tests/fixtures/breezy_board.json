@@ -1,0 +1,213 @@
+[
+ {
+  "id": "9b5dbab30b78",
+  "friendly_id": "9b5dbab30b78-bilingual-board-certified-behavior-analyst-bcba-lba-sign-on-relocation-ral",
+  "name": "BILINGUAL Board Certified Behavior Analyst (BCBA, LBA) - SIGN ON/RELOCATION $ (RAL)",
+  "url": "https://highlights-healthcare.breezy.hr/p/9b5dbab30b78-bilingual-board-certified-behavior-analyst-bcba-lba-sign-on-relocation-ral",
+  "published_date": "2026-09-23T14:48:12.535Z",
+  "type": {
+   "id": "fullTime",
+   "name": "Full-Time"
+  },
+  "location": {
+   "country": {
+    "name": "United States",
+    "id": "US"
+   },
+   "state": {
+    "id": "NC",
+    "name": "North Carolina"
+   },
+   "city": "Raleigh",
+   "name": "Raleigh, NC",
+   "primary": true,
+   "id": "ed6c2b609bc7",
+   "is_remote": false
+  },
+  "department": "Clinician - BCBA",
+  "salary": "$95,000 – $115,000 / year",
+  "company": {
+   "name": "Highlights Healthcare",
+   "logo_url": null,
+   "friendly_id": "highlights-healthcare",
+   "isMultipleLocationsEnabled": true
+  },
+  "locations": [
+   {
+    "country": {
+     "name": "United States",
+     "id": "US"
+    },
+    "state": {
+     "id": "NC",
+     "name": "North Carolina"
+    },
+    "city": "Raleigh",
+    "name": "Raleigh, NC",
+    "primary": true,
+    "id": "ed6c2b609bc7",
+    "is_remote": false
+   }
+  ]
+ },
+ {
+  "id": "4e5454ff973b",
+  "friendly_id": "4e5454ff973b-remote-clinical-supervisor-board-certified-behavior-analyst-bcba",
+  "name": "Remote Clinical Supervisor Board Certified Behavior Analyst (BCBA)",
+  "url": "https://highlights-healthcare.breezy.hr/p/4e5454ff973b-remote-clinical-supervisor-board-certified-behavior-analyst-bcba",
+  "published_date": "2026-08-21T17:29:02.885Z",
+  "type": {
+   "id": "fullTime",
+   "name": "Full-Time"
+  },
+  "location": {
+   "country": {
+    "name": "United States",
+    "id": "US"
+   },
+   "state": {
+    "id": "NC",
+    "name": "North Carolina"
+   },
+   "city": "Mooresville",
+   "primary": true,
+   "is_remote": true,
+   "name": "Mooresville, NC",
+   "id": "fe6538bb131b",
+   "remote_details": {
+    "value": "remote-location",
+    "label": "Fully remote, within chosen location(s)"
+   }
+  },
+  "department": "Clinician - BCBA",
+  "salary": "$90,000 – $95,000 / year",
+  "company": {
+   "name": "Highlights Healthcare",
+   "logo_url": null,
+   "friendly_id": "highlights-healthcare",
+   "isMultipleLocationsEnabled": true
+  },
+  "locations": [
+   {
+    "country": {
+     "name": "United States",
+     "id": "US"
+    },
+    "state": {
+     "id": "NC",
+     "name": "North Carolina"
+    },
+    "city": "Mooresville",
+    "primary": true,
+    "is_remote": true,
+    "name": "Mooresville, NC",
+    "id": "fe6538bb131b",
+    "remote_details": {
+     "value": "remote-location",
+     "label": "Fully remote, within chosen location(s)"
+    }
+   }
+  ]
+ },
+ {
+  "id": "2f4ac922e106",
+  "friendly_id": "2f4ac922e106-board-certified-behavior-analyst-bcba-lba-sign-on-relocation-dur",
+  "name": "Board Certified Behavior Analyst (BCBA, LBA) - SIGN ON/RELOCATION $ (DUR)",
+  "url": "https://highlights-healthcare.breezy.hr/p/2f4ac922e106-board-certified-behavior-analyst-bcba-lba-sign-on-relocation-dur",
+  "published_date": "2026-06-24T19:58:19.575Z",
+  "type": {
+   "id": "fullTime",
+   "name": "Full-Time"
+  },
+  "location": {
+   "country": {
+    "name": "United States",
+    "id": "US"
+   },
+   "state": {
+    "id": "NC",
+    "name": "North Carolina"
+   },
+   "city": "Durham",
+   "name": "Durham, NC",
+   "primary": true,
+   "id": "1b434f67f387",
+   "is_remote": false
+  },
+  "department": "Clinician - BCBA",
+  "salary": "$95,000 – $110,000 / year",
+  "company": {
+   "name": "Highlights Healthcare",
+   "logo_url": null,
+   "friendly_id": "highlights-healthcare",
+   "isMultipleLocationsEnabled": true
+  },
+  "locations": [
+   {
+    "country": {
+     "name": "United States",
+     "id": "US"
+    },
+    "state": {
+     "id": "NC",
+     "name": "North Carolina"
+    },
+    "city": "Durham",
+    "name": "Durham, NC",
+    "primary": true,
+    "id": "1b434f67f387",
+    "is_remote": false
+   }
+  ]
+ },
+ {
+  "id": "703f893febaa",
+  "friendly_id": "703f893febaa-associate-patent-litigation-ee-cs-me-physics-material-science-21793-san-diego",
+  "name": "Associate - Patent Litigation (EE, CS, ME, Physics, Material Science) #21793 San Diego",
+  "url": "https://vanguard-ip.breezy.hr/p/703f893febaa-associate-patent-litigation-ee-cs-me-physics-material-science-21793-san-diego",
+  "published_date": "2026-07-24T22:57:56.419Z",
+  "type": {
+   "id": "fullTime",
+   "name": "Full-Time"
+  },
+  "location": {
+   "country": {
+    "name": "United States",
+    "id": "US"
+   },
+   "state": {
+    "id": "CA",
+    "name": "California"
+   },
+   "city": "San Diego",
+   "primary": true,
+   "is_remote": false,
+   "name": "San Diego, CA"
+  },
+  "department": null,
+  "salary": "",
+  "company": {
+   "name": "Vanguard-IP",
+   "logo_url": null,
+   "friendly_id": "vanguard-ip",
+   "isMultipleLocationsEnabled": false
+  },
+  "locations": [
+   {
+    "country": {
+     "name": "United States",
+     "id": "US"
+    },
+    "state": {
+     "id": "CA",
+     "name": "California"
+    },
+    "city": "San Diego",
+    "primary": true,
+    "is_remote": false,
+    "name": "San Diego, CA",
+    "id": "8712bbb7c5cf"
+   }
+  ]
+ }
+]

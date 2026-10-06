@@ -11,6 +11,8 @@ Getro are OFF: one needs credentials, the other names a place.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .profile import PROFILE
 
 _src = PROFILE.sources
@@ -81,3 +83,26 @@ GETRO_MAX_DETAILS = _getro.max_details
 # off, and a list of your own replaces them.
 RSS_FEEDS: list[tuple[str, str, str]] = [(f.label or f.url, f.url, f.location)
                                          for f in _src.rss]
+
+# Board directory — [sources.board_directory] (src/discovery/board_directory.py):
+# the jobhive dataset of live postings, read for boards the roster lacks.
+BOARD_DIRECTORY = _src.board_directory
+
+# Name registries (src/discovery/registries.py, enabled by
+# [discovery].registries): each reader's endpoint and query facts.
+REGISTRIES: dict[str, dict[str, Any]] = {
+    "nih_sbir": {
+        "url": "https://api.reporter.nih.gov/v2/projects/search",
+        "activity_codes": ["R41", "R42", "R43", "R44", "U43", "U44", "SB1"],
+        "page": 500,
+        "max_offset": 14999,
+    },
+    "openfda_devices": {
+        "url": "https://api.fda.gov/device/registrationlisting.json",
+        "limit": 1000,
+    },
+}
+
+# Wikidata's API: the domain lookup's fallback (src/discovery/resolve/domain.py)
+# and tools/miss_cleanup.py.
+WIKIDATA_API = "https://www.wikidata.org/w/api.php"

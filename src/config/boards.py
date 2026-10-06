@@ -937,6 +937,104 @@ BOARDS: dict[str, dict[str, Any]] = {
         },
         "closure": {"via": "page"},
     },
+    # Breezy, Recruitee and Pinpoint: public JSON, endpoint shapes credited to
+    # kalil0321/ats-scrapers (MIT).
+    "breezy": {
+        "detect": [{"host": "breezy.hr", "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.breezy\.hr"],
+                    "blocklist": ["www", "app", "api", "help", "support", "blog"],
+                    "careers_url": "https://{slug}.breezy.hr"}],
+        "canary": {"name": "Highlights Healthcare", "handle": "highlights-healthcare",
+                   "min_jobs": 10},
+        "eager": True,
+        "job_ref": {"re": r"(?i)//([a-z0-9][a-z0-9-]*)\.breezy\.hr/p/([0-9a-f]+)"},
+        "listing": {
+            "url": "https://{slug}.breezy.hr/json",
+            "fields": {
+                "id": {"format": "breezy_{slug}_{id}"},
+                "title": "name",
+                "url": "url",
+                "location": {"first": [{"merge": {"primary": "location.name",
+                                                  "extras": "locations[].name"}},
+                                       {"const": "Remote", "when": {"truthy": "location.is_remote"}}],
+                             "default": "Unknown"},
+                "posted_at": "published_date",
+                "remote_hint": {"const": "breezy:is_remote",
+                                "when": {"truthy": "location.is_remote"}},
+                "department": "department",
+            },
+        },
+        # The listing names no body; the posting page's JSON-LD does. A pulled
+        # posting's page still answers 200 (the board's own), so closure is
+        # board membership.
+        "detail": {
+            "url": "https://{slug}.breezy.hr/p/{jid}",
+            "decoder": {"kind": "jsonld"},
+            "fields": {"description": "description"},
+        },
+        "closure": {"via": "listing"},
+    },
+    "recruitee": {
+        "detect": [{"host": "recruitee.com", "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.recruitee\.com"],
+                    "blocklist": ["www", "app", "api", "help", "support", "blog", "status"],
+                    "careers_url": "https://{slug}.recruitee.com"}],
+        "canary": {"name": "Hudson Manpower", "handle": "hudsonmanpower", "min_jobs": 10},
+        # An offer's URL names the offer's slug, not the id its row carries:
+        # closure by board membership, on the row id.
+        "job_ref": {"re": r"(?i)//([a-z0-9][a-z0-9-]*)\.recruitee\.com/o/", "parts": ["slug"]},
+        "listing": {
+            "url": "https://{slug}.recruitee.com/api/offers/",
+            "decoder": {"entries": "offers"},
+            "fields": {
+                "id": {"format": "recruitee_{slug}_{id}"},
+                "title": "title",
+                "url": "careers_url",
+                "location": {"first": [{"merge": {"primary": "location",
+                                                  "extras": {"each": "locations",
+                                                             "do": {"join": ["city", "state", "country"],
+                                                                    "sep": ", "}}}},
+                                       {"const": "Remote", "when": {"truthy": "remote"}}],
+                             "default": "Unknown"},
+                "description": {"join": ["description", "requirements"], "sep": "\n",
+                                "transform": "html_text"},
+                "posted_at": {"first": ["published_at", "created_at"]},
+                "remote_hint": {"const": "recruitee:remote", "when": {"truthy": "remote"}},
+                "department": "department",
+            },
+        },
+        "closure": {"via": "listing"},
+    },
+    "pinpoint": {
+        "detect": [{"host": "pinpointhq.com", "re": [r"(?i)([a-z0-9][a-z0-9-]*)\.pinpointhq\.com"],
+                    "blocklist": ["www", "app", "api", "help", "support", "blog", "developers"],
+                    "careers_url": "https://{slug}.pinpointhq.com"}],
+        "canary": {"name": "ISG", "handle": "isginc", "min_jobs": 10},
+        # A posting's URL names its uuid, not the id its row carries: closure
+        # by board membership, on the row id.
+        "job_ref": {"re": r"(?i)//([a-z0-9][a-z0-9-]*)\.pinpointhq\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?postings/",
+                    "parts": ["slug"]},
+        "listing": {
+            "url": "https://{slug}.pinpointhq.com/postings.json",
+            "decoder": {"entries": "data"},
+            "fields": {
+                "id": {"format": "pinpoint_{slug}_{id}"},
+                "title": "title",
+                "url": "url",
+                # A name is "City, ST" or a bare "City": the province completes the latter.
+                "location": {"first": [{"of": "location.name",
+                                        "when": {"contains": ["location.name", ","]}},
+                                       {"join": ["location.name", "location.province"], "sep": ", "},
+                                       {"const": "Remote", "when": {"eq": ["workplace_type", "remote"]}}],
+                             "default": "Unknown"},
+                "description": {"join": ["description", "key_responsibilities",
+                                         "skills_knowledge_expertise"], "sep": "\n",
+                                "transform": "html_text"},
+                "remote_hint": {"const": "pinpoint:workplace_type",
+                                "when": {"eq": ["workplace_type", "remote"]}},
+                "department": "job.department.name",
+            },
+        },
+        "closure": {"via": "listing"},
+    },
     "phenom": {
         # The tenant's own site is the board, so no vendor host names it:
         # every page embeds its widget API origin, the handle.
@@ -986,22 +1084,230 @@ BOARDS: dict[str, dict[str, Any]] = {
         },
         "closure": {"via": "page"},
     },
+    "oracle": {
+        # Oracle Recruiting Cloud; endpoint shapes credited to kalil0321/ats-scrapers (MIT).
+        # A tenant host serves several sites, so the handle is the host and the site number.
+        "detect": [{"host": "oraclecloud.com",
+                    "re": [r"(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)"
+                           r"/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([A-Za-z0-9_-]+)"],
+                    "transform": ["lower", None]},
+                   {"host": "oraclecloud.com",
+                    "re": [r"(?i)([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)/?\?"
+                           r"(?:[^\s\"'<>#]*&)?site_number=([A-Za-z0-9_-]+)"],
+                    "transform": ["lower", None]}],
+        "canary": {"name": "UL Solutions",
+                   "handle": "fa-eups-saasfaprod1.fa.ocs.oraclecloud.com|ULSolutionsCareers",
+                   "min_jobs": 20},
+        "eager": True,
+        "handle": {"parts": ["host", "site"]},
+        "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+\.fa\.(?:[a-z0-9-]+\.)?oraclecloud\.com)"
+                          r"/hcmUI/CandidateExperience/[A-Za-z_-]+/sites/([^/?#]+)/job/(\d+)",
+                    "parts": ["host", "site", "jid"]},
+        "listing": {
+            "url": "https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitions"
+                   "?onlyData=true&expand=requisitionList.secondaryLocations"
+                   "&finder=findReqs;siteNumber={site},limit={size},offset={offset}",
+            # One search wrapper holds the whole board: its total, then the page.
+            "decoder": {"entries": "items[0].requisitionList"},
+            # The server serves at most 200 rows a page, whatever the limit.
+            "pager": {"kind": "offset", "size": 200, "pages": 40,
+                      "total": "items[0].TotalJobsCount"},
+            "fields": {
+                "_tenant": {"format": "{host}", "transform": "host_label"},
+                "id": {"format": "oracle_{_tenant}_{Id}"},
+                "title": "Title",
+                "url": {"format": "https://{host}/hcmUI/CandidateExperience/en/sites/{site}/job/{Id}"},
+                "location": {"merge": {"primary": "PrimaryLocation",
+                                       "extras": "secondaryLocations[].Name"},
+                             "default": "Unknown"},
+                "posted_at": "PostedDate",
+                "remote_hint": {"const": "oracle:workplaceType",
+                                "when": {"eq": ["WorkplaceTypeCode", "ORA_REMOTE"]}},
+                "department": {"join": ["JobFamily", "JobFunction"]},
+            },
+        },
+        "detail": {
+            "url": "https://{host}/hcmRestApi/resources/latest/recruitingCEJobRequisitionDetails",
+            "params": {"expand": "all", "onlyData": "true",
+                       "finder": 'ById;Id="{jid}",siteNumber={site}'},
+            "record": "items[0]",
+            # The corporate boilerplate stays out; the fit model reads the rest.
+            "fields": {"description": {"join": ["ExternalDescriptionStr",
+                                                "ExternalResponsibilitiesStr",
+                                                "ExternalQualificationsStr"],
+                                       "sep": "\n", "transform": "html_text"}},
+        },
+        "closure": {"open": {"truthy": "Id"},
+                    "unmatched": "requisition no longer served",
+                    "why": "a pulled requisition answers 200 with no items, 2026-10"},
+    },
     # Detection-only platforms: real ATSes discovery recognises but cannot
     # fetch (bot-protected APIs or JS-only boards). A lead's detection
     # names a host or path for the note; an entry with no `re` claims the
-    # vendor's host and detects nothing.
-    "eightfold": {"detect": [{"host": "eightfold.ai", "re": [r"(?i)([a-z0-9-]+\.eightfold\.ai)"]}]},
+    # vendor's host and detects nothing. Eightfold, Taleo and Avature among
+    # them are fetchable since 2026-10, left in place: this order is
+    # detection order (signatures.detect).
+    #
+    # Eightfold: endpoint shapes credited to kalil0321/ats-scrapers (MIT). A tenant's
+    # API wants its company domain, which the host (acme.eightfold.ai) does
+    # not name: the first TLD that answers is the domain.
+    "eightfold": {
+        "detect": [{"host": "eightfold.ai", "re": [r"(?i)([a-z0-9-]+\.eightfold\.ai)"],
+                    "blocklist": ["www.eightfold.ai", "app.eightfold.ai", "apply.eightfold.ai",
+                                  "docs.eightfold.ai", "support.eightfold.ai"]}],
+        "canary": {"name": "Arcadis", "handle": "arcadis.eightfold.ai"},
+        "eager": True,
+        "handle": {"try": {"domain": ["{slug|host_label}.com", "{slug|host_label}.org",
+                                      "{slug|host_label}.net"]},
+                   "accept": {"status": [200]},
+                   "why": "the API's domain is the employer's own, 404 on any other, 2026-10"},
+        "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+\.eightfold\.ai)/careers/job/(\d+)"},
+        "listing": [
+            {
+                "url": "https://{slug}/api/pcsx/search",
+                "params": {"domain": "{domain}", "start": "$offset"},
+                "decoder": {"entries": "data.positions"},
+                # The server sizes its pages (10); the walk learns it.
+                "pager": {"kind": "offset", "pages": 60, "total": "data.count"},
+                "fields": {
+                    "id": {"format": "eightfold_{slug|host_label}_{id}"},
+                    "title": "name",
+                    "url": {"format": "https://{slug}/careers/job/{id}"},
+                    "location": {"join": ["locations[]"], "sep": "; ", "default": "Unknown"},
+                    "posted_at": "postedTs",
+                    "remote_hint": {"const": "eightfold:workLocationOption",
+                                    "when": {"eq": ["workLocationOption", "remote"]}},
+                    "department": "department",
+                },
+            },
+            {
+                "url": "https://{slug}/api/apply/v2/jobs",
+                "decoder": {"entries": "positions"},
+                "pager": {"kind": "offset", "pages": 60, "total": "count"},
+                "fields": {
+                    "id": {"format": "eightfold_{slug|host_label}_{id}"},
+                    "title": "name",
+                    "url": {"format": "https://{slug}/careers/job/{id}"},
+                    "location": {"join": ["locations[]"], "sep": "; ", "default": "Unknown"},
+                    "posted_at": "t_create",
+                    "remote_hint": {"const": "eightfold:workLocationOption",
+                                    "when": {"eq": ["work_location_option", "remote"]}},
+                    "department": "department",
+                },
+                "why": "a tenant without PCSX answers the first 403 and serves this API, 2026-10",
+            },
+        ],
+        # Answers on both APIs; a posting that is gone is a 404.
+        "detail": {
+            "url": "https://{slug}/api/apply/v2/jobs/{jid}",
+            "params": {"domain": "{domain}"},
+            "fields": {"description": {"of": "job_description", "transform": "html_text"}},
+        },
+    },
     "dayforce": {"detect": [{"host": "dayforcehcm.com",
                              "re": [r"(?i)(dayforcehcm\.com/[a-zA-Z-]+/[a-zA-Z0-9_-]+)"]}]},
-    "recruitee": {"detect": [{"host": "recruitee.com", "re": [r"(?i)([a-z0-9-]+\.recruitee\.com)"]}]},
     "teamtailor": {"detect": [{"host": "teamtailor.com",
                                "re": [r"(?i)([a-z0-9-]+\.teamtailor\.com)"]}]},
-    "taleo": {"detect": [{"host": "taleo.net", "re": [r"(?i)([a-z0-9-]+\.taleo\.net)"]}]},
+    # Taleo Business Edition ("tbe"): an org on a site path, its career
+    # center the (org, cws) pair. Enterprise Taleo stays a lead below.
+    "taleo": {
+        "detect": [{"host": "tbe.taleo.net",
+                    "re": [r"(?i)([a-z0-9-]+\.tbe\.taleo\.net/[a-z0-9]+)/ats/careers/v2/"
+                           r"(?:searchResults|viewRequisition)\?org=([A-Za-z0-9_-]+)&cws=(\d+)"]}],
+        "canary": {"name": "Nurses and More, Inc.", "handle": "phh.tbe.taleo.net/phh04|NFINDY|37"},
+        "eager": True,
+        "handle": {"parts": ["site", "org", "cws"]},
+        "job_ref": {"re": r"(?i)^https?://([a-z0-9-]+\.tbe\.taleo\.net/[a-z0-9]+)/ats/careers/v2/"
+                          r"viewRequisition\?org=([A-Za-z0-9_-]+)&cws=(\d+)&rid=(\d+)",
+                    "parts": ["site", "org", "cws", "jid"]},
+        "listing": {
+            "url": "https://{site}/ats/careers/v2/searchResults",
+            "params": {"org": "{org}", "cws": "{cws}", "next": "$page", "rowFrom": "$offset"},
+            # Rows 10 a page, to the first empty one; a later page reads the
+            # session the first one opens.
+            "pager": {"kind": "page", "size": 10, "pages": 40, "bare_first": True,
+                      "why": "the first request opens the search session, a later one asks "
+                             "`next`, 2026-10"},
+            "decoder": {"kind": "html", "select": "a.viewJobLink", "context": ["div"],
+                        "cells": {"place": "h4 + div", "dept": "h4 + div + div"}},
+            "fields": {
+                "_rid": {"of": "url", "transform": "group:rid=(\\d+)"},
+                "id": {"format": "taleo_{org|lower}_{cws}_{_rid}", "when": {"truthy": "_rid"}},
+                "title": "text",
+                "url": "url",
+                "location": {"of": "place", "transform": "one_line", "default": "Unknown"},
+                "department": "dept",
+            },
+        },
+        "detail": {
+            "url": "https://{site}/ats/careers/v2/viewRequisition",
+            "params": {"org": "{org}", "cws": "{cws}", "rid": "{jid}"},
+            "decoder": {"kind": "jsonld"},
+            "fields": {"description": "description", "posted_at": "posted_at"},
+        },
+        "closure": {"via": "page"},
+    },
+    "taleo_enterprise": {
+        "detect": [{"host": "taleo.net", "re": [r"(?i)([a-z0-9-]+\.taleo\.net)"],
+                    "blocklist": ["tbe.taleo.net"]}]},
+    # Avature: a portal path on the tenant's own host (`/careers`,
+    # `/en_US/careers`), keyed on its URL.
+    "avature": {
+        "detect": [{"host": "avature.net",
+                    "re": [r"(?i)(https?://[a-z0-9.-]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)"
+                           r"/(?:SearchJobs|JobDetail)\b"],
+                    "careers_url": "{slug}"}],
+        "canary": {"name": "Unifi", "handle": "https://careers.unifiservice.com/careers"},
+        "handle": {"columns": ["careers_url"], "parts": ["base"]},
+        "job_ref": {"re": r"(?i)^(https?://[^/?#]+(?:/[a-z]{2}_[A-Z]{2})?/[a-z]+)/JobDetail/"
+                          r"(?:[^/?#]*/)?(\d+)",
+                    "parts": ["base", "jid"]},
+        "listing": {
+            "url": "{base|rstrip_slash}/SearchJobs",
+            "params": {"jobOffset": "$offset"},
+            # The tenant sizes its pages (12, 20); the page's legend says
+            # "1-20 of 720 results".
+            "pager": {"kind": "offset", "pages": 60,
+                      "total": {"of": {"of": "page", "transform": r"group:(?s)\bof\s+([\d,]+)\s+results"},
+                                "transform": "int"}},
+            "decoder": {"kind": "html", "select": "article.article--result .article__header__text__title a",
+                        "context": ["article"],
+                        "cells": {"loc": ".list-item-location", "country": ".list-item-country",
+                                  "dept": ".list-item-department"}},
+            "fields": {
+                "_jid": {"of": "url", "transform": r"group:/(\d+)/?(?:[?#]|$)"},
+                "_key": {"format": "{base}", "transform": "host_key"},
+                "id": {"format": "avature_{_key}_{_jid}", "when": {"truthy": "_jid"}},
+                "title": "text",
+                "url": "url",
+                "location": {"first": ["loc", "country"], "default": "Unknown"},
+                "department": "dept",
+            },
+        },
+        # A list naming only a country is placed from its title, else its page.
+        "rescue": {"when": "always", "unknown": "^[^,]*$", "cap": 150, "cache_days": 7,
+                   "free": "text",
+                   "why": "a tenant's list names a country, its posting page the city, 2026-10"},
+        "eager": True,
+        "detail": {
+            "url": "{base|rstrip_slash}/JobDetail/-/{jid}",
+            "decoder": {"kind": "html", "select": "body",
+                        "cells": {"city": ".article__content__view__field:contains('City') "
+                                          ".article__content__view__field__value",
+                                  "state": ".article__content__view__field:contains('State') "
+                                           ".article__content__view__field__value",
+                                  "description": "article:contains('Description') "
+                                                 ".article__content__view__field__value"}},
+            "fields": {"description": "description",
+                       "location": {"join": ["city", "state"], "sep": ", "}},
+            "location": "if_unknown",
+        },
+        "closure": {"via": "page"},
+    },
     # UKG Pro's other hosts: the board URL shape is the ultipro spec's.
     "ukg": {"detect": [{"host": "ultipro.com", "re": [r"(?i)([a-z0-9-]+\.ultipro\.com)"]}]},
     "paycom": {"detect": [{"host": "paycomonline.net",
                            "re": [r"(?i)(paycomonline\.net/[A-Za-z0-9/_-]+)"]}]},
-    "breezy": {"detect": [{"host": "breezy.hr", "re": [r"(?i)([a-z0-9-]+\.breezy\.hr)"]}]},
     "gohire": {"detect": [{"host": "gohire.io", "re": [r"(?i)([a-z0-9-]+\.gohire\.io)"]}]},
     "polymer": {"detect": [{"host": "polymer.co"}]},
     "gusto": {"detect": [{"host": "gusto.com"}]},

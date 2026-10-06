@@ -1,0 +1,6 @@
+{"meta": {"total": 3, "offset": 0, "limit": 500},
+ "results": [
+  {"organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
+  {"organization": {"org_name": "ACME THERAPEUTICS, INC.", "org_city": "DURHAM", "org_state": "NC"}},
+  {"organization": {"org_name": "NEURO WIDGETS LLC", "org_city": "CHAPEL HILL", "org_state": "NC"}}
+ ]}

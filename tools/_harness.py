@@ -23,7 +23,9 @@ makes importing this module possible, so it cannot live in it.
 from __future__ import annotations
 
 import re
+import sqlite3
 import sys
+from pathlib import Path
 
 # An anti-bot wall or a rate limit says nothing about our parser: the
 # endpoint is reachable and the code is fine, the request was refused.
@@ -64,3 +66,11 @@ def blame(note: str | None) -> str:
     'broken'
     """
     return "blocked" if BLOCKED_RE.search(note or "") else "broken"
+
+
+def open_ro(path: str | Path) -> sqlite3.Connection:
+    """The store at `path` through a mode=ro URI (no migration, no WAL
+    pragma): SQLite refuses any write. Rows are `sqlite3.Row`."""
+    conn = sqlite3.connect(f"{Path(path).resolve().as_uri()}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn

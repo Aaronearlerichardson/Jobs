@@ -546,7 +546,7 @@ class TestReviewQueue:
         monkeypatch.setattr(ls, "parse_company_names",
                             lambda *a, **k: ["Alpaca Health"])
         tried = []
-        monkeypatch.setattr(ls, "resolved",
+        monkeypatch.setattr("src.discovery.local_sourcing.resolved",
                             answer(lambda *a, **k: tried.append(a) or (None, "x")))
         rows = json.loads(client.post(
             "/api/names/preview", json={"text": "x", "use_llm": False}).data)

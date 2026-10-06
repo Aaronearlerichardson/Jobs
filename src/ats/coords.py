@@ -114,6 +114,16 @@ def board_slug(company: BoardCoords) -> Any:
     return (first != "careers_url" and company.get(first)) or company.get("slug") or ""
 
 
+def slug_title(company: BoardCoords) -> str:
+    """A board's name from its `board_slug` alone, '' without one.
+
+    >>> slug_title({"ats": "lever", "slug": "acme-bio"})
+    'Acme Bio'
+    """
+    slug = board_slug(company)
+    return str(slug).replace("-", " ").title() if slug else ""
+
+
 def slug_named(company: CompanyRow) -> bool:
     """True when a roster row is named after nothing but its own board
     slug/tenant AND was named from that slug in the first place -- the one

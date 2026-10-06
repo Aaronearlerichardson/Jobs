@@ -12,6 +12,7 @@
                          (or scanning its pages, `discovery.scan`) and
                          counting its local postings
     websearch_board.py   the same question asked of a search engine
+    domain.py            name -> official web domain, to seed the sniff
     board.py             the top: name -> validated board, or the miss
                          reason that explains why not
 

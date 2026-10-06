@@ -565,7 +565,7 @@ class TestResolutionStallWatchdog:
             return None, "no-board-found"
 
         monkeypatch.setattr(resolve_board, "resolve_or_miss", _resolve)
-        monkeypatch.setattr(paste_ingest, "RESOLVE_STALL_S", 0.3)
+        monkeypatch.setattr(local_sourcing, "RESOLVE_STALL_S", 0.3)
         misses = []
         monkeypatch.setattr(
             "src.store.record_miss",
@@ -673,7 +673,7 @@ Durham, NC (Hybrid)
 class TestResolveBoardSniffFirstCustomShortCircuit:
     """Offline coverage for the Task 1 fix: a `custom` sniff hit only wins
     immediately when it already carries local jobs. No network: sniff_ats,
-    probe_company, websearch_board and _validate_board are all faked."""
+    probe_company, websearch_board and validate_board are all faked."""
 
     @staticmethod
     def _sniff_custom(careers_url="https://x.example/careers"):
@@ -697,7 +697,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(resolve_board, "websearch_board", _websearch)
         # The marketing page "validates" (a handful of scraped fragments)
         # but has zero LOCAL jobs.
-        monkeypatch.setattr(resolve_board, "_validate_board", answer((9, 0)))
+        monkeypatch.setattr(resolve_board, "validate_board", answer((9, 0)))
 
         hit = await resolve_board.resolve_board_sniff_first("Pfizer")
 
@@ -715,7 +715,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(
             resolve_board, "websearch_board",
             answer(lambda *a, **k: calls.update(websearch=calls["websearch"] + 1)))
-        monkeypatch.setattr(resolve_board, "_validate_board", answer((5, 2)))
+        monkeypatch.setattr(resolve_board, "validate_board", answer((5, 2)))
 
         hit = await resolve_board.resolve_board_sniff_first("Science.xyz")
 
@@ -728,7 +728,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", self._sniff_custom())
         monkeypatch.setattr(resolve_board, "probe_company", answer(None))
         monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
-        monkeypatch.setattr(resolve_board, "_validate_board", answer((9, 0)))
+        monkeypatch.setattr(resolve_board, "validate_board", answer((9, 0)))
 
         hit = await resolve_board.resolve_board_sniff_first("Novozymes")
 
@@ -751,7 +751,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         async def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (10, 4)
 
-        monkeypatch.setattr(resolve_board, "_validate_board", _validate)
+        monkeypatch.setattr(resolve_board, "validate_board", _validate)
 
         hit = await resolve_board.resolve_board_sniff_first("Acme")
 
@@ -769,7 +769,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         async def _validate(comp):
             return (9, 0) if comp["ats"] == "custom" else (20, 6)
 
-        monkeypatch.setattr(resolve_board, "_validate_board", _validate)
+        monkeypatch.setattr(resolve_board, "validate_board", _validate)
 
         hit = await resolve_board.resolve_board_sniff_first("Acme")
 
@@ -784,7 +784,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", answer(
             lambda *a, **k: pytest.fail("the URL names the board")))
         seen = []
-        monkeypatch.setattr(resolve_board, "_validate_board",
+        monkeypatch.setattr(resolve_board, "validate_board",
                             answer(lambda comp: seen.append(comp) or (12, 3)))
         url = "https://careers-acme.icims.com/jobs/search"
 
@@ -803,7 +803,7 @@ class TestResolveBoardSniffFirstCustomShortCircuit:
         monkeypatch.setattr(sniffer, "sniff_ats", answer(None))
         for step in ("probe_company", "websearch_board"):
             monkeypatch.setattr(resolve_board, step, answer(None))
-        monkeypatch.setattr(resolve_board, "_validate_board", answer(
+        monkeypatch.setattr(resolve_board, "validate_board", answer(
             lambda comp: pytest.fail("a foreign board was fetched")))
         url = "https://danaher.wd1.myworkdayjobs.com/DanaherJobs"
 
@@ -1275,7 +1275,7 @@ class TestValidateCandidateResolutionOrder:
     here may reintroduce a probe that outranks the careers-page sniff.
 
     Offline: sniff_ats, probe_company, websearch_board and
-    _validate_board are all faked.
+    validate_board are all faked.
     """
 
     @staticmethod
@@ -1284,7 +1284,7 @@ class TestValidateCandidateResolutionOrder:
         monkeypatch.setattr(resolve_board, "probe_company", answer(probe))
         monkeypatch.setattr(resolve_board, "websearch_board", answer(None))
         monkeypatch.setattr(
-            resolve_board, "_validate_board",
+            resolve_board, "validate_board",
             answer(lambda comp: (boards or {}).get(
                 (comp["ats"], comp.get("slug")), (0, 0))))
         monkeypatch.setattr(pipeline, "sniff_careers_ats", answer(None))
@@ -1498,13 +1498,13 @@ class TestApplyToStoreFetchability:
         the sniffer can NAME but nothing can fetch stays out of the roster."""
         import src.store as store
         self._wire(monkeypatch, db)
-        assert company_fetch.board_for("eightfold") is None
+        assert company_fetch.board_for("teamtailor") is None
 
         lines = await self._apply(self._candidate(
-            "Gamma Devices", "eightfold", "gamma",
+            "Gamma Devices", "teamtailor", "gamma",
             "https://gamma.example/careers"))
 
-        assert any("no fetcher for ATS 'eightfold'" in ln for ln in lines)
+        assert any("no fetcher for ATS 'teamtailor'" in ln for ln in lines)
         assert store.get_companies(db, active_only=False) == []
 
     async def test_a_slug_keyed_candidate_is_unchanged(self, monkeypatch, db):

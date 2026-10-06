@@ -62,8 +62,9 @@ class Candidate:
     # them while validating, and the roster write tags the row LOCAL on it.
     nc: int = 0
     # How the board was found: "sniff" (read off the company's own careers
-    # page), "probe" (a name-guessed slug), "websearch", or "js" (the
-    # headless careers-page scan). Empty while unconfirmed.
+    # page), "probe" (a name-guessed slug), "websearch", "directory" (the
+    # public board directory, by name) or "js" (the headless careers-page
+    # scan). Empty while unconfirmed.
     via: str = ""
     tried_slugs: list[str] = field(default_factory=list)
     # Set when the candidate is unconfirmed but its careers page links to a
@@ -89,7 +90,7 @@ def candidate_from_dict(d: dict[str, Any]) -> Candidate:
 #: Why a confirmed board still deserves a human glance, keyed by HOW it was
 #: found. A sniff read the coordinates off the company's OWN careers page,
 #: which is the one provenance that cannot collide with a same-named
-#: stranger; the other three guessed a handle and then validated it, which is
+#: stranger; the others guessed or looked up a handle and then validated it, which is
 #: weaker evidence of WHOSE board it is.
 _VIA_NOTES = {
     "sniff":     "sniffed from the careers page",
@@ -97,6 +98,8 @@ _VIA_NOTES = {
                  "- confirm identity",
     "websearch": "found by web search, not on the company's own site",
     "js":        "headless careers-page scan - confirm identity",
+    "directory": "matched by name in the public board directory "
+                 "- confirm identity",
 }
 
 

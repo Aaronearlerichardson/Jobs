@@ -207,7 +207,7 @@ class SessionLog:
         # event-loop policy at DEBUG. Their WARNING+ records (retries,
         # request failures) still land.
         for name in ("urllib3", "requests", "charset_normalizer", "playwright",
-                     "werkzeug", "asyncio"):
+                     "werkzeug", "asyncio", "primp", "ddgs"):
             noisy = logging.getLogger(name)
             if noisy.level == logging.NOTSET or noisy.level < logging.WARNING:
                 noisy.setLevel(logging.WARNING)

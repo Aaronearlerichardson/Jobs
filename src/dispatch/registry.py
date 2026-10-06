@@ -43,7 +43,7 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
 
 from src import config
 from src.crawl import runner, triage
-from src.discovery import local_sourcing, paste_ingest
+from src.discovery import board_directory, local_sourcing, paste_ingest, registries
 from src.ops import (backfill, ingest, rekey, repair, restamp, roster, scoring,
                      status)
 from src.validation import drop_blank, error_lines
@@ -243,6 +243,15 @@ class DiscoverTerm(OpParams):
     dry_run: bool = False
 
 
+class ImportBoards(OpParams):
+    apply: bool = False
+    limit: int | None = _omit()
+
+
+class DiscoverRegistries(ImportBoards):
+    """A dry run unless `apply`; `limit` caps the names resolved."""
+
+
 class ScoreMissions(OpParams):
     rescore_all: bool = Field(False, validation_alias="rescore")
 
@@ -398,6 +407,20 @@ REGISTRY: dict[str, dict[str, Any]] = {
         "engine": "local",
         "target": roster.dork_sweep,
         "params": OpParams,
+    },
+    "import-boards": {
+        "label": "Import local boards from the board directory",
+        "engine": "local",
+        "target": board_directory.import_boards,
+        "params": ImportBoards,
+        "ui": False,      # a dry run first; --apply pays for mission scores
+    },
+    "discover-registries": {
+        "label": "Discover companies from public registries",
+        "engine": "local",
+        "target": registries.discover_registries,
+        "params": DiscoverRegistries,
+        "ui": False,      # a dry run first; --apply pays for resolution and scores
     },
     "discover-term": {
         "label": "Discover companies by term",

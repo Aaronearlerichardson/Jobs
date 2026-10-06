@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import cast
+from urllib.parse import unquote_plus
 
 from src import config
 from src.claude.reply import Reply
@@ -166,8 +167,18 @@ def _looks_like_company(name: str | None) -> bool:
     return True
 
 
-def _names_from_html(html: str | None) -> set[str]:
-    # On a directory/listicle page, an employer is a `/company/<slug>/` link.
+def _names_from_html(html: str | None, link_re: str = "") -> set[str]:
+    """Employer names on a directory page: group 1 of `link_re` on each match
+    (URL-decoded), else each `/company/<slug>/` link's slug, title-cased.
+
+    >>> sorted(_names_from_html('<a href="/company/acme-bio/">x</a>'))
+    ['Acme Bio']
+    >>> sorted(_names_from_html('<a href="/co.php/Acme%20Bio">x</a>', '/co.php/([^/?#"]+)'))
+    ['Acme Bio']
+    """
+    if link_re:
+        found = {unquote_plus(m).strip() for m in re.findall(link_re, html or "")}
+        return {n for n in found if _looks_like_company(n)}
     company_slug_re = re.compile(r"/company/([a-z0-9][a-z0-9\-]{2,58})/?", re.I)
     stop_slugs = {"research-triangle-park"}
     out = set()
@@ -185,19 +196,19 @@ def _names_from_html(html: str | None) -> set[str]:
 
 
 async def scrape_directory_names(
-        url: str,
+        url: str, link_re: str = "",
         timeout: float | tuple[float, float] | None = config.FETCH_TIMEOUT) -> list[str]:
-    """Employer names from a directory page's `/company/<slug>/` links — works
-    for any site with that shape (RTP.org, Built In, chamber directories).
-    Server-rendered only; JS-loaded facets are out of scope. The page is
-    read off the loop."""
+    """Employer names from a directory page's `/company/<slug>/` links, or
+    from `link_re`'s first group when given -- works for any site with that
+    shape (RTP.org, Built In, chamber directories). Server-rendered only;
+    JS-loaded facets are out of scope. The page is read off the loop."""
     try:
         r = await http.send("GET", url, timeout=timeout, headers=HEADERS)
         r.raise_for_status()
     except Exception as e:
         print(f"    [!] directory scrape failed ({url}): {e}")
         return []
-    return sorted(await asyncio.to_thread(lambda: _names_from_html(r.text)))
+    return sorted(await asyncio.to_thread(lambda: _names_from_html(r.text, link_re)))
 
 
 async def harvest_search_names(queries: list[str], per_query: int = 12,
@@ -278,8 +289,8 @@ async def gather_names(extra: list[str] | None = None) -> list[str]:
     profile seeds + majors + configured directory scrapes + web-search
     harvesting + an LLM region/domain brainstorm + any explicit `extra`."""
     sources = [SEED_COMPANIES, MAJORS]
-    sources += [await scrape_directory_names(url)
-                for url in config.DISCOVERY_DIRECTORY_URLS]
+    sources += [await scrape_directory_names(p.url, p.link_re)
+                for p in config.DISCOVERY_DIRECTORY_PAGES]
     harvested = await harvest_search_names(config.DISCOVERY_NAME_SEARCH_QUERIES)
     if harvested:
         print(f"    web-search harvested {len(harvested)} candidate name(s)")

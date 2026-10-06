@@ -277,7 +277,13 @@ DISCOVERY_SEED_NAMES         = [s["name"] for s in DISCOVERY_SEED_COMPANIES]
 # Discovery terms that pull the seeds in (empty = always). See src/discovery/seeds.py.
 DISCOVERY_SEED_TRIGGERS      = list(PROFILE.discovery.seed_triggers)
 DISCOVERY_SCAN_MAJORS        = list(PROFILE.discovery.scan_majors)
-DISCOVERY_DIRECTORY_URLS     = list(PROFILE.discovery.directory_urls)
+DISCOVERY_DIRECTORY_PAGES    = list(PROFILE.discovery.directory_urls)
+DISCOVERY_DIRECTORY_URLS     = [p.url for p in DISCOVERY_DIRECTORY_PAGES]
+DISCOVERY_DOMAIN_LOOKUP      = PROFILE.discovery.domain_lookup
+DISCOVERY_DOMAIN_LOOKUP_URLS = list(PROFILE.discovery.domain_lookup_urls)
+DISCOVERY_DOMAIN_HOSTS       = list(PROFILE.discovery.domain_hosts)
+DISCOVERY_LOCALE_PATHS       = list(PROFILE.discovery.locale_paths)
+DISCOVERY_REGISTRIES         = list(PROFILE.discovery.registries)
 DISCOVERY_NAME_SEARCH_QUERIES = list(PROFILE.discovery.name_search_queries)
 # LLM name-brainstorm source for discovery (names verified downstream, so
 # hallucinations are harmless); 0 disables.

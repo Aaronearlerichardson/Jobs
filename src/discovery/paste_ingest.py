@@ -19,16 +19,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from typing import Any, cast
+from typing import Any
 
 from src import store
 from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
-from src.net.parallel import RESOLVE_STALL_S, fan_out
-from src.rows import BoardHit
-from .local_sourcing import score_and_upsert
+from src.rows import BoardHit, CompanyIn, CompanyRow
+from .local_sourcing import queue_names
 from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
-from .resolve.board import resolved
 
 
 def _is_sentence_case(name: str) -> bool:
@@ -421,6 +419,21 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
     return out
 
 
+def _report_queued(_name: str, hit: BoardHit,
+                   result: tuple[CompanyRow | CompanyIn, int, bool]) -> None:
+    """One add_names line. `via` says how the board was found: 'sniff' read
+    it off the company's own careers page, 'probe' guessed a slug, and
+    'websearch' only means some result URL matched; the review queue shows
+    the reviewer which of the weakest two they are looking at."""
+    row, active, pending = result
+    flag = {"probe": "  [slug-guess]",
+            "websearch": "  [websearch match]"}.get(hit.get("via") or "", "")
+    state = "pending review" if pending else "active" if active else "inactive"
+    print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
+          f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(row['mission_tier']):20} "
+          f"{state}{flag}")
+
+
 async def add_names(names: str | bytes | list[str], use_llm: bool = False,
                     max_workers: int = 6,
                     include_missions: list[str] | None = None) -> list[BoardHit]:
@@ -466,43 +479,12 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
         if not fresh:
             return []
 
-        written: list[BoardHit] = []
-        unresolved: list[tuple[str, str | None]] = []
-        stalled: list[str] = []
-
-        async for name, (hit, reason) in fan_out(
-                fresh, resolved, str, max_workers, with_item=True,
-                stall_s=RESOLVE_STALL_S, on_abandon=stalled.append):
-            if not hit:
-                # A pasted name that resolves to nothing used to be printed
-                # once and lost; keep it with a reason so the paste is a
-                # worklist, not a one-shot.
-                await db.run(store.record_miss, name, cast(str, reason), source="paste")
-                unresolved.append((name, reason))
-                continue
-            result = await score_and_upsert(db, hit, source="paste",
-                                            include_missions=include_missions)
-            if not result:
-                continue
-            row, active, pending = result
-            written.append(hit)
-            tier = row["mission_tier"]
-            # resolve_board_sniff_first's `via` says HOW the board was found:
-            # 'sniff' read it off the company's own careers page, 'probe' guessed
-            # a slug from the name, 'websearch' only means some result URL
-            # matched. The weakest two used to be corroborated (or written
-            # inactive) here; the review queue is that check now, and it shows
-            # the reviewer which one they are looking at.
-            flag = {"probe": "  [slug-guess]",
-                    "websearch": "  [websearch match]"}.get(hit.get("via") or "", "")
-            state = ("pending review" if pending
-                     else "active" if active else "inactive")
-            print(f"    [{'queue' if pending else ' ok  '}] {hit['name'][:30]:30} "
-                  f"{hit['ats']:12} {hit['nc']}/{hit['count']:<5} {str(tier):20} "
-                  f"{state}{flag}")
-        for n in stalled:
-            await db.run(store.record_miss, n, "fetch-error:stalled", source="paste")
-            unresolved.append((n, "fetch-error:stalled"))
+        # A pasted name that resolves to nothing is kept as a miss with its
+        # reason, so the paste is a worklist, not a one-shot. A person named
+        # it, so a live board with no local jobs is queued all the same.
+        written, unresolved = await queue_names(
+            db, fresh, "paste", max_workers=max_workers, local_only=False,
+            include_missions=include_missions, report=_report_queued)
     if unresolved:
         print(f"\n  {len(unresolved)} name(s) did not resolve to a live board "
               f"(kept as misses — see the companies table's miss_reason):")

@@ -16,6 +16,7 @@ import asyncio
 import json
 import sqlite3
 from collections.abc import Iterable, Sequence
+from functools import partial
 from typing import Any
 
 from src import config
@@ -26,11 +27,14 @@ from src.ats.board import BOARDS
 from src.ats.board import company as company_fetch
 from src.ats.signatures import detect
 from src.discovery.local_sourcing import score_and_upsert
+from src.discovery.resolve.board import validate_board
 from src.discovery.resolve.identity import nc_hq_signal
 from src.discovery.resolve.probes import slug_keyed
 from src.match.locality import NC_RE
 from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
+from src.net.parallel import fan_out
+from src.rows import BoardHit
 
 
 def _or_group(terms: Sequence[str], n: int = 8) -> str:
@@ -184,57 +188,102 @@ def _existing_boards(conn: sqlite3.Connection) -> set[Any]:
     return {k for k in map(store.board_key, store.get_companies(conn, active_only=False)) if k}
 
 
-async def harvest_urls(urls: Iterable[str], verbose: bool = True) -> tuple[int, int]:
-    """
-    Extract boards from `urls`, NC-verify + mission-score the new ones, and
-    queue them for review. Returns (added, checked).
-    Company name is provisionally the slug (real name can be refined later);
-    mission scoring uses the board's live job titles for domain context.
+async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
+    """`cand` with the counts of a live read of its board, or None when it
+    is not worth scoring: no live local posting (`require_live`), else no
+    local posting and no confirmed local HQ either."""
+    comp = coords.from_hit(cand)
+    if require_live:
+        counts = await validate_board(comp)
+        if not counts or counts[1] < 1:
+            return None
+        total, nc = counts
+    else:
+        try:
+            jobs = await company_fetch.fetch_company(comp, NC_RE, validate=True)
+        except Exception:
+            jobs = []
+        total = nc = len(jobs)
+        # Add even with 0 current NC openings IF we can confirm an NC HQ/office
+        # (so a daily run catches their next NC posting) -- but not otherwise,
+        # else non-NC companies that merely mention NC would pollute the roster.
+        if nc == 0 and not await nc_hq_signal(cand["name"]):
+            return None
+    return {**cand, "nc": nc, "count": total}
 
-    A dorked board is the weakest-sourced candidate in the codebase -- a
-    search engine indexed a URL and the company NAME is a de-hyphenated slug
-    -- so every row lands in the review queue (src.store.mark_pending)
-    rather than on the roster.
+
+async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
+                        tags: str | None = company_tags.LOCAL,
+                        require_live: bool = False, limit: int | None = None,
+                        verbose: bool = True) -> tuple[int, int]:
     """
-    boards = extract_boards_from_urls(urls)
+    Read each candidate board the roster lacks (a `BoardHit`: ats, slug and
+    optionally name and careers_url), mission-score the ones with local
+    jobs, and queue them for review under `source`. Returns (added, checked).
+    A nameless candidate is named after its slug; mission scoring reads the
+    board's live job titles for domain context.
+
+    Every row lands in the review queue (src.store.mark_pending), never on
+    the roster: a candidate named by a search engine or a dataset is the
+    weakest-sourced one in the codebase.
+
+    `require_live` admits only a board with a live local posting, read the
+    way the resolver reads one; without it a board with none is admitted too
+    when the employer has a confirmed local HQ (dork's rule). `limit` caps
+    the rows written, taking candidates in the order given.
+
+    Notes:
+        harvest_urls' body, made the one intake of every board-first source
+        (2026-10-05). Reads run concurrently across hosts for a directory
+        pass; dork's HQ lookups stay one at a time.
+    """
+    named: list[BoardHit] = [
+        {**c, "name": c.get("name") or coords.slug_title(coords.from_hit(c))}
+        for c in candidates]
     async with store.Writer() as db:
         have = await db.run(_existing_boards)
+        todo = [c for c in named if store.board_key(coords.from_hit(c)) not in have]
+        origin = ((lambda c: company_fetch.board_origin(coords.from_hit(c)))
+                  if require_live else None)
         added = 0
-        for ats, slug in boards:
-            comp = coords.columns(ats, slug)
-            if store.board_key(comp) in have:
-                continue
-            try:
-                jobs = await company_fetch.fetch_company(comp, NC_RE, validate=True)
-            except Exception:
-                jobs = []
-            nc = len(jobs)
-            name = coords.board_slug(comp).replace("-", " ").title()
-            # Add even with 0 current NC openings IF we can confirm an NC HQ/office
-            # (so a daily run catches their next NC posting) — but not otherwise,
-            # else non-NC companies that merely mention NC would pollute the roster.
-            if nc == 0 and not await nc_hq_signal(name):
-                continue
-            # Scoring, activation and the review queue are the shared write
-            # path (local_sourcing.score_and_upsert). The row is tagged local
-            # even at nc == 0: the HQ signal above is what admitted it. An
-            # inactive row is near-unrecoverable here -- harvest_urls skips
-            # boards already in the store, so the company is never re-probed --
-            # which is why the activation rule must be the shared one.
-            result = await score_and_upsert(
-                db, {"name": name, "ats": ats, "slug": slug, "nc": nc, "count": nc},
-                source=SLUG_NAME_SOURCE, tags=company_tags.LOCAL)
-            if not result:
-                continue
-            row, active, pending = result
-            added += 1
-            if verbose:
-                state = ("PENDING" if pending
-                         else "ACTIVE" if active else "inactive")
-                print(f"  {name[:26]:26} {ats:12} nc={nc:2} "
-                      f"{str(row['mission_tier']):19} "
-                      f"{row['mission_score'] or 0:.2f} {state}")
-    return added, len(boards)
+        while todo and (limit is None or added < limit):
+            size = 30 if limit is None else min(30, 2 * (limit - added))
+            chunk, todo = todo[:size], todo[size:]
+            live: dict[int, BoardHit] = {}
+            async for cand, hit in fan_out(chunk, partial(_live_board, require_live=require_live),
+                                           "board", with_item=True, max_workers=1, key=origin):
+                if hit:
+                    live[id(cand)] = hit
+            for cand in chunk:
+                hit = live.get(id(cand))
+                if not hit or (limit is not None and added >= limit):
+                    continue
+                # Scoring, activation and the review queue are the shared write
+                # path (local_sourcing.score_and_upsert). The row is tagged local
+                # even at nc == 0: the HQ signal is what admitted it. An inactive
+                # row is near-unrecoverable here -- a board already in the store
+                # is never re-probed -- which is why the activation rule must be
+                # the shared one.
+                result = await score_and_upsert(db, hit, source=source, tags=tags)
+                if not result:
+                    continue
+                row, active, pending = result
+                added += 1
+                if verbose:
+                    state = ("PENDING" if pending
+                             else "ACTIVE" if active else "inactive")
+                    print(f"  {hit['name'][:26]:26} {hit['ats'] or '':12} nc={hit['nc']:2} "
+                          f"{str(row['mission_tier']):19} "
+                          f"{row['mission_score'] or 0:.2f} {state}")
+    return added, len(named)
+
+
+async def harvest_urls(urls: Iterable[str], verbose: bool = True) -> tuple[int, int]:
+    """Extract boards from `urls` and intake the new ones (`intake_boards`),
+    each named after its slug. Returns (added, checked)."""
+    return await intake_boards(
+        ({"ats": ats, "slug": slug} for ats, slug in extract_boards_from_urls(urls)),
+        SLUG_NAME_SOURCE, verbose=verbose)
 
 
 def _next_rotation_index() -> int:

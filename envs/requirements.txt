@@ -29,6 +29,9 @@ typing_extensions>=4.13
 # DDG text search, no API key.
 ddgs>=5.0.0
 
+# Board-directory import (discover.py --import-boards): reads remote Parquet.
+duckdb>=1.4
+
 # Optional - only needed for `discover.py --capture-session` and friends.
 # After install, also run: `playwright install chromium`
 playwright>=1.44.0

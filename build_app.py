@@ -255,7 +255,7 @@ HARVEST_FORBID = ["flask", "werkzeug", "jinja2"]
 # HARVEST_LAZY is the opposite case: src/discovery really does import these,
 # behind guards a whole-board pull never takes. The import exists, so
 # "error" would fail every build; we just decline to follow it.
-HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp"]
+HARVEST_LAZY = ["playwright", "ddgs", "fake_useragent", "primp", "duckdb"]
 
 # The union, for tools/entrydeps.py --check, which reports which skips are
 # doing real work.

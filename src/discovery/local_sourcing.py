@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Awaitable, Callable, Collection, Iterable
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
 from datetime import datetime, timedelta
 from typing import Any, cast
 
@@ -705,6 +705,54 @@ async def populate_companies(extra_names: list[str] | None = None,
         except Exception as e:
             print(f"  [!] dork sweep failed (name-based results unaffected): {e}")
     return written
+
+
+async def queue_names(db: store.Writer, names: Collection[str], source: str,
+                      careers_urls: Mapping[str, str] | None = None,
+                      max_workers: int = 6, *, local_only: bool = True,
+                      include_missions: list[str] | None = None,
+                      report: Callable[[str, BoardHit, tuple[CompanyRow | CompanyIn, int, bool]],
+                                       None] | None = None
+                      ) -> tuple[list[BoardHit], list[tuple[str, str]]]:
+    """Resolve each of `names` (its `careers_urls` entry, when it has one,
+    seeds the sniff) and queue every board with local jobs for review as
+    `source`; every other outcome is recorded as a miss under it.
+
+    Returns (queued hits, [(name, reason)] of the misses). A live board with
+    no local jobs is a miss (`no-local-jobs`), as in discover_local: a name
+    from a regional list is not proof the board is local. Without
+    `local_only` it is queued too. `report(name, hit, (row, active,
+    pending))` prints each queued board (default: `_print_scored`).
+    """
+    urls = careers_urls or {}
+    queued: list[BoardHit] = []
+    missed: list[tuple[str, str]] = []
+    stalled: list[str] = []
+
+    async def miss(name: str, reason: str, hit: BoardHit | None = None) -> None:
+        row = {**_miss_row(hit), "source": source} if hit else {"source": source}
+        await db.run(store.record_miss, name, reason, **row)
+        missed.append((name, reason))
+
+    async for name, (hit, reason) in fan_out(
+            list(names), lambda n: resolved(n, urls.get(n, "")), str, max_workers,
+            with_item=True, stall_s=RESOLVE_STALL_S,
+            on_abandon=stalled.append):
+        if not hit or (reason and local_only):
+            await miss(name, reason or "no-board-found", hit)
+            continue
+        result = await score_and_upsert(db, hit, source=source,
+                                        include_missions=include_missions)
+        if not result:
+            continue
+        queued.append(hit)
+        if report:
+            report(name, hit, result)
+        else:
+            _print_scored(name, result[0], "PENDING REVIEW" if result[2] else "tracked")
+    for name in stalled:
+        await miss(name, "fetch-error:stalled")
+    return queued, missed
 
 
 async def add_board(name: str, url: str, capture: bool = False) -> dict[str, Any] | None:

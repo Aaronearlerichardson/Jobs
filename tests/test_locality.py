@@ -101,6 +101,15 @@ class TestSegments:
         assert not locality.is_nc(f"UK - County {local_city} - Barnard Castle")
         assert not locality.is_nc(f"US, Blue Bell; Canada, {local_city}")
 
+    def test_a_province_or_state_code_in_address_position_is_not_local(
+            self, local_city, own):
+        # non_us_place is doctested; this is the end-to-end verdict.
+        for s in (f"{local_city}, ON", f"Analyst ({local_city}, ON)",
+                  f"{local_city}, Ontario", f"{local_city} VIC",
+                  f"{local_city} House, Cape Town"):
+            assert not locality.is_nc(s), s
+        assert locality.is_nc(f"{local_city}, {own} 27703; Remote, US")
+
     def test_one_local_segment_keeps_the_row_local(self, local_city, own,
                                                     other_state):
         assert locality.is_nc(f"{local_city}, {own}; Springfield, {other_state[1]}")

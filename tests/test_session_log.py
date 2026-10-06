@@ -86,9 +86,12 @@ class TestStartFinish:
         path = session_log.start([], now=datetime(2026, 8, 28, 9, 30, 2))
         logging.getLogger("urllib3.connectionpool").debug("Starting new HTTPS")
         logging.getLogger("urllib3.connectionpool").warning("Retrying request")
+        logging.getLogger("primp").info("response: GET https://x.test 200")
+        logging.getLogger("ddgs.ddgs").info("engine ok")
         session_log.finish()
         text = path.read_text(encoding="utf-8")
         assert "Starting new HTTPS" not in text
+        assert "response: GET" not in text and "engine ok" not in text
         assert "Retrying request" in text
 
     def test_debug_is_allowlisted_to_app_loggers(self, monkeypatch):

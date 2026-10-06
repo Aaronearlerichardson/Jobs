@@ -17,8 +17,9 @@ import functools
 import logging
 import socket
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 from src import config, runstate
 from src.config import PROBE_TIMEOUT
@@ -63,7 +64,8 @@ ROOT_PATTERNS = [p for p in _URL_PATTERNS if p == ("www.{tok}.com", "/")]
 
 def candidate_urls(name: str, careers_url: str = "",
                    patterns: list[tuple[str, str]] = _URL_PATTERNS,
-                   cap: int = 12) -> list[str]:
+                   cap: int = 12, locale_paths: Sequence[str] | None = None
+                   ) -> list[str]:
     """Careers-page URLs to fetch for `name`, best first, `cap` at most:
     each is a speculative GET, and a miss pays every one of them.
 
@@ -108,12 +110,23 @@ def candidate_urls(name: str, careers_url: str = "",
     True
     >>> candidate_urls("")
     []
+
+    A bare root as the hint (a looked-up domain's host) lists `locale_paths`
+    (default `[discovery].locale_paths`) right after it: some careers sites
+    refuse their root and answer only there.
+
+    >>> candidate_urls("Eli Lilly", "https://careers.lilly.com/",
+    ...                locale_paths=["/us/en", "/en-us"])[:3]
+    ['https://careers.lilly.com/', 'https://careers.lilly.com/us/en', 'https://careers.lilly.com/en-us']
     """
     urls = []
     if careers_url and not _FETCHABLE_HOST_RE.search(careers_url):
         if patterns is _URL_PATTERNS:
             urls.append(careers_url)
         base = origin_of(careers_url)
+        if base and patterns is _URL_PATTERNS and urlsplit(careers_url).path in ("", "/"):
+            urls += [base + p for p in (config.DISCOVERY_LOCALE_PATHS
+                                        if locale_paths is None else locale_paths)]
         if base:
             urls += [base + path for path in dict.fromkeys(p for _, p in patterns)]
     toks = domain_tokens(name)

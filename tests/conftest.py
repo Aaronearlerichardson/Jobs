@@ -52,6 +52,7 @@ if sys.platform == "win32":
 
 from src import config as _config                           # noqa: E402
 from src.config.profile_schema import TrackExclude          # noqa: E402
+from src.discovery import board_directory as _board_directory  # noqa: E402
 from src import runstate as _runstate                       # noqa: E402
 import src.session_log as _session_log            # noqa: E402
 import src.store as _store                        # noqa: E402
@@ -70,6 +71,11 @@ def _no_network(monkeypatch):
     def _refuse():
         raise AssertionError("test reached the network")
     monkeypatch.setattr(_http, "_session", _refuse)
+    # The resolver's domain lookup is a network call: off unless a test says so.
+    monkeypatch.setattr(_config, "DISCOVERY_DOMAIN_LOOKUP", False)
+    # Likewise the board directory, which reads a remote dataset.
+    monkeypatch.setattr(_board_directory, "_companies",
+                        lambda: _board_directory.Companies({}, {}))
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -500,6 +506,12 @@ def run_web_op(name, fn, timeout=10):
         assert time.monotonic() < deadline, f"op {name!r} never finished"
         time.sleep(0.02)
     return s
+
+
+def fixture(name):
+    """tests/fixtures/`name`: a .json file decoded, any other as text."""
+    text = (ROOT / "tests" / "fixtures" / name).read_text(encoding="utf-8")
+    return json.loads(text) if name.endswith(".json") else text
 
 
 def fake_response(payload=None, *, text=None, status=200, content=None, url=""):

@@ -4,24 +4,16 @@ parsed jobs under the roster row that owns the host. Offline: the store is
 a throwaway file, the fit scorer a stub, and no fetcher is ever reached
 (a capture-only company has no board for the ingest to hydrate from)."""
 
-from pathlib import Path
-
 import pytest
 
 import capture
-from conftest import answer, fake_response
+from conftest import answer, fake_response, fixture
 import src.claude.fit as fit
 import src.store as store
 from src import tags
 from src.ops import ingest
 import src.ops.maintenance as ops
 from src.crawl.page_capture import parse_page
-
-FIXTURES = Path(__file__).parent / "fixtures"
-
-
-def load(name):
-    return (FIXTURES / name).read_text(encoding="utf-8")
 
 
 def by_title(jobs):
@@ -37,7 +29,7 @@ class TestGenericBoards:
     def test_hosted_board_keyed_on_a_bare_id(self):
         # jobs.<vendor>/<tenant>/<id>: nothing job-shaped in the path, so the
         # card sweep (board host + id tail + own heading) is what finds it.
-        jobs, source = parse_page("", load("capture_polymer_board.html"))
+        jobs, source = parse_page("", fixture("capture_polymer_board.html"))
         assert source == "page"
         got = by_title(jobs)
         assert set(got) == {"Senior Manufacturing Quality Engineer",
@@ -50,7 +42,7 @@ class TestGenericBoards:
         assert all(not j["company"] for j in jobs)   # attribution's job, not the parser's
 
     def test_posting_page_jsonld_names_the_employer_site(self):
-        jobs, _ = parse_page("", load("capture_polymer_job.html"))
+        jobs, _ = parse_page("", fixture("capture_polymer_job.html"))
         assert len(jobs) == 1
         j = jobs[0]
         assert j["title"] == "Microfabrication Cleanroom Manager"
@@ -62,7 +54,7 @@ class TestGenericBoards:
     def test_workday_fed_table_on_a_company_site(self):
         # Three cells per row link the same posting: one job per row, title
         # from the title cell, location from the location cell.
-        jobs, _ = parse_page("", load("capture_wp_workday_table.html"))
+        jobs, _ = parse_page("", fixture("capture_wp_workday_table.html"))
         got = by_title(jobs)
         assert set(got) == {"Senior Data Engineer", "Bioinformatics Scientist",
                             "Clinical Data Analyst"}
@@ -71,7 +63,7 @@ class TestGenericBoards:
         assert got["Clinical Data Analyst"]["location"].lower().startswith("remote")
 
     def test_icims_attract_results_list(self):
-        jobs, _ = parse_page("", load("capture_jibe_results.html"))
+        jobs, _ = parse_page("", fixture("capture_jibe_results.html"))
         got = by_title(jobs)
         assert set(got) == {"Senior Statistical Programmer", "Clinical Data Manager",
                             "Software Engineer, Clinical Systems"}
@@ -82,7 +74,7 @@ class TestGenericBoards:
         assert got["Clinical Data Manager"]["location"] == "Remote"
 
     def test_workable_board_with_relative_shortcode_links(self):
-        jobs, _ = parse_page("", load("capture_workable_board.html"))
+        jobs, _ = parse_page("", fixture("capture_workable_board.html"))
         got = by_title(jobs)
         assert set(got) == {"Software Engineer, Integrations", "Implementation Specialist"}
         assert got["Software Engineer, Integrations"]["url"] == \
@@ -91,7 +83,7 @@ class TestGenericBoards:
         assert got["Implementation Specialist"]["location"] == "Remote"
 
     def test_results_page_with_id_slug_links(self):
-        jobs, _ = parse_page("", load("capture_jobs_host_results.html"))
+        jobs, _ = parse_page("", fixture("capture_jobs_host_results.html"))
         got = by_title(jobs)
         assert set(got) == {"Data Platform Engineer", "Clinical Informatics Analyst",
                             "Registered Nurse - ICU"}
@@ -185,7 +177,7 @@ class TestAttribution:
         # whose site the employer is, and THAT matches the roster.
         store.record_miss(roster, "Acme Neuro", "no-board-found",
                           careers_url="https://acmeneuro.com/")
-        summary = await capture.ingest_html("", load("capture_polymer_job.html"))
+        summary = await capture.ingest_html("", fixture("capture_polymer_job.html"))
         assert summary["company"] == "Acme Neuro"
         assert _row(roster, "Acme Neuro")["ats"] == store.CAPTURE_ATS
 
