@@ -91,7 +91,35 @@ class TestSchema:
         conn = store.connect(path)
         assert conn.execute("PRAGMA user_version").fetchone()[0] >= 2
         assert {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='view'")} \
-            == {"open_jobs", "company_open_stats"}
+            == {"open_jobs", "company_open_stats", "board_employers", "live_jobs"}
+
+    def test_a_version_2_store_gets_its_employers_from_the_tag_and_replays_safely(
+            self, tmp_path):
+        path = tmp_path / "v2.db"
+        conn = store.connect(path)
+        for stmt in ("DROP TRIGGER companies_employer_new", "DROP TRIGGER companies_employer_gone",
+                     "DROP TRIGGER companies_employer_renamed", "DROP VIEW board_employers",
+                     "DROP VIEW live_jobs", "DROP INDEX ix_companies_employer",
+                     "ALTER TABLE companies DROP COLUMN employer_id", "DROP TABLE employers",
+                     "DROP INDEX ix_jobs_dup", "ALTER TABLE jobs DROP COLUMN dup_of",
+                     "PRAGMA user_version = 2"):
+            conn.execute(stmt)
+        for name, held in (("Small", "local,employer:x"), ("Big", "employer:x"), ("Solo", None)):
+            conn.execute("INSERT INTO companies (name, tags) VALUES (?, ?)", (name, held))
+        conn.executemany("INSERT INTO jobs (job_id, company_id, company_name) VALUES (?, ?, ?)",
+                         [("s1", 1, "Small"), ("b1", 2, "Big"), ("b2", 2, "Big")])
+        conn.commit()
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(
+                "SELECT c.name, e.name, c.tags FROM companies c "
+                "JOIN employers e ON e.id = c.employer_id ORDER BY c.id")]                 == [("Small", "Big", "local"), ("Big", "Big", None), ("Solo", "Solo", None)]
+            assert conn.execute("SELECT company_name FROM jobs WHERE job_id='s1'").fetchone()[0] == "Big"
+            assert conn.execute("SELECT COUNT(*) FROM employers").fetchone()[0] == 2
+            conn.execute("PRAGMA user_version = 2")
+            conn.commit()
+            conn.close()
 
     def test_the_job_input_model_names_only_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
@@ -754,11 +782,10 @@ class TestCollapse:
         ids = {r["job_id"] for r in store.ranked_jobs(db, track="local-tech")}
         assert ids == {"gh_acme_1", "gh_beta_1"}
 
-    def test_boards_tagged_one_employer_collapse_across_companies(
+    def test_boards_of_one_employer_collapse_across_companies(
             self, db, company, add_job):
-        beta = store.upsert_company(db, {"name": "Beta", "ats": "greenhouse",
-                                         "slug": "beta", "tags": "employer:acme"})
-        db.execute("UPDATE companies SET tags='employer:acme' WHERE id=?", (company,))
+        beta, how = store.add_board(db, {"name": "Acme", "ats": "ashby", "slug": "beta"})
+        assert how == "sibling"
         add_job("gh_acme_1", "Data Engineer", fit=0.5)
         add_job("gh_beta_1", "Data Engineer", fit=0.9, company_id=beta,
                 company_name="Beta", url="https://beta.io/gh_beta_1")

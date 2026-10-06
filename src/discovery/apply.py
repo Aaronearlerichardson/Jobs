@@ -241,7 +241,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
             candidate.update(coords)
             candidate["careers_url"] = careers_url
             candidate["tags"] = seed_tag_for(coords["ats"])
-        cid = store.upsert_company(conn, store.mark_pending(candidate))
+        cid = store.add_board(conn, store.mark_pending(candidate))[0]
         for j in group:
             j["company_id"] = cid
     return [j for j in jobs if id(j) not in drop]

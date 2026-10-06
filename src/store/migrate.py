@@ -6,6 +6,11 @@ one. connect() calls migrate() on every open: an up-to-date store costs one
 PRAGMA, and a store that needs work is migrated in a single transaction that
 one process wins (BEGIN IMMEDIATE) while the others wait, then find nothing
 left to do. The web UI opens several connections at once, so that matters.
+
+Every statement must be safe to run twice (IF NOT EXISTS, OR IGNORE, UPDATEs
+guarded on what they set): a store whose version was lowered replays them.
+ADD COLUMN, the one thing SQLite cannot guard, counts as done when the column
+is already there.
 """
 
 from __future__ import annotations
@@ -46,7 +51,11 @@ def migrate(conn: sqlite3.Connection) -> None:
         for n, path in enumerate(files, 1):
             if n > version:
                 for statement in _statements(path.read_text(encoding="utf-8")):
-                    conn.execute(statement)
+                    try:
+                        conn.execute(statement)
+                    except sqlite3.OperationalError as e:
+                        if "duplicate column name" not in str(e):
+                            raise
                 conn.execute(f"PRAGMA user_version = {n}")
         conn.commit()
     except BaseException:

@@ -1211,7 +1211,8 @@ class TestScoreAndUpsert:
         # ats_dork admits an nc == 0 board on its HQ signal and says so
         # by passing the tag explicitly.
         await self._upsert(
-            db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0},
+            db, {**self._HIT, "name": "Beta Bio", "slug": "beta", "nc": 0,
+                 "careers_url": "https://beta.example/careers"},
             source="ats_dork", tags=tags.LOCAL)
         beta = next(c for c in store.get_companies(db, active_only=False)
                     if c["name"] == "Beta Bio")

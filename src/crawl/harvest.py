@@ -544,6 +544,10 @@ async def run(db_path: str | Path | None = None, only: Collection[str] | None = 
     summary = await pull(db_path, only=only, names=names,
                          min_age_hours=min_age_hours, limit=limit,
                          hydrate=hydrate, max_hours=max_hours, board_fn=board_fn)
+    async with store.Writer(db_path) as db:
+        flagged = await db.run(store.flag_duplicate_jobs)
+    if flagged:
+        print(f"  {flagged} cross-board duplicate flag(s) changed")
     if triage:
         summary["triage"] = await _triage(db_path, max_workers, score_cap)
     return summary

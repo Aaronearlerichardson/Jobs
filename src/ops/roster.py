@@ -22,14 +22,17 @@ from src.config import RuntimeTrack
 
 def dedup(t: RuntimeTrack | None = None) -> tuple[int, int]:
     """Merge duplicate company rows pointing at one board, then duplicate
-    job rows. Returns (companies merged, jobs dropped)."""
+    job rows, then flag the cross-board duplicates of one employer
+    (store.flag_duplicate_jobs). Returns (companies merged, jobs dropped)."""
     from src import store
     from src.ops.maintenance import track_store
     with track_store(t) as conn:
         n = store.dedup_companies(conn)
         n_jobs = store.dedup_jobs(conn)
+        flagged = store.flag_duplicate_jobs(conn)
     print(f"\n  merged {n} duplicate company row(s) into their canonical board; "
-          f"dropped {n_jobs} duplicate job row(s).")
+          f"dropped {n_jobs} duplicate job row(s); "
+          f"{flagged} cross-board duplicate flag(s) changed.")
     return n, n_jobs
 
 

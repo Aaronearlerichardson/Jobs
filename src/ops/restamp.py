@@ -12,10 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src import config, store, tags
+from src import config, store
 from src.config import RuntimeTrack
 from src.match.locality import geo_mode
-from src.match.names import name_key
 from src.ops.maintenance import track_store
 
 
@@ -128,15 +127,15 @@ def _employer_clusters(pairs: Iterable[tuple[int, int, int]], size: dict[int, in
 def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
                    min_share: float = 0.25, t: RuntimeTrack | None = None,
                    conn: sqlite3.Connection | None = None) -> dict[str, int]:
-    """PREVIEW (default) or APPLY tagging companies that are boards of one
-    employer with a shared `employer:<key>` tag (tags.EMPLOYER), so the
+    """PREVIEW (default) or APPLY joining companies that are boards of one
+    employer under one `employers` row (companies.employer_id), so the
     ranking shows a posting listed on both once. Same preview, backup and
     undo as restamp_geo.
 
     Two companies are one employer when at least `min_shared` of their open
-    postings share a title and location, and those are at least `min_share`
-    of the smaller board's open postings. The key is the name of the
-    cluster's largest board, or a key a member already carries.
+    postings share a title and city, and those are at least `min_share`
+    of the smaller board's open postings. The employer is the cluster's
+    largest board's.
 
     >>> conn = store.connect(":memory:")
     >>> for name in ("Acme", "Acme Labs"):
@@ -146,12 +145,11 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
     ...                                     "company_name": name, "title": f"T{i}",
     ...                                     "location": "Durham"})
     >>> link_employers(min_shared=2, conn=conn)
-      2 row(s) read, 2 would change
-      None -> employer:acme  2
-        Acme | employer:acme
-        Acme Labs | employer:acme
+      2 row(s) read, 1 would change
+      2 -> 1  1
+        Acme Labs | Acme
       preview: nothing written.
-    {'None -> employer:acme': 2}
+    {'2 -> 1': 1}
 
     Notes:
         On 2026-10-05 this found exactly three pairs: ThermoFisher and PPD
@@ -163,8 +161,9 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
     with track_store(t, conn) as conn:
         pairs = conn.execute("""
             WITH k AS (SELECT DISTINCT company_id, norm_title(title) AS t,
-                              lower(COALESCE(location, '')) AS l
-                       FROM open_jobs WHERE company_id IS NOT NULL)
+                              city_key(location) AS l
+                       FROM open_jobs WHERE company_id IS NOT NULL
+                         AND city_key(location) != '')
             SELECT a.company_id AS x, b.company_id AS y, COUNT(*) AS n
             FROM k a JOIN k b ON a.t = b.t AND a.l = b.l AND a.company_id < b.company_id
             GROUP BY 1, 2 HAVING n >= ?""", (min_shared,)).fetchall()
@@ -172,20 +171,22 @@ def link_employers(commit: bool = False, undo: str = "", min_shared: int = 25,
                                  "WHERE company_id IS NOT NULL GROUP BY company_id"))
         clusters = _employer_clusters([(p["x"], p["y"], p["n"]) for p in pairs], size, min_share)
         rows = {r["id"]: r for r in conn.execute(
-            "SELECT id, name, tags FROM companies WHERE id IN (SELECT value FROM json_each(?))",
+            "SELECT c.id, c.name, c.employer_id, e.name AS employer FROM companies c "
+            "JOIN employers e ON e.id = c.employer_id "
+            "WHERE c.id IN (SELECT value FROM json_each(?))",
             (json.dumps([i for ids in clusters for i in ids]),))}
 
         def fresh() -> Iterable[tuple[Any, Any, Any, tuple[str, str]]]:
             for ids in clusters:
-                held = (tags.employer(rows[i]["tags"]) for i in ids)
-                key = next(filter(None, held), "") or name_key(
-                    rows[max(ids, key=lambda i: (size[i], -i))]["name"])
+                top = rows[max(ids, key=lambda i: (size[i], -i))]
                 for i in sorted(ids, key=lambda i: (-size[i], i)):
-                    old = rows[i]["tags"]
-                    yield (i, old, tags.join({*tags.parse(old), f"{tags.EMPLOYER}{key}"}),
-                           (rows[i]["name"], key))
-        return _restamp(conn, commit, undo, ("companies", "id", "tags"), fresh(),
-                        lambda c: f"{c[0]} | {tags.EMPLOYER}{c[1]}")
+                    yield (i, rows[i]["employer_id"], top["employer_id"],
+                           (rows[i]["name"], top["employer"]))
+        counts = _restamp(conn, commit, undo, ("companies", "id", "employer_id"), fresh(),
+                          lambda c: f"{c[0]} | {c[1]}")
+        if commit and counts:
+            store.realign_job_names(conn)
+        return counts
 
 
 def _restamp(conn: sqlite3.Connection, commit: bool, undo: str, column: tuple[str, str, str],

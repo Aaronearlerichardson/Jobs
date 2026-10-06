@@ -215,7 +215,8 @@ async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
 async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                         tags: str | None = company_tags.LOCAL,
                         require_live: bool = False, limit: int | None = None,
-                        verbose: bool = True) -> tuple[int, int]:
+                        verbose: bool = True, siblings_only: bool = False
+                        ) -> tuple[int, int]:
     """
     Read each candidate board the roster lacks (a `BoardHit`: ats, slug and
     optionally name and careers_url), mission-score the ones with local
@@ -231,6 +232,10 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
     way the resolver reads one; without it a board with none is admitted too
     when the employer has a confirmed local HQ (dork's rule). `limit` caps
     the rows written, taking candidates in the order given.
+
+    A board of an employer the roster already holds on another board is
+    written as its sibling, with the employer's mission verdict and no
+    score; `siblings_only` writes only those.
 
     Notes:
         harvest_urls' body, made the one intake of every board-first source
@@ -263,7 +268,8 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
                 # row is near-unrecoverable here -- a board already in the store
                 # is never re-probed -- which is why the activation rule must be
                 # the shared one.
-                result = await score_and_upsert(db, hit, source=source, tags=tags)
+                result = await score_and_upsert(db, hit, source=source, tags=tags,
+                                                score=not siblings_only)
                 if not result:
                     continue
                 row, active, pending = result

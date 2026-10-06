@@ -24,11 +24,12 @@ from collections import defaultdict
 from collections.abc import Collection
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any, Unpack, cast
+from typing import Annotated, Any, Literal, NamedTuple, Unpack, cast
 
 from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 
-from src import config
+from src import config, tags
+from src.match.names import name_key as _name_key
 from src.rows import BoardCoords, CompanyIn, CompanyRow, HandleColumn
 from .schema import (_commit, apply_update, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups)
@@ -43,6 +44,28 @@ def as_company(row: sqlite3.Row) -> CompanyRow:
 # --------------------------------------------------------------------------- #
 #  Companies                                                                   #
 # --------------------------------------------------------------------------- #
+
+class BoardPlan(NamedTuple):
+    """What add_board will do with a board. `action`: "new" (a company, and its
+    employer if `employer_id` is None), "update" (it is `row`'s board already),
+    "replace" (`row`'s own board is gone: point it here) or "sibling" (one more
+    board of `row`'s employer, `row` being the employer's primary)."""
+    action: Literal["new", "update", "replace", "sibling"]
+    row: CompanyRow | None = None
+    employer_id: int | None = None
+
+
+# The columns that name a board (the handle columns of every ATS spec, plus
+# the ats itself).
+_COORD_COLUMNS = frozenset({"ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url"})
+
+
+def _board_gone(row: CompanyRow) -> bool:
+    """True when `row` has no board worth keeping: none named, a recorded miss
+    against it (board-dead included), or a capture-only stub."""
+    return (board_key(row) is None or bool(row.get("miss_reason"))
+            or row.get("ats") == CAPTURE_ATS)
+
 
 def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
     """Insert or update a company by name. `company` is a dict of column->value.
@@ -70,7 +93,35 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
     >>> conn.execute("SELECT miss_reason, miss_at FROM companies "
     ...              "WHERE name='Zeta'").fetchone()[:]
     (None, None)
+
+    A different board for a name whose row has a LIVE one never replaces it:
+    the board is added as a sibling (see add_board), and a miss recorded
+    against the name loses its coordinates instead.
+
+    >>> _ = upsert_company(conn, {"name": "Beta", "ats": "lever", "slug": "beta"})
+    >>> _ = upsert_company(conn, {"name": "Beta", "ats": "ashby", "slug": "beta2"})
+    >>> [r[0] for r in conn.execute("SELECT slug FROM companies WHERE name LIKE 'Beta%'")]
+    ['beta', 'beta2']
+    >>> _ = record_miss(conn, "Beta", "board-dead", ats="lever", slug="gone")
+    >>> conn.execute("SELECT slug FROM companies WHERE name='Beta'").fetchone()[0]
+    'beta'
     """
+    old = conn.execute("SELECT * FROM companies WHERE name=?", (company["name"],)).fetchone()
+    if old and board_key(company) is not None:
+        old = as_company(old)
+        if not _board_gone(old) and board_key(old) != board_key(company):
+            if not company.get("miss_reason"):
+                return add_board(conn, company)[0]
+            company = cast(CompanyIn, {k: v for k, v in company.items()
+                                       if k not in _COORD_COLUMNS})
+    return _write_company(conn, company)
+
+
+def _write_company(conn: sqlite3.Connection, company: CompanyIn,
+                   employer_id: int | None = None) -> int | None:
+    """upsert_company's write: insert or update by name, whatever the row
+    already holds. `employer_id` places a NEW row under that employer (the
+    insert trigger gives it one of its own otherwise)."""
     c: dict[str, Any] = {**company, "last_probed": company.get("last_probed")
                          or datetime.now().isoformat()}
     c.setdefault("created_at", datetime.now().isoformat())
@@ -85,12 +136,15 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
         merged |= set(t for t in (c.get("tags") or "").split(",") if t)
         c["tags"] = ",".join(sorted(merged))
     cols = [k for k in CompanyIn.__annotations__ if k in c]
+    if employer_id is not None:
+        c["employer_id"] = employer_id
+        cols.append("employer_id")
     placeholders = ", ".join("?" for _ in cols)
     # created_at is written on INSERT but never overwritten on UPDATE: it is
     # the row's birth stamp, so a re-probe of a known company must leave it
     # (and a legacy NULL) alone.
     updates = ", ".join(f"{k}=excluded.{k}" for k in cols
-                        if k not in ("name", "created_at"))
+                        if k not in ("name", "created_at", "employer_id"))
     conn.execute(
         f"INSERT INTO companies ({', '.join(cols)}) VALUES ({placeholders}) "
         f"ON CONFLICT(name) DO UPDATE SET {updates}",
@@ -102,6 +156,153 @@ def upsert_company(conn: sqlite3.Connection, company: CompanyIn) -> int | None:
     _commit(conn)
     row = conn.execute("SELECT id FROM companies WHERE name=?", (c["name"],)).fetchone()
     return row["id"] if row else None
+
+
+# --------------------------------------------------------------------------- #
+#  Employers and boards                                                        #
+# --------------------------------------------------------------------------- #
+#
+# An employer owns one or more boards; each `companies` row is ONE board and
+# the crawl unit. Discovery asks add_board, never upsert_company, when it
+# found a board for an employer the roster may already hold.
+
+def _employer_id(conn: sqlite3.Connection, company: CompanyIn,
+                 employer: str | int | None, named: CompanyRow | None) -> int | None:
+    """The employer a board belongs to, or None when the roster has none:
+    the explicit `employer` (an id, or a name), the employer of the row
+    already named so, an employer with the same name_key, or the employer of
+    the roster row whose careers host `company` shares (company_by_host)."""
+    if isinstance(employer, int):
+        return employer
+    if employer:
+        found = conn.execute("SELECT id FROM employers WHERE name=?", (employer,)).fetchone()
+        return found[0] if found else None
+    if named and named.get("employer_id"):
+        return named["employer_id"]
+    conn.execute("UPDATE employers SET name_key=name_key(name) WHERE name_key IS NULL")
+    key = _name_key(company["name"])
+    found = conn.execute("SELECT id FROM employers WHERE name_key=? ORDER BY id LIMIT 1",
+                         (key,)).fetchone() if key else None
+    if found:
+        return cast(int, found[0])
+    host_row = company_by_host(conn, company.get("careers_url"))
+    return host_row["employer_id"] if host_row else None
+
+
+def plan_board(conn: sqlite3.Connection, company: CompanyIn,
+               employer: str | int | None = None) -> BoardPlan:
+    """Decide what add_board would do. Writes nothing but the name keys it
+    caches on `employers`.
+
+    The same board (board_key) already on the roster is an "update" of that
+    row, whatever its name. Otherwise the employer is found (see
+    _employer_id); one of its rows whose board is gone is "replaced", and
+    when every board it has is live the new one is a "sibling". No known
+    employer: "new".
+
+    >>> conn = connect(":memory:")
+    >>> _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"})
+    >>> plan_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme"}).action
+    'update'
+    >>> plan_board(conn, {"name": "Acme", "ats": "ashby", "slug": "acme"}).action
+    'sibling'
+    >>> plan_board(conn, {"name": "Other", "ats": "ashby", "slug": "o"}).action
+    'new'
+    >>> _ = record_miss(conn, "Lead", "no-board-found")
+    >>> plan_board(conn, {"name": "Lead", "ats": "ashby", "slug": "lead"}).action
+    'replace'
+    """
+    named_row = conn.execute("SELECT * FROM companies WHERE name=?", (company["name"],)).fetchone()
+    named = as_company(named_row) if named_row else None
+    if board_key(company) is None:
+        return BoardPlan("update" if named else "new", named,
+                         named["employer_id"] if named else None)
+    same = company_by_board(conn, company)
+    if same:
+        return BoardPlan("update", same, same["employer_id"])
+    emp = _employer_id(conn, company, employer, named)
+    if emp is None:
+        return BoardPlan("new")
+    rows = [as_company(r) for r in conn.execute(
+        "SELECT * FROM companies WHERE employer_id=? ORDER BY id", (emp,))]
+    if not rows:
+        return BoardPlan("new", None, emp)
+    rows.sort(key=lambda r: r["name"] != company["name"])
+    gone = next((r for r in rows if _board_gone(r)), None)
+    if gone:
+        return BoardPlan("replace", gone, emp)
+    primary = min(rows, key=lambda r: (r["mission_tier"] is None, r["id"]))
+    return BoardPlan("sibling", primary, emp)
+
+
+def add_board(conn: sqlite3.Connection, company: CompanyIn,
+              employer: str | int | None = None) -> tuple[int | None, str]:
+    """Write a board the roster may already hold, never losing one that works.
+    Returns (company id, the BoardPlan action taken); see plan_board.
+
+    A sibling is a new row named "<employer> (<ats>)" under the same
+    employer, inheriting its primary row's mission tier, score and reason,
+    scope tags, active flag and pending-review state (so it costs no mission
+    call); anything `company` itself sets wins, except that a pending
+    primary keeps the sibling pending. The caller has validated the board
+    live. A "replace" clears the old coordinates first, so none of them
+    survives beside the new ones.
+
+    >>> conn = connect(":memory:")
+    >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme",
+    ...                         "mission_tier": "core", "mission_score": 0.9, "tags": "local"})
+    >>> b, how = add_board(conn, {"name": "Acme", "ats": "workday", "wd_tenant": "acme",
+    ...                           "wd_pod": 5, "wd_site": "ext"})
+    >>> how, conn.execute("SELECT name, mission_score, tags FROM companies WHERE id=?",
+    ...                   (b,)).fetchone()[:]
+    ('sibling', ('Acme (workday)', 0.9, 'local'))
+    >>> conn.execute("SELECT COUNT(DISTINCT employer_id), COUNT(*) FROM companies").fetchone()[:]
+    (1, 2)
+
+    An employer named outright takes boards the name does not give away:
+
+    >>> c, how = add_board(conn, {"name": "Acme Labs", "ats": "ashby", "slug": "al"},
+    ...                    employer="Acme")
+    >>> how, conn.execute("SELECT name FROM companies WHERE id=?", (c,)).fetchone()[0]
+    ('sibling', 'Acme (ashby)')
+    """
+    plan = plan_board(conn, company, employer)
+    row = plan.row
+    if plan.action == "sibling":
+        return _write_sibling(conn, company, cast(CompanyRow, row),
+                              cast(int, plan.employer_id)), plan.action
+    if plan.action == "new":
+        emp = plan.employer_id
+        if emp is None and isinstance(employer, str):
+            conn.execute("INSERT OR IGNORE INTO employers (name, created_at) VALUES (?, ?)",
+                         (employer, datetime.now().isoformat()))
+            emp = conn.execute("SELECT id FROM employers WHERE name=?", (employer,)).fetchone()[0]
+        return _write_company(conn, company, emp), plan.action
+    row = cast(CompanyRow, row)
+    if plan.action == "replace":
+        conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, wd_pod=NULL, "
+                     "wd_site=NULL WHERE id=?", (row["id"],))
+    return _write_company(conn, {**company, "name": row["name"]}), plan.action
+
+
+def _write_sibling(conn: sqlite3.Connection, company: CompanyIn, primary: CompanyRow,
+                   employer_id: int) -> int | None:
+    """add_board's new row for a board that is another of `primary`'s employer."""
+    base = conn.execute("SELECT name FROM employers WHERE id=?", (employer_id,)).fetchone()[0]
+    label, n = company.get("ats") or "board", 1
+    name = f"{base} ({label})"
+    while conn.execute("SELECT 1 FROM companies WHERE name=?", (name,)).fetchone():
+        n += 1
+        name = f"{base} ({label} {n})"
+    row: dict[str, Any] = {k: primary[k] for k in
+                           ("mission_tier", "mission_score", "mission_reason", "active")
+                           if primary.get(k) is not None}
+    row.update({k: v for k, v in company.items() if v is not None})
+    row["name"] = name
+    row["tags"] = tags.join(tags.parse(primary["tags"]) | tags.parse(company.get("tags"))) or None
+    if tags.has(primary["tags"], tags.PENDING):
+        row["active"] = 0
+    return _write_company(conn, cast(CompanyIn, row), employer_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -507,7 +708,22 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
     same Workday triple) but were created under different name spellings
     ("IQVIA" vs "Quintiles IMS (IQVIA)") — the name-keyed upsert can't catch
     those, so the crawl fetches one board several times. Jobs are re-pointed to
-    the kept row and tags merge, so the merge is lossless. Returns rows merged."""
+    the kept row and tags merge, so the merge is lossless. Returns rows merged.
+
+    Rows that are different boards of one employer (add_board's siblings)
+    are never merged, and a merged row's employer takes over its losers':
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
+    >>> _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "a"})
+    >>> _ = upsert_company(conn, {"name": "Acme Inc", "ats": "lever", "slug": "a"})
+    >>> dedup_companies(conn)
+        Acme                           <- merged 1: Acme Inc
+    1
+    >>> [r[:] for r in conn.execute("SELECT c.name, e.name FROM companies c "
+    ...                             "JOIN employers e ON e.id = c.employer_id")]
+    [('Acme', 'Acme'), ('Acme (ashby)', 'Acme')]
+    """
     # The board key is config-driven Python (board_key); which row of a
     # shared board survives, and whether any of them was active, is SQL:
     # survivor first = a scored row, then active, then most-referenced, then
@@ -536,38 +752,64 @@ def dedup_companies(conn: sqlite3.Connection) -> int:
         groups.setdefault(r["g"], []).append(dict(r))
 
     def carry_over(keep: dict[str, Any], losers: list[dict[str, Any]]) -> None:
-        tags = {t for m in [keep, *losers] for t in (m.get("tags") or "").split(",") if t}
+        merged = {t for m in [keep, *losers] for t in (m.get("tags") or "").split(",") if t}
         # Re-point the losers' jobs AND rename them: jobs.company_name
         # is the denormalized display/grouping key (ranked_jobs groups
         # and the digest prints by it), so a merge that only moved
         # company_id left "Red Hat" and "Red Hat (IBM subsidiary, RTP
         # HQ)" as two companies in every ranking after the 2026-09-01
         # dedup, though both pointed at company 85.
+        lost = json.dumps([l["id"] for l in losers])
         conn.execute("UPDATE jobs SET company_id=?, company_name=? WHERE company_id IN "
-                     "(SELECT value FROM json_each(?))",
-                     (keep["id"], keep["name"], json.dumps([l["id"] for l in losers])))
+                     "(SELECT value FROM json_each(?))", (keep["id"], keep["name"], lost))
+        # One board is one employer's: the losers' employers (and any other
+        # boards they own) join the survivor's.
+        conn.execute("UPDATE companies SET employer_id=(SELECT employer_id FROM companies "
+                     "WHERE id=?) WHERE employer_id IN (SELECT employer_id FROM companies "
+                     "WHERE id IN (SELECT value FROM json_each(?)))", (keep["id"], lost))
         apply_update(conn, "companies", "id", keep["id"],
-                     {"tags": ",".join(sorted(tags)) or None, "active": keep["any_active"]})
+                     {"tags": ",".join(sorted(merged)) or None, "active": keep["any_active"]})
 
     merged = dedup_groups(
         conn, "companies", "id", groups, rank=lambda r: r["rn"], merge=carry_over,
         describe=lambda keep, losers: (
             f"{keep['name'][:30]:30} <- merged {len(losers)}: "
             + ", ".join(l["name"][:20] for l in losers)))
-    # Realign every linked job with its company's current name — this
-    # catches rows renamed by earlier (name-blind) merges and rows whose
-    # ingest path spelled the company its own way ("BD (Becton Dickinson)"
-    # linked to company "BD").
-    realigned = conn.execute(
-        "UPDATE jobs SET company_name=(SELECT name FROM companies "
-        "WHERE companies.id=jobs.company_id) WHERE company_id IN "
-        "(SELECT id FROM companies) AND company_name IS NOT "
-        "(SELECT name FROM companies WHERE companies.id=jobs.company_id)"
-    ).rowcount
-    if realigned:
-        print(f"    {realigned} job row(s) renamed to their company's name")
+    realign_job_names(conn)
+    conn.execute("DELETE FROM employers WHERE NOT EXISTS "
+                 "(SELECT 1 FROM companies WHERE employer_id = employers.id)")
     _commit(conn)
     return merged
+
+
+def realign_job_names(conn: sqlite3.Connection) -> int:
+    """Give every linked job its EMPLOYER's current name (its board's own
+    when it has no employer), in one UPDATE; returns the rows renamed. This
+    catches rows renamed by earlier (name-blind) merges and rows whose
+    ingest path spelled the company its own way ("BD (Becton Dickinson)"
+    linked to company "BD"), and shows a sibling board's jobs under its
+    employer.
+
+    >>> conn = connect(":memory:")
+    >>> a = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
+    >>> b, _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
+    >>> _ = conn.executemany("INSERT INTO jobs (job_id, company_id, company_name) "
+    ...                      "VALUES (?, ?, 'x')", [("j1", a), ("j2", b)])
+    >>> realign_job_names(conn)
+        2 job row(s) renamed to their employer's name
+    2
+    >>> sorted(r[0] for r in conn.execute("SELECT DISTINCT company_name FROM jobs"))
+    ['Acme']
+    """
+    renamed = conn.execute(
+        "UPDATE jobs SET company_name=(SELECT employer_name FROM board_employers b "
+        "WHERE b.company_id=jobs.company_id) WHERE company_id IN "
+        "(SELECT id FROM companies) AND company_name IS NOT "
+        "(SELECT employer_name FROM board_employers b WHERE b.company_id=jobs.company_id)"
+    ).rowcount
+    if renamed:
+        print(f"    {renamed} job row(s) renamed to their employer's name")
+    return renamed
 
 
 def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
@@ -577,6 +819,7 @@ def export_companies(conn: sqlite3.Connection, path: str | Path) -> int:
         "SELECT * FROM companies ORDER BY name").fetchall()]
     for r in rows:
         r.pop("id", None)          # ids are per-database
+        r.pop("employer_id", None)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=1, ensure_ascii=False)
     return len(rows)
@@ -621,17 +864,32 @@ def import_companies(conn: sqlite3.Connection, path: str | Path) -> int:
 def set_company_tag(conn: sqlite3.Connection, name: str, tag: str,
                     add: bool = True) -> str | None:
     """Add or remove one scope tag on a company (case-insensitive name
-    match). Returns the company's new comma-joined tag string ('' when the
-    last tag was removed), or None if no such company exists."""
+    match) and on every other board of its employer. Returns the named
+    company's new comma-joined tag string ('' when the last tag was
+    removed), or None if no such company exists.
+
+    >>> conn = connect(":memory:")
+    >>> _ = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
+    >>> _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
+    >>> set_company_tag(conn, "acme", "watch")
+    'watch'
+    >>> [r[0] for r in conn.execute("SELECT tags FROM companies")]
+    ['watch', 'watch']
+    """
     row = conn.execute(
-        "SELECT id, tags FROM companies WHERE lower(name)=lower(?)",
+        "SELECT id, employer_id FROM companies WHERE lower(name)=lower(?)",
         (name,)).fetchone()
     if not row:
         return None
-    tags = {t for t in (row["tags"] or "").split(",") if t}
-    (tags.add if add else tags.discard)(tag)
-    val = ",".join(sorted(tags)) or None
-    conn.execute("UPDATE companies SET tags=? WHERE id=?", (val, row["id"]))
+    val: str | None = None
+    for r in conn.execute("SELECT id, tags FROM companies WHERE id=? OR employer_id=?",
+                          (row["id"], row["employer_id"])).fetchall():
+        held = {t for t in (r["tags"] or "").split(",") if t}
+        (held.add if add else held.discard)(tag)
+        new = ",".join(sorted(held)) or None
+        conn.execute("UPDATE companies SET tags=? WHERE id=?", (new, r["id"]))
+        if r["id"] == row["id"]:
+            val = new
     _commit(conn)
     return val or ""
 

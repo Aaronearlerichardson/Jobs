@@ -413,7 +413,9 @@ async def mission_context(board: BoardCoords) -> str:
 def _board_already_tracked(conn: sqlite3.Connection,
                            row: CompanyIn) -> CompanyRow | None:
     """store.company_by_board, minus a same-name match: that is the
-    ordinary re-probe/update path, which the caller may upsert.
+    ordinary re-probe/update path, which the caller may upsert. Only the
+    SAME board counts: another board of a tracked employer is a sibling
+    (store.add_board), not a duplicate.
 
     Notes:
         Same NAME, not same name_key: the upsert keys on the exact name, so
@@ -469,7 +471,7 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
                            include_missions: list[str] | None = None,
                            tags: str | None = None,
                            scored: tuple[str | None, float | None, str] | None = None,
-                           extra: CompanyIn | None = None
+                           extra: CompanyIn | None = None, score: bool = True
                            ) -> tuple[CompanyRow | CompanyIn, int, bool] | None:
     """Mission-score a resolved board and write it to the store (`db`, a
     store.Writer) as a review candidate -- the one write path behind every
@@ -487,25 +489,29 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
 
     A name whose roster row is active and has produced jobs
     (_productive_row) keeps its board, `active` and mission verdict: the
-    same board only refreshes the counts, and a different one is printed,
-    noted on the row, and returns None. Neither pays for a score.
+    same board only refreshes the counts. A different board of a scored
+    employer is added beside it as a sibling row (store.add_board) with the
+    employer's verdict. Neither pays for a score; with `score=False` a board
+    that is not settled that way (it would need one) returns None unwritten.
 
     >>> import asyncio
     >>> from src.store import Writer, connect, upsert_company
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
     ...     "wd_tenant": "fortrea", "wd_pod": 1, "wd_site": "Fortrea",
-    ...     "active": 1, "total_job_count": 350})
+    ...     "active": 1, "total_job_count": 350, "mission_tier": "core",
+    ...     "mission_score": 0.9})
     >>> async def add():
     ...     async with Writer(conn) as db:
     ...         return await score_and_upsert(db, {"name": "Fortrea",
     ...             "ats": "phenom", "slug": "careers.fortrea.com", "nc": 24,
     ...             "count": 24}, "local_sourcing")
-    >>> asyncio.run(add())  # doctest: +ELLIPSIS
-        [keep] Fortrea: existing workday board retained; alternate phenom ...
-    >>> conn.execute("SELECT ats, slug, wd_tenant, active, total_job_count, "
-    ...              "notes FROM companies").fetchone()[:]
-    ('workday', None, 'fortrea', 1, 350, 'alt board: phenom careers.fortrea.com')
+    >>> asyncio.run(add())[1:]  # doctest: +ELLIPSIS
+        [sibling] Fortrea: phenom board added beside 'Fortrea'
+    (1, False)
+    >>> [r[:] for r in conn.execute("SELECT name, ats, active, total_job_count "
+    ...                             "FROM companies ORDER BY id")]
+    [('Fortrea', 'workday', 1, 350), ('Fortrea (phenom)', 'phenom', 1, 24)]
 
     The row is inactive and tagged pending-review unless the store has
     already confirmed the name (src.store.is_confirmed_company). `tags`
@@ -527,19 +533,20 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
         board coordinates first) still differ in ways this helper does not
         cover.
     """
-    settled, result = await db.run(_settled_board, hit)
-    if settled:
+    settled, result = await db.run(_settled_board, hit, source, tags, extra)
+    if settled or not score:
         return result
     return await db.run(_write_candidate, hit,
                         scored if scored is not None else await _score_hit(hit),
                         source, include_missions, tags, extra)
 
 
-def _settled_board(conn: sqlite3.Connection, hit: BoardHit
+def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str = "",
+                   tags: str | None = None, extra: CompanyIn | None = None
                    ) -> tuple[bool, tuple[CompanyRow | CompanyIn, int, bool] | None]:
     """(True, score_and_upsert's answer) when the roster already settles
-    `hit` without a score (a duplicate board, a productive row kept), else
-    (False, None)."""
+    `hit` without a score (a duplicate board, a productive row kept, a
+    sibling of a scored employer), else (False, None)."""
     from src.store import board_key, upsert_company
 
     name = hit["name"]
@@ -548,29 +555,33 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit
     if dup:
         _report_dup_board(name, dup)
         return True, None
-    # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
-    # name-keyed upsert below re-pointed its Workday row (353 relevant jobs
-    # an hour earlier) at it; the next crawl read 27 jobs and counted every
-    # one as new. Discovery may not re-point or switch off a board that
-    # works -- the alternate goes in `notes` for a person to judge.
+    plan = store.plan_board(conn, row)
+    primary = plan.row
     kept = _productive_row(conn, name)
-    if not kept:
-        return False, None
-    if board_key(kept) == board_key(row):
+    if kept and plan.action == "update" and board_key(kept) == board_key(row):
         upsert_company(conn, {"name": name,
                               "local_job_count": hit.get("nc") or 0,
                               "total_job_count": hit.get("count")})
         return True, (kept, kept["active"] or 0, False)
-    key = board_key(row)
-    alt = ("/".join(str(p) for p in key[1:]) if key
-           else row.get("careers_url") or "?")
-    print(f"    [keep] {name}: existing {kept['ats']} board retained; "
-          f"alternate {row['ats']} board {alt} noted")
-    note = f"alt board: {row['ats']} {alt}"
-    if note not in (kept["notes"] or ""):
-        upsert_company(conn, {"name": name, "notes": "; ".join(
-            filter(None, (kept["notes"], note)))})
-    return True, None
+    # 2026-09-22: discover-local sniffed Fortrea's Phenom site and the
+    # name-keyed upsert re-pointed its Workday row (353 relevant jobs an
+    # hour earlier) at it; the next crawl read 27 jobs and counted every one
+    # as new. A board that works is never re-pointed: the other board of a
+    # scored employer joins it as a sibling, which inherits the mission
+    # verdict and so pays for no score.
+    if plan.action != "sibling" or primary is None or primary["mission_score"] is None:
+        return False, None
+    nc = hit.get("nc") or 0
+    row.update({"local_job_count": nc, "total_job_count": hit.get("count"),
+                "tags": (company_tags.LOCAL if nc else None) if tags is None else tags,
+                "source": source, "last_probed": datetime.now().isoformat()})
+    if extra:
+        row.update(extra)
+    sid, _ = store.add_board(conn, row)
+    sibling = cast(CompanyRow, store.get_company(conn, sid))
+    print(f"    [sibling] {name}: {row['ats']} board added beside '{primary['name']}'")
+    return True, (sibling, sibling["active"] or 0,
+                  company_tags.has(sibling["tags"], company_tags.PENDING))
 
 
 def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
@@ -580,7 +591,7 @@ def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
     """score_and_upsert's write of a scored board (`scored`, its tier,
     score and reason); returns (row, active, pending)."""
     from src.claude.api import is_active_mission
-    from src.store import is_confirmed_company, mark_pending, upsert_company
+    from src.store import add_board, is_confirmed_company, mark_pending
 
     name = hit["name"]
     row = coords.from_hit(hit, name=name)
@@ -605,7 +616,7 @@ def _write_candidate(conn: sqlite3.Connection, hit: BoardHit,
     pending = not is_confirmed_company(conn, name)
     if pending:
         row = mark_pending(row)
-    upsert_company(conn, row)
+    add_board(conn, row)
     return row, active, pending
 
 

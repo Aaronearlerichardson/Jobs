@@ -152,6 +152,7 @@ class JobRow(TypedDict, closed=True):
     contact: str | None
     referral: int | None
     outcome_reason: str | None
+    dup_of: int | None
     remote_hint: NotRequired[str]
 
 
@@ -201,6 +202,7 @@ class RankedJob(TypedDict, closed=True):
     contact: str | None
     referral: int | None
     outcome_reason: str | None
+    dup_of: int | None
     mission_tier: str | None
     mission_score: float | None
     company_tags: str | None
@@ -269,6 +271,7 @@ class CompanyRow(TypedDict, closed=True):
     last_nonempty_at: str | None
     next_crawl_at: str | None
     last_harvested_at: str | None
+    employer_id: int | None
 
 
 # Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.

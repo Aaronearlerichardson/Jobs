@@ -209,7 +209,8 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     """Open, company-linked rows no crawl has adopted (no track label) and
     triage has not judged yet -- the harvester's unscored material. A row
     triage looked at but could not hydrate stays NULL, so it comes back
-    here next pass.
+    here next pass. A cross-board duplicate (`dup_of`) waits for its survivor
+    instead of costing a second hydrate and score.
 
     >>> from src.store import upsert_company
     >>> conn = connect(":memory:")
@@ -225,7 +226,7 @@ def triage_pending(conn: sqlite3.Connection, company_id: int | None = None,
     """
     q = ("SELECT j.* FROM open_jobs j "
          "JOIN companies c ON j.company_id = c.id "
-         "WHERE j.triage_status IS NULL "
+         "WHERE j.triage_status IS NULL AND j.dup_of IS NULL "
          "AND COALESCE(j.track,'') = ''")
     args: list[Any] = []
     if company_id is not None:
@@ -460,7 +461,9 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
              fit_domain, fit_function, fit_stack, fit_seniority, fit_gates,
              fit_model, posted_at, first_seen, last_seen, status,
              harvested_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           VALUES (?,?,COALESCE((SELECT employer_name FROM board_employers
+                                 WHERE company_id=?), ?),
+                   ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
            ON CONFLICT(job_id) DO UPDATE SET
              title=excluded.title, url=excluded.url,
              location=CASE WHEN ? AND COALESCE(location, '') != ''
@@ -485,7 +488,8 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
              closed_at=CASE WHEN excluded.status='closed'
                             THEN closed_at ELSE NULL END,
              harvested_at=COALESCE(excluded.harvested_at, harvested_at)""",
-        (j["job_id"], j.get("company_id"), j.get("company_name"), j.get("title"),
+        (j["job_id"], j.get("company_id"), j.get("company_id"), j.get("company_name"),
+         j.get("title"),
          url, j.get("location"), track, j.get("geo_mode"),
          remote, j.get("remote_signal"), j.get("anchor_signal"),
          j.get("description"),
@@ -514,6 +518,21 @@ def _norm_url(u: str | None) -> str:
     u = (u or "").strip().lower()
     u = re.sub(r"^https?://", "", u)
     return u.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+
+
+@sql_function("city_key", 1)
+def _city_key(location: str | None) -> str:
+    """The city a location names, as a comparison key: its first
+    comma/semicolon/slash-separated part, [a-z0-9] only; '' when it names no
+    city ("2 Locations", blank).
+
+    >>> _city_key("Durham, NC, United States"), _city_key("Durham, North Carolina")
+    ('durham', 'durham')
+    >>> _city_key("2 Locations"), _city_key(None)
+    ('', '')
+    """
+    key = re.sub(r"[^a-z0-9]", "", re.split(r"[,;|/(]", (location or "").lower())[0])
+    return "" if re.fullmatch(r"\d+locations?", key) else key
 
 
 def touch_job(conn: sqlite3.Connection, job_id: str) -> None:
@@ -833,7 +852,7 @@ def _effective_mission(company_name: str | None, mission: float | None) -> float
 _RANK_SQL = """
 WITH pool AS (
   SELECT j.id, j.job_id, j.url, j.company_id, j.company_name, j.title,
-         j.resume_fit_score, c.mission_score, employer_tag(c.tags) AS _employer,
+         j.resume_fit_score, c.mission_score, c.employer_id AS _employer,
          effective_mission(j.company_name, c.mission_score) AS _mission
   FROM jobs j LEFT JOIN companies c ON j.company_id = c.id
   WHERE {pool_where}
@@ -849,13 +868,12 @@ SELECT {columns}, c.mission_tier, c.mission_score, c.tags AS company_tags,
 FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies c ON j.company_id = c.id
 ORDER BY {final_order}"""
 # The collapse layer's partition is one "same opening at the same employer"
-# group: company_id when a row has one, else the name key (LinkedIn captures,
-# jsonld sweep hits and manual --add carry no company_id -- 4 of 119,411 rows
-# in the 2026-09-17 live store), else the row's own job_id, which never
-# repeats, so a nameless row never collides with every other nameless row.
-# Then the normalised title. A company whose tags carry `employer:<key>`
-# (tags.EMPLOYER) joins the group of every other row with that key first,
-# so two boards of one employer fold the same posting into one row.
+# group: the board's employer (companies.employer_id, so two boards of one
+# employer fold the same posting into one row), else the name key (LinkedIn
+# captures, jsonld sweep hits and manual --add carry no company_id -- 4 of
+# 119,411 rows in the 2026-09-17 live store), else the row's own job_id,
+# which never repeats, so a nameless row never collides with every other
+# nameless row. Then the normalised title.
 _COLLAPSE_SQL = """
 , ranked AS (
   SELECT *, ROW_NUMBER() OVER ordered AS _rn,
@@ -865,7 +883,7 @@ _COLLAPSE_SQL = """
   FROM scored
   WINDOW ordered AS (
     PARTITION BY
-      CASE WHEN _employer != '' THEN 'employer:' || _employer
+      CASE WHEN _employer IS NOT NULL THEN 'employer:' || _employer
            WHEN company_id IS NOT NULL THEN CAST(company_id AS TEXT)
            WHEN name_key(company_name) != '' THEN 'name:' || name_key(company_name)
            ELSE 'job:' || job_id END,
@@ -873,12 +891,6 @@ _COLLAPSE_SQL = """
     ORDER BY {order}),
          whole AS (ordered ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
 )"""
-
-
-@sql_function("employer_tag", 1)
-def _employer_tag(company_tags: str | None) -> str:
-    """tags.employer over a query's column, for ranked_jobs' collapse."""
-    return tags.employer(company_tags)
 
 
 @sql_function("remote_admitted", 4)
@@ -1148,3 +1160,96 @@ def dedup_jobs(conn: sqlite3.Connection) -> int:
         describe=lambda keep, losers: (
             f"{(keep['title'] or '')[:40]:40} kept {keep['job_id'][:28]}"
             f" <- dropped {', '.join(l['job_id'][:28] for l in losers)}"))
+
+
+def flag_duplicate_jobs(conn: sqlite3.Connection) -> int:
+    """Set `jobs.dup_of` on the rows that list, on another board of the
+    same employer, an opening another row already lists; clear it where it
+    no longer holds. Returns the rows whose flag changed. Nothing is deleted.
+
+    A cross-board duplicate: same employer, same normalised title, same
+    city (`city_key`; a row with no city matches any, when each board has
+    the title once), both open, the rows paired one to one in id order so
+    a board's three real openings stay three. The survivor is the row of the
+    board with the most jobs stored; the loser's flag names its id.
+    Dispositioned rows are never flagged. A pair of boards counts only when at
+    least 3 of the loser board's openings, and a fifth of them, pair up. The
+    flag is recomputed from the open rows, so a loser whose survivor closed
+    or vanished comes back.
+
+    >>> from .companies import add_board, upsert_company
+    >>> conn = connect(":memory:")
+    >>> a = upsert_company(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
+    >>> b, _ = add_board(conn, {"name": "Acme", "ats": "ashby", "slug": "b"})
+    >>> for i in range(4):
+    ...     for cid, how in ((a, "A"), (b, "B")):
+    ...         _ = upsert_job(conn, {"job_id": f"{how}{i}", "company_id": cid,
+    ...                               "title": f"Role {i}", "location": "Durham, NC"})
+    >>> _ = upsert_job(conn, {"job_id": "B9", "company_id": b, "title": "Only B",
+    ...                       "location": "Durham, NC"})
+    >>> flag_duplicate_jobs(conn)
+    4
+    >>> [r[0] for r in conn.execute("SELECT job_id FROM jobs WHERE dup_of IS NOT NULL")]
+    ['A0', 'A1', 'A2', 'A3']
+
+    The survivor is the board with more jobs (B); close one of its rows and
+    the other board's twin stands again:
+
+    >>> _ = conn.execute("UPDATE jobs SET status='closed' WHERE job_id='B0'")
+    >>> flag_duplicate_jobs(conn)
+    1
+    >>> sorted(r[0] for r in conn.execute("SELECT job_id FROM jobs WHERE dup_of IS NOT NULL"))
+    ['A1', 'A2', 'A3']
+    """
+    # A cross-board duplicate needs evidence the two boards are mirrors, not
+    # just a title and a city in common ("Registered Nurse", Durham): at
+    # least `paired` of the loser board's open postings must pair with the
+    # survivor board's, and at least `share` of its open postings.
+    flag = """
+    WITH multi AS MATERIALIZED (
+      SELECT employer_id FROM companies WHERE employer_id IS NOT NULL
+      GROUP BY employer_id HAVING COUNT(*) > 1
+    ), o AS MATERIALIZED (
+      SELECT j.id, j.company_id AS cid, c.employer_id AS emp, norm_title(j.title) AS t,
+             city_key(j.location) AS l, j.disposition IS NULL AS free
+      FROM open_jobs j JOIN companies c ON c.id = j.company_id
+      WHERE c.employer_id IN (SELECT employer_id FROM multi) AND COALESCE(j.title, '') != ''
+    ), home AS MATERIALIZED (
+      SELECT company_id AS cid, COUNT(*) AS jobs FROM jobs
+      WHERE company_id IN (SELECT id FROM companies
+                           WHERE employer_id IN (SELECT employer_id FROM multi))
+      GROUP BY company_id
+    ), k AS MATERIALIZED (
+      SELECT o.*, h.jobs,
+             ROW_NUMBER() OVER (PARTITION BY emp, t, l, o.cid ORDER BY o.id) AS ord,
+             COUNT(*) OVER (PARTITION BY emp, t, o.cid) AS tn,
+             DENSE_RANK() OVER (PARTITION BY emp, t, l ORDER BY h.jobs DESC, o.cid) AS brank
+      FROM o JOIN home h ON h.cid = o.cid
+    ), exact AS (
+      SELECT lo.id, w.id AS survivor, lo.cid FROM k lo
+      JOIN k w ON w.emp = lo.emp AND w.t = lo.t AND w.l = lo.l AND w.brank = 1 AND w.ord = lo.ord
+      WHERE lo.brank > 1 AND lo.free
+    ), tk AS (
+      SELECT *, DENSE_RANK() OVER (PARTITION BY emp, t ORDER BY jobs DESC, cid) AS trank
+      FROM k WHERE tn = 1
+    ), loose AS (
+      SELECT lo.id, w.id AS survivor, lo.cid FROM tk lo
+      JOIN tk w ON w.emp = lo.emp AND w.t = lo.t AND w.trank = 1 AND (lo.l = '' OR w.l = '')
+      WHERE lo.trank > 1 AND lo.free AND w.id NOT IN (SELECT id FROM exact)
+    ), pair AS (
+      SELECT id, MIN(survivor) AS survivor, cid FROM (
+        SELECT * FROM exact UNION ALL SELECT * FROM loose) GROUP BY id
+    ), kept AS MATERIALIZED (
+      SELECT p.id, p.survivor FROM pair p
+      JOIN (SELECT cid, COUNT(*) AS matched FROM pair GROUP BY cid) g ON g.cid = p.cid
+      JOIN (SELECT cid, COUNT(*) AS n FROM o GROUP BY cid) s ON s.cid = p.cid
+      WHERE g.matched >= :paired AND g.matched >= :share * s.n
+    )
+    UPDATE jobs SET dup_of = (SELECT survivor FROM kept WHERE kept.id = jobs.id)
+    WHERE id IN (SELECT id FROM kept
+                  UNION SELECT id FROM jobs INDEXED BY ix_jobs_dup WHERE dup_of IS NOT NULL)
+      AND dup_of IS NOT (SELECT survivor FROM kept WHERE kept.id = jobs.id)"""
+    before = conn.total_changes     # a WITH ... UPDATE sets no rowcount
+    conn.execute(flag, {"paired": 3, "share": 0.2})
+    _commit(conn)
+    return conn.total_changes - before

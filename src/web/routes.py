@@ -500,6 +500,7 @@ def api_export() -> ResponseReturnValue:
             "SELECT * FROM companies ORDER BY name").fetchall()]
     for r in rows:
         r.pop("id", None)
+        r.pop("employer_id", None)
     buf = io.BytesIO(json.dumps(rows, indent=1, ensure_ascii=False).encode("utf-8"))
     return send_file(buf, mimetype="application/json", as_attachment=True,
                      download_name="company_roster.json")
@@ -598,11 +599,11 @@ def api_stats() -> ResponseReturnValue:
             return conn.execute(q, args).fetchone()[0]
 
         stats = {
-            "open": one("SELECT COUNT(*) FROM open_jobs"),
+            "open": one("SELECT COUNT(*) FROM live_jobs"),
             "closed": one("SELECT COUNT(*) FROM jobs WHERE status='closed'"),
-            "new_today": one("SELECT COUNT(*) FROM open_jobs WHERE substr(first_seen,1,10)=?",
+            "new_today": one("SELECT COUNT(*) FROM live_jobs WHERE substr(first_seen,1,10)=?",
                              (today,)),
-            "dated": one("SELECT COUNT(posted_at) FROM open_jobs"),
+            "dated": one("SELECT COUNT(posted_at) FROM live_jobs"),
             "pipeline": one("SELECT COUNT(*) FROM jobs "
                             "WHERE disposition IN ('applied','interviewing')"),
             "saved": one("SELECT COUNT(*) FROM jobs WHERE disposition='saved'"),

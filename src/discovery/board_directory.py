@@ -389,7 +389,8 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
 
     * tracked    the roster has this board
     * alternate  the roster has the employer on another board (its name, or
-                 a roster careers host that is this posting's)
+                 a roster careers host that is this posting's); import_boards
+                 adds it as that employer's sibling board
     * blocked    a name a reviewer rejected, or the profile blocks
     * new        the rest. A name the roster holds only as a miss (no
                  board) is new, under the roster's own spelling, so the
@@ -507,7 +508,7 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
     eligible = [b for b in groups["new"] if b["gate_passes"] >= cfg.min_gate_titles]
     print("\n".join(_summary(scan, groups, len(eligible))))
     print(f"  report: {_write_report(groups, vocab)}")
-    counts = {s: len(groups[s]) for s in STATUSES} | {"eligible": len(eligible), "added": 0}
+    counts = {s: len(groups[s]) for s in STATUSES} | {"eligible": len(eligible), "added": 0, "siblings": 0}
     if not apply:
         print("  dry run: nothing written (--apply to validate, score and queue)")
         return counts
@@ -518,4 +519,12 @@ async def import_boards(apply: bool = False, limit: int | None = None) -> dict[s
     cap = min(cfg.max_scored_per_run, limit) if limit else cfg.max_scored_per_run
     counts["added"], _ = await intake_boards(cands, "board_directory", require_live=True, limit=cap)
     print(f"  {counts['added']} board(s) queued for review")
+    # An alternate board needs no verdict of its own: it joins its employer
+    # (store.add_board), once a live local posting confirms it.
+    alts: list[BoardHit] = [
+        {"name": b["name"], "ats": b["ats"], "slug": b["handle"], "careers_url": b["careers_url"]}
+        for b in groups["alternate"]]
+    counts["siblings"], _ = await intake_boards(alts, "board_directory", require_live=True,
+                                                siblings_only=True)
+    print(f"  {counts['siblings']} alternate board(s) added to their employers")
     return counts

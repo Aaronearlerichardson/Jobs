@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from .companies import (  # noqa: F401
     CAPTURE_ATS, MISS_REASONS, _OFFMISSION_MIN_JOBS, _offmission_volume,
-    as_company, board_key, company_by_board,
+    add_board, as_company, board_key, company_by_board, plan_board, realign_job_names,
     company_by_host, company_id_by_name, crawlable_companies,
     deactivate_company, dedup_companies, export_companies, get_companies,
     HARVEST_DEAD_AFTER_DAYS, get_company, harvestable_companies,
@@ -48,7 +48,7 @@ from .companies import (  # noqa: F401
 from .jobs import (  # noqa: F401
     TRIAGE_GATES, TRIAGE_OK, _SCORE_COLS, backfill_axis_columns, clear_triage,
     combined_score, crawl_seen, dedup_jobs, descriptions_for_company,
-    job_exists, join_tracks, mark_desc_checked, merge_jobs, open_in_track_clause,
+    flag_duplicate_jobs, job_exists, join_tracks, mark_desc_checked, merge_jobs, open_in_track_clause,
     ranked_jobs, record_probe_outcome, record_triage, remote_admitted,
     retire_stopped, same_posting, store_body, sync_job_statuses, touch_job, track_set,
     triage_counts, triage_pending, update_job_scores, upsert_job,
