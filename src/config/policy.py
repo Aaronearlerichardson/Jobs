@@ -94,12 +94,12 @@ MULTI_DIVISION_COMPANIES = {s.strip().lower() for s in _pol.multi_division}
 MULTI_DIVISION_MISSION_FLOOR = _pol.multi_division_mission_floor
 
 # TITLE vocabulary that passes the division keyword gate at a conglomerate
-# the roster ALSO carries a `watch` tag for. The division gate
+# the roster ALSO watches. The division gate
 # (src.match.filters.is_relevant, called by src.crawl.triage.row_verdict
 # and src.ops.maintenance._keep_job) asks a conglomerate's postings for the
 # profile's own health/bio/science vocabulary, because a corporate mission
 # score says nothing about the division that is hiring. At a WATCHED
-# conglomerate that question is the wrong one: the watch tag already means
+# conglomerate that question is the wrong one: watching already means
 # "I want this employer's technical roles", and its aligned division is a
 # plain engineering org whose postings never use that vocabulary.
 #

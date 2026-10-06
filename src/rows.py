@@ -205,7 +205,7 @@ class RankedJob(TypedDict, closed=True):
     dup_of: int | None
     mission_tier: str | None
     mission_score: float | None
-    company_tags: str | None
+    company_watch: int | None
     combined_score: float | None
     dup_count: NotRequired[int]
     dup_job_ids: NotRequired[tuple[str, ...]]
@@ -236,12 +236,18 @@ class CompanyIn(TypedDict, total=False, closed=True):
     created_at: str | None
     miss_reason: str | None
     miss_at: str | None
+    #: Facts of the employer: only "pending" and a truthy `watch` act (a write
+    #: never clears them); a legacy `watch`/`pending-review` token in `tags`
+    #: is read as the same. See store.upsert_company.
+    review: str | None
+    watch: int | None
 
 
 class CompanyRow(TypedDict, closed=True):
     """A company as `SELECT *` over the companies_effective view returns it:
-    every column, with the mission, tags, active, review and watch the
-    EFFECTIVE ones (the board's own, else its employer's; migration 0005), so
+    every column, with the mission, active, review and watch the EFFECTIVE
+    ones (the board's own, else its employer's; migration 0005) and `tags` the
+    board's own scope tags (migration 0006), so
     a subscript is checked. Its columns are declared a second time, apart
     from CompanyIn (a TypedDict cannot make an inherited optional key
     required); tests/test_store.py checks both against the table and

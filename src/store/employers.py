@@ -14,11 +14,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Literal
 
-from src import tags
 from .schema import _commit, apply_update, connect  # noqa: F401  (connect: the doctests open stores)
-
-#: The tag tokens that are employer facts, not board scope.
-FACT_TAGS = frozenset({tags.WATCH, tags.PENDING})
 
 #: The columns of one mission verdict, on an employer and on a board alike.
 MISSION_COLS = ("mission_tier", "mission_score", "mission_reason")
@@ -164,18 +160,3 @@ def clear_pending(conn: sqlite3.Connection, company_id: int, employer_id: int, *
         conn.execute("UPDATE companies SET review=NULL WHERE employer_id=?", (employer_id,))
     else:
         conn.execute("UPDATE companies SET review=NULL WHERE id=?", (company_id,))
-
-
-def apply_tag_facts(conn: sqlite3.Connection, company_id: int, held: set[str]) -> None:
-    """Make the fact tags in `held` ({watch, pending-review}) true of board
-    `company_id`, writing the level each belongs to (set_watch, set_pending);
-    a fact already effective is left alone. What an upsert's `tags` and a
-    dedup merge do with the two tokens that are not board scope."""
-    if not held & FACT_TAGS:
-        return
-    row = conn.execute("SELECT review, watch FROM companies_effective WHERE id=?",
-                       (company_id,)).fetchone()
-    if tags.WATCH in held and not row["watch"]:
-        set_watch(conn, company_id, True)
-    if tags.PENDING in held and row["review"] != "pending":
-        set_pending(conn, company_id)

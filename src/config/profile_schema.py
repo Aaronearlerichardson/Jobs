@@ -46,6 +46,23 @@ def _table_only(v: object) -> dict[Any, Any]:
     return v
 
 
+def _scope_tag(v: str | None) -> str | None:
+    """A track's `store_tag`: a canonical scope tag, None when blank. `watch`
+    and `pending-review` are facts of a company (store `watch` and `review`
+    columns), not tags a roster row carries.
+
+    >>> _scope_tag(" NC_Local "), _scope_tag("")
+    ('local', None)
+    >>> _scope_tag("watch")  # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+    ValueError: not a scope tag
+    """
+    tag = tags.canonical(v)
+    if tag in (tags.WATCH, tags.PENDING):
+        raise ValueError(f"{tag!r} is a company flag, not a scope tag")
+    return tag or None
+
+
 Unit = Annotated[float, Field(ge=0.0, le=1.0)]
 Count = Annotated[int, Field(ge=0)]
 Filled = Annotated[str, AfterValidator(_filled)]
@@ -119,9 +136,7 @@ class Methodology(_Table):
     keyword_mode: Literal["extend", "replace"] = "extend"
     accept_remote: bool = False
     sources: TrackSources = Field(default_factory=TrackSources)
-    store_tag: Annotated[str | None,
-                         AfterValidator(lambda v: tags.canonical(v) or None)
-                         ] = None
+    store_tag: Annotated[str | None, AfterValidator(_scope_tag)] = None
     require_core_anchor: bool = False
     geo_gate: bool = True
     # TOML has no null: `false` switches the admission off.

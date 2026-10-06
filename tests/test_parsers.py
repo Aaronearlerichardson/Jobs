@@ -1139,7 +1139,7 @@ class TestScoreAndUpsert:
         assert store.crawlable_companies(db) == []
         stored = store.get_companies(db, active_only=False)[0]
         assert stored["active"] == 0
-        assert {tags.LOCAL, tags.PENDING} <= set(stored["tags"].split(","))
+        assert tags.has(stored["tags"], tags.LOCAL) and stored["review"] == "pending"
         assert (stored["local_job_count"], stored["total_job_count"]) == (3, 8)
         assert stored["source"] == "paste"
         assert stored["careers_url"] == self._HIT["careers_url"]
@@ -1218,8 +1218,8 @@ class TestScoreAndUpsert:
         self._wire(monkeypatch)
         await self._upsert(
             db, {**self._HIT, "nc": 0}, source="paste")
-        assert store.get_companies(db, active_only=False)[0]["tags"] \
-            == tags.PENDING
+        first = store.get_companies(db, active_only=False)[0]
+        assert (first["tags"], first["review"]) == (None, "pending")
         # ats_dork admits an nc == 0 board on its HQ signal and says so
         # by passing the tag explicitly.
         await self._upsert(
@@ -1228,7 +1228,7 @@ class TestScoreAndUpsert:
             source="ats_dork", tags=tags.LOCAL)
         beta = next(c for c in store.get_companies(db, active_only=False)
                     if c["name"] == "Beta Bio")
-        assert {tags.LOCAL, tags.PENDING} <= set(beta["tags"].split(","))
+        assert (beta["tags"], beta["review"]) == (tags.LOCAL, "pending")
 
     async def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
         import src.store as store
@@ -1260,18 +1260,17 @@ class TestScoreMissionsHonoursTheReviewQueue:
 
     async def test_pending_rows_are_scored_but_not_revived(self, monkeypatch, db):
         import src.store as store
-        from src import tags
         self._wire(monkeypatch, db)
         store.upsert_company(db, {"name": "Queued Co", "ats": "lever",
                                   "slug": "queued", "active": 0,
-                                  "tags": tags.PENDING})
+                                  "review": "pending"})
         store.upsert_company(db, {"name": "Failed Call Co", "ats": "lever",
                                   "slug": "failed", "active": 0})
         await local_sourcing.score_missions(max_workers=1)
         rows = {r["name"]: dict(r) for r in
-                db.execute("SELECT name, active, tags, mission_tier FROM companies_effective")}
+                db.execute("SELECT name, active, review, mission_tier FROM companies_effective")}
         assert rows["Queued Co"]["active"] == 0
-        assert tags.has(rows["Queued Co"]["tags"], tags.PENDING)
+        assert rows["Queued Co"]["review"] == "pending"
         assert rows["Queued Co"]["mission_tier"] == "adjacent"
         assert rows["Failed Call Co"]["active"] == 1
 
@@ -1500,7 +1499,7 @@ class TestApplyToStoreFetchability:
         assert (stored["local_job_count"], stored["total_job_count"]) == (2, 5)
         # A custom board is one request, so it seeds the sweep (its spec's
         # `sweep`, D14).
-        assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))
+        assert tags.has(stored["tags"], tags.SWEEP) and stored["review"] == "pending"
 
     async def test_a_custom_roster_row_is_crawlable_end_to_end(self, monkeypatch, db,
                                                          serve):
@@ -1578,7 +1577,7 @@ class TestApplyToStoreFetchability:
 
         stored = store.get_companies(db, active_only=False)[0]
         assert (stored["ats"], stored["slug"]) == ("greenhouse", "alphabio")
-        assert {tags.SWEEP, tags.PENDING} <= set(stored["tags"].split(","))
+        assert tags.has(stored["tags"], tags.SWEEP) and stored["review"] == "pending"
 
 class TestADiscoveryPassKeepsARaisingItem:
     """A pass skips an item whose resolution raises, but never silently:

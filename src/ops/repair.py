@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, cast
 
 from src import config
 from src import store
-from src import tags
 from src.ats import coords
 from src.ats.board import BOARDS, board_for
 from src.ats.board.engine import Board
@@ -72,12 +71,12 @@ def _deactivate(conn: sqlite3.Connection, dead: list[CompanyRow], offmission: bo
               f"board '{c['slug']}' no longer resolves")
     if not offmission:
         return 0
-    # Watched companies are exempt: a watch tag is the user deliberately
+    # Watched companies are exempt: watching is the user deliberately
     # keeping an off-mission employer crawled.
     off = [c for c in store.get_companies(conn, active_only=True)
            if c.get("mission_tier") == "other"
            and not config.is_multi_division(c.get("name"))
-           and not tags.has(c, tags.WATCH)]
+           and not c.get("watch")]
     for c in off:
         store.deactivate_company(conn, c["id"])
         print(f"    [other] {c['name'][:30]:30} {c['ats'] or '?':10} "
@@ -319,8 +318,8 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
     human review. Returns the rows written.
 
     A hit is written onto the EXISTING row (same name): its board
-    coordinates, its mission score, `active=0`, and the `pending-review`
-    scope tag merged into whatever tags the row already carried. Writing
+    coordinates, its mission score, `active=0` and `review` pending, with
+    the scope tags it already carried kept. Writing
     the board clears the row's miss (src.store.upsert_company). A repeated
     miss just re-stamps miss_reason/miss_at, which moves the row to the back
     of the queue `_reresolve_candidates` orders by.
@@ -448,7 +447,7 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
             still.append((r["name"], "fetch-error:stalled"))
         print(f"\n  {len(written)} board(s) "
               + ("re-resolved and queued for review "
-                 f"(active=0, tagged {tags.PENDING})" if commit
+                 "(active=0, review pending)" if commit
                  else "would be re-resolved (preview: nothing written)")
               + (f", {len(dups)} already tracked under another name" if dups else "")
               + f", {len(still)} still missing, of {len(rows)} tried.")

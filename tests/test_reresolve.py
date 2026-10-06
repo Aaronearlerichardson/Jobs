@@ -107,8 +107,8 @@ class TestSilentBoardFamily:
 
 class TestReresolveWrites:
     """What a pass writes. The contract with the roster review queue is
-    narrow on purpose: board coordinates, a mission score, active=0 and the
-    pending-review tag — nothing else."""
+    narrow on purpose: board coordinates, a mission score, active=0 and
+    review pending — nothing else."""
 
     T = track_with(db_path=None)
 
@@ -120,7 +120,7 @@ class TestReresolveWrites:
 
     async def test_a_hit_is_queued_for_review_not_activated(self, db, monkeypatch):
         store.upsert_company(db, {"name": "Emmes", "active": 0,
-                                  "tags": tags.WATCH, "source": "directory"})
+                                  "tags": tags.LOCAL, "watch": 1, "source": "directory"})
         _miss(db, "Emmes", "no-board-found:wrong-domain")
         self._wire(monkeypatch, ({"name": "Emmes", "ats": "greenhouse",
                                   "slug": "emmes", "careers_url":
@@ -133,8 +133,8 @@ class TestReresolveWrites:
             "SELECT * FROM companies_effective WHERE name='Emmes'").fetchone())
         assert (row["ats"], row["slug"]) == ("greenhouse", "emmes")
         assert row["active"] == 0, "a re-resolved board is reviewed, not crawled"
-        assert tags.parse(row["tags"]) == {tags.WATCH, tags.PENDING}, \
-            "the pending tag must merge with the row's existing scope tags"
+        assert (row["tags"], row["review"], row["watch"]) == (tags.LOCAL, "pending", 1), \
+            "the pending state must leave the row's existing scope tags and watch alone"
         assert (row["miss_reason"], row["miss_at"]) == (None, None)
         assert row["last_probed"]
         assert row["mission_tier"] == "adjacent", \
@@ -160,7 +160,7 @@ class TestReresolveWrites:
         assert (row["ats"], row["slug"]) == ("greenhouse", "quiet-new")
         assert row["active"] == 0, \
             "retargeted the same way as any other family: reviewed, not crawled"
-        assert tags.PENDING in tags.parse(row["tags"])
+        assert row["review"] == "pending"
 
     async def test_preview_writes_nothing_and_scores_nothing(self, db,
                                                         monkeypatch):
@@ -230,7 +230,7 @@ class TestReresolveWrites:
         assert row["miss_at"] > "2020-01-01", \
             "a retried miss must move to the back of the queue"
         assert row["active"] == 0
-        assert tags.PENDING not in tags.parse(row["tags"]), \
+        assert row["review"] is None, \
             "a row that still does not resolve has nothing to review"
 
     async def test_a_board_another_row_already_owns_is_not_stolen(

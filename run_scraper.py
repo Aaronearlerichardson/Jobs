@@ -71,14 +71,14 @@ def _cmd_watch(args: argparse.Namespace, t: RuntimeTrack | None) -> None:
     from src import store
     name = args.watch or args.unwatch
     conn = _store(t)
-    tags = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
+    found = store.set_company_tag(conn, name, "watch", add=bool(args.watch))
     conn.close()
-    if tags is None:
+    if found is None:
         print(f"  [!] no company named {name!r} in the store "
               f"(names are matched case-insensitively but exactly).")
     else:
         verb = "watching" if args.watch else "unwatched"
-        print(f"  {verb} {name}  (tags: {tags or 'none'})")
+        print(f"  {verb} {name}")
 
 
 def _cmd_mark(args: argparse.Namespace, t: RuntimeTrack | None) -> None:

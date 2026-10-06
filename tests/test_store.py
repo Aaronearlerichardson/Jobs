@@ -14,12 +14,11 @@ from pydantic import ValidationError
 from conftest import iso_days_ago
 
 from src import config
-from src import tags
 import src.match.locality as locality
 import src.store as store
 from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
                       RankedJob)
-from src.store.migrate import MIGRATIONS_DIR, migrate
+from src.store.migrate import MIGRATIONS_DIR, _statements, migrate
 
 
 def _held_types(hint):
@@ -170,6 +169,33 @@ class TestSchema:
             "SELECT mission_tier, mission_score, review, watch FROM companies_effective "
             "WHERE name = 'C'")] == [("core", 0.9, "confirmed", 1)]
 
+    def test_a_version_5_store_loses_the_synthesized_tags_and_replays_safely(self, tmp_path):
+        path = tmp_path / "v5.db"
+        conn = store.connect(path)
+        for name, kw in (("A", {"tags": "local", "watch": 1}),
+                         ("B", {"tags": "sweep", "review": "pending"}), ("C", {})):
+            store.upsert_company(conn, {"name": name, **kw})
+        view = next(s for s in _statements((MIGRATIONS_DIR / "0005_employer_facts.sql").read_text())
+                    if "CREATE VIEW companies_effective" in s)
+        for stmt in ("DROP VIEW companies_effective", view, "PRAGMA user_version = 5"):
+            conn.execute(stmt)
+        conn.execute("UPDATE companies SET tags = 'sweep,watch,pending-review' WHERE name = 'C'")
+        conn.commit()
+        facts = "SELECT name, active, review, watch FROM companies_effective ORDER BY id"
+        before = [tuple(r) for r in conn.execute(facts)]
+        assert [r[0] for r in conn.execute("SELECT tags FROM companies_effective ORDER BY id")] \
+            == ["local,watch", "sweep,pending-review", "sweep,watch,pending-review"]
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(facts)] == before
+            for table in ("companies_effective", "companies"):
+                assert [r[0] for r in conn.execute(f"SELECT tags FROM {table} ORDER BY id")] \
+                    == ["local", "sweep", "sweep"]
+            conn.execute("PRAGMA user_version = 5")
+            conn.commit()
+            conn.close()
+
     def test_the_job_input_model_names_only_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert set(JobIn.__annotations__) <= cols
@@ -188,7 +214,7 @@ class TestSchema:
     def test_the_job_row_models_are_the_jobs_columns(self, db):
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert set(JobRow.__annotations__) == cols | {"remote_hint"}
-        joined = {"mission_tier", "mission_score", "company_tags", "combined_score",
+        joined = {"mission_tier", "mission_score", "company_watch", "combined_score",
                   "dup_count", "dup_job_ids", "dup_urls"}
         assert set(RankedJob.__annotations__) == cols | joined
         row, ranked = get_type_hints(JobRow), get_type_hints(RankedJob)
@@ -244,7 +270,7 @@ class TestSchema:
         assert {"anchor_signal", "triage_status", "outcome_reason"} <= cols("jobs")
         assert not {"neural_signal", "mission", "tech_bar_score"} & cols("jobs")
         assert tuple(conn.execute("SELECT local_job_count, tags FROM companies_effective").fetchone()) \
-            == (7, "local,sweep,watch")
+            == (7, "local,sweep")
         assert conn.execute("SELECT anchor_signal FROM jobs").fetchone()[0] == "bci"
         assert conn.execute("SELECT COUNT(*) FROM name_blocklist").fetchone()[0] == 0
         assert {"ix_jobs_url", "ix_jobs_triage"} <= {
@@ -288,11 +314,13 @@ class TestCompanies:
 
     def test_watch_tag_roundtrip(self, db):
         store.upsert_company(db, {"name": "W", "ats": "greenhouse", "slug": "w"})
-        assert store.set_company_tag(db, "w", "watch") == "watch"   # case-insensitive
+        assert store.set_company_tag(db, "w", "watch") == ""   # case-insensitive
         row = store.get_companies(db, active_only=False)[0]
         import src.ops.maintenance as ops
-        assert tags.has(row, tags.WATCH) and ops._whole_board(row)
+        assert row["watch"] == 1 and row["tags"] is None and ops._whole_board(row)
+        assert store.get_companies(db, active_only=False, watch=True) == [row]
         assert store.set_company_tag(db, "W", "watch", add=False) == ""
+        assert store.get_companies(db, active_only=False, watch=True) == []
         assert store.set_company_tag(db, "Nope", "watch") is None
 
 
@@ -356,8 +384,10 @@ class TestUpsertColumns:
         store.upsert_company(db, row)
         stored = dict(db.execute("SELECT * FROM companies_effective").fetchone())
         # an `ats` clears the miss pair (see upsert_company), so it is not compared
+        # ... and the two employer facts are applied, not stored as given
         assert {c: v for c, v in row.items()
-                if c not in ("miss_reason", "miss_at")}.items() <= stored.items()
+                if c not in ("miss_reason", "miss_at", "review", "watch")}.items() <= stored.items()
+        assert (stored["review"], stored["watch"]) == ("confirmed", 1)
 
 
 class TestStoredTypes:
@@ -408,13 +438,23 @@ class TestImportCompanies:
         return store.import_companies(conn, path)
 
     def test_an_export_loads_into_another_store(self, db, tmp_path):
-        store.upsert_company(db, {"name": "Acme", "ats": "lever", "slug": "acme",
-                                  "tags": "watch", "mission_score": 1})
+        store.upsert_company(db, store.mark_pending({
+            "name": "Acme", "ats": "lever", "slug": "acme", "tags": "sweep", "watch": 1,
+            "mission_score": 1}))
         store.export_companies(db, tmp_path / "out.json")
         other = store.connect(":memory:")
         assert store.import_companies(other, tmp_path / "out.json") == 1
-        assert other.execute("SELECT name, ats, slug, tags, mission_score FROM companies_effective"
-                             ).fetchone()[:] == ("Acme", "lever", "acme", "watch", 1.0)
+        assert other.execute("SELECT name, ats, slug, tags, mission_score, review, watch "
+                             "FROM companies_effective").fetchone()[:] \
+            == ("Acme", "lever", "acme", "sweep", 1.0, "pending", 1)
+
+    def test_an_old_export_with_fact_tokens_loads_as_the_facts(self, db, tmp_path):
+        self._load(db, tmp_path, [{"name": "Old", "tags": "local,watch,pending-review"}])
+        assert db.execute("SELECT tags, review, watch FROM companies_effective"
+                          ).fetchone()[:] == ("local", "pending", 1)
+        assert db.execute("SELECT tags FROM companies").fetchone()[0] == "local"
+        with pytest.raises(ValidationError):
+            self._load(db, tmp_path, [{"name": "Bad", "review": "maybe"}])
 
     @pytest.mark.parametrize("row, loc, kind", [
         ({"ats": "lever"}, (1,), "value_error"),

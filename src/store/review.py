@@ -18,7 +18,6 @@ import sqlite3
 from datetime import datetime
 
 from src import config
-from src import tags
 from src.rows import CompanyIn, CompanyRow
 from .employers import clear_pending
 from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the doctests open stores)
@@ -34,7 +33,7 @@ from .schema import _commit, connect, sql_function  # noqa: F401  (connect: the 
 # and turned four into ACTIVE roster rows with real boards. Verifying that a
 # board exists at a guessed domain proves a board exists -- never that the
 # NAME was an employer. So every automated path writes its candidates here
-# instead of onto the roster: an `active = 0` row carrying tags.PENDING,
+# instead of onto the roster: an `active = 0` row with `review = 'pending'`,
 # invisible to every crawl (they all read get_companies(active_only=True)),
 # until a person confirms or rejects it.
 #
@@ -65,21 +64,20 @@ def _name_key(name: str | None) -> str:
 
 def mark_pending(row: CompanyIn) -> CompanyIn:
     """A company-row dict rewritten as a REVIEW CANDIDATE: inactive, and
-    carrying the pending-review scope tag.
+    `review` pending.
 
     The contract every automated discovery path writes new companies under.
 
     >>> sorted(mark_pending({"name": "Acme", "active": 1}).items())
-    [('active', 0), ('name', 'Acme'), ('tags', 'pending-review')]
+    [('active', 0), ('name', 'Acme'), ('review', 'pending')]
 
     Scope tags already on the row survive, so confirming it leaves a company
     the crawl knows how to fetch:
 
     >>> mark_pending({"name": "Acme", "tags": "local"})["tags"]
-    'local,pending-review'
+    'local'
     """
-    return {**row, "active": 0,
-            "tags": tags.join(tags.parse(row.get("tags")) | {tags.PENDING})}
+    return {**row, "active": 0, "review": "pending"}
 
 
 def is_confirmed_company(conn: sqlite3.Connection, name: str) -> bool:

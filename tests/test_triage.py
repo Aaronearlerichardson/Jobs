@@ -198,7 +198,7 @@ async def test_geo_drop_before_hydration_unless_trusted(tmp_path, tracks, stubs,
     conn = store.connect(db)
     plain = _company(conn, "Plain", mission_tier="adjacent", mission_score=0.5)
     watched = _company(conn, "Watched", mission_tier="adjacent",
-                       mission_score=0.5, tags=tags.WATCH)
+                       mission_score=0.5, watch=1)
     _harvested(conn, plain, "far", "Data Engineer", elsewhere)
     _harvested(conn, plain, "rem", "Data Engineer", "Remote - US")
     _harvested(conn, watched, "wrem", "Data Engineer", "Remote - US")
@@ -340,7 +340,7 @@ async def test_watching_a_multi_division_company_admits_its_remote_rows(
     plain = _company(conn, "Megacorp", mission_tier="other",
                      mission_score=0.25)
     watched = _company(conn, "Megacorp Watched", mission_tier="other",
-                       mission_score=0.25, tags=tags.WATCH)
+                       mission_score=0.25, watch=1)
     _harvested(conn, plain, "prem", "Data Engineer", "Remote - US")
     _harvested(conn, watched, "wrem", "Data Engineer", "Remote - US")
     _harvested(conn, watched, "woff", "Data Engineer", "Remote - US",
@@ -381,7 +381,7 @@ async def test_a_watched_conglomerates_own_engineering_titles_pass_the_division_
     db = tmp_path / "s.db"
     conn = store.connect(db)
     c = _company(conn, "Megacorp Watched", mission_tier="other",
-                 mission_score=0.25, tags=tags.WATCH)
+                 mission_score=0.25, watch=1)
     for jid, title in (("sw", "Senior Software Engineer, AI Research Clusters"),
                        ("sa", "Senior Solutions Architect, AI Factory"),
                        ("asic", "Senior ASIC Design Engineer"),

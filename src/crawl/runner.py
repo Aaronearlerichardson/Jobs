@@ -44,7 +44,6 @@ from typing import Any, NamedTuple, cast
 
 from src import config
 from src import store
-from src import tags
 from src.ats.registry import iter_store_sources, sweep
 from src.claude.resume import resume_text
 from src.config import RuntimeTrack
@@ -356,7 +355,7 @@ def _fresh_and_watched(conn: sqlite3.Connection, t: RuntimeTrack, c: CompanyRow,
 
     fresh = [j for j in kept if not store.crawl_seen(conn, j["id"])]
     watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] = []
-    if tags.has(c, tags.WATCH):
+    if c.get("watch"):
         # Watch section: EVERY new technical, non-excluded posting at a
         # watched company in the US (us_eligible; 2026-09-29: 20 of 29 hits
         # were NVIDIA seats in Israel, India and Europe) -- out-of-scope

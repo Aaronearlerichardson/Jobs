@@ -872,9 +872,8 @@ def test_the_watch_section_lists_us_postings_only(db, local_track):
     """A watched company's new postings are listed wherever in the US they
     sit; a seat abroad is neither listed nor stored (2026-09-29: 20 of 29
     hits were NVIDIA seats in Israel, India and Europe)."""
-    from src import tags
     from src.crawl import runner
-    c = _company(db, "Acme", tags=tags.WATCH)
+    c = _company(db, "Acme", watch=1)
     jobs = [{**_job(1), "title": "Data Engineer", "location": "US, CA, Santa Clara"},
             {**_job(2), "title": "Data Engineer", "location": "Israel, Yokneam"}]
     _, hits = runner._fresh_and_watched(db, local_track, c, jobs, [], commit=True)

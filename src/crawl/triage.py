@@ -322,14 +322,14 @@ def row_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, cutoff: str) 
             return "geo"
         deferred = deferred or v == DEFER
     if t.exclude_gate and gates.exclude_reason(
-            title, desc, allow_defense=tags.has(company, tags.WATCH),
+            title, desc, allow_defense=bool(company.get("watch")),
             track_id=t.id):
         return "exclude"
     if config.is_multi_division(company.get("name")):
         if not has_body:
             deferred = True
         elif not is_relevant(title, desc,
-                             watch_titles=tags.has(company, tags.WATCH)):
+                             watch_titles=bool(company.get("watch"))):
             return "division"
     return DEFER if deferred else OK
 

@@ -10,7 +10,6 @@ import capture
 from conftest import answer, fake_response, fixture
 import src.claude.fit as fit
 import src.store as store
-from src import tags
 from src.ops import ingest
 import src.ops.maintenance as ops
 from src.crawl.page_capture import parse_page
@@ -170,7 +169,7 @@ class TestAttribution:
         await capture.ingest_html("", _results_page("jobs.acmeguess.com", local_addr))
         row = _row(roster, "Acme Guess")
         assert row["active"] == 0 and row["ats"] is None
-        assert tags.has(row["tags"], tags.PENDING)
+        assert row["review"] == "pending"
 
     async def test_jsonld_employer_site_attributes_a_hosted_board_page(self, roster):
         # The page host is the board vendor's; the posting's own JSON-LD says

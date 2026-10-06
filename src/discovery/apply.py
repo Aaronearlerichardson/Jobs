@@ -183,7 +183,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
     * a name the reviewer rejected (``src.store.block_name``) drops its
       jobs — that decision was "not a company", and it sticks;
     * anything else becomes a review candidate under `commit`:
-      ``src.store.mark_pending`` (inactive, tagged pending-review), with
+      ``src.store.mark_pending`` (inactive, review pending), with
       ``source = "getro:<board host>"`` and the ATS coordinates when the
       apply link revealed them. Never an active row.
 

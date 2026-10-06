@@ -179,7 +179,7 @@ def _job_json(r: JobRow | RankedJob, today: str, rank: int | None = None,
     d["geo_bucket"] = _geo_tag(r)
     d["relocation_required"] = d["geo_bucket"] == "relocation"
     d["us_ok"] = locality.us_eligible(r.get("location") or "")
-    d["watched"] = company_tags.has(r.get("company_tags"), company_tags.WATCH)
+    d["watched"] = bool(r.get("company_watch"))
     # Whether a REMOTE row here is worth showing in a location-scoped track.
     # The same rule ranked_jobs applies server-side, re-run per row because
     # /api/jobs deliberately ships everything and gates on the client.
@@ -312,14 +312,13 @@ def api_companies() -> ResponseReturnValue:
             "SELECT company_id, open_jobs, best_fit FROM company_open_stats").fetchall()}
     out = []
     for c in comps:
-        tags = company_tags.parse(c.get("tags"))
         n_open, best_fit = stats.get(c["id"], (0, None))
         out.append({
             "id": c["id"], "name": c["name"], "ats": c.get("ats"),
             "mission_tier": c.get("mission_tier"),
             "mission_score": c.get("mission_score"),
-            "active": bool(c.get("active")), "tags": sorted(tags),
-            "watched": company_tags.WATCH in tags, "open_jobs": n_open,
+            "active": bool(c.get("active")), "tags": sorted(company_tags.parse(c.get("tags"))),
+            "watched": bool(c.get("watch")), "review": c.get("review"), "open_jobs": n_open,
             "best_fit": best_fit,
             # Crawl cadence, so the roster shows WHY a company stopped
             # producing rows instead of looking silently broken.
@@ -338,11 +337,9 @@ class _Toggle(_Body):
 def api_watch(cid: int) -> ResponseReturnValue:
     p = _body(_Toggle)
     with track_store(_track(p.track)) as conn:
-        row = conn.execute("SELECT name FROM companies WHERE id=?",
-                           (cid,)).fetchone()
-        if not row:
+        if not store.get_company(conn, cid):
             return jsonify(error="not found"), 404
-        store.set_company_tag(conn, row["name"], "watch", add=p.on)
+        store.set_watch(conn, cid, p.on)
     return jsonify(ok=True, watched=p.on)
 
 
@@ -375,7 +372,7 @@ def api_active(cid: int) -> ResponseReturnValue:
 # --------------------------------------------------------------------------- #
 #
 # Nothing an automated path discovers joins the roster by itself: it lands as
-# an inactive, pending-review company row (src/store/review.py) and waits here.
+# an inactive, review-pending company row (src/store/review.py) and waits here.
 
 
 @app.get("/api/pending")
@@ -387,7 +384,7 @@ def api_pending() -> ResponseReturnValue:
 
 @app.post("/api/company/<int:cid>/confirm")
 def api_confirm(cid: int) -> ResponseReturnValue:
-    """Accept a review candidate: the pending tag comes off and the shared
+    """Accept a review candidate: it leaves the queue and the shared
     mission rule decides whether it is crawled."""
     from src.claude.api import is_active_mission
     with track_store(_track(_body(_Body).track)) as conn:

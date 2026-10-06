@@ -449,6 +449,9 @@ class TestRemoteAdmissionFields:
         assert client.post(f"/api/company/{cid}/watch",
                            json={"on": True}).status_code == 200
         assert self._job(client)["remote_ok"] is True
+        row = next(r for r in json.loads(client.get("/api/companies").data)
+                   if r["id"] == cid)
+        assert row["watched"] is True and "watch" not in row["tags"]
 
     def test_roster_carries_the_best_fit_so_far(self, client, wired_db_path,
                                                 monkeypatch):

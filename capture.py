@@ -44,7 +44,7 @@ try:
 except Exception:
     pass
 
-from src import runstate, tags
+from src import runstate
 from src import store
 from src.crawl.page_capture import page_url, parse_page
 from src.ops.ingest import ingest_external_jobs
@@ -95,7 +95,7 @@ def attribute_company(conn: sqlite3.Connection, url: str,
         return None
     for j in jobs:
         j["company"] = row["name"]
-    if not row.get("ats") and not tags.has(row.get("tags"), tags.PENDING):
+    if not row.get("ats") and row["review"] != "pending":
         store.upsert_company(conn, {
             "name": row["name"], "ats": store.CAPTURE_ATS, "active": 1,
             "notes": "capture-only board: browse it yourself and save pages "

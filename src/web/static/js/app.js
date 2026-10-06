@@ -593,7 +593,7 @@ function renderCompanies() {
         <td><span class="chip tier">${esc(c.mission_tier || "?")}</span></td>
         <td class="num">${c.mission_score == null ? "–" : c.mission_score.toFixed(2)}</td>
         <td class="num">${c.open_jobs}</td>
-        <td class="loc">${esc((c.tags || []).filter(t => t !== "watch").join(", "))}</td>
+        <td class="loc">${esc([...(c.tags || []), ...(c.review === "pending" ? ["pending-review"] : [])].join(", "))}</td>
         <td>${crawlCell(c)}</td>
         <td><input type="checkbox" data-active="${c.id}" ${c.active ? "checked" : ""}></td>
       </tr>`).join("")}</tbody></table>`;

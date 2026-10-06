@@ -735,7 +735,6 @@ class TestGetroAttribution:
         assert len(store.get_companies(db, active_only=False)) == 1
 
     def test_an_unknown_employer_is_queued_for_review(self, db):
-        from src import tags
         from src import store
         job = self._job("Orbit Health", "https://orbit.health/jobs/analyst",
                         slug="orbit-health", domain="orbit.health")
@@ -744,7 +743,7 @@ class TestGetroAttribution:
         assert row["name"] == "Orbit Health"
         assert row["source"] == f"getro:{self.BOARD}"
         assert row["careers_url"] == "https://orbit.health"
-        assert tags.has(row["tags"], tags.PENDING)
+        assert row["review"] == "pending"
         assert job["company_id"] == row["id"]
         assert store.get_company(db, row["id"])["active"] == 0
         assert store.crawlable_companies(db) == []
@@ -758,7 +757,7 @@ class TestGetroAttribution:
         (row,) = store.pending_companies(db)
         assert (row["ats"], row["slug"]) == ("greenhouse", "acmeanalytics")
         assert tags.has(row["tags"], tags.SWEEP)
-        assert tags.has(row["tags"], tags.PENDING)
+        assert row["review"] == "pending"
 
     def test_a_rejected_name_stays_rejected(self, db):
         from src import store

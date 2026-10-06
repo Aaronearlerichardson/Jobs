@@ -513,7 +513,7 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
     ...                             "FROM companies ORDER BY id")]
     [('Fortrea', 'workday', 1, 350), ('Fortrea (phenom)', 'phenom', 1, 24)]
 
-    The row is inactive and tagged pending-review unless the store has
+    The row is inactive and review-pending unless the store has
     already confirmed the name (src.store.is_confirmed_company). `tags`
     defaults to the local scope tag when the board has local jobs; a caller
     with another reason to call the company local (ats_dork's HQ signal)
@@ -626,7 +626,7 @@ async def populate_companies(extra_names: list[str] | None = None,
     Full sourcing pass → SQL store: discover NC-local boards, score each
     company's MISSION once (cached), and upsert into the `companies` table.
     Every company new to the store lands in the REVIEW QUEUE — inactive,
-    tagged pending-review (src.store.mark_pending) — so a bulk pass cannot
+    review-pending (src.store.mark_pending) — so a bulk pass cannot
     put a name nobody vetted on the roster. Mission scoring still runs, so
     the reviewer sees the tier; `include_missions` only decides what
     confirming such a row activates.
@@ -1054,7 +1054,7 @@ async def resolve_leads(max_workers: int = 8,
         for name, reason in missed:
             print(f"    [miss] {name[:34]:34} {reason}")
     queued = sum(1 for r in resolved_rows
-                 if company_tags.has(r.get("tags"), company_tags.PENDING))
+                 if r.get("review") == "pending")
     print(f"\n  {len(resolved_rows)} board(s) resolved, "
           f"{queued} awaiting review, "
           f"{sum(r['active'] or 0 for r in resolved_rows)} activated, "

@@ -8,14 +8,18 @@ company should be crawled, not what it does:
               whose whole board is expensive to pull, so we ask for a region)
     sweep   — crawl its whole board (lightweight JSON ATSes; also the tag a
               location-agnostic track sweeps on via [tracks.*].store_tag)
-    watch   — human-set: fetch this board every crawl and flag anything new
-              regardless of rank or geography
 
-The first two used to be named after one user's search — "nc_local" for a
+Both used to be named after one user's search — "nc_local" for a
 North-Carolina local pass and "neural" for a BCI-focused sweep. They were
 never region- or field-specific in behaviour, so they now carry names that
 say what they do. `canonical()` keeps existing stores and hand-written
 profiles working, and `migrate_sql_expr` rewrites the stored tokens in place.
+
+Not a tag: `watch` (human-set: fetch this board every crawl and flag anything
+new regardless of rank or geography) and the review queue are facts of the
+employer, the `watch` and `review` columns of companies_effective. WATCH and
+PENDING below are their legacy tag spellings, which store.upsert_company still
+reads once at the write edge and never stores.
 
 This module lives at the top level beside the config package and imports nothing:
 config, the store, and the scrapers all depend on it, so it must stay a
@@ -31,9 +35,9 @@ LOCAL = "local"
 SWEEP = "sweep"
 WATCH = "watch"
 # Roster review queue (2026-09): a company an automated discovery path
-# resolved but a person has not confirmed. Written active=0 with this
-# tag; confirming drops the tag and applies the mission rule; rejecting
-# removes the row and blocklists the name. Never crawled while pending.
+# resolved but a person has not confirmed (`review = 'pending'`). Written
+# active=0; confirming applies the mission rule; rejecting removes the row
+# and blocklists the name. Never crawled while pending.
 PENDING = "pending-review"
 
 # Retired name -> current name. Read-side only: nothing writes these.

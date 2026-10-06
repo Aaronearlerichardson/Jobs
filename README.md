@@ -179,7 +179,7 @@ The store's `companies` table **is** the roster. Ways to add to it:
 | `python discover.py --from-bciwiki` | Bulk-import a public industry directory (bciwiki.org's ~700 brain-computer-interface companies). A worked example of the pattern; only useful if that's your field. |
 
 Every one of those paths writes **review candidates**, not roster members:
-an inactive `companies` row tagged `pending-review`, which no crawl fetches.
+an inactive `companies` row with `review` pending, which no crawl fetches.
 The web UI's Companies tab lists them — Confirm puts a company on the roster,
 Reject deletes it and blocklists the name. Proving a board answers at a
 guessed domain proves a board exists; it never proved the NAME was an

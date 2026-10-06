@@ -22,7 +22,6 @@ from datetime import datetime, timedelta
 from typing import Any, cast
 
 from src import config
-from src import tags
 from src.match.locality import LocationRE
 from src.net.util import clean_url
 from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
@@ -774,9 +773,9 @@ def remote_admitted(row: Mapping[str, Any], remote_mission_floor: float | None) 
     worth showing in a location-scoped view.
 
     A watched company qualifies whatever it scores — watch is the one
-    human-curated tag, "show me everything at this employer":
+    human-curated flag, "show me everything at this employer":
 
-    >>> remote_admitted({"company_tags": "local,watch",
+    >>> remote_admitted({"company_watch": 1,
     ...                  "mission_score": 0.05}, 0.85)
     True
 
@@ -810,7 +809,7 @@ def remote_admitted(row: Mapping[str, Any], remote_mission_floor: float | None) 
         UI re-applies it per row, because /api/jobs deliberately ships
         every row and gates on the client.
     """
-    if tags.has(row.get("company_tags"), tags.WATCH):
+    if row.get("company_watch"):
         return True
     if remote_mission_floor is None:
         return False
@@ -861,7 +860,7 @@ WITH pool AS (
 ){collapse}, picked AS (
   SELECT * FROM {source} ORDER BY {order} {limit}
 )
-SELECT {columns}, c.mission_tier, c.mission_score, c.tags AS company_tags,
+SELECT {columns}, c.mission_tier, c.mission_score, c.watch AS company_watch,
        p.combined_score{extra}
 FROM picked p JOIN jobs j ON j.id = p.id LEFT JOIN companies_effective c ON j.company_id = c.id
 ORDER BY {final_order}"""
@@ -890,10 +889,10 @@ _COLLAPSE_SQL = """
 
 
 @sql_function("remote_admitted", 4)
-def _remote_admitted_cols(company_tags: str | None, company_name: str | None,
+def _remote_admitted_cols(company_watch: int | None, company_name: str | None,
                           mission_score: float | None, floor: float | None) -> bool:
     """remote_admitted over a query's columns, for ranked_jobs' geo clause."""
-    return remote_admitted({"company_tags": company_tags, "company_name": company_name,
+    return remote_admitted({"company_watch": company_watch, "company_name": company_name,
                             "mission_score": mission_score}, floor)
 
 
@@ -999,7 +998,7 @@ def ranked_jobs(conn: sqlite3.Connection, track: str | None = None, limit: int |
         geo = "COALESCE(j.location, '') IN (SELECT value FROM json_each(?))"
         if allow_geo_modes:
             geo += (" OR (j.geo_mode IN (SELECT value FROM json_each(?)) AND "
-                    "remote_admitted(c.tags, j.company_name, c.mission_score, ?))")
+                    "remote_admitted(c.watch, j.company_name, c.mission_score, ?))")
             args += [json.dumps(sorted(allow_geo_modes)), remote_mission_floor]
         conds.append(f"({geo})")
     if min_mission is not None:

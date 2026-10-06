@@ -79,9 +79,9 @@ class TestRemoteAdmissionGates:
     survive the geo gate — otherwise the ranking would admit rows the crawl
     never fetched."""
 
-    def _co(self, mission=None, tag="", name="Acme"):
+    def _co(self, mission=None, tag="", name="Acme", watch=0):
         return {"id": 1, "name": name, "ats": "greenhouse", "slug": "acme",
-                "mission_score": mission, "tags": tag}
+                "mission_score": mission, "tags": tag, "watch": watch}
 
     def _job(self, location, title="Data Engineer"):
         return {"id": "gh_acme_1", "title": title, "location": location,
@@ -112,11 +112,11 @@ class TestRemoteAdmissionGates:
                                  self._job("Remote - US"),
                                  self._track(local_track))
 
-    async def test_watch_tag_admits_remote(self, local_track):
-        assert await ops._keep_job(self._co(tag="watch"), self._job("Remote - US"),
+    async def test_watching_admits_remote(self, local_track):
+        assert await ops._keep_job(self._co(watch=1), self._job("Remote - US"),
                              self._track(local_track))
 
-    async def test_multi_division_watch_tag_widens_the_crawl_paths_division_gate(
+    async def test_multi_division_watch_widens_the_crawl_paths_division_gate(
             self, local_track, division_vocab):
         # _keep_job is the CRAWL path's division gate; src.crawl.triage has
         # its own copy (tested in test_triage.py against the same fixture).
@@ -125,7 +125,7 @@ class TestRemoteAdmissionGates:
         job = self._job("Remote - US",
                         title="Senior Software Engineer, AI Research Clusters")
         job["description"] = _PLAIN_ENG_BODY
-        assert await ops._keep_job(self._co(tag="watch", name="Megacorp Watched"),
+        assert await ops._keep_job(self._co(watch=1, name="Megacorp Watched"),
                              job, self._track(local_track))
 
     async def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(

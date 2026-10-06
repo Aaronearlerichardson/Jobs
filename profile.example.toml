@@ -171,7 +171,7 @@ default = true
 #   # location_scoped: store boards fetched through the [locality] filter
 #   #   (whole-board for watched companies); false = lightweight ATS sweep
 # store_tag = ""               # only sweep store companies with this tag
-#                              # ("local" / "sweep" / "watch"; src/tags.py)
+#                              # ("local" / "sweep" / any track's tag; src/tags.py)
 # require_core_anchor = false  # gate: posting must hit a CORE keyword
 # geo_gate = true              # gate: drop non-local, non-remote postings
 # remote_mission_floor = 0.85  # a company at or above this mission score is
@@ -206,7 +206,7 @@ default = true
 #                              # single job). An empty day is one with nothing
 #                              # in this track's scope AND no open posting
 #                              # the harvester has on file for the board. One
-#                              # non-empty fetch wakes it, and "watch"-tagged
+#                              # non-empty fetch wakes it, and watched
 #                              # companies never sleep.
 # dormant_days = 7             # how long a dormant company is skipped before
 #                              # its next retry
@@ -236,7 +236,7 @@ multi_division = []
 multi_division_mission_floor = 0.6
 
 # Titles that pass the DIVISION gate at a conglomerate above that your roster
-# ALSO carries a `watch` tag for. That gate asks a conglomerate's postings for
+# ALSO watches. That gate asks a conglomerate's postings for
 # the [keywords] vocabulary, because a corporate mission score says nothing
 # about the division that is hiring -- but at an employer you have explicitly
 # watched, the division worth watching is often a plain engineering org whose

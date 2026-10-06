@@ -201,13 +201,13 @@ def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
 
 # --------------------------------------------------------------------------- #
 #  Company-row helpers (store roster semantics, shared by crawl + ops).        #
-#  Tag checks are tags.has(company, tags.WATCH) etc.                           #
+#  The watch flag is company.get("watch"); scope tags are tags.has(...).       #
 # --------------------------------------------------------------------------- #
 
 def remote_trusted(company: CompanyRow | None, floor: float | None) -> bool:
     """True if the geo gate admits a company's remote postings: it is on
     the watch list, or `_mission_trusted` at `floor`."""
-    return tags.has(company, tags.WATCH) or _mission_trusted(company, floor)
+    return bool(company and company.get("watch")) or _mission_trusted(company, floor)
 
 
 def remote_us_geo_drops(conn: sqlite3.Connection, floors: Iterable[float | None], *,
@@ -249,7 +249,7 @@ def _mission_trusted(company: CompanyRow | None, floor: float | None) -> bool:
         Defers to store.remote_admitted, the rule the ranking applies, so
         the fetch side and the ranking side cannot drift into disagreeing
         about which remote rows should exist. The company row is passed as
-        the job-shaped fields that rule reads; its tags are withheld
+        the job-shaped fields that rule reads; its watch flag is withheld
         because callers test the watch half themselves.
     """
     if not company:
@@ -265,7 +265,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
     Either scope tag qualifies on its own — a sweep board is cheap to pull
     whole, a watched one must never miss a posting:
 
-    >>> _whole_board({"name": "Acme", "tags": "watch"})
+    >>> _whole_board({"name": "Acme", "watch": 1})
     True
     >>> _whole_board({"name": "Acme", "tags": "sweep"})
     True
@@ -291,7 +291,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
         and the count climbs fast as the floor drops. It is a knob to move
         deliberately.
     """
-    return (tags.has(company, tags.SWEEP) or tags.has(company, tags.WATCH)
+    return (tags.has(company, tags.SWEEP) or bool(company.get("watch"))
             or _mission_trusted(company, mission_floor))
 
 
@@ -318,11 +318,11 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
         # crawl path and the triage path disagreed about the same posting at
         # the same company, and one silently dropped what the other kept.
         if not is_relevant(title, job.get("description", ""),
-                           watch_titles=tags.has(company, tags.WATCH)):
+                           watch_titles=bool(company.get("watch"))):
             return False
     if t.exclude_gate and gates.exclude_reason(
             title, job.get("description", ""),
-            allow_defense=tags.has(company, tags.WATCH), track_id=t.id):
+            allow_defense=bool(company.get("watch")), track_id=t.id):
         return False
     floor = t.remote_mission_floor
     if t.geo_gate and _whole_board(company, floor):
