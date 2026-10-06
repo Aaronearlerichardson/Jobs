@@ -21,6 +21,7 @@ from src.net import http
 from src.net.util import cache_dir, json_cache_get, json_cache_put
 from src.rows import BoardHit
 from .local_sourcing import queue_names
+from .name_sources import blocked_keys
 
 
 class NamedSource(NamedTuple):
@@ -72,6 +73,12 @@ def _named(rows: Iterable[tuple[str | None, str | None]], label: str) -> list[Na
     return list(out.values())
 
 
+def _results(payload: Any) -> list[dict[str, Any]]:
+    """The dict entries of a registry reply's `results`, [] when it has none."""
+    results = payload.get("results") if isinstance(payload, dict) else None
+    return [r for r in results or [] if isinstance(r, dict)]
+
+
 def nih_rows(payload: Any) -> list[tuple[str | None, str | None]]:
     """(organization, city) of each project in a RePORTER reply.
 
@@ -80,8 +87,7 @@ def nih_rows(payload: Any) -> list[tuple[str | None, str | None]]:
     >>> nih_rows(None)
     []
     """
-    results = payload.get("results") if isinstance(payload, dict) else None
-    orgs = [(r.get("organization") or {}) for r in results or [] if isinstance(r, dict)]
+    orgs = [(r.get("organization") or {}) for r in _results(payload)]
     return [(o.get("org_name"), o.get("org_city")) for o in orgs]
 
 
@@ -91,8 +97,7 @@ def fda_rows(payload: Any) -> list[tuple[str | None, str | None]]:
     >>> fda_rows({"results": [{"term": "Acme Medical LLC", "count": 3}]})
     [('Acme Medical LLC', None)]
     """
-    results = payload.get("results") if isinstance(payload, dict) else None
-    return [(r.get("term"), None) for r in results or [] if isinstance(r, dict)]
+    return [(r.get("term"), None) for r in _results(payload)]
 
 
 async def nih_sbir(state: str) -> list[NamedSource]:
@@ -149,7 +154,7 @@ def _known_keys(conn: sqlite3.Connection) -> set[str]:
     suffix-stripped (registry names arrive stripped), and every blocked one."""
     names = [r[0] for r in conn.execute("SELECT name FROM companies")]
     return ({name_key(s) for n in names for s in (n, strip_suffixes(n))}
-            | store.blocked_name_keys(conn) | set(config.DISCOVERY_NAME_BLOCKLIST))
+            | blocked_keys(conn))
 
 
 async def discover_registries(apply: bool = False, limit: int = 60) -> dict[str, int]:

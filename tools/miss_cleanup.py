@@ -732,7 +732,7 @@ async def build(args: argparse.Namespace) -> tuple[list[Proposal], list[str], di
 
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Propose cleanup SQL for roster miss rows")
-    ap.add_argument("--db", default=str(config.DATA_DIR / "jobs.db"))
+    ap.add_argument("--db", default=str(config.STORE_DB_PATH))
     ap.add_argument("--out", default="proposals.sql")
     ap.add_argument("--cache", default="wikidata_cache.json")
     ap.add_argument("--hints", help="JSON {merge:{name:target}, prune:{name:reason}, keep:[name]}")

@@ -11,17 +11,21 @@ from __future__ import annotations
 import time
 from collections.abc import Iterable
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from src import config
 from src.match import names
 from src.net import http
-from src.net.util import cache_dir, json_cache_get, json_cache_put
+from src.net.util import cache_dir, host_of, json_cache_get, json_cache_put
+from src.runstate import per_run
 
 # Dropped before two names are compared: legal forms, never industry words
 # ("Precision BioSciences" is not "Precision Nutrition").
 _LEGAL = frozenset({"inc", "llc", "ltd", "corp", "corporation", "co",
                     "company", "plc", "gmbh", "and"})
+
+# The domains.json cache, read once per run and written through.
+_CACHE = per_run(lambda: json_cache_get(cache_dir("domains.json"), float("inf")) or {})
 
 
 def _words(name: str | None) -> list[str]:
@@ -35,11 +39,7 @@ def _bare(domain: str | None) -> str:
     ('lilly.com', 'lilly.com', '')
     """
     d = (domain or "").strip().lower()
-    try:
-        host = urlsplit(d if "//" in d else "//" + d).hostname or ""
-    except ValueError:
-        return ""
-    host = host.removeprefix("www.")
+    host = host_of(d if "//" in d else "//" + d).removeprefix("www.")
     return host if "." in host else ""
 
 
@@ -127,8 +127,9 @@ async def official_domain(name: str) -> str | None:
     key = names.name_key(name)
     if not (key and _words(name)):
         return None
-    path, now = cache_dir("domains.json"), time.time()
-    got: dict[str, Any] | None = (json_cache_get(path, float("inf")) or {}).get(key)
+    cache: dict[str, Any] = _CACHE()
+    now = time.time()
+    got = cache.get(key)
     if got and now - got["at"] < (30 if got["domain"] else 7) * 86400:
         cached: str | None = got["domain"]
         return cached
@@ -137,7 +138,6 @@ async def official_domain(name: str) -> str | None:
         wiki, wiki_answered = await _wikidata(name)
         domain, answered = wiki, answered or wiki_answered
     if domain or answered:
-        cache: dict[str, Any] = json_cache_get(path, float("inf")) or {}
         cache[key] = {"domain": domain, "at": now}
-        json_cache_put(path, cache)
+        json_cache_put(cache_dir("domains.json"), cache)
     return domain

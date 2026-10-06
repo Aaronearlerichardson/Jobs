@@ -194,10 +194,10 @@ class TestRootScan:
         # root-scan fallback.
         root = "https://www.acmegenomics.com/"
         _stub_fetch_all(monkeypatch, {
-            root: '<a href="acme-genomics.dayforcehcm.com/careers/openings">Jobs</a>'})
+            root: '<a href="acme-genomics.gohire.io">Jobs</a>'})
         lead = await sniffer.sniff_careers_ats("Acme Genomics")
         assert lead["confirmed"] is False
-        assert lead["ats"] == "dayforce"
+        assert lead["ats"] == "gohire"
 
     async def test_no_root_fallback_when_a_candidate_already_hit(self, monkeypatch):
         # A hit on a real careers-path candidate must win outright -- the
@@ -978,7 +978,7 @@ class TestPastedNamePreview:
 
     async def test_the_profile_blocklist_counts_too(self, monkeypatch, db):
         self._wire(monkeypatch, db)
-        monkeypatch.setattr(paste_ingest, "NAME_BLOCKLIST", {"biotech"})
+        monkeypatch.setattr(name_sources, "NAME_BLOCKLIST", {"biotech"})
         monkeypatch.setattr(paste_ingest, "parse_company_names",
                             lambda *a, **k: ["Biotech"])
         assert [r["state"] for r in

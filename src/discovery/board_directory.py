@@ -29,6 +29,7 @@ import sqlite3
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
 from urllib.parse import urlsplit
@@ -37,6 +38,7 @@ from src import config, store
 from src.ats import coords
 from src.ats.board import BOARDS
 from src.ats.signatures import detect, pack
+from src.discovery.name_sources import blocked_keys
 from src.discovery.resolve.probes import slug_keyed
 from src.match.gates import exclude_reason, is_technical_role
 from src.match.locality import is_nc
@@ -63,13 +65,14 @@ class DirectoryBoard(TypedDict):
     title_words: set[str]       # the words of every local posting title (`words`)
 
 
-def words(text: str | None) -> set[str]:
+@lru_cache(maxsize=1 << 16)
+def words(text: str | None) -> frozenset[str]:
     """The lower-case words of `text`: runs of three or more letters.
 
     >>> sorted(words("Sr. Clinical Data Engineer (II)"))
     ['clinical', 'data', 'engineer']
     """
-    return set(re.findall(r"[a-z]{3,}", (text or "").lower()))
+    return frozenset(re.findall(r"[a-z]{3,}", (text or "").lower()))
 
 
 class Detected(NamedTuple):
@@ -149,6 +152,12 @@ def _is_url(base: str) -> bool:
     return base.startswith(("http://", "https://"))
 
 
+def _locate(rel: str) -> str:
+    """The directory's file `rel`: its URL, or its path under a local base."""
+    base = config.BOARD_DIRECTORY.base_url
+    return f"{base.rstrip('/')}/{rel}" if _is_url(base) else str(Path(base) / rel)
+
+
 def _try_httpfs() -> bool:
     """Whether DuckDB's httpfs extension installs and loads here."""
     import duckdb
@@ -214,12 +223,8 @@ async def _read(rel: str, sql: str, args: Sequence[str] = ()) -> list[tuple[Any,
     """`sql` over the directory's file `rel` (`?` is the file); None when it
     cannot be read. A remote file is read in place (httpfs), else through
     the cache."""
-    base = config.BOARD_DIRECTORY.base_url
-    if not _is_url(base):
-        src, remote = str(Path(base) / rel), False
-    elif await asyncio.to_thread(_HTTPFS):
-        src, remote = f"{base.rstrip('/')}/{rel}", True
-    else:
+    src, remote = _locate(rel), _is_url(config.BOARD_DIRECTORY.base_url)
+    if remote and not await asyncio.to_thread(_HTTPFS):
         cached = await _cached(rel)
         src, remote = (str(cached) if cached else ""), False
     import duckdb
@@ -245,12 +250,9 @@ class Companies(NamedTuple):
 def _load_companies() -> Companies:
     """companies.parquet's boards by identity and by name, each row's URL
     read through `detect`. Empty when the file cannot be read."""
-    base = config.BOARD_DIRECTORY.base_url
     cached = _cache_path("companies.parquet")
-    if _is_url(base):
-        src = str(cached) if cached.exists() else f"{base.rstrip('/')}/companies.parquet"
-    else:
-        src = str(Path(base) / "companies.parquet")
+    src = (str(cached) if _is_url(config.BOARD_DIRECTORY.base_url) and cached.exists()
+           else _locate("companies.parquet"))
     remote = _is_url(src)
     try:
         rows = _query(src, "SELECT ats, name, slug, url FROM read_parquet(?)", (), remote)
@@ -306,6 +308,7 @@ class Scan:
         self.posts: Counter[str] = Counter()        # platform -> local postings
         self.leads: defaultdict[str, set[Any]] = defaultdict(set)  # unsupported platform -> boards
         self.read = 0                               # rows past the prefilter
+        self.gates: dict[tuple[str, str | None], bool] = {}   # (track id, title) -> the title gate's verdict
 
     def add(self, rows: Iterable[tuple[Any, ...]], label: str,
             names: dict[tuple[Any, ...], str], track: config.RuntimeTrack) -> None:
@@ -345,16 +348,16 @@ class Scan:
                     title_words=set())
             board["nc_postings"] += 1
             board["title_words"] |= words(title)
-            gate = bool(title) and is_technical_role(title, track) and not exclude_reason(
-                title, "", track_id=track.id)
+            gate = self.gates.get((track.id, title))
+            if gate is None:
+                gate = self.gates[track.id, title] = bool(title) and is_technical_role(
+                    title, track) and not exclude_reason(title, "", track_id=track.id)
             samples = board["sample_titles"]
             if gate:
                 board["gate_passes"] += 1
                 if board["gate_passes"] == 1:
                     samples.clear()
-                if len(samples) < 5:
-                    samples.append(title)
-            elif not board["gate_passes"] and len(samples) < 5 and title:
+            if (gate or not board["gate_passes"]) and len(samples) < 5 and title:
                 samples.append(title)
 
 
@@ -365,12 +368,12 @@ async def _files() -> list[str]:
     if cfg.files:
         return list(cfg.files)
     if _is_url(cfg.base_url):
-        manifest = await http.get_json(f"{cfg.base_url.rstrip('/')}/manifest.json",
+        manifest = await http.get_json(_locate("manifest.json"),
                                        "board directory manifest", {})
     else:
         try:
             manifest = json.loads(await asyncio.to_thread(
-                (Path(cfg.base_url) / "manifest.json").read_text, "utf-8"))
+                Path(_locate("manifest.json")).read_text, "utf-8"))
         except (OSError, ValueError):
             manifest = {}
     return list((manifest or {}).get("by_ats", {}))
@@ -427,7 +430,7 @@ def title_vocab(conn: sqlite3.Connection, min_companies: int = 3) -> dict[str, f
     seen: defaultdict[int, set[str]] = defaultdict(set)
     tier: dict[int, bool] = {}
     for cid, mission, title in conn.execute(
-            "SELECT j.company_id, c.mission_tier, j.title FROM jobs j "
+            "SELECT DISTINCT j.company_id, c.mission_tier, j.title FROM jobs j "
             "JOIN companies c ON c.id = j.company_id WHERE c.mission_tier IS NOT NULL"):
         seen[cid] |= words(title)
         tier[cid] = mission in active
@@ -510,7 +513,7 @@ def classify(conn: sqlite3.Connection, boards: Iterable[DirectoryBoard]
     roster = store.get_companies(conn, active_only=False)
     have = {k for k in map(store.board_key, roster) if k}
     by_name = {name_key(c["name"]): c for c in roster}
-    blocked = store.blocked_name_keys(conn) | set(config.DISCOVERY_NAME_BLOCKLIST)
+    blocked = blocked_keys(conn)
     out: dict[str, list[DirectoryBoard]] = {s: [] for s in STATUSES}
     for b in boards:
         if _key(Detected("fetchable", b["ats"], b["handle"], b["careers_url"])) in have:

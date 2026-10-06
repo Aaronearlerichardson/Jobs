@@ -249,11 +249,10 @@ async def intake_boards(candidates: Iterable[BoardHit], source: str, *,
         while todo and (limit is None or added < limit):
             size = 30 if limit is None else min(30, 2 * (limit - added))
             chunk, todo = todo[:size], todo[size:]
-            live: dict[int, BoardHit] = {}
-            async for cand, hit in fan_out(chunk, partial(_live_board, require_live=require_live),
-                                           "board", with_item=True, max_workers=1, key=origin):
-                if hit:
-                    live[id(cand)] = hit
+            live: dict[int, BoardHit] = {
+                id(cand): hit async for cand, hit in fan_out(
+                    chunk, partial(_live_board, require_live=require_live),
+                    "board", with_item=True, max_workers=1, key=origin) if hit}
             for cand in chunk:
                 hit = live.get(id(cand))
                 if not hit or (limit is not None and added >= limit):

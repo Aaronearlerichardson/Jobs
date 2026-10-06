@@ -18,7 +18,6 @@ resolve.board.resolve_or_miss, score, queue for review).
 from __future__ import annotations
 
 import re
-import sqlite3
 from typing import Any
 
 from src import store
@@ -26,7 +25,7 @@ from src.claude.api import have_api_key
 from src.match.names import junk_name_reason, name_key
 from src.rows import BoardHit, CompanyIn, CompanyRow
 from .local_sourcing import queue_names
-from .name_sources import NAME_BLOCKLIST, CompanyNames, _is_nav_noise
+from .name_sources import CompanyNames, _is_nav_noise, blocked_keys
 
 
 def _is_sentence_case(name: str) -> bool:
@@ -303,14 +302,6 @@ _TRACKED_NAMES_SQL = ("SELECT name FROM companies "
                       "WHERE ats IS NOT NULL AND miss_reason IS NULL")
 
 
-def _blocked_keys(conn: sqlite3.Connection) -> set[str]:
-    """Normalized name keys no path may add: the store's rejection blocklist
-    (src.store.blocked_name_keys) union the profile's [discovery]
-    name_blocklist."""
-    from src.store import blocked_name_keys
-    return blocked_name_keys(conn) | set(NAME_BLOCKLIST)
-
-
 def screen_names(names: list[str]) -> tuple[list[str], list[tuple[str, str]]]:
     """Split `names` into (employer-shaped, [(name, reason)]) with
     src.match.names.junk_name_reason. Runs ahead of every resolution path,
@@ -398,7 +389,7 @@ async def preview_names(blob: str | bytes | list[str] | tuple[str, ...],
     async with store.Writer() as db:
         tracked, blocked, missed = await db.run(lambda conn: (
             {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()},
-            _blocked_keys(conn),
+            blocked_keys(conn),
             {name_key(n) for n in store.recent_miss_names(conn)}))
     out, seen = [], set()
     for n in names:
@@ -464,7 +455,7 @@ async def add_names(names: str | bytes | list[str], use_llm: bool = False,
     async with store.Writer() as db:
         skip = await db.run(lambda conn: (
             {name_key(r["name"]) for r in conn.execute(_TRACKED_NAMES_SQL).fetchall()}
-            | _blocked_keys(conn)))
+            | blocked_keys(conn)))
         fresh, junk = screen_names([n for n in names if name_key(n) not in skip])
         skipped = len(names) - len(fresh) - len(junk)
         for n, why in junk:

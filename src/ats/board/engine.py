@@ -69,7 +69,7 @@ from src.rows import BoardCoords, FetchedJob
 from . import decode, fields, pager
 from .fields import Reader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
-from .spec import (ROW_FIELDS, Detail, Detect, EngineRow, FillField, Listing, Pager, Rule,
+from .spec import (ROW_FIELDS, Detail, Detect, EngineRow, FillField, Listing, Pager, Prelude, Rule,
                    Scope, parse)
 
 
@@ -232,7 +232,7 @@ _NAMED: dict[str, Any] = {"$facets": {}, "$search_text": "", "$area": None,
 #: The run's listings read for closure and deep verify, (ats, handle) ->
 #: entries, each read once while concurrent readers of that board wait.
 _MEMO = runstate.per_run(SingleFlight)
-#: The handle parts `handle.try` and `handle.follow` settled on this run:
+#: The handle parts `handle.try`, `handle.follow` and `handle.prelude` settled on this run:
 #: (ats, handle) -> {part: value}; `_SETTLING` holds a handle's settling.
 _VARIANTS: Callable[[], dict[tuple[str, str], dict[str, Any]]] = runstate.per_run(dict)
 _SETTLING = runstate.per_run(SingleFlight)
@@ -357,7 +357,7 @@ class Board:
 
     def _parts(self, handle: str) -> dict[str, str]:
         parts = dict(zip(self._part_names, str(handle).split(self._sep)))
-        if self._hspec.try_ or self._hspec.follow:
+        if self._hspec.try_ or self._hspec.follow or self._hspec.prelude:
             parts.update(_VARIANTS().get((self.name, str(handle)), {}))
         return parts
 
@@ -438,7 +438,7 @@ class Board:
 
     # --- requests ----------------------------------------------------------
 
-    async def _fetch(self, req: Listing | Detail, parts: dict[str, str],
+    async def _fetch(self, req: Listing | Detail | Prelude, parts: dict[str, str],
                      vals: dict[str, Any] | None = None, label: str | None = None,
                      timeout: tuple[float, float] | None = None, url: str | None = None,
                      hop: bool = True) -> tuple[int | None, Any, str | Exception | None]:
@@ -504,6 +504,34 @@ class Board:
                 _VARIANTS().setdefault(key, {})[name] = parts[name]
         return None
 
+    async def _prelude(self, handle: str, parts: dict[str, str], label: str | None = None,
+                       timeout: tuple[float, float] | None = None,
+                       stale: dict[str, str | None] | None = None) -> str | Exception | None:
+        """Settle into `parts` each `handle.prelude` part not yet known for
+        `handle`, from its request's answer. `stale`, the parts a refused
+        request used, have their settled values dropped and asked again,
+        unless another caller already settled new ones. The error, reported
+        under `label`, when an answer does not settle its parts; else None.
+        One caller per request settles at a time, as `_follow` does."""
+        key = (self.name, str(handle))
+        for i, pre in enumerate(self._hspec.prelude):
+            settled = _VARIANTS().setdefault(key, {})
+            if stale or not all(n in settled for n in pre.set):
+                async with _SETTLING().hold((*key, i)):
+                    if stale and all(settled.get(n) == stale.get(n) for n in pre.set):
+                        for n in pre.set:
+                            settled.pop(n, None)
+                    if not all(n in settled for n in pre.set):
+                        status, payload, err = await self._fetch(pre, parts, None, None, timeout)
+                        got = {n: fields.path(payload, p) for n, p in pre.set.items()}
+                        if err or status != 200 or not all(isinstance(v, str) and v
+                                                           for v in got.values()):
+                            return http.failed(
+                                label, f"could not settle the board's {', '.join(pre.set)}")
+                        settled.update(got)
+            parts.update({n: settled[n] for n in pre.set})
+        return None
+
     async def _page(self, req: Listing, handle: str, vals: dict[str, Any],
                     label: str | None = None, timeout: tuple[float, float] | None = None,
                     url: str | None = None
@@ -522,7 +550,27 @@ class Board:
                    vals: dict[str, Any] | None = None, label: str | None = None,
                    timeout: tuple[float, float] | None = None, url: str | None = None
                    ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
-        """(parts, status, payload, error) for one request. A `handle.try`
+        """(parts, status, payload, error) for one request, after the
+        `handle.prelude` has settled its parts; a 401 or 403 re-settles
+        them once and asks again (`_ask_tried`'s answer otherwise)."""
+        pres = self._hspec.prelude
+        stale: dict[str, str | None] | None = None
+        while True:
+            if pres:
+                err = await self._prelude(handle, parts, label, timeout, stale=stale)
+                if err:
+                    return parts, None, None, err
+            got = await self._ask_tried(req, handle, parts, vals, timeout, url)
+            if not pres or stale is not None or got[1] not in (401, 403):
+                break
+            stale = {n: parts.get(n) for pre in pres for n in pre.set}
+        return (*got[:3], http.failed(label, got[3]) if got[3] else None)
+
+    async def _ask_tried(self, req: Listing | Detail, handle: str, parts: dict[str, str],
+                         vals: dict[str, Any] | None = None,
+                         timeout: tuple[float, float] | None = None, url: str | None = None
+                         ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
+        """(parts, status, payload, error), unreported, for one request. A `handle.try`
         part not yet settled for `handle` is tried value by value, each a
         template over `parts` (quietly), until an answer `_wrong` does not
         reject; one without an error settles it. When none does, the first
@@ -534,16 +582,16 @@ class Board:
             async with _SETTLING().hold(key):
                 tries = self._unsettled(key)
                 if tries:
-                    return await self._settle(key, tries, req, parts, vals, label, timeout, url)
+                    return await self._settle(key, tries, req, parts, vals, timeout, url)
             parts = {**parts, **_VARIANTS()[key]}
-        return (parts, *await self._fetch(req, parts, vals, label, timeout, url))
+        return (parts, *await self._fetch(req, parts, vals, None, timeout, url))
 
     def _unsettled(self, key: tuple[str, str]) -> dict[str, tuple[str, ...]]:
         return {k: v for k, v in self._hspec.try_.items() if k not in _VARIANTS().get(key, {})}
 
     async def _settle(self, key: tuple[str, str], tries: dict[str, tuple[str, ...]],
                       req: Listing | Detail, parts: dict[str, str],
-                      vals: dict[str, Any] | None, label: str | None, timeout: tuple[float, float] | None,
+                      vals: dict[str, Any] | None, timeout: tuple[float, float] | None,
                       url: str | None
                       ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
         (name, values), = tries.items()
@@ -560,8 +608,6 @@ class Board:
                 refused = v, status, payload, err
         else:
             v, status, payload, err = refused or (v, status, payload, err)
-        if err:
-            http.failed(label, err)
         return {**parts, name: v}, status, payload, err
 
     def _wrong(self, req: Listing | Detail, status: int | None, payload: Any) -> bool:

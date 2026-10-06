@@ -159,34 +159,6 @@ class JobRef(_Spec):
         return self
 
 
-class Accept(_Spec):
-    status: tuple[Status, ...] | None = Field(None, description="Only these statuses; default any")
-    status_not: tuple[Status, ...] = Field((), description="None of these statuses")
-    total: Bool = Field(False, description="A listing answer carries an int total")
-
-
-class Handle(_Workaround):
-    WORKAROUNDS = ("try_", "accept")
-    columns: tuple[HandleColumn, ...] = Field(
-        config.DEFAULT_HANDLE_COLUMNS, min_length=1,
-        description="The store columns naming the board")
-    parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
-                                                   "columns")
-    sep: Str = Field("|", description="Joins the columns into one handle string")
-    try_: dict[Str, tuple[Template, ...]] = Field(
-        {}, alias="try", max_length=1,
-        description="One part's templates, tried until an answer `accept` allows; "
-                    "settled once per handle")
-    accept: Accept = Field(Accept(),
-                           description="The answers that settle a `try` value")
-    follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
-                                                       "its URL template; settled once per handle")
-
-    @property
-    def names(self) -> tuple[str, ...]:
-        return self.parts or self.columns
-
-
 class _Decoder(_Spec):
     entries: Paths = Field(("",), description="Where the payload keeps its entries: the first "
                                               "path holding a list")
@@ -350,7 +322,7 @@ class Scope(_Spec):
     label: Str = Field(description="A value's label key, matched against the area")
 
 
-class _Request(_Spec):
+class _Call(_Spec):
     url: Template = Field(description="The request's URL template")
     method: Literal["GET", "POST"] = Field("GET", description="The HTTP method")
     params: dict[Str, Str] | None = Field(None, description="Query parameters; a None one is "
@@ -359,6 +331,9 @@ class _Request(_Spec):
     headers: dict[Str, Str] = Field({}, description="Over the shared request headers")
     decoder: Decoder = Field(JsonDecoder(),
                              description="Reads the response body")
+
+
+class _Request(_Call):
     fields: dict[Str, Grammar] = Field({}, description="Row field (or internal _field) -> "
                                                        "field spec")
 
@@ -368,6 +343,51 @@ class _Request(_Spec):
         if extra:
             raise ValueError(f"unknown field(s) {extra}")
         return self
+
+
+class Prelude(_Call):
+    set: dict[Str, Str] = Field(min_length=1, description="{part: path in the decoded answer}: "
+                                                          "the parts one answer settles")
+
+
+class Accept(_Spec):
+    status: tuple[Status, ...] | None = Field(None, description="Only these statuses; default any")
+    status_not: tuple[Status, ...] = Field((), description="None of these statuses")
+    total: Bool = Field(False, description="A listing answer carries an int total")
+
+
+class Handle(_Workaround):
+    WORKAROUNDS = ("try_", "accept", "prelude")
+    columns: tuple[HandleColumn, ...] = Field(
+        config.DEFAULT_HANDLE_COLUMNS, min_length=1,
+        description="The store columns naming the board")
+    parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
+                                                   "columns")
+    sep: Str = Field("|", description="Joins the columns into one handle string")
+    try_: dict[Str, tuple[Template, ...]] = Field(
+        {}, alias="try", max_length=1,
+        description="One part's templates, tried until an answer `accept` allows; "
+                    "settled once per handle")
+    accept: Accept = Field(Accept(),
+                           description="The answers that settle a `try` value")
+    follow: dict[Str, Template] = Field({}, description="A part that is the redirect target of "
+                                                       "its URL template; settled once per handle")
+    prelude: tuple[Prelude, ...] = Field(
+        (), description="Requests answering parts a listing or detail request needs (a token "
+                        "its own page or API hands out), each part settled once per handle "
+                        "and again, once, when a request is refused 401 or 403")
+
+    @model_validator(mode="after")
+    def _prelude_parts(self) -> Self:
+        """A prelude settles parts nothing else names."""
+        taken = [*self.names, *self.follow, *self.try_, *(n for pre in self.prelude for n in pre.set)]
+        if len(taken) != len(set(taken)):
+            raise ValueError("handle.prelude: a part is settled by one source")
+        return self
+
+    @property
+    def names(self) -> tuple[str, ...]:
+        return self.parts or self.columns
 
 
 class Listing(_Request):
