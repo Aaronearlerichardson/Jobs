@@ -911,6 +911,13 @@ class Board:
         n = sum(1 for r in rows or [] if r["id"] is not None)
         return rows is not None, total if total is not None else n
 
+    async def sample(self, handle: str, label: str | None = None
+                     ) -> tuple[list[EngineRow] | None, int | None]:
+        """(rows, total) of the listing's first page as `listing` maps it
+        (None, None when the request failed): what the canary checks fill
+        rates on."""
+        return await self._walk(handle, label, cheap=True, located=True)
+
     def gone(self, error: str | None) -> bool:
         """Whether `error`, a failed listing read's report, proves the board
         does not exist: an HTTP 404 on a `prunable` spec.

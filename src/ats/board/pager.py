@@ -64,6 +64,37 @@ def postings(rows: list[EngineRow] | None) -> bool:
     return any(r["id"] is not None for r in rows or [])
 
 
+#: The row fields whose fill rate says the spec maps them, and the share of
+#: rows each must fill by default (a canary's `min_fill` overrides).
+FILL_FLOORS = {"title": 0.98, "url": 0.98, "location": 0.5, "description": 0.0,
+               "posted_at": 0.0, "remote_hint": 0.0}
+
+
+def fill_rates(rows: Sequence[EngineRow]) -> dict[str, float]:
+    """Per `FILL_FLOORS` field, the share of `rows` that fill it (1.0 on no rows).
+
+    >>> fill_rates([{"title": "A", "url": "u"}, {"title": "", "url": "v", "posted_at": "x"}])
+    {'title': 0.5, 'url': 1.0, 'location': 0.0, 'description': 0.0, 'posted_at': 0.5, 'remote_hint': 0.0}
+    >>> fill_rates([])["title"]
+    1.0
+    """
+    return {k: sum(bool(r.get(k)) for r in rows) / len(rows) if rows else 1.0
+            for k in FILL_FLOORS}
+
+
+def fill_misses(rows: Sequence[EngineRow], floors: dict[str, float] | None = None) -> list[str]:
+    """The fields of `rows` filled under their floor (`FILL_FLOORS` over `floors`),
+    each "field 40% < 98%".
+
+    >>> fill_misses([{"title": "A", "url": ""}], {"location": 0})
+    ['url 0% < 98%']
+    >>> fill_misses([{"title": "A", "url": "u", "location": "x"}])
+    []
+    """
+    floor = FILL_FLOORS | (floors or {})
+    return [f"{k} {v:.0%} < {floor[k]:.0%}" for k, v in fill_rates(rows).items() if v < floor[k]]
+
+
 def ended(pager: Pager, payload: Any, number: int, rows: list[EngineRow],
           size_known: int | None, n_entries: int, size: int) -> bool:
     """Whether a page-counted walk stops after page `number`: at the page

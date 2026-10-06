@@ -887,7 +887,8 @@ async def score_missions(max_workers: int = 6, rescore_all: bool = False) -> int
             "SELECT id FROM companies WHERE mission_tier IS NOT NULL "
             "OR mission_score IS NOT NULL").fetchall())}
         def employer(c: CompanyRow) -> int | str:
-            return c["employer_id"] if c.get("employer_id") is not None else f"row{c['id']}"
+            emp = c.get("employer_id")
+            return emp if emp is not None else f"row{c['id']}"
 
         lead: dict[int | str, int] = {}
         for c in sorted(cos, key=lambda c: (-(c.get("total_job_count") or 0), c["id"])):

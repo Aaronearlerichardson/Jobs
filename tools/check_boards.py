@@ -6,6 +6,7 @@ the way our fetcher expects?
     python tools/check_boards.py --json out.json --markdown BOARDS.md
     python tools/check_boards.py --resolved workday   # one spec, resolved
     python tools/check_boards.py --promote            # default candidates
+    python tools/check_boards.py --spec NAME --handle H  # dry-run a whole board
 
 Coverage percentage cannot answer this question. The fetchers swallow HTTP
 errors and return [] by design (one dead board must not abort a crawl), so a
@@ -28,7 +29,8 @@ set well under the board's normal size, so ordinary hiring slowdowns do
 not cry wolf. A small employer that legitimately empties out is replaced
 in its spec rather than given a floor of 0.
 
-Statuses: ok | degraded (reachable, fewer postings than the floor) |
+Statuses: ok | degraded (reachable, fewer postings than the floor or a field
+filled under its floor, `pager.FILL_FLOORS`) |
 blocked (rate-limited/challenged — not our bug) | broken (4xx/5xx/exception)
 """
 from __future__ import annotations
@@ -59,6 +61,7 @@ from pydantic import BaseModel                       # noqa: E402
 from src import runstate                            # noqa: E402
 from src.ats.board import BOARDS, spec              # noqa: E402
 from src.ats.board.engine import Board               # noqa: E402
+from src.ats.board.pager import FILL_FLOORS, fill_misses, fill_rates  # noqa: E402
 
 STATUS_EMOJI = {"ok": "✅", "degraded": "⚠️", "blocked": "🚧", "broken": "❌"}
 
@@ -72,12 +75,17 @@ async def check_board(board: Board) -> dict[str, Any]:
     try:
         # The engine prints its diagnostics; capture them to classify.
         with contextlib.redirect_stdout(buf):
-            ok, n = await board.alive(canary.handle)
+            rows, total = await board.sample(canary.handle)
+        ok = rows is not None
+        n = total if total is not None else sum(r["id"] is not None for r in rows or [])
         note = " ".join(buf.getvalue().split())
         if not ok and not note:
             note = "the board request failed"
-        if ok and n >= floor:
+        misses = fill_misses(rows or [], canary.min_fill) if ok else []
+        if ok and n >= floor and not misses:
             status, detail = "ok", ""
+        elif ok and n >= floor:
+            status, detail = "degraded", "fill: " + ", ".join(misses)
         elif note:
             status, detail = blame(note), note[:160]
         else:
@@ -155,6 +163,24 @@ def render_markdown(results: list[dict[str, Any]], checked_at: str) -> str:
     return "\n".join(lines)
 
 
+async def dry_run(board: Board, handle: str, show: int, floors: dict[str, float]) -> int:
+    """Fetch `handle`'s whole listing through the engine (nothing stored),
+    print the count, each field's fill rate and the first `show` rows;
+    1 when the board is unreadable or a field falls under its floor."""
+    rows = await board.listing(handle, f"{board.name} {handle}")
+    print(f"  {board.name} {handle}: {len(rows)} jobs")
+    if not rows:
+        return 1
+    floor = FILL_FLOORS | floors
+    rates = fill_rates(rows)
+    for k, v in rates.items():
+        print(f"  {k:12} {v:6.1%}  (floor {floor[k]:.0%}){'  FAIL' if v < floor[k] else ''}")
+    for r in rows[:show]:
+        print(" ", json.dumps({k: v for k, v in r.items() if v and not k.startswith("_")},
+                              ensure_ascii=False)[:400])
+    return 1 if fill_misses(rows, floors) else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="ATS board health canary")
     ap.add_argument("--json", type=Path, help="write machine-readable results")
@@ -167,7 +193,19 @@ def main() -> int:
                     help="print the platform's spec resolved, each value set or default")
     ap.add_argument("--promote", action="store_true",
                     help="list keys 3+ specs set to one non-default value")
+    ap.add_argument("--spec", metavar="PLATFORM", choices=sorted(BOARDS),
+                    help="dry-run this platform's whole listing for --handle (no store writes)")
+    ap.add_argument("--handle", help="the board to dry-run (default: the spec's canary)")
+    ap.add_argument("--rows", type=int, default=5, help="rows the dry run prints")
     args = ap.parse_args()
+    if args.spec:
+        board = BOARDS[args.spec]
+        canary = board.spec.canary
+        handle = args.handle or (canary.handle if canary else None)
+        if not handle:
+            ap.error("--handle is required: the spec names no canary")
+        floors = dict(canary.min_fill) if canary else {}
+        return runstate.run(dry_run(board, handle, args.rows, floors))
     if args.resolved:
         print_resolved(args.resolved)
         return 0

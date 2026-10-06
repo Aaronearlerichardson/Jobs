@@ -119,6 +119,9 @@ class Canary(_Spec):
     name: Str = Field(description="The employer the sample board belongs to")
     handle: Str = Field(description="The sample board's handle")
     min_jobs: Count = Field(1, description="The fewest postings a healthy board lists")
+    min_fill: dict[RowField, Annotated[float, Strict(), Field(ge=0, le=1)]] = Field(
+        {}, description="Per row field, the share of the board's rows that must fill it, "
+                        "over pager.FILL_FLOORS")
 
 
 class Detect(_Spec):
