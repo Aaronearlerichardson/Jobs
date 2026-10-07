@@ -55,6 +55,8 @@ POSTINGS = {
             "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html"
             "?cid=9a6de238-e301-469b-8a29-d35b7eaeebd9&ccId=19000101_000001&jobId=123456&lang=en_US",
             lambda: fake_response(fixture("adp_detail.json"))),
+    "amazon": ("North Carolina", "https://www.amazon.jobs/en/jobs/10509450/data-engineer",
+               lambda: fake_response(fixture("amazon_search.json"))),
 }
 
 #: a board's own URLs, each resolving to (ats, handle)

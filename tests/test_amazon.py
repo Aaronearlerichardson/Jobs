@@ -7,7 +7,6 @@ from `amazon.jobs/en/search.json?region=North Carolina`.
 
 from conftest import fake_response, fixture, no_pacing
 from src.ats.board import board_for
-from src.ats.signatures import detect
 
 AMAZON = board_for("amazon")
 
@@ -29,7 +28,3 @@ async def test_a_pulled_requisition_is_closed(serve):
     serve(fake_response({"hits": 0, "jobs": []}))
     assert (await AMAZON.probe_job("https://www.amazon.jobs/en/jobs/1/x"))[0] is False
 
-
-def test_a_region_search_url_is_a_fetchable_board():
-    url = "https://www.amazon.jobs/en/search?base_query=&region=North%20Carolina"
-    assert detect("", url) == ("fetchable", "amazon", "North Carolina")
