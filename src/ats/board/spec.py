@@ -138,6 +138,9 @@ class Detect(_Spec):
     careers_url: Template | None = Field(None, description="The board's URL, rebuilt from "
                                                            "the parts or the {page} that "
                                                            "carried the signature")
+    off_page: Regex | None = Field(None, description="A page whose URL matches carries no "
+                                                     "signature: the vendor's own pages are "
+                                                     "not a customer's board")
 
     @model_validator(mode="after")
     def _groups(self) -> Self:

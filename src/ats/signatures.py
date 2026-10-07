@@ -77,6 +77,15 @@ def detect(text: str, final_url: str = "", leads: bool = True,
     >>> detect("", "https://apply.workable.com/j/D68529D654") is None
     True
 
+    A customer's site that loads the vendor's assets is the board; the
+    vendor's own page (robots.txt disallows it) is not (`off_page`):
+
+    >>> detect('<script src="https://performancemanager5.successfactors.com/a.js">',
+    ...        "https://careers.acme.org/search")
+    ('fetchable', 'successfactors', 'performancemanager5')
+    >>> detect("", "https://career4.successfactors.com/career?company=acme") is None
+    True
+
     A vendor's own site or an embed path is not a board (BAD_SLUGS):
 
     >>> detect("", "https://www.bamboohr.com/") is None

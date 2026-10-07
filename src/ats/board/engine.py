@@ -371,6 +371,7 @@ class Board:
         self._unknown_re = re.compile(rescue.unknown) if rescue else None
         self._detectors = [_detector(d) for d in spec.detect if d.re]
         self._careers_url = next((d.careers_url for d in spec.detect if d.careers_url), None)
+        self._off_pages = [re.compile(d.off_page) for d in spec.detect if d.off_page]
 
     def __repr__(self) -> str:
         return f"Board({self.name!r})"
@@ -471,7 +472,11 @@ class Board:
         names, or None: the first match of an entry's first regex, every
         other regex matching too, no part in its `blocklist`, and a first
         part `accept(part)` allows; the parts transformed, a tuple where
-        the handle is `multi_column`, else joined by `sep`."""
+        the handle is `multi_column`, else joined by `sep`. A `blob` that
+        opens with a URL an `off_page` regex matches (signatures.detect
+        puts the page's URL first) names none."""
+        if any(rx.match(blob) for rx in self._off_pages):
+            return None
         for regexes, transforms, blocked in self._detectors:
             rest = [rx.search(blob) for rx in regexes[1:]]
             if not all(rest):

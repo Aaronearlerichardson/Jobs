@@ -106,7 +106,8 @@ BOARD_URLS = [
     ("https://jobs.jobvite.com/neogenomics", "jobvite", "neogenomics"),
     ("https://jobs.jobvite.com/neogenomics/job/oAbC1dEf", "jobvite", "neogenomics"),
     ("https://careers.kula.ai/precision-neuroscience", "kula", "precision-neuroscience"),
-    ("https://acme.successfactors.com/", "successfactors", "acme"),
+    ("https://www.amazon.jobs/en/search?base_query=&region=North%20Carolina", "amazon",
+     "North Carolina"),
     ("https://acme.icims.com/jobs/search", "icims", "acme"),
     ("https://careers-acme.icims.com/jobs/42423/data-engineer/job", "icims", "careers-acme"),
     ("https://unc.peopleadmin.com/postings/123", "peopleadmin", "unc"),
@@ -137,6 +138,8 @@ VENDOR_URLS = [
     "https://www.recruiterbox.com/", "https://app.hire.trakstar.com/",
     "https://app.breezy.hr/signin", "https://www.recruitee.com/",
     "https://developers.pinpointhq.com/docs",
+    "https://career4.successfactors.com/career?company=acme",
+    "https://acme.successfactors.com/",
     *(f"https://{host}.eightfold.ai/" for host in ("www", "app", "apply", "docs", "support")),
 ]
 
@@ -156,9 +159,11 @@ def test_every_platform_with_a_detectable_form_has_a_row():
     """A platform added with a host pattern but no table row goes untested:
     its board URL must resolve (`BOARD_URLS`), and a posting judged by its own
     detail endpoint (no `listing`/`page` closure, no prelude) must 404 shut
-    (`POSTINGS`). `jibe` and `phenom` detect from a page's text, not a URL."""
+    (`POSTINGS`). `jibe`, `phenom` and `successfactors` detect from a page's
+    text, not a URL (SuccessFactors' own pages are `off_page`)."""
     urlable = {n for n, b in config.BOARDS.items() if n in FETCHABLE
-               and any("host" in rule for rule in b.get("detect") or ())}
+               and any("host" in rule for rule in b.get("detect") or ())
+               and not any("off_page" in rule for rule in b.get("detect") or ())}
     judged = {n for n, b in config.BOARDS.items() if n in FETCHABLE
               and b.get("job_ref") and b.get("detail") and not b.get("handle", {}).get("prelude")
               and b.get("closure", {}).get("via") is None}

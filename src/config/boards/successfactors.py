@@ -9,7 +9,11 @@ SPEC: dict[str, JSON] = {
     # that carried it.
     "detect": [{"host": "successfactors.",
                 "re": [r"(?i)([a-z0-9-]+)\.(?:successfactors|sapsf)\.(?:com|eu)"],
-                "careers_url": "{page|origin}"},
+                "careers_url": "{page|origin}",
+                # The vendor's own career?company=... pages are not the
+                # customer's careers site: their robots.txt disallows every
+                # path, and the listing below is the customer-site layout.
+                "off_page": r"(?i)https?://[^/\s]*\.(?:successfactors|sapsf)\.(?:com|eu)(?:[/?#:]|$)"},
                {"host": "sapsf."}],
     "canary": {"name": "Duke University", "handle": "https://careers.duke.edu"},
     # The board is the careers site itself, keyed on its URL.
