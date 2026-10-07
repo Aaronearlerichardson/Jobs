@@ -1,0 +1,52 @@
+"""The `jazzhr` board spec."""
+
+from __future__ import annotations
+
+from src.rows import JSON
+
+SPEC: dict[str, JSON] = {
+    "detect": [{"host": "applytojob.com", "re": [r"(?i)([a-z0-9-]+)\.applytojob\.com"]}],
+    "canary": {"name": "Cyclotron Research Centre", "handle": "cyclotroninc"},
+    "sweep": True,
+    "job_ref": {"re": r"(?i)^(https?://([a-z0-9-]+)\.applytojob\.com/apply/([A-Za-z0-9]+)[^?#]*)",
+                "parts": ["link", "slug", "jid"]},
+    "listing": {
+        "url": "https://{slug}.applytojob.com/",
+        "decoder": {"kind": "html", "select": "a[href*='/apply/']", "context": ["li"],
+                    "cells": {"location": "li:has(.fa-map-marker)"}},
+        "fields": {
+            "_path": {"of": "href", "transform": "group:(/apply/[A-Za-z0-9]+/[A-Za-z0-9_-]+)"},
+            "_url": {"format": "https://{slug}.applytojob.com{_path}"},
+            # The key a posting's JSON-LD gives it: none names an
+            # identifier, so its URL's.
+            "_key": {"of": "_url", "transform": "stable_id"},
+            "id": {"format": "jsonld_{slug}_{_key}", "when": {"truthy": "_path"}},
+            "title": {"of": "text", "when": {"truthy": "_path"}},
+            "url": "_url",
+            "location": "location",
+            "department": None,
+        },
+    },
+    # Each posting page's JSON-LD, where it carries one, 60 pages a pull.
+    "rescue": {"when": "always", "unknown": "", "cap": 60,
+               "fields": ["location", "description", "posted_at", "remote_hint"],
+               "why": "the index names no body or date; a posting's JSON-LD does, 2026-09"},
+    "detail": {
+        "url": "{link}",
+        # A page with no JSON-LD posting: its body container.
+        "decoder": {"kind": "jsonld", "cells": {"description": "#job-description"}},
+        "record": ["postings[0]", "page"],
+        "fields": {
+            # "Unknown" where a posting names no place; a bare page names none.
+            "location": {"first": ["location",
+                                   {"const": "Unknown", "when": {"truthy": "title"}}]},
+            "description": "description",
+            "posted_at": "posted_at",
+            "remote_hint": {"const": "jsonld:telecommute", "when": {"truthy": "telecommute"}},
+        },
+        "location": "if_unknown",
+    },
+    "closure": {"url": "https://{slug}.applytojob.com/apply/{jid}",
+                "why": "a pulled posting's page still answers 200, its slug-free apply "
+                       "URL 410, 2026-09"},
+}

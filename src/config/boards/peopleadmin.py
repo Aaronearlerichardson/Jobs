@@ -1,0 +1,50 @@
+"""The `peopleadmin` board spec."""
+
+from __future__ import annotations
+
+from src.rows import JSON
+
+SPEC: dict[str, JSON] = {
+    # Only the hosted tenants carry a signature (a university serving
+    # the software from its own hostname is added by hand); the board
+    # is the tenant's origin.
+    "detect": [{"host": "peopleadmin.com", "re": [r"(?i)([a-z0-9-]+)\.peopleadmin\.com"],
+                "careers_url": "https://{slug}.peopleadmin.com"}],
+    "canary": {"name": "UNC Chapel Hill", "handle": "unc.peopleadmin.com"},
+    # The board is the tenant's host, keyed on any URL on it.
+    "handle": {"columns": ["careers_url"], "parts": ["base"]},
+    # A tenant is one campus: a posting naming no place is on it.
+    "unlocated": "keep",
+    "listing": [
+        {
+            "url": "https://{base|host}/postings/all_jobs.atom",
+            "headers": {"Accept": "application/atom+xml"},
+            "decoder": {"kind": "atom"},
+            "fields": {
+                "_url": {"first": ["link@href", "id"]},
+                "_key": {"of": {"format": "{base|host}"}, "transform": "host_key"},
+                "_pid": {"first": [{"of": "_url", "transform": "group:/postings/(\\d+)"},
+                                   {"of": "_url", "transform": "stable_id"}]},
+                "_title": {"of": "title", "transform": "one_line"},
+                "id": {"format": "pa_{_key}_{_pid}"},
+                "title": "_title",
+                "url": "_url",
+                # The place the title names, else the campus the feed's own
+                # title names; a posting's body is not read for one.
+                "location": {"first": [{"of": "_title", "transform": "place"},
+                                       {"of": "feed.title", "transform": "place"}]},
+                "description": {"join": ["author.name",
+                                         {"of": {"first": ["content", "summary"]},
+                                          "transform": "html_text"}],
+                                "sep": " | "},
+                "posted_at": {"first": ["published", "updated"]},
+                # The hiring department ("Epidemiology - 463501").
+                "department": "author.name",
+            },
+        },
+        {"url": "https://{base|host}/postings/search.atom",
+         "why": "a tenant whose whole-board feed lists nothing may serve its "
+                "default saved search, 2026-09 (inferred)"},
+    ],
+    # No detail: a posting's page is under the host's robots disallow.
+}

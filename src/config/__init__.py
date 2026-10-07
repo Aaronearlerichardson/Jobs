@@ -15,7 +15,7 @@ reads:
     src/config/tracks.py    [tracks.*] tables -> UI_TRACKS
     src/config/policy.py    [policy] + HTTP timeouts / user agents
     src/config/sources.py   [sources]: forums, web search, aggregator feeds
-    src/config/boards.py    BOARDS: every per-platform ATS board fact, as data,
+    src/config/boards/      BOARDS: every per-platform ATS board fact, as data,
                         and the host lists derived from it
 
 Everything is re-exported here, so `import config; config.X` is the whole

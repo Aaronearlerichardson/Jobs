@@ -165,7 +165,7 @@ def test_no_platform_names_in_src():
     named = {}
     for path in (ROOT / "src").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
-        hits = _literals(path) & set(config.BOARDS) if rel != "src/config/boards.py" else None
+        hits = _literals(path) & set(config.BOARDS) if not rel.startswith("src/config/boards/") else None
         if hits:
             named[rel] = hits
     assert named == {}
