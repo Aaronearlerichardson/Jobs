@@ -446,7 +446,7 @@ class TestGolden:
 
 
 class TestEveryDigestWriterCarriesTheTriageFunnel:
-    """maintenance._write_digest is the one writer behind rewrite_digest
+    """maintenance.write_digest is the one writer behind rewrite_digest
     (status sync, deep verify, the harvest pass) and the crawl's
     runner._report_ranked; the triage section used to ride only in the
     crawl's own copy."""

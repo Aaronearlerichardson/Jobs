@@ -473,7 +473,8 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                     max_workers, budget_s=config.PASS_BUDGET_S,
                     on_abandon=abandoned.append)) as verified:
                 async for r, text, res in verified:
-                    if res.score is None:
+                    score = res.score
+                    if score is None:
                         halted = api_disabled()
                         if halted:
                             # One line for the round, not one '[?] kept' per
@@ -493,21 +494,21 @@ async def verify_top(top_n: int = 15, max_workers: int = 4, rounds: int = 2,
                     # triage_status='fit' -- its corrected score is still
                     # recorded above either way.
                     if (r.get("triage_status") == "fit"
-                            and res.score >= t.digest_min_fit):
+                            and score >= t.digest_min_fit):
                         await db.run(store.record_triage, r["job_id"], store.TRIAGE_OK,
                                      r.get("triage_detail") or "",
                                      tracks=[t.track])
                     old = r.get("resume_fit_score")
-                    move = (f"{old:.2f} -> {res.score:.2f}"
-                            if isinstance(old, float) else f"?    -> {res.score:.2f}")
+                    was = f"{old:.2f}" if isinstance(old, float) else "?   "
+                    move = f"{was} -> {score:.2f}"
                     flag = "  [DEMOTED]" if isinstance(old, float) and \
-                        res.score < old - 0.15 else ""
+                        score < old - 0.15 else ""
                     reason = (res.reason or "").removeprefix(f"{DEEP_MARKER} ")[:90]
                     print(f"    {move}, {r['company_name']}, {(r['title'] or '')[:44]}, "
                           f"{reason}{flag}")
                     n_done += 1
                     n_scored += 1
-                    if isinstance(old, float) and res.score < old - 0.25:
+                    if isinstance(old, float) and score < old - 0.25:
                         n_crushed += 1
             if halted:
                 print(f"  [!] deep verify halted: Claude API disabled for this run "

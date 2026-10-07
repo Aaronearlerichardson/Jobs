@@ -92,40 +92,40 @@ class TestRemoteAdmissionGates:
 
     def test_conglomerates_never_qualify_by_score(self, cfg, monkeypatch):
         monkeypatch.setattr(cfg, "is_multi_division", lambda n: True)
-        assert not ops._whole_board(self._co(mission=0.99), 0.85)
+        assert not ops.whole_board(self._co(mission=0.99), 0.85)
 
     async def test_remote_row_survives_the_geo_gate(self, local_track):
-        assert await ops._keep_job(self._co(mission=0.9), self._job("Remote - US"),
+        assert await ops.keep_job(self._co(mission=0.9), self._job("Remote - US"),
                              self._track(local_track))
 
     async def test_onsite_elsewhere_still_drops(self, local_track, elsewhere):
-        assert not await ops._keep_job(self._co(mission=0.9), self._job(elsewhere),
+        assert not await ops.keep_job(self._co(mission=0.9), self._job(elsewhere),
                                  self._track(local_track))
 
     async def test_local_row_is_kept(self, local_track, local_addr):
-        assert await ops._keep_job(self._co(mission=0.9), self._job(local_addr),
+        assert await ops.keep_job(self._co(mission=0.9), self._job(local_addr),
                              self._track(local_track))
 
     async def test_sweep_tag_alone_admits_no_remote(self, local_track):
         # Machine-set tag: whole-board fetch, local-onsite rows ONLY.
-        assert not await ops._keep_job(self._co(tag=tags.SWEEP),
+        assert not await ops.keep_job(self._co(tag=tags.SWEEP),
                                  self._job("Remote - US"),
                                  self._track(local_track))
 
     async def test_watching_admits_remote(self, local_track):
-        assert await ops._keep_job(self._co(watch=1), self._job("Remote - US"),
+        assert await ops.keep_job(self._co(watch=1), self._job("Remote - US"),
                              self._track(local_track))
 
     async def test_multi_division_watch_widens_the_crawl_paths_division_gate(
             self, local_track, division_vocab):
-        # _keep_job is the CRAWL path's division gate; src.crawl.triage has
+        # keep_job is the CRAWL path's division gate; src.crawl.triage has
         # its own copy (tested in test_triage.py against the same fixture).
         # The two used to disagree about the same posting at the same
         # watched conglomerate -- this pins that they now agree.
         job = self._job("Remote - US",
                         title="Senior Software Engineer, AI Research Clusters")
         job["description"] = _PLAIN_ENG_BODY
-        assert await ops._keep_job(self._co(watch=1, name="Megacorp Watched"),
+        assert await ops.keep_job(self._co(watch=1, name="Megacorp Watched"),
                              job, self._track(local_track))
 
     async def test_multi_division_without_watch_keeps_the_crawl_paths_narrow_gate(
@@ -133,7 +133,7 @@ class TestRemoteAdmissionGates:
         job = self._job("Remote - US",
                         title="Senior Software Engineer, AI Research Clusters")
         job["description"] = _PLAIN_ENG_BODY
-        assert not await ops._keep_job(self._co(tag="", name="Megacorp Watched"),
+        assert not await ops.keep_job(self._co(tag="", name="Megacorp Watched"),
                                  job, self._track(local_track))
 
 

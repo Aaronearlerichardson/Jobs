@@ -16,8 +16,8 @@ from src.match import gates
 from src.match.locality import NC_RE, geo_mode
 from src.net.http import fetch_failed
 from src.net.parallel import fan_out
-from src.ops.maintenance import (_keep_job, _score_job, _scored_row, _t,
-                                 _whole_board, board_index, board_match,
+from src.ops.maintenance import (keep_job, score_job, _scored_row, _t,
+                                 whole_board, board_index, board_match,
                                  remote_trusted, track_writer)
 from src.rows import BoardHit, CompanyRow, FetchedJob
 
@@ -144,7 +144,7 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
     Returns (n_fetched, n_kept, n_new). Used by the manual-add flow to pull
     a company's other jobs once it's in the roster."""
     t = _t(t)
-    loc_re = None if _whole_board(company,
+    loc_re = None if whole_board(company,
                                   t.remote_mission_floor) else NC_RE
     try:
         jobs = await company_fetch.fetch_company(company, loc_re)
@@ -155,11 +155,11 @@ async def crawl_company(db: store.Writer, company: CompanyRow, max_workers: int 
     # currently lists: close stored rows that vanished, revive returners.
     if jobs and company.get("id"):
         await db.run(store.sync_job_statuses, company["id"], jobs, track=t.track)
-    kept = [j for j in jobs if await _keep_job(company, j, t)]
+    kept = [j for j in jobs if await keep_job(company, j, t)]
     fresh = await db.run(lambda conn: [j for j in kept
                                        if not store.job_exists(conn, j["id"])])
     n_new = 0
-    async for row in fan_out(fresh, lambda j: _score_job(company, j, t.track),
+    async for row in fan_out(fresh, lambda j: score_job(company, j, t.track),
                              "scoring", max_workers):
         # Kept separate from the scoring failure fan_out reports: a store
         # write that fails is not a scoring problem, and lumping the two

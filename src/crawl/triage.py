@@ -266,6 +266,15 @@ def mission_verdict(company: CompanyRow, t: RuntimeTrack) -> str:
 #  Gates 2-6: per row, per track                                               #
 # --------------------------------------------------------------------------- #
 
+def fit_str(score: float | None) -> str:
+    """A fit score for the log line; '?' when the scorer returned none.
+
+    >>> fit_str(0.5), fit_str(None)
+    ('0.50', '?')
+    """
+    return "?" if score is None else f"{score:.2f}"
+
+
 def _detail_stale(row: JobRow, cutoff: str) -> bool:
     """True once a detail fetch on this row (a body, or a
     location-only lookup) already failed at least RETRY_DAYS ago, per its
@@ -285,7 +294,7 @@ def _geo_verdict(company: CompanyRow, job: JobRow, t: RuntimeTrack, has_body: bo
     "<place>, ST" body rule decides.
 
     Notes:
-        Stricter than the crawl's whole-board path (ops._keep_job, which
+        Stricter than the crawl's whole-board path (ops.keep_job, which
         lets geo_mode read the body): in the 2026-09-10 dry run the loose
         body match called 83 of 130 survivors local ("Garner", "apex",
         "NC" as nonconformance, HQ boilerplate) and 15 non-local rows
@@ -748,7 +757,7 @@ def _write_verdicts(conn: sqlite3.Connection, decided: dict[str, tuple[str, str,
         loc, desc = r.get("location") or "", r.get("description") or ""
         if res is not None:
             label = "surfaced" if status == OK else status
-            print(f"  score {res.score:.2f} {label} | {c.get('name')} | "
+            print(f"  score {fit_str(res.score)} {label} | {c.get('name')} | "
                   f"{r.get('title') or ''} | {loc} | {res.summary()}")
         store.record_triage(
             conn, jid, status, detail, tracks=surfaced, description=desc,

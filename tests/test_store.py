@@ -351,7 +351,7 @@ class TestCompanies:
         store.set_watch(db, cid, True)
         row = store.get_company(db, cid)
         import src.ops.maintenance as ops
-        assert row["watch"] == 1 and row["tags"] is None and ops._whole_board(row)
+        assert row["watch"] == 1 and row["tags"] is None and ops.whole_board(row)
         store.set_watch(db, cid, False)
         assert not store.get_company(db, cid)["watch"]
 

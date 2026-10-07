@@ -166,7 +166,7 @@ def _ranked(conn: sqlite3.Connection, t: RuntimeTrack, limit: int | None = None,
         with_description=with_description)
 
 
-def _write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
+def write_digest(conn: sqlite3.Connection, t: RuntimeTrack,
                   watch_hits: list[tuple[CompanyRow, FetchedJob, bool]] | None = None
                   ) -> tuple[list[RankedJob], list[JobRow], list[JobRow], Path]:
     """Rank the track's open jobs and rewrite its digest file, harvest
@@ -194,7 +194,7 @@ def rewrite_digest(conn: sqlite3.Connection, t: RuntimeTrack, top_n: int = 15,
     status sync and the standalone deep verify both ended with their own
     copy, and the copies had already drifted apart in what they printed.
     """
-    ranked = _write_digest(conn, t)[0]
+    ranked = write_digest(conn, t)[0]
     if heading:
         print(heading)
     for j in ranked[:top_n]:
@@ -265,17 +265,17 @@ def _mission_trusted(company: CompanyRow | None, floor: float | None) -> bool:
          "mission_score": company.get("mission_score")}, floor)
 
 
-def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> bool:
+def whole_board(company: CompanyRow, mission_floor: float | None = None) -> bool:
     """Whether a company's ENTIRE board is fetched, with no location filter.
 
     Either scope tag qualifies on its own — a sweep board is cheap to pull
     whole, a watched one must never miss a posting:
 
-    >>> _whole_board({"name": "Acme", "watch": 1})
+    >>> whole_board({"name": "Acme", "watch": 1})
     True
-    >>> _whole_board({"name": "Acme", "tags": "sweep"})
+    >>> whole_board({"name": "Acme", "tags": "sweep"})
     True
-    >>> _whole_board({"name": "Acme", "tags": "local"})
+    >>> whole_board({"name": "Acme", "tags": "local"})
     False
 
     Given a `mission_floor` (the track's `remote_mission_floor`), a
@@ -284,9 +284,9 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
     ranking that now admits them:
 
     >>> core = {"name": "Acme", "tags": "local", "mission_score": 0.9}
-    >>> _whole_board(core), _whole_board(core, 0.85)
+    >>> whole_board(core), whole_board(core, 0.85)
     (False, True)
-    >>> _whole_board({"name": "Acme", "mission_score": 0.5}, 0.85)
+    >>> whole_board({"name": "Acme", "mission_score": 0.5}, 0.85)
     False
 
     Everyone else gets the locality-scoped pull.
@@ -305,7 +305,7 @@ def _whole_board(company: CompanyRow, mission_floor: float | None = None) -> boo
 #  Crawl helpers (per-company gate + score), used by runner + single adds.     #
 # --------------------------------------------------------------------------- #
 
-async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bool:
+async def keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bool:
     """Company-linked posting filter: technical-title gate, multi-division
     keyword gate, per-track excludes, and (when the track's geo_gate is on)
     the whole-board geography check."""
@@ -332,7 +332,7 @@ async def _keep_job(company: CompanyRow, job: FetchedJob, t: RuntimeTrack) -> bo
             allow_defense=watched, track_id=t.id):
         return False
     floor = t.remote_mission_floor
-    if t.geo_gate and _whole_board(company, floor):
+    if t.geo_gate and whole_board(company, floor):
         # Whole-board companies are fetched with no location restriction,
         # which lets their remote and onsite-elsewhere reqs through the
         # fetch. Gate here:
@@ -386,7 +386,7 @@ async def _scored_row(job: FetchedJob, *, company_id: int | None, company_name: 
     return row
 
 
-async def _score_job(company: CompanyRow, job: FetchedJob, track: str) -> JobIn:
+async def score_job(company: CompanyRow, job: FetchedJob, track: str) -> JobIn:
     await company_fetch.hydrate_description(job)
     return await _scored_row(job, company_id=company["id"],
                              company_name=company["name"], track=track)

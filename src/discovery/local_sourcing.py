@@ -427,13 +427,13 @@ def _tracked_elsewhere(plan: BoardPlan, name: str | None) -> CompanyRow | None:
     return row if plan.action == "update" and row and row["name"] != name else None
 
 
-def _board_already_tracked(conn: sqlite3.Connection,
+def board_already_tracked(conn: sqlite3.Connection,
                            row: CompanyIn) -> CompanyRow | None:
     """`_tracked_elsewhere` of the plan for `row`."""
     return _tracked_elsewhere(store.plan_board(conn, row), row.get("name"))
 
 
-def _report_dup_board(name: str, existing: CompanyRow) -> None:
+def report_dup_board(name: str, existing: CompanyRow) -> None:
     print(f"    [dup]  {name[:30]:30} same {existing.get('ats') or '?'} board "
           f"as '{existing.get('name')}' - already tracked, not added")
 
@@ -565,7 +565,7 @@ def _settled_board(conn: sqlite3.Connection, hit: BoardHit, source: str,
     plan = store.plan_board(conn, row)
     dup = _tracked_elsewhere(plan, name)
     if dup:
-        _report_dup_board(name, dup)
+        report_dup_board(name, dup)
         return True, None, None
     primary = plan.row
     kept = _productive_row(conn, name) if plan.action == "update" else None
@@ -811,9 +811,9 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
                 "source": "manual", "active": 1,
                 "notes": "capture-only board: browse it yourself and save "
                          "pages with capture.py --watch"}
-            dup = await db.run(_board_already_tracked, row)
+            dup = await db.run(board_already_tracked, row)
             if dup:
-                _report_dup_board(name, dup)
+                report_dup_board(name, dup)
                 return None
             await db.run(store.upsert_company, row)
         print(f"  [OK] {name}: capture-only, {url}  -- save its pages with "
@@ -845,9 +845,9 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
     tier, score, reason = await score_company_mission(name, await mission_context(board))
 
     async with store.Writer() as db:
-        dup = await db.run(_board_already_tracked, board)
+        dup = await db.run(board_already_tracked, board)
         if dup:
-            _report_dup_board(name, dup)
+            report_dup_board(name, dup)
             return None
         row = {
             **board,

@@ -166,8 +166,8 @@ async def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
             done, pending = await asyncio.wait(pending, timeout=wait_s,
                                                return_when=asyncio.FIRST_COMPLETED)
             if not done:
-                why = (f"no progress in {stall_s:g}s" if end is None
-                       else f"past its {budget_s:g}s budget")
+                why = (f"past its {budget_s:g}s budget" if budget_s is not None
+                       else f"no progress in {stall_s or 0:g}s")
                 for t in pending:
                     print(f"    [!] {what(tasks[t])}: {why} - abandoned")
                     if on_abandon:
@@ -235,7 +235,7 @@ async def fetch_all[J](
     `on_done(name, platform, jobs, error)` fires as each source completes
     (completion order), for progress output.
     """
-    budget_s = config.FETCH_BUDGET_S if budget_s is None else budget_s
+    budget = config.FETCH_BUDGET_S if budget_s is None else budget_s
     results: list[tuple[list[J], BaseException | None, http.Snapshot | None]] = [
         ([], None, None)] * len(sources)
 
@@ -250,12 +250,12 @@ async def fetch_all[J](
         return jobs, http.snapshot_info()
 
     def abandoned(i: int) -> None:
-        results[i] = ([], TimeoutError(f"past its {budget_s:g}s budget"), None)
+        results[i] = ([], TimeoutError(f"past its {budget:g}s budget"), None)
 
     async for i, (jobs, snap) in fan_out(
             range(len(sources)), accounted, lambda i: sources[i][0], max_workers,
             with_item=True, on_error=lambda i, e: done(i, ([], e, None)),
-            budget_s=budget_s, on_abandon=abandoned):
+            budget_s=budget, on_abandon=abandoned):
         done(i, (jobs, None, snap))
     return results
 

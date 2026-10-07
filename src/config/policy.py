@@ -96,7 +96,7 @@ MULTI_DIVISION_MISSION_FLOOR = _pol.multi_division_mission_floor
 # TITLE vocabulary that passes the division keyword gate at a conglomerate
 # the roster ALSO watches. The division gate
 # (src.match.filters.is_relevant, called by src.crawl.triage.row_verdict
-# and src.ops.maintenance._keep_job) asks a conglomerate's postings for the
+# and src.ops.maintenance.keep_job) asks a conglomerate's postings for the
 # profile's own health/bio/science vocabulary, because a corporate mission
 # score says nothing about the division that is hiring. At a WATCHED
 # conglomerate that question is the wrong one: watching already means

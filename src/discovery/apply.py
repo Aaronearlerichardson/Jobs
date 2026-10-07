@@ -22,6 +22,7 @@ from src.ats import coords
 from src.ats.board import board_for
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
+from src.match.names import name_key
 from src.rows import BoardHit, CompanyIn, FetchedJob, Slug
 
 if TYPE_CHECKING:
@@ -218,7 +219,7 @@ def attribute_employers(conn: sqlite3.Connection, jobs: list[FetchedJob],
                         (j["url"],)).fetchone():
                     drop.add(id(j))
             continue
-        if store._name_key(name) in blocked:
+        if name_key(name) in blocked:
             drop.update(id(j) for j in group)
             continue
         if not commit:

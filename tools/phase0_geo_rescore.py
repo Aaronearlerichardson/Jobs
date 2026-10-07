@@ -16,7 +16,7 @@ Selection:
     victims, OR
   - crawl-scored rows (track IS NOT NULL AND triage_status IS NULL) whose
     fit_gates already contains 'geo' -- the crawl's own first-pass scorer
-    (src.ops.maintenance._score_job) tripped the gate under the old,
+    (src.ops.maintenance.score_job) tripped the gate under the old,
     location-blind prompt,
   restricted to rows whose location either matches the profile's locality
   regex (src.match.locality.NC_RE -- itself derived from profile.toml

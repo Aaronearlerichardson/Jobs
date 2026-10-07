@@ -67,7 +67,7 @@ from .pipeline import (  # noqa: F401
     conversion_report, followups_due,
 )
 from .review import (  # noqa: F401
-    _name_key, mark_pending, is_confirmed_company,
+    mark_pending, is_confirmed_company,
     pending_companies, confirm_company, reject_company, block_name,
     blocked_name_keys,
 )

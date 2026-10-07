@@ -67,7 +67,7 @@ def _deactivate(conn: sqlite3.Connection, dead: list[CompanyRow], offmission: bo
         store.deactivate_company(
             conn, c["id"],
             note=f"deactivated: dead {c['ats']} board '{c['slug']}'")
-        print(f"    [dead]  {c['name'][:30]:30} {c['ats']:10} "
+        print(f"    [dead]  {c['name'][:30]:30} {c['ats'] or '':10} "
               f"board '{c['slug']}' no longer resolves")
     if not offmission:
         return 0
@@ -353,8 +353,8 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
         one-op-at-a-time slot.
     """
     from src.claude.api import score_company_mission
-    from src.discovery.local_sourcing import (_board_already_tracked,
-                                              _report_dup_board,
+    from src.discovery.local_sourcing import (board_already_tracked,
+                                              report_dup_board,
                                               mission_context)
     from src.discovery.resolve.board import resolved
     from src.match.names import junk_name_reason
@@ -412,12 +412,12 @@ async def reresolve_misses(db: store.Writer | None = None, limit: int = 50,
                 print(f"    [miss]    {name[:30]:30} {was[name]} -> {reason}")
                 continue
             board = coords.from_hit(hit, name=name)
-            dup = await db.run(_board_already_tracked, board)
+            dup = await db.run(board_already_tracked, board)
             if dup:
                 # Someone else already holds this board. Leave the row as
                 # the miss it was, but re-stamp it so a bounded rerun moves
                 # past it instead of paying for the same fetch every night.
-                _report_dup_board(name, dup)
+                report_dup_board(name, dup)
                 await miss(name, was[name])
                 dups.append(name)
                 continue
@@ -601,7 +601,7 @@ async def rename_slug_boards(db: store.Writer | None = None, t: RuntimeTrack | N
         out: list[tuple[int, str, str]] = []
         for c in rows:
             new_name = await cast(Board, board_for(c["ats"])).employer_name(c["slug"] or "")
-            label = f"{c['name'][:30]:30} {c['ats']:15}"
+            label = f"{c['name'][:30]:30} {c['ats'] or '':15}"
             if not new_name:
                 print(f"    [skip]      {label} board answered no employer name")
                 continue

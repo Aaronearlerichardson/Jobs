@@ -172,7 +172,7 @@ async def build_sources(cfg: ModuleType, t: RuntimeTrack,
             for c in rows:
                 add(c["name"], c.get("ats") or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if ops._whole_board(cc, floor) else NC_RE)),
+                        cc, None if ops.whole_board(cc, floor) else NC_RE)),
                     company=c, key=("store", (c["name"] or "").lower()))
         else:
             # Location-agnostic lightweight ATS sweep (JSON-API boards only;
@@ -353,7 +353,7 @@ async def _gate_company_board(
         if t.require_core_anchor and not core_anchor(
                 j.get("title", ""), j.get("description", "")):
             continue
-        if not await ops._keep_job(c, j, t):
+        if not await ops.keep_job(c, j, t):
             continue
         kept.append(j)
     fresh, watch_hits = await db.run(_fresh_and_watched, t, c, jobs, kept, commit)
@@ -533,7 +533,7 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
     """Score what the gates kept and write it. Returns the number scored.
 
     Two populations with two shapes: company-linked rows go through
-    ops._score_job (which builds the full store row), sweep rows are
+    ops.score_job (which builds the full store row), sweep rows are
     scored IN PLACE so the fit columns ride along to the upsert below.
     """
     from src.match.locality import geo_mode
@@ -544,7 +544,7 @@ async def _score_and_persist(db: store.Writer, t: RuntimeTrack, got: Collected, 
         print(f"\n  scoring {len(got.to_score)} new job(s) against resume "
               f"({got.n_seen} already scored)...")
         async for row in fan_out(got.to_score,
-                                 lambda cj: ops._score_job(cj[0], cj[1], t.track),
+                                 lambda cj: ops.score_job(cj[0], cj[1], t.track),
                                  "scoring", max_workers):
             # Kept separate from the scoring failure fan_out reports: a
             # store write that fails is not a scoring problem.
@@ -635,7 +635,7 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
     print the watch section and the top N, and return the ranked list.
 
     Notes:
-        The ranking and the digest file are maintenance._write_digest, the
+        The ranking and the digest file are maintenance.write_digest, the
         writer every digest-writing op shares, so this crawl's watch hits
         and triage funnel cannot drift from theirs; only the email, the
         printed watch section and the richer top-N live here.
@@ -644,7 +644,7 @@ async def _report_ranked(db: store.Writer, t: RuntimeTrack, got: Collected, scor
     from src.ops import maintenance as ops
 
     ranked, pipeline, followups, digest_path = await db.run(
-        ops._write_digest, t, watch_hits=got.watch_hits)
+        ops.write_digest, t, watch_hits=got.watch_hits)
     if send:
         if await asyncio.to_thread(digest.send_ranked_digest, ranked, t,
                                    watch_hits=got.watch_hits, pipeline=pipeline,
@@ -698,8 +698,8 @@ async def _report_matches(matches: list[FetchedJob], t: RuntimeTrack, *, new_ids
         print(f"     location: {j.get('location')}")
         if j.get("anchor_signal"):
             print(f"     anchor  : {j['anchor_signal']}")
-        if j.get("resume_fit_score") is not None:
-            print(f"     fit     : {j['resume_fit_score']:.2f}  "
+        if (fit := j.get("resume_fit_score")) is not None:
+            print(f"     fit     : {fit:.2f}  "
                   f"({j.get('fit_reason', '')})")
         print(f"     remote  : {j.get('remote_signal', '')}"
               f"{'   (NEW)' if j['id'] in new_ids else '   (seen)'}")

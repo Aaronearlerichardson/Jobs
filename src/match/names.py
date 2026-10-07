@@ -51,7 +51,7 @@ def name_key(name: str | None) -> str:
     ''
 
     Notes:
-        src.store._name_key and config.DISCOVERY_NAME_BLOCKLIST compute
+        src.store.review._name_key and config.DISCOVERY_NAME_BLOCKLIST compute
         the same key (core and config cannot import discovery), so a name
         blocked or rejected under any spelling stays recognised here.
     """

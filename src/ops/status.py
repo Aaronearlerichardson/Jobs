@@ -19,7 +19,7 @@ from src.ats.board import company as company_fetch
 from src.config import RuntimeTrack
 from src.match.locality import NC_RE
 from src.net.parallel import fan_out, fetch_all
-from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, _whole_board,
+from src.ops.maintenance import (_DEAD_BOARD_FAMILY, _ranked, _t, whole_board,
                                  group_by_company, rewrite_digest, track_writer)
 from src.rows import CompanyRow
 
@@ -99,7 +99,7 @@ async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tup
         loc = NC_RE if t.sources.location_scoped else None
         sources = [(c["name"], c["ats"] or "?",
                     (lambda cc=c: company_fetch.fetch_company(
-                        cc, None if (_whole_board(cc, t.remote_mission_floor)
+                        cc, None if (whole_board(cc, t.remote_mission_floor)
                                      or loc is None) else loc)))
                    for c in companies]
         fetched = await fetch_all(sources)
