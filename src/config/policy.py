@@ -44,6 +44,14 @@ PLAIN_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PROBE_TIMEOUT = (3.0, 10.0)
 FETCH_TIMEOUT = (5.0, 60.0)
 
+# A host answering this many 403/429s in a row with no success between is
+# blocking us: its requests are skipped unasked for REFUSAL_TTL_S. The
+# 2026-10-07 backfill sent jobs.thermofisher.com 10,210 403s in a row after
+# its WAF tripped; no other host that week went past 10 (Workday's pulled
+# postings 403 one by one, between 200s).
+REFUSAL_TRIPS = 20
+REFUSAL_TTL_S = 600.0
+
 # Wall-clock budget of one pool pass, seconds: fetch_all's, and a fan_out's
 # where the caller passes one (net.parallel). Past it, work still queued is
 # cancelled and work still running is abandoned. About ten times the

@@ -188,6 +188,10 @@ class _Calls:
 
 _CALLS = runstate.per_run(_Calls)
 
+#: Whether this run has said the API key is missing (once, not per call:
+#: the 2026-10-07 harvest printed it 122 times).
+_KEY_WARNED = runstate.per_run(list[bool])
+
 
 def _system_field(system_prompt: str, cache: bool = True) -> str | list[dict[str, JSON]]:
     """`system` as a cache-marked block list, or the plain string when caching
@@ -388,7 +392,9 @@ async def call_claude_json[R: Reply](system_prompt: str, user_content: str,
         target, and a bare requests session's headers. Without this
         record API latency never reached the session log."""
     if not have_api_key():
-        print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
+        if not (warned := _KEY_WARNED()):
+            warned.append(True)
+            print("  [!] Set the ANTHROPIC_API_KEY environment variable.")
         return None
     if (fatal := api_disabled()) is not None:
         _log.debug("claude call skipped (breaker tripped): %s", fatal)

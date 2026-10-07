@@ -297,9 +297,28 @@ def _readers(fs: Fields) -> dict[str, StrReader]:
     return {k: fields.str_reader(fs.get(k)) for k in ROW_FIELDS | set(fs)}
 
 
+def _run_start(rx: str) -> str:
+    """`rx`, a pattern opening (after its inline flags) on an alphanumeric
+    group, matched only where an alphanumeric run starts: the same first
+    match, but linear on a long run, where every start inside it retried.
+
+    >>> _run_start(r"(?i)([a-z0-9-]+)\\.icims\\.com")
+    '(?i)(?<![a-z0-9])([a-z0-9-]+)\\\\.icims\\\\.com'
+    >>> _run_start(r"jobs\\.lever\\.co/([^/]+)")
+    'jobs\\\\.lever\\\\.co/([^/]+)'
+
+    Notes:
+        A careers page carrying a ~1 MB inline blob held the GIL for 1-4 s
+        per hostname pattern in `detect`, 40 s a page: the 2026-10-06/07
+        reresolve runs froze the loop until the watchdog abandoned all 50.
+    """
+    m = re.match(r"(\(\?[a-zA-Z]+\))?(?=\(\[a-z0-9)", rx)
+    return f"{m.group(0)}(?<![a-z0-9]){rx[m.end():]}" if m else rx
+
+
 def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, ...], set[str]]:
     """A `detect` entry read once: (regexes, transform per group, blocklist)."""
-    regexes = [re.compile(rx) for rx in entry.re]
+    regexes = [re.compile(_run_start(rx)) for rx in entry.re]
     groups = sum(rx.groups for rx in regexes)
     return regexes, entry.transform or (None,) * groups, {v.lower() for v in entry.blocklist}
 

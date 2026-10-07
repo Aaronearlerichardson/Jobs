@@ -35,7 +35,8 @@ from urllib3.util.ssl_ import create_urllib3_context
 from yarl import URL
 
 from src import runstate
-from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
+from src.config import (FETCH_TIMEOUT, PLAIN_USER_AGENT, REFUSAL_TRIPS, REFUSAL_TTL_S,
+                        USER_AGENT)
 from src.net.util import JSON, host_of, origin_key
 
 # File-only request trace (src/session_log.py installs the handler; there
@@ -77,6 +78,10 @@ Unreachable = requests.ConnectionError
 #: Any failed request (HTTPError and Unreachable are kinds of it); `send` also
 #: raises robots.RobotsDisallowed, which is not one.
 RequestError = requests.RequestException
+
+
+class HostRefusing(RequestError):
+    """A polite request not sent: its host has been blocking us (`send`)."""
 
 
 # --------------------------------------------------------------------------- #
@@ -381,10 +386,17 @@ async def send(method: str, url: str, *, polite: bool = True,
         robots check, the pacing and the pooling, and no fetcher can
         quietly skip them. `[policy] respect_robots = false` turns the
         check off (not the pooling).
+
+        A host that answers REFUSAL_TRIPS 403/429s in a row is skipped,
+        HostRefusing raised unsent, for REFUSAL_TTL_S (`_REFUSING`).
     """
     method = method.upper()
     if not polite:
         return await _exchange(method, url, polite=False, **kw)
+    refusing = _REFUSING()
+    if refusing.dead(url):
+        _log.debug("%s %s -> skipped, host refusing", method, url)
+        raise HostRefusing(f"{host_of(url)} refused {REFUSAL_TRIPS} requests in a row")
     # Imported here: robots.py imports this module.
     from .robots import CACHE, RobotsDisallowed
     robots = CACHE()
@@ -403,6 +415,10 @@ async def send(method: str, url: str, *, polite: bool = True,
         raise
     _log.debug("%s %s -> %s in %.2fs", method, url, r.status_code,
                r.elapsed.total_seconds())
+    if r.status_code in (403, 429):
+        refusing.trip(url)
+    elif r.status_code < 400:
+        refusing.clear(url)
     return r
 
 
@@ -604,7 +620,8 @@ def fetch_failed[T](label: str, err: object, indent: int = 4) -> list[T]:
     acct = _account()
     acct.n += 1
     acct.last = f"{label}: {err}"
-    sys.stdout.write(f"{' ' * indent}[!] {label}: {err}\n")
+    if not isinstance(err, HostRefusing):   # `send` logged the skip; the block's 403s printed
+        sys.stdout.write(f"{' ' * indent}[!] {label}: {err}\n")
     return []
 
 
@@ -724,6 +741,13 @@ class HostBreaker:
     >>> b = HostBreaker(ttl=0); b.trip("https://a.example/")
     >>> b.dead("https://a.example/")
     False
+
+    `clear(url)`, an answer from the host, restarts its count:
+
+    >>> b = HostBreaker(ttl=60, trips=2)
+    >>> b.trip("https://a.example/"); b.clear("https://a.example/x")
+    >>> b.trip("https://a.example/"); b.dead("https://a.example/")
+    False
     """
 
     def __init__(self, ttl: float, trips: int = 1) -> None:
@@ -736,6 +760,9 @@ class HostBreaker:
             last, n = self._hits.get(host, (0.0, 0))
             self._hits[host] = (now, n + 1 if now - last < self.ttl else 1)
 
+    def clear(self, url: str) -> None:
+        self._hits.pop(host_of(url), None)
+
     def dead(self, url: str) -> bool:
         host = host_of(url)
         hit = self._hits.get(host)
@@ -743,3 +770,7 @@ class HostBreaker:
             del self._hits[host]
             return False
         return hit is not None and hit[1] >= self.trips
+
+
+#: This run's blocking hosts (`send`): REFUSAL_TRIPS 403/429s in a row.
+_REFUSING = runstate.per_run(lambda: HostBreaker(ttl=REFUSAL_TTL_S, trips=REFUSAL_TRIPS))
