@@ -58,9 +58,14 @@ def total_of(pager: Pager | None, payload: JSON) -> int | None:
     return t if isinstance(t, int) else None
 
 
+def _ids(rows: Sequence[EngineRow]) -> list[str]:
+    """The ids of the rows that have one, in order."""
+    return [r["id"] for r in rows if r["id"] is not None]
+
+
 def postings(rows: list[EngineRow] | None) -> bool:
     """Whether `rows` hold a posting: a row with an id."""
-    return any(r["id"] is not None for r in rows or [])
+    return bool(_ids(rows or []))
 
 
 #: The row fields whose fill rate says the spec maps them, and the share of
@@ -139,8 +144,8 @@ def scope_failed(scoped_total: int | None, board_total: int | None, cap: int,
         all 1,200 as local.
     """
     if not isinstance(scoped_total, int):
-        head = list(dict.fromkeys(r["id"] for r in board_page if r["id"] is not None))
-        return bool(head) and [r["id"] for r in rows if r["id"] is not None][:len(head)] == head
+        head = list(dict.fromkeys(_ids(board_page)))
+        return bool(head) and _ids(rows)[:len(head)] == head
     if scoped_total <= 0:
         return False
     if isinstance(board_total, int) and 0 < board_total <= scoped_total:
@@ -229,13 +234,13 @@ async def walk(spec: Listing,
             size_known = None if total is not None and ceiling and total == ceiling else total
         n_entries, listed = await asyncio.to_thread(rows_of, parts, payload)
         if learn:
-            n_entries = len({r["id"] for r in listed if r["id"] is not None})
+            n_entries = len(set(_ids(listed)))
             if n == 0:
                 size = n_entries
                 step = size - 1 if size_known is None and size > 1 else size
                 pages = page_cap(pager, budget, step) if widen and pager else pages
         elif n == 0 and widen and pager and not size:
-            pages = page_cap(pager, budget, len({r["id"] for r in listed if r["id"] is not None}))
+            pages = page_cap(pager, budget, len(set(_ids(listed))))
         elif n == 0 and pager and pager.kind in ("offset", "overlap") \
                 and 0 < n_entries < min(size, size_known or 0):
             size = step = n_entries

@@ -90,7 +90,7 @@ class Employer(TypedDict, closed=True):
     page_url: str
 
 
-class FetchedJob(TypedDict, total=False, closed=True):
+class FetchedJob(_FitFields, total=False, closed=True):
     """A posting as a fetcher returns it, then as each later stage stamps it
     in place. Its names are checked against ROW_FIELDS and FitColumns by
     tests/test_boards_spec.py::test_the_fetched_job_names_the_row_fields_and_fit_columns.
@@ -120,20 +120,57 @@ class FetchedJob(TypedDict, total=False, closed=True):
     remote_eligible: bool
     remote_signal: str
     anchor_signal: str
+
+
+class _JobColumns(TypedDict):
+    """The jobs columns a stored row and a ranked row share."""
+    id: int
+    job_id: str
+    company_id: int | None
+    company_name: str | None
+    title: str | None
+    url: str | None
+    location: str | None
+    track: str | None
+    geo_mode: str | None
+    remote_eligible: int | None
+    remote_signal: str | None
+    anchor_signal: str | None
+    desc_checked_at: str | None
     resume_fit_score: float | None
     fit_reason: str | None
-    fit_gates: str | None
-    fit_model: str | None
+    first_seen: str | None
+    last_seen: str | None
+    status: str | None
+    harvested_at: str | None
+    triage_status: str | None
+    triage_detail: str | None
+    triaged_at: str | None
     fit_domain: float | None
     fit_function: float | None
     fit_stack: float | None
     fit_seniority: float | None
+    fit_gates: str | None
+    fit_model: str | None
+    closed_at: str | None
+    posted_at: str | None
+    disposition: str | None
+    disposition_note: str | None
+    disposition_at: str | None
+    probe_streak: int | None
+    applied_at: str | None
+    followup_at: str | None
+    contact: str | None
+    referral: int | None
+    outcome_reason: str | None
+    dup_of: int | None
 
 
-class JobRow(TypedDict, closed=True):
+class JobRow(_JobColumns, closed=True):
     """A stored jobs row, as `SELECT *` returns it: every column, so a
-    subscript is checked. It is declared apart from `JobIn` (what
-    upsert_job takes) and `RankedJob`; tests/test_store.py checks all three
+    subscript is checked. It shares its columns with `RankedJob`
+    (`_JobColumns`) and is declared apart from `JobIn` (what upsert_job
+    takes, every key optional); tests/test_store.py checks all three
     against the table.
 
     Notes:
@@ -141,97 +178,17 @@ class JobRow(TypedDict, closed=True):
         hydration stamps the hint a detail gave onto the row for the rest of
         its pass, and the geo gate reads it.
     """
-    id: int
-    job_id: str
-    company_id: int | None
-    company_name: str | None
-    title: str | None
-    url: str | None
-    location: str | None
-    track: str | None
-    geo_mode: str | None
-    remote_eligible: int | None
-    remote_signal: str | None
-    anchor_signal: str | None
     description: str | None
-    desc_checked_at: str | None
-    resume_fit_score: float | None
-    fit_reason: str | None
-    first_seen: str | None
-    last_seen: str | None
-    status: str | None
-    harvested_at: str | None
-    triage_status: str | None
-    triage_detail: str | None
-    triaged_at: str | None
-    fit_domain: float | None
-    fit_function: float | None
-    fit_stack: float | None
-    fit_seniority: float | None
-    fit_gates: str | None
-    fit_model: str | None
-    closed_at: str | None
-    posted_at: str | None
-    disposition: str | None
-    disposition_note: str | None
-    disposition_at: str | None
-    probe_streak: int | None
-    applied_at: str | None
-    followup_at: str | None
-    contact: str | None
-    referral: int | None
-    outcome_reason: str | None
-    dup_of: int | None
     remote_hint: NotRequired[str]
 
 
-class RankedJob(TypedDict, closed=True):
+class RankedJob(_JobColumns, closed=True):
     """A row of `ranked_jobs`: the jobs columns (`description` only with
     `with_description`), the company's mission and tags, the combined score
     and, once collapsed, the survivor's `dup_*` fields. Its keys are checked
     by tests/test_store.py::TestJobReaders.test_ranked_jobs_returns_the_ranked_job_keys.
     """
-    id: int
-    job_id: str
-    company_id: int | None
-    company_name: str | None
-    title: str | None
-    url: str | None
-    location: str | None
-    track: str | None
-    geo_mode: str | None
-    remote_eligible: int | None
-    remote_signal: str | None
-    anchor_signal: str | None
     description: NotRequired[str | None]
-    desc_checked_at: str | None
-    resume_fit_score: float | None
-    fit_reason: str | None
-    first_seen: str | None
-    last_seen: str | None
-    status: str | None
-    harvested_at: str | None
-    triage_status: str | None
-    triage_detail: str | None
-    triaged_at: str | None
-    fit_domain: float | None
-    fit_function: float | None
-    fit_stack: float | None
-    fit_seniority: float | None
-    fit_gates: str | None
-    fit_model: str | None
-    closed_at: str | None
-    posted_at: str | None
-    disposition: str | None
-    disposition_note: str | None
-    disposition_at: str | None
-    probe_streak: int | None
-    applied_at: str | None
-    followup_at: str | None
-    contact: str | None
-    referral: int | None
-    outcome_reason: str | None
-    dup_of: int | None
     mission_tier: str | None
     mission_score: float | None
     company_watch: int | None
