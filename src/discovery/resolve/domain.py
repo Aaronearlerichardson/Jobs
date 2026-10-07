@@ -16,7 +16,7 @@ from urllib.parse import quote
 from src import config
 from src.match import names
 from src.net import http
-from src.net.util import cache_dir, host_of, json_cache_get, json_cache_put
+from src.net.util import JSON, cache_dir, dig, host_of, json_cache_get, json_cache_put
 from src.runstate import per_run
 
 # Dropped before two names are compared: legal forms, never industry words
@@ -84,11 +84,15 @@ async def _suggested(name: str) -> tuple[str | None, bool]:
             if not isinstance(data, list):
                 continue
             answered = True
-            hit = pick_domain(name, [(s.get("name"), s.get("domain"))
+            hit = pick_domain(name, [(_str(s.get("name")), _str(s.get("domain")))
                                      for s in data if isinstance(s, dict)])
             if hit:
                 return hit, True
     return None, answered
+
+
+def _str(v: JSON) -> str | None:
+    return v if isinstance(v, str) else None
 
 
 async def _wikidata(name: str) -> tuple[str | None, bool]:
@@ -100,8 +104,9 @@ async def _wikidata(name: str) -> tuple[str | None, bool]:
         "language": "en", "limit": 3, "format": "json"})
     if not isinstance(found, dict):
         return None, False
-    labels = {e["id"]: e.get("label") for e in found.get("search") or []
-              if isinstance(e, dict) and e.get("id")}
+    search = found.get("search")
+    labels = {str(e["id"]): _str(e.get("label")) for e in search
+              if isinstance(e, dict) and e.get("id")} if isinstance(search, list) else {}
     if not any(_words(lbl) == _words(name) for lbl in labels.values()):
         return None, True
     data = await http.get_json(api, label, params={
@@ -110,9 +115,11 @@ async def _wikidata(name: str) -> tuple[str | None, bool]:
     if not isinstance(data, dict):
         return None, False
     sites = []
-    for qid, entity in (data.get("entities") or {}).items():
-        for claim in (entity.get("claims") or {}).get("P856", []):
-            value = ((claim.get("mainsnak") or {}).get("datavalue") or {}).get("value")
+    entities = dig(data, "entities")
+    for qid, entity in entities.items() if isinstance(entities, dict) else []:
+        claims = dig(entity, "claims", "P856")
+        for claim in claims if isinstance(claims, list) else []:
+            value = dig(claim, "mainsnak", "datavalue", "value")
             if isinstance(value, str):
                 sites.append((labels.get(qid), value))
     return pick_domain(name, sites), True

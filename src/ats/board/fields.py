@@ -34,19 +34,25 @@ import functools
 import html
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from typing import Any, Literal, cast, overload
 from urllib.parse import unquote
 
 from src.match.locality import MONTH_ABBRS, location_snippet
-from src.net.util import (LOC_TEXT_RE, clean_field, host_of, norm_posted_date,
+from src.net.util import (JSON, LOC_TEXT_RE, clean_field, host_of, norm_posted_date,
                           origin_of, stable_id, text_from_html)
 
 #: A field spec read once (`reader`): (entry, ctx) -> the value.
-Reader = Callable[[Any, dict[str, Any]], Any]
+Reader = Callable[[JSON, Mapping[str, JSON]], JSON]
+
+#: A row field's spec read once (`str_reader`): (entry, ctx) -> its text.
+StrReader = Callable[[JSON, Mapping[str, JSON]], str | None]
+
+#: What a transform gives: text, a count (`int`), or None for no value.
+Transform = Callable[..., str | int | None]
 
 
-def _text(v: Any) -> str:
+def _text(v: JSON) -> str:
     """A payload value as markup text: a list's items joined, a dict none."""
     if isinstance(v, list):
         return " ".join(str(x) for x in v)
@@ -64,7 +70,7 @@ def _after(text: str, marker: str) -> str:
     return body or text
 
 
-def _ymd(v: Any) -> str | None:
+def _ymd(v: JSON) -> str | None:
     """A YYYYMMDD value as an ISO date; None for zeros or anything else.
 
     >>> _ymd("20260921"), _ymd(20260921), _ymd("00000000"), _ymd("")
@@ -74,7 +80,7 @@ def _ymd(v: Any) -> str | None:
     return f"{m[1]}-{m[2]}-{m[3]}" if m and m[1] != "0000" else None
 
 
-def _colon_location(raw: Any) -> str:
+def _colon_location(raw: JSON) -> str:
     """A colon-delimited, broadest-first location ("US:NC:Morrisville") as
     a readable one, a two-letter state kept beside its city.
 
@@ -90,12 +96,12 @@ def _colon_location(raw: Any) -> str:
     return ", ".join(x for x in (", ".join(parts), state, country) if x)
 
 
-def _host(v: Any) -> str:
+def _host(v: JSON) -> str:
     """A URL's host, or `v` itself when it is a bare host."""
-    return host_of(v) if "://" in str(v) else str(v)
+    return host_of(str(v)) if "://" in str(v) else str(v)
 
 
-def _host_part(v: Any) -> str:
+def _host_part(v: JSON) -> str:
     """The host in `v`, a URL or a bare host (with or without a path),
     lowercased; "" when it names none.
 
@@ -108,7 +114,7 @@ def _host_part(v: Any) -> str:
     return m.group(1).lower() if m else ""
 
 
-def _group(v: Any, regex: str) -> str | None:
+def _group(v: JSON, regex: str) -> str | None:
     """The first group of `regex`'s first match in `v`; None when none.
 
     >>> _group("/job/US-NC-Durham/Eng_R1", "^/job/([^/]+)/"), _group("/x", "^/job/([^/]+)/")
@@ -118,7 +124,7 @@ def _group(v: Any, regex: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _int(v: Any) -> int | None:
+def _int(v: JSON) -> int | None:
     """A count written with thousands separators as an int; None otherwise.
 
     >>> _int("1,621"), _int(" 25 "), _int("n/a")
@@ -128,7 +134,7 @@ def _int(v: Any) -> int | None:
     return int(s) if s.isdigit() else None
 
 
-def _cut_date_tail(v: Any) -> str:
+def _cut_date_tail(v: JSON) -> str:
     """The place, with a glued-on posting date and whatever follows it (a
     theme's repeated title/location) cut off.
 
@@ -141,7 +147,7 @@ def _cut_date_tail(v: Any) -> str:
     return re.sub(date_tail, "", str(v), flags=re.I).strip(" ,-")
 
 
-def _strip_labels(v: Any) -> str:
+def _strip_labels(v: JSON) -> str:
     r"""An anchor's text with the screen-reader label ahead of its title
     ("Requisition Title", or a bare "Title" on its own line) dropped and
     the whitespace collapsed. A bare "Title" is a label only when a line
@@ -161,7 +167,7 @@ def _strip_labels(v: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _loc_text(v: Any) -> str | None:
+def _loc_text(v: JSON) -> str | None:
     """The first "City, ST"-shaped phrase in `v` (net.util.LOC_TEXT_RE), or
     None.
 
@@ -172,7 +178,7 @@ def _loc_text(v: Any) -> str | None:
     return m.group(0).strip() if m else None
 
 
-TRANSFORMS: dict[str, Callable[..., Any]] = {
+TRANSFORMS: dict[str, Transform] = {
     "html_text": lambda v: text_from_html(_text(v)),
     # A JSON string holding "&lt;p&gt;..." has no markup to strip until it
     # is unescaped: stripped first, the tags come back as TEXT.
@@ -215,7 +221,7 @@ TRANSFORMS: dict[str, Callable[..., Any]] = {
 _TOKEN_RE = re.compile(r"\{([A-Za-z0-9_.\[\]]+)(?::(\d+))?(?:\|([a-z_]+))?\}")
 
 
-def merge_locations(primary: str | None, extras: list[Any] | None) -> str:
+def merge_locations(primary: JSON, extras: list[JSON] | None) -> str:
     """One location string carrying every location a posting names: the
     primary field first, then any secondary office/location not already
     present in it.
@@ -232,17 +238,18 @@ def merge_locations(primary: str | None, extras: list[Any] | None) -> str:
         up front while the site that matters hides in the secondary list;
         the location regex and the geo logic must see them all.
     """
-    loc = (primary or "").strip()
+    # TODO(any-zero): a typed Reader return makes `primary` str | None | list; a list raises.
+    loc = (cast(str | None, primary) or "").strip()
     seen = loc.lower()
     for e in extras or []:
-        e = (e or "").strip() if isinstance(e, str) else ""
+        e = e.strip() if isinstance(e, str) else ""
         if e and e.lower() not in seen:
             loc = f"{loc}; {e}" if loc else e
             seen = loc.lower()
     return loc
 
 
-def path(obj: Any, p: str) -> Any:
+def path(obj: JSON, p: str) -> JSON:
     """The value at dotted path `p`; a "[]" step maps over a list, "[n]"
     takes its nth item.
 
@@ -256,7 +263,7 @@ def path(obj: Any, p: str) -> Any:
 
 
 @functools.cache
-def _getter(p: str) -> Callable[[Any], Any]:
+def _getter(p: str) -> Callable[[JSON], JSON]:
     """`path` for one `p`, parsed once: a callable obj -> value."""
     if p == "":
         return lambda obj: obj
@@ -266,7 +273,7 @@ def _getter(p: str) -> Callable[[Any], Any]:
     if all(index is None for _key, index in split):
         keys = tuple(key for key, _index in split)
 
-        def chain(obj: Any) -> Any:
+        def chain(obj: JSON) -> JSON:
             for k in keys:
                 obj = obj.get(k) if isinstance(obj, dict) else None
             return obj
@@ -274,10 +281,10 @@ def _getter(p: str) -> Callable[[Any], Any]:
     mapped = any(index == "" for _key, index in split)
     steps = [(key, index if index in (None, "") else int(index)) for key, index in split]
 
-    def walk(obj: Any) -> Any:
+    def walk(obj: JSON) -> JSON:
         cur = [obj]
         for key, index in steps:
-            nxt: list[Any] = []
+            nxt: list[JSON] = []
             for c in cur:
                 v = c.get(key) if isinstance(c, dict) else None
                 if index is None:
@@ -291,19 +298,19 @@ def _getter(p: str) -> Callable[[Any], Any]:
     return walk
 
 
-def _flat(v: Any) -> list[Any]:
+def _flat(v: JSON) -> list[JSON]:
     return [x for item in v for x in _flat(item)] if isinstance(v, list) else [v]
 
 
 @overload
-def fmt(template: str, lookup: Callable[[str], Any], strict: Literal[False] = False) -> str: ...
+def fmt(template: str, lookup: Callable[[str], JSON], strict: Literal[False] = False) -> str: ...
 
 
 @overload
-def fmt(template: str, lookup: Callable[[str], Any], strict: bool) -> str | None: ...
+def fmt(template: str, lookup: Callable[[str], JSON], strict: bool) -> str | None: ...
 
 
-def fmt(template: str, lookup: Callable[[str], Any], strict: bool = False) -> str | None:
+def fmt(template: str, lookup: Callable[[str], JSON], strict: bool = False) -> str | None:
     """`template` with each "{name}" / "{name:n}" token filled by `lookup`;
     None when `strict` and a token is empty.
 
@@ -344,7 +351,7 @@ def _template(template: str) -> tuple[tuple[str, str | None, int | None, str | N
 
 
 @functools.cache
-def _transform(name: str) -> Callable[[Any], Any]:
+def _transform(name: str) -> Callable[[JSON], JSON]:
     """The transform `name` ("t", or "t:arg" passing it an argument) as a
     callable, looked up in TRANSFORMS when called."""
     t, _, arg = name.partition(":")
@@ -353,8 +360,8 @@ def _transform(name: str) -> Callable[[Any], Any]:
     return lambda v: TRANSFORMS[t](v)
 
 
-def value(spec: Any, entry: Any, ctx: dict[str, Any] | None = None,
-          strict: bool = False) -> Any:
+def value(spec: Any, entry: JSON, ctx: Mapping[str, JSON] | None = None,
+          strict: bool = False) -> JSON:
     """The value `spec` names in `entry`. `ctx` holds the handle parts and
     any "_" fields already computed, which "format" templates read first.
 
@@ -391,6 +398,14 @@ def value(spec: Any, entry: Any, ctx: dict[str, Any] | None = None,
     return reader(spec, strict)(entry, ctx or {})
 
 
+def str_reader(spec: Any, strict: bool = False) -> StrReader:
+    """`reader(spec)` for a row field that holds text (id, title, url,
+    location, description, posted_at, remote_hint)."""
+    # TODO(any-zero): a spec can name a list or dict here, and the reader
+    # then gives one; nothing is converted or checked. Parse the spec by type.
+    return cast(StrReader, reader(spec, strict))
+
+
 def reader(spec: Any, strict: bool = False) -> Reader:
     """Field spec `spec` read once: a callable (entry, ctx) -> the value
     `value` would give. The engine builds one per spec field when a board
@@ -407,7 +422,7 @@ def reader(spec: Any, strict: bool = False) -> Reader:
     if when is None and transform is None and not has_default:
         return body
 
-    def read(entry: Any, ctx: dict[str, Any]) -> Any:
+    def read(entry: JSON, ctx: Mapping[str, JSON]) -> JSON:
         v = body(entry, ctx) if when is None or when(entry, ctx) else other(entry, ctx)
         if transform is not None and v not in (None, ""):
             v = transform(v)
@@ -432,7 +447,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
     if "first" in spec:
         subs = [reader(s) for s in spec["first"]]
 
-        def first(entry: Any, ctx: dict[str, Any]) -> Any:
+        def first(entry: JSON, ctx: Mapping[str, JSON]) -> JSON:
             for f in subs:
                 x = f(entry, ctx)
                 if x and not isinstance(x, dict):
@@ -442,7 +457,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
     if "join" in spec:
         subs, sep, cap = [reader(s) for s in spec["join"]], spec.get("sep", " "), spec.get("max")
 
-        def join(entry: Any, ctx: dict[str, Any]) -> str:
+        def join(entry: JSON, ctx: Mapping[str, JSON]) -> str:
             parts = [s for s in (str(p).strip() for p in _flat([f(entry, ctx) for f in subs])
                                  if p and not isinstance(p, dict)) if s]
             return cast(str, sep.join(parts[:cap]))
@@ -451,7 +466,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
         items_of, do = _getter(spec["each"]), reader(spec.get("do", ""))
         skip = _condition(spec["skip"]) if spec.get("skip") else None
 
-        def each(entry: Any, ctx: dict[str, Any]) -> list[Any]:
+        def each(entry: JSON, ctx: Mapping[str, JSON]) -> JSON:
             items = items_of(entry)
             return [do(i, ctx) for i in (items if isinstance(items, list) else [])
                     if not (skip and isinstance(i, dict) and skip(i, ctx))]
@@ -464,7 +479,7 @@ def _operator(spec: dict[str, Any], strict: bool) -> Reader:
         getters = {name: _getter(name) for _lit, name, _n, _t in _template(template)
                    if name is not None}
 
-        def form(entry: Any, ctx: dict[str, Any]) -> str | None:
+        def form(entry: JSON, ctx: Mapping[str, JSON]) -> str | None:
             return fmt(template, lambda k: ctx[k] if ctx and k in ctx else getters[k](entry),
                        strict)
         return form
@@ -537,7 +552,7 @@ def _check_cond(cond: Any) -> None:
         check(arg)
 
 
-def holds(cond: dict[str, Any], entry: Any, ctx: dict[str, Any] | None = None) -> bool:
+def holds(cond: dict[str, Any], entry: JSON, ctx: Mapping[str, JSON] | None = None) -> bool:
     """Whether condition `cond` holds for `entry`. `eq` compares strings
     case-insensitively and anything else by type and value; `contains`
     searches a list's items joined, for a needle that is literal or, as
@@ -558,7 +573,7 @@ def holds(cond: dict[str, Any], entry: Any, ctx: dict[str, Any] | None = None) -
     return _condition(cond)(entry, ctx or {})
 
 
-def _condition(cond: dict[str, Any]) -> Callable[[Any, dict[str, Any]], bool]:
+def _condition(cond: dict[str, Any]) -> Callable[[JSON, Mapping[str, JSON]], bool]:
     """Condition `cond` read once: a callable (entry, ctx) -> `holds`."""
     (op, arg), = cond.items()
     if op in ("any", "all"):
@@ -571,7 +586,7 @@ def _condition(cond: dict[str, Any]) -> Callable[[Any, dict[str, Any]], bool]:
         if op == "falsy":
             return lambda entry, ctx: not f(entry, ctx)
 
-        def past(entry: Any, ctx: dict[str, Any]) -> bool:
+        def past(entry: JSON, ctx: Mapping[str, JSON]) -> bool:
             v = str(f(entry, ctx) or "")
             return bool(re.match(r"\d{4}-\d{2}-\d{2}", v)) and v[:10] < time.strftime("%Y-%m-%d")
         return past
@@ -581,12 +596,12 @@ def _condition(cond: dict[str, Any]) -> Callable[[Any, dict[str, Any]], bool]:
         if isinstance(want, str):
             low = want.lower()
 
-            def eq_text(entry: Any, ctx: dict[str, Any]) -> bool:
+            def eq_text(entry: JSON, ctx: Mapping[str, JSON]) -> bool:
                 v = f(entry, ctx)
                 return v is not None and str(v).lower() == low
             return eq_text
 
-        def eq(entry: Any, ctx: dict[str, Any]) -> bool:
+        def eq(entry: JSON, ctx: Mapping[str, JSON]) -> bool:
             v = f(entry, ctx)
             return type(v) is type(want) and v == want
         return eq
@@ -595,7 +610,7 @@ def _condition(cond: dict[str, Any]) -> Callable[[Any, dict[str, Any]], bool]:
         of_needle = reader(needle[1:]) if needle.startswith("$") else None
         low = needle.lower()
 
-        def contains(entry: Any, ctx: dict[str, Any]) -> bool:
+        def contains(entry: JSON, ctx: Mapping[str, JSON]) -> bool:
             v = f(entry, ctx)
             n = str(of_needle(entry, ctx) or "").lower() if of_needle else low
             hay = " ".join(str(x) for x in _flat(v) if x) if isinstance(v, list) else str(v or "")

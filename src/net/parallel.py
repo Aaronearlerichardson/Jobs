@@ -18,7 +18,7 @@ import asyncio
 import time
 from collections.abc import (AsyncGenerator, AsyncIterator, Awaitable, Callable,
                              Hashable, Iterable, Sequence)
-from typing import Any, Literal, overload
+from typing import Literal, cast, overload
 
 from src import config
 from . import http
@@ -191,12 +191,12 @@ async def fan_out[T, R](items: Iterable[T], fn: Callable[[T], Awaitable[R]],
             await asyncio.wait(pending)
 
 
-async def fetch_all(
-        sources: Sequence[tuple[str, str, Callable[[], Awaitable[list[Any] | None]]]],
+async def fetch_all[J](
+        sources: Sequence[tuple[str, str, Callable[[], Awaitable[list[J] | None]]]],
         max_workers: int = DEFAULT_WORKERS,
-        on_done: Callable[[str, str, list[Any], BaseException | None], object] | None = None,
+        on_done: Callable[[str, str, list[J], BaseException | None], object] | None = None,
         budget_s: float | None = None
-        ) -> list[tuple[list[Any], BaseException | None, dict[str, Any] | None]]:
+        ) -> list[tuple[list[J], BaseException | None, http.Snapshot | None]]:
     """Run every (name, platform, fetch) source concurrently: `fetch()` is
     the source's coroutine.
 
@@ -236,16 +236,16 @@ async def fetch_all(
     (completion order), for progress output.
     """
     budget_s = config.FETCH_BUDGET_S if budget_s is None else budget_s
-    results: list[tuple[list[Any], BaseException | None, dict[str, Any] | None]] = [
+    results: list[tuple[list[J], BaseException | None, http.Snapshot | None]] = [
         ([], None, None)] * len(sources)
 
-    def done(i: int, got: tuple[list[Any], BaseException | None, dict[str, Any] | None]
+    def done(i: int, got: tuple[list[J], BaseException | None, http.Snapshot | None]
              ) -> None:
         results[i] = got
         if on_done:
             on_done(sources[i][0], sources[i][1], got[0], got[1])
 
-    async def accounted(i: int) -> tuple[list[Any], dict[str, Any]]:
+    async def accounted(i: int) -> tuple[list[J], http.Snapshot]:
         jobs = await sources[i][2]() or []
         return jobs, http.snapshot_info()
 
@@ -286,29 +286,30 @@ class SingleFlight:
     somewhere else (the board engine's settled handle parts).
     """
 
-    def __init__(self, keep: Callable[[Any], bool] | None = None) -> None:
+    def __init__(self, keep: Callable[[object], bool] | None = None) -> None:
         self._keep = keep
-        self._memo: dict[Hashable, tuple[float | None, Any]] = {}   # key -> (expires, value)
+        self._memo: dict[Hashable, tuple[float | None, object]] = {}   # key -> (expires, value)
         self._locks: dict[Hashable, asyncio.Lock] = {}
 
     def hold(self, key: Hashable) -> asyncio.Lock:
         """The asyncio.Lock one maker of `key` holds at a time."""
         return self._locks.setdefault(key, asyncio.Lock())
 
-    def _kept(self, key: Hashable) -> tuple[float | None, Any] | None:
+    def _kept(self, key: Hashable) -> tuple[float | None, object] | None:
         got = self._memo.get(key)
         return got if got and (got[0] is None or time.monotonic() < got[0]) else None
 
-    async def do(self, key: Hashable, make: Callable[[], Awaitable[Any]],
-                 ttl: float | None = None) -> Any:
+    async def do[T](self, key: Hashable, make: Callable[[], Awaitable[T]],
+                    ttl: float | None = None) -> T:
         """The value kept for `key`, else make()'s (see the class)."""
         got = self._kept(key)
         if got is None:
             async with self.hold(key):
                 got = self._kept(key) or self._made(key, await make(), ttl)
-        return got[1]
+        return cast(T, got[1])      # a key's value is its maker's T
 
-    def _made(self, key: Hashable, value: Any, ttl: float | None) -> tuple[float | None, Any]:
+    def _made(self, key: Hashable, value: object, ttl: float | None
+              ) -> tuple[float | None, object]:
         """(expiry, value) for a value just made, kept when `keep` allows."""
         got = (None if ttl is None else time.monotonic() + ttl, value)
         if self._keep is None or self._keep(value):

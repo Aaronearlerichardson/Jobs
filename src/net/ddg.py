@@ -32,13 +32,14 @@ import contextvars
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from contextlib import AbstractContextManager
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast
+from typing import Protocol, TypedDict, cast
 
 from src import config, runstate
-from src.net.util import hashed_cache_path, json_cache_get, json_cache_put
+from src.net.util import JSON, hashed_cache_path, json_cache_get, json_cache_put
 
 # File-only diagnostics (session log DEBUG channel -- never printed).
 _log = logging.getLogger("discovery")
@@ -61,7 +62,19 @@ RETRY_PAUSE = 2.5               # seconds, scaled by the attempt number
 # patches the library, so it is the process's, until `reset_resolver()`
 # drops it.
 RESOLVER_WINDOW = 90.0          # seconds of skipping after the first trip
-_RESOLVER_OVERRIDE: tuple[ModuleType, Any] | None = None   # (module, original Client)
+_RESOLVER_OVERRIDE: tuple[ModuleType, Callable[..., object]] | None = None   # (module, original Client)
+
+
+class Hit(TypedDict, total=False):
+    """One result of a DDG text search."""
+    href: str
+    url: str
+    title: str
+    body: str
+
+
+class _Ddgs(Protocol):
+    def text(self, query: str, **kw: int) -> Iterable[Hit]: ...
 
 
 class _Searches:
@@ -86,14 +99,14 @@ def _cache_path(key: str) -> Path:
     return hashed_cache_path(CACHE_DIR, key)
 
 
-def cache_get(key: str) -> Any:
+def cache_get(key: str) -> JSON:
     """The cached JSON value for `key`, or None when absent or older than
     seven days. Also used by the LLM name brainstorm, which rides the same
     TTL."""
-    return json_cache_get(_cache_path(key), 7 * 24 * 3600)
+    return cast(JSON, json_cache_get(_cache_path(key), 7 * 24 * 3600))
 
 
-def cache_put(key: str, value: Any) -> None:
+def cache_put(key: str, value: object) -> None:
     """Best-effort write; a cache failure never fails the search."""
     json_cache_put(_cache_path(key), value)
 
@@ -198,7 +211,7 @@ def _install_resolver(query: str) -> bool:
         return False
     orig = hc.primp.Client
 
-    def client(*a: Any, **kw: Any) -> Any:
+    def client(*a: object, **kw: object) -> object:
         kw.setdefault("dns_resolver", list(servers))
         return orig(*a, **kw)
 
@@ -270,8 +283,9 @@ def reset_resolver() -> None:
         _RESOLVER_OVERRIDE = None
 
 
-def _query(DDGS: Any, query: str, max_results: int, page: int, deadline: float,
-           retries: int, stop: threading.Event) -> list[dict[str, Any]]:
+def _query(DDGS: Callable[..., AbstractContextManager[_Ddgs]], query: str,
+           max_results: int, page: int, deadline: float,
+           retries: int, stop: threading.Event) -> list[Hit]:
     """One query with retry/backoff, on the search's own thread. Ends by
     itself about when the caller stops waiting: each attempt's timeout is
     at most the time left before `deadline` (time.monotonic()), and a retry
@@ -325,12 +339,15 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
     future: asyncio.Future[T] = loop.create_future()
     stop = threading.Event()
 
-    def settle(ok: bool, value: Any) -> None:
+    def settle(ok: bool, value: T | BaseException) -> None:
         if not future.done():            # cancelled: no one waits
-            (future.set_result if ok else future.set_exception)(value)
+            if ok:
+                future.set_result(cast(T, value))
+            else:
+                future.set_exception(cast(BaseException, value))
 
     def body() -> None:
-        outcome: tuple[bool, Any]
+        outcome: tuple[bool, T | BaseException]
         try:
             outcome = True, fn(stop)
         except Exception as e:
@@ -347,7 +364,7 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
 
 
 async def search(query: str, max_results: int = 10, page: int = 1, budget: float = 25.0,
-                 retries: int = 2) -> list[dict[str, Any]]:
+                 retries: int = 2) -> list[Hit]:
     """Bounded, cached, retried DDG text search. Returns a list of result
     dicts (each with 'href'/'title'/...), or [] on miss, timeout or missing
     package -- every caller already tolerates an empty list. `budget` is
@@ -356,15 +373,16 @@ async def search(query: str, max_results: int = 10, page: int = 1, budget: float
     key = f"{query}||{max_results}" + (f"||page={page}" if page != 1 else "")
     cached = await asyncio.to_thread(cache_get, key)
     if cached is not None:
-        _log.debug("ddg cache hit (%d result(s)): %s", len(cached), query)
-        return cast(list[dict[str, Any]], cached)
+        hits = cast(list[Hit], cached)
+        _log.debug("ddg cache hit (%d result(s)): %s", len(hits), query)
+        return hits
     probe = _resolver_gate()
     if probe is None:
         _log.debug("ddg skipped, resolver breaker tripped: %s", query)
         return []
     deadline = time.monotonic() + budget
 
-    def run(stop: threading.Event) -> list[dict[str, Any]] | None:
+    def run(stop: threading.Event) -> list[Hit] | None:
         # The library blocks, and its first import is slow: off the loop.
         DDGS = _ddgs_class()
         if DDGS is None:

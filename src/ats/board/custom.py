@@ -18,12 +18,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-from typing import Any, cast
+from typing import TypedDict, cast
 from urllib.parse import urldefrag, urljoin
 
 from lxml import etree
 
 from src import config
+from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
@@ -31,6 +32,22 @@ from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           json_cache_put, links, node_text, parse_markup)
 
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
+
+
+class PageElement(TypedDict):
+    """One job link `read_page` found."""
+
+    title: str
+    href: str
+    url: str
+    location: str
+
+
+class Page(TypedDict, total=False):
+    """`read_page`'s answer: the links, or the page to read instead."""
+
+    elements: list[PageElement]
+    hop: str
 
 
 def find_job_links(tree: etree._Element) -> list[tuple[etree._Element, str, str]]:
@@ -121,7 +138,7 @@ def _hop_target(tree: etree._Element, page_url: str) -> str | None:
     return op if op and op.rstrip("/") != page_url.rstrip("/") else None
 
 
-def _location_near(a: etree._Element, area: re.Pattern[str] | None = None) -> str:
+def _location_near(a: etree._Element, area: LocationRE | None = None) -> str:
     """The place named nearest a job link: in the link, else its parent,
     else its grandparent. Where `area` (a location regex) matches in that
     element its match wins, so a role listed "Alameda, CA | Durham, NC" is
@@ -137,8 +154,8 @@ def _location_near(a: etree._Element, area: re.Pattern[str] | None = None) -> st
     return ""
 
 
-def read_page(tree: etree._Element, page_url: str, area: re.Pattern[str] | None = None,
-              hop: bool = True) -> dict[str, Any]:
+def read_page(tree: etree._Element, page_url: str, area: LocationRE | None = None,
+              hop: bool = True) -> Page:
     """A careers page's parsed `tree` as the html decoder's payload:
     {"elements"}, one per job link (its `title`, `href`, absolute `url` and
     `location`, read `_location_near` with `area`), or {"hop"}, the
@@ -154,7 +171,8 @@ def read_page(tree: etree._Element, page_url: str, area: re.Pattern[str] | None 
     target = _hop_target(tree, page_url) if hop and len(links) < config.CAREERS_PAGE_MIN_LINKS else None
     if target:
         return {"hop": target}
-    out, seen = [], set()
+    out: list[PageElement] = []
+    seen: set[str] = set()
     for a, href, title in links:
         url = urljoin(page_url, href)
         if url not in seen:

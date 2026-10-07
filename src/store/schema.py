@@ -12,15 +12,18 @@ import asyncio
 import contextvars
 import sqlite3
 import threading
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Hashable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Concatenate, Literal, cast
+from typing import TYPE_CHECKING, Any, Concatenate, Literal, cast
 
 from src import config
 from src.rows import JobRow
 from .migrate import migrate
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsRichComparison
 
 # How long a writer waits on another process's write lock before giving up.
 # The web UI, the scheduled crawl and the background harvester all write to
@@ -32,10 +35,11 @@ BUSY_TIMEOUT_S = 30.0
 # A module declares one with @sql_function beside the Python rule it wraps,
 # so a rule lives in one place whether a row loop or a query applies it, and
 # connect() installs every one on each new connection.
-SQL_FUNCTIONS: dict[str, tuple[int, Callable[..., Any]]] = {}
+type SqlFn = Callable[..., str | bytes | int | float | None]
+SQL_FUNCTIONS: dict[str, tuple[int, SqlFn]] = {}
 
 
-def sql_function[F: Callable[..., Any]](name: str, narg: int) -> Callable[[F], F]:
+def sql_function[F: SqlFn](name: str, narg: int) -> Callable[[F], F]:
     """Register `fn` as SQL function `name` (see SQL_FUNCTIONS); returns `fn`
     unchanged, so Python callers keep using it directly."""
     def register(fn: F) -> F:
@@ -100,12 +104,12 @@ class sql:
 
     __slots__ = ("expr", "args")
 
-    def __init__(self, expr: str, *args: Any) -> None:
+    def __init__(self, expr: str, *args: object) -> None:
         self.expr, self.args = expr, args
 
 
-def apply_update(conn: sqlite3.Connection, table: str, id_col: str, id_val: Any,
-                 fields: Mapping[str, Any]) -> int:
+def apply_update(conn: sqlite3.Connection, table: str, id_col: str, id_val: object,
+                 fields: Mapping[str, object]) -> int:
     """Write just the columns `fields` names on one row; return rows changed.
 
     Five writers -- the crawl-outcome stamp, the harvest stamp, the triage
@@ -146,7 +150,7 @@ def apply_update(conn: sqlite3.Connection, table: str, id_col: str, id_val: Any,
         that transaction instead of ending it early.
     """
     sets: list[str] = []
-    args: list[Any] = []
+    args: list[object] = []
     for col, val in fields.items():
         if isinstance(val, sql):
             sets.append(f"{col}={val.expr}")
@@ -258,8 +262,10 @@ class Writer:
     """
 
     #: The block's call queue and its drainer, made as the block opens.
-    _queue: asyncio.Queue[tuple[asyncio.Future[Any], Callable[..., Any],
-                                Callable[[], Any]] | None]
+    # TODO(any-zero): Future is invariant and each ask has its own T; one
+    # queue of mixed asks needs Any here (a closure-per-ask rewrite would change flow).
+    _queue: asyncio.Queue[tuple[asyncio.Future[Any], Callable[..., object],
+                                Callable[[], object]] | None]
     _drainer: asyncio.Task[None]
 
     def __init__(self, path: str | Path | sqlite3.Connection | None = None) -> None:
@@ -291,17 +297,17 @@ class Writer:
             self._thread.shutdown(wait=False)
 
     def run[**P, T](self, fn: Callable[Concatenate[sqlite3.Connection, P], T],
-                    *args: P.args, **kw: P.kwargs) -> Coroutine[Any, Any, T]:
+                    *args: P.args, **kw: P.kwargs) -> Coroutine[None, None, T]:
         """`fn(conn, *args, **kw)` on the store's thread (a coroutine)."""
         return self._ask(False, fn, args, kw)
 
     def batch[**P, T](self, fn: Callable[Concatenate[sqlite3.Connection, P], T],
-                      *args: P.args, **kw: P.kwargs) -> Coroutine[Any, Any, T]:
+                      *args: P.args, **kw: P.kwargs) -> Coroutine[None, None, T]:
         """`run`, inside one `batch` transaction."""
         return self._ask(True, fn, args, kw)
 
-    async def _ask[T](self, whole: bool, fn: Callable[..., T], args: tuple[Any, ...],
-                      kw: dict[str, Any]) -> T:
+    async def _ask[T](self, whole: bool, fn: Callable[..., T], args: tuple[object, ...],
+                      kw: dict[str, object]) -> T:
         asked: asyncio.Future[T] = asyncio.get_running_loop().create_future()
 
         def call() -> T:
@@ -341,11 +347,11 @@ def as_job(row: sqlite3.Row) -> JobRow:
     return cast(JobRow, dict(row))
 
 
-def dedup_groups(conn: sqlite3.Connection, table: str, id_col: str,
-                 groups: Mapping[Any, list[dict[str, Any]]],
-                 rank: Callable[[dict[str, Any]], Any],
-                 describe: Callable[[dict[str, Any], list[dict[str, Any]]], str],
-                 merge: Callable[[dict[str, Any], list[dict[str, Any]]], object] | None = None
+def dedup_groups[K: Hashable, R: Mapping[str, object]](conn: sqlite3.Connection, table: str, id_col: str,
+                 groups: Mapping[K, list[R]],
+                 rank: Callable[[R], SupportsRichComparison],
+                 describe: Callable[[R, list[R]], str],
+                 merge: Callable[[R, list[R]], object] | None = None
                  ) -> int:
     """Keep one row per group, delete the rest, say so. Returns rows deleted.
 

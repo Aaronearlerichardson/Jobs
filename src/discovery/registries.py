@@ -15,7 +15,7 @@ import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from datetime import date
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 from src import config, store
 from src.match.names import junk_name_reason, name_key, strip_suffixes
@@ -152,7 +152,9 @@ async def nih_sbir(state: str) -> list[NamedSource]:
         page = nih_rows(data)
         rows += page
         offset += cfg["page"]
-        total = ((data.get("meta") or {}).get("total") or 0) if isinstance(data, dict) else 0
+        meta = (data.get("meta") or {}) if isinstance(data, dict) else {}
+        # TODO(any-zero): parse `total` through a typed model at the edge; a non-number raises.
+        total = cast(float, (meta.get("total") if isinstance(meta, dict) else 0) or 0)
         if not page or offset >= total:
             break
     return _named(rows, "nih_sbir")

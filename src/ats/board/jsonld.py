@@ -16,17 +16,29 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Mapping
+from typing import TypedDict, TypeGuard, cast
 
 from src.net import http
 from src.net.http import HEADERS, fetch_failed
-from src.net.util import jsonld_scripts, parse_markup, stable_id, text_from_html
+from src.net.util import JSON, jsonld_scripts, parse_markup, stable_id, text_from_html
 from src.net.util import norm_posted_date as _norm_posted
 from src.rows import FetchedJob
 
 
-def extract_jsonld(html: str, url: str = "") -> list[Any]:
+class Posting(TypedDict):
+    """A JobPosting's values as `read_posting` reads them."""
+
+    title: str
+    url: str
+    location: str
+    description: str
+    posted_at: JSON
+    key: str
+    telecommute: bool
+
+
+def extract_jsonld(html: str, url: str = "") -> list[JSON]:
     """Find every <script type=application/ld+json> block in the page at
     `url`; return parsed objects, a list's items and an @graph's members
     each one; a trailing comma is forgiven.
@@ -35,7 +47,7 @@ def extract_jsonld(html: str, url: str = "") -> list[Any]:
     ...                ' "title": "Chemist",}]}</script>')
     [{'@type': 'JobPosting', 'title': 'Chemist'}]
     """
-    out: list[Any] = []
+    out: list[JSON] = []
     for script in jsonld_scripts(parse_markup(html, url=url)):
         txt = script.text
         if not txt:
@@ -58,7 +70,7 @@ def extract_jsonld(html: str, url: str = "") -> list[Any]:
     return out
 
 
-def is_jobposting(obj: Any) -> bool:
+def is_jobposting(obj: JSON) -> TypeGuard[Mapping[str, JSON]]:
     if not isinstance(obj, dict):
         return False
     t = obj.get("@type")
@@ -67,7 +79,7 @@ def is_jobposting(obj: Any) -> bool:
     return "JobPosting" in str(t or "")
 
 
-def _one_location(loc: Any) -> str:
+def _one_location(loc: JSON) -> str:
     """One jobLocation entry -> display string ('' when unreadable)."""
     if not isinstance(loc, dict):
         return str(loc or "").strip()
@@ -84,7 +96,7 @@ def _one_location(loc: Any) -> str:
     return ""
 
 
-def _normalize_location(jp: dict[str, Any]) -> str:
+def _normalize_location(jp: Mapping[str, JSON]) -> str:
     # Multi-location postings list several jobLocation entries; taking only
     # the first hid every secondary site (a "Remote"-first posting with a
     # Durham office read as just "Remote"). Join them all.
@@ -106,7 +118,7 @@ def _normalize_location(jp: dict[str, Any]) -> str:
     return "Unknown"
 
 
-def read_posting(jp: dict[str, Any], page_url: str = "") -> dict[str, Any]:
+def read_posting(jp: Mapping[str, JSON], page_url: str = "") -> Posting:
     """A JobPosting's values, plain: `title`, `url` (the posting's own, else
     `page_url`), `location` ("" when it names none), `description` (text),
     `posted_at` (as written), `key` (its identifier, else a stable id of
@@ -128,7 +140,7 @@ def read_posting(jp: dict[str, Any], page_url: str = "") -> dict[str, Any]:
         "title": str(jp.get("title") or jp.get("name") or "").strip(),
         "url": str(job_url) if job_url else page_url,
         "location": "" if location == "Unknown" else location,
-        "description": text_from_html(jp.get("description", "") or ""),
+        "description": text_from_html(cast(str, jp.get("description", "") or "")),  # TODO(any-zero): non-str passes as before
         "posted_at": jp.get("datePosted"),
         "key": str(identifier or stable_id(str(job_url))),
         # Structured remote signal: schema.org marks remote roles explicitly.
@@ -136,12 +148,12 @@ def read_posting(jp: dict[str, Any], page_url: str = "") -> dict[str, Any]:
     }
 
 
-def postings(html: str, page_url: str = "") -> list[dict[str, Any]]:
+def postings(html: str, page_url: str = "") -> list[Posting]:
     """Every JobPosting on a page, as `read_posting` records."""
     return [read_posting(o, page_url) for o in extract_jsonld(html, page_url) if is_jobposting(o)]
 
 
-def _job_from_posting(jp: dict[str, Any], company_name: str, source_url: str) -> FetchedJob:
+def _job_from_posting(jp: Mapping[str, JSON], company_name: str, source_url: str) -> FetchedJob:
     p = read_posting(jp, source_url)
     job: FetchedJob = {
         "id":          f"jsonld_{company_name.replace(' ', '_')}_{p['key']}",

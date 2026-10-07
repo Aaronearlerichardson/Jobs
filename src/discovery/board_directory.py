@@ -28,7 +28,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, TypedDict, cast
 
 from src import config, store
 from src.ats import coords
@@ -40,6 +40,7 @@ from src.match.gates import exclude_reason, is_technical_role
 from src.match.locality import is_nc
 from src.match.names import name_key
 from src.net import http
+from src.net.util import JSON
 from src.rows import BoardHit
 from src.runstate import per_run
 
@@ -249,7 +250,8 @@ async def _files() -> list[str]:
                 Path(locate("manifest.json")).read_text, "utf-8"))
         except (OSError, ValueError):
             manifest = {}
-    return list((manifest or {}).get("by_ats", {}))
+    # TODO(any-zero): HEAD trusts the manifest shape; parse it at the edge.
+    return list(cast("Iterable[str]", cast("dict[str, JSON]", manifest or {}).get("by_ats", {})))
 
 
 def _names() -> dict[tuple[Any, ...], str]:

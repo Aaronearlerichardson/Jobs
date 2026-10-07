@@ -20,7 +20,8 @@ from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
 from typing_extensions import TypedDict
 
 from src import config, validation
-from src.net.util import css, xpath
+from src.match.locality import LocationRE
+from src.net.util import JSON, css, xpath
 from src.rows import HandleColumn
 from . import fields
 
@@ -50,6 +51,17 @@ class EngineRow(TypedDict, total=False, closed=True):
     remote_hint: str
     head: str
     _free: str
+
+
+#: A `fields` map: row field (or internal `_field`) -> field spec (fields.py).
+Fields = dict[str, JSON]
+
+#: The named request values a template reads ("$area": the pull's location
+#: regex, for a decoder that chooses among places).
+Vals = TypedDict("Vals", {"$size": int, "$offset": int, "$page": int | None,
+                          "$facets": dict[str, list[JSON]], "$search_text": str,
+                          "$area": LocationRE | None, "$plain_user_agent": str},
+                 total=False, closed=True)
 
 
 def _css(v: str) -> str:
@@ -551,7 +563,7 @@ class BoardSpec(_Spec):
         return "detail" if self.detail else "page"
 
 
-def parse(name: str, raw: Any) -> BoardSpec:
+def parse(name: str, raw: JSON) -> BoardSpec:
     """`raw`, a `config.BOARDS` entry, as a BoardSpec; ValueError naming
     `name` and every broken key's path when it breaks the schema."""
     try:

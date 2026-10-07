@@ -176,7 +176,7 @@ def _segment_is_local(segment: str) -> bool:
 class LocationRE(Protocol):
     """What judges a LOCATION string local: a compiled regex, or NC_RE."""
 
-    def search(self, text: str, /) -> object: ...
+    def search(self, text: str, /) -> re.Match[str] | None: ...
 
 
 class _LocalLocationRE:

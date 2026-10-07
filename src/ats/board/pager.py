@@ -12,15 +12,15 @@ import asyncio
 import json
 import math
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
 
 from src import config
 from src.net.http import note_capped
+from src.net.util import JSON
 from . import fields
-from .spec import CursorPager, EngineRow, Listing, Pager
+from .spec import CursorPager, EngineRow, Listing, Pager, Vals
 
 
-def page_vals(pager: Pager | None, n: int, size: int) -> dict[str, Any]:
+def page_vals(pager: Pager | None, n: int, size: int) -> Vals:
     """The named request values for page `n` (from 0) of `size` rows, a
     listing without a pager reading page 0.
 
@@ -53,7 +53,7 @@ def page_cap(pager: Pager, budget: int | None, step: int | None) -> int:
     return max(pager.pages, math.ceil(budget / step)) if budget and step else pager.pages
 
 
-def total_of(pager: Pager | None, payload: Any) -> int | None:
+def total_of(pager: Pager | None, payload: JSON) -> int | None:
     """The int total a pager's `total` names on `payload`, else None."""
     t = fields.value(pager.total, payload) if pager and pager.total else None
     return t if isinstance(t, int) else None
@@ -95,7 +95,7 @@ def fill_misses(rows: Sequence[Mapping[str, object]], floors: Mapping[str, float
     return [f"{k} {v:.0%} < {floor[k]:.0%}" for k, v in fill_rates(rows).items() if v < floor[k]]
 
 
-def ended(pager: Pager, payload: Any, number: int, rows: list[EngineRow],
+def ended(pager: Pager, payload: JSON, number: int, rows: list[EngineRow],
           size_known: int | None, n_entries: int, size: int) -> bool:
     """Whether a page-counted walk stops after page `number`: at the page
     `declared` last (no declared page ends it); else once `rows` reach
@@ -109,7 +109,7 @@ def ended(pager: Pager, payload: Any, number: int, rows: list[EngineRow],
     return n_entries < size
 
 
-def next_url(payload: Any, pager: CursorPager, home: str) -> str | None:
+def next_url(payload: JSON, pager: CursorPager, home: str) -> str | None:
     """A cursor page's next-page URL, to follow verbatim; None when it
     names none or points outside the listing's own directory `home`
     (served data, not a promise)."""
@@ -149,7 +149,7 @@ def scope_failed(scoped_total: int | None, board_total: int | None, cap: int,
     return scoped_total >= cap
 
 
-def _fresh(listed: list[EngineRow], seen: set[Any]) -> list[EngineRow]:
+def _fresh(listed: list[EngineRow], seen: set[str | None]) -> list[EngineRow]:
     """The rows of one page that are new: a row whose id an earlier page
     gave is dropped, as is one repeating a row of its own page verbatim
     (a page may list a posting once per location; two copies of one row
@@ -168,9 +168,9 @@ def _fresh(listed: list[EngineRow], seen: set[Any]) -> list[EngineRow]:
 
 
 async def walk(spec: Listing,
-               ask: Callable[[int, dict[str, Any], str | None],
-                             Awaitable[tuple[dict[str, Any], Any, str | Exception | None]]],
-               rows_of: Callable[[dict[str, Any], Any], tuple[int, list[EngineRow]]],
+               ask: Callable[[int, Vals, str | None],
+                             Awaitable[tuple[dict[str, str], JSON, str | Exception | None]]],
+               rows_of: Callable[[dict[str, str], JSON], tuple[int, list[EngineRow]]],
                size: int | None = None, pages: int | None = None, cheap: bool = False,
                scoped: bool = False,
                budget: int | None = None) -> tuple[list[EngineRow] | None, int | None]:
@@ -218,7 +218,7 @@ async def walk(spec: Listing,
                                                                    size and pager.stride))
     ceiling = pager.ceiling if pager else None
     rows: list[EngineRow] = []
-    seen: set[Any] = set()
+    seen: set[str | None] = set()
     total, size_known, capped, url, n = None, None, False, None, 0
     while True:
         parts, payload, err = await ask(n, page_vals(pager, n, step), url)

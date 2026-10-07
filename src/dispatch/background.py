@@ -24,16 +24,65 @@ import sys
 from collections import deque
 from collections.abc import Awaitable, Callable
 from datetime import datetime
-from typing import Any, TextIO
+from typing import NotRequired, TextIO, TypedDict
 
 from src import config, runstate
 from src import session_log
 from src.claude import api as claude_api
 from src.dispatch import registry
 
-TASK: dict[str, Any] = {"name": None, "task": None, "log": [], "log_offset": 0,
-                        "started": None, "ended": None, "error": None, "stopped": False,
-                        "active": False}
+class _Task(TypedDict):
+    """The one running op's slot."""
+    name: str | None
+    task: asyncio.Task[None] | None
+    log: list[str]
+    log_offset: int
+    started: str | None
+    ended: str | None
+    error: str | None
+    stopped: bool
+    active: bool
+
+
+class _Entry(TypedDict):
+    name: str
+    fn: Callable[[], Awaitable[object]]
+
+
+class _Queued(_Entry):
+    """An op waiting for the slot."""
+    id: str
+    params: dict[str, object]
+    key: str
+    enqueued_at: str
+
+
+class _Status(TypedDict):
+    """`status`: the runner as the browser polls it."""
+    running: bool
+    name: str | None
+    started: str | None
+    ended: str | None
+    error: str | None
+    stopped: bool
+    lines: list[str]
+    total: int
+    queue: list[_EntryJson]
+
+
+class _EntryJson(TypedDict):
+    """A queue entry as the browser sees it."""
+    id: str
+    name: str
+    position: int
+    enqueued_at: str
+    params: dict[str, object]
+    duplicate: NotRequired[bool]
+
+
+TASK: _Task = {"name": None, "task": None, "log": [], "log_offset": 0,
+               "started": None, "ended": None, "error": None, "stopped": False,
+               "active": False}
 
 
 def _log_lines(lines: list[str]) -> None:
@@ -118,11 +167,11 @@ class _Tee(io.TextIOBase):
 _BASELINE_KW = config.keyword_snapshot()
 
 
-def _start(entry: dict[str, Any]) -> None:
+def _start(entry: _Entry) -> None:
     """Claim the slot for `entry` and start its op's task. On the loop."""
-    TASK.update(name=entry["name"], error=None, ended=None, stopped=False,
-                started=datetime.now().isoformat(), active=True,
-                log=[], log_offset=0)
+    TASK.update({"name": entry["name"], "error": None, "ended": None, "stopped": False,
+                 "started": datetime.now().isoformat(), "active": True,
+                 "log": [], "log_offset": 0})
     task = TASK["task"] = asyncio.get_running_loop().create_task(
         _run(entry["name"], entry["fn"]))
     task.add_done_callback(_hand_off)
@@ -143,7 +192,7 @@ def _hand_off(task: asyncio.Task[None]) -> None:
         _start(entry)
 
 
-async def _run(name: str, fn: Callable[[], Awaitable[Any]]) -> None:
+async def _run(name: str, fn: Callable[[], Awaitable[object]]) -> None:
     """One op, a run of its own (src/runstate.py: fresh memos, a re-armed
     Claude breaker): `await fn()` with the console tee'd into its log (and
     a session log of its own). An exception is the op's error; a cancel
@@ -200,13 +249,13 @@ async def _run(name: str, fn: Callable[[], Awaitable[Any]]) -> None:
 # Nothing here survives a restart: the queue is in memory, and a config save
 # relaunches the process (src/web/server.py schedule_restart), which is why
 # routes.py refuses to save while entries are waiting.
-QUEUE: deque[dict[str, Any]] = deque()
+QUEUE: deque[_Queued] = deque()
 
 
-def _entry_json(entry: dict[str, Any], position: int,
-                duplicate: bool | None = None) -> dict[str, Any]:
+def _entry_json(entry: _Queued, position: int,
+                duplicate: bool | None = None) -> _EntryJson:
     """One queue entry as the browser sees it — everything but the callable."""
-    d: dict[str, Any] = {"id": entry["id"], "name": entry["name"], "position": position,
+    d: _EntryJson = {"id": entry["id"], "name": entry["name"], "position": position,
                          "enqueued_at": entry["enqueued_at"], "params": entry["params"]}
     if duplicate is not None:
         d["duplicate"] = duplicate
@@ -214,7 +263,7 @@ def _entry_json(entry: dict[str, Any], position: int,
 
 
 async def submit(name: str, args: registry.OpParams,
-                 fn: Callable[[], Awaitable[Any]]) -> dict[str, Any] | None:
+                 fn: Callable[[], Awaitable[object]]) -> _EntryJson | None:
     """Run `fn()` (a coroutine) now if the slot is free, else put it in
     the run queue.
 
@@ -235,7 +284,7 @@ async def submit(name: str, args: registry.OpParams,
     for i, e in enumerate(QUEUE):
         if e["name"] == name and e["key"] == key:
             return _entry_json(e, i + 1, duplicate=True)
-    entry = {"id": secrets.token_hex(4), "name": name,
+    entry: _Queued = {"id": secrets.token_hex(4), "name": name,
              "params": args.model_dump(mode="json"), "key": key,
              "enqueued_at": datetime.now().isoformat(), "fn": fn}
     QUEUE.append(entry)
@@ -254,7 +303,7 @@ async def stop() -> bool:
     return True
 
 
-async def status(since: int = 0) -> dict[str, Any]:
+async def status(since: int = 0) -> _Status:
     """The runner as the browser polls it: whether an op runs, its name,
     times, error and `stopped`, the log lines past the absolute cursor
     `since` (see _Tee) with the new `total`, and the waiting queue."""

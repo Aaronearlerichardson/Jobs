@@ -55,22 +55,23 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable, Iterable, Iterator
-from typing import Any, Literal, cast
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
+from typing import Literal, cast
 
 from src import config, runstate
 from src.match.locality import LocationRE, location_unknown
 from src.net import http
 from src.net.http import HEADERS, JSON_HEADERS
 from src.net.parallel import SingleFlight
-from src.net.util import (cache_dir, clean_field, default_search_text,
-                          hashed_cache_path, json_cache_get, json_cache_put, origin_key)
+from src.net.util import (JSON, cache_dir, clean_field, default_search_text,
+                          hashed_cache_path, json_cache_get, json_cache_put, norm_posted_date,
+                          origin_key)
 from src.rows import BoardCoords, FetchedJob
 from . import decode, fields, pager
-from .fields import Reader
+from .fields import StrReader
 from .pager import page_cap, page_size, page_vals, postings, scope_failed, total_of
-from .spec import (ROW_FIELDS, Detail, Detect, EngineRow, FillField, Listing, Pager, Prelude, Rule,
-                   Scope, parse)
+from .spec import (ROW_FIELDS, Detail, Detect, EngineRow, FillField, Fields, Listing, Pager,
+                   Prelude, Rule, Scope, Vals, parse)
 
 
 def loc_ok(loc_re: LocationRE | None, text: str | None) -> bool:
@@ -230,19 +231,19 @@ def adapt(jobs: Iterable[FetchedJob], ats: str,
 #: "$area" is the location regex a pull is filtered by, for a decoder that
 #: chooses among the places a row names; "$plain_user_agent" a bare
 #: platform UA, for a WAF refusing a Chrome UA without Chrome's client hints.
-_NAMED: dict[str, Any] = {"$facets": {}, "$search_text": "", "$area": None,
-                          "$plain_user_agent": config.PLAIN_USER_AGENT}
+_NAMED: Vals = {"$facets": {}, "$search_text": "", "$area": None,
+                "$plain_user_agent": config.PLAIN_USER_AGENT}
 
 #: The run's listings read for closure and deep verify, (ats, handle) ->
 #: entries, each read once while concurrent readers of that board wait.
 _MEMO = runstate.per_run(SingleFlight)
 #: The handle parts `handle.try`, `handle.follow` and `handle.prelude` settled on this run:
 #: (ats, handle) -> {part: value}; `_SETTLING` holds a handle's settling.
-_VARIANTS: Callable[[], dict[tuple[str, str], dict[str, Any]]] = runstate.per_run(dict)
+_VARIANTS: Callable[[], dict[tuple[str, str], dict[str, str]]] = runstate.per_run(dict)
 _SETTLING = runstate.per_run(SingleFlight)
 
 
-def _fill(tpl: Any, lookup: Callable[[str], Any], vals: dict[str, Any]) -> Any:
+def _fill(tpl: JSON, lookup: Callable[[str], JSON], vals: Mapping[str, object]) -> JSON:
     """A request template filled in: "$size"/"$offset" by value (typed),
     every other string as a `fields.fmt` template.
 
@@ -254,11 +255,12 @@ def _fill(tpl: Any, lookup: Callable[[str], Any], vals: dict[str, Any]) -> Any:
     if isinstance(tpl, list):
         return [_fill(v, lookup, vals) for v in tpl]
     if isinstance(tpl, str):
-        return vals[tpl] if tpl in vals else fields.fmt(tpl, lookup)
+        # TODO(any-zero): a "$" value is read by a str key; Vals holds a regex or None under "$area".
+        return cast(JSON, vals[tpl]) if tpl in vals else fields.fmt(tpl, lookup)
     return tpl
 
 
-def _reason(rules: tuple[Rule, ...], rec: dict[str, Any] | None, default: str) -> str | None:
+def _reason(rules: tuple[Rule, ...], rec: dict[str, JSON] | None, default: str) -> str | None:
     """The reason the first of closure `rules` holding for `rec` gives (its
     "why", else `default`); None when none holds."""
     for rule in rules if rec is not None else ():
@@ -267,10 +269,10 @@ def _reason(rules: tuple[Rule, ...], rec: dict[str, Any] | None, default: str) -
     return None
 
 
-def _readers(fs: dict[str, Any]) -> dict[str, Reader]:
-    """A spec's `fields` read once (`fields.reader`): {name: reader} for
-    every row field, one reading None where `fs` names none."""
-    return {k: fields.reader(fs.get(k)) for k in ROW_FIELDS | set(fs)}
+def _readers(fs: Fields) -> dict[str, StrReader]:
+    """A spec's `fields` read once (`fields.str_reader`): {name: reader}
+    for every row field, one reading None where `fs` names none."""
+    return {k: fields.str_reader(fs.get(k)) for k in ROW_FIELDS | set(fs)}
 
 
 def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, ...], set[str]]:
@@ -280,36 +282,36 @@ def _detector(entry: Detect) -> tuple[list[re.Pattern[str]], tuple[str | None, .
     return regexes, entry.transform or (None,) * groups, {v.lower() for v in entry.blocklist}
 
 
-def _row_mapper(fs: dict[str, Any],
-                free: Any = None) -> Callable[[dict[str, Any], Any], EngineRow]:
+def _row_mapper(fs: Fields, free: JSON = None) -> Callable[[dict[str, str], JSON], EngineRow]:
     """`fs` (a listing's `fields`) read once, as a callable
     (parts, entry) -> row: the "_" fields computed first, in order, into
     the context the others read; `id` strict; `posted_at` a date; `head`
     the title plus the department; `_free` the rescue's free text."""
     internal = [(k, fields.reader(s)) for k, s in fs.items() if k.startswith("_")]
-    rid = fields.reader(fs.get("id"), strict=True)
+    rid = fields.str_reader(fs.get("id"), strict=True)
     title, url, location, description, posted, hint, dept = (
-        fields.reader(fs.get(k)) for k in ("title", "url", "location", "description",
+        fields.str_reader(fs.get(k)) for k in ("title", "url", "location", "description",
                                            "posted_at", "remote_hint", "department"))
-    free = fields.reader(free) if free else None
+    read_free = fields.reader(free) if free else None
 
-    def row(parts: dict[str, str], entry: Any) -> EngineRow:
-        ctx = dict(parts)
+    def row(parts: dict[str, str], entry: JSON) -> EngineRow:
+        ctx: dict[str, JSON] = dict(parts)
         for k, f in internal:
             ctx[k] = f(entry, ctx)
         t = title(entry, ctx) or ""
         r: EngineRow = {"id": rid(entry, ctx), "title": t, "url": url(entry, ctx) or "",
-             "location": location(entry, ctx) or "",
-             "description": description(entry, ctx) or ""}
-        when, why = fields.TRANSFORMS["date"](posted(entry, ctx)), hint(entry, ctx)
+                        "location": location(entry, ctx) or "",
+                        "description": description(entry, ctx) or ""}
+        when, why = norm_posted_date(posted(entry, ctx)), hint(entry, ctx)
         if when:
             r["posted_at"] = when
         if why:
             r["remote_hint"] = why
         d = dept(entry, ctx)
         r["head"] = f"{t} {d}" if d else t
-        if free:
-            r["_free"] = free(entry, ctx) or ""
+        if read_free:
+            # TODO(any-zero): the rescue's free grammar may read a non-text value.
+            r["_free"] = cast(str, read_free(entry, ctx) or "")
         return r
     return row
 
@@ -324,7 +326,7 @@ class Board:
     separator (`handle`); split on it, its parts fill the spec's templates.
     """
 
-    def __init__(self, name: str, raw: Any) -> None:
+    def __init__(self, name: str, raw: JSON) -> None:
         self.name = name
         self.spec = spec = parse(name, raw)
         self._listings = spec.listing
@@ -387,7 +389,7 @@ class Board:
         return a if a == b else ""
 
     def job_ref(self, url: str | None,
-                company: BoardCoords | None = None) -> dict[str, Any] | None:
+                company: BoardCoords | None = None) -> dict[str, str] | None:
         """The named parts a stored posting URL carries, or None when the
         URL is not this platform's. A store row of this platform
         (`company`) supplies its own handle parts in place of the URL's."""
@@ -425,27 +427,28 @@ class Board:
                 raw = [p or "" for p in (*m.groups(), *later)]
                 if blocked and blocked.intersection(p.lower() for p in raw) or not accept(raw[0]):
                     continue
-                parts = [p if t is None else fields.TRANSFORMS[t](p)
+                # TODO(any-zero): a transform may give a count or None, which the join raises on.
+                parts = [p if t is None else cast(str, fields.TRANSFORMS[t](p))
                          for p, t in zip(raw, transforms)]
                 return tuple(parts) if self.multi_column else self._sep.join(parts)
         return None
 
-    def careers_url(self, slug: Any, page: str = "") -> str | None:
+    def careers_url(self, slug: JSON, page: str = "") -> str | None:
         """The board's URL rebuilt from a detection's `slug` and the `page`
         that carried it (the spec's `detect.careers_url`), or None where the
         spec rebuilds none."""
         return (fields.fmt(self._careers_url, {"slug": slug, "page": page}.get)
                 if self._careers_url else None)
 
-    def _handle_of(self, ref: dict[str, Any]) -> str:
+    def _handle_of(self, ref: dict[str, str]) -> str:
         return self._sep.join(ref.get(p, "") for p in self._part_names)
 
     # --- requests ----------------------------------------------------------
 
     async def _fetch(self, req: Listing | Detail | Prelude, parts: dict[str, str],
-                     vals: dict[str, Any] | None = None, label: str | None = None,
+                     vals: Vals | None = None, label: str | None = None,
                      timeout: tuple[float, float] | None = None, url: str | None = None,
-                     hop: bool = True) -> tuple[int | None, Any, str | Exception | None]:
+                     hop: bool = True) -> tuple[int | None, JSON, str | Exception | None]:
         """(status, payload, error) for one request built from `req` (the
         listing or detail spec) and the handle `parts`; `url`, a served
         next-page URL, replaces the spec's URL and parameters verbatim. A
@@ -455,17 +458,20 @@ class Board:
         followed, once. The answer is decoded off the loop."""
         dec = req.decoder
         vals = {**_NAMED, **(vals or {})}
-        kw: dict[str, Any] = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
-                                          **_fill(req.headers, parts.get, vals)}}
+        kw: dict[str, JSON] = {"headers": {**(JSON_HEADERS if dec.kind == "json" else HEADERS),
+                                          **cast(Mapping[str, JSON],
+                                                 _fill(req.headers, parts.get, vals))}}
         if url is None and req.params:
             params = {k: v.get(k) if isinstance(v, dict) else v
-                      for k, v in _fill(req.params, parts.get, vals).items()}
+                      for k, v in cast(Mapping[str, JSON],
+                                       _fill(req.params, parts.get, vals)).items()}
             kw["params"] = {k: v for k, v in params.items() if v is not None}
         if url is None and req.json_:
             kw["json"] = _fill(req.json_, parts.get, vals)
         if timeout:
             kw["timeout"] = timeout
-        url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else vals.get(f"${k}"))
+        named = cast(Mapping[str, JSON], vals)     # TODO(any-zero): a non-literal key into Vals
+        url = url or fields.fmt(req.url, lambda k: parts[k] if k in parts else named.get(f"${k}"))
         if dec.kind == "json":
             status, payload, err = await http.request_json(req.method, url, label, **kw)
         else:
@@ -473,12 +479,13 @@ class Board:
             if err or r is None:
                 return status, None, err
             try:
-                payload = await asyncio.to_thread(
-                    lambda: decode.decode(dec, r.text, parts, url, vals["$area"], hop))
+                payload, hopped = await asyncio.to_thread(
+                    lambda: decode.decode(dec, r.text, parts, url,
+                                          vals["$area"], hop))
             except ValueError:
                 return status, None, http.failed(label, "unreadable response")
-            if isinstance(payload, dict) and payload.get("hop"):
-                return await self._fetch(req, parts, vals, label, timeout, payload["hop"], False)
+            if hopped:
+                return await self._fetch(req, parts, vals, label, timeout, hopped, False)
         if dec.values and payload is not None:
             payload = await asyncio.to_thread(decode.unwrap, payload, dec.values)
         return status, payload, err
@@ -532,14 +539,14 @@ class Board:
                                                            for v in got.values()):
                             return http.failed(
                                 label, f"could not settle the board's {', '.join(pre.set)}")
-                        settled.update(got)
+                        settled.update(cast(dict[str, str], got))   # each checked a str above
             parts.update({n: settled[n] for n in pre.set})
         return None
 
-    async def _page(self, req: Listing, handle: str, vals: dict[str, Any],
+    async def _page(self, req: Listing, handle: str, vals: Vals,
                     label: str | None = None, timeout: tuple[float, float] | None = None,
                     url: str | None = None
-                    ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
+                    ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
         """(parts, status, payload, error) for one listing request, after
         `_follow`; a handle missing a part is an error, asked nothing."""
         parts = self._parts(handle)
@@ -551,9 +558,9 @@ class Board:
         return await self._ask(req, handle, parts, vals, label, timeout, url)
 
     async def _ask(self, req: Listing | Detail, handle: str, parts: dict[str, str],
-                   vals: dict[str, Any] | None = None, label: str | None = None,
+                   vals: Vals | None = None, label: str | None = None,
                    timeout: tuple[float, float] | None = None, url: str | None = None
-                   ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
+                   ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
         """(parts, status, payload, error) for one request, after the
         `handle.prelude` has settled its parts; a 401 or 403 re-settles
         them once and asks again (`_ask_tried`'s answer otherwise)."""
@@ -571,9 +578,9 @@ class Board:
         return (*got[:3], http.failed(label, got[3]) if got[3] else None)
 
     async def _ask_tried(self, req: Listing | Detail, handle: str, parts: dict[str, str],
-                         vals: dict[str, Any] | None = None,
+                         vals: Vals | None = None,
                          timeout: tuple[float, float] | None = None, url: str | None = None
-                         ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
+                         ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
         """(parts, status, payload, error), unreported, for one request. A `handle.try`
         part not yet settled for `handle` is tried value by value, each a
         template over `parts` (quietly), until an answer `_wrong` does not
@@ -595,9 +602,9 @@ class Board:
 
     async def _settle(self, key: tuple[str, str], tries: dict[str, tuple[str, ...]],
                       req: Listing | Detail, parts: dict[str, str],
-                      vals: dict[str, Any] | None, timeout: tuple[float, float] | None,
+                      vals: Vals | None, timeout: tuple[float, float] | None,
                       url: str | None
-                      ) -> tuple[dict[str, Any], int | None, Any, str | Exception | None]:
+                      ) -> tuple[dict[str, str], int | None, JSON, str | Exception | None]:
         (name, values), = tries.items()
         refused = None
         for v in dict.fromkeys(fields.fmt(t, parts.get) for t in values):
@@ -614,7 +621,7 @@ class Board:
             v, status, payload, err = refused or (v, status, payload, err)
         return {**parts, name: v}, status, payload, err
 
-    def _wrong(self, req: Listing | Detail, status: int | None, payload: Any) -> bool:
+    def _wrong(self, req: Listing | Detail, status: int | None, payload: JSON) -> bool:
         """Whether an answer rules out the `handle.try` value that got it:
         no answer, a status `handle.accept` refuses, or, under its "total",
         a listing answer with no int total."""
@@ -633,7 +640,7 @@ class Board:
 
     async def _walk(self, handle: str, label: str | None = None, cheap: bool = False,
                     size: int | None = None, pages: int | None = None,
-                    vals: dict[str, Any] | None = None, scoped: bool = False,
+                    vals: Vals | None = None, scoped: bool = False,
                     first: bool | str = False, budget: int | None = None,
                     located: bool = False) -> tuple[list[EngineRow] | None, int | None]:
         """(rows, total) from the first listing alternative whose walk
@@ -648,10 +655,10 @@ class Board:
         return got
 
     async def _walk_listing(self, spec: Listing,
-                            row: Callable[[dict[str, Any], Any], EngineRow], handle: str,
+                            row: Callable[[dict[str, str], JSON], EngineRow], handle: str,
                             label: str | None = None, cheap: bool = False,
                             size: int | None = None, pages: int | None = None,
-                            vals: dict[str, Any] | None = None, scoped: bool = False,
+                            vals: Vals | None = None, scoped: bool = False,
                             budget: int | None = None, located: bool = False
                             ) -> tuple[list[EngineRow] | None, int | None]:
         """`pager.walk` over one listing `spec`, its entries mapped by `row`:
@@ -665,14 +672,14 @@ class Board:
         timeout = config.PROBE_TIMEOUT if cheap else None
         dec, vals = spec.decoder, vals or {}
 
-        async def ask(n: int, page: dict[str, Any], url: str | None
-                      ) -> tuple[dict[str, Any], Any, str | Exception | None]:
+        async def ask(n: int, page: Vals, url: str | None
+                      ) -> tuple[dict[str, str], JSON, str | Exception | None]:
             parts, _status, payload, err = await self._page(
                 req, handle, {**vals, **page}, f"{label} p{n}" if label and paged else label,
                 timeout, url)
             return parts, payload, err
 
-        def rows_of(parts: dict[str, str], payload: Any) -> tuple[int, list[EngineRow]]:
+        def rows_of(parts: dict[str, str], payload: JSON) -> tuple[int, list[EngineRow]]:
             entries = decode.entries(payload, dec)
             return len(entries), [row(parts, e) for e in entries]
         return await pager.walk(spec, ask, rows_of, size, pages, cheap, scoped, budget)
@@ -700,7 +707,7 @@ class Board:
 
     async def _scope(self, handle: str, loc_re: LocationRE, sc: Scope,
                      timeout: tuple[float, float] | None = None
-                     ) -> tuple[dict[str, Any], str, int | None, list[EngineRow]]:
+                     ) -> tuple[Vals, str, int | None, list[EngineRow]]:
         """(values, vouched, board_total, board_page) narrowing the listing
         to `loc_re` server-side: the facet values whose label `loc_re`
         matches, read off one unscoped first page (`vouched`: their labels
@@ -712,20 +719,21 @@ class Board:
         listing = self._listings[0]
         parts, _s, payload, err = await self._page(
             listing, handle, page_vals(self._pager, 0, 1), timeout=timeout)
-        applied: dict[str, list[Any]] = {}
+        applied: dict[str, list[JSON]] = {}
         labels: dict[str, None] = {}
         total = None
         if not err:
             total = total_of(self._pager, payload)
             param_re = re.compile(sc.param_re)
 
-            def walk(values: Any, param: Any) -> None:
+            def walk(values: JSON, param: JSON) -> None:
                 for v in values if isinstance(values, list) else []:
                     if not isinstance(v, dict):
                         continue
                     p, label = v.get(sc.param) or param, str(v.get(sc.label) or "")
                     if v.get(sc.id) and loc_re.search(label):
-                        applied.setdefault(p, []).append(v[sc.id])
+                        # TODO(any-zero): a facet's param name is read as text, as at HEAD.
+                        applied.setdefault(cast(str, p), []).append(v[sc.id])
                         labels[label] = None
                     walk(v.get(sc.values), p)
             groups = fields.path(payload, sc.facets)
@@ -829,7 +837,7 @@ class Board:
             row["location"] = loc or row.get("location") or ""
         for key in fill if rec else ():
             v = fs[key](rec, ctx) if key != "location" else None
-            v = fields.TRANSFORMS["date"](v) if key == "posted_at" else v
+            v = norm_posted_date(v) if key == "posted_at" else v
             if v:
                 row[key] = v
         if rec and fill != ("location",):
@@ -837,7 +845,7 @@ class Board:
 
     async def _locate(self, url: str | None, report: bool = False,
                       company: BoardCoords | None = None
-                      ) -> tuple[str, dict[str, Any] | None, dict[str, Reader], dict[str, Any]]:
+                      ) -> tuple[str, dict[str, JSON] | None, dict[str, StrReader], dict[str, str]]:
         """(location, record, field readers, job_ref parts) for the posting
         `url` names: the location its detail gives ("" on a miss) and the
         record read, None when the location came from the cache, where a
@@ -975,22 +983,22 @@ class Board:
 
     # --- one posting -------------------------------------------------------
 
-    async def _listing_entries(self, handle: str) -> list[dict[str, Any]] | None:
+    async def _listing_entries(self, handle: str) -> list[dict[str, JSON]] | None:
         """The raw first-page listing entries, memoized for
         config.BOARD_MEMO_S so a board with many stale rows is read once
         per pass, however many callers ask at once. None when the listing
         is unreadable or empty."""
         listing = self._listings[0]
 
-        async def read() -> list[dict[str, Any]] | None:
+        async def read() -> list[dict[str, JSON]] | None:
             _parts, _s, payload, err = await self._page(
                 listing, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, listing.decoder) or None
-        return cast(list[dict[str, Any]] | None,
+        return cast(list[dict[str, JSON]] | None,
                     await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S))
 
-    async def _member(self, ref: dict[str, Any], job_id: str | None = None
-                      ) -> dict[str, Any] | None:
+    async def _member(self, ref: dict[str, str], job_id: str | None = None
+                      ) -> dict[str, JSON] | None:
         """The listing entry for the posting `ref` names: by the posting id
         its URL carries, else by the row id `job_id` (a platform whose
         posting URLs are all the board's own), the rows mapped off the
@@ -1006,7 +1014,7 @@ class Board:
                           if want and str(self._rows[0](parts, e)["id"] or "").lower() == want),
                          None))
 
-    def row_id(self, handle: str, url: str) -> Any:
+    def row_id(self, handle: str, url: str) -> str | None:
         """The id this board's listing gives the posting `url` names, or
         None: the listing's `id` field read with the URL's job_ref parts
         standing in for the listing entry, so it resolves where the spec
@@ -1014,8 +1022,8 @@ class Board:
         ref = self.job_ref(url)
         return self._rows[0](self._parts(handle), ref)["id"] if ref else None
 
-    async def detail(self, ref: dict[str, Any], report: bool = False, url: str | None = None
-                     ) -> tuple[int | None, dict[str, Any] | None, str | Exception | None]:
+    async def detail(self, ref: dict[str, str], report: bool = False, url: str | None = None
+                     ) -> tuple[int | None, dict[str, JSON] | None, str | Exception | None]:
         """(status, record, error) for the posting `ref` names, through the
         handle's settled `try` parts (tried, where unsettled, as a listing
         request is); `url`, a template, replaces the detail's."""
@@ -1032,7 +1040,7 @@ class Board:
 
     async def _posting(self, url: str | None, report: bool = False,
                        company: BoardCoords | None = None
-                       ) -> tuple[dict[str, Any] | None, dict[str, Reader], dict[str, Any]]:
+                       ) -> tuple[dict[str, JSON] | None, dict[str, StrReader], dict[str, str]]:
         """(record, its field readers, the posting's `job_ref` parts) for
         the posting `url` names (with `company`), read live: the detail
         endpoint, or the listing entry where the platform has none. A
@@ -1087,8 +1095,8 @@ class Board:
                 job["description"] = job["description"][:config.MAX_DESC_CHARS]
         return job
 
-    def _apply(self, job: EngineRow | FetchedJob, rec: dict[str, Any], fs: dict[str, Reader],
-               ctx: dict[str, Any]) -> None:
+    def _apply(self, job: EngineRow | FetchedJob, rec: dict[str, JSON], fs: dict[str, StrReader],
+               ctx: dict[str, str]) -> None:
         """Fill `job` in place from its posting's record: the body when it
         has none; the location as `detail.location` allows ("always",
         "if_unknown": `location_unknown`, or "never", the default); a remote hint and
@@ -1107,7 +1115,7 @@ class Board:
         hint = fs["remote_hint"](rec, ctx)
         if hint and not job.get("remote_hint"):
             job["remote_hint"] = hint
-        posted = fields.TRANSFORMS["date"](fs["posted_at"](rec, ctx))
+        posted = norm_posted_date(fs["posted_at"](rec, ctx))
         if posted and not job.get("posted_at"):
             job["posted_at"] = posted
 
@@ -1115,7 +1123,8 @@ class Board:
         """The headers a posting's own page is read with: the detail's
         (filled from the URL's `job_ref`) over the shared defaults."""
         headers = self.detail_spec.headers if self.detail_spec else {}
-        return {**HEADERS, **_fill(headers, (self.job_ref(url) or {}).get, _NAMED)}
+        return {**HEADERS, **cast(Mapping[str, str],
+                                  _fill(headers, (self.job_ref(url) or {}).get, _NAMED))}
 
     async def probe_job(self, url: str, job_id: str | None = None) -> tuple[bool | None, str]:
         """(is_open, reason) for a stored posting URL: True live, False

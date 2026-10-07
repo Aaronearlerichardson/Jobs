@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import ModuleType
@@ -24,6 +25,20 @@ from yarl import URL
 from src import config
 
 _log = logging.getLogger(__name__)
+
+#: What `json.loads` returns, once narrowed: a payload's value.
+type JSON = Mapping[str, JSON] | Sequence[JSON] | str | int | float | bool | None
+
+
+def dig(v: JSON, *keys: str) -> JSON:
+    """`v` at the nested dict `keys`; None where the shape breaks.
+
+    >>> dig({"a": {"b": [1]}}, "a", "b"), dig({"a": 1}, "a", "b"), dig([1], "a")
+    ([1], None, None)
+    """
+    for k in keys:
+        v = v.get(k) if isinstance(v, dict) else None
+    return v
 
 # City, ST  |  City, State  |  Remote — a location as a careers page prints
 # it, for reading one off a listing row's text (custom boards, iCIMS).

@@ -8,7 +8,7 @@ import itertools
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -31,8 +31,8 @@ from src.rows import CompanyRow
 _SYNC_SKIP_REASONS = ("fetch error", "empty board", "no roster id")
 
 
-def _sync_skip_reason(company: CompanyRow, jobs: list[dict[str, Any]] | None, err: object,
-                      snapshot: dict[str, Any] | None = None) -> str | None:
+def _sync_skip_reason(company: CompanyRow, jobs: Sequence[object] | None, err: object,
+                      snapshot: Mapping[str, object] | None = None) -> str | None:
     """Why this company's board cannot be reconciled, or None when it can.
     `snapshot` is fetch_all's net.http.snapshot_info() for the board: an
     INCOMPLETE one (a page failed partway) is a fetch error too.
@@ -127,7 +127,7 @@ async def sync_status_all(top_n: int = 15, t: RuntimeTrack | None = None) -> tup
                 continue
             n_re, n_cl = await db.run(
                 store.sync_job_statuses, c["id"], jobs, track=t.track,
-                capped=(snapshot or {}).get("capped", False))
+                capped=snapshot["capped"] if snapshot else False)
             n_boards += 1
             n_closed += n_cl
             n_reopened += n_re

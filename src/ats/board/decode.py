@@ -6,68 +6,77 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
-from typing import Any, cast
+from typing import cast
 from urllib.parse import urljoin
 
 from lxml import etree
 
-from src.net.util import css, first, named, node_text, parse_markup, xpath
+from src.match.locality import LocationRE
+from src.net.util import JSON, css, first, named, node_text, parse_markup, xpath
 from . import custom, fields, jsonld
 from .spec import (AtomDecoder, Decoder, Detail, HtmlDecoder, JsonInHtmlDecoder,
                    JsonLdDecoder)
 
 
 def decode(dec: JsonInHtmlDecoder | JsonLdDecoder | AtomDecoder | HtmlDecoder, text: str,
-           parts: dict[str, str], url: str, area: re.Pattern[str] | None = None,
-           hop: bool = True) -> Any:
-    """A non-JSON response body (to `url`) as data; None when it holds
-    none. Raises ValueError when embedded JSON will not parse. `area` and
-    `hop` reach the careers-page reader (`custom.read_page`).
+           parts: dict[str, str], url: str, area: LocationRE | None = None,
+           hop: bool = True) -> tuple[JSON, str | None]:
+    """A non-JSON response body (to `url`) as (data, hop): data None when it
+    holds none; hop the openings page to read in its place, when the
+    careers-page reader (`custom.read_page`, given `area` and `hop`) names
+    one. Raises ValueError when embedded JSON will not parse.
 
     >>> dec = HtmlDecoder(kind="html", select="a", selects=True)
     >>> decode(dec, '<select name="loc"><option value="7-Durham"> Durham, NC</select>', {},
-    ...        "https://x.test")["selects"]
+    ...        "https://x.test")[0]["selects"]
     [{'name': 'loc', 'options': [{'value': '7-Durham', 'label': 'Durham, NC'}]}]
     """
     if dec.kind == "json_in_html":
         m = re.search(dec.regex, text)
-        return json.JSONDecoder().raw_decode(text, m.end())[0] if m else None
+        return (json.JSONDecoder().raw_decode(text, m.end())[0] if m else None), None
     if dec.kind == "jsonld":
         found = jsonld.postings(text, url)
         if found or not dec.cells:
-            return {"postings": found}
-        return {"postings": [], "page": _cells(parse_markup(text, url=url), dec.cells)}
+            # TODO(any-zero): `Posting` is JSON by construction; a TypedDict is not a Mapping[str, JSON].
+            return {"postings": cast(JSON, found)}, None
+        return {"postings": [], "page": _cells(parse_markup(text, url=url), dec.cells)}, None
     if dec.kind == "atom":
-        return {"entries": _atom(text, url)}
+        return {"entries": _atom(text, url)}, None
     tree = parse_markup(text, url=url)
     if dec.select == ("$job_links",):
-        return custom.read_page(tree, url, area, hop)
-    payload = {"elements": elements(dec, tree, parts, url), "page": text}
+        page = custom.read_page(tree, url, area, hop)
+        # TODO(any-zero): a TypedDict is not a Mapping[str, JSON]; `Page` is JSON by construction.
+        return (None, page["hop"]) if "hop" in page else (cast(JSON, page), None)
+    payload: dict[str, JSON] = {"elements": elements(dec, tree, parts, url), "page": text}
     if dec.selects:
         payload["selects"] = [{"name": s.get("name") or "",
                                "options": [{"value": o.get("value") or "", "label": node_text(o)}
                                            for o in s.iterdescendants("option")]}
                               for s in tree.iter("select")]
-    return payload
+    return payload, None
 
 
-def entries(payload: Any, dec: Decoder) -> list[dict[str, Any]]:
+def entries(payload: JSON, dec: Decoder) -> list[dict[str, JSON]]:
     """The postings (dicts) in a payload decoded by `dec`: the first of its
     entry paths holding a list; a wrong shape is []."""
-    return [e for e in first_path(payload, dec.entries, list) or [] if isinstance(e, dict)]
+    for p in dec.entries:
+        if isinstance(found := fields.path(payload, p), list):
+            return [e for e in found if isinstance(e, dict)]
+    return []
 
 
-def record(payload: Any, detail: Detail) -> dict[str, Any] | None:
+def record(payload: JSON, detail: Detail) -> dict[str, JSON] | None:
     """A detail answer's record: the first dict at the detail's `record`
     paths, by default its decoder's first entry; None when there is none."""
     if not payload:
         return None
-    return cast(dict[str, Any] | None, first_path(
-        payload, (detail.decoder.first,) if detail.record is None else detail.record, dict))
+    for p in (detail.decoder.first,) if detail.record is None else detail.record:
+        if isinstance(found := fields.path(payload, p), dict):
+            return found
+    return None
 
 
-def _atom(text: str, url: str = "") -> list[dict[str, Any]]:
+def _atom(text: str, url: str = "") -> list[dict[str, JSON]]:
     """An Atom feed's entries, each an `_xml_record` carrying its feed's own
     elements under "feed" (an entry inherits its feed's metadata).
 
@@ -83,11 +92,11 @@ def _atom(text: str, url: str = "") -> list[dict[str, Any]]:
     return [{**_xml_record(e), "feed": feed} for e in named(root, "entry")]
 
 
-def _xml_record(el: etree._Element, skip: str | None = None) -> dict[str, Any]:
+def _xml_record(el: etree._Element, skip: str | None = None) -> dict[str, JSON]:
     """An XML element's children as a dict, the first of each local name
     (but `skip`): a child holding elements as its own record, else its
     text; each attribute as "<name>@<attribute>"."""
-    out: dict[str, Any] = {}
+    out: dict[str, JSON] = {}
     for child in el.iterchildren(etree.Element):
         name = etree.QName(child).localname
         if name in out or name == skip:
@@ -100,7 +109,7 @@ def _xml_record(el: etree._Element, skip: str | None = None) -> dict[str, Any]:
 
 
 def elements(dec: HtmlDecoder, tree: etree._Element, parts: dict[str, str],
-             url: str) -> list[dict[str, Any]]:
+             url: str) -> list[dict[str, JSON]]:
     """One entry per element the html decoder's `select` finds (a CSS
     template over the handle `parts`, or a list tried in order until one
     finds any): its `text`, its `raw` text (unstripped, line breaks
@@ -126,7 +135,7 @@ def elements(dec: HtmlDecoder, tree: etree._Element, parts: dict[str, str],
     out = []
     for el in found:
         href = el.get("href") or ""
-        e: dict[str, Any] = {"text": node_text(el), "raw": node_text(el, " ", strip=False),
+        e: dict[str, JSON] = {"text": node_text(el), "raw": node_text(el, " ", strip=False),
                              "href": href, "url": urljoin(base, href) if href else ""}
         if dec.context is not None or dec.cells:
             ctx, lines = _context(el, dec.context or "parent")
@@ -177,17 +186,7 @@ def _context(el: etree._Element,
     return el.getparent(), None
 
 
-def first_path(payload: Any, wanted: Iterable[str], kind: type) -> Any:
-    """The first value of type `kind` at one of the paths `wanted` in
-    `payload`, or None."""
-    for p in wanted:
-        v = fields.path(payload, p)
-        if isinstance(v, kind):
-            return v
-    return None
-
-
-def unwrap(v: Any, key: str) -> Any:
+def unwrap(v: JSON, key: str) -> JSON:
     """`v` with every dict holding `key` replaced by that key's value: a
     decoder's `values`, for a payload that wraps each value in a dict.
 

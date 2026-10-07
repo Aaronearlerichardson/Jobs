@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Iterable, Mapping
 from datetime import timedelta
-from typing import Any, cast
+from typing import Any, TypedDict, Unpack, cast
 
 import aiohttp
 import requests
@@ -35,7 +35,7 @@ from yarl import URL
 
 from src import runstate
 from src.config import FETCH_TIMEOUT, PLAIN_USER_AGENT, USER_AGENT
-from src.net.util import host_of, origin_key
+from src.net.util import JSON, host_of, origin_key
 
 # File-only request trace (src/session_log.py installs the handler; there
 # is no console handler, so this never reaches the terminal). One record
@@ -124,10 +124,28 @@ def _timeout(t: float | tuple[float, float] | None) -> aiohttp.ClientTimeout:
                                  sock_connect=connect, sock_read=read)
 
 
+type Param = str | bytes | int | float
+
+
+class PrepKw(TypedDict, total=False):
+    """The request keywords `_prepare` takes."""
+    headers: Mapping[str, str | None] | None
+    params: Mapping[str, Param | Iterable[Param] | None] | None
+    data: Mapping[str, Param | None] | str | bytes | None
+    json: JSON
+
+
+class SendKw(PrepKw, total=False):
+    """The keywords `send` takes: `_prepare`'s, plus the transport's."""
+    timeout: float | tuple[float, float] | None
+    allow_redirects: bool
+
+
 def _prepare(method: str, url: str, polite: bool = True,
              headers: Mapping[str, str | None] | None = None,
-             params: Mapping[str, Any] | None = None, data: Any = None,
-             json: Any = None) -> requests.PreparedRequest:
+             params: Mapping[str, Param | Iterable[Param] | None] | None = None,
+             data: Mapping[str, Param | None] | str | bytes | None = None,
+             json: JSON = None) -> requests.PreparedRequest:
     """The request requests would send: the URL with its params encoded,
     the body, and `headers` over the session's own (a bare requests
     session's, with HEADERS on top when `polite`: the crawler's).
@@ -284,7 +302,7 @@ async def _hop(req: requests.PreparedRequest, timeout: aiohttp.ClientTimeout) ->
 
 async def _exchange(method: str, url: str, polite: bool = True,
                     timeout: float | tuple[float, float] | None = None,
-                    allow_redirects: bool = True, **kw: Any) -> requests.Response:
+                    allow_redirects: bool = True, **kw: Unpack[PrepKw]) -> requests.Response:
     """The requests.Response requests would return for one request (its
     keywords: headers, params, data, json), redirects followed by
     requests' rules, MAX_REDIRECTS at most
@@ -335,7 +353,8 @@ def retry_after(r: requests.Response, cap: float = 30.0, default: float = 5.0) -
     return min(ask, cap) if ask >= 0 else default
 
 
-async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requests.Response:
+async def send(method: str, url: str, *, polite: bool = True,
+               **kw: Unpack[SendKw]) -> requests.Response:
     """The requests.Response for one request, taking requests' keywords
     (headers, params, data, json, timeout, allow_redirects).
 
@@ -375,6 +394,16 @@ async def send(method: str, url: str, *, polite: bool = True, **kw: Any) -> requ
     return r
 
 
+class _Turn:
+    """One origin's lock and its next turn (monotonic)."""
+
+    __slots__ = ("lock", "next")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.next = 0.0
+
+
 class HostLimiter:
     """Spaces the turns on one origin: `await wait(url, gap)` returns once
     the last turn on url's origin is `gap` seconds old, holding only the
@@ -382,18 +411,18 @@ class HostLimiter:
     (tests/test_robots.py::test_crawl_delay_spaces_one_origin_only)."""
 
     def __init__(self) -> None:
-        self._origins: dict[str, list[Any]] = {}   # origin -> [asyncio.Lock, next turn (monotonic)]
+        self._origins: dict[str, _Turn] = {}
 
-    def _slot(self, url: str) -> list[Any]:
-        return self._origins.setdefault(origin_key(url), [asyncio.Lock(), 0.0])
+    def _slot(self, url: str) -> _Turn:
+        return self._origins.setdefault(origin_key(url), _Turn())
 
     async def wait(self, url: str, gap: float) -> None:
         """Wait for url's origin's turn, then book the next `gap` on."""
         slot = self._slot(url)
-        async with slot[0]:
-            while (left := slot[1] - time.monotonic()) > 0:   # a defer may land mid-sleep
+        async with slot.lock:
+            while (left := slot.next - time.monotonic()) > 0:   # a defer may land mid-sleep
                 await asyncio.sleep(left)
-            slot[1] = time.monotonic() + gap
+            slot.next = time.monotonic() + gap
 
     def defer(self, url: str, seconds: float) -> None:
         """Push url's origin's next turn out to `seconds` from now (never
@@ -409,7 +438,7 @@ class HostLimiter:
         True
         """
         slot = self._slot(url)
-        slot[1] = max(slot[1], time.monotonic() + seconds)
+        slot.next = max(slot.next, time.monotonic() + seconds)
 
 
 #: The process's one limiter: robots.txt's Crawl-delay feeds it. Not run
@@ -419,6 +448,7 @@ class HostLimiter:
 LIMITER = HostLimiter()
 
 
+# TODO(any-zero): board/engine.py passes a dict[str, JSON] splat, which Unpack[SendKw] rejects.
 async def request(method: str, url: str, label: str | None = None, **kw: Any
                   ) -> tuple[int | None, requests.Response | None, str | Exception | None]:
     """(status, response, error) for one polite request, HEADERS under the
@@ -440,7 +470,7 @@ async def request(method: str, url: str, label: str | None = None, **kw: Any
 
 
 def _json_of(status: int | None, r: requests.Response | None, err: str | Exception | None,
-             label: str | None) -> tuple[int | None, Any, str | Exception | None]:
+             label: str | None) -> tuple[int | None, JSON, str | Exception | None]:
     """request_json's answer from request's: "empty response" and
     "non-JSON response" are errors too."""
     if err:
@@ -454,8 +484,9 @@ def _json_of(status: int | None, r: requests.Response | None, err: str | Excepti
         return status, None, failed(label, "non-JSON response")
 
 
+# TODO(any-zero): as `request`.
 async def request_json(method: str, url: str, label: str | None = None, **kw: Any
-                       ) -> tuple[int | None, Any, str | Exception | None]:
+                       ) -> tuple[int | None, JSON, str | Exception | None]:
     """(status, payload, error) for one JSON request: `request`'s, plus
     "empty response" and "non-JSON response" as errors. The JSON is
     decoded off the loop, its failure counted here (`_account`)."""
@@ -464,7 +495,7 @@ async def request_json(method: str, url: str, label: str | None = None, **kw: An
     return await asyncio.to_thread(_json_of, status, r, err, label)
 
 
-async def get_json(url: str, label: str | None, default: Any = None, **kw: Any) -> Any:
+async def get_json(url: str, label: str | None, default: JSON = None, **kw: Unpack[SendKw]) -> JSON:
     """The endpoint's JSON, or `default` -- reported (`request_json`'s
     reasons), never raised.
 
@@ -533,7 +564,7 @@ def _account() -> _Account:
     return acct
 
 
-def fetch_failed(label: str, err: object, indent: int = 4) -> list[Any]:
+def fetch_failed[T](label: str, err: object, indent: int = 4) -> list[T]:
     """Report one failed fetch, count it, and hand back [].
 
     The line goes out as ONE write, so another thread cannot splice into
@@ -612,7 +643,18 @@ def note_fill(rows: int, rates: dict[str, float]) -> None:
         acct.fill_sum[k] = acct.fill_sum.get(k, 0.0) + v * rows
 
 
-def snapshot_info() -> dict[str, Any]:
+class Snapshot(TypedDict):
+    """What `snapshot_info` reports."""
+    fetch_errors: int
+    incomplete: bool
+    capped: bool
+    capped_total: int | None
+    last_error: str | None
+    fill: dict[str, float]
+    fill_rows: int
+
+
+def snapshot_info() -> Snapshot:
     """This context's fetch accounting since the last reset, as the callers
     record it: the failure count, whether the snapshot is INCOMPLETE (a
     fetch failed partway) or CAPPED (truncated without an error), the
