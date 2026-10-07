@@ -352,6 +352,10 @@ class RobotsDisallowed(Exception):
     so this surfaces in the crawl log the same way a 404 would."""
 
 
+#: Everything `http.send` raises: a failed request, or a robots refusal.
+FETCH_ERRORS = (http.RequestError, RobotsDisallowed)
+
+
 #: This run's cache: one robots.txt per host per hour, however many
 #: fetchers are running.
 CACHE = runstate.per_run(RobotsCache)

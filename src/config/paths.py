@@ -1,6 +1,6 @@
 """Where the code, the install and YOUR data live.
 
-Imports only config.secrets (for the environment), so anything (a
+Imports only config.home and config.secrets (for the environment), so anything (a
 bootstrap, a log opener, a build script) can learn the data directory
 without pulling in the profile, tags or the track tables.
 
@@ -23,13 +23,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+from .home import APP_HOME, DB_NAMES, SCRIPT_DIR  # noqa: F401 (re-exported)
 from .secrets import SETTINGS
 
 APP_NAME = "JobCrawler"
-
-# Current DB filename, then the pre-rename one — probed when deciding whether
-# a directory is an existing install.
-_DB_NAMES = ("jobs.db", "local_tech.db")
 
 
 def _platform_data_dir() -> Path:
@@ -63,32 +60,10 @@ def _resolve_data_dir(app_home: Path) -> Path:
         return SETTINGS.jobs_data_dir.expanduser()
     if (app_home / "data").is_dir():
         return app_home / "data"
-    if any((app_home / n).exists() for n in _DB_NAMES):
+    if any((app_home / n).exists() for n in DB_NAMES):
         return app_home
     return _platform_data_dir()
 
-
-if "__compiled__" in globals():
-    _exe_dir = Path(sys.argv[0]).resolve().parent
-    SCRIPT_DIR = _exe_dir
-    # APP_HOME: first place that looks like an install (a profile, a store
-    # or a data folder) — the exe's own folder (copied-to-another-machine
-    # layout), else the folder ABOVE the dist dir (dist still inside the
-    # checkout), else the exe's folder.
-    APP_HOME = next((d for d in (_exe_dir, _exe_dir.parent)
-                     if (d / "profile.toml").exists()
-                     or any((d / n).exists() for n in _DB_NAMES)
-                     or (d / "data").is_dir()),
-                    _exe_dir)
-else:
-    # This file is <root>/src/config/paths.py, so the checkout root is two
-    # levels above the package. Counted from the path itself rather than
-    # hardcoded: when the package tree moved under src/ this line still
-    # said `.parent.parent`, which silently repointed DATA_DIR from the
-    # user's real store to an empty per-user one -- the app came up
-    # working, on nothing. tests/test_config_env.py pins it.
-    SCRIPT_DIR = Path(__file__).resolve().parents[2]
-    APP_HOME = SCRIPT_DIR
 
 DATA_DIR = _resolve_data_dir(APP_HOME)
 DATA_DIR.mkdir(parents=True, exist_ok=True)

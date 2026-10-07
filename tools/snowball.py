@@ -37,7 +37,30 @@ import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing_extensions import TypedDict
+
+class Hit(TypedDict, closed=True):
+    """Evidence accumulated for one candidate name key."""
+
+    display: str
+    mentions: int
+    postings: set[str]
+    intro_postings: set[str]
+    suffix_postings: set[str]
+    high_fit: bool
+    titles: list[str]
+
+
+class Candidate(TypedDict, closed=True):
+    """One ranked candidate in the report."""
+
+    name: str
+    mentions: int
+    postings: int
+    high_fit: bool
+    score: float
+    sample_titles: list[str]
+
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -550,7 +573,7 @@ def _evidence_score(name: str | None, intro_postings: int, suffix_postings: int,
     return round(score, 2)
 
 
-def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+def _merge_variants(hits: dict[str, Hit]) -> dict[str, Hit]:
     """Merge candidates whose display name is a contiguous prefix or
     suffix (at word boundaries) of another candidate's display name,
     summing their evidence into whichever variant was independently seen
@@ -568,13 +591,13 @@ def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]
 
     >>> hits = {
     ...     "carolinasmedical": {"display": "Carolinas Medical", "mentions": 1,
-    ...                          "postings": {1}, "intro_postings": set(),
-    ...                          "suffix_postings": {1},
+    ...                          "postings": {"1"}, "intro_postings": set(),
+    ...                          "suffix_postings": {"1"},
     ...                          "high_fit": False, "titles": []},
     ...     "atriumhealthscarolinasmedical": {
     ...         "display": "Atrium Health's Carolinas Medical", "mentions": 1,
-    ...         "postings": {2}, "intro_postings": set(),
-    ...         "suffix_postings": {2}, "high_fit": False,
+    ...         "postings": {"2"}, "intro_postings": set(),
+    ...         "suffix_postings": {"2"}, "high_fit": False,
     ...         "titles": []},
     ... }
     >>> merged = _merge_variants(hits)
@@ -582,7 +605,7 @@ def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]
     1
     >>> next(iter(merged.values()))["display"]
     "Atrium Health's Carolinas Medical"
-    >>> next(iter(merged.values()))["postings"] == {1, 2}
+    >>> next(iter(merged.values()))["postings"] == {"1", "2"}
     True
 
     A junk prefix glued onto a well-corroborated short name by the 5-word
@@ -593,13 +616,13 @@ def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]
     >>> hits2 = {
     ...     "dukeregionalhospital": {
     ...         "display": "Duke Regional Hospital", "mentions": 90,
-    ...         "postings": set(range(90)), "intro_postings": set(),
-    ...         "suffix_postings": set(range(90)), "high_fit": False,
+    ...         "postings": {str(i) for i in range(90)}, "intro_postings": set(),
+    ...         "suffix_postings": {str(i) for i in range(90)}, "high_fit": False,
     ...         "titles": []},
     ...     "mritechnologistdukeregionalhospital": {
     ...         "display": "MRI Technologist- Duke Regional Hospital",
-    ...         "mentions": 1, "postings": {90}, "intro_postings": set(),
-    ...         "suffix_postings": {90}, "high_fit": False, "titles": []},
+    ...         "mentions": 1, "postings": {"90"}, "intro_postings": set(),
+    ...         "suffix_postings": {"90"}, "high_fit": False, "titles": []},
     ... }
     >>> next(iter(_merge_variants(hits2).values()))["display"]
     'Duke Regional Hospital'
@@ -639,7 +662,7 @@ def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]
 
 def harvest_from_store(conn: sqlite3.Connection, min_mentions: int = 2,
                        min_score: float | None = None, use_llm: bool = False,
-                       limit: int | None = None) -> list[dict[str, Any]]:
+                       limit: int | None = None) -> list[Candidate]:
     """Mine every stored job description for third-party organization names
     not already in the company roster.
 
@@ -665,9 +688,10 @@ def harvest_from_store(conn: sqlite3.Connection, min_mentions: int = 2,
     ).fetchall()
 
     # name-key -> accumulated evidence
-    hits: dict[str, dict[str, Any]] = defaultdict(lambda: {"display": None, "mentions": 0, "postings": set(),
-                                "intro_postings": set(), "suffix_postings": set(),
-                                "high_fit": False, "titles": []})
+    hits: dict[str, Hit] = defaultdict(lambda: {
+        "display": "", "mentions": 0, "postings": set(),
+        "intro_postings": set(), "suffix_postings": set(),
+        "high_fit": False, "titles": []})
     for r in rows:
         employer_key = _norm_key(r["company_name"])
         # One evidence kind per (candidate, posting): the intro loop inside
@@ -702,7 +726,7 @@ def harvest_from_store(conn: sqlite3.Connection, min_mentions: int = 2,
 
     hits = _merge_variants(hits)
 
-    out = []
+    out: list[Candidate] = []
     for key, h in hits.items():
         n_postings = len(h["postings"])
         if n_postings < min_mentions:
@@ -728,7 +752,7 @@ class KeepList(Reply):
     keep: list[str]
 
 
-def _llm_refine(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _llm_refine(candidates: list[Candidate]) -> list[Candidate]:
     """Optional second pass: ask Claude to drop anything in `candidates`
     that isn't really a distinct organization (catches shapes the regex
     heuristics can't, e.g. a person's name with a corporate-suffix-looking
@@ -786,7 +810,7 @@ def _print_safe(line: str) -> None:
         print(line.encode(enc, errors="replace").decode(enc))
 
 
-def print_report(candidates: list[dict[str, Any]]) -> None:
+def print_report(candidates: list[Candidate]) -> None:
     w = 66
     _print_safe(f"\n{'='*w}")
     _print_safe("  Snowball: company names mined from stored job descriptions")
@@ -806,7 +830,7 @@ def print_report(candidates: list[dict[str, Any]]) -> None:
 
 def run_snowball(min_mentions: int = 2, min_score: float | None = None,
                  use_llm: bool = False, limit: int | None = None,
-                 db_path: str | Path | None = None) -> list[dict[str, Any]]:
+                 db_path: str | Path | None = None) -> list[Candidate]:
     """Callable entry point (also used by tests): connect, harvest, report,
     and return the candidate list."""
     conn = connect(db_path or config.STORE_DB_PATH)

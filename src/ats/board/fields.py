@@ -473,6 +473,8 @@ def _path_reader(p: str) -> Reader:
     return lambda entry, ctx: get(entry)
 
 
+# The four `_as_*` guards share a shape on purpose: each narrows to a different
+# type, which one generic `isinstance` helper could only return through a cast.
 def _as_map(v: JSON) -> Mapping[str, JSON]:
     """`v` as a mapping; `check` has vouched for a loaded spec."""
     if not isinstance(v, Mapping):

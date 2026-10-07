@@ -24,7 +24,7 @@ from typing import TypedDict, cast
 from src import config
 from src.match.locality import LocationRE
 from src.net.util import clean_url
-from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob
+from src.rows import FetchedJob, FitColumns, JobIn, JobRow, RankedJob, str_or_none
 from .schema import (SqlScalar, _commit, apply_update, as_job, batch,  # noqa: F401 (doctests)
                      connect, dedup_groups, sql, sql_function)
 
@@ -507,11 +507,6 @@ def upsert_job(conn: sqlite3.Connection, j: JobIn, keep_location: bool = False) 
 #  Job status sync, score columns, ranking                                     #
 # --------------------------------------------------------------------------- #
 
-def _str_or_none(v: object) -> str | None:
-    """`v` if it is a string, else None (a row value read through a Mapping)."""
-    return v if isinstance(v, str) else None
-
-
 @sql_function("norm_title", 1)
 def _norm_title(t: str | None) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
@@ -822,7 +817,7 @@ def remote_admitted(row: Mapping[str, object], remote_mission_floor: float | Non
         return True
     if remote_mission_floor is None:
         return False
-    if config.is_multi_division(_str_or_none(row.get("company_name"))):
+    if config.is_multi_division(str_or_none(row.get("company_name"))):
         return False
     mission = row.get("mission_score")
     return isinstance(mission, int | float) and mission >= remote_mission_floor
@@ -1069,7 +1064,7 @@ def _same_posting_cols(url_a: str | None, title_a: str | None,
 
 def _posting_key(r: Mapping[str, object]) -> tuple[str, str]:
     """(_norm_url, _norm_title) of a job row: its identity across id schemes."""
-    return _norm_url(_str_or_none(r.get("url"))), _norm_title(_str_or_none(r.get("title")))
+    return _norm_url(str_or_none(r.get("url"))), _norm_title(str_or_none(r.get("title")))
 
 
 def merge_jobs(conn: sqlite3.Connection, row_ids: Collection[int], job_id: str) -> int:

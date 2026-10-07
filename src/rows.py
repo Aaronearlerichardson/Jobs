@@ -35,6 +35,15 @@ def dig(v: JSON, *keys: str) -> JSON:
     return v
 
 
+def str_or_none(v: object) -> str | None:
+    """`v` if it is a string, else None: a payload or Mapping value read as text.
+
+    >>> str_or_none("a"), str_or_none(1), str_or_none(None)
+    ('a', None, None)
+    """
+    return v if isinstance(v, str) else None
+
+
 class _FitFields(TypedDict, total=False):
     resume_fit_score: float | None
     fit_reason: str | None

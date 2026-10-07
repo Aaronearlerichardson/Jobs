@@ -21,7 +21,7 @@ from src.ats.signatures import Detection, detect, pack
 from src.match.names import name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
-from src.net.robots import RobotsDisallowed
+from src.net.robots import FETCH_ERRORS
 from .identity import foreign_board
 from .probes import Slug
 
@@ -126,7 +126,7 @@ async def websearch_board(name: str, max_results: int = 8) -> Detection | None:
                 text = await asyncio.to_thread(lambda: r.text) if r.status_code == 200 else ""
                 if len(text) < 300:
                     continue
-            except (http.RequestError, RobotsDisallowed) as e:
+            except FETCH_ERRORS as e:
                 _log.debug("search hit %s: %s", u, type(e).__name__)
                 continue
             own = _host_matches_name(r.url, name)

@@ -19,6 +19,7 @@ import re
 import time
 from datetime import datetime, timedelta
 
+import playwright.async_api  # noqa: F401  (`_launch` loads it off the loop; these tests skip `_launch`)
 import pytest
 import requests
 

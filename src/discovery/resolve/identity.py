@@ -27,7 +27,7 @@ from src.match.locality import NC_HQ_RE as _NC_HQ_RE
 from src.match.names import domain_tokens, name_key, risky_domain_tokens
 from src.net import http
 from src.net.http import HEADERS
-from src.net.robots import RobotsDisallowed
+from src.net.robots import FETCH_ERRORS
 from src.rows import FetchedJob
 from .fetchpool import Page
 
@@ -374,6 +374,6 @@ async def nc_hq_signal(name: str, careers_url: str = "",
             if r.status_code == 200 and await asyncio.to_thread(
                     lambda: _hq_match_beyond_brand(r.text, name)):
                 return True
-        except (http.RequestError, RobotsDisallowed) as e:
+        except FETCH_ERRORS as e:
             _log.debug("hq probe %s: %s", u, type(e).__name__)
     return False

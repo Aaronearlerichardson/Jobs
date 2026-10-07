@@ -313,6 +313,7 @@ class JsScanProbePool:
           2. Is the board link in the initial server-rendered HTML?
           3. After JS settles (networkidle, capped at 6s), try again.
         """
+        # `_launch` has already imported it (off the loop), so this is a lookup.
         from playwright.async_api import Error as PlaywrightError
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)

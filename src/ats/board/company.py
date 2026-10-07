@@ -31,7 +31,7 @@ from src import config
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
-from src.net.robots import RobotsDisallowed
+from src.net.robots import FETCH_ERRORS
 from src.net.util import clean_field, first, node_text, parse_markup
 from src.rows import BoardCoords, FetchedJob
 from . import jsonld
@@ -108,7 +108,7 @@ async def job_page_meta(url: str) -> tuple[str, str]:
         r = await http.send("GET", url, headers=HEADERS, allow_redirects=True)
         if r.status_code in (403, 405):
             r = await http.send("GET", url, allow_redirects=True, headers=PLAIN_HEADERS)
-    except (http.RequestError, RobotsDisallowed) as e:
+    except FETCH_ERRORS as e:
         _log.debug("page meta %s: %s", url, e)
         return "", ""
     return await asyncio.to_thread(_page_meta, r, url)

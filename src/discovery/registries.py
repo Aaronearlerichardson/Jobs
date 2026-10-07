@@ -25,7 +25,7 @@ from src.match.names import junk_name_reason, name_key, strip_suffixes
 from src.net import http
 from src.net.util import cache_dir, json_cache_get, json_cache_put
 from src.net.util import JSON
-from src.rows import BoardHit
+from src.rows import BoardHit, str_or_none
 from .local_sourcing import queue_names
 from .name_sources import blocked_keys
 from .vocab import title_vocab, word_score, words
@@ -101,11 +101,6 @@ def _results(payload: JSON) -> list[Mapping[str, JSON]]:
     return [r for r in results or [] if isinstance(r, Mapping)] if isinstance(results, list) else []
 
 
-def _text(v: JSON) -> str | None:
-    """`v` when it is text, else None."""
-    return v if isinstance(v, str) else None
-
-
 def nih_rows(payload: JSON) -> list[tuple[str | None, str | None, str | None]]:
     """(organization, city, project title) of each project in a RePORTER reply.
 
@@ -116,11 +111,11 @@ def nih_rows(payload: JSON) -> list[tuple[str | None, str | None, str | None]]:
     []
     """
     field = config.REGISTRIES["nih_sbir"]["blurb_field"]
-    rows = []
+    rows: list[tuple[str | None, str | None, str | None]] = []
     for r in _results(payload):
         org = r.get("organization")
-        o = org if isinstance(org, Mapping) else {}
-        rows.append((_text(o.get("org_name")), _text(o.get("org_city")), _text(r.get(field))))
+        o: Mapping[str, JSON] = org if isinstance(org, Mapping) else {}
+        rows.append((str_or_none(o.get("org_name")), str_or_none(o.get("org_city")), str_or_none(r.get(field))))
     return rows
 
 
@@ -130,7 +125,7 @@ def fda_rows(payload: JSON) -> list[tuple[str | None, str | None, str | None]]:
     >>> fda_rows({"results": [{"term": "Acme Medical LLC", "count": 3}]})
     [('Acme Medical LLC', None, None)]
     """
-    return [(_text(r.get("term")), None, None) for r in _results(payload)]
+    return [(str_or_none(r.get("term")), None, None) for r in _results(payload)]
 
 
 def fda_search(state: str, specialties: Sequence[str]) -> str:

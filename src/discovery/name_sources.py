@@ -24,7 +24,7 @@ from src.claude.reply import Reply
 from src.match.names import junk_name_reason, name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
-from src.net.robots import RobotsDisallowed
+from src.net.robots import FETCH_ERRORS
 
 _log = logging.getLogger(__name__)
 
@@ -245,7 +245,7 @@ async def harvest_search_names(queries: list[str], per_query: int = 12,
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
             resp = await http.send("GET", u, timeout=config.FETCH_TIMEOUT, headers=HEADERS)
-        except (http.RequestError, RobotsDisallowed) as e:
+        except FETCH_ERRORS as e:
             _log.debug("directory %s: %s", u, type(e).__name__)
             continue
         names |= await asyncio.to_thread(lambda: _names_from_html(resp.text))

@@ -16,7 +16,8 @@ from urllib.parse import quote
 from src import config
 from src.match import names
 from src.net import http
-from src.net.util import JSON, cache_dir, dig, host_of, json_cache_get, json_cache_put
+from src.net.util import cache_dir, dig, host_of, json_cache_get, json_cache_put
+from src.rows import str_or_none
 from src.runstate import per_run
 
 # Dropped before two names are compared: legal forms, never industry words
@@ -93,15 +94,11 @@ async def _suggested(name: str) -> tuple[str | None, bool]:
             if not isinstance(data, list):
                 continue
             answered = True
-            hit = pick_domain(name, [(_str(s.get("name")), _str(s.get("domain")))
+            hit = pick_domain(name, [(str_or_none(s.get("name")), str_or_none(s.get("domain")))
                                      for s in data if isinstance(s, dict)])
             if hit:
                 return hit, True
     return None, answered
-
-
-def _str(v: JSON) -> str | None:
-    return v if isinstance(v, str) else None
 
 
 async def _wikidata(name: str) -> tuple[str | None, bool]:
@@ -114,7 +111,7 @@ async def _wikidata(name: str) -> tuple[str | None, bool]:
     if not isinstance(found, dict):
         return None, False
     search = found.get("search")
-    labels: dict[str, str | None] = {str(e["id"]): _str(e.get("label")) for e in search
+    labels: dict[str, str | None] = {str(e["id"]): str_or_none(e.get("label")) for e in search
               if isinstance(e, dict) and e.get("id")} if isinstance(search, list) else {}
     if not any(_words(lbl) == _words(name) for lbl in labels.values()):
         return None, True

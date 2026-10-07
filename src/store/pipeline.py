@@ -23,7 +23,7 @@ from pydantic import (BaseModel, BeforeValidator, ConfigDict, PlainSerializer,
                       ValidationError)
 
 from src.match.names import name_key
-from src.rows import JobRow
+from src.rows import JobRow, str_or_none
 from src.validation import OneOf, Text, blank_is_none, error_lines
 from .schema import apply_update, as_job, sql
 
@@ -222,10 +222,6 @@ def title_keys(title: str | None) -> tuple[str, str]:
     return " ".join(words), " ".join(role or words)
 
 
-def _str(v: object) -> str | None:
-    return v if isinstance(v, str) else None
-
-
 def prior_lookup(pipeline: Iterable[Mapping[str, object]]
                  ) -> Callable[[Mapping[str, object]], Prior | None]:
     """A function from a job row to the application it repeats, or None,
@@ -250,24 +246,24 @@ def prior_lookup(pipeline: Iterable[Mapping[str, object]]
     by_company: dict[str, list[tuple[str, str, Mapping[str, object]]]] = {}
     for p in pipeline:
         if p.get("disposition") in APPLIED_DISPOSITIONS:
-            exact, role = title_keys(_str(p.get("title")))
-            by_company.setdefault(name_key(_str(p.get("company_name"))), []).append((exact, role, p))
+            exact, role = title_keys(str_or_none(p.get("title")))
+            by_company.setdefault(name_key(str_or_none(p.get("company_name"))), []).append((exact, role, p))
 
     def when(p: Mapping[str, object]) -> str:
-        return (_str(p.get("applied_at")) or _str(p.get("disposition_at")) or "")[:10]
+        return (str_or_none(p.get("applied_at")) or str_or_none(p.get("disposition_at")) or "")[:10]
 
     def look(job: Mapping[str, object]) -> Prior | None:
-        rivals = by_company.get(name_key(_str(job.get("company_name"))))
+        rivals = by_company.get(name_key(str_or_none(job.get("company_name"))))
         if not rivals:
             return None
-        exact, role = title_keys(_str(job.get("title")))
+        exact, role = title_keys(str_or_none(job.get("title")))
         best = max(((1 if e == exact else 0, when(p), p) for e, r, p in rivals
                     if p.get("job_id") != job.get("job_id") and r == role),
                    key=itemgetter(0, 1), default=None)
         if best is None:
             return None
-        return Prior("repost" if best[0] else "sibling", _str(best[2].get("title")) or "",
-                     _str(best[2].get("disposition")) or "", best[1])
+        return Prior("repost" if best[0] else "sibling", str_or_none(best[2].get("title")) or "",
+                     str_or_none(best[2].get("disposition")) or "", best[1])
     return look
 
 

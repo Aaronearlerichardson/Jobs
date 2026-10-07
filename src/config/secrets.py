@@ -17,7 +17,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.validation import drop_blank
 
-_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+from .home import APP_HOME
+
+# From APP_HOME, not `__file__`: a compiled build's `__file__` is its unpack dir.
+_ENV_FILE = APP_HOME / ".env"
 
 
 class Settings(BaseSettings):

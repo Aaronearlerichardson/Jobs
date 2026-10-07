@@ -51,7 +51,7 @@ class TestCodeRoot:
     """SCRIPT_DIR is where the CODE lives, and every other path hangs off
     it: APP_HOME, then DATA_DIR (the store, the profile, the reports).
 
-    It is derived by walking up from `src/config/paths.py`, so moving the
+    It is derived by walking up from `src/config/home.py`, so moving the
     package tree changes how far up "the root" is. When the tree moved
     under src/ the walk was left at two levels and pointed at src/ --
     DATA_DIR silently fell through to the empty per-user default, and the
