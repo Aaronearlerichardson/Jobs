@@ -75,7 +75,11 @@ def probe_origin(url: str) -> str:
     'https://careers-acme.icims.com'
     """
     board = board_for_url(url)
-    return (board and board.spec.via != "page" and board.origin(url=url)) or origin_key(url)
+    if board is not None and board.spec.via != "page":
+        origin = board.origin(url=url)
+        if origin:
+            return origin
+    return origin_key(url)
 
 
 # A job-detail host that refuses connections refuses every row on it: the

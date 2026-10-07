@@ -21,7 +21,7 @@ from src import config
 try:  # Windows consoles default to cp1252; job text carries em-dashes etc.
     # typeshed types sys.stdout as TextIO, which has no reconfigure; the
     # console stream is a TextIOWrapper, and anything else raises here.
-    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # pyrefly: ignore[missing-attribute]  # stdout is a TextIOWrapper
 except Exception:
     pass
 

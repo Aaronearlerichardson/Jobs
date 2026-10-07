@@ -276,7 +276,7 @@ def _getter(p: str) -> Callable[[JSON], JSON]:
     if p == "":
         return lambda obj: obj
     # The pattern matches any one-line step: never None.
-    split = [re.match(r"^(.*?)(?:\[(\d*)\])?$", s).groups()  # type: ignore[union-attr]
+    split = [re.match(r"^(.*?)(?:\[(\d*)\])?$", s).groups()  # pyrefly: ignore[missing-attribute]  # the pattern matches every string
              for s in p.split(".")]
     if all(index is None for _key, index in split):
         keys = tuple(key for key, _index in split)

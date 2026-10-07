@@ -2,9 +2,9 @@
 when the engine loads (`parse`). A key's meaning is its `Field` description
 and its default is declared on its model, nowhere else.
 
-A key that exists only because one platform misbehaves (a model's
-`WORKAROUNDS`, or a listing alternative after the first) needs a `why`,
-"reason, YYYY-MM", beside it.
+A model's `ADAPTATIONS` are the keys that adapt the engine to one platform's
+behavior; a `why` ("reason, YYYY-MM") may note them. A listing alternative
+after the first is a fallback, and needs one.
 """
 
 from __future__ import annotations
@@ -110,21 +110,11 @@ class _Spec(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
 
-class _Workaround(_Spec):
-    """A model whose `WORKAROUNDS` keys, when set, need its `why`; a `why`
-    with none set is refused too."""
-    WORKAROUNDS: ClassVar[tuple[str, ...]] = ()
-    why: Why | None = Field(None, description='Why a workaround key is set: "reason, YYYY-MM"')
-
-    @model_validator(mode="after")
-    def _explained(self) -> Self:
-        used = [type(self).model_fields[k].alias or k for k in self.WORKAROUNDS
-                if k in self.model_fields_set]
-        if used and self.why is None:
-            raise ValueError(f'{", ".join(used)}: a workaround; say why ("reason, YYYY-MM")')
-        if self.why is not None and not used:
-            raise ValueError("why: explains a workaround key, and none is set")
-        return self
+class _Adaptation(_Spec):
+    """A model with `ADAPTATIONS`: keys that adapt the engine to one
+    platform's behavior. `why` optionally notes them."""
+    ADAPTATIONS: ClassVar[tuple[str, ...]] = ()
+    why: Why | None = Field(None, description='Why the adaptation: "reason, YYYY-MM"')
 
 
 class Canary(_Spec):
@@ -245,8 +235,8 @@ Decoder = Annotated[Union[Annotated[JsonDecoder, Tag("json")],
                     Discriminator(_decoder_kind)]
 
 
-class _Pager(_Workaround):
-    WORKAROUNDS: ClassVar[tuple[str, ...]] = ("ceiling",)
+class _Pager(_Adaptation):
+    ADAPTATIONS: ClassVar[tuple[str, ...]] = ("ceiling",)
     size: Count = Field(description="Rows asked per page")
     pages: Count = Field(10, description="The most pages a walk reads")
     total: Grammar = Field(None, description="Names the board's total on the first page")
@@ -274,7 +264,7 @@ class _Pager(_Workaround):
 
 class OffsetPager(_Pager):
     kind: Literal["offset"] = Field(description='"$offset" steps a page')
-    size: Count | None = Field(  # type: ignore[assignment]  # pydantic lets it widen
+    size: Count | None = Field(  # pyrefly: ignore[bad-override]  # pydantic lets it widen
         None, description="Rows asked per page; unset, the server sizes its pages and the walk "
                           "learns it (pager.walk)")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first row's offset")
@@ -284,7 +274,7 @@ class OffsetPager(_Pager):
 
 
 class OverlapPager(_Pager):
-    WORKAROUNDS = ("ceiling", "step")
+    ADAPTATIONS = ("ceiling", "step")
     kind: Literal["overlap"] = Field(description='"$offset" steps `step` < `size`: pages overlap')
     step: Count = Field(description="Rows each page steps")
 
@@ -305,9 +295,9 @@ class OverlapPager(_Pager):
 
 
 class PagePager(_Pager):
-    WORKAROUNDS = ("ceiling", "bare_first")
+    ADAPTATIONS = ("ceiling", "bare_first")
     kind: Literal["page"] = Field(description='"$page" counts pages')
-    size: Count | None = Field(  # type: ignore[assignment]  # pydantic lets it widen
+    size: Count | None = Field(  # pyrefly: ignore[bad-override]  # pydantic lets it widen
         None, description="Rows a page holds, when known")
     start: Annotated[Int, Field(ge=0)] = Field(0, description="The first page's number")
     bare_first: Bool = Field(False, description="The first page's request names no page")
@@ -340,6 +330,11 @@ class Scope(_Spec):
 
 
 class _Call(_Spec):
+    """One request. The config key `json` fills `json_`:
+
+    >>> _Call.model_validate({"url": "https://x.test/", "json": {"q": "{search_text}"}}).json_
+    {'q': '{search_text}'}
+    """
     url: Template = Field(description="The request's URL template")
     method: Literal["GET", "POST"] = Field("GET", description="The HTTP method")
     params: dict[Str, Str] | None = Field(None, description="Query parameters; a None one is "
@@ -374,8 +369,15 @@ class Accept(_Spec):
     total: Bool = Field(False, description="A listing answer carries an int total")
 
 
-class Handle(_Workaround):
-    WORKAROUNDS = ("try_", "accept", "prelude")
+class Handle(_Adaptation):
+    """A board's handle: its columns, and the adaptations that settle it.
+
+    The config key `try` fills `try_`:
+
+    >>> Handle.model_validate({"try": {"host": ["a", "b"]}}).try_
+    {'host': ('a', 'b')}
+    """
+    ADAPTATIONS = ("try_", "accept", "prelude")
     columns: tuple[HandleColumn, ...] = Field(
         config.DEFAULT_HANDLE_COLUMNS, min_length=1,
         description="The store columns naming the board")
@@ -384,7 +386,7 @@ class Handle(_Workaround):
     sep: Str = Field("|", description="Joins the columns into one handle string")
     fold: Bool = Field(False, description="The host answers a handle's case alike, so boards "
                                           "differing only in case are one board")
-    try_: dict[Str, tuple[Template, ...]] = Field(
+    try_: dict[Str, Annotated[tuple[Template, ...], Field(min_length=1)]] = Field(
         default_factory=dict, alias="try", max_length=1,
         description="One part's templates, tried until an answer `accept` allows; "
                     "settled once per handle")
@@ -452,8 +454,8 @@ Rules = Annotated[tuple[Rule, ...],
                   BeforeValidator(lambda v: [{"when": v}] if isinstance(v, dict) else v)]
 
 
-class Closure(_Workaround):
-    WORKAROUNDS = ("url", "unmatched")
+class Closure(_Adaptation):
+    ADAPTATIONS = ("url", "unmatched")
     via: Literal["detail", "listing", "page"] | None = Field(
         None, description="What judges a posting; default the detail where there is one, "
                           "else its page")

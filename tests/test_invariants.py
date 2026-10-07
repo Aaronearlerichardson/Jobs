@@ -751,7 +751,7 @@ def test_compiled_code_has_no_assert_or_debug():
 
 def test_every_module_keeps_its_annotations_as_strings():
     """Every first-party module has `from __future__ import annotations`:
-    one annotation style for mypy, and pydantic models whose annotations
+    one annotation style for the type checker, and pydantic models whose annotations
     stay strings. Without it Nuitka compiles each class's `__annotate__`,
     and on Python 3.14 pydantic's FORWARDREF read of that raises TypeError
     whenever an annotation holds a lambda reading a name, or `str.lower`:

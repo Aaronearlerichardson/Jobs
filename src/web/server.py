@@ -80,7 +80,8 @@ def _ours_on(port: int) -> bool:
     try:
         with urllib.request.urlopen(
                 f"http://127.0.0.1:{port}/api/stats", timeout=2) as r:
-            return b"screen_model" in r.read(4096)
+            head: bytes = r.read(4096)
+            return b"screen_model" in head
     except Exception:
         return False
 

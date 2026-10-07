@@ -121,7 +121,7 @@ def restore_keywords(snapshot: tuple[list[str] | bool, ...],
     cfg = _self() if cfg is None else cfg
     for name, saved in zip(_SNAPSHOT_LISTS, snapshot):
         getattr(cfg, name)[:] = saved
-    cfg.ACCEPT_REMOTE = snapshot[-1]
+    setattr(cfg, "ACCEPT_REMOTE", snapshot[-1])
 
 
 def widen_keywords(cfg: Any = None) -> None:
@@ -149,7 +149,7 @@ def widen_keywords(cfg: Any = None) -> None:
     cfg.INCLUDE_KEYWORDS[:] = [""]
     for name in _WIDENED_EMPTY:
         getattr(cfg, name)[:] = []
-    cfg.ACCEPT_REMOTE = True
+    setattr(cfg, "ACCEPT_REMOTE", True)
 
 
 def _self() -> ModuleType:

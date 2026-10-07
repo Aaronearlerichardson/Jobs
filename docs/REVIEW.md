@@ -16,7 +16,7 @@ the concept; it does not open a parallel path beside it.
 - **Output:** findings ranked by additivity (new modules, parallel code
   paths, duplicated helpers first).
 - **Edits:** apply only behaviour-identical folds and renames. Anything else
-  is reported, not applied. Keep `python -m pytest`, `python -m mypy` and
+  is reported, not applied. Keep `python -m pytest`, `python -m pyrefly check` and
   `python -m flake8 --select=F` green. Never commit.
 - **Proof:** "behaviour-identical" is shown by running the old and the new
   code on the same inputs and comparing outputs, not by a green suite alone
@@ -160,27 +160,27 @@ What a reviewer holds a new shape to:
 - **A read-only parameter takes a read-only view, not `dict`.** A
   `TypedDict` is not assignable to `dict[str, Any]`, only to a `Mapping`. A
   function that takes either a hit or a row reads `BoardCoords`.
-- **Close record types.** mypy checks subscripts (`row["typo"]`) but not
+- **Close record types.** The checker flags subscripts (`row["typo"]`) but not
   `.get("typo")` on an open `TypedDict`: the typing spec allows it and it
   comes back as `object`. On a `closed=True` one it comes back as `None`, so
   the typo surfaces where the value is used. `closed` and `ReadOnly` come
-  from `typing_extensions`, since CI runs Python 3.12 to 3.14, and need mypy
-  2.3 or later. A closed `TypedDict` cannot be extended with new keys, and an open one
+  from `typing_extensions`, since CI runs Python 3.12 to 3.14. A closed `TypedDict` cannot be extended with new keys, and an open one
   is not assignable to it, so `FitColumns` stays open (`JobIn` extends it) and the
   one place a fit score updates a `FetchedJob` takes a `cast`.
 - **A field a config-driven reader fills admits `None`.** `fields.reader`
   returns `Any`, so nothing checked that a spec naming no `id` leaves it
   `None`: `EngineRow.id` said `str` while every consumer tested `is not
-  None`. `mypy` runs `strict` (bar `no_implicit_reexport`, which would want
-  `__all__` in each facade) with `possibly-undefined` and `redundant-expr`
-  on; the second is what reports a guard the types call unnecessary, which
-  is either dead code or a type that is too narrow. Check which. `tools/` is
+  None`. `pyrefly.toml` mirrors mypy's old `strict` (bar `implicit-reexport`, which
+  would want `__all__` in each facade) with `unbound-name` and
+  `redundant-condition` on; the second is what reports a guard the types call
+  unnecessary, which is either dead code or a type that is too narrow. Check
+  which. A suppression is `# pyrefly: ignore[kind]  # reason`. `tools/` is
   checked too: after the typing phases it stood 45 errors behind `src/`
   (a roster probe passing a plain dict where a board's coordinates are
-  read), because nothing ran mypy there.
+  read), because nothing ran the checker there.
 - **Convert a flow whole.** A `TypedDict` is not assignable to `dict[str,
   Any]`, so a producer and every function that receives its dicts change in
-  one commit; a half-typed flow does not pass mypy. Such a phase is
+  one commit; a half-typed flow does not pass the checker. Such a phase is
   annotation-only, and shown to be: parse the old and the new tree, strip
   annotations, `cast(T, x)` and imports, and compare the ASTs (what still
   differs is the edits meant), and compare the suite's `-s` output as a

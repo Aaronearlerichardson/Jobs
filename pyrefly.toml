@@ -1,0 +1,59 @@
+# Pyrefly config, the only type checker (replaced mypy.ini; see docs/pyrefly-migration-plan.md).
+project-includes = ["src", "tools"]
+# tools/ are scripts that import `src` and `tools._harness` by package path.
+search-path = ["."]
+python-version = "3.12"
+# Pyrefly queries the `python` on PATH for site-packages; run it from the jobs env
+# (or pass --python-interpreter-path) or third-party imports report missing-import.
+preset = "legacy"
+ignore-missing-imports = [
+    "lxml.*",
+    "html5lib.*",
+    "winotify.*",
+    "duckduckgo_search.*",
+]
+# mypy `strict` with unannotated defs checked and no return-type inference.
+check-unannotated-defs = true
+infer-return-types = "never"
+
+[errors]
+# mypy `strict` member flags.
+implicit-any = "error"            # disallow_any_explicit/unimported/decorated family
+implicit-any-parameter = "error"  # disallow_untyped_defs, disallow_incomplete_defs
+implicit-any-attribute = "error"
+implicit-any-empty-container = "error"
+implicit-any-lambda = "error"
+implicit-any-type-argument = "error"  # disallow_any_generics
+unannotated-return = "error"      # disallow_untyped_defs
+unannotated-parameter = "error"
+unannotated-attribute = "error"
+no-any-return = "error"           # warn_return_any
+redundant-cast = "error"          # warn_redundant_casts
+unused-ignore = "error"           # warn_unused_ignores
+unused-type-ignore = "error"
+untyped-function-decorator = "error"  # disallow_untyped_decorators
+untyped-class-decorator = "error"
+unnecessary-comparison = "error"  # strict_equality
+# warn_unreachable = True
+unreachable = "error"
+# enable_error_code = possibly-undefined
+unbound-name = "error"
+# enable_error_code = redundant-expr (found the EngineRow.id str that is None
+# whenever a spec names no id)
+redundant-condition = "error"
+# no_implicit_reexport = False: the facades (store, config, net) import a name to
+# re-export it, and this flag wants each of ~440 of them named again in an
+# `__all__`, which tests/test_invariants.py's single-reader rules would then have
+# to read around.
+implicit-reexport = "ignore"
+# GAPS (no Pyrefly equivalent found in `pyrefly check --help` error kinds):
+#   mypy ignore-without-code: none; `# pyrefly: ignore[kind]` codes are optional
+#     (misplaced-ignore only flags position). Enforce by review/tools/scans.py.
+#   mypy truthy-bool (flags `if obj:` on a type with no __bool__/__len__): none;
+#     implicit-bool is a different check and is not enabled.
+#   mypy plugins = pydantic.mypy: none needed, pydantic support is built in, but
+#     custom alias callables, AliasGenerator and some Field constraints are not
+#     modelled (see plan, Pydantic caveat).
+#   mypy unused-awaitable (left off in mypy.ini: it flags TaskGroup.create_task,
+#     which the group itself keeps, test_every_task_is_kept): unused-coroutine
+#     is the nearest Pyrefly kind; unused-call-result stays off for the same reason.

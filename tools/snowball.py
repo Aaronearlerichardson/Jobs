@@ -37,7 +37,7 @@ import sqlite3
 import sys
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -547,7 +547,7 @@ def _evidence_score(name: str | None, intro_postings: int, suffix_postings: int,
     score = intro_component + suffix_component
     if high_fit:
         score *= _HIGH_FIT_MULTIPLIER
-    return cast(float, round(score, 2))
+    return round(score, 2)
 
 
 def _merge_variants(hits: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:

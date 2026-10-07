@@ -342,11 +342,8 @@ async def queue_clear() -> int:
 # never against a user-chosen track id. `params` is the op's model, which
 # api_run validates the POSTed JSON with; `fn(args)` is the op's coroutine
 # through registry.invoke with those validated args.
-class OpEntry(TypedDict):
+class OpEntry(registry.OpSpec):
     """One web operation: see the comment above."""
-    label: str
-    engine: str | None
-    params: type[registry.OpParams]
     fn: Callable[[registry.OpParams], Awaitable[object]]
 
 

@@ -92,7 +92,7 @@ def _open_session() -> aiohttp.ClientSession:
         default executor, where no work waits on the loop.
     """
     tls = create_urllib3_context()
-    tls.load_verify_locations(certs.where())
+    tls.load_verify_locations(certs.where())  # pyrefly: ignore[missing-attribute]  # stubs lack it
     tls.sslobject_class = _Handshake
     session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(limit=100, ssl=tls, keepalive_timeout=30,
@@ -203,10 +203,10 @@ def _reply(req: requests.PreparedRequest, status: int, reason: str | None,
     """
     r = requests.Response()
     # requests types reason and url as str: aiohttp's reason may be None.
-    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req  # type: ignore[assignment]
+    r.status_code, r.reason, r.url, r.request = status, reason, req.url, req  # pyrefly: ignore[bad-assignment]  # aiohttp's reason may be None
     r.headers = _headers(raw_headers)
     r.encoding = get_encoding_from_headers(r.headers)
-    r._content, r._content_consumed = content, True
+    r._content, r._content_consumed = content, True  # pyrefly: ignore[missing-attribute]  # stubs lack it
     r.elapsed = timedelta(seconds=elapsed)
     return r
 
@@ -288,7 +288,7 @@ async def _hop(req: requests.PreparedRequest, timeout: aiohttp.ClientTimeout) ->
     t0 = time.monotonic()
     try:
         async with _session().request(method, _target(url),
-                                      headers=req.headers,  # type: ignore[arg-type]  # str values
+                                      headers=req.headers,
                                       data=body,
                                       allow_redirects=False,
                                       timeout=timeout) as resp:

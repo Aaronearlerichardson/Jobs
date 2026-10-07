@@ -31,10 +31,9 @@ def page_vals(pager: Pager | None, n: int, size: int) -> Vals:
     {'$size': 100, '$offset': 200, '$page': 3}
     >>> page_vals(OffsetPager(kind="offset", size=50, start=1), 1, 50)["$offset"]
     51
-    >>> why = "rows shift, 2026-09"
-    >>> page_vals(OverlapPager(kind="overlap", size=500, step=250, why=why), 1, 500)["$offset"]
+    >>> page_vals(OverlapPager(kind="overlap", size=500, step=250), 1, 500)["$offset"]
     250
-    >>> page_vals(PagePager(kind="page", bare_first=True, why=why), 0, 0)["$page"] is None
+    >>> page_vals(PagePager(kind="page", bare_first=True), 0, 0)["$page"] is None
     True
     """
     if pager is None:

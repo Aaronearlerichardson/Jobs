@@ -169,7 +169,7 @@ async def board_jobs(rows: Iterable[EngineRow | None], company_name: str,
             await asyncio.sleep(detail_delay)
         return desc
 
-    for row, head, desc, head_ok, listed_ok in await asyncio.to_thread(list, screened()):
+    for row, head, desc, head_ok, listed_ok in await asyncio.to_thread(lambda: list(screened())):
         if not head_ok and not desc and (read := await hydrate(row)) is not None:
             desc, listed_ok = read, gate is None or gate(head, read)
         if not listed_ok:
@@ -618,7 +618,7 @@ class Board:
                                     or status in (403, 405, 429)):
                 refused = v, status, payload, err
         else:
-            v, status, payload, err = refused or (v, status, payload, err)
+            v, status, payload, err = refused or (v, status, payload, err)  # pyrefly: ignore[unbound-name]  # the spec guarantees a non-empty tuple (`try` min_length=1)
         return {**parts, name: v}, status, payload, err
 
     def _wrong(self, req: Listing | Detail, status: int | None, payload: JSON) -> bool:
@@ -995,8 +995,7 @@ class Board:
             _parts, _s, payload, err = await self._page(
                 listing, handle, page_vals(self._pager, 0, page_size(self._pager)))
             return None if err else decode.entries(payload, listing.decoder) or None
-        return cast(list[dict[str, JSON]] | None,
-                    await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S))
+        return await _MEMO().do((self.name, handle), read, ttl=config.BOARD_MEMO_S)
 
     async def _member(self, ref: dict[str, str], job_id: str | None = None
                       ) -> dict[str, JSON] | None:

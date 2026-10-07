@@ -235,7 +235,7 @@ def _engine(kind, handle=None, url="https://x.test/list", **pager):
     return board.Board("t", {**spec, **({"handle": handle} if handle else {})})
 
 
-#: An overlap pager's reason (the kind is a workaround).
+#: An overlap pager's reason (an adaptation, so optional).
 _SHIFTS = "rows shift between requests, 2026-09"
 
 

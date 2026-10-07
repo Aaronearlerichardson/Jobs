@@ -158,7 +158,8 @@ def open_in_track_clause(track: str | None = None, *, alias: str = "",
 # --------------------------------------------------------------------------- #
 
 def job_exists(conn: sqlite3.Connection, job_id: str) -> bool:
-    return conn.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone() is not None
+    row: tuple[int] | None = conn.execute("SELECT 1 FROM jobs WHERE job_id=?", (job_id,)).fetchone()
+    return row is not None
 
 
 def crawl_seen(conn: sqlite3.Connection, job_id: str) -> bool:

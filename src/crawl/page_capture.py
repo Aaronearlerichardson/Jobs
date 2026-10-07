@@ -338,14 +338,16 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
         items = data if isinstance(data, list) else \
             data.get("itemListElement", [data]) if isinstance(data, dict) else []
         for it in items:
-            jp = it.get("item", it) if isinstance(it, dict) else {}
+            jp = it.get("item", it) if isinstance(it, dict) else dict[str, JSON]()
             if not isinstance(jp, dict) or jp.get("@type") not in ("JobPosting",):
                 continue
+            jp = cast(dict[str, Any], jp)   # TODO(any-zero): schema.org JSON-LD is read untyped
             org = jp.get("hiringOrganization") or {}
             loc = jp.get("jobLocation") or {}
             if isinstance(loc, list):
                 loc = loc[0] if loc else dict[str, JSON]()
-            addr = (loc.get("address") or {}) if isinstance(loc, dict) else {}
+            addr = (cast(dict[str, Any], loc.get("address") or {})   # TODO(any-zero)
+                    if isinstance(loc, dict) else dict[str, Any]())
             location = ", ".join(x for x in (addr.get("addressLocality"),
                                              addr.get("addressRegion")) if x)
             url = jp.get("url") or page_url
@@ -534,13 +536,17 @@ def parse_page(url: str, html: str) -> tuple[list[FetchedJob], str]:
     if "linkedin." in low:
         # Site-specific pages skip the generic link sweep — it would re-add
         # the same postings under synthetic ids.
-        layers, source = [parse_linkedin, parse_jsonld], "linkedin"
+        layers = [parse_linkedin, parse_jsonld]
+        source = "linkedin"
     elif "indeed." in low:
-        layers, source = [parse_indeed, parse_jsonld], "indeed"
+        layers = [parse_indeed, parse_jsonld]
+        source = "indeed"
     elif "metacareers." in low:
-        layers, source = [parse_metacareers], "metacareers"
+        layers = [parse_metacareers]
+        source = "metacareers"
     else:
-        layers, source = [parse_jsonld, parse_generic], "page"
+        layers = [parse_jsonld, parse_generic]
+        source = "page"
 
     by_id: dict[str, FetchedJob] = {}
     for layer in layers:

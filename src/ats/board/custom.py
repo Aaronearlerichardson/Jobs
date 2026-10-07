@@ -128,7 +128,7 @@ def _openings_link(tree: etree._Element, page_url: str) -> str | None:
                      r"job-openings|openings|opportunities|positions|jobs)\b", href, re.I) \
                 or re.search(r"(current|open|view|see|all).{0,12}(opening|position|role|job)",
                              text, re.I):
-            return cast(str, absu)
+            return absu
     return None
 
 

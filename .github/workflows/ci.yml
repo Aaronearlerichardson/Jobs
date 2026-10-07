@@ -80,8 +80,11 @@ jobs:
         # package re-export facades and the doctest-only imports carry.
         run: python -m flake8 --select=F src tools tests *.py
 
-      - name: Type check (mypy)
-        run: python -m mypy
+      - name: Type check (Pyrefly)
+        # Pinned in envs/requirements-dev.txt; it reads pyrefly.toml. It
+        # queries the `python` on PATH for site-packages, which is the
+        # setup-python interpreter here, so no interpreter flag is needed.
+        run: python -m pyrefly check
 
       - name: Validate the example profile
         run: |

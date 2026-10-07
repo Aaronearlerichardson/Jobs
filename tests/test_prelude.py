@@ -33,7 +33,7 @@ def _board(**handle):
     """A one-field POST listing wanting the `token` a prelude settles."""
     return Board("t", {
         "handle": {"prelude": [{"url": "https://x.test/token", "set": {"token": "t"}}],
-                   "why": "the API wants a token, 2026-10", **handle},
+                   **handle},
         "listing": {"method": "POST", "url": "https://x.test/list",
                     "headers": {"Authorization": "Bearer {token}"},
                     "decoder": {"entries": "items"},
@@ -100,10 +100,11 @@ class TestPrelude:
     def test_the_schema_refuses_a_prelude_it_cannot_run(self):
         from src.ats.board import spec
         ok = {"url": "https://x.test/t", "set": {"token": "t"}}
-        for handle in ({"prelude": [ok]}, {"prelude": [{**ok, "set": {}}], "why": "x, 2026-10"},
-                       {"prelude": [ok, ok], "why": "x, 2026-10"},
-                       {"prelude": [ok], "follow": {"token": "{slug}"}, "why": "x, 2026-10"},
-                       {"prelude": [{**ok, "nope": 1}], "why": "x, 2026-10"}):
+        spec.parse("t", {"handle": {"prelude": [ok]}})
+        for handle in ({"prelude": [{**ok, "set": {}}]}, {"prelude": [ok, ok]},
+                       {"prelude": [ok], "follow": {"token": "{slug}"}},
+                       {"prelude": [{**ok, "nope": 1}]},
+                       {"prelude": [ok], "why": "because"}):
             with pytest.raises(ValueError):
                 spec.parse("t", {"handle": handle})
 

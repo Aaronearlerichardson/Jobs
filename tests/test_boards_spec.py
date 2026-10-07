@@ -56,11 +56,10 @@ REFUSED = [
     _pager(kind="scroll", size=1), _pager(kind="offset", size=0),
     _pager(kind="offset", size=2, step=1), _pager(kind="overlap", size=2, step=2, why=_WHY),
     _pager(kind="cursor", size=2), _pager(kind="offset", size=2, ceiling="2000", why=_WHY),
-    _pager(kind="offset", size=2, ceiling=2000), _pager(kind="offset", size=2, why=_WHY),
     _pager(kind="offset", size=2, ceiling=2000, why="because"),
     _listing(scope={"kind": "facets", "facets": "f"}), _listing(scope={"kind": "param"}),
     {"handle": {"columns": []}}, {"handle": {"nope": 1}}, {"handle": {"follow": {"base": 1}}},
-    {"handle": {"try": {"a": ["x"], "b": ["y"]}, "why": _WHY}},
+    {"handle": {"try": {"a": ["x"], "b": ["y"]}}}, {"handle": {"try": {"a": []}}},
     {"handle": {"accept": {"nope": 1}, "why": _WHY}},
     {"listing": [_L, {"url": "https://x.test/2"}]},
     {"listing": [{**_L, "why": _WHY}, {"url": "https://x.test/2", "why": _WHY}]},
@@ -70,7 +69,7 @@ REFUSED = [
     _always(fields=["department"]), _always(fields=["title"]),
     {"closure": {"nope": 1}}, {"closure": {"via": "email"}}, {"closure": {"via": "detail"}},
     {**_pager(kind="offset", size=2), "closure": {"via": "listing"}},
-    {"closure": {"unmatched": 7, "why": _WHY}}, {"closure": {"unmatched": "gone"}},
+    {"closure": {"unmatched": 7, "why": _WHY}}, {"closure": {"unmatched": "gone", "why": "because"}},
     {"closure": {"closed": [{"why": {"const": "x"}}]}},
     {"closure": {"closed": [{"when": {"truthy": "a"}, "if": 1}]}},
     {"closure": {"open": {"maybe": "a"}}},
@@ -85,7 +84,10 @@ REFUSED = [
 
 
 def test_the_schema_refuses_what_it_cannot_read():
-    """Each spec in REFUSED breaks one rule; the error names the spec."""
+    """Each spec in REFUSED breaks one rule; the error names the spec. An
+    adaptation key needs no `why`."""
+    spec.parse("ok", _pager(kind="offset", size=2, ceiling=2000))
+    spec.parse("ok", _pager(kind="offset", size=2, why=_WHY))
     for i, raw in enumerate(REFUSED):
         with pytest.raises(ValueError, match=f"^case{i}: "):
             spec.parse(f"case{i}", raw)

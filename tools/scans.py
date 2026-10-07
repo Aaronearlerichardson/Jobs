@@ -191,7 +191,7 @@ def patches(repo: Repo) -> Iterator[str]:
 
 @scan()
 def looseness(repo: Repo) -> Iterator[str]:
-    """Typing left open in src/: Any, dict[str, Any], cast(), type: ignore."""
+    """Typing left open in src/: Any, dict[str, Any], cast(), type: ignore, pyrefly: ignore."""
     total, files = Counter[str](), Counter[str]()
     for rel, text in repo.files("src"):
         for n in ast.walk(ast.parse(text)):
@@ -203,6 +203,7 @@ def looseness(repo: Repo) -> Iterator[str]:
             if isinstance(n, ast.Call) and name_of(n) == "cast":
                 total["cast()"] += 1
         total["type: ignore"] += len(re.findall(r"#\s*type:\s*ignore", text))
+        total["pyrefly: ignore"] += len(re.findall(r"#\s*pyrefly:\s*ignore", text))
     yield ", ".join(f"{k} {n}" for k, n in total.items())
     yield from top("most Any, by file", files, 6)
 

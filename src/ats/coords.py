@@ -75,7 +75,7 @@ def columns(ats: str | None, slug: str | tuple[Any, ...] | list[Any] | None = No
     if multi:
         parts = slug if isinstance(slug, (tuple, list)) else str(slug).split(sep)
         for col, part in zip(cols, parts):
-            out[col] = part
+            out[col] = part  # pyrefly: ignore[bad-assignment]  # TODO(user decision): wd_pod is typed int | None but a str part is stored; SQLite INTEGER affinity coerces on write
     out.update(extra)
     return out
 

@@ -725,7 +725,7 @@ def _gated(r: FitReply, gates: list[str], reason: str, model: str,
     gates = apply_gate_overrides(gates, location=location,
                                  description=description)
     axes = r.axes()
-    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)
+    score = combine(axes, gates, config.FIT_WEIGHTS, config.FIT_GATE_PENALTY)  # pyrefly: ignore[missing-attribute]  # config is None only when the standalone import failed
     return FitResult(score=score, axes=axes, gates=gates, reason=reason,
                      model=model)
 

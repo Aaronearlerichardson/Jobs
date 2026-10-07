@@ -36,7 +36,8 @@ from __future__ import annotations
 import asyncio
 import inspect
 import operator
-from typing import Annotated, Any, ClassVar
+from collections.abc import Callable
+from typing import Annotated, Any, ClassVar, NotRequired, TypedDict, cast
 
 from pydantic import (AfterValidator, BaseModel, BeforeValidator, ConfigDict,
                       Field, ValidationError, model_validator)
@@ -117,7 +118,7 @@ class OpParams(BaseModel):
 
     _blank_is_absent = model_validator(mode="before")(drop_blank)
 
-    def kwargs(self, track: config.RuntimeTrack | None) -> dict[str, Any]:
+    def kwargs(self, track: config.RuntimeTrack | None) -> dict[str, object]:
         """The target's keyword arguments, with `track` (a track config or
         None) passed as `track_kw` says."""
         out = self.model_dump(exclude={"track"})
@@ -267,7 +268,20 @@ class ResolveLeads(OpParams):
     limit: int | None = _omit()
 
 
-REGISTRY: dict[str, dict[str, Any]] = {
+class OpSpec(TypedDict):
+    """The part of an op every front end sees: label, engine, params model."""
+    label: str
+    engine: str | None
+    params: type[OpParams]
+
+
+class RegistryEntry(OpSpec):
+    """One REGISTRY entry (see the module docstring)."""
+    target: Callable[..., object]
+    ui: NotRequired[bool]
+
+
+REGISTRY: dict[str, RegistryEntry] = {
     # ── the crawl ─────────────────────────────────────────────────────
     "crawl": {
         "label": "Crawl",
@@ -450,13 +464,13 @@ REGISTRY: dict[str, dict[str, Any]] = {
 }
 
 
-def ui_ops() -> dict[str, dict[str, Any]]:
+def ui_ops() -> dict[str, RegistryEntry]:
     """The entries the web UI exposes as buttons (everything not `ui: False`)."""
     return {n: e for n, e in REGISTRY.items() if e.get("ui", True)}
 
 
-async def invoke(name: str, params: dict[str, Any] | OpParams | None = None, *,
-                 track: Any = UNSET) -> Any:
+async def invoke(name: str, params: dict[str, object] | OpParams | None = None, *,
+                 track: object = UNSET) -> object:
     """Run operation `name` with a front end's params (a dict, or the op's
     model already validated); returns what the target returns. Params the
     op does not accept raise ParamError before anything runs.
@@ -479,7 +493,7 @@ async def invoke(name: str, params: dict[str, Any] | OpParams | None = None, *,
         raise ParamError(name, error_lines(e)) from None
     if track is UNSET:
         track = config.UI_TRACKS.get(args.track or config.DEFAULT_TRACK or "")
-    target, kw = entry["target"], args.kwargs(track)
+    target, kw = entry["target"], args.kwargs(cast("config.RuntimeTrack | None", track))
     if inspect.iscoroutinefunction(target):
         return await target(**kw)
     done = asyncio.ensure_future(asyncio.to_thread(target, **kw))

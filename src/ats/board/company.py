@@ -212,7 +212,11 @@ def board_origin(company: BoardCoords) -> str | None:
     'workday'
     """
     board = board_for(company.get("ats"))
-    return (board and board.origin(company)) or company.get("ats")
+    if board is not None:
+        origin = board.origin(company)
+        if origin:
+            return origin
+    return company.get("ats")
 
 
 # --- title sampling ------------------------------------------------------------ #

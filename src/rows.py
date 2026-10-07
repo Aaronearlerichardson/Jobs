@@ -4,7 +4,7 @@ job rows read back, and for the resolver hit that becomes a company row.
 
 A misspelled key in a row headed for upsert_job used to store nothing and
 say nothing (`j.get("resume_fit_scor")` reads as None). These TypedDicts let
-mypy check every place that builds one, and tests/test_store.py checks the
+the type checker check every place that builds one, and tests/test_store.py checks the
 field names and column types against the tables themselves.
 
 A leaf module, like src/tags.py: the store, the scorer and the crawl all

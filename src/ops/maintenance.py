@@ -373,7 +373,7 @@ async def _scored_row(job: FetchedJob, *, company_id: int | None, company_name: 
                              job.get("description", "")) or "onsite",
         "description": (job.get("description", "") or "")[:config.MAX_DESC_CHARS],
         "posted_at": job.get("posted_at"),
-        **res.as_columns(),  # type: ignore[typeddict-item]  # FitColumns names JobIn's fit keys
+        **res.as_columns(),
     }
     if status is not None:
         row["status"] = status

@@ -63,7 +63,7 @@ async def fetch_discourse(display_name: str, base_url: str, category_id: int,
             jobs.append({
                 "id":          f"discourse_{base_url.split('.')[0].split('//')[1]}_{tid}",
                 "company":     display_name,
-                "title":       title,  # type: ignore[typeddict-item]  # null passes through, as before
+                "title":       title,  # pyrefly: ignore[bad-assignment]  # null passes through, as before
                 "url":         jurl,
                 "location":    f"Posted {loc}",
                 "description": "",
