@@ -338,6 +338,9 @@ def build_command(name: str | None = None) -> list[str]:
     # and one flag for both keeps the file the single place those
     # declarations live.
     cmd += [f"--user-package-configuration-file={PACKAGE_CONFIG}"]
+    # Nuitka's bundled pydantic config implicit-imports pydantic.mypy (the
+    # mypy plugin), which drags mypy in: 69 modules, psutil, ~42 MB of input.
+    cmd += ["--nofollow-import-to=pydantic.mypy"]
     if name == "harvest":
         cmd += [f"--noinclude-custom-mode={p}:error" for p in HARVEST_FORBID]
         cmd += [f"--nofollow-import-to={p}" for p in HARVEST_LAZY]

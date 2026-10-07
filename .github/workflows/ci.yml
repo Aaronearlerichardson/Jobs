@@ -245,6 +245,9 @@ jobs:
         # through to Nuitka, so these go on the command line.
         run: python build_app.py --report=jobcrawlerui.report.xml --report-diffable
 
+      - name: No type checker in the UI binary
+        run: python tools/check_no_typechecker.py jobcrawlerui.report.xml
+
       - name: Smoke-launch the built binary
         # A build that compiles but can't boot is not a passing build: run
         # the real binary and require the API to answer. It has no
@@ -271,6 +274,9 @@ jobs:
         # (HARVEST_SKIP in build_app.py), which is roughly three quarters
         # of the UI payload.
         run: python build_app.py --target harvest --report=jobharvester.report.xml --report-diffable
+
+      - name: No type checker in the harvester binary
+        run: python tools/check_no_typechecker.py jobharvester.report.xml
 
       - name: Smoke-launch the harvester binary
         # --help is the whole smoke test: harvest.py parks on a timer and
