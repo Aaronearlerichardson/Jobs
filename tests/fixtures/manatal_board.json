@@ -1,0 +1,52 @@
+{
+ "count": 33,
+ "next": "https://www.careers-page.com/api/v1.0/c/manatal/jobs/?page=2&page_size=100",
+ "previous": null,
+ "results": [
+  {
+   "id": 452374,
+   "hash": "QW3VVV8W",
+   "organization_name": "Customer Success",
+   "position_name": "Business Development Consultant (Outbound)",
+   "description": "<p><strong><a href=\"https://www.manatal.com/\">Manatal</a></strong> is an HRTech software service (B2B SaaS) company headquartered in Bangkok, Thailand. Manatal is one of the fastest-growing start-ups ",
+   "country": "Thailand",
+   "state": "Bangkok",
+   "city": "Bangkok",
+   "address": "redacted",
+   "zipcode": "",
+   "location_display": "Bangkok, Bangkok, Thailand",
+   "is_salary_visible": false,
+   "is_pinned_in_career_page": false
+  },
+  {
+   "id": 1333846,
+   "hash": "L8597V4V",
+   "organization_name": "Customer Success",
+   "position_name": "Business Development Internship (12PM - 9PM)",
+   "description": "<p><a href=\"https://www.manatal.com/\">Manatal</a> is an HRTech software service (B2B SaaS) company headquartered in Bangkok, Thailand. It is one of the fastest-growing start-ups in the region, backed ",
+   "country": "Thailand",
+   "state": "Bangkok",
+   "city": "Bangkok",
+   "address": "redacted",
+   "zipcode": "",
+   "location_display": "Bangkok, Bangkok, Thailand",
+   "is_salary_visible": false,
+   "is_pinned_in_career_page": false
+  },
+  {
+   "id": 3268737,
+   "hash": "V666XX7R",
+   "organization_name": "Customer Success",
+   "position_name": "Business Development Internship (Outbound)",
+   "description": "<p><strong>Manatal</strong> is an AI based recruitment software company based in Bangkok, Thailand. Our mission is to offer easy-to-use software to empower small, medium, and large companies in their ",
+   "country": "Thailand",
+   "state": "Bangkok",
+   "city": "Bangkok",
+   "address": "redacted",
+   "zipcode": "",
+   "location_display": "Bangkok, Bangkok, Thailand",
+   "is_salary_visible": false,
+   "is_pinned_in_career_page": false
+  }
+ ]
+}

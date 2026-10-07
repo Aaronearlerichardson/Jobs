@@ -554,10 +554,11 @@ class Board:
         """Settle into `parts` each `handle.follow` part not yet known for
         `handle`: the URL its template redirects to, query and trailing "/"
         dropped (a scheme-less template is https). The error, reported
-        under `label`, when one does not answer 200; else None. One caller
+        under `label`, when none of a part's templates answers 200 (they are
+        tried in order); else None. One caller
         per handle settles at a time; one that waited takes what it settled."""
         key = (self.name, handle)
-        for name, tpl in self._hspec.follow.items():
+        for name, tpls in self._hspec.follow.items():
             if name in parts:
                 continue
             async with _SETTLING().hold(key):
@@ -565,10 +566,13 @@ class Board:
                 if name in settled:
                     parts[name] = settled[name]
                     continue
-                url = fields.fmt(tpl, parts.get)
-                url = url if re.match(r"(?i)^https?://", url) else f"https://{url}"
-                status, r, err = await http.request("GET", url, timeout=timeout)
-                if err or status != 200 or r is None:
+                for tpl in tpls:
+                    url = fields.fmt(tpl, parts.get)
+                    url = url if re.match(r"(?i)^https?://", url) else f"https://{url}"
+                    status, r, err = await http.request("GET", url, timeout=timeout)
+                    if not (err or status != 200 or r is None):
+                        break
+                else:
                     return http.failed(label, f"could not resolve the board's {name}")
                 parts[name] = re.sub(r"[?#].*$", "", r.url or url).rstrip("/")
                 _VARIANTS().setdefault(key, {})[name] = parts[name]

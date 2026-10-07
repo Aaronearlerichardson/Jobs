@@ -10,8 +10,10 @@ SPEC: dict[str, JSON] = {
     "detect": [{"re": [r'(?i)"widgetApiEndpoint"\s*:\s*"https?://([a-z0-9.-]+)/widgets"']}],
     "canary": {"name": "PPD", "handle": "jobs.thermofisher.com"},
     # The listing lives under a locale prefix only the board's root
-    # redirect names (/us/en, /global/en, ...).
-    "handle": {"follow": {"base": "{slug}"}},
+    # redirect names (/us/en, /global/en, ...). A tenant whose bare root
+    # answers 403 (Lilly, 2026-10) serves its locale paths: those are tried
+    # next, the page URL they land on being the base.
+    "handle": {"follow": {"base": ["{slug}", "{slug}/us/en", "{slug}/global/en"]}},
     # Last in this table: its URLs are the ones on the tenant's own host.
     "job_ref": {"re": r"^(https?://([^/?#]+)/[a-z]{2,8}/[a-z]{2}(?:[-_][A-Za-z]{2})?)"
                       r"/job/([^/?#]+)/?$",

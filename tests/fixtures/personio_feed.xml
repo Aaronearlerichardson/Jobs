@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<workzag-jobs>
+
+<position>
+    <id>2415353</id>
+    <subcompany>CLARK Holding SE</subcompany>
+    <office>Berlin</office>
+    <additionalOffices>
+        <office>Frankfurt am Main</office>
+    </additionalOffices>
+    <department>Group - Marketing</department>
+    <recruitingCategory>CLARK Business Roles</recruitingCategory>
+    <name>(Senior) CRM Manager (m/w/d)</name>
+    <jobDescriptions></jobDescriptions>
+    <employmentType>permanent</employmentType>
+    <seniority>experienced</seniority>
+    <schedule>full-time</schedule>
+    <yearsOfExperience>2-5</yearsOfExperience>
+    <occupation>direct_marketing_crm</occupation>
+    <occupationCategory>marketing_and_product</occupationCategory>
+    <createdAt>2025-11-04T08:40:52+00:00</createdAt>
+</position>
+
+<position>
+    <id>2377588</id>
+    <subcompany>Clark Germany GmbH</subcompany>
+    <office>Remote</office>
+    <department>DE - Pre-/After-Sales</department>
+    <recruitingCategory>CLARK Sales Roles</recruitingCategory>
+    <name>Digitaler Bestandskundenbetreuer (Outbound) (m/w/d)</name>
+    <jobDescriptions></jobDescriptions>
+    <employmentType>permanent</employmentType>
+    <seniority>entry-level</seniority>
+    <schedule>full-time</schedule>
+    <yearsOfExperience>1-2</yearsOfExperience>
+    <occupation>general_and_other_customer_support_and_client_care</occupation>
+    <occupationCategory>customer_support_and_client_care</occupationCategory>
+    <createdAt>2025-10-07T15:05:38+00:00</createdAt>
+</position>
+
+<position>
+    <id>342554</id>
+    <subcompany>Clark Germany GmbH</subcompany>
+    <office>Berlin</office>
+    <department>DE - Sales Life &amp; Health</department>
+    <recruitingCategory>CLARK Sales Roles</recruitingCategory>
+    <name>Sales Consultant (m/w/d)</name>
+    <jobDescriptions></jobDescriptions>
+    <employmentType>permanent</employmentType>
+    <seniority>experienced</seniority>
+    <schedule>full-time</schedule>
+    <yearsOfExperience>1-2</yearsOfExperience>
+    <occupation>insurance_agent_and_broker</occupation>
+    <occupationCategory>sales_and_business_development</occupationCategory>
+    <createdAt>2021-03-24T16:31:23+00:00</createdAt>
+</position>
+
+<position>
+    <id>2335782</id>
+    <subcompany>Clark Switzerland AG</subcompany>
+    <office>Zürich</office>
+    <department>CH - CLARK Sales</department>
+    <recruitingCategory>CLARK Sales Roles</recruitingCategory>
+    <name>Sales Consultant (m/w/d)</name>
+    <jobDescriptions></jobDescriptions>
+    <employmentType>permanent</employmentType>
+    <seniority>experienced</seniority>
+    <schedule>full-time</schedule>
+    <occupation>financial_products_sales_and_brokerage</occupation>
+    <occupationCategory>sales_and_business_development</occupationCategory>
+    <createdAt>2025-09-15T08:25:51+00:00</createdAt>
+</position>
+
+</workzag-jobs>

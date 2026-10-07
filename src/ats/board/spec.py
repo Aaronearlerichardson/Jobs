@@ -421,9 +421,12 @@ class Handle(_Adaptation):
                     "settled once per handle")
     accept: Accept = Field(Accept(),
                            description="The answers that settle a `try` value")
-    follow: dict[Str, Template] = Field(default_factory=dict,
-                                 description="A part that is the redirect target of "
-                                             "its URL template; settled once per handle")
+    follow: dict[Str, Annotated[tuple[Template, ...], BeforeValidator(_listed),
+                                Field(min_length=1)]] = Field(
+        default_factory=dict,
+        description="A part that is the redirect target of its URL template, or of the "
+                    "first of several that answers 200 (a root that refuses a client, "
+                    "then a known path); settled once per handle")
     prelude: tuple[Prelude, ...] = Field(
         (), description="Requests answering parts a listing or detail request needs (a token "
                         "its own page or API hands out), each part settled once per handle "

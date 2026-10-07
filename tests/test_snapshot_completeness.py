@@ -418,6 +418,21 @@ class TestEnginePagers:
         assert [len(rows) for rows in both] == [1, 1] and len(await b.listing("x.test")) == 1
         assert [c.url for c in calls] == ["https://x.test"] + ["https://x.test/us/en/list"] * 3
 
+    async def test_a_followed_part_falls_back_when_the_root_refuses(self, serve):
+        """`handle.follow` templates are tried in order: a root answering
+        403 (Lilly's Phenom) does not end the walk; the next path's page
+        URL is the base."""
+        async def reply(url, **kw):
+            if url == "https://x.test":
+                return fake_response(status=403)
+            return fake_response({"items": _items([0])} if "/list" in url else None,
+                                 url="https://x.test/us/en")
+        calls = serve(reply)
+        b = _engine("offset", handle={"follow": {"base": ["{slug}", "{slug}/us/en"]}},
+                    url="{base}/list", size=9, pages=1)
+        assert len(await b.listing("x.test")) == 1
+        assert [c.url for c in calls][:2] == ["https://x.test", "https://x.test/us/en"]
+
     async def test_a_handle_missing_a_part_names_no_board(self, serve):
         calls = serve(fake_response({"items": _items([0])}))
         b = _engine("offset", handle={"parts": ["host", "org"]}, size=9, pages=1)
