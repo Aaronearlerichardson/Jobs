@@ -239,9 +239,7 @@ class CompanyIn(TypedDict, total=False, closed=True):
     name: Annotated[str, MinLen(1)]
     ats: str | None
     slug: str | None
-    wd_tenant: str | None
-    wd_pod: int | str | None    # a slug's text part is written; INTEGER affinity stores an int
-    wd_site: str | None
+    handle: str | None          # a multi-part handle, its parts joined by the spec's `sep`
     careers_url: str | None
     local_job_count: int | None
     total_job_count: int | None
@@ -276,9 +274,7 @@ class CompanyRow(TypedDict, closed=True):
     name: str
     ats: str | None
     slug: str | None
-    wd_tenant: str | None
-    wd_pod: int | None
-    wd_site: str | None
+    handle: str | None
     careers_url: str | None
     local_job_count: int | None
     total_job_count: int | None
@@ -309,7 +305,7 @@ def is_watched(company: Mapping[str, object] | None) -> bool:
     return bool(company and company.get("watch"))
 
 
-# Closed, so `"wd_tenant" in x` narrows a `BoardHit | CompanyRow` to the row.
+# Closed, so `"handle" in x` narrows a `BoardHit | CompanyRow` to the row.
 #: A board's handle: a slug, or Workday's (tenant, pod, site).
 type Slug = str | tuple[str | int, ...] | None
 
@@ -335,13 +331,11 @@ class BoardCoords(TypedDict, total=False):
     that reads only these and takes either."""
     ats: ReadOnly[str | None]
     slug: ReadOnly[Slug]
-    wd_tenant: ReadOnly[str | None]
-    wd_pod: ReadOnly[int | str | None]
-    wd_site: ReadOnly[str | None]
+    handle: ReadOnly[str | None]
     careers_url: ReadOnly[str | None]
 
 
 #: The companies columns a board's handle can be spelled in (`handle.columns`
-#: of a config.BOARDS spec).
-HandleColumn = Literal["slug", "wd_tenant", "wd_pod", "wd_site", "careers_url"]
+#: of a config.BOARDS spec); `handle` holds a handle of several parts, `sep`-joined.
+HandleColumn = Literal["slug", "handle", "careers_url"]
 

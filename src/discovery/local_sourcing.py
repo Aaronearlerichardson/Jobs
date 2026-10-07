@@ -79,7 +79,7 @@ async def _hit_from_detection(name: str, det: Detection) -> BoardHit:
     The two fallback passes each wrote this out, and had drifted: only the
     websearch copy special-cased a `custom` board. Coordinates go through
     src.ats.coords now (the rule for every other board write in the repo),
-    which handles a multi-column handle, a plain slug and a careers-URL-only
+    which handles a multi-part handle, a plain slug and a careers-URL-only
     custom board without a branch per caller.
 
     A `reason` rides along only when nc == 0: a live board with nothing
@@ -390,8 +390,8 @@ async def _sample_titles(hit: BoardCoords, n: int = 6) -> list[str]:
         hyphenated tenants (Bioventus, United Therapeutics) were
         mission-scored with no titles at all.
     """
-    # A hit carries a Workday triple in `slug`; a row carries it in wd_*.
-    board = hit if "wd_tenant" in hit else coords.from_hit(hit)
+    # A hit carries a multi-part handle in `slug` as a tuple; a row in `handle`.
+    board = hit if "handle" in hit else coords.from_hit(hit)
     return await company_fetch.sample_titles(board, n)
 
 
@@ -502,7 +502,7 @@ async def score_and_upsert(db: store.Writer, hit: BoardHit, source: str,
     >>> from src.store import Writer, connect, upsert_company
     >>> conn = connect(":memory:")
     >>> _ = upsert_company(conn, {"name": "Fortrea", "ats": "workday",
-    ...     "wd_tenant": "fortrea", "wd_pod": 1, "wd_site": "Fortrea",
+    ...     "handle": "fortrea|1|Fortrea",
     ...     "active": 1, "total_job_count": 350, "mission_tier": "core",
     ...     "mission_score": 0.9})
     >>> async def add():
@@ -831,7 +831,7 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
         return None
 
     ats = found["ats"]
-    # The sniffed handle (a tuple where it spans several columns); the URL
+    # The sniffed handle (a tuple where it has several parts); the URL
     # labels the printout below when there is none.
     handle = found.get("triple", found.get("slug"))
     slug = handle or url
@@ -966,8 +966,8 @@ def _miss_row(m: BoardHit) -> CompanyIn:
     ...            "nc": 0, "count": 4, "reason": "no-local-jobs"})["ats"]
     'greenhouse'
     >>> _miss_row({"name": "X", "ats": "workday", "slug": ("t", 5, "s"),
-    ...            "reason": "no-local-jobs"})["wd_tenant"]
-    't'
+    ...            "reason": "no-local-jobs"})["handle"]
+    't|5|s'
 
     Only what was established is carried, never a NULL that could overwrite
     a stored coordinate:

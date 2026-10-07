@@ -453,7 +453,7 @@ async def probe_roster(limit: int | None = None, workers: int = 8) -> list[dict[
 
     with contextlib.closing(store.connect()) as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT name, ats, slug, careers_url, wd_tenant, wd_pod, wd_site "
+            "SELECT name, ats, slug, careers_url, handle "
             "FROM companies_effective WHERE active=1 AND ats IS NOT NULL ORDER BY name")]
 
     # Probed in bulk: the platforms whose spec sets `sweep`, cheap boards

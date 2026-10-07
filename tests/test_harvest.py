@@ -326,8 +326,7 @@ async def test_harvest_board_stops_hydrating_a_host_that_stopped_answering(
     the remaining rows each burned two doomed requests."""
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    c = _company(conn, "Acme", ats="workday", wd_tenant="acme", wd_pod=5,
-                 wd_site="Ext")
+    c = _company(conn, "Acme", ats="workday", handle="acme|5|Ext")
     board = [_job(i) for i in range(40)]
     _fetches(monkeypatch, lambda comp: board)
     calls = []
@@ -349,8 +348,7 @@ async def test_harvest_board_reuses_stored_bodies_and_caps_hydration(
         tmp_path, monkeypatch):
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    c = _company(conn, "Acme", ats="workday", wd_tenant="acme", wd_pod=5,
-                 wd_site="Ext")
+    c = _company(conn, "Acme", ats="workday", handle="acme|5|Ext")
     # 3 rows already carry a body in the store (an earlier harvest).
     for i in range(3):
         store.upsert_job(conn, {"job_id": f"gh_acme_{i}", "company_id": c["id"],
@@ -537,7 +535,7 @@ async def test_harvest_board_partial_fetch_stores_rows_but_closes_nothing(
     no_pacing(monkeypatch)
     db = tmp_path / "s.db"
     conn = store.connect(db)
-    c = _company(conn, "Acme", ats="workday", wd_tenant="acme", wd_pod=5, wd_site="Site")
+    c = _company(conn, "Acme", ats="workday", handle="acme|5|Site")
     store.upsert_job(conn, {"job_id": "wd_acme_old", "company_id": c["id"],
                             "title": "Still open", "track": "local"})
 
@@ -811,8 +809,7 @@ async def test_harvest_summary_names_boards_whose_name_is_just_their_own_slug(
     db = tmp_path / "s.db"
     conn = store.connect(db)
     store.upsert_company(conn, {"name": "Xyz", "ats": "workday",
-                                "wd_tenant": "xyz", "wd_pod": 5,
-                                "wd_site": "Ext", "total_job_count": 5,
+                                "handle": "xyz|5|Ext", "total_job_count": 5,
                                 "source": SLUG_NAME_SOURCE})
     store.upsert_company(conn, {"name": "Bigco", "ats": "lever",
                                 "slug": "bigco", "total_job_count": 50,

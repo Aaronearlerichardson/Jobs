@@ -33,7 +33,7 @@ def fresh_accounting():
 #  Workday: a scoped, ceilinged offset pager (config.BOARDS["workday"])        #
 # --------------------------------------------------------------------------- #
 
-WD = {"ats": "workday", "wd_tenant": "acme", "wd_pod": 5, "wd_site": "Site"}
+WD = {"ats": "workday", "handle": "acme|5|Site"}
 
 
 def _posting(loc, path, title="Data Engineer"):
@@ -209,7 +209,7 @@ class TestWorkdayScope:
         settled for the pull and a stored row's detail, whose remote type
         rides along as a hint."""
         calls = cxs(_postings(3))
-        company = {**WD, "wd_tenant": "vhr-unither"}
+        company = {**WD, "handle": "vhr-unither|5|Site"}
         rows = await board_for("workday").whole_board(company)
         job = await company_fetch.hydrate_description(
             {"ats": "workday", "url": rows[0]["url"], "description": "", "location": ""},

@@ -483,8 +483,7 @@ async function refreshPipelineDerived() {
    ("Oncology", "Job Location", "Who You Are") and four of them landed on the
    roster with real boards. Candidates wait here instead, uncrawled. */
 function reviewBoard(c) {
-  if (c.ats === "workday") return esc(`${c.wd_tenant || "?"} / ${c.wd_site || "?"}`);
-  return esc(c.slug || c.careers_url || "—");
+  return esc(c.slug || c.handle || c.careers_url || "—");
 }
 
 function renderReview() {

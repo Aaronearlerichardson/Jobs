@@ -419,7 +419,7 @@ BOARDS: dict[str, dict[str, JSON]] = {
                       "hint": [[1, "myworkdayjobs"], [8, "workday"]]},
         # Not in the lightweight sweep: boards run to thousands of rows and
         # are pulled scoped to the locality.
-        "handle": {"columns": ["wd_tenant", "wd_pod", "wd_site"],
+        "handle": {"columns": ["handle"],
                    "parts": ["tenant", "pod", "site"],
                    "fold": True,
                    "try": {"cxs_tenant": ["{tenant}", "{tenant|underscore}"]},

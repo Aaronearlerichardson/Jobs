@@ -461,8 +461,7 @@ def _retarget(conn: sqlite3.Connection, name: str, row: CompanyIn) -> None:
     drops None values so it can never erase a stored one -- which would
     leave the dead board's slug beside a new Workday triple -- so the
     coordinate columns are cleared first."""
-    conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, "
-                 "wd_pod=NULL, wd_site=NULL WHERE name=?", (name,))
+    conn.execute("UPDATE companies SET slug=NULL, handle=NULL WHERE name=?", (name,))
     store.upsert_company(conn, row)
 
 

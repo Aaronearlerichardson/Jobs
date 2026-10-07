@@ -179,7 +179,7 @@ def scan_hit(text: str | None) -> tuple[str, Slug] | None:
 
 def _handle(ats: str, slug: Slug) -> str | None:
     """The engine handle for a resolver hit's slug (a tuple where the
-    board spans several columns); None when a column is empty."""
+    handle has several parts); None when a part is empty."""
     return cast(Board, board_for(ats)).handle(coords.columns(ats, slug))
 
 

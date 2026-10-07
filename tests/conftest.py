@@ -149,12 +149,14 @@ def loop_blocks(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _outputs_to_tmp(tmp_path, monkeypatch):
-    """Session logs and digest files never land in the real data dir
-    during tests: the webapp op runner opens a log per op, and a harvest
-    pass rewrites every roster track's digest."""
+    """Session logs, digest files and the store never land in the real data
+    dir during tests: the webapp op runner opens a log per op, a harvest
+    pass rewrites every roster track's digest, and a test that opens the
+    default store would migrate the live jobs.db."""
     monkeypatch.setattr(_session_log, "_log_dir",
                         lambda: tmp_path / "session-logs")
     monkeypatch.setattr(_config, "REPORT_DIR", tmp_path / "job_reports")
+    monkeypatch.setattr(_config, "STORE_DB_PATH", tmp_path / "jobs.db")
 
 
 @pytest.fixture(autouse=True)

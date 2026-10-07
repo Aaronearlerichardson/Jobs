@@ -920,7 +920,7 @@ def requeue_reasons(conn: sqlite3.Connection, tracks: Iterable[RuntimeTrack] | N
 
     >>> conn = store.connect(":memory:")
     >>> cid = store.upsert_company(conn, {"name": "Acme", "ats": "workday",
-    ...                                   "wd_tenant": "acme", "mission_score": 0.9})
+    ...                                   "handle": "acme", "mission_score": 0.9})
     >>> for jid, loc in [("a", "2 Locations"), ("b", "Ulaanbaatar, Mongolia"),
     ...                  ("c", "Ulaanbaatar, Mongolia"), ("d", "United States"),
     ...                  ("e", "Remote - Philippines")]:

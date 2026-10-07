@@ -378,9 +378,42 @@ class Board:
     # --- handles and URLs --------------------------------------------------
 
     def handle(self, company: BoardCoords) -> str | None:
-        """The handle string for a store row, or None when a column is empty."""
+        """The handle string for a store row, or None when a part is empty.
+
+        A multi-part handle is stored as the very string its parts join to,
+        so every request built from it is unchanged by how it is stored:
+
+        >>> wd = BOARDS["workday"]
+        >>> wd.handle({"handle": "acme|5|External"})
+        'acme|5|External'
+        >>> parts = dict(zip(wd.spec.handle.names, "acme|5|External".split("|")), cxs_tenant="acme")
+        >>> fields.fmt(wd.listing_spec.url, parts.get)
+        'https://acme.wd5.myworkdayjobs.com/wday/cxs/acme/External/jobs'
+        >>> wd.handle({"handle": "acme||"}), wd.handle({"handle": "acme"})
+        (None, None)
+        """
         vals = [str(company.get(c) or "") for c in self._columns]
+        if self.multi_column:
+            vals = vals[0].split(self._sep)
+            if len(vals) != len(self._part_names):
+                return None
         return self._sep.join(vals) if all(vals) else None
+
+    def split(self, text: str | None) -> tuple[str | int, ...] | None:
+        """A `sep`-joined multi-part handle as the tuple `detect` returns,
+        each part given the first `detect` entry's transforms; None unless
+        every part is there.
+
+        >>> BOARDS["workday"].split("Acme|5|External")
+        ('acme', 5, 'External')
+        >>> BOARDS["workday"].split("acme||") is None
+        True
+        """
+        raw = (text or "").split(self._sep)
+        kinds = next((d.transform for d in self.spec.detect if d.transform), (None,) * len(raw))
+        done = [p if k is None else fields.TRANSFORMS[k](p) for p, k in zip(raw, kinds)]
+        parts = tuple(p for p in done if isinstance(p, (str, int)) and p != "")
+        return parts if len(raw) == len(parts) == len(self._part_names) else None
 
     def _parts(self, handle: str) -> dict[str, str]:
         parts = dict(zip(self._part_names, handle.split(self._sep)))
@@ -428,9 +461,9 @@ class Board:
 
     @property
     def multi_column(self) -> bool:
-        """Whether the handle spans several store columns (a hit carries
-        it as a tuple, one value per column)."""
-        return len(self._columns) > 1
+        """Whether the handle's parts are stored `sep`-joined in the
+        `handle` column (a hit carries it as a tuple, one value per part)."""
+        return "handle" in self._columns
 
     def detect(self, blob: str,
                accept: Callable[[str], bool]) -> Slug:
@@ -438,7 +471,7 @@ class Board:
         names, or None: the first match of an entry's first regex, every
         other regex matching too, no part in its `blocklist`, and a first
         part `accept(part)` allows; the parts transformed, a tuple where
-        the handle spans several columns, else joined by `sep`."""
+        the handle is `multi_column`, else joined by `sep`."""
         for regexes, transforms, blocked in self._detectors:
             rest = [rx.search(blob) for rx in regexes[1:]]
             if not all(rest):

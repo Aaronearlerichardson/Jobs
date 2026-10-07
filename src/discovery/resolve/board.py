@@ -181,7 +181,7 @@ async def resolve_board_sniff_first(name: str, careers_url: str = "",
     itself (``via='sniff'``).
 
     Returns {name, ats, slug, careers_url, count, nc, via} or None. ``slug`` is
-    a tuple where the handle spans several store columns (Workday's (tenant,
+    a tuple where the handle has several parts (Workday's (tenant,
     pod, site)), the GUID/slug otherwise, None for a custom self-hosted board."""
     return (await _resolve(name, careers_url, websearch))[0]
 

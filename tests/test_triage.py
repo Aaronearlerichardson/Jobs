@@ -21,14 +21,13 @@ SWEEP = "remote-neural"
 def _wd_company(conn, name="Wd"):
     """A Workday company, mission-scored so the location tests below never
     reach the mission scorer."""
-    return _company(conn, name, ats="workday", wd_tenant=name.lower(),
-                    wd_pod=5, wd_site="External",
+    return _company(conn, name, ats="workday", handle=f"{name.lower()}|5|External",
                     mission_tier="core-mission", mission_score=0.9)
 
 
 def _wd_url(jid):
     """A URL the workday spec's job_ref reads as a Workday job page (the
-    company row's own wd_tenant/pod/site win over whatever sits in the
+    company row's own handle parts win over whatever sits in the
     URL; only the /job/<path> tail is read from it)."""
     return f"https://acme.wd5.myworkdayjobs.com/External/job/{jid}"
 

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from conftest import iso_days_ago
 
 from src import config
+from src.ats.board import BOARDS
 import src.match.locality as locality
 import src.store as store
 from src.rows import (BoardCoords, CompanyIn, CompanyRow, FitColumns, HandleColumn, JobIn, JobRow,
@@ -200,14 +201,45 @@ class TestSchema:
         cols = {r[1] for r in db.execute("PRAGMA table_info(jobs)")}
         assert set(JobIn.__annotations__) <= cols
 
+    def test_a_version_7_store_gets_its_multi_part_handles_and_replays_safely(self, tmp_path):
+        path = tmp_path / "v7.db"
+        conn = store.connect(path)
+        view = next(s for s in _statements((MIGRATIONS_DIR / "0006_view_own_tags.sql").read_text())
+                    if "CREATE VIEW companies_effective" in s)
+        for stmt in ("DROP VIEW companies_effective", "ALTER TABLE companies DROP COLUMN handle",
+                     view, "PRAGMA user_version = 7"):
+            conn.execute(stmt)
+        conn.executemany("INSERT INTO companies (name, ats, slug, wd_tenant, wd_pod, wd_site) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         [("A", "workday", None, "acme", 5, "External"),
+                          ("B", "workday", None, "b", None, None),
+                          ("C", "lever", "c", "stale", 1, "s")])
+        conn.commit()
+        deprecated = "SELECT wd_tenant, wd_pod, wd_site FROM companies ORDER BY id"
+        before = [tuple(r) for r in conn.execute(deprecated)]
+        conn.close()
+        for _ in range(2):          # the second pass replays a store already migrated
+            conn = store.connect(path)
+            assert [tuple(r) for r in conn.execute(deprecated)] == before
+            assert [r[0] for r in conn.execute("SELECT handle FROM companies_effective ORDER BY id")] \
+                == ["acme|5|External", "b||", None]
+            rows = [store.as_company(r) for r in conn.execute(
+                "SELECT * FROM companies_effective ORDER BY id")]
+            wd = BOARDS["workday"]      # the very handle string the old columns joined to
+            assert wd.handle(rows[0]) == "|".join(map(str, before[0]))
+            assert (wd.split(rows[0]["handle"]), wd.handle(rows[1])) == (("acme", 5, "External"), None)
+            conn.execute("PRAGMA user_version = 7")
+            conn.commit()
+            conn.close()
+
     def test_the_company_row_model_is_exactly_the_companies_columns(self, db):
-        cols = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
+        cols = {r[1] for r in db.execute("PRAGMA table_info(companies_effective)")}
         assert set(CompanyRow.__annotations__) == cols
-        assert {r[1] for r in db.execute("PRAGMA table_info(companies_effective)")} == cols
+        table = {r[1] for r in db.execute("PRAGMA table_info(companies)")}
+        assert table - cols == {"wd_tenant", "wd_pod", "wd_site"}   # deprecated by 0008
         assert set(CompanyIn.__annotations__) < set(CompanyRow.__annotations__)
         writer, reader = get_type_hints(CompanyIn), get_type_hints(CompanyRow)
-        assert all(writer[k] == reader[k] for k in writer if k != "wd_pod"),             "CompanyIn and CompanyRow disagree"
-        assert writer["wd_pod"] == reader["wd_pod"] | str    # a slug's text part, stored as an int
+        assert all(writer[k] == reader[k] for k in writer), "CompanyIn and CompanyRow disagree"
         assert CompanyRow.__required_keys__ == set(CompanyRow.__annotations__)
         assert set(get_args(HandleColumn)) <= cols
         assert set(BoardCoords.__annotations__) == {"ats", *get_args(HandleColumn)}
@@ -460,14 +492,14 @@ class TestImportCompanies:
         ({"ats": "lever"}, (1,), "value_error"),
         ({"name": ""}, (1, "name"), "string_too_short"),
         ({"name": "B", "bogus": 1}, (1, "bogus"), "extra_forbidden"),
-        ({"name": "B", "wd_pod": 5.5}, (1, "wd_pod"), "int_from_float"),
+        ({"name": "B", "total_job_count": 5.5}, (1, "total_job_count"), "int_from_float"),
         ({"name": "B", "notes": 123}, (1, "notes"), "string_type"),
     ])
     def test_a_bad_row_is_named_and_nothing_is_written(self, db, tmp_path, row, loc, kind):
         with pytest.raises(ValidationError) as err:
             self._load(db, tmp_path, [{"name": "Good"}, row])
         errors = [(e["loc"][:len(loc)], e["type"]) for e in err.value.errors()]
-        assert errors[:1] == [(loc, kind)]      # wd_pod's int | str reports one error per branch
+        assert errors[:1] == [(loc, kind)]
         assert db.execute("SELECT COUNT(*) FROM companies").fetchone()[0] == 0
 
     def test_every_bad_row_is_listed_at_once(self, db, tmp_path):
@@ -481,8 +513,8 @@ class TestImportCompanies:
         assert db.execute("SELECT active FROM companies").fetchone()[0] == 1
 
     def test_numeric_strings_and_whole_floats_load_as_integers(self, db, tmp_path):
-        self._load(db, tmp_path, [{"name": "A", "wd_pod": "5", "local_job_count": 5.0}])
-        assert db.execute("SELECT wd_pod, local_job_count FROM companies"
+        self._load(db, tmp_path, [{"name": "A", "total_job_count": "5", "local_job_count": 5.0}])
+        assert db.execute("SELECT total_job_count, local_job_count FROM companies"
                           ).fetchone()[:] == (5, 5)
 
     def test_the_id_and_the_crawl_schedule_are_accepted_and_ignored(self, db, tmp_path):
@@ -1405,8 +1437,7 @@ class TestDedupCompaniesRenamesJobs:
     showing both names."""
 
     def _wd(self, name, **extra):
-        return {"name": name, "ats": "workday", "wd_tenant": "redhat",
-                "wd_pod": 5, "wd_site": "jobs", **extra}
+        return {"name": name, "ats": "workday", "handle": "redhat|5|jobs", **extra}
 
     def test_merged_rows_take_the_kept_company_name(self, db):
         keep = store.upsert_company(db, self._wd("Red Hat (IBM subsidiary)",
@@ -1440,11 +1471,9 @@ class TestCompanyByBoard:
 
     def test_workday_triple_is_the_key(self, db):
         store.upsert_company(db, {"name": "NVIDIA", "ats": "workday",
-                                  "wd_tenant": "nvidia", "wd_pod": 5,
-                                  "wd_site": "NVIDIAExternalCareerSite"})
-        same = {"ats": "workday", "wd_tenant": "nvidia", "wd_pod": 5,
-                "wd_site": "NVIDIAExternalCareerSite"}
-        other_site = dict(same, wd_site="Internal")
+                                  "handle": "nvidia|5|NVIDIAExternalCareerSite"})
+        same = {"ats": "workday", "handle": "nvidia|5|NVIDIAExternalCareerSite"}
+        other_site = dict(same, handle="nvidia|5|Internal")
         assert store.company_by_board(db, same)["name"] == "NVIDIA"
         assert store.company_by_board(db, other_site) is None
 
@@ -1712,8 +1741,8 @@ class TestPlanBoardVerdict:
     def test_a_replaced_board_with_an_override_inherits_the_employers_verdict(self, db):
         a, _ = store.add_board(db, {"name": "Acme", "ats": "lever", "slug": "a"})
         store.set_mission(db, a, "core", 0.9, "the lab")
-        b, _ = store.add_board(db, {"name": "Acme", "ats": "workday", "wd_tenant": "acme",
-                                    "wd_pod": 5, "wd_site": "ext"})
+        b, _ = store.add_board(db, {"name": "Acme", "ats": "workday",
+                                    "handle": "acme|5|ext"})
         store.set_board_mission(db, b, "other", 0.1, "the hospital division")
         db.execute("UPDATE companies SET miss_reason='board-dead' WHERE id=?", (b,))
         plan = store.plan_board(db, {"name": "Acme", "ats": "ashby", "slug": "z"})

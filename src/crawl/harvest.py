@@ -197,7 +197,7 @@ def plan(conn: sqlite3.Connection, only: Collection[str] | None = None,
     ...                    ("Old", "lever", 5, "2026-09-09T08:00:00")]:
     ...     _ = store.upsert_company(conn, {
     ...         "name": n, "ats": a, "slug": n.lower(), "total_job_count": t,
-    ...         "wd_tenant": "big", "wd_pod": 5, "wd_site": "Ext"})
+    ...         "handle": "big|5|Ext"})
     ...     conn.execute("UPDATE companies SET last_harvested_at=? WHERE name=?",
     ...                  (h, n)).rowcount
     1

@@ -65,8 +65,7 @@ def set_board_mission(conn: sqlite3.Connection, company_id: int, tier: str | Non
     >>> from src.store import add_board
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "a"})
-    >>> b, _ = add_board(conn, {"name": "Acme", "ats": "workday", "wd_tenant": "x",
-    ...                         "wd_pod": 1, "wd_site": "s"})
+    >>> b, _ = add_board(conn, {"name": "Acme", "ats": "workday", "handle": "x|1|s"})
     >>> set_mission(conn, a, "core", 0.9)
     >>> set_board_mission(conn, b, "other", 0.1, "the hospital division")
     >>> [r[:] for r in conn.execute("SELECT id = ?, mission_tier, mission_score "

@@ -34,8 +34,8 @@ def detect(text: str, final_url: str = "", leads: bool = True,
     """Scan text + final URL (HTML entities decoded) for an ATS signature.
 
     Returns (kind, ats, slug) or None: kind "fetchable" for a spec with a
-    listing, else "lead"; the slug a tuple where the handle spans several
-    store columns (Workday's tenant, pod and site), else a string. The
+    listing, else "lead"; the slug a tuple where the handle has several
+    parts in the `handle` column (Workday's tenant, pod and site), else a string. The
     specs are tried in config.BOARDS order, each over its `detect` entries
     (`Board.detect`); a fetchable detection's first part is at least two
     characters and not in BAD_SLUGS, a lead's at least two. `leads=False`

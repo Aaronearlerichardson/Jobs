@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING
 from src import store
 from src.ats import coords
 from src.ats.board import board_for
-from src.ats.board.fields import TRANSFORMS
 from src.ats.registry import seed_tag_for
 from src.ats.signatures import detect, pack
 from src.rows import BoardHit, CompanyIn, FetchedJob, Slug
@@ -33,10 +32,9 @@ if TYPE_CHECKING:
 
 def _candidate_hit(c: Candidate) -> BoardHit | None:
     """A confirmed Candidate as the resolver-shaped hit dict the store write
-    path takes, or None when its coordinates are malformed. A handle
-    spanning several store columns ('t|p|s', Workday's) goes back to the
-    tuple src.ats.coords spells out as columns, each part typed as the
-    spec's `detect` types it (Workday's pod an int).
+    path takes, or None when its coordinates are malformed. A multi-part
+    handle ('t|p|s', Workday's) goes back to the tuple a hit carries
+    (Board.split: each part typed as `detect` types it, Workday's pod an int).
 
     What counts as coordinates is ``src.store.board_key``, the store's own
     rule for which column identifies a board -- the slug for most families,
@@ -46,19 +44,14 @@ def _candidate_hit(c: Candidate) -> BoardHit | None:
     its URL, as a malformed one (src.discovery.resolve.board returns exactly
     that for a real careers page on no known platform).
     """
-    # The handle: a string, or the tuple of a multi-column one.
+    # The handle: a string, or the tuple of a multi-part one.
     text = (c.slug or "").strip() or None
     slug: Slug = text
     board = board_for(c.ats)
     if board and board.multi_column:
-        parts = (text or "").split(board.spec.handle.sep)
-        kinds = next((d.transform for d in board.spec.detect if d.transform),
-                     (None,) * len(parts))
-        values = tuple(TRANSFORMS[k](p) if k else p
-                       for p, k in zip(parts, kinds))
-        if len(parts) != len(board.spec.handle.columns) or any(p in (None, "") for p in values):
+        slug = board.split(text)
+        if slug is None:
             return None
-        slug = tuple(p for p in values if p is not None)
     hit: BoardHit = {"name": c.name, "ats": c.ats, "slug": slug,
                      "careers_url": c.careers_url or None,
                      "count": c.job_count, "nc": c.nc}

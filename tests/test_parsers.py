@@ -962,7 +962,7 @@ class TestPastedNamePreview:
     async def test_states_split_new_tracked_blocked_and_missed(self, monkeypatch, db):
         import src.store as store
         store.upsert_company(db, {"name": "IQVIA", "ats": "workday",
-                                  "wd_tenant": "iqvia"})
+                                  "handle": "iqvia|5|IQVIA"})
         store.block_name(db, "Oncology", "not a company")
         store.record_miss(db, "Fennec Pharmaceuticals", "no-board-found")
         self._wire(monkeypatch, db)
@@ -1230,7 +1230,7 @@ class TestScoreAndUpsert:
                     if c["name"] == "Beta Bio")
         assert (beta["tags"], beta["review"]) == (tags.LOCAL, "pending")
 
-    async def test_a_workday_triple_lands_in_the_wd_columns(self, monkeypatch, db):
+    async def test_a_workday_triple_lands_in_the_handle_column(self, monkeypatch, db):
         import src.store as store
         self._wire(monkeypatch)
         await self._upsert(
@@ -1238,8 +1238,7 @@ class TestScoreAndUpsert:
                  "slug": ("acme", 5, "External")}, source="ats_dork")
         stored = store.get_companies(db, active_only=False)[0]
         assert stored["slug"] is None
-        assert (stored["wd_tenant"], stored["wd_pod"], stored["wd_site"]) \
-            == ("acme", 5, "External")
+        assert stored["handle"] == "acme|5|External"
 
 
 class TestScoreMissionsHonoursTheReviewQueue:

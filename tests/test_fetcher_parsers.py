@@ -954,7 +954,7 @@ class TestADeadEndpointIsNeverAnException:
     #: One registry row every fetcher can read its coordinates from; the
     #: ATSes whose slug is structured get their own.
     ROW = {"slug": "acme", "careers_url": "https://acme.test/careers",
-           "wd_tenant": "acme", "wd_pod": 5, "wd_site": "External"}
+           "handle": "acme|5|External"}
     SLUGS = {"adp": "cid|ccid", "ultipro": "CODE|GUID",
              "infor": "css-acme-prd.inforcloudsuite.com|42"}
     FEEDS = {

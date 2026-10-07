@@ -405,10 +405,11 @@ class Handle(_Adaptation):
     ADAPTATIONS = ("try_", "accept", "prelude")
     columns: tuple[HandleColumn, ...] = Field(
         config.DEFAULT_HANDLE_COLUMNS, min_length=1,
-        description="The store columns naming the board")
+        description="The store columns naming the board; `handle` alone holds a handle of "
+                    "several parts, `sep`-joined (a hit carries it as a tuple)")
     parts: tuple[Str, ...] = Field((), description="The handle's pieces' names; default the "
                                                    "columns")
-    sep: Str = Field("|", description="Joins the columns into one handle string")
+    sep: Str = Field("|", description="Joins the parts into one handle string")
     fold: Bool = Field(False, description="The host answers a handle's case alike, so boards "
                                           "differing only in case are one board")
     try_: dict[Str, Annotated[tuple[Template, ...], Field(min_length=1)]] = Field(
@@ -431,6 +432,13 @@ class Handle(_Adaptation):
         taken = [*self.names, *self.follow, *self.try_, *(n for pre in self.prelude for n in pre.set)]
         if len(taken) != len(set(taken)):
             raise ValueError("handle.prelude: a part is settled by one source")
+        return self
+
+    @model_validator(mode="after")
+    def _handle_alone(self) -> Self:
+        """The `handle` column holds the whole handle."""
+        if "handle" in self.columns and self.columns != ("handle",):
+            raise ValueError("handle.columns: the `handle` column stands alone")
         return self
 
     @property

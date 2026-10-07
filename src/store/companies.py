@@ -30,7 +30,7 @@ from collections.abc import Callable, Collection, Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import EllipsisType
-from typing import Annotated, Literal, NamedTuple, TypedDict, Unpack, cast
+from typing import Annotated, Literal, NamedTuple, TypedDict, Unpack, cast, get_args
 
 from pydantic import AfterValidator, BeforeValidator, ConfigDict, TypeAdapter
 
@@ -81,7 +81,7 @@ class BoardPlan(NamedTuple):
 
 # The columns that name a board (the handle columns of every ATS spec, plus
 # the ats itself).
-_COORD_COLUMNS = frozenset({"ats", "slug", "wd_tenant", "wd_pod", "wd_site", "careers_url"})
+_COORD_COLUMNS = frozenset({"ats", *get_args(HandleColumn)})
 
 
 def _board_gone(row: CompanyRow) -> bool:
@@ -305,8 +305,7 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
     >>> conn = connect(":memory:")
     >>> a, _ = add_board(conn, {"name": "Acme", "ats": "lever", "slug": "acme",
     ...                         "mission_tier": "core", "mission_score": 0.9, "tags": "local"})
-    >>> b, how = add_board(conn, {"name": "Acme", "ats": "workday", "wd_tenant": "acme",
-    ...                           "wd_pod": 5, "wd_site": "ext"})
+    >>> b, how = add_board(conn, {"name": "Acme", "ats": "workday", "handle": "acme|5|ext"})
     >>> how, conn.execute("SELECT name, mission_score, tags FROM companies_effective WHERE id=?",
     ...                   (b,)).fetchone()[:]
     ('sibling', ('Acme (workday)', 0.9, None))
@@ -324,8 +323,7 @@ def add_board(conn: sqlite3.Connection, company: CompanyIn) -> tuple[int | None,
         return _write_company(conn, company, plan.employer_id), plan.action
     row = cast(CompanyRow, row)
     if plan.action == "replace":
-        conn.execute("UPDATE companies SET slug=NULL, wd_tenant=NULL, wd_pod=NULL, "
-                     "wd_site=NULL WHERE id=?", (row["id"],))
+        conn.execute("UPDATE companies SET slug=NULL, handle=NULL WHERE id=?", (row["id"],))
     return _write_company(conn, {**company, "name": row["name"]}), plan.action
 
 
@@ -664,21 +662,21 @@ def board_key(r: BoardCoords) -> BoardKey | None:
     and the careers_url IS the board identity. Keying these on slug merged
     Bayer into Sonova (both performancemanager5).
 
-    >>> board_key({"ats": "workday", "wd_tenant": "redhat", "wd_pod": 5, "wd_site": "jobs"})
-    ('workday', 'redhat', 5, 'jobs')
-    >>> board_key({"ats": "icims", "slug": "globalcareers-sas", "wd_tenant": None})
+    >>> board_key({"ats": "workday", "handle": "redhat|5|jobs"})
+    ('workday', 'redhat|5|jobs')
+    >>> board_key({"ats": "icims", "slug": "globalcareers-sas", "handle": None})
     ('icims', 'globalcareers-sas')
-    >>> board_key({"ats": "custom", "slug": None, "wd_tenant": None,
+    >>> board_key({"ats": "custom", "slug": None, "handle": None,
     ...            "careers_url": "https://x.com/careers/"})
     ('custom', 'https://x.com/careers')
-    >>> board_key({"ats": None, "slug": None, "wd_tenant": None}) is None
+    >>> board_key({"ats": None, "slug": None, "handle": None}) is None
     True
 
     A site's case is not identity: Workday answers `External` and `external`
     alike, and the roster held 7 boards twice that way (2026-10-06).
 
-    >>> a = {"ats": "workday", "wd_tenant": "aah", "wd_pod": 5, "wd_site": "External"}
-    >>> board_key(a) == board_key({**a, "wd_tenant": "AAH", "wd_site": "external"})
+    >>> a = {"ats": "workday", "handle": "aah|5|External"}
+    >>> board_key(a) == board_key({**a, "handle": "AAH|5|external"})
     True
 
     Only a host that answers case alike (handle `fold`) is folded; another's
@@ -941,9 +939,6 @@ def _checked(row: CompanyIn) -> CompanyIn:
         raise ValueError("name is required")
     if row.get("review") not in (None, "pending", "confirmed"):
         raise ValueError("review is 'pending' or 'confirmed'")
-    pod = row.get("wd_pod")
-    if isinstance(pod, str) and not pod.isdecimal():    # CompanyIn.wd_pod admits text; the column is INTEGER
-        raise ValueError("wd_pod is a number")
     return row
 
 
