@@ -131,6 +131,15 @@ class TestSeededResolution:
         assert await resolve_board.classify_miss("Eli Lilly") == "ats-unsupported:taleo"
         assert seen == ["", "https://lilly.com/", "https://careers.lilly.com/"]
 
+    async def test_a_looked_up_domain_that_answers_names_the_miss(self, monkeypatch):
+        async def classify(name, curl):
+            return ("no-board-found:site-only-no-careers" if curl == "https://lilly.com/"
+                    else "no-board-found:domain-unreachable")
+
+        monkeypatch.setattr(resolve_board, "_classify", classify)
+        assert (await resolve_board.classify_miss("Eli Lilly")
+                == "no-board-found:site-only-no-careers")
+
 
 class TestDirectoryStep:
     @pytest.fixture(autouse=True)

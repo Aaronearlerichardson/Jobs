@@ -311,11 +311,33 @@ async def classify_miss(name: str, careers_url: str = "") -> str:
     first = await _classify(name, careers_url)
     if not first.startswith("no-board-found"):
         return first
+    misses = [first]
     for seed in await _seeds(name, careers_url):
         reason = await _classify(name, seed)
         if not reason.startswith("no-board-found"):
             return reason
-    return first
+        misses.append(reason)
+    return _closest_miss(misses)
+
+
+def _closest_miss(misses: list[str]) -> str:
+    """The "no-board-found" reason of the page that got furthest, the first
+    on a tie: a looked-up domain that answers beats a guess that did not.
+
+    >>> _closest_miss(["no-board-found:domain-unreachable",
+    ...                "no-board-found:site-only-no-careers"])
+    'no-board-found:site-only-no-careers'
+    >>> _closest_miss(["no-board-found", "no-board-found:wrong-domain"])
+    'no-board-found:wrong-domain'
+    >>> _closest_miss(["no-board-found:wrong-domain", "no-board-found"])
+    'no-board-found:wrong-domain'
+    """
+    reached = ("careers-page-no-ats", "site-only-no-careers", "wrong-domain", "domain-unreachable")
+
+    def depth(reason: str) -> int:
+        sub = reason.partition(":")[2]
+        return reached.index(sub) if sub in reached else len(reached)
+    return min(misses, key=depth)
 
 
 async def _classify(name: str, careers_url: str) -> str:

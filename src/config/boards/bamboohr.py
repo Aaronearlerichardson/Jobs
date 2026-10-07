@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from src.rows import JSON
 
+# A posting the board marks remote, by flag or by location type.
+REMOTE: JSON = {"any": [{"truthy": "isRemote"}, {"eq": ["locationType", "1"]}]}
+
 SPEC: dict[str, JSON] = {
     "detect": [{"host": "bamboohr.com", "re": [r"(?i)([a-z0-9-]+)\.bamboohr\.com"]}],
     "canary": {"name": "EMS Biomedical", "handle": "ems"},
@@ -22,14 +25,13 @@ SPEC: dict[str, JSON] = {
             "url": {"format": "https://{slug}.bamboohr.com/careers/{id}"},
             "location": {"first": [
                 {"format": "Remote / {_loc}",
-                 "when": {"all": [{"any": [{"truthy": "isRemote"}, {"eq": ["locationType", "1"]}]},
+                 "when": {"all": [REMOTE,
                                   {"truthy": "_loc"}]}},
                 {"const": "Remote",
-                 "when": {"any": [{"truthy": "isRemote"}, {"eq": ["locationType", "1"]}]}},
+                 "when": REMOTE},
                 "_loc"], "default": "Unknown"},
             "remote_hint": {"const": "bamboohr:locationType",
-                            "when": {"any": [{"truthy": "isRemote"},
-                                             {"eq": ["locationType", "1"]}]}},
+                            "when": REMOTE},
             "department": "departmentLabel",
         },
     },

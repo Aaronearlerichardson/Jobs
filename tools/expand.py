@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Collection
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from src import config, runstate  # noqa: E402
 
 from src.claude.api import ExpandReply, LocationReply, expand_location, expand_search  # noqa: E402
 
+BAR = "=" * 62
 INCLUDE_KEYWORDS = config.INCLUDE_KEYWORDS
 LOCATION_INCLUDE = config.LOCATION_INCLUDE
 LOCATION_EXCLUDE = config.LOCATION_EXCLUDE
@@ -38,57 +40,39 @@ REPORT_DIR = config.REPORT_DIR
 
 # ─── Expansion pretty-printers ────────────────────────────────────────────
 
-def print_expansion(term: str, expanded: ExpandReply) -> None:
-    w = 62
-    bar = "=" * w
-    print(f"\n{bar}")
-    print(f"  BCI Expansion: '{term}'")
-    print(f"{bar}")
+def _banner(title: str) -> None:
+    print(f"\n{BAR}\n  {title}\n{BAR}")
 
-    titles, keywords, sectors = expanded.titles, expanded.keywords, expanded.sectors
 
-    print(f"\n  JOB TITLES TO SEARCH ({len(titles)})")
-    for t in titles:
-        print(f"    - {t}")
+def _section(title: str, items: list[str], known: Collection[str] = ()) -> None:
+    """`items` under `title`, each marked when `known` already holds it."""
+    seen = {k.lower() for k in known}
+    print(f"\n  {title} ({len(items)})")
+    for x in items:
+        print(f"    - {x}{'  [already in list]' if x.lower() in seen else ''}")
 
-    print(f"\n  KEYWORDS TO ADD ({len(keywords)})")
-    for k in keywords:
-        marker = "  [already in list]" if k.lower() in INCLUDE_KEYWORDS else ""
-        print(f"    - {k}{marker}")
 
-    print(f"\n  SECTORS / COMPANIES TO INVESTIGATE ({len(sectors)})")
-    for s in sectors:
-        print(f"    - {s}")
-
+def _footer(*lines: str) -> None:
     print(f"\n  {'-'*58}")
-    print("  To fold these into a live crawl, rerun with:")
-    print('    add the keywords to profile.toml [keywords] (Settings tab)')
-    print(f"{bar}\n")
+    for line in lines:
+        print(f"  {line}")
+    print(f"{BAR}\n")
+
+
+def print_expansion(term: str, expanded: ExpandReply) -> None:
+    _banner(f"BCI Expansion: '{term}'")
+    _section("JOB TITLES TO SEARCH", expanded.titles)
+    _section("KEYWORDS TO ADD", expanded.keywords, INCLUDE_KEYWORDS)
+    _section("SECTORS / COMPANIES TO INVESTIGATE", expanded.sectors)
+    _footer("To fold these into a live crawl, rerun with:",
+            "  add the keywords to profile.toml [keywords] (Settings tab)")
 
 
 def print_location_expansion(term: str, expanded: LocationReply) -> None:
-    w = 62
-    bar = "=" * w
-    print(f"\n{bar}")
-    print(f"  Location Expansion: '{term}'")
-    print(f"{bar}")
-    include, exclude = expanded.include, expanded.exclude
-
-    print(f"\n  LOCATION_INCLUDE additions ({len(include)})")
-    known = {i.lower() for i in LOCATION_INCLUDE}
-    for x in include:
-        marker = "  [already in list]" if x.lower() in known else ""
-        print(f"    - {x}{marker}")
-
-    print(f"\n  LOCATION_EXCLUDE additions ({len(exclude)})")
-    known = {i.lower() for i in LOCATION_EXCLUDE}
-    for x in exclude:
-        marker = "  [already in list]" if x.lower() in known else ""
-        print(f"    - {x}{marker}")
-
-    print(f"\n  {'-'*58}")
-    print("  Copy entries you want into LOCATION_INCLUDE / LOCATION_EXCLUDE.")
-    print(f"{bar}\n")
+    _banner(f"Location Expansion: '{term}'")
+    _section("LOCATION_INCLUDE additions", expanded.include, LOCATION_INCLUDE)
+    _section("LOCATION_EXCLUDE additions", expanded.exclude, LOCATION_EXCLUDE)
+    _footer("Copy entries you want into LOCATION_INCLUDE / LOCATION_EXCLUDE.")
 
 
 # ─── Bulk keyword report ──────────────────────────────────────────────────
