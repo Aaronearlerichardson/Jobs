@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import re
+import tomllib
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -33,6 +35,8 @@ from src.rows import CompanyRow, JobRow, RankedJob, is_watched
 from src.validation import Text, error_lines
 from . import BOOT_ID, STATE, app
 from .server import call, schedule_restart
+
+_log = logging.getLogger(__name__)
 
 
 class _Body(BaseModel):
@@ -538,9 +542,9 @@ def api_config_get() -> ResponseReturnValue:
     raw, source = profile_edit.read_raw()
     parsed: dict[str, JSON]
     try:
-        import tomllib
         parsed = tomllib.loads(raw)
-    except Exception:
+    except tomllib.TOMLDecodeError as e:     # mid-edit text: no parsed view
+        _log.debug("profile does not parse: %s", e)
         parsed = {}
     return jsonify(raw=raw, source=source, parsed=parsed)
 

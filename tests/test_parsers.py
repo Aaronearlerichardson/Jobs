@@ -171,7 +171,7 @@ class TestJobPageMeta:
         assert (await company_fetch.job_page_meta("https://x.example/j"))[0] == "Data Engineer II"
 
     async def test_fetch_failure_is_a_double_miss(self, serve):
-        serve(RuntimeError("down"))
+        serve(requests.ConnectionError("down"))
         assert await company_fetch.job_page_meta("https://x.example/j") == ("", "")
 
 

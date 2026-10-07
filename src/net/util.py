@@ -58,7 +58,10 @@ def json_cache_get(path: Path, ttl: float) -> JSON:
         if time.time() - path.stat().st_mtime > ttl:
             return None
         return cast(JSON, json.loads(path.read_text("utf-8")))
-    except Exception:
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:      # unreadable file, corrupt JSON
+        _log.debug("cache miss %s: %s", path, e)
         return None
 
 
@@ -68,8 +71,8 @@ def json_cache_put(path: Path, value: object) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(value), encoding="utf-8")
-    except Exception:
-        pass
+    except (OSError, TypeError, ValueError) as e:
+        _log.warning("cache write %s failed: %s", path, e)
 
 
 def default_search_text() -> str:

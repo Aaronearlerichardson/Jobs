@@ -151,7 +151,8 @@ def _ensure_ddgs_engines() -> None:
     try:
         from ddgs.base import BaseSearchEngine
         from ddgs.engines import ENGINES
-    except Exception:
+    except ImportError as e:
+        _log.debug("ddgs engines unavailable: %s", e)
         return
     if ENGINES.get("text"):
         return
@@ -161,7 +162,8 @@ def _ensure_ddgs_engines() -> None:
                     "wikipedia", "yahoo", "yahoo_news", "yandex"):
         try:
             module = importlib.import_module(f"ddgs.engines.{modname}")
-        except Exception:
+        except ImportError as e:
+            _log.debug("ddgs engine %s missing: %s", modname, e)
             continue
         for _, cls in inspect.getmembers(module, inspect.isclass):
             if (not issubclass(cls, BaseSearchEngine) or cls is BaseSearchEngine
@@ -195,7 +197,8 @@ def _http_client_module() -> ModuleType | None:
     try:
         import ddgs.http_client as hc
         return hc
-    except Exception:
+    except ImportError as e:
+        _log.debug("ddgs.http_client unavailable: %s", e)
         return None
 
 
@@ -355,7 +358,7 @@ def _on_own_thread[T](loop: asyncio.AbstractEventLoop, fn: Callable[[threading.E
         try:
             loop.call_soon_threadsafe(settle, *outcome)
         except RuntimeError:             # the loop has closed (exit)
-            pass
+            _log.debug("search result dropped: event loop closed")
 
     # ctx.run, not Thread(context=): that keyword is 3.14+ only.
     threading.Thread(target=contextvars.copy_context().run, args=(body,),

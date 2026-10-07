@@ -6,16 +6,20 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import logging
 import os
 import subprocess
 import sys
 import threading
 from collections.abc import Coroutine
+from http.client import HTTPException
 from typing import Never
 
 from src import config, runstate
 from src.claude.api import have_api_key
 from . import STATE, app
+
+_log = logging.getLogger(__name__)
 
 #: The web UI's event loop, on a daemon thread of its own, once started.
 _LOOP: asyncio.AbstractEventLoop | None = None
@@ -69,8 +73,8 @@ def _unwind(loop: asyncio.AbstractEventLoop) -> None:
             await asyncio.wait(tasks, timeout=10)
     try:
         asyncio.run_coroutine_threadsafe(cancel_all(), loop).result(timeout=12)
-    except Exception:
-        pass
+    except (TimeoutError, RuntimeError) as e:
+        _log.debug("unwind at exit: %s", type(e).__name__)
     loop.call_soon_threadsafe(loop.stop)
 
 
@@ -82,7 +86,8 @@ def _ours_on(port: int) -> bool:
                 f"http://127.0.0.1:{port}/api/stats", timeout=2) as r:
             head: bytes = r.read(4096)
             return b"screen_model" in head
-    except Exception:
+    except (OSError, HTTPException) as e:
+        _log.debug("port %s not ours: %s", port, type(e).__name__)
         return False
 
 

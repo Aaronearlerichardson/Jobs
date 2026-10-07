@@ -66,7 +66,7 @@ def extract_jsonld(html: str, url: str = "") -> list[JSON]:
         except json.JSONDecodeError:
             try:
                 data = json.loads(re.sub(r",\s*([}\]])", r"\1", txt))
-            except Exception:
+            except json.JSONDecodeError:
                 continue
         if isinstance(data, list):
             out.extend(data)

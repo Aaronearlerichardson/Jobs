@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -51,6 +52,8 @@ from src.claude.reply import Reply, Unit
 from src.match import locality
 from src.rows import FitColumns
 from src.validation import OneOf
+
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -311,7 +314,8 @@ def _read_disposition_block() -> str:
         from src import store
         with closing(store.connect()) as conn:
             return disposition_examples_block(conn, n)
-    except Exception:
+    except (sqlite3.Error, OSError) as e:
+        _log.warning("disposition examples unavailable: %s", e)
         return ""
 
 

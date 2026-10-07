@@ -3,6 +3,7 @@ and the deep verify of the ranking's finalists."""
 
 from __future__ import annotations
 
+import logging
 import re
 import sqlite3
 from collections.abc import Collection
@@ -25,6 +26,8 @@ from src.rows import JobRow, RankedJob
 
 if TYPE_CHECKING:
     from sqlite3 import Connection
+
+_log = logging.getLogger(__name__)
 
 
 # How long a REFUSED marker holds off a retry (fit.unscored_cause's
@@ -287,7 +290,8 @@ async def _live_jd(row: JobRow | RankedJob) -> str:
             text = await board.description_for(url)
         if not text and url:
             text = (await company_fetch.job_page_meta(url))[1]
-    except Exception:
+    except Exception:           # fetcher bug or network: fall back to the stored text
+        _log.warning("live description for %s failed", url, exc_info=True)
         text = ""
     stored = row.get("description") or ""
     return text if text and len(text) >= len(text_from_html(stored)) else stored

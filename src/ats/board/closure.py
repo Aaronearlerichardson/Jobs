@@ -188,13 +188,10 @@ def _page_verdict(r: Page, url: str, fallback: str,
     )), html, re.I)
     if m:
         return False, f"page says {m.group(0)[:50]!r}"
-    try:
-        for obj in extract_jsonld(html, url):
-            if is_jobposting(obj):
-                vt = str(obj.get("validThrough") or "")[:10]
-                if vt and vt < time.strftime("%Y-%m-%d"):
-                    return False, f"validThrough {vt} past"
-                return True, "JSON-LD JobPosting live"
-    except Exception:
-        pass
+    for obj in extract_jsonld(html, url):
+        if is_jobposting(obj):
+            vt = str(obj.get("validThrough") or "")[:10]
+            if vt and vt < time.strftime("%Y-%m-%d"):
+                return False, f"validThrough {vt} past"
+            return True, "JSON-LD JobPosting live"
     return None, fallback or "no closed signal"

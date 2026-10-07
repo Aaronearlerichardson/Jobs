@@ -21,17 +21,23 @@ behind the `custom` spec is board/custom.py.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from urllib.parse import unquote
+
+from lxml import etree
 
 from src import config
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS, PLAIN_HEADERS
+from src.net.robots import RobotsDisallowed
 from src.net.util import clean_field, first, node_text, parse_markup
 from src.rows import BoardCoords, FetchedJob
 from . import jsonld
 from .engine import Board, board_for, board_for_url
+
+_log = logging.getLogger(__name__)
 
 
 def _board_of(job: FetchedJob) -> Board | None:
@@ -102,7 +108,8 @@ async def job_page_meta(url: str) -> tuple[str, str]:
         r = await http.send("GET", url, headers=HEADERS, allow_redirects=True)
         if r.status_code in (403, 405):
             r = await http.send("GET", url, allow_redirects=True, headers=PLAIN_HEADERS)
-    except Exception:
+    except (http.RequestError, RobotsDisallowed) as e:
+        _log.debug("page meta %s: %s", url, e)
         return "", ""
     return await asyncio.to_thread(_page_meta, r, url)
 
@@ -111,7 +118,8 @@ def _page_meta(r: jsonld.Page, url: str) -> tuple[str, str]:
     """job_page_meta's (title, description) off the fetched page `r`."""
     try:
         html = r.text
-    except Exception:
+    except (ValueError, LookupError) as e:
+        _log.debug("page meta %s: undecodable body: %s", url, e)
         return "", ""
     title = desc = ""
     try:
@@ -122,8 +130,8 @@ def _page_meta(r: jsonld.Page, url: str) -> tuple[str, str]:
             d = p["description"].strip()
             if len(d) >= 120:
                 desc = d[:config.MAX_DESC_CHARS]
-    except Exception:
-        pass
+    except Exception:   # hostile JSON-LD shapes: any field may be any type
+        _log.warning("page meta %s: JSON-LD unreadable", url, exc_info=True)
     if title and desc:
         return title, desc
     try:
@@ -151,8 +159,8 @@ def _page_meta(r: jsonld.Page, url: str) -> tuple[str, str]:
                 d = node_text(el)
                 if len(d) >= 120:
                     desc = d[:config.MAX_DESC_CHARS]
-    except Exception:
-        pass
+    except (etree.LxmlError, ValueError) as e:
+        _log.warning("page meta %s: markup unreadable: %s", url, e)
     return title, desc
 
 
@@ -243,7 +251,8 @@ async def sample_titles(company: BoardCoords, n: int = 6) -> list[str]:
     try:
         handle = board.handle(company) if board else None
         jobs = await board.listing(handle, cheap=True, rescue_cap=n) if board and handle else []
-    except Exception:
+    except Exception:   # a sampler never raises; the engine's failures are many
+        _log.warning("title sample %s: board unreadable", company.get("slug"), exc_info=True)
         return []
     titles: list[str] = []
     seen: set[str] = set()

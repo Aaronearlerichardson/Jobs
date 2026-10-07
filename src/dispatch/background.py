@@ -130,12 +130,12 @@ class _Tee(io.TextIOBase):
     def write(self, s: str) -> int:
         try:
             self.orig.write(s)
-        except Exception:
+        except (OSError, ValueError):       # a closed or broken console never fails a print
             pass
         if self.sink is not None:
             try:
                 self.sink.feed(s, err=self._err)
-            except Exception:
+            except Exception:       # logging here would recurse into this tee
                 pass
         lines = session_log.whole_lines(self, s)
         if lines:
@@ -156,7 +156,7 @@ class _Tee(io.TextIOBase):
     def flush(self) -> None:
         try:
             self.orig.flush()
-        except Exception:
+        except (OSError, ValueError):
             pass
 
 

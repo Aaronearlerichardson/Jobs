@@ -17,6 +17,7 @@ four public renderers compose.
 
 from __future__ import annotations
 
+import logging
 import smtplib
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime
@@ -29,6 +30,8 @@ from src import config, store
 from src.config import RuntimeTrack
 from src.match import locality
 from src.rows import CompanyRow, FetchedJob, JobRow, RankedJob
+
+_log = logging.getLogger(__name__)
 
 # The mid-fit local band, half-open on the high side. The interviews to date
 # came from applications scored in this range at local onsite postings, not
@@ -541,13 +544,14 @@ def toast(t: RuntimeTrack, count: int, path: str | Path, lead: str = "Open today
 
     Notes:
         The email is the contract and the toast is a convenience, so every
-        failure here is swallowed rather than surfaced.
+        failure here is logged rather than raised.
     """
     if not t.notify or not count:
         return False
     try:
         from winotify import Notification
-    except Exception:
+    except ImportError:
+        _log.debug("winotify not installed: no toast")
         return False
     try:
         n = Notification(app_id="Job Crawler",
@@ -556,7 +560,8 @@ def toast(t: RuntimeTrack, count: int, path: str | Path, lead: str = "Open today
         n.add_actions(label="Open digest", launch=str(path))
         n.show()
         return True
-    except Exception:
+    except Exception:   # a convenience after the send: whatever winotify raises, not fatal
+        _log.warning("toast failed", exc_info=True)
         return False
 
 

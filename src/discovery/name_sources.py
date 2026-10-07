@@ -13,6 +13,7 @@ requests rather than roster rows -- which is why the shape filters
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import sqlite3
 from typing import cast
@@ -23,6 +24,9 @@ from src.claude.reply import Reply
 from src.match.names import junk_name_reason, name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
+from src.net.robots import RobotsDisallowed
+
+_log = logging.getLogger(__name__)
 
 # Seed employers + careers-page-scan majors + drop-list all come from the
 # active profile ([discovery]) so sourcing generalizes to any region/domain.
@@ -241,7 +245,8 @@ async def harvest_search_names(queries: list[str], per_query: int = 12,
     for u in list(dict.fromkeys(dir_urls))[:fetch_dirs]:
         try:
             resp = await http.send("GET", u, timeout=config.FETCH_TIMEOUT, headers=HEADERS)
-        except Exception:
+        except (http.RequestError, RobotsDisallowed) as e:
+            _log.debug("directory %s: %s", u, type(e).__name__)
             continue
         names |= await asyncio.to_thread(lambda: _names_from_html(resp.text))
     return sorted(names)

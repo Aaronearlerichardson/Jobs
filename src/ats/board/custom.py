@@ -17,6 +17,7 @@ is a board at all. The reader's constants live in config
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from typing import cast
 from urllib.parse import urldefrag, urljoin
@@ -28,10 +29,12 @@ from src import config
 from src.match.locality import LocationRE
 from src.net import http
 from src.net.http import HEADERS
+from src.net.robots import RobotsDisallowed
 from src.net.util import (LOC_TEXT_RE, cache_dir, clean_field, first,
                           JSON, hashed_cache_path, host_of, json_cache_get,
                           json_cache_put, links, node_text, parse_markup)
 
+_log = logging.getLogger(__name__)
 _OFFSITE_RE = config.hosts_re(config.SHARED_HOSTS)
 
 
@@ -193,7 +196,8 @@ async def _page_tree(url: str) -> etree._Element | None:
         if r.status_code != 200:
             return None
         return await asyncio.to_thread(lambda: parse_markup(r.text, url=url))
-    except Exception:
+    except (http.RequestError, RobotsDisallowed, ValueError, LookupError) as e:
+        _log.debug("page tree %s: %s", url, e)
         return None
 
 
@@ -208,10 +212,7 @@ def is_board_page(html: str) -> bool:
     >>> is_board_page("<a href='/careers/'>Careers</a>")
     False
     """
-    try:
-        return _is_board(parse_markup(html))
-    except Exception:
-        return False
+    return _is_board(parse_markup(html))
 
 
 async def custom_board_listing_url(page_url: str, html: str | None = None) -> str | None:

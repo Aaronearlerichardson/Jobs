@@ -25,7 +25,8 @@ from src import config, runstate
 from src.config import PROBE_TIMEOUT
 from src.match.names import domain_tokens
 from src.net import http
-from src.net.http import HEADERS, HostBreaker, Unreachable
+from src.net.http import HEADERS, HostBreaker, RequestError, Unreachable
+from src.net.robots import RobotsDisallowed
 from src.net.util import host_of, origin_of
 
 class Page(Protocol):
@@ -222,7 +223,8 @@ async def _fetch_page(url: str,
         # SSLError and ConnectTimeout; ReadTimeout is a Timeout, not one.
         _DEAD_HOSTS().trip(url)
         return None
-    except Exception:
+    except (RequestError, RobotsDisallowed) as e:
+        _log.debug("fetch %s: %s", url, type(e).__name__)
         return None
     _memo_put(url, resp)
     return resp

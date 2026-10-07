@@ -313,34 +313,34 @@ class JsScanProbePool:
           2. Is the board link in the initial server-rendered HTML?
           3. After JS settles (networkidle, capped at 6s), try again.
         """
+        from playwright.async_api import Error as PlaywrightError
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-        except Exception as e:
+        except PlaywrightError as e:
             msg = str(e)
             if ("interrupted by another navigation" not in msg
                     and "Navigation timeout" not in msg):
+                _log.debug("js scan %s: goto failed: %s", url, e)
                 return None
-        try:
-            cur = page.url
-        except Exception:
-            cur = ""
-        if (hit := scan_hit(cur)):
+        if (hit := scan_hit(page.url)):
             return hit
         try:
             html = await page.content()
-        except Exception:
+        except PlaywrightError as e:
+            _log.debug("js scan %s: content failed: %s", url, e)
             html = ""
         if (hit := await asyncio.to_thread(scan_hit, html)):
             return hit
         # Wait for JS-deferred content (iframes, ajax-injected links).
         try:
             await page.wait_for_load_state("networkidle", timeout=6000)
-        except Exception:
-            pass
+        except PlaywrightError as e:
+            _log.debug("js scan %s: networkidle wait: %s", url, e)
         try:
             cur = page.url
             html = await page.content()
-        except Exception:
+        except PlaywrightError as e:
+            _log.debug("js scan %s: re-read failed: %s", url, e)
             return None
         return scan_hit(cur) or await asyncio.to_thread(scan_hit, html)
 
@@ -352,11 +352,7 @@ class JsScanProbePool:
             hit = await cls._scan(page, url)
             if not hit or await foreign_board(name, *hit):
                 continue
-            try:
-                source = page.url
-            except Exception:
-                source = url
-            meta = await _scan_meta(*hit, source)
+            meta = await _scan_meta(*hit, page.url)
             return meta, "hit" if meta["validated"] else "not validated"
         return None, "no board link"
 

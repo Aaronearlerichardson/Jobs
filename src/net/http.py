@@ -74,6 +74,9 @@ MAX_REDIRECTS = 30
 #: a refusal, a failed TLS handshake or a connect timeout.
 HTTPError = requests.HTTPError
 Unreachable = requests.ConnectionError
+#: Any failed request (HTTPError and Unreachable are kinds of it); `send` also
+#: raises robots.RobotsDisallowed, which is not one.
+RequestError = requests.RequestException
 
 
 # --------------------------------------------------------------------------- #

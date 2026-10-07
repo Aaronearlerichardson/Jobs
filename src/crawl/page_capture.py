@@ -16,6 +16,7 @@ layers hit, results are merged and de-duplicated by job id.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Callable, Iterator, Mapping
 from typing import TYPE_CHECKING, cast
@@ -25,6 +26,8 @@ from src import config
 from src.net.util import (JSON, first, host_of, jsonld_scripts, links, node_text, parse_markup,
                           stable_id, strip_html, xpath)
 from src.rows import FetchedJob
+
+_log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from lxml import etree
@@ -344,7 +347,8 @@ def parse_jsonld(tree: etree._Element, page_url: str = "") -> list[FetchedJob]:
     for tag in jsonld_scripts(tree):
         try:
             data: JSON = json.loads(tag.text or "")
-        except Exception:
+        except json.JSONDecodeError as e:
+            _log.debug("unparseable JSON-LD block: %s", e)
             continue
         listed = data.get("itemListElement", [data]) if isinstance(data, Mapping) else data
         for it in listed if isinstance(listed, list) else []:

@@ -28,6 +28,7 @@ already knows), resolve_leads (leads banked by capture.py), score_missions
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping
@@ -49,6 +50,8 @@ from .resolve.board import read_local, resolved
 from .resolve.probes import nc_count, probe_company
 from src.ats.signatures import Detection
 from .resolve.websearch_board import websearch_board
+
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -835,7 +838,8 @@ async def add_board(name: str, url: str, capture: bool = False) -> Detection | N
     board = coords.columns(ats, handle, found.get("careers_url") or url, name=name)
     try:
         nc = len(await company_fetch.fetch_company(board, NC_RE, validate=True))
-    except Exception:
+    except Exception:   # the engine fan-out has many failure kinds
+        _log.warning("add board %s: fetch failed", url, exc_info=True)
         nc = 0
 
     tier, score, reason = await score_company_mission(name, await mission_context(board))

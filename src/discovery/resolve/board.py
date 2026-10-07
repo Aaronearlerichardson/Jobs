@@ -28,6 +28,7 @@ lives here and they live one level up.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from operator import itemgetter
 from typing import cast
@@ -46,6 +47,8 @@ from .identity import foreign_board
 from .probes import Slug, probe_company
 from .websearch_board import websearch_board
 
+_log = logging.getLogger(__name__)
+
 
 async def read_board(comp: BoardCoords,
                      loc_re: LocationRE | None = None) -> list[FetchedJob] | None:
@@ -63,6 +66,7 @@ async def read_board(comp: BoardCoords,
     try:
         rows = await company_fetch.fetch_company(comp, loc_re, validate=True)
     except Exception:
+        _log.warning("read_board %s failed", comp.get("name"), exc_info=True)
         return None
     if rows or http.fetch_failures() == before:
         return rows
@@ -134,6 +138,7 @@ async def _seeds(name: str, careers_url: str = "") -> list[str]:
     try:
         domain = await official_domain(name)
     except Exception:
+        _log.warning("official_domain %s failed", name, exc_info=True)
         return []
     return [f"https://{h.format(domain=domain)}/"
             for h in config.DISCOVERY_DOMAIN_HOSTS] if domain else []
@@ -324,6 +329,7 @@ async def _classify(name: str, careers_url: str) -> str:
         try:
             sub = await diagnose_no_board(name, careers_url or "")
         except Exception:
+            _log.warning("diagnose_no_board %s failed", name, exc_info=True)
             sub = ""
         return f"no-board-found:{sub}" if sub else "no-board-found"
     ats = lead.get("ats") or "?"

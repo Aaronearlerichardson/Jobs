@@ -13,6 +13,7 @@ _host_matches_name), with the shared parent-board check
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from src import config
 from src.ats.board import BOARDS
@@ -20,8 +21,11 @@ from src.ats.signatures import Detection, detect, pack
 from src.match.names import name_key
 from src.net import ddg, http
 from src.net.http import HEADERS
+from src.net.robots import RobotsDisallowed
 from .identity import foreign_board
 from .probes import Slug
+
+_log = logging.getLogger(__name__)
 
 # Job aggregators / company-directory sites: they rank highly for
 # '"<name>" careers' but are never the employer's own ATS board, so sniffing
@@ -122,7 +126,8 @@ async def websearch_board(name: str, max_results: int = 8) -> Detection | None:
                 text = await asyncio.to_thread(lambda: r.text) if r.status_code == 200 else ""
                 if len(text) < 300:
                     continue
-            except Exception:
+            except (http.RequestError, RobotsDisallowed) as e:
+                _log.debug("search hit %s: %s", u, type(e).__name__)
                 continue
             own = _host_matches_name(r.url, name)
             hit = await asyncio.to_thread(detect, text, r.url, leads=False)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Callable, Iterable, Sequence
 from functools import partial
 
@@ -33,6 +34,8 @@ from src.match.names import SLUG_NAME_SOURCE
 from src.net import ddg
 from src.net.parallel import fan_out
 from src.rows import BoardHit, FetchedJob
+
+_log = logging.getLogger(__name__)
 
 
 def _or_group(terms: Sequence[str], n: int = 8) -> str:
@@ -194,7 +197,8 @@ async def _live_board(cand: BoardHit, require_live: bool) -> BoardHit | None:
     else:
         try:
             jobs = await company_fetch.fetch_company(comp, NC_RE, validate=True)
-        except Exception:
+        except Exception:   # the engine fan-out has many failure kinds
+            _log.warning("dork candidate %s: board fetch failed", cand["name"], exc_info=True)
             jobs = list[FetchedJob]()
         total = nc = len(jobs)
         # Add even with 0 current NC openings IF we can confirm an NC HQ/office
@@ -300,15 +304,18 @@ def _next_rotation_index() -> int:
     # instead of repeating the same slice (and a re-read reproduces exactly
     # which slice a past run covered) — deterministic, not `random`-based.
     state = config.DATA_DIR / ".cache" / "dork_rotation.json"
-    try:
-        idx = int(json.loads(state.read_text("utf-8")).get("index", 0))
-    except Exception:
-        idx = 0
+    idx = 0
+    if state.exists():
+        try:
+            saved = json.loads(state.read_text("utf-8"))
+            idx = int(saved.get("index", 0)) if isinstance(saved, dict) else 0
+        except (OSError, ValueError) as e:
+            _log.warning("dork rotation state %s unreadable: %s", state, e)
     try:
         state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"index": idx + 1}), encoding="utf-8")
-    except Exception:
-        pass
+    except OSError as e:
+        _log.warning("dork rotation state %s unwritable: %s", state, e)
     return idx
 
 
